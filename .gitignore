@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+rust/target/
+.dart_tool/
+.gradle/
+*.apk
+*.aab
+
+# Generated bindings (regenerate via flutter_rust_bridge_codegen)
+# lib/src/rust/ is committed for reviewability — never hand-edited
+
+# Secrets & local environment — NEVER committed (INV-3, INV-11)
+*.keystore
+*.jks
+key.properties
+docs/environment.local.md
+.env*
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Flutter
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+pubspec.lock.bak
