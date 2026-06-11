@@ -49,6 +49,22 @@ else
   skip_check "flutter app" "pubspec.yaml absent (pre-P0-D1 scaffold state)"
 fi
 
+# ── FRB codegen drift (stale committed bindings = silent runtime breakage) ──
+if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
+  if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
+    codegen_drift() {
+      flutter_rust_bridge_codegen generate >/dev/null 2>&1 || return 1
+      git -C "$ROOT" diff --exit-code --quiet -- lib/src/rust/ || {
+        echo "   generated bindings differ from committed ones — run codegen and commit"
+        return 1
+      }
+    }
+    run_check "codegen drift (lib/src/rust/)" codegen_drift
+  else
+    skip_check "codegen drift" "flutter_rust_bridge_codegen not installed"
+  fi
+fi
+
 # ── Contract spine (P3+) ────────────────────────────────────────
 if compgen -G "$ROOT/contracts/*/SPEC.md" >/dev/null 2>&1; then
   for c in "$ROOT"/contracts/*/; do
@@ -63,7 +79,7 @@ fi
 
 # ── Summary ─────────────────────────────────────────────────────
 echo; echo "══════════ GATE SUMMARY ══════════"
-printf '%s\n' "${RESULTS[@]}"
+printf '%s\n' "${RESULTS[@]:-"(no checks ran)"}"
 echo "──────────────────────────────────"
 echo "pass=$PASS fail=$FAIL skip=$SKIP"
 if [ "$FAIL" -gt 0 ]; then echo "GATE: RED"; exit 1; fi
