@@ -77,6 +77,25 @@ if compgen -G "$ROOT/contracts/*/SPEC.md" >/dev/null 2>&1; then
   # vectors execute inside `cargo test` (chain crate integration tests)
 fi
 
+# ── Public-repo hygiene (always runs — the repo is public, D-011/D-019) ──
+repo_hygiene() {
+  local bad=0
+  local tracked
+  tracked="$(git -C "$ROOT" ls-files -- '*.keystore' '*.jks' '*.p12' '*.pem' \
+    '*key.properties' '.env' '.env.*' 'id_rsa*' 'docs/environment.local.md')"
+  if [ -n "$tracked" ]; then
+    echo "   secret-shaped files are git-tracked:"; echo "$tracked" | sed 's/^/     /'
+    bad=1
+  fi
+  if git -C "$ROOT" grep -lI -e "BEGIN .*PRIVATE KEY" -- ':!tools/gate.sh' >/dev/null 2>&1; then
+    echo "   a tracked file contains PEM private-key material:"
+    git -C "$ROOT" grep -lI -e "BEGIN .*PRIVATE KEY" -- ':!tools/gate.sh' | sed 's/^/     /'
+    bad=1
+  fi
+  return $bad
+}
+run_check "public-repo hygiene (no tracked secrets)" repo_hygiene
+
 # ── Summary ─────────────────────────────────────────────────────
 echo; echo "══════════ GATE SUMMARY ══════════"
 printf '%s\n' "${RESULTS[@]:-"(no checks ran)"}"
