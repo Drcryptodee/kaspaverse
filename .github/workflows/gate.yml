@@ -1,0 +1,81 @@
+# CI = the same tools/gate.sh that runs locally, in strict mode: a skipped
+# check on a runner is a provisioning bug, not an acceptable gap (D-024).
+# Actions are pinned by commit SHA (supply-chain posture, INV-7); tool versions
+# mirror the local environment — bump them together, deliberately.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # Pinned image, not ubuntu-latest: the -latest label migrates underneath
+    # you (24.04 today; 26.04 images already published).
+    runs-on: ubuntu-24.04
+    # Cold cache compiles the rusty-kaspa tree three times (clippy, test,
+    # arm64) plus three tool installs; warm runs are a fraction of this.
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install pinned Rust toolchain
+        # Mirrors rust/rust-toolchain.toml — the runner ships a newer stable
+        # without clippy, and `clippy -D warnings` must not drift with it.
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal \
+            --component rustfmt --component clippy \
+            --target aarch64-linux-android
+          rustup default 1.94.0
+
+      - name: Cache gate tools
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/ci-tools
+          key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0
+
+      - name: Cache cargo registry + build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: rust-${{ runner.os }}-1.94.0-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-1.94.0-
+
+      - name: Install gate tools (compiled once, then cache-hit)
+        run: |
+          echo "$HOME/ci-tools/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/ci-tools/bin:$PATH"
+          command -v cargo-deny >/dev/null || \
+            cargo install cargo-deny --version 0.19.8 --locked --root "$HOME/ci-tools"
+          command -v cargo-ndk >/dev/null || \
+            cargo install cargo-ndk --version 4.1.2 --locked --root "$HOME/ci-tools"
+          command -v flutter_rust_bridge_codegen >/dev/null || \
+            cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked --root "$HOME/ci-tools"
+
+      - name: Set up Flutter (pinned — codegen-drift check needs this exact version)
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.41.5
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Run the gate (strict — every check provisioned or red)
+        # ANDROID_NDK_HOME is preset on the runner image; the gate uses it for
+        # the arm64 cross-compile check.
+        run: GATE_STRICT=1 tools/gate.sh

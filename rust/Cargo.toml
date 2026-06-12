@@ -15,9 +15,11 @@ license = "MIT"
 [workspace.dependencies]
 # rusty-kaspa pinned at tag v2.0.0 (INV-9: consensus logic only from these).
 # Pinned by rev — immutable, unlike tags; rev verified = tag v2.0.0 on 2026-06-12.
-kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
-kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
-kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+# `version` alongside the rev: cargo asserts the pinned commit really is v2.0.0,
+# and cargo-deny's wildcard ban stays at "deny" (a version-less dep reads as "*").
+kaspa-wrpc-client = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+kaspa-consensus-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+kaspa-addresses = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
 # Async plumbing — versions chosen to unify with what the pinned rusty-kaspa
 # tree already uses (tokio 1.x; async-channel 2.x is what `ChannelConnection`'s
 # Sender actually is). FRB's own runtime is also tokio (rust-async default).
