@@ -43,8 +43,14 @@ allow = [
     # Public-domain equivalents (0BSD: mock_instant; CC0: secp256k1).
     "0BSD",
     "CC0-1.0",
+    # xxhash-rust (via kaspa-wallet-core, P1.1 / D-030) — Boost Software
+    # License: permissive, OSI-approved, no attribution required in binaries.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
+# Note (P1.1): slugify-rs 0.0.3 (via kaspa-wallet-core storage) omits the
+# manifest `license` field; cargo-deny detects its MIT LICENSE file directly
+# (same situation as allo-isolate). Warning is informational.
 
 # Scoped per-crate exceptions — weaker-copyleft licenses allowed ONLY for the
 # named crates, so nothing else can ride in under them unnoticed.
