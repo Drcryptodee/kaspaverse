@@ -24,6 +24,19 @@ COMMIT="$(git rev-parse --short HEAD)"
 [ -f android/key.properties ] \
   || die "android/key.properties missing — see docs/RELEASE.md (the build would fall back to the unshippable debug key)"
 
+# apksigner is a java wrapper, and on this machine the JDK lives in $HOME off
+# PATH (no-sudo WSL2 install, environment.local.md) — discover it like gate.sh
+# discovers the NDK.
+if ! command -v java >/dev/null 2>&1; then
+  if [ -z "${JAVA_HOME:-}" ]; then
+    for d in "$HOME"/jdk-*/; do
+      [ -x "${d}bin/java" ] && JAVA_HOME="${d%/}"
+    done
+  fi
+  [ -n "${JAVA_HOME:-}" ] && export JAVA_HOME && PATH="$JAVA_HOME/bin:$PATH"
+fi
+command -v java >/dev/null 2>&1 || die "java not found (apksigner needs a JDK)"
+
 # apksigner ships with SDK build-tools; discover like gate.sh discovers the NDK.
 APKSIGNER="$(command -v apksigner || true)"
 if [ -z "$APKSIGNER" ]; then
