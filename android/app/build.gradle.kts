@@ -1,8 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Release signing (P0.5, INV-11): credentials live in android/key.properties —
+// gitignored, never committed (gate hygiene fails on a tracked copy). Template:
+// android/key.properties.template; founder setup: docs/RELEASE.md.
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -35,11 +47,33 @@ android {
         }
     }
 
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // EXPLICIT debug fallback, never a silent one: without
+            // key.properties, `flutter run --release` still works for perf
+            // smoke tests, but the warning below fires and tools/release.sh
+            // (the only documented release path) refuses to ship the result —
+            // it verifies the actual signer cert on the APK, not this config.
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "WARNING: android/key.properties missing — release build will be " +
+                        "DEBUG-SIGNED (dev smoke test only, unshippable). See docs/RELEASE.md."
+                )
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

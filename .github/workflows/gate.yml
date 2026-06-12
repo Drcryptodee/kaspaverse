@@ -8,6 +8,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # Weekly advisory tripwire: cargo-deny pulls a fresh RustSec DB each run,
+    # so a quiet repo still learns about a new CVE within a week (P0.5).
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC — off the top-of-hour load spike
+
 
 permissions:
   contents: read

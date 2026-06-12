@@ -1,0 +1,11 @@
+# Release-signing credentials — TEMPLATE (this file is committed; the real
+# android/key.properties is gitignored and the gate fails if one is ever
+# tracked). Setup: docs/RELEASE.md. Copy this file to android/key.properties
+# and fill it in locally — type the values in your own editor/terminal only;
+# never paste passwords into a chat session or a committed file.
+#
+# storeFile is an absolute path OUTSIDE the repo (e.g. ~/keystores/…).
+storeFile=/home/CHANGE_ME/keystores/kaspaverse-upload.jks
+storePassword=CHANGE_ME
+keyAlias=upload
+keyPassword=CHANGE_ME
