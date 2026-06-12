@@ -15,8 +15,9 @@ license = "MIT"
 [workspace.dependencies]
 # rusty-kaspa pinned at tag v2.0.0 (INV-9: consensus logic only from these).
 # Pinned by rev — immutable, unlike tags; rev verified = tag v2.0.0 on 2026-06-12.
-# `version` alongside the rev: cargo asserts the pinned commit really is v2.0.0,
-# and cargo-deny's wildcard ban stays at "deny" (a version-less dep reads as "*").
+# `version` alongside the rev: cargo asserts the pinned commit resolves to a
+# compatible 2.x (the immutable rev fixes which one), and cargo-deny's wildcard
+# ban stays at "deny" (a version-less dep reads as "*"). L23.
 kaspa-wrpc-client = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
 kaspa-consensus-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
 kaspa-addresses = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
