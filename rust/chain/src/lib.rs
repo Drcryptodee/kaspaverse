@@ -1,7 +1,16 @@
 //! kaspaverse-chain — wRPC connection + DAG state.
 //!
-//! Shell in P0.2: the rusty-kaspa v2.0.0 crates (`kaspa-wrpc-client`,
-//! `kaspa-consensus-core`, `kaspa-addresses`) are pinned by rev and compile for
-//! Android; P0.3 adds the resolver-based mainnet connection and the
-//! virtual-DAA/sink stream. Consensus logic always comes from the pinned
-//! crates, never re-implemented here (INV-9); no trusted indexers (INV-8).
+//! P0.3: resolver-based mainnet connection (PNN, `Resolver::default()`) and a
+//! virtual-DAA / sink-blue-score event stream. Connection pattern derived from
+//! the pinned rev's `rpc/wrpc/examples/subscriber` (INV-9); the resolver only
+//! *discovers* public node endpoints — all data comes from the node over wRPC,
+//! no trusted indexers (INV-8). Consensus logic always comes from the pinned
+//! crates, never re-implemented here (INV-9).
+
+mod dag_monitor;
+mod error;
+
+pub use dag_monitor::{DagEvent, DagMonitor};
+pub use error::{ChainError, Result};
+// Re-export so downstream crates (bridge) name network types from one place.
+pub use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};

@@ -2409,9 +2409,11 @@ dependencies = [
 name = "kaspaverse-chain"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "kaspa-addresses",
  "kaspa-consensus-core",
  "kaspa-wrpc-client",
+ "tokio",
 ]
 
 [[package]]
@@ -2423,6 +2425,8 @@ name = "kaspaverse_bridge"
 version = "0.1.0"
 dependencies = [
  "flutter_rust_bridge",
+ "kaspaverse-chain",
+ "tokio",
 ]
 
 [[package]]
