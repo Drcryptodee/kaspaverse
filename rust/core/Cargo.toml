@@ -5,3 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+kaspa-bip32.workspace = true
+kaspa-wallet-keys.workspace = true
+kaspa-wallet-core.workspace = true
+kaspa-consensus-core.workspace = true
+kaspa-addresses.workspace = true
+argon2.workspace = true
+chacha20poly1305.workspace = true
+zeroize.workspace = true

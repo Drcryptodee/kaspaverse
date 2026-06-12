@@ -21,6 +21,19 @@ license = "MIT"
 kaspa-wrpc-client = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
 kaspa-consensus-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
 kaspa-addresses = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+# Wallet layer (P1 §0.1, executes D-005): processor/generator/keys ONLY — the
+# upstream `Wallet` account/storage framework is deliberately not used (its
+# file-wallet custody conflicts with our INV-4 platform vault).
+kaspa-wallet-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+kaspa-wallet-keys = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+kaspa-bip32 = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+# Vault crypto (P1 §0.2 Path B). Versions are exactly what the pinned tree
+# already locks (its own storage AEAD uses these crates), so the wallet crates
+# above bring them in regardless — direct-depping adds zero new transitive
+# code (D-022a pattern). zeroize features mirror the pin (no derive macro).
+argon2 = "0.5.2"
+chacha20poly1305 = "0.10.1"
+zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 # Async plumbing — versions chosen to unify with what the pinned rusty-kaspa
 # tree already uses (tokio 1.x; async-channel 2.x is what `ChannelConnection`'s
 # Sender actually is). FRB's own runtime is also tokio (rust-async default).
