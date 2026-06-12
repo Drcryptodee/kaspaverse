@@ -1,5 +1,7 @@
 # KaspaVerse
 
+[![gate](https://github.com/Drcryptodee/kaspaverse/actions/workflows/gate.yml/badge.svg)](https://github.com/Drcryptodee/kaspaverse/actions/workflows/gate.yml)
+
 **A sovereign wallet kernel + covenant arcade for the Kaspa BlockDAG.**
 
 Android-first. Non-custodial. Built on [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa)
