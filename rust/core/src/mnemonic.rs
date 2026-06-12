@@ -75,6 +75,16 @@ impl MnemonicCeremony {
     /// seed and is gone — never persisted, never derivable from anything
     /// stored (wallet-security checklist item 6). Salt convention follows
     /// the pinned `to_seed` exactly (`"mnemonic" + extra`, PBKDF2/2048).
+    ///
+    /// **No NFKD normalization** (D-031, deliberate): strict BIP39 mandates
+    /// NFKD on the passphrase, but the pinned rusty-kaspa `to_seed` does not
+    /// normalize — and Kaspa-ecosystem compatibility outranks spec purity
+    /// here (a normalizing implementation would derive a DIFFERENT wallet
+    /// from the same non-ASCII extra word, silently, thanks to the decoy
+    /// property). Consequence: non-ASCII extra words are portable only
+    /// between non-normalizing wallets. The P1.4 create ceremony therefore
+    /// restricts NEW extra words to ASCII (where NFKD is the identity);
+    /// restore accepts any UTF-8 for maximum compatibility.
     pub fn into_seed(self, extra_word: &[u8]) -> Result<SecretSeed> {
         let extra = std::str::from_utf8(extra_word).map_err(|_| CoreError::ExtraWordEncoding)?;
         let seed = self.0.to_seed(extra);

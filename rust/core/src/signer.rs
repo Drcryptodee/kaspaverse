@@ -21,10 +21,21 @@ use zeroize::Zeroize;
 
 /// The unlocked vault: sole strong owner of the [`KeyChain`].
 ///
-/// `lock()` (or drop — e.g. the P1.2 lifecycle hook on backgrounding) is a
-/// deterministic kill switch: the seed zeroizes immediately, and every
-/// [`VaultSigner`] handed out goes dead — signing after lock fails with
-/// `VaultLocked` instead of holding secrets alive (INV-2).
+/// `lock()` (or drop — e.g. the P1.2 lifecycle hook on backgrounding) is the
+/// kill switch, with **exactly these semantics** (audited, D-031):
+///
+/// - No operation can *start* after lock: every [`VaultSigner`] path begins
+///   with a `Weak::upgrade` that now fails (`VaultLocked`).
+/// - An operation already *in flight* on another thread holds an upgraded
+///   strong reference and **completes** — it is not interrupted mid-signature.
+/// - The seed zeroizes when the LAST strong reference drops: immediately if
+///   nothing is in flight, else the moment the in-flight call returns. The
+///   window is bounded by one signing/derivation call (no await points, no
+///   way to extend it through the public API — `keychain()` borrows, so the
+///   borrow checker forbids holding it across `lock(self)`).
+///
+/// Async callers above the bridge (P1.2+) must not treat lock-return as
+/// proof of erasure when a sign is concurrently executing.
 pub struct UnlockedVault {
     keychain: Arc<KeyChain>,
 }
@@ -50,7 +61,9 @@ impl UnlockedVault {
         }
     }
 
-    /// Explicit lifecycle drop: consume the vault, zeroize the seed now.
+    /// Explicit lifecycle drop: consume the vault. Zeroizes the seed now if
+    /// no operation is in flight; otherwise when the in-flight call returns
+    /// (see the type docs for the full contract).
     pub fn lock(self) {}
 }
 
@@ -208,6 +221,29 @@ mod tests {
         ));
         let err = signer.try_sign(empty_tx(), &[address]).unwrap_err();
         assert!(err.to_string().contains("locked"));
+    }
+
+    /// Pins the audited lock contract (D-031): an operation that upgraded
+    /// the Weak BEFORE lock() holds the seed alive until it returns — lock
+    /// is "no new operations", not "instant erasure under concurrency".
+    /// If this test ever fails, the contract changed: update the type docs,
+    /// the threat model (vault_architecture §7), and the P1.2 bridge
+    /// assumptions together.
+    #[test]
+    fn in_flight_strong_ref_survives_lock_until_released() {
+        let vault = unlocked_vault();
+        // Simulate try_sign mid-execution on another thread: it has already
+        // done `self.keychain.upgrade()` when lock() runs.
+        let in_flight: Arc<KeyChain> = Arc::clone(&vault.keychain);
+        assert_eq!(Arc::strong_count(&in_flight), 2);
+
+        vault.lock();
+
+        // Seed not yet destroyed — the in-flight operation still works…
+        assert_eq!(Arc::strong_count(&in_flight), 1);
+        assert!(in_flight.receive_address(0).is_ok());
+        // …and destruction happens exactly when the last ref releases.
+        drop(in_flight);
     }
 
     #[test]
