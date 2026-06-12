@@ -45,6 +45,15 @@ fi
 # ── Flutter app ─────────────────────────────────────────────────
 if [ -f "$ROOT/pubspec.yaml" ]; then
   cd "$ROOT"
+  # Hand-written Dart only — generated bindings (lib/src/rust/) are formatted
+  # by FRB codegen and vendored cargokit is excluded like in analysis_options.
+  dart_format_paths=()
+  for p in lib/main.dart lib/src/services lib/src/ui test; do
+    [ -e "$ROOT/$p" ] && dart_format_paths+=("$p")
+  done
+  if [ "${#dart_format_paths[@]}" -gt 0 ]; then
+    run_check "dart format" dart format --output=none --set-exit-if-changed "${dart_format_paths[@]}"
+  fi
   run_check "flutter analyze" flutter analyze
   if [ -d "$ROOT/test" ] && [ -n "$(ls -A "$ROOT/test" 2>/dev/null)" ]; then
     run_check "flutter test" flutter test
@@ -61,7 +70,8 @@ if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
     codegen_drift() {
       flutter_rust_bridge_codegen generate >/dev/null 2>&1 || return 1
       git -C "$ROOT" diff --exit-code --quiet -- lib/src/rust/ || {
-        echo "   generated bindings differ from committed ones — run codegen and commit"
+        echo "   generated bindings differ from the index — after an API change,"
+        echo "   stage them ('git add lib/src/rust/') before gating (L20)"
         return 1
       }
     }

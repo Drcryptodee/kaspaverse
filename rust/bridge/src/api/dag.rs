@@ -77,7 +77,10 @@ async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError
                     match events.recv().await {
                         Ok(event) => {
                             fold(&mut current, event);
-                            *LATEST.lock().unwrap() = Some(current.clone());
+                            *LATEST
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(current.clone());
                             // Send fails only with zero subscribers — fine.
                             let _ = fan_out.send(current.clone());
                         }
@@ -97,8 +100,17 @@ async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError
 /// later calls share the same connection. Each stream ends only when its
 /// Dart listener goes away.
 pub async fn subscribe_dag_updates(sink: StreamSink<DagSnapshot>) -> Result<(), AppError> {
-    let mut receiver = snapshots().await?.subscribe();
-    let latest = LATEST.lock().unwrap().clone();
+    let sender = snapshots().await?;
+    // Subscribe while holding the LATEST lock: the folder updates LATEST
+    // *before* broadcasting (under the same lock), so everything arriving on
+    // `receiver` is >= the snapshot we deliver first — values never regress
+    // on (re)attach. Plain Mutex, no await inside the block.
+    let (mut receiver, latest) = {
+        let guard = LATEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (sender.subscribe(), guard.clone())
+    };
     if let Some(snapshot) = latest {
         let _ = sink.add(snapshot);
     }

@@ -10,3 +10,4 @@ kaspa-consensus-core.workspace = true
 kaspa-addresses.workspace = true
 tokio.workspace = true
 async-channel.workspace = true
+log.workspace = true

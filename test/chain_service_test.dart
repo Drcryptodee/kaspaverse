@@ -21,21 +21,20 @@ void main() {
   test('folded snapshots land in the notifiers', () async {
     final service = ChainService.instance..start();
 
-    controller.add(DagSnapshot(
-      connected: true,
-      endpoint: 'wss://node.example/borsh',
-      virtualDaaScore: BigInt.parse('18446744073709551615'), // u64::MAX
-      sinkBlueScore: BigInt.from(456290012),
-    ));
+    controller.add(
+      DagSnapshot(
+        connected: true,
+        endpoint: 'wss://node.example/borsh',
+        virtualDaaScore: BigInt.parse('18446744073709551615'), // u64::MAX
+        sinkBlueScore: BigInt.from(456290012),
+      ),
+    );
     await Future<void>.delayed(Duration.zero);
 
     expect(service.connected.value, isTrue);
     expect(service.endpoint.value, 'wss://node.example/borsh');
     // Survives the > 2^53 range intact (L3).
-    expect(
-      service.virtualDaaScore.value,
-      BigInt.parse('18446744073709551615'),
-    );
+    expect(service.virtualDaaScore.value, BigInt.parse('18446744073709551615'));
     expect(service.sinkBlueScore.value, BigInt.from(456290012));
     expect(service.error.value, isNull);
   });

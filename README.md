@@ -21,9 +21,16 @@ No servers. No telemetry. Indexers are optional, untrusted accelerators.
 
 ## Status
 
-Pre-alpha — governance scaffold + Phase 0 (foundation) in progress. See
-`docs/phases/PHASE_INDEX.md` for the roadmap and `docs/CONSTITUTION.md` for the
-security invariants this project is built under.
+Pre-alpha — Phase 0 (foundation) in progress. The end-to-end pipeline is **live**:
+the app connects to Kaspa mainnet through the public-node resolver and renders the
+virtual DAA score + sink blue score streaming in real time on a physical Android
+device (Flutter UI → flutter_rust_bridge → Rust → wRPC). No wallet or keys yet —
+that is Phase 1, behind the gate and auditor machinery Phase 0 finishes first.
+
+See `docs/phases/PHASE_INDEX.md` for the roadmap and `docs/CONSTITUTION.md` for the
+security invariants this project is built under. Builds are arm64-only for now
+(upstream `kaspa-hashes` has no x86_64-android assembly path — x86_64 emulators
+won't run it; use a physical device).
 
 ## Development
 

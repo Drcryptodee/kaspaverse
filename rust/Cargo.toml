@@ -23,3 +23,6 @@ kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "
 # Sender actually is). FRB's own runtime is also tokio (rust-async default).
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
 async-channel = "2"
+# Observability: FRB's init installs a console logger (logcat on Android), so
+# `log::` calls in chain/bridge surface in app logs with zero extra plumbing.
+log = "0.4"
