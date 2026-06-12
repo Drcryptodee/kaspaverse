@@ -52,8 +52,13 @@ pub const BLOB_LEN: usize = HEADER_LEN + SEED_LEN + TAG_LEN;
 // Sanity bounds enforced on both seal and unseal (see module docs). Generous:
 // real parameters come from on-device tuning against PERFORMANCE_BUDGET.md
 // and sit far inside these.
-const MIN_M_COST_KIB: u32 = 8 * 1024; // 8 MiB — below the v1 grid is suspicious
-const MAX_M_COST_KIB: u32 = 1024 * 1024; // 1 GiB — above this is a DoS, not a KDF
+// 8 MiB floor — below the v1 grid is suspicious.
+const MIN_M_COST_KIB: u32 = 8 * 1024;
+// 256 MiB ceiling (D-031, audit remediation): the bound must be survivable on
+// the REFERENCE DEVICE, not merely "not absurd" — a corrupted header demanding
+// 1 GiB would OOM-kill the app before authentication fails, which is exactly
+// the DoS this guard exists to stop. P1.2's tuned value must sit well below.
+const MAX_M_COST_KIB: u32 = 256 * 1024;
 const MIN_T_COST: u32 = 1;
 const MAX_T_COST: u32 = 64;
 const MIN_P_COST: u32 = 1;
@@ -366,5 +371,119 @@ mod tests {
             seal_seed(&test_seed(), b"pw", too_small),
             Err(CoreError::BlobParamBounds)
         ));
+    }
+
+    #[test]
+    fn m_cost_ceiling_is_mobile_survivable_and_edges_hold() {
+        // D-031: the guard must reject costs that would OOM the reference
+        // device — 1 GiB passed the old bound and is fatal there.
+        assert_eq!(MAX_M_COST_KIB, 256 * 1024);
+        let just_over = SealParams {
+            m_cost_kib: MAX_M_COST_KIB + 1,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        assert!(matches!(
+            seal_seed(&test_seed(), b"pw", just_over),
+            Err(CoreError::BlobParamBounds)
+        ));
+        let one_gib = SealParams {
+            m_cost_kib: 1024 * 1024,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        assert!(matches!(
+            seal_seed(&test_seed(), b"pw", one_gib),
+            Err(CoreError::BlobParamBounds)
+        ));
+        // Boundary inclusivity proven on the bounds function directly —
+        // sealing at MAX would pay a 256 MiB KDF in CI for no extra truth.
+        let at_max = SealParams {
+            m_cost_kib: MAX_M_COST_KIB,
+            t_cost: MAX_T_COST,
+            p_cost: MAX_P_COST,
+        };
+        assert!(at_max.check_bounds().is_ok());
+        let at_min = SealParams {
+            m_cost_kib: MIN_M_COST_KIB,
+            t_cost: MIN_T_COST,
+            p_cost: MIN_P_COST,
+        };
+        assert!(at_min.check_bounds().is_ok());
+    }
+
+    // ── Adversarial property tests (D-031, audit remediation) ─────────────
+    // Hand-rolled deterministic PRNG: no new dev-dependencies, reproducible
+    // failures (a failing case is recoverable from its iteration index).
+
+    fn lcg(state: &mut u64) -> u64 {
+        // Knuth MMIX constants — statistical quality is irrelevant here;
+        // determinism and coverage spread are the point.
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
+
+    /// Every single-byte corruption of a valid blob, at every offset, must
+    /// fail clean: no panic, never Ok. Offsets 0..6 fail structurally
+    /// (magic/version/scheme); 6..18 at bounds or auth (params); 18..58 at
+    /// auth via KDF/nonce (salt, nonce); 58.. at auth (ciphertext, tag) —
+    /// the first test that exercises the AAD binding at every position.
+    #[test]
+    fn every_single_byte_corruption_fails_clean() {
+        let blob = seal_seed(&test_seed(), b"pw", TEST_PARAMS).unwrap();
+        for at in 0..blob.len() {
+            let mut corrupt = blob.clone();
+            corrupt[at] ^= 0x01;
+            assert!(
+                unseal_seed(&corrupt, b"pw").is_err(),
+                "corruption at byte {at} unsealed successfully"
+            );
+        }
+    }
+
+    /// Random structural garbage must never panic the parser and never
+    /// unseal: random lengths and bytes, valid-magic prefixes with garbage
+    /// tails, and truncations of a valid blob at every length.
+    #[test]
+    fn unseal_survives_garbage_and_truncation_without_panicking() {
+        let mut rng: u64 = 0x4B56_5342; // "KVSB"
+        for i in 0..512 {
+            let len = (lcg(&mut rng) % 200) as usize;
+            let mut bytes: Vec<u8> = (0..len).map(|_| lcg(&mut rng) as u8).collect();
+            if i % 3 == 0 && len >= 6 {
+                bytes[..4].copy_from_slice(MAGIC); // force past the magic check
+                bytes[4] = VERSION_V1;
+                bytes[5] = SCHEME_PATH_B;
+            }
+            assert!(
+                unseal_seed(&bytes, b"pw").is_err(),
+                "garbage case {i} unsealed"
+            );
+        }
+        let blob = seal_seed(&test_seed(), b"pw", TEST_PARAMS).unwrap();
+        for cut in 0..blob.len() {
+            assert!(
+                unseal_seed(&blob[..cut], b"pw").is_err(),
+                "truncation at {cut} unsealed"
+            );
+        }
+    }
+
+    /// Round-trip must hold across the cheap corners of the legal parameter
+    /// lattice (large-m corners are P1.2 device-tuning's job, not CI's).
+    #[test]
+    fn round_trip_holds_at_cheap_param_corners() {
+        for (t, p) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+            let params = SealParams {
+                m_cost_kib: MIN_M_COST_KIB,
+                t_cost: t,
+                p_cost: p,
+            };
+            let blob = seal_seed(&test_seed(), b"pw", params).unwrap();
+            let seed = unseal_seed(&blob, b"pw").unwrap();
+            assert_eq!(seed.as_bytes(), &[0x42u8; 64], "corner t={t} p={p}");
+        }
     }
 }
