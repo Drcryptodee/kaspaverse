@@ -1,10 +1,13 @@
-# Build artifacts
-build/
+# Build artifacts — anchored: an unanchored build/ swallowed the unrelated
+# .claude/skills/build/ directory (L24)
+/build/
+android/**/build/
 rust/target/
 .dart_tool/
 .gradle/
 *.apk
 *.aab
+dist/
 
 # Generated bindings (regenerate via flutter_rust_bridge_codegen)
 # lib/src/rust/ is committed for reviewability — never hand-edited
