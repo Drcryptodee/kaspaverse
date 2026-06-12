@@ -118,5 +118,12 @@ printf '%s\n' "${RESULTS[@]:-"(no checks ran)"}"
 echo "──────────────────────────────────"
 echo "pass=$PASS fail=$FAIL skip=$SKIP"
 if [ "$FAIL" -gt 0 ]; then echo "GATE: RED"; exit 1; fi
+# Strict mode (CI, D-024): a SKIP means a tool is missing — on a runner that is a
+# provisioning bug, not an acceptable gap, or CI reads green while checking less
+# than the local gate does.
+if [ "${GATE_STRICT:-0}" = "1" ] && [ "$SKIP" -gt 0 ]; then
+  echo "GATE: RED (strict — $SKIP skipped check(s); provision the missing tool)"
+  exit 1
+fi
 if [ "$PASS" -eq 0 ]; then echo "GATE: NOTHING TO CHECK (scaffold state)"; exit 0; fi
 echo "GATE: GREEN"

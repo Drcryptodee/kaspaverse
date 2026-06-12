@@ -1,0 +1,8 @@
+# Pinned toolchain (D-024): local and CI must compile with the same rustc, or
+# `clippy -- -D warnings` turns the gate red the day a new stable adds a lint.
+# The CI workflow installs this same triple explicitly — keep the two in sync.
+# Bump deliberately: re-run the full gate locally first, then update both places.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-linux-android"]

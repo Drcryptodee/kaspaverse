@@ -1,0 +1,78 @@
+# cargo-deny baseline — P0.4, D-024. INV-7: every dependency is vetted & ledgered;
+# this file is the machine-enforced half of that law. `tools/gate.sh` runs
+# `cargo deny check` on every gate; CI runs it strict.
+#
+# Schema: cargo-deny 0.19.x (pinned in CI; keep local install in sync).
+# Any new license, advisory ignore, or source added here needs a DECISION_LOG
+# entry — same bar as the dependency that drags it in.
+
+[graph]
+# Only platforms we actually build: dev/CI host + the Android device target
+# (arm64-only, D-022). Keeps every check scoped to code that can ship.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-linux-android"]
+
+[advisories]
+# Vulnerabilities are errors by default (cargo-deny ≥0.14) — for the WHOLE tree,
+# transitive included; a CVE landing in the pinned tree SHOULD turn the gate red.
+# Baseline ignores: none. An ignore entry requires a D-entry with its repayment
+# trigger.
+#
+# unmaintained = "workspace": only OUR direct deps must be actively maintained.
+# The pinned rusty-kaspa tree carries 5 unmaintained transitive crates
+# (async-std, atty, derivative, instant, paste — RUSTSEC, 2026-06 state) that we
+# cannot fix without breaking the pin (INV-9). Upstream hygiene is reviewed at
+# every re-pin instead: run `cargo deny check advisories` after editing the rev.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Explicit SPDX allow-list — anything not listed is denied. Derived from the
+# actual tree at the rusty-kaspa v2.0.0 pin (workspace itself is MIT).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    # webpki-roots (Mozilla CA-certificate data via rustls) — data license,
+    # permissive, attribution-style. Needed for wRPC TLS.
+    "CDLA-Permissive-2.0",
+    # Public-domain equivalents (0BSD: mock_instant; CC0: secp256k1).
+    "0BSD",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+# Scoped per-crate exceptions — weaker-copyleft licenses allowed ONLY for the
+# named crates, so nothing else can ride in under them unnoticed.
+[[licenses.exceptions]]
+# kaspa-math (consensus difficulty/Uint arithmetic) → malachite bignum, LGPL-3.0.
+# Statically linked, but the app is MIT open-source: the LGPL's modify-and-relink
+# freedom is preserved by the public source itself. Unavoidable at the v2.0.0 pin
+# (D-024). Revisit at re-pin or before any non-open distribution.
+allow = ["LGPL-3.0-only"]
+name = "malachite-base"
+
+[[licenses.exceptions]]
+allow = ["LGPL-3.0-only"]
+name = "malachite-nz"
+
+[[licenses.exceptions]]
+# dirs-sys → option-ext, MPL-2.0 (file-level copyleft, used unmodified).
+allow = ["MPL-2.0"]
+name = "option-ext"
+
+[bans]
+# The rusty-kaspa tree carries duplicate minor versions of common crates —
+# deny would be permanent noise at this pin. Revisit at the next re-pin.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The ONE allowed git source: the pinned consensus implementation (INV-9).
+allow-git = ["https://github.com/kaspanet/rusty-kaspa.git"]

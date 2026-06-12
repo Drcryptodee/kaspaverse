@@ -20,6 +20,8 @@ echo "• toolchain: rustc=$(rustc --version 2>/dev/null | cut -d' ' -f2 || echo
      "flutter=$(flutter --version 2>/dev/null | head -1 | cut -d' ' -f2 || echo missing)" \
      "cargo-ndk=$(command -v cargo-ndk >/dev/null && echo yes || echo no)" \
      "cargo-deny=$(command -v cargo-deny >/dev/null && echo yes || echo no)"
+# adb lives in the local SDK install (P0.3), not on PATH in fresh shells.
+command -v adb >/dev/null || PATH="$PATH:$HOME/Android/Sdk/platform-tools"
 echo "• android device: $(command -v adb >/dev/null && adb devices 2>/dev/null | sed -n '2p' | awk '{print $1" "$2}' || echo 'adb missing')"
 echo "═══════════════════════════════════════════"
 echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md"
