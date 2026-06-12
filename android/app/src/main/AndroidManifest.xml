@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- wRPC to public Kaspa nodes. Debug builds inject this permission;
+         profile/release would silently fail to connect without it. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="KaspaVerse"
         android:name="${applicationName}"

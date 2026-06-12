@@ -8,3 +8,5 @@ license.workspace = true
 kaspa-wrpc-client.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-addresses.workspace = true
+tokio.workspace = true
+async-channel.workspace = true

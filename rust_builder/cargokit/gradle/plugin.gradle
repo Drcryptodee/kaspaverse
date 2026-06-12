@@ -139,11 +139,12 @@ class CargoKitPlugin implements Plugin<Project> {
                 platforms = plugin.getTargetPlatforms().collect()
             }
 
-            // Same thing addFlutterDependencies does in flutter.gradle
-            if (buildType == "debug") {
-                platforms.add("android-x86")
-                platforms.add("android-x64")
-            }
+            // KaspaVerse patch (D-022): upstream cargokit force-added
+            // android-x86/android-x64 to every debug build (emulator
+            // support, mirroring old flutter.gradle). kaspa-hashes at the
+            // pinned rev cannot build for x86_64-android (its asm build
+            // script panics "Unsupported OS"), and P0 targets arm64 devices
+            // only — debug builds use exactly the platforms flutter requests.
 
             // The task name depends on plugin properties, which are not available
             // at this point
