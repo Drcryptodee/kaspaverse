@@ -1,0 +1,28 @@
+name: kaspaverse
+description: "KaspaVerse — Android-first Kaspa wallet kernel + covenant arcade."
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Rust bridge (FRB v2) — runtime + the cargokit builder plugin that compiles
+  # rust/bridge during the native build (P0 §0.1).
+  flutter_rust_bridge: 2.12.0
+  kaspaverse_bridge:
+    path: rust_builder
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

@@ -26,6 +26,12 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
   else
     skip_check "cargo deny (INV-7)" "cargo-deny not installed — REQUIRED from P0-D4"
   fi
+  # cargo-ndk needs an NDK; discover a local install when the env var is unset.
+  if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+    for d in "$HOME"/android-ndk-r* "$HOME"/Android/Sdk/ndk/*; do
+      [ -d "$d" ] && export ANDROID_NDK_HOME="$d"
+    done
+  fi
   if command -v cargo-ndk >/dev/null 2>&1; then
     run_check "android cross-compile" cargo ndk -t arm64-v8a build --workspace
   else
