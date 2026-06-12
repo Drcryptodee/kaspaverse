@@ -63,6 +63,13 @@ CERTS="$("$APKSIGNER" verify --print-certs "$APK")" \
   || die "apksigner rejected the APK (unsigned or invalid signature)"
 echo "$CERTS" | grep -q "CN=Android Debug" \
   && die "APK is DEBUG-SIGNED — key.properties was not applied; see docs/RELEASE.md"
+# Pin the KaspaVerse upload cert (P0.5 sweep): any OTHER signer — not just the
+# debug key — fails. The fingerprint is public by nature (it ships inside every
+# APK); rotation = new keystore + this line + a DECISION_LOG entry + a public
+# announcement. Verification runbook: docs/RELEASE.md "Verifying provenance".
+EXPECTED_CERT_SHA256="ef7ac03d67e324f9b08f372fd1b1270ae77518ce31966fdf10fb36d95d94b696"
+echo "$CERTS" | grep -qi "SHA-256 digest: $EXPECTED_CERT_SHA256" \
+  || die "signer cert does not match the pinned KaspaVerse upload cert — wrong keystore?"
 
 # ── Emit artifact + checksum + provenance ───────────────────────
 mkdir -p dist
