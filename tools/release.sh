@@ -35,7 +35,12 @@ fi
 
 # ── Build ───────────────────────────────────────────────────────
 echo "── release: building $TAG ($COMMIT) — arm64-v8a, release profile"
-flutter build apk --release
+# Pin the platform set: flutter's release default is arm+arm64+x64, and
+# cargokit compiles EVERY requested platform — abiFilters only governs
+# packaging, it does not trim cargokit's build matrix. kaspa-hashes can't
+# build x86_64-android at the pinned rev (L18/L25), so an unpinned release
+# build dies mid-compile after minutes of wasted armv7 work.
+flutter build apk --release --target-platform android-arm64
 
 APK="build/app/outputs/flutter-apk/app-release.apk"
 [ -f "$APK" ] || die "expected output missing: $APK"
