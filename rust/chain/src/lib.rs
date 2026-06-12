@@ -7,6 +7,8 @@
 //! no trusted indexers (INV-8). Consensus logic always comes from the pinned
 //! crates, never re-implemented here (INV-9).
 
+#![forbid(unsafe_code)]
+
 mod dag_monitor;
 mod error;
 

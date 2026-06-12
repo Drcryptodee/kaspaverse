@@ -2413,6 +2413,7 @@ dependencies = [
  "kaspa-addresses",
  "kaspa-consensus-core",
  "kaspa-wrpc-client",
+ "log",
  "tokio",
 ]
 
@@ -2426,6 +2427,7 @@ version = "0.1.0"
 dependencies = [
  "flutter_rust_bridge",
  "kaspaverse-chain",
+ "log",
  "tokio",
 ]
 

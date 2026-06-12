@@ -115,7 +115,11 @@ impl DagMonitor {
         // Connected event cannot be missed.
         let ctl_channel = self.inner.client.rpc_ctl().multiplexer().channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        *self.inner.shutdown.lock().unwrap() = Some(shutdown_tx);
+        *self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shutdown_tx);
 
         let monitor = self.clone();
         let task = tokio::spawn(async move {
@@ -123,7 +127,11 @@ impl DagMonitor {
                 .event_loop(ctl_channel.receiver.clone(), shutdown_rx)
                 .await;
         });
-        *self.inner.event_task.lock().unwrap() = Some(task);
+        *self
+            .inner
+            .event_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
 
         let options = ConnectOptions {
             block_async_connect: false,
@@ -137,11 +145,21 @@ impl DagMonitor {
     /// Disconnects, then signals the event task and waits for it to drain.
     pub async fn stop(&self) -> Result<()> {
         self.inner.client.disconnect().await?;
-        let shutdown = self.inner.shutdown.lock().unwrap().take();
+        let shutdown = self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if let Some(tx) = shutdown {
             let _ = tx.send(());
         }
-        let task = self.inner.event_task.lock().unwrap().take();
+        let task = self
+            .inner
+            .event_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if let Some(task) = task {
             let _ = task.await;
         }
@@ -167,18 +185,30 @@ impl DagMonitor {
                 msg = ctl_rx.recv() => {
                     match msg {
                         Ok(RpcState::Connected) => {
-                            if self.handle_connect().await.is_ok() {
-                                self.inner.is_connected.store(true, Ordering::SeqCst);
-                                self.emit(DagEvent::Connected { url: self.inner.client.url() });
+                            match self.handle_connect().await {
+                                Ok(()) => {
+                                    self.inner.is_connected.store(true, Ordering::SeqCst);
+                                    log::info!("dag-monitor: connected to {:?}", self.inner.client.url());
+                                    self.emit(DagEvent::Connected { url: self.inner.client.url() });
+                                }
+                                // Stay "disconnected"; the client's Retry
+                                // strategy will produce a fresh Connected event.
+                                // KNOWN GAP (audited 2026-06-12, [→ P1]): if the
+                                // node accepts the socket but rejects a
+                                // subscription, the link idles half-set-up until
+                                // the next natural reconnect.
+                                Err(e) => log::warn!("dag-monitor: subscription setup failed: {e}"),
                             }
-                            // On error: stay "disconnected"; the client's Retry
-                            // strategy will produce a fresh Connected event.
                         }
                         Ok(RpcState::Disconnected) => {
+                            log::info!("dag-monitor: disconnected (client keeps retrying)");
                             self.handle_disconnect().await;
                         }
                         // Ctl channel closed: client is gone, nothing to track.
-                        Err(_) => break,
+                        Err(_) => {
+                            log::warn!("dag-monitor: ctl channel closed — event task exiting");
+                            break;
+                        }
                     }
                 }
                 notification = notification_rx.recv() => {
@@ -188,7 +218,10 @@ impl DagMonitor {
                                 self.emit(event);
                             }
                         }
-                        Err(_) => break,
+                        Err(_) => {
+                            log::warn!("dag-monitor: notification channel closed — event task exiting");
+                            break;
+                        }
                     }
                 }
                 _ = &mut shutdown_rx => break,
@@ -207,7 +240,11 @@ impl DagMonitor {
             self.inner.notification_tx.clone(),
             ChannelType::Persistent,
         ));
-        *self.inner.listener_id.lock().unwrap() = Some(listener_id);
+        *self
+            .inner
+            .listener_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener_id);
         rpc.start_notify(
             listener_id,
             Scope::VirtualDaaScoreChanged(VirtualDaaScoreChangedScope {}),
@@ -222,7 +259,12 @@ impl DagMonitor {
     }
 
     async fn handle_disconnect(&self) {
-        let listener_id = self.inner.listener_id.lock().unwrap().take();
+        let listener_id = self
+            .inner
+            .listener_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if let Some(id) = listener_id {
             // Best-effort: on a dropped connection the node already forgot us.
             let _ = self.inner.client.rpc_api().unregister_listener(id).await;
