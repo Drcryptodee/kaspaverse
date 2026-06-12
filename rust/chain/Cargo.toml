@@ -1,0 +1,10 @@
+[package]
+name = "kaspaverse-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kaspa-wrpc-client.workspace = true
+kaspa-consensus-core.workspace = true
+kaspa-addresses.workspace = true

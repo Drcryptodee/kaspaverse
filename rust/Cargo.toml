@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["core", "chain", "bridge"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# Profile note (P0 §0.5): TLS/crypto deps must be rustls-based — anything
+# OpenSSL-linked breaks the Android cross-compile (lesson L16). Verified at pin
+# time: rusty-kaspa v2.0.0 pins workflow-rpc with default-features = false +
+# rustls-tls-webpki-roots, so the wRPC stack is OpenSSL-free.
+
+[workspace.dependencies]
+# rusty-kaspa pinned at tag v2.0.0 (INV-9: consensus logic only from these).
+# Pinned by rev — immutable, unlike tags; rev verified = tag v2.0.0 on 2026-06-12.
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "90dbf074275d60c1fe74a3491883196f110970c0" }
