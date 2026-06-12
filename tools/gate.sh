@@ -47,12 +47,11 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   cd "$ROOT"
   # Hand-written Dart only — generated bindings (lib/src/rust/) are formatted
   # by FRB codegen and vendored cargokit is excluded like in analysis_options.
-  dart_format_paths=()
-  for p in lib/main.dart lib/src/services lib/src/ui test; do
-    [ -e "$ROOT/$p" ] && dart_format_paths+=("$p")
-  done
-  if [ "${#dart_format_paths[@]}" -gt 0 ]; then
-    run_check "dart format" dart format --output=none --set-exit-if-changed "${dart_format_paths[@]}"
+  # Enumerated by find, not a hardcoded dir list: a future lib/ subdir must not
+  # silently escape the check (P0-close audit, 2026-06-12).
+  mapfile -t dart_format_files < <(find lib test -name '*.dart' -not -path 'lib/src/rust/*' 2>/dev/null)
+  if [ "${#dart_format_files[@]}" -gt 0 ]; then
+    run_check "dart format" dart format --output=none --set-exit-if-changed "${dart_format_files[@]}"
   fi
   run_check "flutter analyze" flutter analyze
   if [ -d "$ROOT/test" ] && [ -n "$(ls -A "$ROOT/test" 2>/dev/null)" ]; then
