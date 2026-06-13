@@ -68,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 2064807748;
+  int get rustContentHash => 1528483805;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -91,6 +91,8 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiVaultInitVault({required String appPrivateDir});
 
+  Future<BigInt> crateApiVaultKdfBenchMs({required VaultKdfParams params});
+
   Future<void> crateApiVaultLockVault();
 
   Stream<DagSnapshot> crateApiDagSubscribeDagUpdates();
@@ -102,6 +104,8 @@ abstract class RustLibApi extends BaseApi {
   Future<bool> crateApiVaultVaultExists();
 
   Future<VaultKdfParams> crateApiVaultVaultKdfParamsStartingGrid();
+
+  Future<VaultKdfParams> crateApiVaultVaultKdfParamsTuned();
 
   Future<VaultStatus> crateApiVaultVaultStatusDefault();
 
@@ -233,6 +237,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "init_vault", argNames: ["appPrivateDir"]);
 
   @override
+  Future<BigInt> crateApiVaultKdfBenchMs({required VaultKdfParams params}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_vault_kdf_params(params, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_app_error,
+        ),
+        constMeta: kCrateApiVaultKdfBenchMsConstMeta,
+        argValues: [params],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultKdfBenchMsConstMeta =>
+      const TaskConstMeta(debugName: "kdf_bench_ms", argNames: ["params"]);
+
+  @override
   Future<void> crateApiVaultLockVault() {
     return handler.executeNormal(
       NormalTask(
@@ -241,7 +273,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -271,7 +303,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 6,
+              funcId: 7,
               port: port_,
             );
           },
@@ -306,7 +338,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 8,
             port: port_,
           );
         },
@@ -336,7 +368,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 9,
             port: port_,
           );
         },
@@ -363,7 +395,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -385,6 +417,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<VaultKdfParams> crateApiVaultVaultKdfParamsTuned() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_vault_kdf_params,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiVaultVaultKdfParamsTunedConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultVaultKdfParamsTunedConstMeta =>
+      const TaskConstMeta(debugName: "vault_kdf_params_tuned", argNames: []);
+
+  @override
   Future<VaultStatus> crateApiVaultVaultStatusDefault() {
     return handler.executeNormal(
       NormalTask(
@@ -393,7 +452,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 12,
             port: port_,
           );
         },
@@ -423,7 +482,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 11,
+              funcId: 13,
               port: port_,
             );
           },

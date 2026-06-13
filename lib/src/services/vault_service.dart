@@ -67,7 +67,9 @@ class VaultService with WidgetsBindingObserver {
     vault_api.VaultKdfParams? params,
   }) async {
     try {
-      final p = params ?? await vault_api.VaultKdfParams.startingGrid();
+      // Default = the P1.2 on-device tuned point (192 MiB / 3 / 1,
+      // PERFORMANCE_BUDGET.md); the blob header records what was used.
+      final p = params ?? await vault_api.VaultKdfParams.tuned();
       await vault_api.createVault(passphrase: passphrase, params: p);
     } finally {
       passphrase.fillRange(0, passphrase.length, 0);
