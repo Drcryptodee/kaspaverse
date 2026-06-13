@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+. The sealed seed blob, the Path-A Keystore blob, and the lockout
+     counter must never leave the device via cloud backup OR device-to-device
+     transfer (vault_architecture §5; wallet-security item 2). allowBackup is
+     already false; these explicit exclusions are defence in depth. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="vault.kvsb"/>
+        <exclude domain="file" path="vault.keystore.blob"/>
+        <exclude domain="file" path="vault.lockout"/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="vault.kvsb"/>
+        <exclude domain="file" path="vault.keystore.blob"/>
+        <exclude domain="file" path="vault.lockout"/>
+    </device-transfer>
+</data-extraction-rules>

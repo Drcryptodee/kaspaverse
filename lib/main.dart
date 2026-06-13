@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
+import 'package:kaspaverse/src/services/vault_service.dart';
 import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
 
 Future<void> main() async {
@@ -9,6 +10,9 @@ Future<void> main() async {
   // Single app-lifetime subscription to the bridge stream (L4); the first
   // call also kicks off the mainnet connection in Rust.
   ChainService.instance.start();
+  // Vault lane (P1.2): hands Rust the app-private dir, attaches the status
+  // stream, and registers the background→lock kill switch (§0.11).
+  await VaultService.instance.start();
   runApp(KaspaVerseApp(chain: ChainService.instance));
 }
 

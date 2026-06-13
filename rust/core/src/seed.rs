@@ -13,6 +13,17 @@ impl SecretSeed {
         Self(bytes)
     }
 
+    /// Construct from raw seed bytes delivered over the platform JNI lane
+    /// (Path A unlock, P1 §0.4): the GCM plaintext the Android Keystore Cipher
+    /// produced after a biometric unlock. The **only** public constructor, and
+    /// the bridge's ffi-leak-audited JNI path is its sole intended caller — the
+    /// caller owns wiping the source `byte[]`/buffer (L9). The fixed 64-byte box
+    /// makes length a type invariant: there is no malformed-length path to
+    /// mishandle here (D-033). The bytes never leave this crate after this call.
+    pub fn from_seed_bytes(bytes: Box<[u8; 64]>) -> Self {
+        Self(bytes)
+    }
+
     pub(crate) fn as_bytes(&self) -> &[u8; 64] {
         &self.0
     }
