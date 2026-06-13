@@ -30,6 +30,10 @@ class ChainService {
   /// Last bridge error message, null while healthy.
   final ValueNotifier<String?> error = ValueNotifier(null);
 
+  /// Wall-clock of the last *fresh* snapshot (connected + a real score). Drives
+  /// the StatusBeacon stale state (DS-1); null until the first fresh tip.
+  final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
+
   StreamSubscription<DagSnapshot>? _subscription;
 
   /// Idempotent: the first call attaches the app-lifetime subscription.
@@ -45,8 +49,21 @@ class ChainService {
   void _apply(DagSnapshot snapshot) {
     connected.value = snapshot.connected;
     endpoint.value = snapshot.endpoint;
-    virtualDaaScore.value = snapshot.virtualDaaScore;
-    sinkBlueScore.value = snapshot.sinkBlueScore;
+    // Retain last-known scores when a snapshot carries none — a dropped link
+    // emits nulls, and DS-1 dims last-known data with its age rather than
+    // blanking it to unknown ("—"). A genuine first-connect simply has no
+    // prior value to retain, so it still reads "—".
+    if (snapshot.virtualDaaScore != null) {
+      virtualDaaScore.value = snapshot.virtualDaaScore;
+    }
+    if (snapshot.sinkBlueScore != null) {
+      sinkBlueScore.value = snapshot.sinkBlueScore;
+    }
+    // Freshness clock for the stale beacon: only a connected snapshot bearing
+    // real chain data resets it. Silence or a dropped link lets age grow.
+    if (snapshot.connected && snapshot.virtualDaaScore != null) {
+      lastUpdate.value = DateTime.now();
+    }
     error.value = null;
   }
 
@@ -59,5 +76,6 @@ class ChainService {
     virtualDaaScore.value = null;
     sinkBlueScore.value = null;
     error.value = null;
+    lastUpdate.value = null;
   }
 }

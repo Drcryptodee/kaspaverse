@@ -1,9 +1,13 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/vault_service.dart';
+import 'package:kaspaverse/src/ui/app_shell.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
+import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/unlock_surface.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,7 +21,9 @@ Future<void> main() async {
   runApp(KaspaVerseApp(chain: ChainService.instance));
 }
 
-/// P0.3 hello-DAG: one screen, live DAA + sink blue score from mainnet.
+/// The app: Bioluminescent Vault theme (tokens, P1.3) wrapping the navigation
+/// shell. The D-027 freestyle seed-colour drift dies here — the theme is built
+/// entirely from `kv_theme.dart` / `tokens.dart`.
 class KaspaVerseApp extends StatelessWidget {
   const KaspaVerseApp({super.key, required this.chain});
 
@@ -27,33 +33,62 @@ class KaspaVerseApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'KaspaVerse',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00E5C7),
-          brightness: Brightness.dark,
+      debugShowCheckedModeBanner: false,
+      theme: kvDarkTheme(),
+      home: AppShell(
+        status: VaultService.instance.status,
+        initializing: const KvSplash(),
+        // The real create / unlock ceremonies are P1.4; debug builds reach the
+        // caged DevVaultPanel from these surfaces (D5).
+        onboarding: const NoVaultSurface(
+          debugFooter: kDebugMode ? _DevPanelLink() : null,
+        ),
+        locked: const UnlockSurface(
+          debugFooter: kDebugMode ? _DevPanelLink() : null,
+        ),
+        home: HelloDagScreen(
+          connected: chain.connected,
+          endpoint: chain.endpoint,
+          virtualDaaScore: chain.virtualDaaScore,
+          sinkBlueScore: chain.sinkBlueScore,
+          error: chain.error,
+          lastUpdate: chain.lastUpdate,
+          floatingActionButton: kDebugMode ? const _DevPanelFab() : null,
         ),
       ),
-      // P1.2 device pass: the hello-DAG home plus a THROWAWAY dev panel
-      // (FAB) driving the vault mechanisms — dies when P1.3/P1.4 land the
-      // real shell and ceremonies.
-      home: Builder(
-        builder: (context) => Scaffold(
-          body: HelloDagScreen(
-            connected: chain.connected,
-            endpoint: chain.endpoint,
-            virtualDaaScore: chain.virtualDaaScore,
-            sinkBlueScore: chain.sinkBlueScore,
-            error: chain.error,
-          ),
-          floatingActionButton: FloatingActionButton(
-            tooltip: 'DEV vault panel',
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const DevVaultPanel()),
-            ),
-            child: const Icon(Icons.lock_outline),
-          ),
-        ),
-      ),
+    );
+  }
+}
+
+/// Debug-only launcher for the caged DevVaultPanel (D5) — the P1.2 throwaway
+/// driver, kept for P1.4 dev + the passphrase fallback. Never built in release
+/// (`kDebugMode` guards both call sites), so the panel is unreachable there.
+class _DevPanelLink extends StatelessWidget {
+  const _DevPanelLink();
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      onPressed: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute<void>(builder: (_) => const DevVaultPanel())),
+      icon: const Icon(Icons.build_outlined),
+      label: const Text('Dev vault panel'),
+    );
+  }
+}
+
+class _DevPanelFab extends StatelessWidget {
+  const _DevPanelFab();
+
+  @override
+  Widget build(BuildContext context) {
+    return FloatingActionButton(
+      tooltip: 'DEV vault panel',
+      onPressed: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute<void>(builder: (_) => const DevVaultPanel())),
+      child: const Icon(Icons.build_outlined),
     );
   }
 }

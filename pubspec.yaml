@@ -26,3 +26,15 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Bundled type — never runtime-fetched (DS-6/§4). Two faces only (§13):
+  # Inter (UI) + JetBrains Mono (every amount/address/hash/score, DS-2).
+  # Variable TTFs; weight rides the `wght` axis via FontVariation (kv_theme).
+  # OFL-licensed (assets/fonts/OFL-*.txt); fetched at build time, committed.
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Variable.ttf
