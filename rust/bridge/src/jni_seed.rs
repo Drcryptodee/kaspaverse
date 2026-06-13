@@ -1,14 +1,18 @@
 //! The Path-A seed lane (P1 §0.4, D-033) — Android-only.
 //!
-//! Seed plaintext crosses **Kotlin ↔ Rust by direct JNI** into this same `.so`,
-//! never via FRB and never as anything in the Dart heap (INV-1). Two entries,
-//! mirroring the two directions the Keystore needs:
+//! Seed/phrase plaintext crosses **Kotlin ↔ Rust by direct JNI** into this same
+//! `.so`, never via FRB and never as anything in the Dart heap (INV-1). Three
+//! entries — the two Keystore directions plus the P1.4 reveal lane:
 //!
 //! - `nativeUnlockWithSeed(byte[])` — after a biometric unlock, Kotlin hands the
 //!   Keystore Cipher's GCM plaintext here; we load the vault.
 //! - `nativeExportSeedForKeystore()` — at enroll, we hand the live seed to Kotlin
 //!   so the hardware Keystore key can wrap it; Kotlin wipes the `byte[]` in
 //!   `finally` (L9).
+//! - `nativeRevealCeremonyWords()` — during a create ceremony (P1.4, D-037), we
+//!   hand the space-joined 12 words to the native FLAG_SECURE reveal/verify
+//!   surface to render; Kotlin wipes the `byte[]` after rendering (L9). The words
+//!   never reach Dart (INV-1).
 //!
 //! Invariants this module enforces (ffi-leak full):
 //! - **No panic crosses the boundary** (INV-2): every entry is wrapped in
@@ -28,7 +32,9 @@ use jni::JNIEnv;
 use zeroize::Zeroizing;
 
 use crate::api::error::AppError;
-use crate::api::vault::{export_seed_for_keystore, load_vault_from_seed_bytes};
+use crate::api::vault::{
+    export_seed_for_keystore, load_vault_from_seed_bytes, reveal_ceremony_words,
+};
 
 const SEED_LEN: usize = 64;
 
@@ -123,4 +129,43 @@ fn export_seed(env: &mut JNIEnv) -> Result<jbyteArray, AppError> {
         .map_err(|e| AppError::msg(format!("jni set_byte_array_region: {e}")))?;
     Ok(arr.into_raw())
     // `signed` and `seed` zeroize here on drop.
+}
+
+/// Reveal lane (P1.4, D-037). Returns a fresh Java `byte[]` holding the
+/// space-joined words of the in-progress create ceremony, for the native
+/// FLAG_SECURE surface to render; on error throws and returns null. The caller
+/// MUST wipe the `byte[]` after rendering (L9). Words never touch Dart (INV-1).
+///
+/// # Safety
+/// Standard JNI contract, as above; no unwinding escapes (`catch_unwind`).
+#[no_mangle]
+pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeRevealCeremonyWords(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jbyteArray {
+    match catch_unwind(AssertUnwindSafe(|| reveal_words(&mut env))) {
+        Ok(Ok(arr)) => arr,
+        Ok(Err(e)) => {
+            throw(&mut env, &e.message);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            throw(&mut env, "internal error in native seed lane (reveal)");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn reveal_words(env: &mut JNIEnv) -> Result<jbyteArray, AppError> {
+    let words = reveal_ceremony_words()?; // Zeroizing<Vec<u8>>, wiped on drop
+    let arr = env
+        .new_byte_array(words.len() as i32)
+        .map_err(|e| AppError::msg(format!("jni new_byte_array: {e}")))?;
+    // Transient signed copy, wiped on drop; then handed to the JVM byte[] via
+    // SetByteArrayRegion — no JNI-owned intermediate we cannot wipe.
+    let signed: Zeroizing<Vec<i8>> = Zeroizing::new(words.iter().map(|&b| b as i8).collect());
+    env.set_byte_array_region(&arr, 0, signed.as_slice())
+        .map_err(|e| AppError::msg(format!("jni set_byte_array_region: {e}")))?;
+    Ok(arr.into_raw())
+    // `signed` and `words` zeroize here on drop.
 }

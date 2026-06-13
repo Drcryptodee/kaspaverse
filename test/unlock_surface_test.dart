@@ -43,7 +43,7 @@ void main() {
   });
 
   testWidgets(
-    'no Path-A enrolled → passphrase-in-P1.4 note, no unlock button',
+    'no Path-A enrolled → offers passphrase unlock (Path B), no biometric button',
     (tester) async {
       await tester.pumpWidget(
         MaterialApp(
@@ -55,8 +55,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('Passphrase unlock'), findsOneWidget);
-      expect(find.text('Unlock vault'), findsNothing);
+      // P1.4 (D-036/D-037): the locked surface now hands off to the §0.6
+      // passphrase screen instead of the P1.3 "arrives later" note.
+      expect(find.text('Unlock with passphrase'), findsOneWidget);
+      expect(find.text('Unlock vault'), findsNothing); // no biometric button
     },
   );
 }

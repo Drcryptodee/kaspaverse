@@ -6,6 +6,7 @@ import 'package:kaspaverse/src/services/vault_service.dart';
 import 'package:kaspaverse/src/ui/app_shell.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
+import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
 
@@ -38,9 +39,11 @@ class KaspaVerseApp extends StatelessWidget {
       home: AppShell(
         status: VaultService.instance.status,
         initializing: const KvSplash(),
-        // The real create / unlock ceremonies are P1.4; debug builds reach the
-        // caged DevVaultPanel from these surfaces (D5).
-        onboarding: const NoVaultSurface(
+        // P1.4: onboarding (create/restore) + the passphrase unlock screen the
+        // locked surface hands off to. The create ceremony's native word reveal
+        // is the on-device build (D-037); debug builds still reach the caged
+        // DevVaultPanel from these surfaces (D5).
+        onboarding: const OnboardingSurface(
           debugFooter: kDebugMode ? _DevPanelLink() : null,
         ),
         locked: const UnlockSurface(

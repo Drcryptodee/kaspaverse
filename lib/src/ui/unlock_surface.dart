@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
+import 'passphrase_unlock_screen.dart';
 import 'theme/tokens.dart';
 
 /// The locked-state surface (P1.3 shell, decision D-036: biometric-first). A
@@ -97,6 +98,15 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
     }
   }
 
+  /// Hand off to the §0.6 passphrase unlock screen (Path B) — pushed over the
+  /// shell; on success the status stream flips unlocked and the shell shows home
+  /// beneath, and that screen pops itself.
+  void _openPassphrase() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const PassphraseUnlockScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -125,6 +135,13 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
                 ),
                 const SizedBox(height: KvSpace.xl),
                 _action(theme),
+                if (_biometricReady == true) ...[
+                  const SizedBox(height: KvSpace.s),
+                  TextButton(
+                    onPressed: _openPassphrase,
+                    child: const Text('Use passphrase instead'),
+                  ),
+                ],
                 if (_message != null) ...[
                   const SizedBox(height: KvSpace.m),
                   Text(
@@ -163,14 +180,16 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
       );
     }
     if (_biometricReady == false) {
-      // No Path-A on this device yet — the passphrase unlock screen is P1.4.
-      // Inter (prose), not the mono data role (§4).
-      return Text(
-        'Passphrase unlock arrives in the next update.',
-        style: theme.textTheme.bodyMedium?.copyWith(
-          color: KvColor.textTertiary,
+      // No Path-A enrolled (or unavailable) — Path B is the unlock lane (P1.4).
+      return SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          style: FilledButton.styleFrom(
+            minimumSize: const Size.fromHeight(KvSpace.touchTarget),
+          ),
+          onPressed: _openPassphrase,
+          child: const Text('Unlock with passphrase'),
         ),
-        textAlign: TextAlign.center,
       );
     }
     return SizedBox(
@@ -182,54 +201,6 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
         ),
         onPressed: _unlocking ? null : _unlock,
         child: Text(_unlocking ? 'Unlocking…' : 'Unlock vault'),
-      ),
-    );
-  }
-}
-
-/// The `!exists` state — no vault on this device yet. The real create ceremony
-/// (generate → reveal → verify) is P1.4; this is a calm placeholder so the
-/// shell is navigable. Debug builds get the caged DevVaultPanel to create one.
-class NoVaultSurface extends StatelessWidget {
-  const NoVaultSurface({super.key, this.debugFooter});
-
-  /// Debug-only escape hatch (the caged DevVaultPanel); null in release.
-  final Widget? debugFooter;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(KvSpace.gutter),
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.shield_outlined,
-                  size: KvSpace.xxl,
-                  color: KvColor.primaryMuted,
-                ),
-                const SizedBox(height: KvSpace.l),
-                Text('No vault yet', style: theme.textTheme.headlineSmall),
-                const SizedBox(height: KvSpace.s),
-                Text(
-                  'Wallet setup arrives in the next update.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                if (debugFooter != null) ...[
-                  const SizedBox(height: KvSpace.xl),
-                  debugFooter!,
-                ],
-              ],
-            ),
-          ),
-        ),
       ),
     );
   }

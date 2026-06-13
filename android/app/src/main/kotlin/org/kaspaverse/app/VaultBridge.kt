@@ -31,4 +31,13 @@ object VaultBridge {
      * if the vault is locked.
      */
     external fun nativeExportSeedForKeystore(): ByteArray
+
+    /**
+     * Reveal the in-progress create ceremony's 12 words for the native
+     * FLAG_SECURE reveal/verify surface to render (P1.4, D-037). Returns the
+     * words space-joined as UTF-8 bytes; the caller MUST wipe the array after
+     * rendering. The words never become a Dart object (INV-1). Throws if no
+     * ceremony is in progress.
+     */
+    external fun nativeRevealCeremonyWords(): ByteArray
 }

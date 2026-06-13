@@ -27,6 +27,13 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
+  # The canonical BIP39 English wordlist (public data; sha256 2f5eed…3b24dbda),
+  # bundled for the restore picker's filter ONLY — the secret is the ordered
+  # selection, not the dictionary. Never fetched at runtime; validation stays
+  # Rust-side (the pinned kaspa_bip32, INV-9).
+  assets:
+    - assets/bip39/english.txt
+
   # Bundled type — never runtime-fetched (DS-6/§4). Two faces only (§13):
   # Inter (UI) + JetBrains Mono (every amount/address/hash/score, DS-2).
   # Variable TTFs; weight rides the `wght` axis via FontVariation (kv_theme).

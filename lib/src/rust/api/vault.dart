@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `current_status`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lockout_delay_secs`, `lockout_path`, `now_unix`, `read_blob`, `read_lockout`, `set_vault`, `status_tx`, `to_bytes`, `vault_dir`, `write_lockout`
+// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `current_status`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lockout_delay_secs`, `lockout_path`, `now_unix`, `read_blob`, `read_lockout`, `reveal_ceremony_words`, `set_vault`, `status_tx`, `to_bytes`, `vault_dir`, `write_lockout`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Lockout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -38,6 +38,67 @@ Future<void> createVault({
   required List<int> passphrase,
   required VaultKdfParams params,
 }) => RustLib.instance.api.crateApiVaultCreateVault(
+  passphrase: passphrase,
+  params: params,
+);
+
+/// Begin a create ceremony: generate a fresh 12-word mnemonic and hold it for
+/// the native reveal/verify surface. Refuses if a vault already exists (one
+/// wallet per install) or a ceremony is already in progress (seal or abandon the
+/// prior one first). The phrase never crosses FRB.
+Future<void> beginCreate() => RustLib.instance.api.crateApiVaultBeginCreate();
+
+/// Abandon an in-progress create ceremony (back-gesture / cancel): drops the
+/// held mnemonic, zeroizing the phrase. Idempotent (a no-op if none is held).
+Future<void> abandonCreate() =>
+    RustLib.instance.api.crateApiVaultAbandonCreate();
+
+/// Complete a create ceremony: seal the held mnemonic's seed under `passphrase`,
+/// persist the blob atomically, and leave the vault unlocked. The optional
+/// `extra_word` (13th word / BIP39 passphrase) is restricted to **ASCII** on the
+/// create path (D-031.5; `mnemonic.rs::into_seed`): the pinned `to_seed` does no
+/// NFKD, so a non-ASCII extra word would silently derive a different wallet on a
+/// normalizing implementation — refused here so a NEW backup stays portable. The
+/// cheap checks (ASCII, vault-absent, ceremony-present) run BEFORE the ceremony
+/// is consumed, so a rejected attempt leaves it held for a retry.
+Future<void> sealAndPersist({
+  required List<int> passphrase,
+  required List<int> extraWord,
+  required VaultKdfParams params,
+}) => RustLib.instance.api.crateApiVaultSealAndPersist(
+  passphrase: passphrase,
+  extraWord: extraWord,
+  params: params,
+);
+
+/// Restore preview (deliverable 2 — the decoy/typo trap): derive the FIRST
+/// receive address from a candidate phrase WITHOUT persisting or unlocking. A
+/// single wrong word opens a visibly DIFFERENT wallet, so surfacing the derived
+/// address lets the user catch a typo before committing instead of landing in a
+/// silent empty wallet. The address is public (INV-2 permits it to cross);
+/// `phrase`/`extra_word` are the user's `Uint8List`, wiped Dart-side after the
+/// call (INV-1 sentence two). Restore accepts any UTF-8 extra word (max
+/// compatibility — unlike the ASCII-only create path).
+Future<String> restorePreview({
+  required List<int> phrase,
+  required List<int> extraWord,
+}) => RustLib.instance.api.crateApiVaultRestorePreview(
+  phrase: phrase,
+  extraWord: extraWord,
+);
+
+/// Restore-commit (deliverable 2): restore from `phrase` (+ optional
+/// `extra_word`), seal the derived seed under `passphrase`, persist, unlock.
+/// Refuses if a vault already exists. Any-UTF-8 extra word (restore is the
+/// compatibility path; the ASCII restriction is create-only).
+Future<void> restoreAndPersist({
+  required List<int> phrase,
+  required List<int> extraWord,
+  required List<int> passphrase,
+  required VaultKdfParams params,
+}) => RustLib.instance.api.crateApiVaultRestoreAndPersist(
+  phrase: phrase,
+  extraWord: extraWord,
   passphrase: passphrase,
   params: params,
 );
