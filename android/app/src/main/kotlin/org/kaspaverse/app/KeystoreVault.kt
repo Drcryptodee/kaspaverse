@@ -169,10 +169,15 @@ object KeystoreVault {
         )
         return try {
             generator.init(builder.build())
-            generator.generateKey()
+            generator.generateKey().also {
+                // Non-sensitive: which hardware tier holds the key (§2 evidence).
+                android.util.Log.i("KeystoreVault", "key created (strongbox=$strongBox)")
+            }
         } catch (e: StrongBoxUnavailableException) {
-            if (strongBox) createKey(strongBox = false) // graceful TEE fallback
-            else throw e
+            if (strongBox) {
+                android.util.Log.i("KeystoreVault", "StrongBox unavailable — TEE fallback")
+                createKey(strongBox = false)
+            } else throw e
         }
     }
 

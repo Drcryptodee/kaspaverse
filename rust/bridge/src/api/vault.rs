@@ -68,15 +68,28 @@ pub struct VaultKdfParams {
 }
 
 impl VaultKdfParams {
-    /// The v1 starting grid (P1 §0.3): m = 64 MiB, t = 3, p = 1. P1.2 device
-    /// tuning replaces this with a measured point recorded in
-    /// PERFORMANCE_BUDGET.md.
+    /// The v1 starting grid (P1 §0.3): m = 64 MiB, t = 3, p = 1. Kept for
+    /// reference/benching; new vaults use [`VaultKdfParams::tuned`].
     pub fn starting_grid() -> Self {
         let d = SealParams::default();
         Self {
             m_cost_kib: d.m_cost_kib,
             t_cost: d.t_cost,
             p_cost: d.p_cost,
+        }
+    }
+
+    /// The P1.2 on-device tuned point (LG V60, release build, 2026-06-13):
+    /// m = 192 MiB → 679 ms measured, ~32% headroom under the ≤1.0 s unlock
+    /// budget — 256 MiB measured 910 ms, too close to the edge for field
+    /// thermal/load variance (D-026: a budget miss is a finding). Full grid
+    /// in PERFORMANCE_BUDGET.md. Default for new vaults; the blob header
+    /// carries whatever a vault was actually sealed with.
+    pub fn tuned() -> Self {
+        Self {
+            m_cost_kib: 192 * 1024,
+            t_cost: 3,
+            p_cost: 1,
         }
     }
 }
@@ -312,10 +325,20 @@ pub fn create_vault(passphrase: Vec<u8>, params: VaultKdfParams) -> Result<(), A
     Ok(())
 }
 
+/// Serializes passphrase-unlock attempts end-to-end. The lockout counter is a
+/// read-modify-write spanning a seconds-long KDF — unserialized, concurrent
+/// failures lose updates (caught LIVE on-device 2026-06-13: two overlapping
+/// wrong attempts both recorded `attempt=1`, so a burst of N parallel guesses
+/// would count as one — wallet-security item 11). Concurrent attempts have no
+/// legitimate use; they wait their turn.
+static UNLOCK_GATE: Mutex<()> = Mutex::new(());
+
 /// Unlock via passphrase (Path B). Rate-limit is checked BEFORE the KDF runs
 /// (wallet-security 11), so a locked-out attempt costs nothing. On failure the
-/// attempt counter advances and persists; on success it resets.
+/// attempt counter advances and persists; on success it resets. Attempts are
+/// serialized by [`UNLOCK_GATE`] so every failure is counted.
 pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
+    let _gate = UNLOCK_GATE.lock().unwrap_or_else(PoisonError::into_inner);
     let passphrase = Zeroizing::new(passphrase);
     let now = now_unix();
     let mut lockout = read_lockout();
@@ -371,6 +394,17 @@ pub fn lock_vault() {
 
 fn read_blob() -> Result<Vec<u8>, AppError> {
     fs::read(blob_path()?).map_err(|e| AppError::io("read blob", e))
+}
+
+/// Time one Argon2id run at `params` on THIS device (P1.2 §0.3 tuning):
+/// seals a throwaway seed under a dummy passphrase and returns elapsed
+/// milliseconds. No secrets involved; bounds-checked by the core
+/// (8 MiB..=256 MiB, D-031.2). Runs on FRB's worker pool like the real KDF.
+pub fn kdf_bench_ms(params: VaultKdfParams) -> Result<u64, AppError> {
+    let seed = SecretSeed::from_seed_bytes(Box::new([0u8; 64]));
+    let started = std::time::Instant::now();
+    seal_seed(&seed, b"kdf-bench-dummy", params.into()).map_err(AppError::core)?;
+    Ok(started.elapsed().as_millis() as u64)
 }
 
 // ── JNI lane entry points (called by `jni_seed`, Android-only) ────────────
@@ -570,6 +604,32 @@ mod tests {
         // Clear it so we leave clean state.
         write_lockout(Lockout::default()).unwrap();
         lock_vault();
+    }
+
+    /// Regression pin for the live on-device find (2026-06-13): concurrent
+    /// wrong-passphrase attempts must EACH advance the counter — the lost
+    /// update came from the read-modify-write spanning the KDF. With the
+    /// UNLOCK_GATE they serialize; the count is exact, never racy.
+    #[test]
+    fn concurrent_failed_unlocks_are_all_counted() {
+        let (_g, _dir) = enter();
+        create_vault(b"the-real-one".to_vec(), cheap_params()).unwrap();
+        lock_vault();
+
+        std::thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    assert!(unlock_with_passphrase(b"wrong".to_vec()).is_err());
+                });
+            }
+        });
+
+        assert_eq!(
+            current_status().failed_attempts,
+            2,
+            "a concurrent failure was lost (attempt counter raced)"
+        );
+        write_lockout(Lockout::default()).unwrap();
     }
 
     #[test]

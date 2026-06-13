@@ -44,7 +44,8 @@ Future<void> createVault({
 
 /// Unlock via passphrase (Path B). Rate-limit is checked BEFORE the KDF runs
 /// (wallet-security 11), so a locked-out attempt costs nothing. On failure the
-/// attempt counter advances and persists; on success it resets.
+/// attempt counter advances and persists; on success it resets. Attempts are
+/// serialized by [`UNLOCK_GATE`] so every failure is counted.
 Future<void> unlockWithPassphrase({required List<int> passphrase}) => RustLib
     .instance
     .api
@@ -59,6 +60,13 @@ Future<void> unlockWithPassphrase({required List<int> passphrase}) => RustLib
 /// this on background/detach.
 Future<void> lockVault() => RustLib.instance.api.crateApiVaultLockVault();
 
+/// Time one Argon2id run at `params` on THIS device (P1.2 §0.3 tuning):
+/// seals a throwaway seed under a dummy passphrase and returns elapsed
+/// milliseconds. No secrets involved; bounds-checked by the core
+/// (8 MiB..=256 MiB, D-031.2). Runs on FRB's worker pool like the real KDF.
+Future<BigInt> kdfBenchMs({required VaultKdfParams params}) =>
+    RustLib.instance.api.crateApiVaultKdfBenchMs(params: params);
+
 /// Argon2id cost parameters chosen by on-device tuning (P1.2 §0.3). Mapped onto
 /// the core `SealParams`, which bounds-checks them (8 MiB..=256 MiB, D-031.2).
 class VaultKdfParams {
@@ -72,11 +80,19 @@ class VaultKdfParams {
     required this.pCost,
   });
 
-  /// The v1 starting grid (P1 §0.3): m = 64 MiB, t = 3, p = 1. P1.2 device
-  /// tuning replaces this with a measured point recorded in
-  /// PERFORMANCE_BUDGET.md.
+  /// The v1 starting grid (P1 §0.3): m = 64 MiB, t = 3, p = 1. Kept for
+  /// reference/benching; new vaults use [`VaultKdfParams::tuned`].
   static Future<VaultKdfParams> startingGrid() =>
       RustLib.instance.api.crateApiVaultVaultKdfParamsStartingGrid();
+
+  /// The P1.2 on-device tuned point (LG V60, release build, 2026-06-13):
+  /// m = 192 MiB → 679 ms measured, ~32% headroom under the ≤1.0 s unlock
+  /// budget — 256 MiB measured 910 ms, too close to the edge for field
+  /// thermal/load variance (D-026: a budget miss is a finding). Full grid
+  /// in PERFORMANCE_BUDGET.md. Default for new vaults; the blob header
+  /// carries whatever a vault was actually sealed with.
+  static Future<VaultKdfParams> tuned() =>
+      RustLib.instance.api.crateApiVaultVaultKdfParamsTuned();
 
   @override
   int get hashCode => mCostKib.hashCode ^ tCost.hashCode ^ pCost.hashCode;
