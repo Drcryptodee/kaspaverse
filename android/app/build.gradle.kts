@@ -81,3 +81,12 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // P1.2 §0.5, D-034 — the ONE new platform dep this phase. BiometricPrompt
+    // (BIOMETRIC_STRONG) gating the Keystore Cipher for Path-A unlock. Stable
+    // 1.1.0; dependency-steward audited (INV-7). Keystore itself uses raw
+    // `android.security.keystore` (platform, no dep). Rejected: any Flutter
+    // biometric/vault plugin (third-party code on the custody path, §0.5).
+    implementation("androidx.biometric:biometric:1.1.0")
+}

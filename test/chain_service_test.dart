@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/dag.dart';
+import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 
 void main() {

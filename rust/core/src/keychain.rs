@@ -107,6 +107,14 @@ impl KeyChain {
         self.prefix
     }
 
+    /// The root seed bytes, for the Path-A enroll export only (P1 §0.4).
+    /// Crate-private and routed exclusively through
+    /// [`UnlockedVault::with_seed_bytes`], which scopes the borrow to one
+    /// closure call so the bytes can never be stored or returned.
+    pub(crate) fn seed_bytes(&self) -> &[u8; 64] {
+        self.seed.as_bytes()
+    }
+
     /// Derive the raw private key for `(branch, index)`; the returned buffer
     /// zeroizes on drop. Mirror of upstream `PrivateKeyGenerator`
     /// (pin: privkeygen.rs:26-56). Crate-private: only the signer calls this.

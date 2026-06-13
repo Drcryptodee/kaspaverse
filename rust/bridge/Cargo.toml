@@ -9,9 +9,26 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 flutter_rust_bridge = "=2.12.0"
+kaspaverse-core = { version = "0.1.0", path = "../core" }
 kaspaverse-chain = { version = "0.1.0", path = "../chain" }
 tokio.workspace = true
 log.workspace = true
+zeroize.workspace = true
+
+# JNI seed lane (P1 §0.4, D-033). Path-A seed plaintext crosses Kotlin → Rust
+# (and the generated seed crosses Rust → Kotlin's Keystore Cipher at enroll) via
+# a direct JNI call into the same `.so` — never FRB, never Dart. Android-only:
+# the host build and `cargo test` never link a JVM, so all seed-handling LOGIC
+# lives in host-testable safe code (`api::vault`) and this crate only marshals
+# bytes across the boundary. `default-features = false` drops the `invocation`
+# JVM-launch surface we must never carry. Chosen over `jni-sys`: a binding is
+# needed regardless (no in-tree one), and `jni`'s audited array+exception
+# handling keeps the correctness-critical unsafe off our hand-written seed path
+# (INV-2 — a Rust error becomes a thrown Java exception, never a panic across
+# the boundary). dependency-steward audits at name+version (L27); ffi-leak owns
+# the seed path.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21.1", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

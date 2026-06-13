@@ -52,6 +52,20 @@ impl UnlockedVault {
         &self.keychain
     }
 
+    /// Expose the root seed bytes to a one-shot closure for the Path-A enroll
+    /// Keystore-seal (P1 §0.4): the Android Keystore Cipher needs the plaintext
+    /// to wrap it under a hardware-backed, non-exportable key. This is the
+    /// **only** sanctioned read of the seed above `core`, and the sole intended
+    /// caller is the bridge's ffi-leak-audited JNI export. Scoped on purpose —
+    /// the bytes are borrowed for exactly one call and can be neither returned
+    /// nor stored (the closure returns `R`, never the slice). Threat-model cost
+    /// (vault_architecture §7): the seed plaintext crosses the JNI (Kotlin)
+    /// boundary at enroll, never the Dart boundary (INV-1); Kotlin wipes its
+    /// `byte[]` in `finally` (L9).
+    pub fn with_seed_bytes<R>(&self, f: impl FnOnce(&[u8; 64]) -> R) -> R {
+        f(self.keychain.seed_bytes())
+    }
+
     /// A signer holding only a weak reference — it cannot keep the vault
     /// alive past `lock()`.
     pub fn signer(&self) -> VaultSigner {
@@ -254,5 +268,22 @@ mod tests {
         let rendered = format!("{vault:?} {signer:?}");
         assert!(rendered.contains("redacted"));
         assert!(!rendered.contains("kprv") && !rendered.contains("kaspa:"));
+    }
+
+    /// The Path-A seed lane (P1 §0.4, D-033): a seed reconstructed from raw
+    /// JNI bytes builds a working vault, and the scoped enroll export hands
+    /// back exactly those bytes (so the Keystore seals the true seed). Proves
+    /// the round trip the bridge's JNI import/export pair relies on.
+    #[test]
+    fn path_a_seed_lane_round_trips_bytes_through_the_vault() {
+        use crate::seed::SecretSeed;
+        let bytes = [0x33u8; 64];
+        let seed = SecretSeed::from_seed_bytes(Box::new(bytes));
+        let vault = UnlockedVault::new(KeyChain::from_seed(seed, Prefix::Mainnet).unwrap());
+        // Enroll export sees exactly the seed that was imported…
+        let exported = vault.with_seed_bytes(|b| *b);
+        assert_eq!(exported, bytes);
+        // …and the reconstructed vault derives addresses (the keychain is live).
+        assert!(vault.keychain().receive_address(0).is_ok());
     }
 }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../rust/api/dag.dart';
+import '../rust/api/error.dart';
 
 /// Owns the app's single subscription to the bridge DAG stream.
 ///

@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use kaspaverse_chain::{DagEvent, DagMonitor};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::api::error::AppError;
 use crate::frb_generated::StreamSink;
 
 /// Live view of the DAG tip as seen over wRPC, streamed on every change.
@@ -22,20 +23,6 @@ pub struct DagSnapshot {
     pub endpoint: Option<String>,
     pub virtual_daa_score: Option<u64>,
     pub sink_blue_score: Option<u64>,
-}
-
-/// Error type crossing the FFI (INV-2: `Result`, never a panic).
-#[derive(Debug)]
-pub struct AppError {
-    pub message: String,
-}
-
-impl AppError {
-    fn chain(e: kaspaverse_chain::ChainError) -> Self {
-        Self {
-            message: e.to_string(),
-        }
-    }
 }
 
 /// Snapshot fan-out, created once per process; every Dart subscription
