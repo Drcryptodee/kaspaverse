@@ -70,8 +70,13 @@ class _DevVaultPanelState extends State<DevVaultPanel> {
             runSpacing: 4,
             children: [
               ElevatedButton(
-                onPressed: () =>
-                    _run('create', () => vault.createVault(_pwBytes())),
+                onPressed: () => _run('create', () async {
+                  // Two-step create with the reveal skipped (dev only): begin →
+                  // seal. The real onboarding adds the native reveal/verify
+                  // between these (create_vault retired, D-038).
+                  await vault.beginCreate();
+                  await vault.sealAndPersist(_pwBytes(), Uint8List(0));
+                }),
                 child: const Text('create (Path B)'),
               ),
               ElevatedButton(

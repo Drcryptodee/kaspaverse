@@ -1,7 +1,9 @@
 package org.kaspaverse.app
 
-import android.provider.Settings
+import android.app.Activity
+import android.content.Intent
 import android.view.WindowManager
+import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -18,6 +20,17 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterFragmentActivity() {
     private val channel = "org.kaspaverse.app/ceremony"
+
+    // The pending Dart reply for an in-flight native reveal (D-039). RevealActivity
+    // returns RESULT_OK only after the verify quiz passes; RESULT_CANCELED otherwise.
+    private var pendingReveal: MethodChannel.Result? = null
+    private val revealLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        val reply = pendingReveal
+        pendingReveal = null
+        reply?.success(res.resultCode == Activity.RESULT_OK)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -45,7 +58,21 @@ class MainActivity : FlutterFragmentActivity() {
                     // §0.6 a11y gate: secret screens refuse to render while ANY
                     // accessibility service is enabled. This is the query; the
                     // refuse-to-render + explanation screen is the Dart guard.
-                    "isAccessibilityActive" -> result.success(isAccessibilityActive())
+                    "isAccessibilityActive" -> result.success(isAccessibilityActive(this))
+
+                    // §0.6 native word reveal + verify (D-037/D-039): launch the
+                    // dedicated FLAG_SECURE RevealActivity; it reads the held
+                    // ceremony words over the JNI lane (never Dart) and returns true
+                    // only once the verify quiz passes. Words never cross this
+                    // channel — only the boolean verdict does.
+                    "revealAndVerify" -> {
+                        if (pendingReveal != null) {
+                            result.error("BUSY", "a reveal is already in progress", null)
+                        } else {
+                            pendingReveal = result
+                            revealLauncher.launch(Intent(this, RevealActivity::class.java))
+                        }
+                    }
 
                     "biometricAvailable" -> result.success(KeystoreVault.isBiometricAvailable(this))
                     "pathAEnrolled" -> result.success(KeystoreVault.isEnrolled(this))
@@ -65,17 +92,5 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
-    }
-
-    /** True if any accessibility service is currently enabled (§0.6). */
-    private fun isAccessibilityActive(): Boolean {
-        val enabled = Settings.Secure.getInt(
-            contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0
-        )
-        if (enabled != 1) return false
-        val services = Settings.Secure.getString(
-            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        )
-        return !services.isNullOrEmpty()
     }
 }

@@ -29,20 +29,23 @@ void main() {
     },
   );
 
-  test('createVault wipes its buffer on the throw path too', () async {
+  test('sealAndPersist wipes its buffers on the throw path too', () async {
     final passphrase = Uint8List.fromList(List.filled(16, 0x7A));
+    final extraWord = Uint8List.fromList(List.filled(4, 0x33));
 
     await expectLater(
-      VaultService.instance.createVault(
+      VaultService.instance.sealAndPersist(
         passphrase,
-        // Explicit params: the startingGrid() fetch is itself a bridge call
-        // that would throw on host BEFORE createVault runs — passing params
-        // makes the createVault call the one under test.
+        extraWord,
+        // Explicit params: the tuned() fetch is itself a bridge call that would
+        // throw on host BEFORE sealAndPersist runs — passing params makes the
+        // sealAndPersist call the one under test.
         params: const VaultKdfParams(mCostKib: 65536, tCost: 3, pCost: 1),
       ),
       throwsA(anything),
     );
 
     expect(passphrase.every((b) => b == 0), isTrue);
+    expect(extraWord.every((b) => b == 0), isTrue);
   });
 }

@@ -27,21 +27,6 @@ Stream<VaultStatus> vaultStatusStream() =>
 /// Whether a sealed blob exists at rest.
 Future<bool> vaultExists() => RustLib.instance.api.crateApiVaultVaultExists();
 
-/// Enroll mechanism (P1 §0.4, Path B). Generates a fresh 12-word seed, seals it
-/// under `passphrase`, writes the blob atomically, leaves the vault unlocked.
-///
-/// **The word-reveal + verification ceremony is P1.4** — this mechanism stands
-/// up a recoverable vault so the unlock/lock loop is testable; it deliberately
-/// never surfaces the phrase (INV-1: words never cross FRB). Path-A biometric is
-/// layered on afterwards by the Kotlin Keystore path via the JNI enroll export.
-Future<void> createVault({
-  required List<int> passphrase,
-  required VaultKdfParams params,
-}) => RustLib.instance.api.crateApiVaultCreateVault(
-  passphrase: passphrase,
-  params: params,
-);
-
 /// Begin a create ceremony: generate a fresh 12-word mnemonic and hold it for
 /// the native reveal/verify surface. Refuses if a vault already exists (one
 /// wallet per install) or a ceremony is already in progress (seal or abandon the

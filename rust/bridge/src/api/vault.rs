@@ -307,40 +307,12 @@ pub fn vault_exists() -> bool {
     blob_path().map(|p| p.exists()).unwrap_or(false)
 }
 
-/// Enroll mechanism (P1 §0.4, Path B). Generates a fresh 12-word seed, seals it
-/// under `passphrase`, writes the blob atomically, leaves the vault unlocked.
-///
-/// **The word-reveal + verification ceremony is P1.4** — this mechanism stands
-/// up a recoverable vault so the unlock/lock loop is testable; it deliberately
-/// never surfaces the phrase (INV-1: words never cross FRB). Path-A biometric is
-/// layered on afterwards by the Kotlin Keystore path via the JNI enroll export.
-pub fn create_vault(passphrase: Vec<u8>, params: VaultKdfParams) -> Result<(), AppError> {
-    let passphrase = Zeroizing::new(passphrase);
-    if blob_path()?.exists() {
-        return Err(AppError::msg(
-            "a vault already exists; refusing to overwrite",
-        ));
-    }
-    let seed = MnemonicCeremony::generate()
-        .map_err(AppError::core)?
-        .into_seed(b"")
-        .map_err(AppError::core)?;
-    let blob = seal_seed(&seed, &passphrase, params.into()).map_err(AppError::core)?;
-    atomic_write(&blob_path()?, &blob).map_err(|e| AppError::io("write blob", e))?;
-    set_vault(UnlockedVault::new(
-        KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?,
-    ));
-    log::info!("vault created (path=passphrase scheme=argon2id)"); // no secret values
-    broadcast_status();
-    Ok(())
-}
-
 // ── P1.4 create ceremony (two-step: generate → hold → reveal → seal) ────────
-// D-038. `create_vault` above is the superseded one-shot mechanism (kept caged
-// for dev/test until the ceremony is device-proven); these are the real
-// onboarding surface. The live phrase is held in `CREATE_CEREMONY` and shown
-// only by the native reveal/verify surface over the JNI lane (D-037) — never
-// FRB.
+// D-038, debt repaid at the P1.4 device pass. The retired `create_vault` (a
+// one-shot generate+seal that never surfaced the phrase, so it could not back a
+// real backup) is GONE — these two-step fns ARE the onboarding surface. The live
+// phrase is held in `CREATE_CEREMONY` and shown only by the native reveal/verify
+// surface over the JNI lane (D-037) — never FRB.
 
 /// Begin a create ceremony: generate a fresh 12-word mnemonic and hold it for
 /// the native reveal/verify surface. Refuses if a vault already exists (one
@@ -707,13 +679,21 @@ mod tests {
 
     // ── Global-vault flow tests (serialized via TEST_LOCK) ────────────────
 
+    /// Stand up a sealed + unlocked vault the way the ceremony does, minus the
+    /// device-only reveal/verify (begin → seal). The headless stand-in for the
+    /// retired `create_vault` (D-038).
+    fn seal_test_vault(passphrase: Vec<u8>, params: VaultKdfParams) {
+        begin_create().unwrap();
+        seal_and_persist(passphrase, Vec::new(), params).unwrap();
+    }
+
     #[test]
     fn create_lock_unlock_round_trip() {
         let (_g, _dir) = enter();
         let pw = b"correct horse battery".to_vec();
 
         assert!(!vault_exists());
-        create_vault(pw.clone(), cheap_params()).unwrap();
+        seal_test_vault(pw.clone(), cheap_params());
         assert!(vault_exists());
         assert!(current_status().unlocked);
 
@@ -727,18 +707,24 @@ mod tests {
     }
 
     #[test]
-    fn create_refuses_to_overwrite_existing_vault() {
+    fn seal_refuses_to_overwrite_existing_vault() {
         let (_g, _dir) = enter();
-        create_vault(b"pw-one".to_vec(), cheap_params()).unwrap();
-        let again = create_vault(b"pw-two".to_vec(), cheap_params());
-        assert!(again.is_err(), "second create must refuse");
+        seal_test_vault(b"pw-one".to_vec(), cheap_params());
+        // Seal's own guard (defense-in-depth beside begin_create's): handed a
+        // ceremony past begin's gate, it must STILL refuse over an existing vault.
+        *CREATE_CEREMONY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(MnemonicCeremony::generate().unwrap());
+        let again = seal_and_persist(b"pw-two".to_vec(), Vec::new(), cheap_params());
+        assert!(again.is_err(), "seal must refuse over an existing vault");
+        abandon_create();
         lock_vault();
     }
 
     #[test]
     fn wrong_passphrase_advances_lockout_and_survives_restart() {
         let (_g, dir) = enter();
-        create_vault(b"the-real-one".to_vec(), cheap_params()).unwrap();
+        seal_test_vault(b"the-real-one".to_vec(), cheap_params());
         lock_vault();
 
         // Three wrong attempts.
@@ -767,7 +753,7 @@ mod tests {
     #[test]
     fn locked_out_unlock_is_refused_before_the_kdf() {
         let (_g, _dir) = enter();
-        create_vault(b"pw".to_vec(), cheap_params()).unwrap();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
         lock_vault();
 
         // Force an active lockout window directly, then time the refusal: it
@@ -796,7 +782,7 @@ mod tests {
     #[test]
     fn concurrent_failed_unlocks_are_all_counted() {
         let (_g, _dir) = enter();
-        create_vault(b"the-real-one".to_vec(), cheap_params()).unwrap();
+        seal_test_vault(b"the-real-one".to_vec(), cheap_params());
         lock_vault();
 
         std::thread::scope(|s| {
@@ -832,7 +818,7 @@ mod tests {
     #[test]
     fn export_seed_requires_unlocked_and_matches_the_sealed_seed() {
         let (_g, _dir) = enter();
-        create_vault(b"pw".to_vec(), cheap_params()).unwrap();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
         // Unlocked: export yields 64 bytes (the live seed the Keystore wraps).
         let exported = export_seed_for_keystore().unwrap();
         assert_eq!(exported.len(), 64);
@@ -873,7 +859,7 @@ mod tests {
         begin_create().unwrap();
         assert!(begin_create().is_err(), "a second ceremony must refuse");
         abandon_create();
-        create_vault(b"pw".to_vec(), cheap_params()).unwrap();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
         assert!(
             begin_create().is_err(),
             "begin must refuse when a vault exists"
