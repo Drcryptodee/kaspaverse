@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../services/vault_service.dart';
+import 'secret/masked_dots.dart';
 import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
@@ -103,7 +104,7 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
                         style: theme.textTheme.headlineSmall,
                       ),
                       const SizedBox(height: KvSpace.l),
-                      _MaskedDots(length: _buffer.length),
+                      MaskedDots(length: _buffer.length),
                       const SizedBox(height: KvSpace.l),
                       SizedBox(
                         width: double.infinity,
@@ -139,41 +140,6 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Renders the buffer LENGTH as masked dots — never the bytes (INV-3). Rebuilds
-/// off the buffer's `ValueNotifier<int>`.
-class _MaskedDots extends StatelessWidget {
-  const _MaskedDots({required this.length});
-
-  final ValueListenable<int> length;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ValueListenableBuilder<int>(
-      valueListenable: length,
-      builder: (context, n, _) {
-        if (n == 0) {
-          return Text(
-            'Use the keyboard below',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: KvColor.textTertiary,
-            ),
-          );
-        }
-        return Wrap(
-          spacing: KvSpace.s,
-          runSpacing: KvSpace.s,
-          alignment: WrapAlignment.center,
-          children: [
-            for (var i = 0; i < n; i++)
-              Icon(Icons.circle, size: KvSpace.sm, color: KvColor.primaryMuted),
-          ],
-        );
-      },
     );
   }
 }

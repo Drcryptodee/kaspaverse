@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1759330039;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1163459127;
 
 // Section: executor
 
@@ -106,40 +106,6 @@ fn wire__crate__api__vault__begin_create_impl(
             move |context| {
                 transform_result_sse::<_, crate::api::error::AppError>((move || {
                     let output_ok = crate::api::vault::begin_create()?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__vault__create_vault_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "create_vault",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_passphrase = <Vec<u8>>::sse_decode(&mut deserializer);
-            let api_params = <crate::api::vault::VaultKdfParams>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, crate::api::error::AppError>((move || {
-                    let output_ok = crate::api::vault::create_vault(api_passphrase, api_params)?;
                     Ok(output_ok)
                 })())
             }
@@ -847,31 +813,30 @@ fn pde_ffi_dispatcher_primary_impl(
     match func_id {
         1 => wire__crate__api__vault__abandon_create_impl(port, ptr, rust_vec_len, data_len),
         2 => wire__crate__api__vault__begin_create_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__vault__create_vault_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__dag__dag_snapshot_default_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__app__init_app_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__vault__init_vault_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__vault__kdf_bench_ms_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__vault__lock_vault_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__vault__restore_and_persist_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__vault__restore_preview_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__vault__seal_and_persist_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__dag__subscribe_dag_updates_impl(port, ptr, rust_vec_len, data_len),
-        13 => {
+        3 => wire__crate__api__dag__dag_snapshot_default_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__app__init_app_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__vault__init_vault_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__vault__kdf_bench_ms_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__vault__lock_vault_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__vault__restore_and_persist_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__vault__restore_preview_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__vault__seal_and_persist_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__dag__subscribe_dag_updates_impl(port, ptr, rust_vec_len, data_len),
+        12 => {
             wire__crate__api__vault__unlock_with_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
-        14 => wire__crate__api__vault__vault_exists_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__vault__vault_kdf_params_starting_grid_impl(
+        13 => wire__crate__api__vault__vault_exists_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__vault__vault_kdf_params_starting_grid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        16 => {
+        15 => {
             wire__crate__api__vault__vault_kdf_params_tuned_impl(port, ptr, rust_vec_len, data_len)
         }
-        17 => wire__crate__api__vault__vault_status_default_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__vault__vault_status_stream_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__vault__vault_status_default_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__vault__vault_status_stream_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

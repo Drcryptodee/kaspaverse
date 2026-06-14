@@ -31,6 +31,11 @@ class VaultService with WidgetsBindingObserver {
 
   StreamSubscription<vault_api.VaultStatus>? _subscription;
 
+  /// True while the native reveal Activity owns the foreground (D-039). It pauses
+  /// Flutter on purpose; suppress the §0.11 auto-lock for that window or we would
+  /// drop the very create ceremony being revealed.
+  bool _ceremonyHandoffActive = false;
+
   /// Idempotent: hands Rust the app-private directory (INV-3 — the sealed
   /// blob's home), attaches the app-lifetime status subscription, and
   /// registers the lifecycle observer.
@@ -57,27 +62,8 @@ class VaultService with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
   }
 
-  /// Create the vault (Path B). The ONE Dart call site for the passphrase
-  /// lane: every future ceremony screen routes through here, never the raw
-  /// bridge fn, so the L9 wipe below covers them all. The caller's buffer is
-  /// zeroed in `finally` — a throw between use and wipe cannot leak (INV-1
-  /// sentence two).
-  Future<void> createVault(
-    Uint8List passphrase, {
-    vault_api.VaultKdfParams? params,
-  }) async {
-    try {
-      // Default = the P1.2 on-device tuned point (192 MiB / 3 / 1,
-      // PERFORMANCE_BUDGET.md); the blob header records what was used.
-      final p = params ?? await vault_api.VaultKdfParams.tuned();
-      await vault_api.createVault(passphrase: passphrase, params: p);
-    } finally {
-      passphrase.fillRange(0, passphrase.length, 0);
-    }
-  }
-
   /// Unlock via passphrase (Path B). Same single-call-site + finally-wipe
-  /// contract as [createVault].
+  /// contract as [sealAndPersist].
   Future<void> unlockWithPassphrase(Uint8List passphrase) async {
     try {
       await vault_api.unlockWithPassphrase(passphrase: passphrase);
@@ -100,6 +86,23 @@ class VaultService with WidgetsBindingObserver {
   /// Abandon an in-progress create ceremony (cancel / back-gesture). Idempotent.
   /// (Backgrounding also drops it: the lifecycle [lockVault] does, Rust-side.)
   Future<void> abandonCreate() => vault_api.abandonCreate();
+
+  /// Run the native FLAG_SECURE reveal + verify surface (D-037/D-039) for the
+  /// held create ceremony. Returns true once the user has revealed the 12 words
+  /// and passed the verify quiz; false on back-out, a11y refusal, or error. The
+  /// words are read by native Kotlin over the JNI lane and NEVER cross this call
+  /// (INV-1) — only the boolean verdict returns. The native Activity pauses
+  /// Flutter, so this suppresses the §0.11 auto-lock for the handoff (the native
+  /// surface is the ceremony's guardian meanwhile — it drops on background).
+  Future<bool> revealAndVerify() async {
+    _ceremonyHandoffActive = true;
+    try {
+      final ok = await ceremony.invokeMethod<bool>('revealAndVerify');
+      return ok ?? false;
+    } finally {
+      _ceremonyHandoffActive = false;
+    }
+  }
 
   /// Seal the held ceremony's seed under [passphrase] (+ optional ASCII
   /// [extraWord]) and persist. Both throwaway buffers are zeroed in `finally`
@@ -168,6 +171,10 @@ class VaultService with WidgetsBindingObserver {
   /// the on-device acceptance evidence.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // A native reveal handoff (D-039) pauses Flutter on purpose; the
+    // RevealActivity guards the in-progress ceremony for its own lifetime, so
+    // don't drop it here. No unlocked vault exists pre-seal — nothing else to lock.
+    if (_ceremonyHandoffActive) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       unawaited(vault_api.lockVault());
