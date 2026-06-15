@@ -1,0 +1,372 @@
+import 'package:flutter/material.dart';
+
+import '../../rust/api/send.dart';
+import '../format.dart';
+import '../theme/tokens.dart';
+import '../widgets/amount_text.dart';
+
+/// The anti-blind-signing confirm (consensus B7 — the heart of P1.6). Everything
+/// here renders the [SendSummaryDto] Rust decoded from the ACTUAL transactions it
+/// will sign — never the form's echo of the user's intent. The hold-to-sign
+/// ceremony (DS-3) is decelerate-only with no double-tap path to broadcast.
+///
+/// Dismissing before the hold completes calls [abandon] (drops the Rust stash);
+/// a completed send pops with its [SendOutcomeDto].
+class ConfirmSendSheet extends StatefulWidget {
+  const ConfirmSendSheet({
+    super.key,
+    required this.summary,
+    required this.commit,
+    required this.abandon,
+  });
+
+  final SendSummaryDto summary;
+  final Future<SendOutcomeDto> Function(BigInt nonce) commit;
+  final Future<void> Function() abandon;
+
+  @override
+  State<ConfirmSendSheet> createState() => _ConfirmSendSheetState();
+}
+
+class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
+  bool _committed = false;
+  bool _sending = false;
+  SendOutcomeDto? _outcome;
+  String? _error;
+
+  @override
+  void dispose() {
+    // Dismissed without sending → release the stashed (unsigned) plan in Rust.
+    if (!_committed) widget.abandon();
+    super.dispose();
+  }
+
+  Future<void> _commit() async {
+    setState(() {
+      _committed = true;
+      _sending = true;
+      _error = null;
+    });
+    try {
+      final outcome = await widget.commit(widget.summary.nonce);
+      if (mounted) setState(() => _outcome = outcome);
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          0,
+          KvSpace.gutter,
+          KvSpace.l,
+        ),
+        child: _body(context),
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context) {
+    if (_sending) {
+      return const Padding(
+        padding: EdgeInsets.all(KvSpace.xl),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (_outcome != null || _error != null) {
+      return _ResultView(
+        outcome: _outcome,
+        error: _error,
+        onDone: () => Navigator.of(context).pop(_outcome),
+      );
+    }
+    return _confirm(context);
+  }
+
+  Widget _confirm(BuildContext context) {
+    final theme = Theme.of(context);
+    final s = widget.summary;
+    final amount = kasParts(s.amountSompi);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Confirm send', style: theme.textTheme.titleMedium),
+        const SizedBox(height: KvSpace.l),
+        _Field(
+          label: 'To',
+          child: Text(
+            chunkAddress(s.destination),
+            style: theme.textTheme.bodySmall?.copyWith(fontFamily: KvFont.mono),
+          ),
+        ),
+        const SizedBox(height: KvSpace.m),
+        _Field(
+          label: 'Amount',
+          child: AmountText(s.amountSompi, role: AmountRole.row),
+        ),
+        const SizedBox(height: KvSpace.m),
+        // The exact fee — never "≈ free" (KIP-9 storage mass can be non-trivial).
+        _Field(
+          label: 'Network fee',
+          child: AmountText(s.feeSompi, role: AmountRole.row),
+        ),
+        const SizedBox(height: KvSpace.m),
+        _Field(
+          label: 'Total',
+          child: AmountText(s.totalSompi, role: AmountRole.row),
+        ),
+        if (s.txCount > 1) ...[
+          const SizedBox(height: KvSpace.m),
+          Text(
+            'Sent as ${s.txCount} transactions (your amount exceeds one '
+            "transaction's size limit).",
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textTertiary,
+            ),
+          ),
+        ],
+        const SizedBox(height: KvSpace.xl),
+        _HoldToSign(
+          label: 'Hold to send ${amount.integer}.${amount.fraction} KAS',
+          onComplete: _commit,
+        ),
+        const SizedBox(height: KvSpace.s),
+        Text(
+          'Sends are final — there is no cancel once broadcast.',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: KvColor.textTertiary,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A labelled confirm row: small caption over the (Rust-decoded) value.
+class _Field extends StatelessWidget {
+  const _Field({required this.label, required this.child});
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: KvColor.textSecondary,
+          ),
+        ),
+        const SizedBox(height: KvSpace.xs),
+        child,
+      ],
+    );
+  }
+}
+
+/// The post-broadcast result: the txid (copyable, for an explorer cross-check),
+/// or an honest partial/failure (B6 — never a silent "it failed").
+class _ResultView extends StatelessWidget {
+  const _ResultView({
+    required this.outcome,
+    required this.error,
+    required this.onDone,
+  });
+
+  final SendOutcomeDto? outcome;
+  final String? error;
+  final VoidCallback onDone;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final o = outcome;
+    final failedOutright = o == null || (o.submitted == 0 && o.error != null);
+    final partial = o != null && o.partial;
+
+    final (IconData icon, Color color, String title) = failedOutright
+        ? (Icons.error_outline, KvColor.error, 'Send failed')
+        : partial
+        ? (Icons.warning_amber, KvColor.warning, 'Partly sent')
+        : (Icons.check_circle_outline, KvColor.success, 'Sent');
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: KvSpace.m),
+        Icon(icon, color: color, size: 40),
+        const SizedBox(height: KvSpace.s),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.titleMedium,
+        ),
+        if (partial) ...[
+          const SizedBox(height: KvSpace.s),
+          Text(
+            'Broadcast ${o.submitted} of ${o.total} transactions; the rest did '
+            'not send. Your activity will reflect what landed.',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+        ],
+        if (o?.finalTxid != null) ...[
+          const SizedBox(height: KvSpace.l),
+          Text(
+            'Transaction id',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+          const SizedBox(height: KvSpace.xs),
+          Container(
+            padding: const EdgeInsets.all(KvSpace.sm),
+            decoration: BoxDecoration(
+              color: KvColor.surfaceAlt,
+              borderRadius: BorderRadius.circular(KvRadius.data),
+            ),
+            child: SelectableText(
+              o!.finalTxid!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: KvFont.mono,
+              ),
+            ),
+          ),
+        ],
+        if (error != null) ...[
+          const SizedBox(height: KvSpace.m),
+          Text(
+            error!,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall?.copyWith(color: KvColor.error),
+          ),
+        ],
+        const SizedBox(height: KvSpace.xl),
+        FilledButton(onPressed: onDone, child: const Text('Done')),
+      ],
+    );
+  }
+}
+
+/// DS-3 hold-to-sign: press and hold; a decelerate-only fill advances over
+/// [KvMotion.deliberate]; only completing the hold fires [onComplete] (no
+/// double-tap path to broadcast). Releasing early reverses — nothing happens.
+class _HoldToSign extends StatefulWidget {
+  const _HoldToSign({required this.label, required this.onComplete});
+
+  final String label;
+  final VoidCallback onComplete;
+
+  @override
+  State<_HoldToSign> createState() => _HoldToSignState();
+}
+
+class _HoldToSignState extends State<_HoldToSign>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: KvMotion.deliberate,
+  )..addStatusListener(_onStatus);
+  bool _fired = false;
+
+  void _onStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed && !_fired) {
+      _fired = true;
+      widget.onComplete();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _down(_) {
+    if (_fired) return;
+    _controller.forward();
+  }
+
+  void _release([_]) {
+    if (_fired) return;
+    _controller.reverse();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return GestureDetector(
+      onTapDown: _down,
+      onTapUp: _release,
+      onTapCancel: _release,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+        child: Container(
+          height: KvSpace.touchTarget + KvSpace.s,
+          // Dual teal (token semantics): muted = ambient base, primary = the
+          // "activated" charge sweeping over it. Dark text reads on both.
+          color: KvColor.primaryMuted,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Decelerate-only fill (DS-5 vault register; never overshoot).
+              Positioned.fill(
+                child: AnimatedBuilder(
+                  animation: _controller,
+                  builder: (context, _) => Align(
+                    alignment: Alignment.centerLeft,
+                    child: FractionallySizedBox(
+                      widthFactor: KvMotion.out.transform(_controller.value),
+                      child: Container(color: KvColor.primary),
+                    ),
+                  ),
+                ),
+              ),
+              // Scale the full-precision label down rather than ever clip or
+              // ellipsize an amount (DS-2), incl. at large text scale.
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.lock_outline,
+                        size: 18,
+                        color: KvColor.abyss,
+                      ),
+                      const SizedBox(width: KvSpace.s),
+                      Text(
+                        widget.label,
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          color: KvColor.abyss,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

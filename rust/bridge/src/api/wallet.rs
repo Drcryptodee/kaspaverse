@@ -29,7 +29,16 @@ use crate::frb_generated::StreamSink;
 /// covers the gap-of-20 plus headroom; grow-on-use re-scan deferred). A restore
 /// of a wallet that used >30 receive addresses can miss funds past the window —
 /// a documented limitation, never a silent zero.
-const GAP_LIMIT: u32 = 30;
+pub(crate) const GAP_LIMIT: u32 = 30;
+
+/// The change-branch window to derive/watch/register: the fixed [`GAP_LIMIT`]
+/// widened to cover every change index used so far (the persisted cursor, D-041).
+/// The SINGLE source for the change window — both the sync engine's initial scan
+/// and a send's signer registration call it, so the watched set and the signer
+/// can never drift (risk #5). Receive stays fixed at `GAP_LIMIT`.
+pub(crate) fn change_window() -> u32 {
+    GAP_LIMIT.max(vault::change_cursor().saturating_add(1))
+}
 
 /// Direction of an activity row (mapped from the wallet framework's typed
 /// transaction data). Receive-only at P1.5; outgoing/change rows arrive with
@@ -93,6 +102,25 @@ static SNAPSHOTS: tokio::sync::OnceCell<broadcast::Sender<WalletSnapshot>> =
 /// Latest folded state, so a fresh subscriber paints immediately.
 static LATEST: Mutex<Option<WalletSnapshot>> = Mutex::new(None);
 
+/// The live sync engine handle, for send construction (P1.6 [`crate::api::send`]).
+/// `None` until the home screen has subscribed (the engine starts lazily on the
+/// first subscribe) — a send before then errors honestly.
+pub(crate) fn engine_handle() -> Option<WalletEngine> {
+    ENGINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// The latest folded snapshot, for send's "insufficient vs still-confirming"
+/// classification (reads `pending`/`mature` — nothing recomputed, INV-9).
+pub(crate) fn latest_snapshot() -> Option<WalletSnapshot> {
+    LATEST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
 fn map_activity(record: WalletActivityRecord) -> ActivityRecord {
     ActivityRecord {
         txid: record.txid,
@@ -152,8 +180,12 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
     SNAPSHOTS
         .get_or_try_init(|| async {
             // Derive the public watch set from the unlocked vault (INV-1: the
-            // seed never leaves vault.rs).
-            let addresses = vault::derive_wallet_addresses(GAP_LIMIT)?;
+            // seed never leaves vault.rs). Change widens with the cursor (D-041)
+            // so previously-used change addresses are re-watched on restart; the
+            // change subset lets the engine tell our own returning change from a
+            // real deposit.
+            let (addresses, change_addresses) =
+                vault::derive_wallet_addresses(GAP_LIMIT, change_window())?;
             // Bind to the SAME wRPC client the DAG monitor uses (§0.8 / D-005).
             let monitor = dag::shared_monitor().await?;
             let engine = WalletEngine::new(
@@ -164,7 +196,10 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
             .map_err(AppError::chain)?;
 
             let mut events = engine.subscribe();
-            engine.start(addresses).await.map_err(AppError::chain)?;
+            engine
+                .start(addresses, change_addresses)
+                .await
+                .map_err(AppError::chain)?;
             // Keep the engine alive for the process (its Sender feeds `events`).
             *ENGINE.lock().unwrap_or_else(PoisonError::into_inner) = Some(engine);
 

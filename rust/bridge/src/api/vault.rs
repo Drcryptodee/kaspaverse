@@ -22,8 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaspaverse_chain::Address;
 use kaspaverse_core::{
-    seal_seed, unseal_seed, KeyChain, MnemonicCeremony, Prefix, SealParams, SecretSeed,
-    UnlockedVault,
+    seal_seed, unseal_seed, Branch, KeyChain, MnemonicCeremony, Prefix, SealParams, SecretSeed,
+    UnlockedVault, VaultSigner,
 };
 use tokio::sync::broadcast::{self, error::RecvError};
 use zeroize::Zeroizing;
@@ -189,24 +189,104 @@ pub(crate) fn wallet_store_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("wallet").join("activity.kvlog"))
 }
 
-/// Derive the public receive + change address window (BIP44 gap window) from the
-/// unlocked vault, for the P1.5 wallet-sync engine. INV-1: the seed and the
-/// `KeyChain` NEVER leave this module — the keychain reference is held only under
-/// the `VAULT` lock and only public [`Address`] values are returned. This is the
-/// single derivation site; P1.6's signer registration must reuse it (one source,
-/// never two that drift — phase file §P1.5 two-consumer seam). Errors if locked.
-pub(crate) fn derive_wallet_addresses(gap: u32) -> Result<Vec<Address>, AppError> {
+/// App-private path for the change-address cursor (P1.6, D-041): the next-unused
+/// change index, persisted so fresh-per-send change survives a restart. Public
+/// data (an index), in the same `wallet/` subdir — no encryption (INV-3).
+pub(crate) fn change_cursor_path() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet").join("change.cursor"))
+}
+
+/// Read the persisted change cursor (the next-unused change index). A missing or
+/// malformed file reads as 0 — a fresh wallet has used no change addresses.
+pub(crate) fn change_cursor() -> u32 {
+    change_cursor_path()
+        .ok()
+        .and_then(|p| fs::read(p).ok())
+        .filter(|b| b.len() == 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .unwrap_or(0)
+}
+
+/// Persist the change cursor atomically — advanced only after a fully-broadcast
+/// send (D-041), so an abandoned/failed send never burns an index.
+pub(crate) fn set_change_cursor(next: u32) -> Result<(), AppError> {
+    atomic_write(&change_cursor_path()?, &next.to_le_bytes())
+        .map_err(|e| AppError::io("write change cursor", e))
+}
+
+/// Derive the public receive + change address window from the unlocked vault,
+/// for the wallet-sync engine. INV-1: the seed and the `KeyChain` NEVER leave
+/// this module — the keychain reference is held only under the `VAULT` lock and
+/// only public [`Address`] values are returned. The single derivation site (the
+/// two-consumer seam, now wired): the SAME window is watched by the `UtxoContext`
+/// (via the engine) and registered with the `VaultSigner` ([`build_wallet_signer`]).
+/// `change_count` widens with the change cursor (D-041) so used change addresses
+/// are re-watched after a restart. Errors if locked.
+/// Returns `(all_watched, change_only)`: the full receive+change window to watch,
+/// and — separately — the change addresses, so the sync engine can tell our own
+/// returning change from a real deposit (a UTXO at a change address is never a
+/// deposit; D — device find 2026-06-15).
+pub(crate) fn derive_wallet_addresses(
+    receive_count: u32,
+    change_count: u32,
+) -> Result<(Vec<Address>, Vec<Address>), AppError> {
     let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
     let vault = guard
         .as_ref()
         .ok_or_else(|| AppError::msg("wallet is locked — cannot derive addresses"))?;
     let keychain = vault.keychain();
-    let mut addresses = Vec::with_capacity((gap as usize) * 2);
-    for index in 0..gap {
-        addresses.push(keychain.receive_address(index).map_err(AppError::core)?);
-        addresses.push(keychain.change_address(index).map_err(AppError::core)?);
+    let mut receive = Vec::with_capacity(receive_count as usize);
+    for index in 0..receive_count {
+        receive.push(keychain.receive_address(index).map_err(AppError::core)?);
     }
-    Ok(addresses)
+    let mut change = Vec::with_capacity(change_count as usize);
+    for index in 0..change_count {
+        change.push(keychain.change_address(index).map_err(AppError::core)?);
+    }
+    let all = receive.into_iter().chain(change.iter().cloned()).collect();
+    Ok((all, change))
+}
+
+/// The change address at `index` (public — derived from the account xpub), for a
+/// send's fresh change (P1.6, D-041). Same single derivation site; the keychain
+/// never leaves this module (INV-1). Errors if locked.
+pub(crate) fn change_address_at(index: u32) -> Result<Address, AppError> {
+    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| AppError::msg("wallet is locked"))?;
+    vault
+        .keychain()
+        .change_address(index)
+        .map_err(AppError::core)
+}
+
+/// Build a [`VaultSigner`] for a send, registering the SAME watched window
+/// (receive `0..receive_count` + change `0..change_count`) so `try_sign` resolves
+/// any input the Generator selects, plus the fresh change. The signer holds a
+/// Weak ref to the keychain (the lock kill switch); keys are derived transiently
+/// per signature and zeroized (signer.rs). INV-1: the keychain stays inside this
+/// module — only the opaque signer (no key table in memory) leaves. Errors if locked.
+pub(crate) fn build_wallet_signer(
+    receive_count: u32,
+    change_count: u32,
+) -> Result<VaultSigner, AppError> {
+    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| AppError::msg("wallet is locked — cannot sign"))?;
+    let signer = vault.signer();
+    for index in 0..receive_count {
+        signer
+            .register(Branch::Receive, index)
+            .map_err(AppError::core)?;
+    }
+    for index in 0..change_count {
+        signer
+            .register(Branch::Change, index)
+            .map_err(AppError::core)?;
+    }
+    Ok(signer)
 }
 
 /// The wallet's primary receive address (receive index 0), for the Receive
@@ -239,7 +319,8 @@ fn now_unix() -> u64 {
 /// file intact, never a half-written one (P1.1-audit corruption vector). Temp
 /// file in the SAME directory → fsync data → rename (atomic on POSIX) → fsync
 /// the directory so the rename itself is durable. std-only (no new dep).
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// `pub(crate)` so the wallet/send lanes reuse it (the change cursor, P1.6).
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent dir"))?;

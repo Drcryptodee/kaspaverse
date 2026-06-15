@@ -8,6 +8,7 @@
 
 import 'api/dag.dart';
 import 'api/error.dart';
+import 'api/send.dart';
 import 'api/vault.dart';
 import 'api/wallet.dart';
 import 'dart:async';
@@ -85,6 +86,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
+
+  @protected
+  SendOutcomeDto dco_decode_send_outcome_dto(dynamic raw);
+
+  @protected
+  SendSummaryDto dco_decode_send_summary_dto(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -173,6 +180,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
+  SendOutcomeDto sse_decode_send_outcome_dto(SseDeserializer deserializer);
+
+  @protected
+  SendSummaryDto sse_decode_send_summary_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -278,6 +291,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_send_outcome_dto(
+    SendOutcomeDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_send_summary_dto(
+    SendSummaryDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

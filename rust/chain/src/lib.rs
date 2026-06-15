@@ -11,10 +11,12 @@
 
 mod dag_monitor;
 mod error;
+mod send;
 mod wallet_sync;
 
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
+pub use send::{PreparedSend, SendOutcome, SendSummary};
 pub use wallet_sync::{
     ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,
 };
@@ -22,4 +24,7 @@ pub use wallet_sync::{
 // shared wRPC handle from one place.
 pub use kaspa_addresses::Address;
 pub use kaspa_wallet_core::rpc::Rpc;
+// The signer trait the bridge coerces its `VaultSigner` into (`Arc<dyn SignerT>`)
+// when handing it to [`WalletEngine::prepare_send`] — same trait both crates use.
+pub use kaspa_wallet_core::tx::generator::signer::SignerT;
 pub use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};

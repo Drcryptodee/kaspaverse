@@ -11,6 +11,15 @@ pub enum ChainError {
     Wallet(Box<kaspa_wallet_core::error::Error>),
     /// Local activity-store I/O (app-private file; public data only, INV-3).
     Io(std::io::Error),
+    /// The mature UTXO set can't cover a send (the wallet-core Generator's
+    /// `InsufficientFunds`, surfaced as a typed variant so the bridge can tell a
+    /// true shortfall from "not yet spendable / still maturing" using the live
+    /// balance — P1.6). `additional_needed` is sompi short of amount + fee.
+    InsufficientFunds { additional_needed: u64 },
+    /// KIP-9 storage mass for this send exceeds the per-tx maximum: the amount
+    /// is too small relative to the wallet's UTXOs (a tiny output is penalized).
+    /// Typed so the bridge can guide the user to a larger amount (P1.6).
+    StorageMassExceeded { storage_mass: u64 },
     /// A chain-layer message with no upstream source.
     Message(String),
 }
@@ -21,6 +30,12 @@ impl fmt::Display for ChainError {
             ChainError::Rpc(e) => e.fmt(f),
             ChainError::Wallet(e) => e.fmt(f),
             ChainError::Io(e) => e.fmt(f),
+            ChainError::InsufficientFunds { additional_needed } => {
+                write!(f, "insufficient funds — {additional_needed} sompi short")
+            }
+            ChainError::StorageMassExceeded { storage_mass } => {
+                write!(f, "storage mass {storage_mass} exceeds the per-tx maximum")
+            }
             ChainError::Message(m) => f.write_str(m),
         }
     }
@@ -32,7 +47,9 @@ impl std::error::Error for ChainError {
             ChainError::Rpc(e) => Some(e.as_ref()),
             ChainError::Wallet(e) => Some(e.as_ref()),
             ChainError::Io(e) => Some(e),
-            ChainError::Message(_) => None,
+            ChainError::InsufficientFunds { .. }
+            | ChainError::StorageMassExceeded { .. }
+            | ChainError::Message(_) => None,
         }
     }
 }
