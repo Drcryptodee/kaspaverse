@@ -71,3 +71,21 @@ String chunkAddress(String address) {
   }
   return buffer.toString();
 }
+
+/// Compact, payload-aware address form for non-actionable contexts (DS-8): keep
+/// the `kaspa:` scheme intact, then first 8 + `…` + last 8 of the *payload*. The
+/// distinguishing entropy lives in the payload, so we spend the truncation
+/// budget there and never on `kaspa:q…` — eliding the scheme would leave
+/// near-zero identifying bits, a gift to address-poisoning. Example:
+/// `kaspa:qrxk2f9p…wmx3f4a2`. Payloads of 16 chars or fewer are returned whole
+/// (nothing to elide). The full review form is [chunkAddress]; a tap on a
+/// compact address should reveal it.
+String truncateAddressPayload(String address) {
+  final sep = address.indexOf(':');
+  final prefix = sep >= 0 ? address.substring(0, sep + 1) : '';
+  final payload = sep >= 0 ? address.substring(sep + 1) : address;
+  if (payload.length <= 16) return address;
+  final head = payload.substring(0, 8);
+  final tail = payload.substring(payload.length - 8);
+  return '$prefix$head…$tail';
+}

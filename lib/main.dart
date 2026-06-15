@@ -9,6 +9,7 @@ import 'package:kaspaverse/src/ui/app_shell.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
+import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
@@ -70,7 +71,7 @@ class KaspaVerseApp extends StatelessWidget {
           syncing: wallet.syncing,
           utxoIndexMissing: wallet.utxoIndexMissing,
           onReady: wallet.start,
-          receiveAddress: vaultReceiveAddress,
+          receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
           sendRoute: (_) => SendScreen(
             mature: wallet.mature,
             prepare: wallet.prepareSend,

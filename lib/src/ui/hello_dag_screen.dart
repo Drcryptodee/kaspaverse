@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../rust/api/wallet.dart';
 import 'format.dart';
@@ -39,7 +38,7 @@ class HelloDagScreen extends StatefulWidget {
     required this.syncing,
     required this.utxoIndexMissing,
     this.onReady,
-    this.receiveAddress,
+    this.receiveRoute,
     this.sendRoute,
     this.clock = DateTime.now,
     this.floatingActionButton,
@@ -63,8 +62,9 @@ class HelloDagScreen extends StatefulWidget {
   /// Called once on mount (post-unlock) — starts the wallet sync engine.
   final VoidCallback? onReady;
 
-  /// Fetches the receive address for the Receive sheet (`null` ⇒ no Receive UI).
-  final Future<String> Function()? receiveAddress;
+  /// Builds the Receive screen (`null` ⇒ no Receive UI). `main.dart` wires it to
+  /// `vaultReceiveAddress` so this consumer never imports it.
+  final WidgetBuilder? receiveRoute;
 
   /// Builds the Send screen (`null` ⇒ no Send UI). `main.dart` wires it to the
   /// wallet service so this consumer never imports it.
@@ -114,15 +114,10 @@ class _HelloDagScreenState extends State<HelloDagScreen> {
     Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
   }
 
-  Future<void> _showReceive() async {
-    final fetch = widget.receiveAddress;
-    if (fetch == null) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: KvColor.surface,
-      showDragHandle: true,
-      builder: (context) => _ReceiveSheet(fetch: fetch),
-    );
+  void _openReceive() {
+    final builder = widget.receiveRoute;
+    if (builder == null) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
   }
 
   @override
@@ -191,7 +186,7 @@ class _HelloDagScreenState extends State<HelloDagScreen> {
                   syncing: widget.syncing.value && mature == null,
                 ),
                 const SizedBox(height: KvSpace.l),
-                if (widget.sendRoute != null || widget.receiveAddress != null)
+                if (widget.sendRoute != null || widget.receiveRoute != null)
                   Row(
                     children: [
                       if (widget.sendRoute != null)
@@ -203,12 +198,12 @@ class _HelloDagScreenState extends State<HelloDagScreen> {
                           ),
                         ),
                       if (widget.sendRoute != null &&
-                          widget.receiveAddress != null)
+                          widget.receiveRoute != null)
                         const SizedBox(width: KvSpace.sm),
-                      if (widget.receiveAddress != null)
+                      if (widget.receiveRoute != null)
                         Expanded(
                           child: OutlinedButton.icon(
-                            onPressed: _showReceive,
+                            onPressed: _openReceive,
                             icon: const Icon(Icons.south_west, size: 18),
                             label: const Text('Receive'),
                           ),
@@ -391,79 +386,5 @@ class _ActivityRow extends StatelessWidget {
     final age = now.difference(at);
     if (age.inSeconds < 5) return 'just now';
     return '${formatAge(age)} ago';
-  }
-}
-
-/// Modal sheet showing the receive address (public; copy to clipboard is fine —
-/// INV-3 forbids secrets, not addresses).
-class _ReceiveSheet extends StatelessWidget {
-  const _ReceiveSheet({required this.fetch});
-
-  final Future<String> Function() fetch;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          KvSpace.gutter,
-          0,
-          KvSpace.gutter,
-          KvSpace.l,
-        ),
-        child: FutureBuilder<String>(
-          future: fetch(),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const Padding(
-                padding: EdgeInsets.all(KvSpace.xl),
-                child: Center(child: CircularProgressIndicator()),
-              );
-            }
-            if (snapshot.hasError || !snapshot.hasData) {
-              return Padding(
-                padding: const EdgeInsets.all(KvSpace.m),
-                child: Text(
-                  'Could not load the receive address.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.error,
-                  ),
-                ),
-              );
-            }
-            final address = snapshot.data!;
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text('Receive', style: theme.textTheme.titleMedium),
-                const SizedBox(height: KvSpace.m),
-                Container(
-                  padding: const EdgeInsets.all(KvSpace.m),
-                  decoration: BoxDecoration(
-                    color: KvColor.surfaceAlt,
-                    borderRadius: BorderRadius.circular(KvRadius.data),
-                  ),
-                  child: SelectableText(
-                    address,
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ),
-                const SizedBox(height: KvSpace.m),
-                FilledButton.icon(
-                  onPressed: () async {
-                    await Clipboard.setData(ClipboardData(text: address));
-                    if (context.mounted) Navigator.of(context).pop();
-                  },
-                  icon: const Icon(Icons.copy, size: 18),
-                  label: const Text('Copy address'),
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
   }
 }
