@@ -40,6 +40,13 @@ abstract final class KvColor {
   static const Color warning = Color(0xFFFBBF24); // degraded: stale link
   static const Color error = Color(0xFFF87171); // fund risk + destruction only
   static const Color info = Color(0xFF60A5FA); // explanatory callouts
+
+  // QR identity tile (DS-8/§8) — deliberately OUTSIDE the dark palette. A QR is
+  // ALWAYS dark modules on a light tile regardless of theme: scanability is the
+  // function, and a dark-themed QR defeats scanners. Pure black-on-white is the
+  // maximum-contrast standard. Never themed, never inverted (D-045b).
+  static const Color qrTile = Color(0xFFFFFFFF); // the light tile
+  static const Color qrModule = Color(0xFF000000); // the dark modules
 }
 
 /// §9 — Spacing. 4 dp base grid; the only permitted steps. Screen gutter 24 dp.

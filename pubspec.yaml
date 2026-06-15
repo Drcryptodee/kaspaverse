@@ -19,6 +19,12 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
+  # QR matrix encoder (P1.7) — pure Dart, no native/plugin/FFI, no network
+  # (INV-8); only transitive dep is `meta` (already in tree). We render the
+  # matrix ourselves with a CustomPainter to own the DS-8 dark-on-light rule
+  # (D-045b). Pinned exact (INV-7 supply-chain custody). License: BSD-3.
+  qr: 4.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
