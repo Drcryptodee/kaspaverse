@@ -6,6 +6,7 @@
 import 'api/dag.dart';
 import 'api/error.dart';
 import 'api/vault.dart';
+import 'api/wallet.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
@@ -34,7 +35,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<WalletSnapshot> dco_decode_StreamSink_wallet_snapshot_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
+
+  @protected
+  ActivityDirection dco_decode_activity_direction(dynamic raw);
+
+  @protected
+  ActivityRecord dco_decode_activity_record(dynamic raw);
 
   @protected
   AppError dco_decode_app_error(dynamic raw);
@@ -52,10 +64,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DagSnapshot dco_decode_dag_snapshot(dynamic raw);
 
   @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
+  List<ActivityRecord> dco_decode_list_activity_record(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  MaturityState dco_decode_maturity_state(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -82,6 +103,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VaultStatus dco_decode_vault_status(dynamic raw);
 
   @protected
+  WalletSnapshot dco_decode_wallet_snapshot(dynamic raw);
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
@@ -95,7 +119,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<WalletSnapshot> sse_decode_StreamSink_wallet_snapshot_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  ActivityDirection sse_decode_activity_direction(SseDeserializer deserializer);
+
+  @protected
+  ActivityRecord sse_decode_activity_record(SseDeserializer deserializer);
 
   @protected
   AppError sse_decode_app_error(SseDeserializer deserializer);
@@ -115,10 +150,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DagSnapshot sse_decode_dag_snapshot(SseDeserializer deserializer);
 
   @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  List<ActivityRecord> sse_decode_list_activity_record(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  MaturityState sse_decode_maturity_state(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -145,7 +191,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VaultStatus sse_decode_vault_status(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
+  WalletSnapshot sse_decode_wallet_snapshot(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
@@ -166,7 +212,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_wallet_snapshot_Sse(
+    RustStreamSink<WalletSnapshot> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_activity_direction(
+    ActivityDirection self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_activity_record(
+    ActivityRecord self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_app_error(AppError self, SseSerializer serializer);
@@ -187,6 +251,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_dag_snapshot(DagSnapshot self, SseSerializer serializer);
 
   @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_activity_record(
+    List<ActivityRecord> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
@@ -194,6 +267,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_maturity_state(MaturityState self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
@@ -223,7 +299,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_vault_status(VaultStatus self, SseSerializer serializer);
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
+  void sse_encode_wallet_snapshot(
+    WalletSnapshot self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class

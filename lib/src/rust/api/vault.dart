@@ -7,10 +7,17 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `current_status`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lockout_delay_secs`, `lockout_path`, `now_unix`, `read_blob`, `read_lockout`, `reveal_ceremony_words`, `set_vault`, `status_tx`, `to_bytes`, `vault_dir`, `write_lockout`
+// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `current_status`, `derive_wallet_addresses`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lockout_delay_secs`, `lockout_path`, `now_unix`, `read_blob`, `read_lockout`, `reveal_ceremony_words`, `set_vault`, `status_tx`, `to_bytes`, `vault_dir`, `wallet_store_path`, `write_lockout`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Lockout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+
+/// The wallet's primary receive address (receive index 0), for the Receive
+/// sheet. An address is PUBLIC (derived from the account xpub) — INV-1 governs
+/// secrets, not addresses — so it may cross the FFI. Errors if the vault is
+/// locked. (Next-unused-address rotation is deferred; P1.5 shows index 0.)
+Future<String> vaultReceiveAddress() =>
+    RustLib.instance.api.crateApiVaultVaultReceiveAddress();
 
 /// Hand the bridge the platform's app-private directory (INV-3). Idempotent
 /// for the same path (hot restart re-calls it); a later call with a DIFFERENT

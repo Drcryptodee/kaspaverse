@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kaspaverse_chain::Address;
 use kaspaverse_core::{
     seal_seed, unseal_seed, KeyChain, MnemonicCeremony, Prefix, SealParams, SecretSeed,
     UnlockedVault,
@@ -179,6 +180,50 @@ fn blob_path() -> Result<PathBuf, AppError> {
 
 fn lockout_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join(LOCKOUT_FILE))
+}
+
+/// App-private path for the wallet activity log (§0.10): the vault's dir, in a
+/// `wallet/` subdir. Public chain data only (INV-3) — distinct from the sealed
+/// blob, no encryption layer.
+pub(crate) fn wallet_store_path() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet").join("activity.kvlog"))
+}
+
+/// Derive the public receive + change address window (BIP44 gap window) from the
+/// unlocked vault, for the P1.5 wallet-sync engine. INV-1: the seed and the
+/// `KeyChain` NEVER leave this module — the keychain reference is held only under
+/// the `VAULT` lock and only public [`Address`] values are returned. This is the
+/// single derivation site; P1.6's signer registration must reuse it (one source,
+/// never two that drift — phase file §P1.5 two-consumer seam). Errors if locked.
+pub(crate) fn derive_wallet_addresses(gap: u32) -> Result<Vec<Address>, AppError> {
+    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| AppError::msg("wallet is locked — cannot derive addresses"))?;
+    let keychain = vault.keychain();
+    let mut addresses = Vec::with_capacity((gap as usize) * 2);
+    for index in 0..gap {
+        addresses.push(keychain.receive_address(index).map_err(AppError::core)?);
+        addresses.push(keychain.change_address(index).map_err(AppError::core)?);
+    }
+    Ok(addresses)
+}
+
+/// The wallet's primary receive address (receive index 0), for the Receive
+/// sheet. An address is PUBLIC (derived from the account xpub) — INV-1 governs
+/// secrets, not addresses — so it may cross the FFI. Errors if the vault is
+/// locked. (Next-unused-address rotation is deferred; P1.5 shows index 0.)
+pub fn vault_receive_address() -> Result<String, AppError> {
+    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| AppError::msg("wallet is locked"))?;
+    let address: String = vault
+        .keychain()
+        .receive_address(0)
+        .map_err(AppError::core)?
+        .into();
+    Ok(address)
 }
 
 fn now_unix() -> u64 {
