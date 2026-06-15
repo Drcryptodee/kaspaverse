@@ -40,6 +40,7 @@ class HelloDagScreen extends StatefulWidget {
     required this.utxoIndexMissing,
     this.onReady,
     this.receiveAddress,
+    this.sendRoute,
     this.clock = DateTime.now,
     this.floatingActionButton,
   });
@@ -64,6 +65,10 @@ class HelloDagScreen extends StatefulWidget {
 
   /// Fetches the receive address for the Receive sheet (`null` ⇒ no Receive UI).
   final Future<String> Function()? receiveAddress;
+
+  /// Builds the Send screen (`null` ⇒ no Send UI). `main.dart` wires it to the
+  /// wallet service so this consumer never imports it.
+  final WidgetBuilder? sendRoute;
 
   /// Test seam for "now" (default wall-clock).
   final DateTime Function() clock;
@@ -101,6 +106,12 @@ class _HelloDagScreenState extends State<HelloDagScreen> {
   Duration? _age() {
     final last = widget.lastUpdate.value;
     return last == null ? null : widget.clock().difference(last);
+  }
+
+  void _openSend() {
+    final builder = widget.sendRoute;
+    if (builder == null) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
   }
 
   Future<void> _showReceive() async {
@@ -180,11 +191,29 @@ class _HelloDagScreenState extends State<HelloDagScreen> {
                   syncing: widget.syncing.value && mature == null,
                 ),
                 const SizedBox(height: KvSpace.l),
-                if (widget.receiveAddress != null)
-                  OutlinedButton.icon(
-                    onPressed: _showReceive,
-                    icon: const Icon(Icons.south_west, size: 18),
-                    label: const Text('Receive'),
+                if (widget.sendRoute != null || widget.receiveAddress != null)
+                  Row(
+                    children: [
+                      if (widget.sendRoute != null)
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: _openSend,
+                            icon: const Icon(Icons.north_east, size: 18),
+                            label: const Text('Send'),
+                          ),
+                        ),
+                      if (widget.sendRoute != null &&
+                          widget.receiveAddress != null)
+                        const SizedBox(width: KvSpace.sm),
+                      if (widget.receiveAddress != null)
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _showReceive,
+                            icon: const Icon(Icons.south_west, size: 18),
+                            label: const Text('Receive'),
+                          ),
+                        ),
+                    ],
                   ),
                 const SizedBox(height: KvSpace.xl),
                 Text('Activity', style: theme.textTheme.titleMedium),
@@ -309,11 +338,17 @@ class _ActivityRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final incoming = record.direction == ActivityDirection.incoming;
     final icon = switch (record.direction) {
       ActivityDirection.incoming => Icons.south_west,
       ActivityDirection.outgoing => Icons.north_east,
       ActivityDirection.change => Icons.sync_alt,
+    };
+    // Direction semantics (DS-3 §3): a deposit is green, a withdrawal is red —
+    // the universal money convention, felt at a glance (founder directive).
+    final iconColor = switch (record.direction) {
+      ActivityDirection.incoming => KvColor.success,
+      ActivityDirection.outgoing => KvColor.error,
+      ActivityDirection.change => KvColor.textSecondary,
     };
     final pending = record.maturity == MaturityState.pending;
     final time = record.unixtimeMsec;
@@ -322,11 +357,7 @@ class _ActivityRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
       child: Row(
         children: [
-          Icon(
-            icon,
-            size: 20,
-            color: incoming ? KvColor.primaryMuted : KvColor.textSecondary,
-          ),
+          Icon(icon, size: 20, color: iconColor),
           const SizedBox(width: KvSpace.sm),
           Expanded(child: AmountText(record.valueSompi, role: AmountRole.row)),
           const SizedBox(width: KvSpace.s),

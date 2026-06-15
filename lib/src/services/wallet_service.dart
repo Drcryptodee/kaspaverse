@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../rust/api/error.dart';
+import '../rust/api/send.dart';
 import '../rust/api/wallet.dart';
 
 /// Owns the app's single subscription to the bridge wallet stream (L4): balance
@@ -61,6 +62,34 @@ class WalletService {
       },
     );
   }
+
+  // ── Send (P1.6) ──────────────────────────────────────────────────────────
+  // Request/response over the bridge, not the stream. Test seams (like
+  // [streamFactory]) let widget tests run without the native library.
+
+  @visibleForTesting
+  static Future<SendSummaryDto> Function(String destination, BigInt amountSompi)
+  sendPrepareFn = (destination, amountSompi) =>
+      sendPrepare(destination: destination, amountSompi: amountSompi);
+
+  @visibleForTesting
+  static Future<SendOutcomeDto> Function(BigInt nonce) sendCommitFn = (nonce) =>
+      sendCommit(nonce: nonce);
+
+  @visibleForTesting
+  static Future<void> Function() sendAbandonFn = sendAbandon;
+
+  /// Phase 1: build + stash the send in Rust; returns the Rust-decoded summary
+  /// the confirm renders (B7). Throws [AppError] on a bad address / shortfall.
+  Future<SendSummaryDto> prepareSend(String destination, BigInt amountSompi) =>
+      sendPrepareFn(destination, amountSompi);
+
+  /// Phase 2: sign + broadcast the stashed plan `nonce`. Returns the outcome
+  /// (final txid, or a typed partial result — B6).
+  Future<SendOutcomeDto> commitSend(BigInt nonce) => sendCommitFn(nonce);
+
+  /// Drop a stashed-but-unconfirmed send (confirm dismissed).
+  Future<void> abandonSend() => sendAbandonFn();
 
   void _apply(WalletSnapshot snapshot) {
     connected.value = snapshot.connected;

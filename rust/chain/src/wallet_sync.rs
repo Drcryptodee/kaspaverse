@@ -19,7 +19,7 @@
 //! module (it never sees a seed or keychain — the bridge hands it public
 //! [`Address`]es only).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -97,31 +97,110 @@ pub enum WalletEvent {
     Error(String),
 }
 
+/// The amount a wallet-originated send displays: the PAYMENT that left the wallet
+/// (`payment_value`), or — for a sweep with no payment output — the net outflow
+/// (inputs − change). NEVER the change that returns to us. Pure; unit-tested.
+fn spend_value(payment_value: Option<u64>, aggregate_input: u64, change_value: u64) -> u64 {
+    payment_value.unwrap_or_else(|| aggregate_input.saturating_sub(change_value))
+}
+
+/// True iff every UTXO sits at one of our CHANGE addresses (and there is at
+/// least one). A UTXO at a change address is always our own change returning —
+/// never a deposit, since change addresses are internal and never handed out.
+/// Pure; unit-tested. An unknown (`None`) address is NOT assumed to be change.
+fn all_change_addresses(addresses: &[Option<Address>], change_set: &HashSet<Address>) -> bool {
+    !addresses.is_empty()
+        && addresses
+            .iter()
+            .all(|a| a.as_ref().is_some_and(|a| change_set.contains(a)))
+}
+
+/// Whether a record is our own change re-reported as an incoming deposit. After
+/// a restart, wallet-core loses its in-memory "this was my send" context, so a
+/// re-scan files our returning change as an `Incoming` (`context.rs`
+/// handle_utxo_added, `outgoing()` = None). Such a record is NOT a deposit — its
+/// UTXOs are all at our change addresses (device find 2026-06-15).
+fn is_own_change(record: &TransactionRecord, change_set: &HashSet<Address>) -> bool {
+    let utxos = match record.transaction_data() {
+        TransactionData::Incoming { utxo_entries, .. }
+        | TransactionData::External { utxo_entries, .. } => utxo_entries,
+        // Outgoing/Change/Batch are handled as sends; only an incoming-classified
+        // record can be our misfiled change.
+        _ => return false,
+    };
+    let addresses: Vec<Option<Address>> = utxos.iter().map(|u| u.address.clone()).collect();
+    all_change_addresses(&addresses, change_set)
+}
+
 /// Project a wallet-core record onto a row, classifying with the record's own
 /// helpers (INV-9). `current_daa_score` drives maturity — pass the processor's
 /// live DAA so a reloaded Pending row promotes the instant the chain advances.
 fn map_record(record: &TransactionRecord, current_daa_score: u64) -> WalletActivityRecord {
-    let direction = if record.is_outgoing() {
-        ActivityDirection::Outgoing
-    } else if record.is_change() || record.is_batch() {
-        ActivityDirection::Change
-    } else {
-        match record.transaction_data() {
-            TransactionData::TransferOutgoing { .. } => ActivityDirection::Outgoing,
-            // Incoming / External / TransferIncoming / Reorg / Stasis read as
-            // received (Reorg/Stasis never reach the feed — see the engine).
-            _ => ActivityDirection::Incoming,
+    // A transaction the wallet ORIGINATED (a send) reaches us as TWO records on
+    // one txid: an `Outgoing` (pending, on submit) and — when the change UTXO
+    // confirms — a `Change` record (wallet-core, context.rs:handle_utxo_added).
+    // Both must render as ONE outgoing row showing the PAYMENT (`payment_value`),
+    // never the change that returns to us (== the new balance; not a receive).
+    // And a send is Confirmed the moment the DAG ACCEPTS it (`accepted_daa_score`)
+    // — NOT when its change UTXO separately matures (that left sends stuck on
+    // "Pending" until the next event). `record.value()` (= change for a `Change`
+    // record) is wrong for this row; we read the typed data instead.
+    let (direction, value_sompi, spend_accepted) = match record.transaction_data() {
+        TransactionData::Outgoing {
+            payment_value,
+            aggregate_input_value,
+            change_value,
+            accepted_daa_score,
+            ..
         }
+        | TransactionData::Change {
+            payment_value,
+            aggregate_input_value,
+            change_value,
+            accepted_daa_score,
+            ..
+        }
+        | TransactionData::TransferOutgoing {
+            payment_value,
+            aggregate_input_value,
+            change_value,
+            accepted_daa_score,
+            ..
+        } => (
+            ActivityDirection::Outgoing,
+            spend_value(*payment_value, *aggregate_input_value, *change_value),
+            Some(accepted_daa_score.is_some()),
+        ),
+        // Internal compounding leg of a >100k-mass chained send.
+        TransactionData::Batch {
+            aggregate_input_value,
+            accepted_daa_score,
+            ..
+        } => (
+            ActivityDirection::Change,
+            *aggregate_input_value,
+            Some(accepted_daa_score.is_some()),
+        ),
+        // Incoming / External / TransferIncoming: a receive (Reorg/Stasis never
+        // reach the feed — the engine tombstones / ignores them).
+        _ => (ActivityDirection::Incoming, record.value(), None),
     };
 
-    let maturity = match record.maturity(current_daa_score) {
-        Maturity::Confirmed => ActivityMaturity::Confirmed,
-        Maturity::Pending | Maturity::Stasis => ActivityMaturity::Pending,
+    let maturity = match spend_accepted {
+        // A spend: Confirmed once the DAG accepts it; Pending until then.
+        Some(accepted) if accepted => ActivityMaturity::Confirmed,
+        Some(_) => ActivityMaturity::Pending,
+        // A receive: matures over the UTXO maturity period (INV-9 — the record's
+        // own helper at the live DAA, never our own threshold).
+        None => match record.maturity(current_daa_score) {
+            Maturity::Confirmed => ActivityMaturity::Confirmed,
+            Maturity::Pending | Maturity::Stasis => ActivityMaturity::Pending,
+        },
     };
 
     WalletActivityRecord {
         txid: record.id().to_string(),
-        value_sompi: record.value(),
+        value_sompi,
         unixtime_msec: record.unixtime_msec(),
         block_daa_score: record.block_daa_score(),
         direction,
@@ -229,8 +308,18 @@ impl ActivityStore {
     }
 
     /// Newest-first rows, capped, with maturity resolved at `current_daa_score`.
-    fn list(&self, current_daa_score: u64) -> Vec<WalletActivityRecord> {
-        let mut records: Vec<&TransactionRecord> = self.records.values().collect();
+    /// Hides any record that is our own returning change misfiled as an incoming
+    /// (cleans entries a pre-fix restart re-scan may have already persisted).
+    fn list(
+        &self,
+        current_daa_score: u64,
+        change_set: &HashSet<Address>,
+    ) -> Vec<WalletActivityRecord> {
+        let mut records: Vec<&TransactionRecord> = self
+            .records
+            .values()
+            .filter(|record| !is_own_change(record, change_set))
+            .collect();
         records.sort_by(|a, b| {
             b.block_daa_score()
                 .cmp(&a.block_daa_score())
@@ -287,14 +376,28 @@ impl WalletEngine {
         self.inner.events.subscribe()
     }
 
+    /// The spendable UTXO source, for send construction (P1.6 [`crate::send`]).
+    /// A clone shares the SAME underlying context (Arc) — the exact watched set
+    /// the balance reflects, so a send spends only what the UI shows as mature.
+    pub fn context(&self) -> UtxoContext {
+        self.inner.context.clone()
+    }
+
     /// Start watching `addresses` (the derived receive+change window — public
     /// strings derived by the bridge from the unlocked vault; this layer never
     /// sees a secret). Spawns the fold task and starts the processor; if the
     /// shared client is already connected the processor fires `UtxoProcStart`
     /// immediately (`processor.rs:704`), which triggers the initial scan.
     ///
-    /// Must be called from within a tokio runtime (FRB's).
-    pub async fn start(&self, addresses: Vec<Address>) -> Result<()> {
+    /// Must be called from within a tokio runtime (FRB's). `change_addresses` is
+    /// the change subset of `addresses` — used to recognise our own returning
+    /// change (a UTXO there is never a deposit) so a restart re-scan doesn't
+    /// misfile it as an incoming.
+    pub async fn start(
+        &self,
+        addresses: Vec<Address>,
+        change_addresses: Vec<Address>,
+    ) -> Result<()> {
         // Register on the Events multiplexer BEFORE start() so a synchronous
         // UtxoProcStart on an already-connected client is buffered, not missed.
         let channel = self.inner.processor.multiplexer().channel();
@@ -305,6 +408,7 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
 
+        let change_set: HashSet<Address> = change_addresses.into_iter().collect();
         let engine = self.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -314,7 +418,7 @@ impl WalletEngine {
                     biased;
                     msg = channel.receiver.recv() => {
                         match msg {
-                            Ok(event) => engine.handle_event(*event, &addresses).await,
+                            Ok(event) => engine.handle_event(*event, &addresses, &change_set).await,
                             Err(_) => break, // multiplexer closed
                         }
                     }
@@ -372,18 +476,23 @@ impl WalletEngine {
         self.inner.processor.current_daa_score().unwrap_or(0)
     }
 
-    fn emit_activity(&self) {
+    fn emit_activity(&self, change_set: &HashSet<Address>) {
         let daa = self.current_daa();
         let list = self
             .inner
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .list(daa);
+            .list(daa, change_set);
         self.emit(WalletEvent::Activity(list));
     }
 
-    async fn handle_event(&self, event: Events, addresses: &[Address]) {
+    async fn handle_event(
+        &self,
+        event: Events,
+        addresses: &[Address],
+        change_set: &HashSet<Address>,
+    ) {
         match event {
             Events::UtxoProcStart => {
                 self.emit(WalletEvent::Syncing);
@@ -430,6 +539,12 @@ impl WalletEngine {
             Events::Pending { record }
             | Events::Maturity { record }
             | Events::Discovery { record } => {
+                // Our own change re-reported as an incoming deposit (a restart
+                // re-scan lost the outgoing context) is never a deposit — don't
+                // record it (the spend's own record already represents the tx).
+                if is_own_change(&record, change_set) {
+                    return;
+                }
                 {
                     let mut store = self
                         .inner
@@ -440,7 +555,7 @@ impl WalletEngine {
                         log::warn!("wallet-sync: activity append failed: {e}");
                     }
                 }
-                self.emit_activity();
+                self.emit_activity(change_set);
             }
             Events::Reorg { record } => {
                 log::info!("wallet-sync: reorg — removing tx {}", record.id());
@@ -454,7 +569,7 @@ impl WalletEngine {
                         log::warn!("wallet-sync: activity tombstone failed: {e}");
                     }
                 }
-                self.emit_activity();
+                self.emit_activity(change_set);
             }
             // Coinbase stasis is never a user row (events.rs:185).
             Events::Stasis { .. } => {}
@@ -556,6 +671,57 @@ mod tests {
     }
 
     #[test]
+    fn a_send_displays_the_payment_not_the_returning_change() {
+        // The device bug (2026-06-15): a 0.42 KAS send whose ~0.39 change returns
+        // to us must show 0.42 — never the change (which equals the new balance).
+        // wallet-core's `Change` record has `value() == change_value`, so we must
+        // read `payment_value` from the typed data instead.
+        let payment = 42_000_000; // 0.42 KAS sent
+        let change = 39_284_000; // ~0.393 KAS returned as change
+        let input = payment + change + 716_000; // inputs cover payment + change + fee
+        assert_eq!(
+            spend_value(Some(payment), input, change),
+            payment,
+            "a send shows the payment, not the change"
+        );
+        // A sweep (no payment output) shows the net outflow = inputs − change.
+        assert_eq!(spend_value(None, input, change), input - change);
+    }
+
+    #[test]
+    fn own_change_addresses_are_recognised_not_treated_as_deposits() {
+        // The device bug (2026-06-15): after a restart, wallet-core re-files our
+        // returning change as an `Incoming`. A UTXO at a CHANGE address is never
+        // a deposit (change addresses are internal, never handed out).
+        let change = Address::try_from(
+            "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692",
+        )
+        .unwrap();
+        let receive = Address::try_from(
+            "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf",
+        )
+        .unwrap();
+        let change_set: HashSet<Address> = [change.clone()].into_iter().collect();
+
+        assert!(
+            all_change_addresses(&[Some(change.clone())], &change_set),
+            "a UTXO at our change address is our own change"
+        );
+        assert!(
+            !all_change_addresses(&[Some(receive)], &change_set),
+            "a UTXO at a receive address is a real deposit"
+        );
+        assert!(
+            !all_change_addresses(&[Some(change), None], &change_set),
+            "an unknown-address UTXO is never assumed to be our change"
+        );
+        assert!(
+            !all_change_addresses(&[], &change_set),
+            "no UTXOs ⇒ not our change"
+        );
+    }
+
+    #[test]
     fn list_is_newest_first_and_capped() {
         let dir = std::env::temp_dir().join(format!("kv-wsync-{}", std::process::id()));
         let path = dir.join("activity.kvlog");
@@ -567,7 +733,7 @@ mod tests {
         store.upsert(incoming(2, 20, 10)).unwrap();
         store.upsert(incoming(3, 30, 20)).unwrap();
 
-        let rows = store.list(1_000_000);
+        let rows = store.list(1_000_000, &HashSet::new());
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].block_daa_score, 30);
         assert_eq!(rows[1].block_daa_score, 20);

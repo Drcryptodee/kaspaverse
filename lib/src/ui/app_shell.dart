@@ -14,7 +14,7 @@ import 'theme/tokens.dart';
 /// attach cannot flash over an in-flight unlock (P1.3 watch-out). The four
 /// destination widgets are injected so the routing is unit-testable without
 /// any of them.
-class AppShell extends StatelessWidget {
+class AppShell extends StatefulWidget {
   const AppShell({
     super.key,
     required this.status,
@@ -39,19 +39,56 @@ class AppShell extends StatelessWidget {
     return 'home';
   }
 
+  @override
+  State<AppShell> createState() => _AppShellState();
+}
+
+class _AppShellState extends State<AppShell> {
+  String _lastKey = AppShell.routeKey(null);
+
+  @override
+  void initState() {
+    super.initState();
+    _lastKey = AppShell.routeKey(widget.status.value);
+    widget.status.addListener(_onStatusChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.status.removeListener(_onStatusChanged);
+    super.dispose();
+  }
+
+  /// When the vault leaves `home` (e.g. a background-lock — §0.11), dismiss any
+  /// route pushed over the shell (the Send screen, the Receive/confirm sheets)
+  /// so the locked surface is actually shown, never hidden behind a stale
+  /// money screen. The vault already refuses operations while locked; this makes
+  /// the UI tell the truth (the founder's device find, 2026-06-15).
+  void _onStatusChanged() {
+    final key = AppShell.routeKey(widget.status.value);
+    if (key != 'home' && _lastKey == 'home') {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          Navigator.maybeOf(context)?.popUntil((route) => route.isFirst);
+        }
+      });
+    }
+    _lastKey = key;
+  }
+
   Widget _childFor(String key) => switch (key) {
-    'init' => initializing,
-    'onboarding' => onboarding,
-    'locked' => locked,
-    _ => home,
+    'init' => widget.initializing,
+    'onboarding' => widget.onboarding,
+    'locked' => widget.locked,
+    _ => widget.home,
   };
 
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<vault_api.VaultStatus?>(
-      valueListenable: status,
+      valueListenable: widget.status,
       builder: (context, s, _) {
-        final key = routeKey(s);
+        final key = AppShell.routeKey(s);
         // Vault-calm cross-fade between states — decelerate, no slide (DS-5/§6).
         return AnimatedSwitcher(
           duration: KvMotion.normal,

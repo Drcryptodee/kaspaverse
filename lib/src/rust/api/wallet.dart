@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `fold`, `map_activity`, `snapshots`
+// These functions are ignored because they are not marked as `pub`: `change_window`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `snapshots`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Subscribe to live wallet snapshots (balance + activity) for the unlocked
