@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
@@ -103,6 +104,18 @@ impl DagMonitor {
     /// pick up from the next event — scores tick about once per second.
     pub fn subscribe(&self) -> broadcast::Receiver<DagEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// The shared wRPC handle (`rpc_api` + `rpc_ctl`), for binding a wallet-core
+    /// `UtxoProcessor` to this same connection — one client for both DAG status
+    /// and wallet sync (P1 §0.8 / D-005: no DAA divergence, one socket to
+    /// manage). The processor reacts to the client's `RpcState` over the shared
+    /// ctl multiplexer, so it connects and resyncs in lockstep with the monitor.
+    pub fn rpc(&self) -> Rpc {
+        Rpc::new(
+            self.inner.client.rpc_api(),
+            self.inner.client.rpc_ctl().clone(),
+        )
     }
 
     /// Spawns the event task and starts a non-blocking connect with

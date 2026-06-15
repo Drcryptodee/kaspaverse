@@ -3101,8 +3101,10 @@ name = "kaspaverse-chain"
 version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
+ "borsh",
  "kaspa-addresses",
  "kaspa-consensus-core",
+ "kaspa-wallet-core",
  "kaspa-wrpc-client",
  "log",
  "tokio",

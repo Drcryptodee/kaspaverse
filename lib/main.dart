@@ -1,8 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/vault_service.dart';
+import 'package:kaspaverse/src/services/wallet_service.dart';
 import 'package:kaspaverse/src/ui/app_shell.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
@@ -19,16 +21,21 @@ Future<void> main() async {
   // Vault lane (P1.2): hands Rust the app-private dir, attaches the status
   // stream, and registers the background→lock kill switch (§0.11).
   await VaultService.instance.start();
-  runApp(KaspaVerseApp(chain: ChainService.instance));
+  // WalletService is NOT started here — its stream derives addresses from the
+  // unlocked vault, so the home screen starts it on mount (post-unlock).
+  runApp(
+    KaspaVerseApp(chain: ChainService.instance, wallet: WalletService.instance),
+  );
 }
 
 /// The app: Bioluminescent Vault theme (tokens, P1.3) wrapping the navigation
 /// shell. The D-027 freestyle seed-colour drift dies here — the theme is built
 /// entirely from `kv_theme.dart` / `tokens.dart`.
 class KaspaVerseApp extends StatelessWidget {
-  const KaspaVerseApp({super.key, required this.chain});
+  const KaspaVerseApp({super.key, required this.chain, required this.wallet});
 
   final ChainService chain;
+  final WalletService wallet;
 
   @override
   Widget build(BuildContext context) {
@@ -53,9 +60,16 @@ class KaspaVerseApp extends StatelessWidget {
           connected: chain.connected,
           endpoint: chain.endpoint,
           virtualDaaScore: chain.virtualDaaScore,
-          sinkBlueScore: chain.sinkBlueScore,
           error: chain.error,
           lastUpdate: chain.lastUpdate,
+          mature: wallet.mature,
+          pending: wallet.pending,
+          outgoing: wallet.outgoing,
+          activity: wallet.activity,
+          syncing: wallet.syncing,
+          utxoIndexMissing: wallet.utxoIndexMissing,
+          onReady: wallet.start,
+          receiveAddress: vaultReceiveAddress,
           floatingActionButton: kDebugMode ? const _DevPanelFab() : null,
         ),
       ),

@@ -8,6 +8,14 @@ license.workspace = true
 kaspa-wrpc-client.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-addresses.workspace = true
+# Wallet UTXO sync (P1.5 §0.8 / D-005): UtxoProcessor/UtxoContext + the Events
+# stream + TransactionRecord (its own borsh codec). INV-9 authority — consumed,
+# never re-implemented. The wallet-core dep lives HERE (not the bridge), so the
+# secret-free chain layer is what touches the wallet framework, never the FFI.
+kaspa-wallet-core.workspace = true
+# Activity store: persist wallet-core TransactionRecords with the pin's own
+# borsh codec (derive for our framing enum). Already in the lock (1.6.1).
+borsh = { version = "1", features = ["derive"] }
 tokio.workspace = true
 async-channel.workspace = true
 log.workspace = true

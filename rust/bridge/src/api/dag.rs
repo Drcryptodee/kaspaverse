@@ -33,6 +33,25 @@ static SNAPSHOTS: tokio::sync::OnceCell<broadcast::Sender<DagSnapshot>> =
 /// next on-chain tick.
 static LATEST: Mutex<Option<DagSnapshot>> = Mutex::new(None);
 
+/// The one shared DagMonitor — a single wRPC client for both DAG status and
+/// wallet sync (P1 §0.8 / D-005). Created + started exactly once; both
+/// [`subscribe_dag_updates`] (here) and the wallet engine (via
+/// [`kaspaverse_chain::DagMonitor::rpc`]) bind to this instance, so the header
+/// DAA and the wallet's maturity DAA can never come from different nodes.
+static MONITOR: tokio::sync::OnceCell<DagMonitor> = tokio::sync::OnceCell::const_new();
+
+/// Get the shared, started monitor (initialising it on the first call).
+pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
+    MONITOR
+        .get_or_try_init(|| async {
+            let monitor = DagMonitor::mainnet().map_err(AppError::chain)?;
+            monitor.start().await.map_err(AppError::chain)?;
+            Ok::<_, AppError>(monitor)
+        })
+        .await
+        .cloned()
+}
+
 /// Events carry absolute values, so folding is plain assignment (INV-9:
 /// nothing is computed locally).
 fn fold(snapshot: &mut DagSnapshot, event: DagEvent) {
@@ -52,10 +71,13 @@ fn fold(snapshot: &mut DagSnapshot, event: DagEvent) {
 async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError> {
     SNAPSHOTS
         .get_or_try_init(|| async {
-            let monitor = DagMonitor::mainnet().map_err(AppError::chain)?;
-            // Subscribe before start() so the first Connected is not missed.
+            // Created + started once in shared_monitor(); we subscribe right
+            // after. start() only *initiates* an async connect (non-blocking,
+            // ConnectStrategy::Retry) — Connected fires a network round-trip
+            // later, long after this subscribe, so it is not missed. The wallet
+            // engine binds to this same monitor via its rpc() (§0.8 / D-005).
+            let monitor = shared_monitor().await?;
             let mut events = monitor.subscribe();
-            monitor.start().await.map_err(AppError::chain)?;
             let (sender, _) = broadcast::channel(64);
             let fan_out = sender.clone();
             tokio::spawn(async move {

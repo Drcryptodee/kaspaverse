@@ -11,8 +11,15 @@
 
 mod dag_monitor;
 mod error;
+mod wallet_sync;
 
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
-// Re-export so downstream crates (bridge) name network types from one place.
+pub use wallet_sync::{
+    ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,
+};
+// Re-export so downstream crates (bridge) name network types, addresses and the
+// shared wRPC handle from one place.
+pub use kaspa_addresses::Address;
+pub use kaspa_wallet_core::rpc::Rpc;
 pub use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
