@@ -2,7 +2,7 @@ name: kaspaverse
 description: "KaspaVerse — Android-first Kaspa wallet kernel + covenant arcade."
 publish_to: 'none'
 
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: ^3.11.3
