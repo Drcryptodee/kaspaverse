@@ -15,6 +15,8 @@ vulnerability reporting:
 
 > The repository's **Security** tab → **Report a vulnerability**
 > (`https://github.com/Drcryptodee/kaspaverse/security/advisories/new`)
+>
+> Prefer email? `kaspaverse@gmail.com` reaches the maintainer privately too.
 
 This opens a private advisory only the maintainers can see. Include:
 
