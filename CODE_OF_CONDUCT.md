@@ -25,10 +25,13 @@ and "Enforcement Guidelines" sections apply to this project as written there.
 Maintainers are responsible for clarifying and enforcing this standard and will respond to
 reported behavior fairly and, where appropriate, confidentially.
 
-To report a concern, contact the maintainers privately:
+To report a concern, contact the maintainer privately through either channel:
 
-> **Conduct contact:** _to be set by the maintainer before public launch_
-> (a dedicated conduct email or an equivalent private channel).
+> - **Email:** `kaspaverse@gmail.com` — read only by the maintainer.
+> - **GitHub:** open a private report via the repository's **Security → "Report a vulnerability"**
+>   tab, which routes privately to the maintainer.
+
+Use whichever you're comfortable with; both reach the maintainer directly.
 
 Reports will be reviewed and investigated promptly. Maintainers will respect the privacy and
 safety of anyone who reports in good faith. Consequences follow the Contributor Covenant's
