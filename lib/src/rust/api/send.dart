@@ -7,8 +7,14 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `fully_broadcast`, `validate_mainnet_address`
+// These functions are ignored because they are not marked as `pub`: `fully_broadcast`, `kas_display`, `validate_mainnet_address`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`
+
+/// The smallest amount currently sendable from this wallet's coins (the KIP-9
+/// floor for the live UTXO shape, computed by probing the pinned Generator —
+/// D-054), or `None` when the wallet cannot send at all / isn't ready. Public
+/// data only; signerless; no cursor movement (peeks the current change address).
+Future<BigInt?> sendMinimum() => RustLib.instance.api.crateApiSendSendMinimum();
 
 /// Phase 1: validate, build the tx chain over the live UTXO context, and stash
 /// the unsigned transactions. Returns the Rust-decoded summary for the confirm.

@@ -79,10 +79,18 @@ class WalletService {
   @visibleForTesting
   static Future<void> Function() sendAbandonFn = sendAbandon;
 
+  @visibleForTesting
+  static Future<BigInt?> Function() sendMinimumFn = sendMinimum;
+
   /// Phase 1: build + stash the send in Rust; returns the Rust-decoded summary
   /// the confirm renders (B7). Throws [AppError] on a bad address / shortfall.
   Future<SendSummaryDto> prepareSend(String destination, BigInt amountSompi) =>
       sendPrepareFn(destination, amountSompi);
+
+  /// The smallest currently-sendable amount (sompi) for the wallet's live coin
+  /// shape — the KIP-9 floor probed from the pinned Generator (D-054). Advisory
+  /// display; `prepareSend` stays the single authority.
+  Future<BigInt?> minimumSendable() => sendMinimumFn();
 
   /// Phase 2: sign + broadcast the stashed plan `nonce`. Returns the outcome
   /// (final txid, or a typed partial result — B6).

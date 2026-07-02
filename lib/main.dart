@@ -81,6 +81,7 @@ class KaspaVerseApp extends StatelessWidget {
             prepare: wallet.prepareSend,
             commit: wallet.commitSend,
             abandon: wallet.abandonSend,
+            minimumSendable: wallet.minimumSendable,
           ),
           floatingActionButton: kDebugMode ? const _DevPanelFab() : null,
         ),

@@ -86,6 +86,31 @@ fn fully_broadcast(outcome: &SendOutcome) -> bool {
         && outcome.submitted == outcome.total
 }
 
+/// Display a sompi amount as KAS with trailing zeros trimmed (display-only —
+/// never consensus math). Pure; tested.
+fn kas_display(sompi: u64) -> String {
+    let kas = sompi / 100_000_000;
+    let frac = sompi % 100_000_000;
+    if frac == 0 {
+        format!("{kas}")
+    } else {
+        let s = format!("{kas}.{frac:08}");
+        s.trim_end_matches('0').to_string()
+    }
+}
+
+/// The smallest amount currently sendable from this wallet's coins (the KIP-9
+/// floor for the live UTXO shape, computed by probing the pinned Generator —
+/// D-054), or `None` when the wallet cannot send at all / isn't ready. Public
+/// data only; signerless; no cursor movement (peeks the current change address).
+pub fn send_minimum() -> Result<Option<u64>, AppError> {
+    let Some(engine) = wallet::engine_handle() else {
+        return Ok(None); // engine not up yet — the UI simply shows no hint
+    };
+    let change = vault::change_address_at(vault::change_cursor())?;
+    engine.minimum_sendable(change).map_err(AppError::chain)
+}
+
 /// Phase 1: validate, build the tx chain over the live UTXO context, and stash
 /// the unsigned transactions. Returns the Rust-decoded summary for the confirm.
 /// Errors honestly: malformed/wrong-network address, locked/unready wallet, or
@@ -132,12 +157,24 @@ pub async fn send_prepare(
         }
         Err(ChainError::StorageMassExceeded { .. }) => {
             // KIP-9: a tiny output relative to the wallet's UTXOs is penalized
-            // past the per-tx mass limit (INV-8 — surface it honestly, with the
-            // way out, never a raw error).
-            return Err(AppError::msg(
-                "this amount is too small to send economically from your current balance — \
-                 Kaspa's storage-mass rule penalises tiny outputs. Try sending a larger amount.",
-            ));
+            // past the Generator's per-tx mass ceiling (INV-8 — surface it
+            // honestly, WITH the exact way out: the computed minimum for this
+            // wallet's coin shape, not a mystery — D-054).
+            let hint = engine
+                .minimum_sendable(vault::change_address_at(vault::change_cursor())?)
+                .ok()
+                .flatten()
+                .map(|m| {
+                    format!(
+                        " The smallest sendable right now is about {} KAS.",
+                        kas_display(m)
+                    )
+                })
+                .unwrap_or_default();
+            return Err(AppError::msg(format!(
+                "this amount is too small to send from your current coins — Kaspa's \
+                 anti-dust rule (storage mass) prices tiny outputs.{hint}"
+            )));
         }
         Err(e) => return Err(AppError::chain(e)),
     };
@@ -278,6 +315,15 @@ mod tests {
             error: None,
             final_txid: None,
         }));
+    }
+
+    #[test]
+    fn kas_display_trims_honestly() {
+        assert_eq!(kas_display(100_000_000), "1");
+        assert_eq!(kas_display(10_000_000), "0.1");
+        assert_eq!(kas_display(12_345_678), "0.12345678");
+        assert_eq!(kas_display(23_000_000), "0.23");
+        assert_eq!(kas_display(0), "0");
     }
 
     #[test]
