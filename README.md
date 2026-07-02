@@ -11,14 +11,16 @@ leave Rust memory and never cross the language boundary** (enforced, not aspirat
 
 ## What this becomes
 
+The north star: a sovereign **everything-app for the pure-L1 Kaspa ecosystem** — finance,
+communications, identity, and games as native L1 primitives. The beachhead, in order:
+
 - **A minimal, excellent Kaspa wallet** — Keystore/biometric vault, send/receive at
   10 bps speed, KIP-9-aware fees.
 - **The first covenant games on Kaspa L1** — PvP duels with on-chain wager escrow,
   enforced by Toccata covenants (KIP-17/20): commit-reveal RPS → tic-tac-toe →
   ZK battleship (KIP-16) → tournaments. Every move is a ~1-second L1 transaction.
-- **Challenge transport** — encrypted payload messaging, wire-compatible with
-  [Kasia](https://github.com/K-Kluster/Kasia).
-- **Identity** — [KNS](https://app.knsdomains.org/) name resolution.
+- **Native challenge transport** — encrypted payload messaging as an L1 primitive
+  (wire-compatible with the ecosystem's Kasia payload format).
 
 Pure L1 — no L2, no house. No servers. No telemetry. Indexers are optional, untrusted
 accelerators, always verifiable against the chain.
@@ -36,9 +38,9 @@ What's done: the custody core, the platform vault, onboarding & backup, wallet s
 **send & receive** (Phase 1.1–1.7). What's next: the covenant arcade (Phase 2+) — the first
 on-chain games, on pure L1.
 
-See [`docs/phases/PHASE_INDEX.md`](docs/phases/PHASE_INDEX.md) for the roadmap and
-[`docs/COMPLETION_HISTORY.md`](docs/COMPLETION_HISTORY.md) for what is actually *proven* (every
-entry is backed by a green gate run).
+The current state of every subsystem — built, in-flight, or planned — lives in
+[`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md); the *why* behind every established
+choice is ledgered in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
 
 ### Known limitations (honest roadmap)
 
@@ -68,9 +70,10 @@ Full toolchain + the contributor workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Contributing & security
 
-This repo is built **AI-first**: [`CLAUDE.md`](CLAUDE.md) routes an AI architect through a
-constitution, a phased plan, a decision ledger, and an executable proof gate. The same
-documents are the human contributor guide.
+Development runs on an internal AI-assisted process; its working journal is not part of
+this repo. What *is* here is the complete product record: the code, the research corpus,
+a constitution, a decision ledger, and an executable proof gate — the same documents human
+contributors and auditors use.
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — build from a clean clone, the proof gate, the
   risk-tier auditor ritual, and the doc "spine".
