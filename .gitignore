@@ -30,3 +30,14 @@ docs/environment.local.md
 .flutter-plugins-dependencies
 .packages
 pubspec.lock.bak
+
+# Personal AI-workflow — local only, versioned in the private ops mirror (D-047)
+CLAUDE.md
+.claude/
+docs/sessions/
+docs/audits/
+docs/proposals/
+docs/phases/
+docs/COMPLETION_HISTORY.md
+docs/REAUDIT_CAMPAIGN_PROMPT.md
+docs/CLAUDE_DESIGN_PROMPT.md

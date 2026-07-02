@@ -5,9 +5,10 @@ bar is unusual: **nothing is "done" until it is proven** (a green gate cited as 
 and a change that touches keys, the language boundary, or on-chain logic gets adversarial
 review before it merges. This guide is how to clear that bar.
 
-This repository is built **AI-first**: [`CLAUDE.md`](CLAUDE.md) routes an AI architect
-through a constitution, a phased plan, a decision ledger, and an executable proof gate. The
-same documents are the human contributor guide — there is no second, hidden process.
+Development runs on an internal AI-assisted process; its working journal (session logs,
+phase plans, agent instructions) is deliberately not part of this repo. Everything a
+contributor or auditor needs *is*: the code, the research corpus, a constitution, a
+decision ledger, and an executable proof gate — the same record the maintainer works from.
 
 ## The one rule
 
@@ -71,9 +72,10 @@ reviewers. The tier of a change is the highest tier of anything it touches.
 | T2 | tx construction, fees, mass, broadcast | consensus + wallet-security |
 | T3 | keys, vault, FFI surface, contracts, deps | FFI-leak + wallet-security + consensus + dependency-steward |
 
-The review machinery lives in [`.claude/skills/audit/`](.claude/skills/audit/) — five domain
-auditors that issue **PASS / CONCERNS / BLOCK** verdicts citing invariant (`INV-`) and
-design-system (`DS-`) numbers. An absent mandated verdict blocks the merge.
+Reviews issue **PASS / CONCERNS / BLOCK** verdicts citing invariant (`INV-`) and
+design-system (`DS-`) numbers — run against five internal domain-audit checklists
+(consensus, wallet-security, FFI-leak, dependency-steward, UX). An absent mandated verdict
+blocks the merge.
 
 ## How decisions are made (the epistemic order)
 
@@ -90,10 +92,12 @@ ignore it.
 [`docs/INDEX.md`](docs/INDEX.md) is the map. The load-bearing docs:
 
 - [`docs/CONSTITUTION.md`](docs/CONSTITUTION.md) — the numbered laws (INV-1…12). Read first.
-- [`docs/phases/PHASE_INDEX.md`](docs/phases/PHASE_INDEX.md) → the one active phase file — the plan.
+- [`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md) — what is true right now: every
+  subsystem's state, built or planned (grep a section, then range-read).
 - [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) — the *why* behind established choices (it
   may be deliberate before you "fix" it).
-- [`docs/COMPLETION_HISTORY.md`](docs/COMPLETION_HISTORY.md) — what is actually proven.
+- [`docs/research/`](docs/research/) — the verified research corpus behind every protocol
+  and design claim.
 
 ## Pull requests
 
