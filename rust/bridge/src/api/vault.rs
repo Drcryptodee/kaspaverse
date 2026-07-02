@@ -196,6 +196,15 @@ pub(crate) fn change_cursor_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("wallet").join("change.cursor"))
 }
 
+/// App-private path remembering the last-good wRPC endpoint (P1.5 re-audit —
+/// the connect fast path). Public data (a wss URL the PNN resolver handed us),
+/// in the same `wallet/` subdir — no encryption (INV-3), no new trust (INV-8:
+/// the resolver is already an untrusted accelerator; remembering its last
+/// answer adds nothing).
+pub(crate) fn endpoint_cache_path() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet").join("endpoint.cache"))
+}
+
 /// Read the persisted change cursor (the next-unused change index). A missing or
 /// malformed file reads as 0 — a fresh wallet has used no change addresses.
 pub(crate) fn change_cursor() -> u32 {

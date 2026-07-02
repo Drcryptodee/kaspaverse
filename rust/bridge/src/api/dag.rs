@@ -45,11 +45,38 @@ pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
     MONITOR
         .get_or_try_init(|| async {
             let monitor = DagMonitor::mainnet().map_err(AppError::chain)?;
+            // Last-good-endpoint memory (P1.5 re-audit): main.dart initialises
+            // the vault dir before the chain stream attaches, so the path is
+            // available here. A miss (tests, exotic boot orders) just means the
+            // first connect uses the resolver — self-healing, never fatal.
+            match super::vault::endpoint_cache_path() {
+                Ok(path) => monitor.set_endpoint_cache(path),
+                Err(_) => log::info!("dag: no vault dir yet — endpoint cache off for this boot"),
+            }
             monitor.start().await.map_err(AppError::chain)?;
             Ok::<_, AppError>(monitor)
         })
         .await
         .cloned()
+}
+
+/// Background grace-drop (PERFORMANCE_BUDGET battery posture): close the wRPC
+/// socket and stop the retry loop. Dart's ChainService calls this ~30 s after
+/// the app backgrounds. A no-op before the first connection exists.
+pub async fn dag_pause() -> Result<(), AppError> {
+    if let Some(monitor) = MONITOR.get() {
+        monitor.pause().await.map_err(AppError::chain)?;
+    }
+    Ok(())
+}
+
+/// Foreground resume after a grace-drop: reconnect, preferring the last-good
+/// endpoint (fast path), resolver fallback. No-op while already connected.
+pub async fn dag_resume() -> Result<(), AppError> {
+    if let Some(monitor) = MONITOR.get() {
+        monitor.resume().await.map_err(AppError::chain)?;
+    }
+    Ok(())
 }
 
 /// Events carry absolute values, so folding is plain assignment (INV-9:

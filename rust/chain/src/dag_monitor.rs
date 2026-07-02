@@ -6,14 +6,21 @@
 //! connection — they are lost on disconnect, so every `RpcState::Connected`
 //! event must re-register the listener and its scopes.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::error::Result;
+
+/// How long the cached-endpoint fast path may take before falling back to the
+/// resolver (P1.5 re-audit: connection latency — a bounded first try, never a
+/// hang; a dead cached node costs at most this before discovery proceeds).
+const CACHED_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A chain event observed by the [`DagMonitor`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +59,20 @@ struct Inner {
     events: broadcast::Sender<DagEvent>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    /// App-private file remembering the last node that worked (public data,
+    /// INV-3; the PNN resolver is already an untrusted accelerator, INV-8 —
+    /// remembering its last answer adds no new trust). `None` until the bridge
+    /// learns the app dir.
+    endpoint_cache: Mutex<Option<PathBuf>>,
+    /// True while the live connection was dialed directly to the cached URL.
+    /// A direct URL bypasses resolver rotation, so on disconnect we must
+    /// re-issue a resolver-mode connect or a dead cached node would be
+    /// retried forever (regression guard vs. the pure-resolver behavior).
+    forced_cached_url: AtomicBool,
+    /// True between [`DagMonitor::pause`] and [`DagMonitor::resume`] — a
+    /// deliberate grace-drop also emits `Disconnected`, and the rotation-restore
+    /// logic must not treat it as a dead node and dial right back.
+    paused: AtomicBool,
 }
 
 /// Owns one wRPC client plus the event task that tracks its connection state
@@ -88,8 +109,50 @@ impl DagMonitor {
                 events,
                 event_task: Mutex::new(None),
                 shutdown: Mutex::new(None),
+                endpoint_cache: Mutex::new(None),
+                forced_cached_url: AtomicBool::new(false),
+                paused: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// Tell the monitor where to remember the last-good endpoint (app-private
+    /// file; public data — a wss URL). Callable any time; connects that happen
+    /// before this is set simply skip the fast path.
+    pub fn set_endpoint_cache(&self, path: PathBuf) {
+        *self
+            .inner
+            .endpoint_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+    }
+
+    fn cache_path(&self) -> Option<PathBuf> {
+        self.inner
+            .endpoint_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The remembered endpoint, if any. Accepts only ws/wss URLs (a corrupt or
+    /// hand-edited file must never redirect the wallet elsewhere).
+    fn read_cached_endpoint(&self) -> Option<String> {
+        let path = self.cache_path()?;
+        let url = std::fs::read_to_string(path).ok()?.trim().to_string();
+        (url.starts_with("wss://") || url.starts_with("ws://")).then_some(url)
+    }
+
+    /// Best-effort persist of the endpoint that just worked.
+    fn persist_endpoint(&self, url: &str) {
+        if let Some(path) = self.cache_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&path, url) {
+                log::warn!("dag-monitor: endpoint cache write failed: {e}");
+            }
+        }
     }
 
     pub fn mainnet() -> Result<Self> {
@@ -146,6 +209,42 @@ impl DagMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
 
+        self.connect_preferring_cache().await?;
+        Ok(())
+    }
+
+    /// Connect, preferring the last-good endpoint (bounded fast path), falling
+    /// back to resolver discovery with endless retry (the original behavior).
+    /// The fast path is what makes cold start + post-grace resume fast (P1.5
+    /// re-audit): one TLS+WS dial to a known node instead of resolver
+    /// round-trips and a node-quality lottery.
+    async fn connect_preferring_cache(&self) -> Result<()> {
+        if let Some(url) = self.read_cached_endpoint() {
+            let started = std::time::Instant::now();
+            let options = ConnectOptions {
+                url: Some(url.clone()),
+                strategy: ConnectStrategy::Fallback, // fail once, never retry a pinned URL
+                block_async_connect: true,
+                connect_timeout: Some(CACHED_CONNECT_TIMEOUT),
+                ..Default::default()
+            };
+            match self.inner.client.connect(Some(options)).await {
+                Ok(_) => {
+                    self.inner.forced_cached_url.store(true, Ordering::SeqCst);
+                    log::info!(
+                        "dag-monitor: connected via cached endpoint {url} in {:?}",
+                        started.elapsed()
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::info!(
+                        "dag-monitor: cached endpoint {url} unreachable ({e}) after {:?} — falling back to resolver",
+                        started.elapsed()
+                    );
+                }
+            }
+        }
         let options = ConnectOptions {
             block_async_connect: false,
             strategy: ConnectStrategy::Retry,
@@ -153,6 +252,28 @@ impl DagMonitor {
         };
         self.inner.client.connect(Some(options)).await?;
         Ok(())
+    }
+
+    /// Background grace-drop (PERFORMANCE_BUDGET "battery posture"): close the
+    /// socket and stop the retry loop, keeping the event task and every
+    /// subscriber attached. The wallet processor pauses with the shared ctl and
+    /// resyncs in lockstep on [`Self::resume`] (§0.8 / D-005).
+    pub async fn pause(&self) -> Result<()> {
+        self.inner.paused.store(true, Ordering::SeqCst);
+        self.inner.forced_cached_url.store(false, Ordering::SeqCst);
+        self.inner.client.disconnect().await?;
+        Ok(())
+    }
+
+    /// Foreground resume after a grace-drop: dial the last-good endpoint first
+    /// (persisted at most 30 s + grace ago), resolver fallback otherwise.
+    /// No-op while already connected (never bounce a healthy socket).
+    pub async fn resume(&self) -> Result<()> {
+        self.inner.paused.store(false, Ordering::SeqCst);
+        if self.is_connected() {
+            return Ok(());
+        }
+        self.connect_preferring_cache().await
     }
 
     /// Disconnects, then signals the event task and waits for it to drain.
@@ -202,6 +323,11 @@ impl DagMonitor {
                                 Ok(()) => {
                                     self.inner.is_connected.store(true, Ordering::SeqCst);
                                     log::info!("dag-monitor: connected to {:?}", self.inner.client.url());
+                                    // Remember the node that worked — the next cold
+                                    // start / post-grace resume dials it directly.
+                                    if let Some(url) = self.inner.client.url() {
+                                        self.persist_endpoint(&url);
+                                    }
                                     self.emit(DagEvent::Connected { url: self.inner.client.url() });
                                 }
                                 // Stay "disconnected"; the client's Retry
@@ -216,6 +342,23 @@ impl DagMonitor {
                         Ok(RpcState::Disconnected) => {
                             log::info!("dag-monitor: disconnected (client keeps retrying)");
                             self.handle_disconnect().await;
+                            // A direct-dialed cached URL has no resolver rotation
+                            // behind it: restore resolver mode so a node that died
+                            // mid-session is replaced, never retried forever. A
+                            // deliberate pause() is not a dead node — stay down.
+                            if !self.inner.paused.load(Ordering::SeqCst)
+                                && self.inner.forced_cached_url.swap(false, Ordering::SeqCst)
+                            {
+                                log::info!("dag-monitor: cached endpoint dropped — restoring resolver rotation");
+                                let options = ConnectOptions {
+                                    block_async_connect: false,
+                                    strategy: ConnectStrategy::Retry,
+                                    ..Default::default()
+                                };
+                                if let Err(e) = self.inner.client.connect(Some(options)).await {
+                                    log::warn!("dag-monitor: resolver re-connect failed: {e}");
+                                }
+                            }
                         }
                         // Ctl channel closed: client is gone, nothing to track.
                         Err(_) => {
@@ -317,6 +460,51 @@ mod tests {
     fn constructs_mainnet_monitor_without_network() {
         let monitor = DagMonitor::mainnet().expect("resolver-based client construction is offline");
         assert!(!monitor.is_connected());
+    }
+
+    #[test]
+    fn endpoint_cache_round_trips_and_rejects_non_ws() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        // Unset path → no fast path, no persist crash.
+        assert_eq!(monitor.read_cached_endpoint(), None);
+        monitor.persist_endpoint("wss://node.example:17110/kaspa/mainnet/wrpc/borsh");
+
+        let dir = std::env::temp_dir().join(format!("kv-epcache-{}", std::process::id()));
+        let path = dir.join("endpoint.cache");
+        let _ = std::fs::remove_file(&path);
+        monitor.set_endpoint_cache(path.clone());
+
+        // Missing file → None.
+        assert_eq!(monitor.read_cached_endpoint(), None);
+        // Round-trip.
+        monitor.persist_endpoint("wss://node.example:17110/kaspa/mainnet/wrpc/borsh");
+        assert_eq!(
+            monitor.read_cached_endpoint().as_deref(),
+            Some("wss://node.example:17110/kaspa/mainnet/wrpc/borsh")
+        );
+        // A corrupt/hand-edited file must never redirect the wallet to a
+        // non-websocket scheme (it would fail anyway — refuse early).
+        std::fs::write(&path, "https://evil.example/steal").unwrap();
+        assert_eq!(monitor.read_cached_endpoint(), None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pause_before_any_connect_is_a_safe_noop() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor
+            .pause()
+            .await
+            .expect("disconnect on a never-connected client is Ok");
+        assert!(!monitor.is_connected());
+        // resume() with no cache + no network initiates the resolver path
+        // non-blocking; constructing the future must not panic. We don't await
+        // a connection here (offline unit test) — resume itself must be Ok.
+        monitor
+            .resume()
+            .await
+            .expect("resume initiates non-blocking connect");
     }
 
     /// Live smoke test against mainnet via the PNN resolver — run manually:

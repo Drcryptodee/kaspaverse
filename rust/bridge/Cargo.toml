@@ -13,6 +13,7 @@ kaspaverse-core = { version = "0.1.0", path = "../core" }
 kaspaverse-chain = { version = "0.1.0", path = "../chain" }
 tokio.workspace = true
 log.workspace = true
+workflow-log.workspace = true
 zeroize.workspace = true
 
 # JNI seed lane (P1 §0.4, D-033). Path-A seed plaintext crosses Kotlin → Rust

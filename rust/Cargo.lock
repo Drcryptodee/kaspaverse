@@ -3134,6 +3134,7 @@ dependencies = [
  "kaspaverse-core",
  "log",
  "tokio",
+ "workflow-log",
  "zeroize",
 ]
 

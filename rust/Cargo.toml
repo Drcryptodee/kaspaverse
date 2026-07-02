@@ -43,6 +43,11 @@ zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 # Sender actually is). FRB's own runtime is also tokio (rust-async default).
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
 async-channel = "2"
-# Observability: FRB's init installs a console logger (logcat on Android), so
-# `log::` calls in chain/bridge surface in app logs with zero extra plumbing.
+# Observability: `log::` is the facade our crates emit through. L40 (device,
+# 2026-06-15): no sink was ever installed for it — FRB's default utils did NOT
+# surface our lines in logcat, while the kaspa crates' own `workflow-log` DOES
+# reach logcat. Repaid at the P1.5 re-audit: init_app installs a log→workflow-log
+# forwarder. workflow-log is already resolved in the pinned tree (same version,
+# zero new transitive code — the D-028 §0.2 pattern).
 log = "0.4"
+workflow-log = "0.18.0"
