@@ -22,6 +22,7 @@ class SendScreen extends StatefulWidget {
     required this.prepare,
     required this.commit,
     required this.abandon,
+    this.minimumSendable,
   });
 
   /// Spendable (mature) balance, for the informational "available" line. The
@@ -33,6 +34,12 @@ class SendScreen extends StatefulWidget {
   final Future<SendOutcomeDto> Function(BigInt nonce) commit;
   final Future<void> Function() abandon;
 
+  /// The smallest currently-sendable amount (sompi), probed from the pinned
+  /// Generator over the live coin shape (D-054) — advisory display only; the
+  /// Generator on `prepare` stays the single authority. Null provider or null
+  /// result ⇒ no hint line.
+  final Future<BigInt?> Function()? minimumSendable;
+
   @override
   State<SendScreen> createState() => _SendScreenState();
 }
@@ -42,12 +49,25 @@ class _SendScreenState extends State<SendScreen> {
   final _address = TextEditingController();
   bool _building = false;
   String? _error;
+  BigInt? _minSompi;
 
   @override
   void initState() {
     super.initState();
     _amount.addListener(_onChanged);
     _address.addListener(_onChanged);
+    // Fetch the live floor once per screen-open. Advisory: failures (engine
+    // not ready, probe error) simply mean no hint — never a blocked send.
+    final probe = widget.minimumSendable;
+    if (probe != null) {
+      probe()
+          .then((min) {
+            if (mounted) setState(() => _minSompi = min);
+          })
+          .catchError((Object _) {
+            /* no hint — prepare stays authoritative */
+          });
+    }
   }
 
   @override
@@ -158,6 +178,10 @@ class _SendScreenState extends State<SendScreen> {
                       ),
                       const SizedBox(height: KvSpace.s),
                       _AvailableLine(mature: widget.mature),
+                      if (_minSompi != null) ...[
+                        const SizedBox(height: KvSpace.xs),
+                        _MinimumLine(minSompi: _minSompi!),
+                      ],
                       const SizedBox(height: KvSpace.xl),
                       Text('To', style: theme.textTheme.labelLarge),
                       const SizedBox(height: KvSpace.s),
@@ -234,6 +258,26 @@ class _AvailableLine extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// "Minimum right now: ≈ N KAS" — the probed KIP-9 floor for the wallet's
+/// current coin shape (D-054). Honest teaching line, not an enforcement point:
+/// the Generator on Review remains the single authority.
+class _MinimumLine extends StatelessWidget {
+  const _MinimumLine({required this.minSompi});
+
+  final BigInt minSompi;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final parts = kasParts(minSompi);
+    return Text(
+      'Minimum right now: ≈ ${parts.integer}.${parts.fraction} KAS '
+      '(network anti-dust rule for your current coins)',
+      style: theme.textTheme.bodySmall?.copyWith(color: KvColor.textTertiary),
     );
   }
 }

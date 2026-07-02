@@ -96,6 +96,52 @@ void main() {
       await tester.pump();
       expect(find.textContaining('not yet spendable'), findsOneWidget);
     });
+
+    testWidgets('the probed KIP-9 floor renders as an advisory line (D-054)', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          SendScreen(
+            mature: ValueNotifier<BigInt?>(BigInt.from(100000000000)),
+            prepare: (_, _) async => _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            minimumSendable: () async => BigInt.from(23000000), // 0.23 KAS
+          ),
+        ),
+      );
+      await tester.pump(); // resolve the probe future
+      expect(find.textContaining('Minimum right now'), findsOneWidget);
+      expect(find.textContaining('0.23000000 KAS'), findsOneWidget);
+      // Advisory only: Review enablement is unchanged by the hint.
+      await tester.enterText(find.byType(TextField).first, '0.01');
+      await tester.enterText(find.byType(TextField).at(1), _addr);
+      await tester.pump();
+      final review = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Review'),
+      );
+      expect(
+        review.onPressed,
+        isNotNull,
+        reason: 'the Generator on prepare stays the single authority',
+      );
+    });
+
+    testWidgets('no minimum provider ⇒ no hint line', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          SendScreen(
+            mature: ValueNotifier<BigInt?>(BigInt.from(100000000000)),
+            prepare: (_, _) async => _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.textContaining('Minimum right now'), findsNothing);
+    });
   });
 
   group('ConfirmSendSheet (anti-blind-signing, B7)', () {

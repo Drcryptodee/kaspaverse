@@ -203,6 +203,160 @@ impl WalletEngine {
     }
 }
 
+/// Outcome of one signerless probe: can the pinned Generator build a payment of
+/// this size from the current UTXO set? (P1.6 re-audit, D-054 — the KIP-9 floor
+/// made exact: the Generator itself is the oracle, nothing re-implemented.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    /// A full chain was generated — this amount is sendable right now.
+    Builds,
+    /// Storage mass exceeded the Generator's per-tx ceiling — amount too small.
+    TooSmall,
+    /// Amount (plus fees) exceeds spendable funds — amount too large.
+    TooLarge,
+}
+
+/// Ladder start for the floor search: 0.01 KAS — comfortably below any
+/// realistic KIP-9 floor, so the first known-TooSmall bound is found fast.
+const PROBE_LADDER_START_SOMPI: u64 = 1_000_000;
+/// Bisection precision: 0.001 KAS — display precision; probes are cheap but
+/// sompi-exact minima are false precision (fees shift the boundary anyway).
+const PROBE_PRECISION_SOMPI: u64 = 100_000;
+
+/// Classify one candidate amount by running a real (unsigned, non-broadcast)
+/// generation over the live context. Public data only: simulated payment to our
+/// own change address (mass depends on script SIZE, not identity), no signer.
+fn probe_context(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+    change: &Address,
+    amount_sompi: u64,
+) -> Result<ProbeOutcome> {
+    let payment: PaymentDestination = PaymentOutputs::from((change.clone(), amount_sompi)).into();
+    let settings = match GeneratorSettings::try_new_with_context(
+        context.clone(),
+        None,
+        change.clone(),
+        1,
+        1,
+        payment,
+        None,
+        Fees::SenderPays(0),
+        None,
+        None,
+    ) {
+        Ok(settings) => settings,
+        Err(e) => return probe_error(e),
+    };
+    let generator = match Generator::try_new(settings, None, None) {
+        Ok(generator) => generator,
+        Err(e) => return probe_error(e),
+    };
+    loop {
+        match generator.generate_transaction() {
+            Ok(Some(_)) => continue,
+            Ok(None) => return Ok(ProbeOutcome::Builds),
+            Err(e) => return probe_error(e),
+        }
+    }
+}
+
+/// Map a generation error onto a probe outcome (or a real failure).
+fn probe_error(e: kaspa_wallet_core::error::Error) -> Result<ProbeOutcome> {
+    match map_generate_error(e) {
+        ChainError::StorageMassExceeded { .. } => Ok(ProbeOutcome::TooSmall),
+        ChainError::InsufficientFunds { .. } => Ok(ProbeOutcome::TooLarge),
+        other => Err(other),
+    }
+}
+
+/// Find the smallest sendable amount by searching the TooSmall→Builds boundary.
+/// Pure over an injected probe (unit-tested against synthetic boundaries AND the
+/// real Generator). Sendability is not monotonic at the TOP (a near-sweep leaves
+/// dusty change), so the search brackets only the BOTTOM boundary:
+///
+/// 1. doubling ladder from 0.01 KAS until a `Builds` anchor (or the balance
+///    ceiling — then a short hunt inside the last window);
+/// 2. bisect TooSmall/Builds to display precision.
+///
+/// `None` = no sendable amount exists below the balance (the honest answer for
+/// a dust-only wallet).
+fn search_minimum(mut probe: impl FnMut(u64) -> Result<ProbeOutcome>) -> Result<Option<u64>> {
+    let mut lo: u64 = 0; // greatest known-TooSmall
+    let mut hi: Option<u64> = None; // smallest known-Builds
+    let mut ceiling: Option<u64> = None; // smallest known-TooLarge
+
+    // Phase 1 — doubling ladder for a Builds anchor.
+    let mut v = PROBE_LADDER_START_SOMPI;
+    for _ in 0..20 {
+        match probe(v)? {
+            ProbeOutcome::Builds => {
+                hi = Some(v);
+                break;
+            }
+            ProbeOutcome::TooSmall => {
+                lo = v;
+                v = v.saturating_mul(2);
+            }
+            ProbeOutcome::TooLarge => {
+                ceiling = Some(v);
+                break;
+            }
+        }
+    }
+
+    // Phase 1b — the ladder hit the balance ceiling before any Builds: hunt for
+    // a buildable amount inside (lo, ceiling). A handful of probes suffices —
+    // if the window holds no Builds, the wallet genuinely cannot send.
+    if hi.is_none() {
+        let Some(mut top) = ceiling else {
+            return Ok(None); // ladder exhausted without Builds or ceiling
+        };
+        for _ in 0..10 {
+            if top.saturating_sub(lo) <= PROBE_PRECISION_SOMPI {
+                return Ok(None);
+            }
+            let mid = lo + (top - lo) / 2;
+            match probe(mid)? {
+                ProbeOutcome::Builds => {
+                    hi = Some(mid);
+                    break;
+                }
+                ProbeOutcome::TooSmall => lo = mid,
+                ProbeOutcome::TooLarge => top = mid,
+            }
+        }
+        if hi.is_none() {
+            return Ok(None);
+        }
+    }
+
+    // Phase 2 — bisect the TooSmall/Builds boundary.
+    let mut hi = hi.expect("anchored above");
+    while hi.saturating_sub(lo) > PROBE_PRECISION_SOMPI {
+        let mid = lo + (hi - lo) / 2;
+        match probe(mid)? {
+            ProbeOutcome::Builds => hi = mid,
+            ProbeOutcome::TooSmall => lo = mid,
+            // A shrinking window mid-bisect (fees at the margin) — treat as an
+            // upper bound and keep closing in.
+            ProbeOutcome::TooLarge => hi = mid,
+        }
+    }
+    Ok(Some(hi))
+}
+
+impl WalletEngine {
+    /// The smallest payment the pinned Generator will build from the CURRENT
+    /// mature UTXO set (the KIP-9 floor, exact, for this wallet's coin shape) —
+    /// or `None` when no amount below the balance is sendable. Signerless,
+    /// offline, public data only; the change address doubles as the probe
+    /// destination (identical script size ⇒ identical mass).
+    pub fn minimum_sendable(&self, change: Address) -> Result<Option<u64>> {
+        let context = self.context();
+        search_minimum(|amount| probe_context(&context, &change, amount))
+    }
+}
+
 /// Project the pinned aggregate [`GeneratorSummary`] onto the FFI-facing
 /// [`SendSummary`]. Pure (INV-9: nothing recomputed — the numbers are the
 /// Generator's).
@@ -351,6 +505,111 @@ mod tests {
         assert!(
             matches!(mapped, ChainError::StorageMassExceeded { .. }),
             "a dust-small send must map to StorageMassExceeded, got {mapped:?}"
+        );
+    }
+
+    /// A synthetic wallet: TooSmall below `floor`, Builds in [floor, balance],
+    /// TooLarge above — the shape `search_minimum` brackets.
+    fn synthetic(floor: u64, balance: u64) -> impl FnMut(u64) -> Result<ProbeOutcome> {
+        move |v| {
+            Ok(if v < floor {
+                ProbeOutcome::TooSmall
+            } else if v <= balance {
+                ProbeOutcome::Builds
+            } else {
+                ProbeOutcome::TooLarge
+            })
+        }
+    }
+
+    #[test]
+    fn search_finds_the_floor_within_precision() {
+        // A ~0.23 KAS floor in a 50-KAS wallet (the founder's neighborhood).
+        let floor = 23_000_000;
+        let min = search_minimum(synthetic(floor, 5_000_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(min >= floor, "reported minimum must be sendable");
+        assert!(
+            min - floor <= PROBE_PRECISION_SOMPI,
+            "within display precision"
+        );
+    }
+
+    #[test]
+    fn search_hunts_inside_a_tiny_balance_window() {
+        // Floor 0.05 KAS, balance 0.08 KAS: the doubling ladder hits the
+        // ceiling before a Builds — the hunt must still find the window.
+        let min = search_minimum(synthetic(5_000_000, 8_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(
+            (5_000_000..=5_200_000).contains(&min),
+            "min {min} in window"
+        );
+    }
+
+    #[test]
+    fn search_reports_none_when_nothing_is_sendable() {
+        // Floor above balance: a dust-only wallet cannot send at all.
+        assert_eq!(
+            search_minimum(synthetic(10_000_000, 4_000_000)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn real_generator_minimum_sits_at_the_kip9_floor_for_one_big_coin() {
+        // A single 100-KAS UTXO (the harshest shape: minimal input relief).
+        // KIP-9 at the pin: payment output costs C/p grams (C = 10^12) against
+        // wallet-core's frozen 100k ceiling (mass.rs:25) ⇒ p ≥ ~0.1 KAS.
+        // This test is ALSO the C5 tripwire: a pin bump that changes
+        // wallet-core's post-Toccata ceiling moves this floor and fails here
+        // — re-derive D-054's numbers when it does.
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            let entries = vec![UtxoEntryReference::simulated(kaspa_to_sompi(100.0))];
+            let payment: PaymentDestination = PaymentOutputs::from((addr(DEST), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                Box::new(entries.into_iter()),
+                None,
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+        let min = search_minimum(probe)
+            .unwrap()
+            .expect("a 100-KAS wallet can send");
+        // Expected neighborhood: ~0.1 KAS (10^12/100_000), plus fee margin.
+        assert!(
+            (9_000_000..=13_000_000).contains(&min),
+            "pin-frozen 100k ceiling puts the one-big-coin floor near 0.1 KAS, got {min} sompi"
+        );
+        // The boundary is real: the reported min builds; just below it does not.
+        assert_eq!(probe(min).unwrap(), ProbeOutcome::Builds);
+        assert_eq!(
+            probe(min - 2 * PROBE_PRECISION_SOMPI).unwrap(),
+            ProbeOutcome::TooSmall
         );
     }
 
