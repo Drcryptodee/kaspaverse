@@ -1,5 +1,6 @@
 pub mod api;
 mod frb_generated;
+mod logging;
 
 // The Path-A seed lane (P1 §0.4) is Android-only: it links the JVM via `jni`.
 // On the host it does not exist, so its callers in `api::vault` are reached

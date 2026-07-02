@@ -1,16 +1,25 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/dag.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late StreamController<DagSnapshot> controller;
+  late int pauseCalls;
+  late int resumeCalls;
 
   setUp(() async {
     controller = StreamController<DagSnapshot>();
     ChainService.streamFactory = () => controller.stream;
+    pauseCalls = 0;
+    resumeCalls = 0;
+    ChainService.pauseBridge = () async => pauseCalls++;
+    ChainService.resumeBridge = () async => resumeCalls++;
+    ChainService.graceDuration = const Duration(milliseconds: 20);
     await ChainService.instance.reset();
   });
 
@@ -63,5 +72,53 @@ void main() {
     controller.add(const DagSnapshot(connected: true));
     await Future<void>.delayed(Duration.zero);
     expect(service.error.value, isNull);
+  });
+
+  group('background grace-drop (PERFORMANCE_BUDGET battery posture)', () {
+    test(
+      'background past the grace drops the socket; resume reconnects',
+      () async {
+        final service = ChainService.instance..start();
+
+        service.didChangeAppLifecycleState(AppLifecycleState.paused);
+        expect(pauseCalls, 0, reason: 'inside the grace window — still up');
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(pauseCalls, 1, reason: 'grace elapsed — socket dropped');
+
+        service.didChangeAppLifecycleState(AppLifecycleState.resumed);
+        await Future<void>.delayed(Duration.zero);
+        expect(resumeCalls, 1, reason: 'we dropped it — we reconnect');
+      },
+    );
+
+    test(
+      'resume inside the grace window cancels the drop — no bounce',
+      () async {
+        final service = ChainService.instance..start();
+
+        service.didChangeAppLifecycleState(AppLifecycleState.paused);
+        service.didChangeAppLifecycleState(AppLifecycleState.resumed);
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(
+          pauseCalls,
+          0,
+          reason: 'drop cancelled before the grace elapsed',
+        );
+        expect(
+          resumeCalls,
+          0,
+          reason: 'nothing was dropped — nothing to resume',
+        );
+      },
+    );
+
+    test('repeated pause events arm one timer, not several', () async {
+      final service = ChainService.instance..start();
+
+      service.didChangeAppLifecycleState(AppLifecycleState.paused);
+      service.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(pauseCalls, 1);
+    });
   });
 }

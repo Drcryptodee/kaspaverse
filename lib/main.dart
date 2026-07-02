@@ -17,12 +17,16 @@ import 'package:kaspaverse/src/ui/unlock_surface.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
-  // Single app-lifetime subscription to the bridge stream (L4); the first
-  // call also kicks off the mainnet connection in Rust.
-  ChainService.instance.start();
-  // Vault lane (P1.2): hands Rust the app-private dir, attaches the status
-  // stream, and registers the background→lock kill switch (§0.11).
+  // Vault lane (P1.2) FIRST: hands Rust the app-private dir, attaches the
+  // status stream, and registers the background→lock kill switch (§0.11).
+  // Ordering matters since the P1.5 re-audit: the chain lane's last-good
+  // endpoint cache lives under the vault dir, so the dir must exist before
+  // the monitor initialises (or the first connect skips the fast path).
   await VaultService.instance.start();
+  // Single app-lifetime subscription to the bridge stream (L4); the first
+  // call also kicks off the mainnet connection in Rust — preferring the
+  // cached endpoint, resolver fallback.
+  ChainService.instance.start();
   // WalletService is NOT started here — its stream derives addresses from the
   // unlocked vault, so the home screen starts it on mount (post-unlock).
   runApp(

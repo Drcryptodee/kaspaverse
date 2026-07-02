@@ -10,6 +10,15 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These functions are ignored because they are not marked as `pub`: `fold`, `shared_monitor`, `snapshots`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
 
+/// Background grace-drop (PERFORMANCE_BUDGET battery posture): close the wRPC
+/// socket and stop the retry loop. Dart's ChainService calls this ~30 s after
+/// the app backgrounds. A no-op before the first connection exists.
+Future<void> dagPause() => RustLib.instance.api.crateApiDagDagPause();
+
+/// Foreground resume after a grace-drop: reconnect, preferring the last-good
+/// endpoint (fast path), resolver fallback. No-op while already connected.
+Future<void> dagResume() => RustLib.instance.api.crateApiDagDagResume();
+
 /// Subscribe to live DAG snapshots from mainnet. The first call connects;
 /// later calls share the same connection. Each stream ends only when its
 /// Dart listener goes away.
