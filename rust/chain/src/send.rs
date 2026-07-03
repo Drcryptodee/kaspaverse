@@ -1,6 +1,7 @@
 //! Send pipeline — build, sign, broadcast a payment, every byte of mass / fee /
 //! UTXO-selection / signing consumed from the pinned `kaspa-wallet-core`
-//! Generator (INV-9; never hand-rolled). Mirrored API (pin = rev `90dbf07`):
+//! Generator (INV-9; never hand-rolled). Mirrored API (pin = rev `cfafeb4c`,
+//! v2.0.1 — D-058; every line cite below verified byte-identical at the bump):
 //!
 //! - `GeneratorSettings::try_new_with_context` — settings.rs:97 (the spendable
 //!   source is our live [`WalletEngine`] `UtxoContext`, so a send spends only
