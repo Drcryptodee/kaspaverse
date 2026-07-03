@@ -8,13 +8,15 @@ edition = "2021"
 license = "MIT"
 
 # Profile note (P0 §0.5): TLS/crypto deps must be rustls-based — anything
-# OpenSSL-linked breaks the Android cross-compile (lesson L16). Verified at pin
-# time: rusty-kaspa v2.0.0 pins workflow-rpc with default-features = false +
-# rustls-tls-webpki-roots, so the wRPC stack is OpenSSL-free.
+# OpenSSL-linked breaks the Android cross-compile (lesson L16). Verified at the
+# original pin and re-held at the v2.0.1 bump (D-058): rusty-kaspa pins
+# workflow-rpc with default-features = false + rustls-tls-webpki-roots, so the
+# wRPC stack is OpenSSL-free.
 
 [workspace.dependencies]
-# rusty-kaspa pinned at tag v2.0.0 (INV-9: consensus logic only from these).
-# Pinned by rev — immutable, unlike tags; rev verified = tag v2.0.0 on 2026-06-12.
+# rusty-kaspa pinned at tag v2.0.1 (INV-9: consensus logic only from these).
+# Pinned by rev — immutable, unlike tags; rev verified = tag v2.0.1 on 2026-07-03
+# (D-058 bump from v2.0.0/`90dbf07`, D-021 — zero consensus deltas proven).
 # `version` alongside the rev: cargo asserts the pinned commit resolves to a
 # compatible 2.x (the immutable rev fixes which one), and cargo-deny's wildcard
 # ban stays at "deny" (a version-less dep reads as "*"). L23.
