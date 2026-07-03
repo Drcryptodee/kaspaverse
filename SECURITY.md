@@ -29,7 +29,7 @@ fix, and prepare a disclosure. We will credit you in the advisory unless you ask
 Please give us a reasonable window to ship a fix before any public disclosure — on a ledger
 that cannot be rolled back, a coordinated release protects users who cannot patch retroactively.
 
-There is **no bug-bounty program** at this pre-alpha stage; reports are handled on good faith.
+There is **no bug-bounty program** at this alpha stage; reports are handled on good faith.
 
 ## The security model (what we guarantee, by design)
 
@@ -84,5 +84,5 @@ These are enforced invariants, not aspirations. The full numbered law is
 
 ## Supported versions
 
-KaspaVerse is **pre-alpha**. Security fixes target `main` and the most recent tagged release
+KaspaVerse is **alpha**. Security fixes target `main` and the most recent tagged release
 (currently the `v0.2.0-alpha` line). There are no long-term support branches yet.
