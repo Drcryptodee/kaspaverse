@@ -12,11 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kaspa_addresses::Prefix;
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::error::Result;
+use crate::transport::{self, TransportEvent};
 
 /// How long the cached-endpoint fast path may take before falling back to the
 /// resolver (P1.5 re-audit: connection latency — a bounded first try, never a
@@ -58,6 +60,14 @@ struct Inner {
     notification_rx: async_channel::Receiver<Notification>,
     listener_id: Mutex<Option<ListenerId>>,
     events: broadcast::Sender<DagEvent>,
+    /// Payload-transport fan-out (P2.1): matches from the BlockAdded scan.
+    /// Separate from `events` — these are discrete deliveries, not foldable
+    /// absolute-state snapshots, and they stay sparse (only `ciph_msg:` matches
+    /// are ever sent; the ~10 blocks/s stream itself never crosses).
+    transport_events: broadcast::Sender<TransportEvent>,
+    /// Address prefix for the scan's output-address extraction — derived from
+    /// the network this monitor was constructed for.
+    address_prefix: Prefix,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// App-private file remembering the last node that worked (public data,
@@ -100,6 +110,7 @@ impl DagMonitor {
         )?);
         let (notification_tx, notification_rx) = async_channel::unbounded();
         let (events, _) = broadcast::channel(256);
+        let (transport_events, _) = broadcast::channel(256);
         Ok(Self {
             inner: Arc::new(Inner {
                 client,
@@ -108,6 +119,8 @@ impl DagMonitor {
                 notification_rx,
                 listener_id: Mutex::new(None),
                 events,
+                transport_events,
+                address_prefix: Prefix::from(network_id.network_type),
                 event_task: Mutex::new(None),
                 shutdown: Mutex::new(None),
                 endpoint_cache: Mutex::new(None),
@@ -168,6 +181,15 @@ impl DagMonitor {
     /// pick up from the next event — scores tick about once per second.
     pub fn subscribe(&self) -> broadcast::Receiver<DagEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// New receiver onto the payload-transport fan-out (P2.1): one
+    /// [`TransportEvent`] per `ciph_msg:` match seen in the BlockAdded stream.
+    /// Live-only by design (D-049/§0.3): a late subscriber sees the next match,
+    /// never history — the P2.3 message store owns persistence. Rides the same
+    /// socket + pause/resume posture as everything else (foreground-only).
+    pub fn subscribe_transport(&self) -> broadcast::Receiver<TransportEvent> {
+        self.inner.transport_events.subscribe()
     }
 
     /// The shared wRPC handle (`rpc_api` + `rpc_ctl`), for binding a wallet-core
@@ -370,6 +392,22 @@ impl DagMonitor {
                 }
                 notification = notification_rx.recv() => {
                     match notification {
+                        // P2.1 payload scan: BlockAdded is consumed here — the
+                        // ~10 blocks/s stream never leaves this task; only
+                        // `ciph_msg:` matches fan out (sparse by design, §0.3).
+                        // Version-neutral by construction (transport.rs, §0.2).
+                        Ok(Notification::BlockAdded(added)) => {
+                            let matches = transport::scan_block(&added.block, self.inner.address_prefix);
+                            if !matches.is_empty() {
+                                // Count only — payload bodies are never logged
+                                // (§4 plaintext discipline).
+                                log::debug!("dag-monitor: {} transport match(es) in block", matches.len());
+                            }
+                            for event in matches {
+                                // Send fails only with zero subscribers — fine.
+                                let _ = self.inner.transport_events.send(event);
+                            }
+                        }
                         Ok(notification) => {
                             if let Some(event) = map_notification(&notification) {
                                 self.emit(event);
@@ -412,6 +450,12 @@ impl DagMonitor {
             Scope::SinkBlueScoreChanged(SinkBlueScoreChangedScope {}),
         )
         .await?;
+        // P2.1: the payload-transport scan source. Joins the SAME listener +
+        // channel as the score scopes (D-053 single-listener machinery; §0.3) —
+        // re-registered on every connect like the others, paused with the
+        // socket (foreground-only posture unchanged).
+        rpc.start_notify(listener_id, Scope::BlockAdded(BlockAddedScope {}))
+            .await?;
         Ok(())
     }
 

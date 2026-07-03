@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
+import 'package:kaspaverse/src/services/transport_service.dart';
 import 'package:kaspaverse/src/services/vault_service.dart';
 import 'package:kaspaverse/src/services/wallet_service.dart';
 import 'package:kaspaverse/src/ui/app_shell.dart';
+import 'package:kaspaverse/src/ui/dev_transport_panel.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
@@ -27,6 +29,9 @@ Future<void> main() async {
   // call also kicks off the mainnet connection in Rust — preferring the
   // cached endpoint, resolver fallback.
   ChainService.instance.start();
+  // Live `ciph_msg:` wire (P2.1) — same shared socket, matches only; the
+  // Rust-side scan pauses/resumes with the chain service's battery posture.
+  TransportService.instance.start();
   // WalletService is NOT started here — its stream derives addresses from the
   // unlocked vault, so the home screen starts it on mount (post-unlock).
   runApp(
@@ -83,7 +88,7 @@ class KaspaVerseApp extends StatelessWidget {
             abandon: wallet.abandonSend,
             minimumSendable: wallet.minimumSendable,
           ),
-          floatingActionButton: kDebugMode ? const _DevPanelFab() : null,
+          floatingActionButton: kDebugMode ? const _DevFabs() : null,
         ),
       ),
     );
@@ -108,17 +113,34 @@ class _DevPanelLink extends StatelessWidget {
   }
 }
 
-class _DevPanelFab extends StatelessWidget {
-  const _DevPanelFab();
+/// The debug FAB stack on home: vault panel (P1.2) + transport panel (P2.1).
+/// Distinct heroTags — two FABs on one route must never share the default tag.
+class _DevFabs extends StatelessWidget {
+  const _DevFabs();
 
   @override
   Widget build(BuildContext context) {
-    return FloatingActionButton(
-      tooltip: 'DEV vault panel',
-      onPressed: () => Navigator.of(
-        context,
-      ).push(MaterialPageRoute<void>(builder: (_) => const DevVaultPanel())),
-      child: const Icon(Icons.build_outlined),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        FloatingActionButton.small(
+          heroTag: 'dev-transport',
+          tooltip: 'DEV transport panel',
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const DevTransportPanel()),
+          ),
+          child: const Icon(Icons.satellite_alt_outlined),
+        ),
+        const SizedBox(height: 8),
+        FloatingActionButton.small(
+          heroTag: 'dev-vault',
+          tooltip: 'DEV vault panel',
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const DevVaultPanel()),
+          ),
+          child: const Icon(Icons.build_outlined),
+        ),
+      ],
     );
   }
 }

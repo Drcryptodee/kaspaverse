@@ -12,11 +12,13 @@
 mod dag_monitor;
 mod error;
 mod send;
+mod transport;
 mod wallet_sync;
 
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
 pub use send::{PreparedSend, SendOutcome, SendSummary};
+pub use transport::{compose_bcast, parse_payload, TransportEvent};
 pub use wallet_sync::{
     ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,
 };

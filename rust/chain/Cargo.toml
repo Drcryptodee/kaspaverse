@@ -8,6 +8,9 @@ license.workspace = true
 kaspa-wrpc-client.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-addresses.workspace = true
+# P2.1 transport scan: output-script → address via the pin's standard decoder
+# (INV-9). Same-pin crate, already in the lock transitively.
+kaspa-txscript.workspace = true
 # Wallet UTXO sync (P1.5 §0.8 / D-005): UtxoProcessor/UtxoContext + the Events
 # stream + TransactionRecord (its own borsh codec). INV-9 authority — consumed,
 # never re-implemented. The wallet-core dep lives HERE (not the bridge), so the

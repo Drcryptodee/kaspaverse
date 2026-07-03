@@ -60,13 +60,19 @@ static PENDING_SEND: Mutex<Option<(u64, PreparedSend)>> = Mutex::new(None);
 
 /// Monotonic nonce source (a unique token per prepare is all that's needed to
 /// reject a stale commit — no randomness required). Starts at 1 so 0 is never a
-/// live nonce.
+/// live nonce. SHARED with the transport stash (api/transport.rs): one nonce
+/// space, so a token can never name a plan in the wrong stash.
 static NONCE: AtomicU64 = AtomicU64::new(1);
+
+/// Next prepare nonce (shared across the payment and transport stashes).
+pub(crate) fn next_nonce() -> u64 {
+    NONCE.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Parse `s` as a mainnet Kaspa address, rejecting malformed input and a
 /// wrong-network (e.g. testnet) address up front (DS-8) — the Generator's own
 /// prefix check (generator.rs:389/418) is the backstop, not the only gate.
-fn validate_mainnet_address(s: &str) -> Result<Address, AppError> {
+pub(crate) fn validate_mainnet_address(s: &str) -> Result<Address, AppError> {
     let address = Address::try_from(s)
         .map_err(|_| AppError::msg("that doesn't look like a valid Kaspa address"))?;
     if address.prefix != Prefix::Mainnet {
@@ -139,7 +145,7 @@ pub async fn send_prepare(
     let rpc = dag::shared_monitor().await?.rpc();
 
     let prepared = match engine
-        .prepare_send(dest, amount_sompi, change, signer, rpc)
+        .prepare_send(dest, amount_sompi, change, signer, rpc, None)
         .await
     {
         Ok(prepared) => prepared,
@@ -179,7 +185,7 @@ pub async fn send_prepare(
         Err(e) => return Err(AppError::chain(e)),
     };
 
-    let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = next_nonce();
     let summary = prepared.summary().clone();
     *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
 
@@ -195,29 +201,33 @@ pub async fn send_prepare(
     })
 }
 
-/// Phase 2: sign + broadcast the stashed plan identified by `nonce`. Refuses a
-/// stale/mismatched nonce or an empty stash (the user re-confirms). Advances the
-/// change cursor only on a fully-broadcast send.
-pub async fn send_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
-    let prepared = {
-        let mut guard = PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner);
-        match guard.take() {
-            Some((stored, prepared)) if stored == nonce => prepared,
-            Some((stored, prepared)) => {
-                // Mismatch: put it back and refuse (the confirmed plan changed).
-                *guard = Some((stored, prepared));
-                return Err(AppError::msg(
-                    "this send is no longer current — please review and confirm again",
-                ));
-            }
-            None => {
-                return Err(AppError::msg(
-                    "nothing to send — please start the send again",
-                ))
-            }
+/// Take the plan identified by `nonce` out of a stash. Refuses a
+/// stale/mismatched nonce (putting the live plan back) or an empty stash —
+/// the user re-confirms. Shared by the payment and transport commit paths.
+pub(crate) fn take_stashed(
+    stash: &Mutex<Option<(u64, PreparedSend)>>,
+    nonce: u64,
+) -> Result<PreparedSend, AppError> {
+    let mut guard = stash.lock().unwrap_or_else(PoisonError::into_inner);
+    match guard.take() {
+        Some((stored, prepared)) if stored == nonce => Ok(prepared),
+        Some((stored, prepared)) => {
+            // Mismatch: put it back and refuse (the confirmed plan changed).
+            *guard = Some((stored, prepared));
+            Err(AppError::msg(
+                "this send is no longer current — please review and confirm again",
+            ))
         }
-    };
+        None => Err(AppError::msg(
+            "nothing to send — please start the send again",
+        )),
+    }
+}
 
+/// Sign + broadcast a taken plan, advancing the change cursor only on a
+/// fully-broadcast outcome (D-041) — every committed send returns change to
+/// the same cursor discipline, payload or not.
+pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto {
     // The change index this send used (cursor is advanced only on full success,
     // so it still reads as the index we prepared with).
     let used_cursor = vault::change_cursor();
@@ -228,13 +238,21 @@ pub async fn send_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
         let _ = vault::set_change_cursor(used_cursor.saturating_add(1));
     }
 
-    Ok(SendOutcomeDto {
+    SendOutcomeDto {
         final_txid: outcome.final_txid,
         submitted: outcome.submitted,
         total: outcome.total,
         partial: outcome.partial,
         error: outcome.error,
-    })
+    }
+}
+
+/// Phase 2: sign + broadcast the stashed plan identified by `nonce`. Refuses a
+/// stale/mismatched nonce or an empty stash (the user re-confirms). Advances the
+/// change cursor only on a fully-broadcast send.
+pub async fn send_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
+    let prepared = take_stashed(&PENDING_SEND, nonce)?;
+    Ok(commit_and_advance(prepared).await)
 }
 
 /// Drop any stashed send (confirm dismissed / back-gesture). Idempotent.

@@ -59,6 +59,10 @@ pub struct SendSummary {
     pub tx_count: u32,
     /// Number of UTXOs consumed as inputs.
     pub utxo_count: u32,
+    /// Payload bytes on the FINAL built transaction (0 = none) — read back from
+    /// the generated tx itself, never echoed from the caller (B7; P2.1
+    /// anti-blind-signing parity: the confirm renders what will be signed).
+    pub payload_len: u32,
 }
 
 /// The result of broadcasting the chain. `partial` (consensus B6): if a leg
@@ -94,6 +98,18 @@ impl PreparedSend {
     /// The Rust-decoded summary the confirm screen renders.
     pub fn summary(&self) -> &SendSummary {
         &self.summary
+    }
+
+    /// The payload carried by the final built transaction (the pinned Generator
+    /// places the payload on the FINAL tx of a chain — settings.rs:38 /
+    /// generator.rs:1093). Read from the built tx, so a confirm-screen decode
+    /// of it is B7-honest. Empty when the send carries no payload.
+    pub fn final_payload(&self) -> Vec<u8> {
+        self.pending
+            .iter()
+            .find(|pt| pt.is_final())
+            .map(|pt| pt.transaction().payload.clone())
+            .unwrap_or_default()
     }
 
     /// Sign + broadcast every leg, IN ORDER (a batch tx's output funds the next
@@ -152,6 +168,13 @@ impl WalletEngine {
     /// The fresh `change` is registered with the engine's [`UtxoContext`] here
     /// (consumer ii of the change seam) so the returned change is watched +
     /// spendable on the next send.
+    ///
+    /// `payload`: raw bytes for the final transaction's payload field (P2.1
+    /// transport spine) — priced by the pinned Generator's own mass accounting
+    /// upstream of us (settings.rs:38 / generator.rs:1093 at `cfafeb4`, INV-9);
+    /// `None` = a plain payment. Size is bounded by the Generator's per-tx mass
+    /// ceiling, surfaced as its own typed error — never a magic constant here
+    /// (§4 watch-out).
     pub async fn prepare_send(
         &self,
         destination: Address,
@@ -159,6 +182,7 @@ impl WalletEngine {
         change: Address,
         signer: Arc<dyn SignerT>,
         rpc: Rpc,
+        payload: Option<Vec<u8>>,
     ) -> Result<PreparedSend> {
         let context = self.context();
         // (ii) Watch the fresh change so the change UTXO this send returns is
@@ -179,7 +203,7 @@ impl WalletEngine {
             payment,
             None,                // fee_rate — normal priority
             Fees::SenderPays(0), // priority fee 0; NOT Fees::None (generator.rs:384)
-            None,                // payload
+            payload,             // final-tx payload (P2.1 transport spine)
             None,                // multiplexer
         )?;
 
@@ -195,13 +219,26 @@ impl WalletEngine {
             }
         }
 
-        let summary = project_summary(&generator.summary(), destination.to_string());
+        let mut summary = project_summary(&generator.summary(), destination.to_string());
+        // B7: the payload size the confirm shows is read back from the BUILT
+        // final tx, never echoed from the caller's argument.
+        summary.payload_len = final_payload_len(&pending);
         Ok(PreparedSend {
             pending,
             summary,
             rpc,
         })
     }
+}
+
+/// Payload bytes on the final tx of a built chain (pure; shared by prepare and
+/// tests). The Generator carries the payload on the final tx only.
+fn final_payload_len(pending: &[PendingTransaction]) -> u32 {
+    pending
+        .iter()
+        .find(|pt| pt.is_final())
+        .map(|pt| pt.transaction().payload.len() as u32)
+        .unwrap_or(0)
 }
 
 /// Outcome of one signerless probe: can the pinned Generator build a payment of
@@ -372,6 +409,7 @@ fn project_summary(gs: &GeneratorSummary, destination: String) -> SendSummary {
         mass: gs.aggregate_mass(),
         tx_count: gs.number_of_generated_transactions() as u32,
         utxo_count: gs.aggregated_utxos() as u32,
+        payload_len: 0, // set by the caller from the BUILT chain (B7)
     }
 }
 
@@ -414,6 +452,15 @@ mod tests {
     /// only build + summarise), mirroring the pin's `make_generator`
     /// (tx/generator/test.rs:411) but via `try_new_with_iterator`.
     fn offline_generator(values_kas: &[f64], send_kas: f64, change: Address) -> Generator {
+        offline_generator_with_payload(values_kas, send_kas, change, None)
+    }
+
+    fn offline_generator_with_payload(
+        values_kas: &[f64],
+        send_kas: f64,
+        change: Address,
+        payload: Option<Vec<u8>>,
+    ) -> Generator {
         let entries: Vec<UtxoEntryReference> = values_kas
             .iter()
             .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
@@ -430,7 +477,7 @@ mod tests {
             payment,
             None,
             Fees::SenderPays(0),
-            None,
+            payload,
             None,
         )
         .unwrap();
@@ -465,6 +512,72 @@ mod tests {
         );
         assert_eq!(summary.destination, DEST);
         assert_eq!(summary.utxo_count, 2, "needed both UTXOs to cover 12 KAS");
+    }
+
+    /// P2.1 spine: the payload rides the FINAL built tx, byte-exact, and the
+    /// pinned Generator prices its mass — fee and mass strictly higher than the
+    /// identical no-payload send (KIP-9: payload bytes are never free).
+    #[test]
+    fn payload_rides_the_final_tx_and_is_mass_priced() {
+        let payload = b"ciph_msg:1:bcast:kv-dev:offline pricing proof".to_vec();
+
+        let without = offline_generator(&[10.0, 10.0], 12.0, addr(CHANGE));
+        let pending_without = drain(&without);
+        let base = project_summary(&without.summary(), DEST.to_string());
+
+        let with = offline_generator_with_payload(
+            &[10.0, 10.0],
+            12.0,
+            addr(CHANGE),
+            Some(payload.clone()),
+        );
+        let pending_with = drain(&with);
+        let priced = project_summary(&with.summary(), DEST.to_string());
+
+        // Byte-exact on the final (here: only) tx; summary length is the BUILT
+        // tx's, not an echo.
+        assert_eq!(pending_with.last().unwrap().transaction().payload, payload);
+        assert_eq!(final_payload_len(&pending_with), payload.len() as u32);
+        assert_eq!(final_payload_len(&pending_without), 0);
+
+        // The Generator priced the payload bytes (INV-9: its numbers, not ours).
+        assert!(
+            priced.mass > base.mass,
+            "payload mass must be priced (with {} vs without {})",
+            priced.mass,
+            base.mass
+        );
+        assert!(
+            priced.fee_sompi > base.fee_sompi,
+            "payload fee must be priced (with {} vs without {})",
+            priced.fee_sompi,
+            base.fee_sompi
+        );
+    }
+
+    /// THE §0.2 EMISSION TRIPWIRE (D-062 lock; extends the D-054/C5 family):
+    /// the pinned Generator emits tx version 0 today (hardcoded at
+    /// generator.rs:1093, `cfafeb4`). We deliberately emit whatever the pin
+    /// emits — building our own v1 route would re-implement consensus (INV-9).
+    /// A pin bump that flips emission MUST fail here loudly: when it does,
+    /// re-run the D-061 v0/v1 ruling (decode stays version-neutral either way;
+    /// scan neutrality is proven in transport.rs).
+    #[test]
+    fn v0_emission_tripwire() {
+        let generator = offline_generator_with_payload(
+            &[10.0, 10.0],
+            12.0,
+            addr(CHANGE),
+            Some(b"ciph_msg:1:bcast:kv-dev:tripwire".to_vec()),
+        );
+        for pt in drain(&generator) {
+            assert_eq!(
+                pt.transaction().version,
+                0,
+                "the pinned Generator's emitted tx version changed — the D-062 \
+                 §0.2 emission ruling must be re-derived before this pin ships"
+            );
+        }
     }
 
     #[test]
