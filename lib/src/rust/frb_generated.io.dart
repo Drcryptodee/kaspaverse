@@ -6,6 +6,7 @@
 import 'api/dag.dart';
 import 'api/error.dart';
 import 'api/send.dart';
+import 'api/transport.dart';
 import 'api/vault.dart';
 import 'api/wallet.dart';
 import 'dart:async';
@@ -29,6 +30,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RustStreamSink<DagSnapshot> dco_decode_StreamSink_dag_snapshot_Sse(
     dynamic raw,
   );
+
+  @protected
+  RustStreamSink<TransportEventDto>
+  dco_decode_StreamSink_transport_event_dto_Sse(dynamic raw);
 
   @protected
   RustStreamSink<VaultStatus> dco_decode_StreamSink_vault_status_Sse(
@@ -68,6 +73,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
   List<ActivityRecord> dco_decode_list_activity_record(dynamic raw);
 
   @protected
@@ -90,6 +98,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SendSummaryDto dco_decode_send_summary_dto(dynamic raw);
+
+  @protected
+  TransportEventDto dco_decode_transport_event_dto(dynamic raw);
+
+  @protected
+  TransportSendSummaryDto dco_decode_transport_send_summary_dto(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -119,6 +133,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RustStreamSink<DagSnapshot> sse_decode_StreamSink_dag_snapshot_Sse(
     SseDeserializer deserializer,
   );
+
+  @protected
+  RustStreamSink<TransportEventDto>
+  sse_decode_StreamSink_transport_event_dto_Sse(SseDeserializer deserializer);
 
   @protected
   RustStreamSink<VaultStatus> sse_decode_StreamSink_vault_status_Sse(
@@ -160,6 +178,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
   List<ActivityRecord> sse_decode_list_activity_record(
     SseDeserializer deserializer,
   );
@@ -184,6 +205,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SendSummaryDto sse_decode_send_summary_dto(SseDeserializer deserializer);
+
+  @protected
+  TransportEventDto sse_decode_transport_event_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TransportSendSummaryDto sse_decode_transport_send_summary_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -215,6 +246,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_StreamSink_dag_snapshot_Sse(
     RustStreamSink<DagSnapshot> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_transport_event_dto_Sse(
+    RustStreamSink<TransportEventDto> self,
     SseSerializer serializer,
   );
 
@@ -267,6 +304,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_activity_record(
     List<ActivityRecord> self,
     SseSerializer serializer,
@@ -299,6 +339,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_send_summary_dto(
     SendSummaryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_transport_event_dto(
+    TransportEventDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_transport_send_summary_dto(
+    TransportSendSummaryDto self,
     SseSerializer serializer,
   );
 

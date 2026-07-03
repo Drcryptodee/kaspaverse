@@ -3104,6 +3104,7 @@ dependencies = [
  "borsh",
  "kaspa-addresses",
  "kaspa-consensus-core",
+ "kaspa-txscript",
  "kaspa-wallet-core",
  "kaspa-wrpc-client",
  "log",
