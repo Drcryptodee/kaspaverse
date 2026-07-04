@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_transport_send`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_transport_send`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `warn_store`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
 

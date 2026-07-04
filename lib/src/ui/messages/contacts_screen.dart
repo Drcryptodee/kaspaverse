@@ -62,7 +62,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
         commit: _messaging.commit,
         abandon: _messaging.abandon,
         title: title,
-        contextNote: contextNote,
+        // B7: the payload line renders what Rust decoded from the BUILT tx
+        // (kind + size), never an assumption about what was requested.
+        contextNote:
+            '$contextNote\n'
+            'Carries: ${summary.payloadKind} payload, '
+            '${summary.payloadLen} bytes (decoded from the built transaction).',
       ),
     );
     await _messaging.refresh();
