@@ -3117,11 +3117,15 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
+ "hmac",
  "kaspa-addresses",
  "kaspa-bip32",
  "kaspa-consensus-core",
  "kaspa-wallet-core",
  "kaspa-wallet-keys",
+ "secp256k1",
+ "serde_json",
+ "sha2",
  "zeroize",
 ]
 

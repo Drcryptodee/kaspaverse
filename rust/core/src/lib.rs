@@ -25,6 +25,7 @@ pub mod keychain;
 pub mod mnemonic;
 pub mod seed;
 pub mod signer;
+pub mod transport_crypto;
 pub mod vault;
 
 pub use error::{CoreError, Result};

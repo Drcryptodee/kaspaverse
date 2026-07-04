@@ -41,6 +41,17 @@ pub enum CoreError {
     VaultLocked,
     /// Transaction signing failed in the pinned consensus crate.
     Signing(String),
+    /// Transport envelope failed structural parsing: wrong length or
+    /// ephemeral-key tag. The reason names the field, never its value.
+    MalformedEnvelope(&'static str),
+    /// Key material handed to the transport cipher was invalid (not a curve
+    /// point / not a valid scalar). Carries the parameter name only.
+    TransportKey(&'static str),
+    /// Transport AEAD open failed: wrong key or tampered envelope — the two
+    /// are cryptographically indistinguishable, and the message says so.
+    TransportOpen,
+    /// Transport encrypt/KDF failed (should not happen with valid inputs).
+    TransportSeal,
 }
 
 impl fmt::Display for CoreError {
@@ -71,6 +82,12 @@ impl fmt::Display for CoreError {
             }
             Self::VaultLocked => f.write_str("vault is locked"),
             Self::Signing(e) => write!(f, "signing: {e}"),
+            Self::MalformedEnvelope(what) => write!(f, "transport envelope malformed: {what}"),
+            Self::TransportKey(what) => write!(f, "transport cipher key invalid: {what}"),
+            Self::TransportOpen => {
+                f.write_str("transport decrypt failed: wrong key or tampered envelope")
+            }
+            Self::TransportSeal => f.write_str("transport encrypt failed"),
         }
     }
 }
