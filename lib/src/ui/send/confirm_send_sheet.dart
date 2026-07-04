@@ -4,11 +4,14 @@ import '../../rust/api/send.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/amount_text.dart';
+import '../widgets/haptics.dart';
 
 /// The anti-blind-signing confirm (consensus B7 — the heart of P1.6). Everything
 /// here renders the [SendSummaryDto] Rust decoded from the ACTUAL transactions it
 /// will sign — never the form's echo of the user's intent. The hold-to-sign
-/// ceremony (DS-3) is decelerate-only with no double-tap path to broadcast.
+/// ceremony (DS-3) is decelerate-only with no double-tap path to broadcast, and
+/// every amount on this surface is exact to all 8 decimals (DS-2: the full
+/// truth at the moment of commitment).
 ///
 /// Dismissing before the hold completes calls [abandon] (drops the Rust stash);
 /// a completed send pops with its [SendOutcomeDto].
@@ -49,6 +52,9 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
     });
     try {
       final outcome = await widget.commit(widget.summary.nonce);
+      // Broadcast accepted — the §7 money moment (fires only for real
+      // acceptance, full or partial; a zero-submitted failure stays silent).
+      if (outcome.submitted > 0) KvHaptic.moneyMoment();
       if (mounted) setState(() => _outcome = outcome);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -97,30 +103,56 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Confirm send', style: theme.textTheme.titleMedium),
+        Center(child: Text('Confirm send', style: theme.textTheme.titleMedium)),
+        const SizedBox(height: KvSpace.l),
+        // The headline: what leaves, exact (screen-level amount role, §4).
+        Center(
+          child: Text(
+            'Sending',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+        ),
+        const SizedBox(height: KvSpace.xs),
+        Center(child: AmountText(s.amountSompi, role: AmountRole.screen)),
         const SizedBox(height: KvSpace.l),
         _Field(
           label: 'To',
-          child: Text(
-            chunkAddress(s.destination),
-            style: theme.textTheme.bodySmall?.copyWith(fontFamily: KvFont.mono),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(KvSpace.sm),
+            decoration: BoxDecoration(
+              color: KvColor.surfaceAlt,
+              borderRadius: BorderRadius.circular(KvRadius.data),
+            ),
+            child: Text(
+              chunkAddress(s.destination),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: KvFont.mono,
+              ),
+            ),
           ),
         ),
         const SizedBox(height: KvSpace.m),
-        _Field(
-          label: 'Amount',
-          child: AmountText(s.amountSompi, role: AmountRole.row),
-        ),
-        const SizedBox(height: KvSpace.m),
-        // The exact fee — never "≈ free" (KIP-9 storage mass can be non-trivial).
-        _Field(
-          label: 'Network fee',
-          child: AmountText(s.feeSompi, role: AmountRole.row),
-        ),
-        const SizedBox(height: KvSpace.m),
-        _Field(
-          label: 'Total',
-          child: AmountText(s.totalSompi, role: AmountRole.row),
+        // The exact costs — never "≈ free" (KIP-9 storage mass can be
+        // non-trivial); all 8 decimals on a signing surface (DS-2).
+        Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.m,
+            vertical: KvSpace.xs,
+          ),
+          decoration: BoxDecoration(
+            border: Border.all(color: KvColor.border),
+            borderRadius: BorderRadius.circular(KvRadius.data),
+          ),
+          child: Column(
+            children: [
+              _CostRow(label: 'Network fee', sompi: s.feeSompi),
+              const Divider(),
+              _CostRow(label: 'Total', sompi: s.totalSompi),
+            ],
+          ),
         ),
         if (s.txCount > 1) ...[
           const SizedBox(height: KvSpace.m),
@@ -139,7 +171,8 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         ),
         const SizedBox(height: KvSpace.s),
         Text(
-          'Sends are final — there is no cancel once broadcast.',
+          // Irreversibility, said once, plainly, at signing (§12).
+          'Kaspa transactions confirm in about a second and cannot be reversed.',
           textAlign: TextAlign.center,
           style: theme.textTheme.labelSmall?.copyWith(
             color: KvColor.textTertiary,
@@ -176,6 +209,34 @@ class _Field extends StatelessWidget {
   }
 }
 
+/// One exact cost line: label left, all-8-decimals amount right (DS-2).
+class _CostRow extends StatelessWidget {
+  const _CostRow({required this.label, required this.sompi});
+
+  final String label;
+  final BigInt sompi;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+          const Spacer(),
+          AmountText(sompi, role: AmountRole.row, exact: true),
+        ],
+      ),
+    );
+  }
+}
+
 /// The post-broadcast result: the txid (copyable, for an explorer cross-check),
 /// or an honest partial/failure (B6 — never a silent "it failed").
 class _ResultView extends StatelessWidget {
@@ -207,8 +268,18 @@ class _ResultView extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: KvSpace.m),
-        Icon(icon, color: color, size: 40),
-        const SizedBox(height: KvSpace.s),
+        Center(
+          child: Container(
+            width: KvSpace.control + KvSpace.s,
+            height: KvSpace.control + KvSpace.s,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color.withValues(alpha: 0.14),
+            ),
+            child: Icon(icon, color: color, size: KvSpace.xl),
+          ),
+        ),
+        const SizedBox(height: KvSpace.sm),
         Text(
           title,
           textAlign: TextAlign.center,
@@ -222,6 +293,7 @@ class _ResultView extends StatelessWidget {
             textAlign: TextAlign.center,
             style: theme.textTheme.bodySmall?.copyWith(
               color: KvColor.textSecondary,
+              fontFamily: KvFont.ui,
             ),
           ),
         ],
@@ -253,7 +325,10 @@ class _ResultView extends StatelessWidget {
           Text(
             error!,
             textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(color: KvColor.error),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.error,
+              fontFamily: KvFont.ui,
+            ),
           ),
         ],
         const SizedBox(height: KvSpace.xl),
@@ -266,6 +341,7 @@ class _ResultView extends StatelessWidget {
 /// DS-3 hold-to-sign: press and hold; a decelerate-only fill advances over
 /// [KvMotion.deliberate]; only completing the hold fires [onComplete] (no
 /// double-tap path to broadcast). Releasing early reverses — nothing happens.
+/// The threshold lands with `mediumImpact` (§7).
 class _HoldToSign extends StatefulWidget {
   const _HoldToSign({required this.label, required this.onComplete});
 
@@ -287,6 +363,7 @@ class _HoldToSignState extends State<_HoldToSign>
   void _onStatus(AnimationStatus status) {
     if (status == AnimationStatus.completed && !_fired) {
       _fired = true;
+      KvHaptic.holdThreshold();
       widget.onComplete();
     }
   }
@@ -314,56 +391,66 @@ class _HoldToSignState extends State<_HoldToSign>
       onTapDown: _down,
       onTapUp: _release,
       onTapCancel: _release,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(KvRadius.button),
-        child: Container(
-          height: KvSpace.touchTarget + KvSpace.s,
-          // Dual teal (token semantics): muted = ambient base, primary = the
-          // "activated" charge sweeping over it. Dark text reads on both.
-          color: KvColor.primaryMuted,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              // Decelerate-only fill (DS-5 vault register; never overshoot).
-              Positioned.fill(
-                child: AnimatedBuilder(
-                  animation: _controller,
-                  builder: (context, _) => Align(
-                    alignment: Alignment.centerLeft,
-                    child: FractionallySizedBox(
-                      widthFactor: KvMotion.out.transform(_controller.value),
-                      child: Container(color: KvColor.primary),
+      child: Container(
+        // Glow is rationed to primary actions (§3) — this is THE primary
+        // action; the shadow sits outside the clip so it can breathe.
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(KvRadius.button),
+          boxShadow: const [
+            BoxShadow(color: KvColor.glow, blurRadius: 24, spreadRadius: 2),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(KvRadius.button),
+          child: Container(
+            height: KvSpace.control,
+            // Dual teal (token semantics): muted = ambient base, primary = the
+            // "activated" charge sweeping over it. Dark text reads on both.
+            color: KvColor.primaryMuted,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                // Decelerate-only fill (DS-5 vault register; never overshoot).
+                Positioned.fill(
+                  child: AnimatedBuilder(
+                    animation: _controller,
+                    builder: (context, _) => Align(
+                      alignment: Alignment.centerLeft,
+                      child: FractionallySizedBox(
+                        widthFactor: KvMotion.out.transform(_controller.value),
+                        child: Container(color: KvColor.primary),
+                      ),
                     ),
                   ),
                 ),
-              ),
-              // Scale the full-precision label down rather than ever clip or
-              // ellipsize an amount (DS-2), incl. at large text scale.
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.lock_outline,
-                        size: 18,
-                        color: KvColor.abyss,
-                      ),
-                      const SizedBox(width: KvSpace.s),
-                      Text(
-                        widget.label,
-                        style: theme.textTheme.labelLarge?.copyWith(
+                // Scale the full-precision label down rather than ever clip or
+                // ellipsize an amount (DS-2), incl. at large text scale.
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.lock_outline,
+                          size: 18,
                           color: KvColor.abyss,
-                          fontWeight: FontWeight.w600,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: KvSpace.s),
+                        Text(
+                          widget.label,
+                          style: theme.textTheme.labelLarge?.copyWith(
+                            color: KvColor.abyss,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

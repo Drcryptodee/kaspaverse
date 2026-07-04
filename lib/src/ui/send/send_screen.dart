@@ -167,10 +167,9 @@ class _SendScreenState extends State<SendScreen> {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
-                        // Mono/tabular for an amount column (DS-2).
-                        style: theme.textTheme.headlineSmall?.copyWith(
-                          fontFamily: KvFont.mono,
-                        ),
+                        // The amount is the screen's subject — screen-level
+                        // mono role (§4), tabular so digits never jiggle (DS-2).
+                        style: theme.textTheme.displaySmall,
                         decoration: const InputDecoration(
                           hintText: '0.00000000',
                           suffixText: 'KAS',

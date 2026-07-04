@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'create_screen.dart';
 import 'restore_screen.dart';
 import 'theme/tokens.dart';
+import 'widgets/ceremony_mark.dart';
+import 'widgets/entrance.dart';
 
 /// The `!exists` shell state (P1.4) — no vault on this device yet. Offers the
 /// two onboarding paths: create a new wallet, or restore an existing one. Both
@@ -26,53 +28,57 @@ class OnboardingSurface extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  Icons.shield_outlined,
-                  size: KvSpace.xxl,
-                  color: KvColor.primaryMuted,
-                ),
+                const Entrance(child: CeremonyMark(Icons.shield_outlined)),
                 const SizedBox(height: KvSpace.l),
-                Text(
-                  'Your sovereign vault',
-                  style: theme.textTheme.headlineSmall,
-                ),
-                const SizedBox(height: KvSpace.s),
-                Text(
-                  'Hold your own keys on Kaspa. Set up a new wallet, or restore '
-                  'one you already own.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.textSecondary,
+                Entrance(
+                  index: 1,
+                  child: Column(
+                    children: [
+                      Text(
+                        'Your sovereign vault',
+                        style: theme.textTheme.headlineSmall,
+                      ),
+                      const SizedBox(height: KvSpace.s),
+                      Text(
+                        'Hold your own keys on Kaspa. Set up a new wallet, or '
+                        'restore one you already own.',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: KvColor.textSecondary,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
                   ),
-                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: KvSpace.xl),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-                    ),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const CreateScreen(),
+                Entrance(
+                  index: 2,
+                  child: Column(
+                    children: [
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const CreateScreen(),
+                            ),
+                          ),
+                          child: const Text('Create new wallet'),
+                        ),
                       ),
-                    ),
-                    child: const Text('Create new wallet'),
-                  ),
-                ),
-                const SizedBox(height: KvSpace.sm),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-                    ),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const RestoreScreen(),
+                      const SizedBox(height: KvSpace.sm),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const RestoreScreen(),
+                            ),
+                          ),
+                          child: const Text('Restore existing wallet'),
+                        ),
                       ),
-                    ),
-                    child: const Text('Restore existing wallet'),
+                    ],
                   ),
                 ),
                 if (debugFooter != null) ...[

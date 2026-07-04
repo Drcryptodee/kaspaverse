@@ -8,6 +8,7 @@ import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'theme/tokens.dart';
+import 'widgets/haptics.dart';
 
 enum _Step { words, extraWord, preview, passphrase }
 
@@ -94,6 +95,7 @@ class _RestoreScreenState extends State<RestoreScreen> {
   void _select(String word) {
     final idx = _wordlist!.indexOf(word);
     if (idx < 0 || _indices.length >= _target) return;
+    KvHaptic.selection(); // word-select (§7)
     setState(() {
       _indices.add(idx);
       _filter = '';
@@ -222,7 +224,10 @@ class _RestoreScreenState extends State<RestoreScreen> {
                       ],
                       selected: {_target},
                       onSelectionChanged: _indices.isEmpty
-                          ? (s) => setState(() => _target = s.first)
+                          ? (s) {
+                              KvHaptic.selection(); // toggle (§7)
+                              setState(() => _target = s.first);
+                            }
                           : null,
                     ),
                   ],
@@ -256,9 +261,6 @@ class _RestoreScreenState extends State<RestoreScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-                      ),
                       onPressed: () => setState(() => _step = _Step.extraWord),
                       child: const Text('Continue'),
                     ),
@@ -340,9 +342,6 @@ class _RestoreScreenState extends State<RestoreScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-                    ),
                     onPressed: _busy ? null : _runPreview,
                     child: Text(_busy ? 'Checking…' : 'Show my address'),
                   ),
@@ -398,9 +397,6 @@ class _RestoreScreenState extends State<RestoreScreen> {
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-              ),
               onPressed: () => setState(() => _step = _Step.passphrase),
               child: const Text('This is my wallet'),
             ),
@@ -453,9 +449,6 @@ class _RestoreScreenState extends State<RestoreScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-                    ),
                     onPressed: _busy ? null : _runCommit,
                     child: Text(_busy ? 'Restoring…' : 'Restore wallet'),
                   ),
