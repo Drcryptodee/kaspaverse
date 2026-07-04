@@ -3124,6 +3124,7 @@ dependencies = [
  "kaspa-wallet-core",
  "kaspa-wallet-keys",
  "secp256k1",
+ "serde",
  "serde_json",
  "sha2",
  "zeroize",

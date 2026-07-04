@@ -21,11 +21,23 @@ class ConfirmSendSheet extends StatefulWidget {
     required this.summary,
     required this.commit,
     required this.abandon,
+    this.title = 'Confirm send',
+    this.contextNote,
   });
 
   final SendSummaryDto summary;
   final Future<SendOutcomeDto> Function(BigInt nonce) commit;
   final Future<void> Function() abandon;
+
+  /// Sheet heading — transport sends (P2.3) rename the ceremony honestly
+  /// ("Confirm contact request", "Confirm message") without touching the
+  /// B7 numbers or the hold-to-sign discipline.
+  final String title;
+
+  /// One optional plain-English line under the destination — what this send
+  /// carries beyond value (e.g. the bond-refund rule). Never a number the
+  /// summary doesn't back (B7: the DTO stays the only source of figures).
+  final String? contextNote;
 
   @override
   State<ConfirmSendSheet> createState() => _ConfirmSendSheetState();
@@ -103,7 +115,7 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Center(child: Text('Confirm send', style: theme.textTheme.titleMedium)),
+        Center(child: Text(widget.title, style: theme.textTheme.titleMedium)),
         const SizedBox(height: KvSpace.l),
         // The headline: what leaves, exact (screen-level amount role, §4).
         Center(
@@ -134,6 +146,15 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
             ),
           ),
         ),
+        if (widget.contextNote != null) ...[
+          const SizedBox(height: KvSpace.s),
+          Text(
+            widget.contextNote!,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+        ],
         const SizedBox(height: KvSpace.m),
         // The exact costs — never "≈ free" (KIP-9 storage mass can be
         // non-trivial); all 8 decimals on a signing surface (DS-2).

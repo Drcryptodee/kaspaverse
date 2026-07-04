@@ -75,6 +75,14 @@ impl UnlockedVault {
         }
     }
 
+    /// Weak keychain handle for the transport decrypt seam
+    /// ([`crate::transport_keys::TransportDecryptor`]) — same lifecycle
+    /// contract as the signer's weak reference. Crate-private: only vault
+    /// seams mint weak handles.
+    pub(crate) fn downgrade_keychain(&self) -> Weak<KeyChain> {
+        Arc::downgrade(&self.keychain)
+    }
+
     /// Explicit lifecycle drop: consume the vault. Zeroizes the seed now if
     /// no operation is in flight; otherwise when the in-flight call returns
     /// (see the type docs for the full contract).

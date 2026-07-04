@@ -424,6 +424,11 @@ fn map_generate_error(e: kaspa_wallet_core::error::Error) -> ChainError {
         kaspa_wallet_core::error::Error::StorageMassExceedsMaximumTransactionMass {
             storage_mass,
         } => ChainError::StorageMassExceeded { storage_mass },
+        // A payload/output set too heavy for one tx (P2.3: message too large —
+        // the compose path maps this to the honest friendly error, §4).
+        kaspa_wallet_core::error::Error::GeneratorTransactionIsTooHeavy => {
+            ChainError::TransactionTooHeavy
+        }
         other => ChainError::from(other),
     }
 }

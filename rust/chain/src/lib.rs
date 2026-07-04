@@ -13,18 +13,28 @@ mod dag_monitor;
 mod error;
 mod send;
 mod transport;
+mod transport_store;
 mod wallet_sync;
 
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
 pub use send::{PreparedSend, SendOutcome, SendSummary};
-pub use transport::{compose_bcast, parse_payload, TransportEvent};
+pub use transport::{
+    compose_bcast, compose_comm_wire, compose_handshake_wire, decode_envelope_body, parse_payload,
+    resolve_return_address, split_comm_body, TransportEvent, HANDSHAKE_BOND_SOMPI, KIND_LEGACY,
+    KIND_UNKNOWN,
+};
+pub use transport_store::{
+    ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord, StoredKind,
+    TransportStore,
+};
 pub use wallet_sync::{
     ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,
 };
 // Re-export so downstream crates (bridge) name network types, addresses and the
 // shared wRPC handle from one place.
 pub use kaspa_addresses::Address;
+pub use kaspa_addresses::Version as AddressVersion;
 pub use kaspa_wallet_core::rpc::Rpc;
 // The signer trait the bridge coerces its `VaultSigner` into (`Arc<dyn SignerT>`)
 // when handing it to [`WalletEngine::prepare_send`] — same trait both crates use.

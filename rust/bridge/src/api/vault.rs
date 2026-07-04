@@ -205,6 +205,25 @@ pub(crate) fn endpoint_cache_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("wallet").join("endpoint.cache"))
 }
 
+/// App-private dir for the P2.3 transport stores (conversations + messages).
+/// Message bodies in there are ciphertext-at-rest (§0.4); conversation
+/// metadata is public-wire-class data (see `transport_store.rs` module docs)
+/// — sibling of the P1.5 `wallet/` subdir.
+pub(crate) fn transport_store_dir() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("transport"))
+}
+
+/// A vault-scoped transport decryptor (core's weak-handle seam, P2.3): every
+/// decrypt starts with a `Weak::upgrade` that fails once the vault locks —
+/// key bytes exist only inside core, never here (INV-1). Errors if locked.
+pub(crate) fn transport_decryptor() -> Result<kaspaverse_core::TransportDecryptor, AppError> {
+    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| AppError::msg("wallet is locked"))?;
+    Ok(vault.transport_decryptor())
+}
+
 /// Read the persisted change cursor (the next-unused change index). A missing or
 /// malformed file reads as 0 — a fresh wallet has used no change addresses.
 pub(crate) fn change_cursor() -> u32 {
@@ -267,6 +286,20 @@ pub(crate) fn change_address_at(index: u32) -> Result<Address, AppError> {
     vault
         .keychain()
         .change_address(index)
+        .map_err(AppError::core)
+}
+
+/// The watched-window address at an arbitrary `(branch, index)` slot — the
+/// P2.3 re-seal-to-self target (a conversation's §0.7 bound slot). Public
+/// data, same single derivation site. Errors if locked.
+pub(crate) fn wallet_address_at(branch: Branch, index: u32) -> Result<Address, AppError> {
+    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| AppError::msg("wallet is locked"))?;
+    vault
+        .keychain()
+        .address(branch, index)
         .map_err(AppError::core)
 }
 

@@ -44,6 +44,7 @@ class HomeScreen extends StatefulWidget {
     this.onReady,
     this.receiveRoute,
     this.sendRoute,
+    this.messagesRoute,
     this.clock = DateTime.now,
     this.floatingActionButton,
   });
@@ -73,6 +74,9 @@ class HomeScreen extends StatefulWidget {
   /// Builds the Send screen (`null` ⇒ no Send UI). `main.dart` wires it to the
   /// wallet service so this consumer never imports it.
   final WidgetBuilder? sendRoute;
+
+  /// Builds the Messages screen (P2.3 transport UI; `null` ⇒ no entry).
+  final WidgetBuilder? messagesRoute;
 
   /// Test seam for "now" (default wall-clock).
   final DateTime Function() clock;
@@ -120,6 +124,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _openReceive() {
     final builder = widget.receiveRoute;
+    if (builder == null) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
+  }
+
+  void _openMessages() {
+    final builder = widget.messagesRoute;
     if (builder == null) return;
     Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
   }
@@ -175,7 +185,9 @@ class _HomeScreenState extends State<HomeScreen> {
             final mature = widget.mature.value;
             final pending = widget.pending.value;
             final hasActions =
-                widget.sendRoute != null || widget.receiveRoute != null;
+                widget.sendRoute != null ||
+                widget.receiveRoute != null ||
+                widget.messagesRoute != null;
 
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -253,6 +265,20 @@ class _HomeScreenState extends State<HomeScreen> {
                                     label: const Text('Receive'),
                                   ),
                                 ),
+                              if (widget.messagesRoute != null) ...[
+                                const SizedBox(width: KvSpace.sm),
+                                Expanded(
+                                  child: FilledButton.tonalIcon(
+                                    onPressed: _openMessages,
+                                    icon: const Icon(
+                                      Icons.forum_outlined,
+                                      size: 18,
+                                      color: KvColor.primaryMuted,
+                                    ),
+                                    label: const Text('Message'),
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),

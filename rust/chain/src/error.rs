@@ -20,6 +20,11 @@ pub enum ChainError {
     /// is too small relative to the wallet's UTXOs (a tiny output is penalized).
     /// Typed so the bridge can guide the user to a larger amount (P1.6).
     StorageMassExceeded { storage_mass: u64 },
+    /// The built transaction exceeds the per-tx mass ceiling for a reason
+    /// other than storage mass — for a payload send this means the MESSAGE is
+    /// too large (the Generator's `GeneratorTransactionIsTooHeavy`). Typed so
+    /// the P2.3 compose path can say "message too large" honestly (§4).
+    TransactionTooHeavy,
     /// A chain-layer message with no upstream source.
     Message(String),
 }
@@ -36,6 +41,9 @@ impl fmt::Display for ChainError {
             ChainError::StorageMassExceeded { storage_mass } => {
                 write!(f, "storage mass {storage_mass} exceeds the per-tx maximum")
             }
+            ChainError::TransactionTooHeavy => {
+                f.write_str("transaction exceeds the per-tx mass ceiling (payload too large)")
+            }
             ChainError::Message(m) => f.write_str(m),
         }
     }
@@ -49,6 +57,7 @@ impl std::error::Error for ChainError {
             ChainError::Io(e) => Some(e),
             ChainError::InsufficientFunds { .. }
             | ChainError::StorageMassExceeded { .. }
+            | ChainError::TransactionTooHeavy
             | ChainError::Message(_) => None,
         }
     }
