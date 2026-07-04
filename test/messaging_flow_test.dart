@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/transport.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
@@ -264,6 +265,45 @@ void main() {
       pings.add('c1');
       await tester.pump();
       expect(pulls, before + 1, reason: 'own ping re-pulls');
+    });
+
+    testWidgets('two pings for the same conversation re-pull twice', (
+      tester,
+    ) async {
+      var pulls = 0;
+      MessagingService.threadFn = (_) async {
+        pulls++;
+        return const [];
+      };
+      await MessagingService.instance.start();
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+      final before = pulls;
+
+      pings.add('c1');
+      await tester.pump();
+      pings.add('c1');
+      await tester.pump();
+      expect(
+        pulls,
+        before + 2,
+        reason:
+            'a second message in the SAME conversation must still refresh '
+            'the open thread (ValueNotifier equality trap — sitting find)',
+      );
+    });
+  });
+
+  group('displayError', () {
+    test('unwraps AppError to its honest message', () {
+      expect(
+        displayError(const AppError(message: 'wallet is locked')),
+        'wallet is locked',
+      );
+    });
+
+    test('falls back to toString for foreign errors', () {
+      expect(displayError(StateError('boom')), 'Bad state: boom');
     });
   });
 }
