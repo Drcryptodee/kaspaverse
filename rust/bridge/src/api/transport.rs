@@ -305,6 +305,17 @@ pub async fn transport_start() -> Result<(), AppError> {
     Ok(())
 }
 
+/// A store fold must never be silently lossy (consensus-audit in-run finding
+/// at P2.3): a lost SENT row cannot be re-derived from the wire — its
+/// envelope is sealed to the counterparty — so append failures are warned
+/// (I/O error text only, never content; the wallet-sync store has the same
+/// posture).
+fn warn_store<T>(result: kaspaverse_chain::Result<T>) {
+    if let Err(e) = result {
+        log::warn!("transport-hub: store append failed: {e}");
+    }
+}
+
 /// One scan match → store/conversation fold. Content never reaches a log
 /// line from here (§4: message plaintext is treated like key material for
 /// logging; even sealed bodies are logged as shapes only).
@@ -375,8 +386,8 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
             conversation.bound_index = slot.1;
             conversation.last_activity_unix_ms = now;
             let conversation_id = conversation.conversation_id.clone();
-            let _ = store.upsert_conversation(conversation);
-            let _ = store.record_message(MessageRecord {
+            warn_store(store.upsert_conversation(conversation));
+            warn_store(store.record_message(MessageRecord {
                 txid: txid.to_string(),
                 conversation_id: conversation_id.clone(),
                 direction: MessageDirection::Inbound,
@@ -385,7 +396,7 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
                 unix_ms: payload.timestamp,
                 alias_on_wire: None,
                 sealed_to: None,
-            });
+            }));
             drop(store);
             ping(&conversation_id);
             return;
@@ -410,8 +421,8 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
         last_activity_unix_ms: now,
         handshake_txid: Some(txid.to_string()),
     };
-    let _ = store.upsert_conversation(conversation);
-    let _ = store.record_message(MessageRecord {
+    warn_store(store.upsert_conversation(conversation));
+    warn_store(store.record_message(MessageRecord {
         txid: txid.to_string(),
         conversation_id: conversation_id.clone(),
         direction: MessageDirection::Inbound,
@@ -420,7 +431,7 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
         unix_ms: payload.timestamp,
         alias_on_wire: None,
         sealed_to: None,
-    });
+    }));
     drop(store);
     ping(&conversation_id);
 }
@@ -485,11 +496,14 @@ fn handle_inbound_comm(hub: &TransportHub, txid: &str, body: &[u8]) {
         alias_on_wire: Some(alias),
         sealed_to,
     });
+    if let Err(e) = &recorded {
+        log::warn!("transport-hub: store append failed: {e}");
+    }
     if let Ok(true) = recorded {
         if let Some(existing) = store.conversation(&conversation_id) {
             let mut conversation = existing.clone();
             conversation.last_activity_unix_ms = now;
-            let _ = store.upsert_conversation(conversation);
+            warn_store(store.upsert_conversation(conversation));
         }
         drop(store);
         ping(&conversation_id);
@@ -863,8 +877,8 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
             conversation.handshake_txid = Some(txid.to_string());
             let conversation_id = conversation.conversation_id.clone();
             let sealed_to = Some((conversation.bound_branch, conversation.bound_index));
-            let _ = store.upsert_conversation(conversation);
-            let _ = store.record_message(MessageRecord {
+            warn_store(store.upsert_conversation(conversation));
+            warn_store(store.record_message(MessageRecord {
                 txid: txid.to_string(),
                 conversation_id: conversation_id.clone(),
                 direction: MessageDirection::Outbound,
@@ -873,7 +887,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 unix_ms: timestamp_ms,
                 alias_on_wire: None,
                 sealed_to,
-            });
+            }));
             drop(store);
             ping(&conversation_id);
         }
@@ -891,8 +905,8 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 conversation.status = ConversationStatus::Active;
                 conversation.last_activity_unix_ms = timestamp_ms;
                 let sealed_to = Some((conversation.bound_branch, conversation.bound_index));
-                let _ = store.upsert_conversation(conversation);
-                let _ = store.record_message(MessageRecord {
+                warn_store(store.upsert_conversation(conversation));
+                warn_store(store.record_message(MessageRecord {
                     txid: txid.to_string(),
                     conversation_id: conversation_id.clone(),
                     direction: MessageDirection::Outbound,
@@ -901,7 +915,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                     unix_ms: timestamp_ms,
                     alias_on_wire: None,
                     sealed_to,
-                });
+                }));
             }
             drop(store);
             ping(&conversation_id);
@@ -913,7 +927,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
             sealed_to,
             timestamp_ms,
         } => {
-            let _ = store.record_message(MessageRecord {
+            warn_store(store.record_message(MessageRecord {
                 txid: txid.to_string(),
                 conversation_id: conversation_id.clone(),
                 direction: MessageDirection::Outbound,
@@ -922,11 +936,11 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 unix_ms: timestamp_ms,
                 alias_on_wire: Some(alias_on_wire),
                 sealed_to: Some(sealed_to),
-            });
+            }));
             if let Some(existing) = store.conversation(&conversation_id) {
                 let mut conversation = existing.clone();
                 conversation.last_activity_unix_ms = timestamp_ms;
-                let _ = store.upsert_conversation(conversation);
+                warn_store(store.upsert_conversation(conversation));
             }
             drop(store);
             ping(&conversation_id);
