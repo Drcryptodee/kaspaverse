@@ -237,37 +237,45 @@ class _HomeScreenState extends State<HomeScreen> {
                         const SizedBox(height: KvSpace.m),
                         Entrance(
                           index: 1,
-                          child: Row(
+                          child: Column(
                             children: [
-                              if (widget.sendRoute != null)
-                                Expanded(
-                                  child: FilledButton.icon(
-                                    onPressed: _openSend,
-                                    icon: const Icon(
-                                      Icons.north_east,
-                                      size: 18,
+                              // Send + Receive share the row; Message gets its
+                              // own full-width line so no label ever wraps
+                              // (three-across broke on the V60 — sitting note).
+                              Row(
+                                children: [
+                                  if (widget.sendRoute != null)
+                                    Expanded(
+                                      child: FilledButton.icon(
+                                        onPressed: _openSend,
+                                        icon: const Icon(
+                                          Icons.north_east,
+                                          size: 18,
+                                        ),
+                                        label: const Text('Send'),
+                                      ),
                                     ),
-                                    label: const Text('Send'),
-                                  ),
-                                ),
-                              if (widget.sendRoute != null &&
-                                  widget.receiveRoute != null)
-                                const SizedBox(width: KvSpace.sm),
-                              if (widget.receiveRoute != null)
-                                Expanded(
-                                  child: FilledButton.tonalIcon(
-                                    onPressed: _openReceive,
-                                    icon: const Icon(
-                                      Icons.south_west,
-                                      size: 18,
-                                      color: KvColor.primaryMuted,
+                                  if (widget.sendRoute != null &&
+                                      widget.receiveRoute != null)
+                                    const SizedBox(width: KvSpace.sm),
+                                  if (widget.receiveRoute != null)
+                                    Expanded(
+                                      child: FilledButton.tonalIcon(
+                                        onPressed: _openReceive,
+                                        icon: const Icon(
+                                          Icons.south_west,
+                                          size: 18,
+                                          color: KvColor.primaryMuted,
+                                        ),
+                                        label: const Text('Receive'),
+                                      ),
                                     ),
-                                    label: const Text('Receive'),
-                                  ),
-                                ),
+                                ],
+                              ),
                               if (widget.messagesRoute != null) ...[
-                                const SizedBox(width: KvSpace.sm),
-                                Expanded(
+                                const SizedBox(height: KvSpace.sm),
+                                SizedBox(
+                                  width: double.infinity,
                                   child: FilledButton.tonalIcon(
                                     onPressed: _openMessages,
                                     icon: const Icon(

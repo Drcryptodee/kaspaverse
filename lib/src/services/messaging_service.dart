@@ -82,6 +82,9 @@ class MessagingService {
   Future<void> start() async {
     _subscription ??= pingFactory().listen(
       (conversationId) {
+        // ValueNotifier skips equal values — a second message in the SAME
+        // conversation must still re-notify open thread views.
+        if (lastPing.value == conversationId) lastPing.value = null;
         lastPing.value = conversationId;
         refresh();
       },

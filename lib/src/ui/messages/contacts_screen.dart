@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
@@ -193,6 +194,9 @@ String contactLabel(ConversationDto c) => c.contactAddress.isEmpty
 
 /// AppError-aware message extraction for snackbars.
 String displayError(Object e) {
+  // The generated AppError has no toString override — Dart's default is
+  // "Instance of 'AppError'", which swallows the honest message.
+  if (e is AppError) return e.message;
   final s = e.toString();
   // FRB wraps AppError into its exception string; keep the message half.
   const marker = 'message: ';
