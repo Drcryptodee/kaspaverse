@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
+import 'package:kaspaverse/src/services/messaging_service.dart';
 import 'package:kaspaverse/src/services/transport_service.dart';
 import 'package:kaspaverse/src/services/vault_service.dart';
 import 'package:kaspaverse/src/services/wallet_service.dart';
@@ -10,6 +11,7 @@ import 'package:kaspaverse/src/ui/app_shell.dart';
 import 'package:kaspaverse/src/ui/dev_transport_panel.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
+import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
@@ -79,7 +81,13 @@ class KaspaVerseApp extends StatelessWidget {
           activity: wallet.activity,
           syncing: wallet.syncing,
           utxoIndexMissing: wallet.utxoIndexMissing,
-          onReady: wallet.start,
+          onReady: () {
+            wallet.start();
+            // P2.3 transport hub: needs the unlocked vault (this screen only
+            // mounts unlocked) and rebuilds after a re-unlock. Fire-and-forget;
+            // the service surfaces its own errors.
+            MessagingService.instance.start();
+          },
           receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
           sendRoute: (_) => SendScreen(
             mature: wallet.mature,
@@ -88,6 +96,7 @@ class KaspaVerseApp extends StatelessWidget {
             abandon: wallet.abandonSend,
             minimumSendable: wallet.minimumSendable,
           ),
+          messagesRoute: (_) => const ContactsScreen(),
           floatingActionButton: kDebugMode ? const _DevFabs() : null,
         ),
       ),

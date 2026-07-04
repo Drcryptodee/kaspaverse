@@ -21,18 +21,22 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod handshake;
 pub mod keychain;
 pub mod mnemonic;
 pub mod seed;
 pub mod signer;
 pub mod transport_crypto;
+pub mod transport_keys;
 pub mod vault;
 
 pub use error::{CoreError, Result};
+pub use handshake::HandshakePayload;
 pub use keychain::{Branch, KeyChain};
 pub use mnemonic::MnemonicCeremony;
 pub use seed::SecretSeed;
 pub use signer::{UnlockedVault, VaultSigner};
+pub use transport_keys::{KeySlot, TransportDecryptor};
 pub use vault::{seal_seed, unseal_seed, SealParams, BLOB_LEN};
 
 // Re-exported so callers name the network without depending on the kaspa

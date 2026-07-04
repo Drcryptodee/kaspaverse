@@ -16,8 +16,9 @@ zeroize.workspace = true
 secp256k1.workspace = true
 sha2.workspace = true
 hmac.workspace = true
-
-[dev-dependencies]
-# Parity-fixture harness only (tests/transport_parity.rs) — already resolved
-# in the lock via the pinned tree; never compiled into the shipped library.
+# Handshake JSON build/parse (P2.3 §0.7) — direct lines on packages already
+# locked in the tree via the pinned kaspa crates (the D-065/D-063 pattern:
+# zero new packages; serde_json moved up from dev-deps where P2.2 already
+# used it for the parity fixtures).
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

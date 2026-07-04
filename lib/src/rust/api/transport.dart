@@ -8,8 +8,16 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `to_dto`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_transport_send`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// Start (or restart after a re-unlock) the transport hub: load the stores,
+/// take a vault-scoped decryptor, derive the PUBLIC watched window, and
+/// attach the inbound task to the live `ciph_msg:` scan. Idempotent while
+/// the vault stays unlocked; called by Dart alongside the wallet start.
+Future<void> transportStart() =>
+    RustLib.instance.api.crateApiTransportTransportStart();
 
 /// Phase 1 (dev/broadcast lane): compose `ciph_msg:1:bcast:<channel>:<text>`,
 /// build the tx chain over the live UTXO context with the payload on the final
@@ -27,15 +35,69 @@ Future<TransportSendSummaryDto> transportPrepareBcast({
   message: message,
 );
 
+/// Phase 1 (initiate a conversation): fresh alias + the live-shape handshake
+/// JSON, sealed to the recipient's address key; 0.2 KAS bond (§0.6 — THE one
+/// provenance-cited constant, refunded in their acceptance). The plaintext is
+/// re-sealed to self HERE so the stash holds ciphertext only (§0.4).
+Future<TransportSendSummaryDto> transportPrepareHandshake({
+  required String destination,
+}) => RustLib.instance.api.crateApiTransportTransportPrepareHandshake(
+  destination: destination,
+);
+
+/// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
+/// own return-address lookup (consensus data, never payload content — §0.3:
+/// this flow commits value), build the acceptance response, refund the 0.2
+/// KAS bond (§0.6).
+Future<TransportSendSummaryDto> transportPrepareAccept({
+  required String conversationId,
+}) => RustLib.instance.api.crateApiTransportTransportPrepareAccept(
+  conversationId: conversationId,
+);
+
+/// Phase 1 (a message in an active conversation): seal to the contact's
+/// address key, tag the wire with OUR alias (the live convention), and carry
+/// the honest computed minimum value to the recipient (§0.6 — the D-054
+/// floor machinery, never a hardcoded number).
+Future<TransportSendSummaryDto> transportPrepareComm({
+  required String conversationId,
+  required String text,
+}) => RustLib.instance.api.crateApiTransportTransportPrepareComm(
+  conversationId: conversationId,
+  text: text,
+);
+
 /// Phase 2: sign + broadcast the stashed transport plan identified by `nonce`.
 /// Same stale-nonce refusal, partial-honesty (B6) and change-cursor discipline
-/// as the payment path — one shared implementation.
+/// as the payment path — one shared implementation. On a CLEAN broadcast the
+/// stashed intent folds into the transport store (conversation + sent row).
 Future<SendOutcomeDto> transportCommit({required BigInt nonce}) =>
     RustLib.instance.api.crateApiTransportTransportCommit(nonce: nonce);
 
 /// Drop any stashed transport send (confirm dismissed / back). Idempotent.
 Future<void> transportAbandon() =>
     RustLib.instance.api.crateApiTransportTransportAbandon();
+
+/// All conversations, most recently active first.
+Future<List<ConversationDto>> transportConversations() =>
+    RustLib.instance.api.crateApiTransportTransportConversations();
+
+/// A conversation's thread, oldest first — DECRYPT-ON-VIEW (§0.4): sealed
+/// rows open here, per call, while the vault is unlocked; the plaintext
+/// crosses once as the display DTO and Dart drops it with the widget. Vault
+/// locked ⇒ this errs and the thread is unreadable (the P2.3 acceptance
+/// observation). Handshake rows are system rows — no body crosses.
+Future<List<ThreadMessageDto>> transportThread({
+  required String conversationId,
+}) => RustLib.instance.api.crateApiTransportTransportThread(
+  conversationId: conversationId,
+);
+
+/// Sparse, content-free conversation-change pings (a conversation id) —
+/// Dart re-pulls [`transport_conversations`] / [`transport_thread`] on each.
+/// Nothing decrypted ever streams (§0.4: no Dart state manager holds content).
+Stream<String> subscribeThreadPings() =>
+    RustLib.instance.api.crateApiTransportSubscribeThreadPings();
 
 /// Subscribe to live `ciph_msg:` matches from the BlockAdded scan. Discrete
 /// deliveries, not snapshots: there is deliberately no cached-latest replay
@@ -44,6 +106,109 @@ Future<void> transportAbandon() =>
 /// rides the shared socket's `dag_pause()`/`dag_resume()` posture (D-053).
 Stream<TransportEventDto> subscribeTransportEvents() =>
     RustLib.instance.api.crateApiTransportSubscribeTransportEvents();
+
+/// A conversation row for the contacts surface. Every field is public-wire-
+/// class data (addresses/txids on-chain, aliases on-wire, local ids/status).
+class ConversationDto {
+  final String conversationId;
+
+  /// Counterparty address — empty on an inbound-pending row until the
+  /// accept flow resolves the sender via the node.
+  final String contactAddress;
+  final String myAlias;
+  final String? theirAlias;
+
+  /// `pending_out` / `pending_in` / `active`.
+  final String status;
+  final bool initiatedByMe;
+  final BigInt createdUnixMs;
+  final BigInt lastActivityUnixMs;
+
+  const ConversationDto({
+    required this.conversationId,
+    required this.contactAddress,
+    required this.myAlias,
+    this.theirAlias,
+    required this.status,
+    required this.initiatedByMe,
+    required this.createdUnixMs,
+    required this.lastActivityUnixMs,
+  });
+
+  @override
+  int get hashCode =>
+      conversationId.hashCode ^
+      contactAddress.hashCode ^
+      myAlias.hashCode ^
+      theirAlias.hashCode ^
+      status.hashCode ^
+      initiatedByMe.hashCode ^
+      createdUnixMs.hashCode ^
+      lastActivityUnixMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConversationDto &&
+          runtimeType == other.runtimeType &&
+          conversationId == other.conversationId &&
+          contactAddress == other.contactAddress &&
+          myAlias == other.myAlias &&
+          theirAlias == other.theirAlias &&
+          status == other.status &&
+          initiatedByMe == other.initiatedByMe &&
+          createdUnixMs == other.createdUnixMs &&
+          lastActivityUnixMs == other.lastActivityUnixMs;
+}
+
+/// One thread row — [`text`](Self::text) is THE first decrypted content to
+/// cross this bridge (user content post-decrypt, D-056; ffi-leak pre-cleared
+/// shape). Produced only by [`transport_thread`] (decrypt-on-view, §0.4):
+/// Dart renders and drops it; nothing here is cached, logged, or persisted.
+class ThreadMessageDto {
+  final String txid;
+
+  /// `handshake` (a system row — no body) or `comm`.
+  final String kind;
+  final bool outbound;
+  final BigInt unixMs;
+
+  /// Decrypted message text for readable `comm` rows; empty otherwise.
+  final String text;
+
+  /// False when no watched key opens the envelope (kept honest, not hidden).
+  final bool readable;
+
+  const ThreadMessageDto({
+    required this.txid,
+    required this.kind,
+    required this.outbound,
+    required this.unixMs,
+    required this.text,
+    required this.readable,
+  });
+
+  @override
+  int get hashCode =>
+      txid.hashCode ^
+      kind.hashCode ^
+      outbound.hashCode ^
+      unixMs.hashCode ^
+      text.hashCode ^
+      readable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThreadMessageDto &&
+          runtimeType == other.runtimeType &&
+          txid == other.txid &&
+          kind == other.kind &&
+          outbound == other.outbound &&
+          unixMs == other.unixMs &&
+          text == other.text &&
+          readable == other.readable;
+}
 
 /// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).
 /// Raw by design: kind is the verbatim wire token, `body` the raw bytes after

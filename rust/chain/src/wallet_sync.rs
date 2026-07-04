@@ -383,6 +383,23 @@ impl WalletEngine {
         self.inner.context.clone()
     }
 
+    /// DAA score at which a recorded activity tx was accepted — for incoming
+    /// records this is the UTXO entry's acceptance score (wallet-core
+    /// `new_incoming_impl`, pin record.rs:496: `utxos[0].utxo.block_daa_score`),
+    /// which is exactly what the node's `get_utxo_return_address` lookup keys
+    /// on (P2.3 sender resolution). `None` while the pipeline has not yet
+    /// recorded the tx — the caller surfaces "still confirming", never guesses.
+    pub fn activity_daa_score(&self, txid: &str) -> Option<u64> {
+        let id: TransactionId = txid.parse().ok()?;
+        self.inner
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .records
+            .get(&id)
+            .map(|record| record.block_daa_score())
+    }
+
     /// Start watching `addresses` (the derived receive+change window — public
     /// strings derived by the bridge from the unlocked vault; this layer never
     /// sees a secret). Spawns the fold task and starts the processor; if the

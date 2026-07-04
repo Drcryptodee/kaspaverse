@@ -52,6 +52,10 @@ pub enum CoreError {
     TransportOpen,
     /// Transport encrypt/KDF failed (should not happen with valid inputs).
     TransportSeal,
+    /// Decrypted handshake plaintext failed the live receiver's shape law
+    /// (bad JSON, malformed alias, unsupported version). The reason names the
+    /// field, never its value — plaintext never enters an error (§0.4).
+    HandshakeShape(&'static str),
 }
 
 impl fmt::Display for CoreError {
@@ -88,6 +92,7 @@ impl fmt::Display for CoreError {
                 f.write_str("transport decrypt failed: wrong key or tampered envelope")
             }
             Self::TransportSeal => f.write_str("transport encrypt failed"),
+            Self::HandshakeShape(what) => write!(f, "handshake payload malformed: {what}"),
         }
     }
 }

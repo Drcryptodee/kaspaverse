@@ -29,6 +29,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  RustStreamSink<String> dco_decode_StreamSink_String_Sse(dynamic raw);
+
+  @protected
   RustStreamSink<DagSnapshot> dco_decode_StreamSink_dag_snapshot_Sse(
     dynamic raw,
   );
@@ -69,6 +72,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VaultKdfParams dco_decode_box_autoadd_vault_kdf_params(dynamic raw);
 
   @protected
+  ConversationDto dco_decode_conversation_dto(dynamic raw);
+
+  @protected
   DagSnapshot dco_decode_dag_snapshot(dynamic raw);
 
   @protected
@@ -81,10 +87,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ActivityRecord> dco_decode_list_activity_record(dynamic raw);
 
   @protected
+  List<ConversationDto> dco_decode_list_conversation_dto(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<ThreadMessageDto> dco_decode_list_thread_message_dto(dynamic raw);
 
   @protected
   MaturityState dco_decode_maturity_state(dynamic raw);
@@ -100,6 +112,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SendSummaryDto dco_decode_send_summary_dto(dynamic raw);
+
+  @protected
+  ThreadMessageDto dco_decode_thread_message_dto(dynamic raw);
 
   @protected
   TransportEventDto dco_decode_transport_event_dto(dynamic raw);
@@ -130,6 +145,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<String> sse_decode_StreamSink_String_Sse(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<DagSnapshot> sse_decode_StreamSink_dag_snapshot_Sse(
@@ -174,6 +194,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ConversationDto sse_decode_conversation_dto(SseDeserializer deserializer);
+
+  @protected
   DagSnapshot sse_decode_dag_snapshot(SseDeserializer deserializer);
 
   @protected
@@ -188,10 +211,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<ConversationDto> sse_decode_list_conversation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<ThreadMessageDto> sse_decode_list_thread_message_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   MaturityState sse_decode_maturity_state(SseDeserializer deserializer);
@@ -207,6 +240,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SendSummaryDto sse_decode_send_summary_dto(SseDeserializer deserializer);
+
+  @protected
+  ThreadMessageDto sse_decode_thread_message_dto(SseDeserializer deserializer);
 
   @protected
   TransportEventDto sse_decode_transport_event_dto(
@@ -242,6 +278,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_String_Sse(
+    RustStreamSink<String> self,
     SseSerializer serializer,
   );
 
@@ -300,6 +342,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_conversation_dto(
+    ConversationDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_dag_snapshot(DagSnapshot self, SseSerializer serializer);
 
   @protected
@@ -315,11 +363,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_conversation_dto(
+    List<ConversationDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_thread_message_dto(
+    List<ThreadMessageDto> self,
     SseSerializer serializer,
   );
 
@@ -341,6 +401,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_send_summary_dto(
     SendSummaryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_thread_message_dto(
+    ThreadMessageDto self,
     SseSerializer serializer,
   );
 
