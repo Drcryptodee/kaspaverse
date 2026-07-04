@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
-import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
+import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 
 void main() {
@@ -24,7 +24,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
-        home: HelloDagScreen(
+        home: HomeScreen(
           connected: connected,
           endpoint: endpoint,
           virtualDaaScore: daa,
@@ -98,7 +98,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
-        home: HelloDagScreen(
+        home: HomeScreen(
           connected: ValueNotifier(true),
           endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),

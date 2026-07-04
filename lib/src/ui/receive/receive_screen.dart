@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import '../address_text.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
+import '../widgets/entrance.dart';
+import '../widgets/haptics.dart';
 import 'qr_tile.dart';
 
 /// Receive screen (P1.7 · T1): the QR a sender scans, plus the address in full
@@ -48,12 +50,14 @@ class _ReceiveBody extends StatelessWidget {
   final String address;
 
   Future<void> _copy(BuildContext context) async {
-    // Copy the FULL string (DS-8) — never the truncated compact form.
+    // Copy the FULL string (DS-8) — never the truncated compact form. The
+    // confirmation stays neutral (§3: success is rationed to chain events).
+    KvHaptic.selection();
     await Clipboard.setData(ClipboardData(text: address));
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Address copied'), duration: KvMotion.slow),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Address copied')));
   }
 
   @override
@@ -66,29 +70,45 @@ class _ReceiveBody extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(child: QrTile(data: address)),
+          Entrance(
+            child: Center(child: QrTile(data: address)),
+          ),
           const SizedBox(height: KvSpace.m),
           Center(
             child: Text(
               'Scan to send KAS to this wallet',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: KvColor.textTertiary,
+                fontFamily: KvFont.ui,
               ),
             ),
           ),
           const SizedBox(height: KvSpace.xl),
-          Text('Your address', style: theme.textTheme.labelLarge),
-          const SizedBox(height: KvSpace.s),
-          // Glanceable identity (DS-8 compact); the full form below is the
-          // character-by-character verification surface.
-          Center(child: AddressText(address, style: theme.textTheme.bodyLarge)),
-          const SizedBox(height: KvSpace.m),
-          _FullAddress(address: address),
+          Entrance(
+            index: 1,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Your address', style: theme.textTheme.labelLarge),
+                const SizedBox(height: KvSpace.s),
+                // Glanceable identity (DS-8 compact); the full form below is
+                // the character-by-character verification surface.
+                Center(
+                  child: AddressText(address, style: theme.textTheme.bodyLarge),
+                ),
+                const SizedBox(height: KvSpace.m),
+                _FullAddress(address: address),
+              ],
+            ),
+          ),
           const SizedBox(height: KvSpace.l),
-          FilledButton.icon(
-            onPressed: () => _copy(context),
-            icon: const Icon(Icons.copy, size: 18),
-            label: const Text('Copy address'),
+          Entrance(
+            index: 2,
+            child: FilledButton.icon(
+              onPressed: () => _copy(context),
+              icon: const Icon(Icons.copy, size: 18),
+              label: const Text('Copy address'),
+            ),
           ),
         ],
       ),

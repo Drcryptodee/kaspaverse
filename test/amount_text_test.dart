@@ -51,6 +51,19 @@ void main() {
     });
   });
 
+  group('trimFraction (§5 feeds/lists rule)', () {
+    test('trims trailing zeros keeping at least two decimals', () {
+      expect(trimFraction('50000000'), '50');
+      expect(trimFraction('00000000'), '00');
+      expect(trimFraction('40000000'), '40');
+    });
+
+    test('never trims significant digits', () {
+      expect(trimFraction('56789012'), '56789012');
+      expect(trimFraction('00000001'), '00000001');
+    });
+  });
+
   group('AmountText (DS-1/DS-2)', () {
     Future<void> pump(
       WidgetTester tester,
@@ -121,6 +134,68 @@ void main() {
         ),
       );
       expect(text.semanticsLabel, '1,234.56789012 KAS');
+    });
+  });
+
+  group('AmountText precision & sign (§5/DS-2)', () {
+    Future<void> pumpRole(
+      WidgetTester tester,
+      BigInt sompi, {
+      AmountRole role = AmountRole.row,
+      bool? exact,
+      String? prefix,
+    }) {
+      return tester.pumpWidget(
+        MaterialApp(
+          theme: kvDarkTheme(),
+          home: Scaffold(
+            body: AmountText(sompi, role: role, exact: exact, prefix: prefix),
+          ),
+        ),
+      );
+    }
+
+    String rendered(WidgetTester tester) {
+      final text = tester.widget<Text>(
+        find.descendant(
+          of: find.byType(AmountText),
+          matching: find.byType(Text),
+        ),
+      );
+      return text.textSpan?.toPlainText() ?? text.data ?? '';
+    }
+
+    testWidgets('a row trims trailing zeros to ≥2 decimals (feeds rule)', (
+      tester,
+    ) async {
+      await pumpRole(tester, BigInt.from(50000000)); // 0.5 KAS
+      expect(rendered(tester), '0.50 KAS');
+    });
+
+    testWidgets('exact forces all 8 decimals — the signing surface truth', (
+      tester,
+    ) async {
+      await pumpRole(tester, BigInt.from(50000000), exact: true);
+      expect(rendered(tester), '0.50000000 KAS');
+    });
+
+    testWidgets('hero and screen roles stay exact by default', (tester) async {
+      await pumpRole(tester, BigInt.from(50000000), role: AmountRole.screen);
+      expect(rendered(tester), '0.50000000 KAS');
+    });
+
+    testWidgets('a direction prefix renders and is spoken (§11)', (
+      tester,
+    ) async {
+      await pumpRole(tester, BigInt.from(50000000), prefix: '+ ');
+      expect(rendered(tester), '+ 0.50 KAS');
+      final text = tester.widget<Text>(
+        find.descendant(
+          of: find.byType(AmountText),
+          matching: find.byType(Text),
+        ),
+      );
+      expect(text.semanticsLabel, '+ 0.50 KAS');
     });
   });
 }

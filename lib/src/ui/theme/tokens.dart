@@ -47,6 +47,10 @@ abstract final class KvColor {
   // maximum-contrast standard. Never themed, never inverted (D-045b).
   static const Color qrTile = Color(0xFFFFFFFF); // the light tile
   static const Color qrModule = Color(0xFF000000); // the dark modules
+
+  // GlassPanel fill (§8) — 3% white over a σ16 backdrop blur; the frost, not a
+  // surface. Solid fallback is [surfaceAlt] (same layout, lesser shimmer).
+  static const Color glassFill = Color(0x08FFFFFF);
 }
 
 /// §9 — Spacing. 4 dp base grid; the only permitted steps. Screen gutter 24 dp.
@@ -59,11 +63,15 @@ abstract final class KvSpace {
   static const double xl = 32;
   static const double xxl = 48;
 
-  /// Screen edge gutter (§9; shipped at `hello_dag_screen.dart`).
+  /// Screen edge gutter (§9; shipped at the home screen).
   static const double gutter = 24;
 
   /// Minimum touch target — Material, not HIG's 44 (§9, P1 §0.6 lock).
   static const double touchTarget = 48;
+
+  /// Primary action (button) height — comfortably above the 48 dp law for the
+  /// thumb-zone money actions (§9).
+  static const double control = 56;
 }
 
 /// §9 — Corner radii. Cards/sheets 16 · buttons 12 · data blocks 8.
@@ -91,6 +99,17 @@ abstract final class KvMotion {
 
   /// Overshoot — **arcade register only** (DS-5). Never near custody.
   static const Curve spring = Curves.easeOutBack;
+
+  /// Entrance law (§6): elements arrive with `translateY(entranceOffset) +
+  /// fade`, staggered [stagger] per element. Reduced motion ⇒ opacity-only.
+  static const double entranceOffset = 24;
+  static const Duration stagger = Duration(milliseconds: 75);
+}
+
+/// §8 — GlassPanel blur strength. At most ONE live blur per screen, never
+/// inside a scrollable (saveLayer cost); the solid fallback needs no budget.
+abstract final class KvGlass {
+  static const double blurSigma = 16;
 }
 
 /// §8/DS-1 — Freshness. A chain-derived datum renders live, stale (dimmed +

@@ -34,8 +34,16 @@ String formatAge(Duration age) {
   return '${age.inHours} h';
 }
 
-/// Dot + label, never colour alone (§11). Value-driven and stateless so widget
-/// tests drive it directly; the 1 s age cadence lives in the parent ticker.
+/// Dot + label, never colour alone (§11), worn as a compact chip. Connected
+/// reads the plain-English network name (§12 — the endpoint URL is power-user
+/// detail and lives behind [onTap], the network details sheet); the other
+/// states keep their honest lines verbatim.
+///
+/// The live dot breathes on [pulsePhase] — flipped by the parent's existing
+/// 1 s freshness ticker, so the pulse IS the freshness clock made visible
+/// (§6 attention-guidance; honest under DS-1: it stops the moment the link
+/// stops being live). Value-driven and stateless so widget tests drive it
+/// directly.
 class StatusBeacon extends StatelessWidget {
   const StatusBeacon({
     super.key,
@@ -43,12 +51,20 @@ class StatusBeacon extends StatelessWidget {
     required this.endpoint,
     required this.error,
     required this.age,
+    this.pulsePhase = true,
+    this.onTap,
   });
 
   final BeaconState state;
   final String? endpoint;
   final String? error;
   final Duration? age;
+
+  /// Alternates each freshness tick; drives the live breath.
+  final bool pulsePhase;
+
+  /// Opens the network details (endpoint, DAA, age) — plain chip if null.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -64,20 +80,71 @@ class StatusBeacon extends StatelessWidget {
         KvColor.warning,
         age == null ? 'no recent update' : 'as of ${formatAge(age!)} ago',
       ),
-      BeaconState.connected => (KvColor.primary, endpoint ?? 'connected'),
+      BeaconState.connected => (KvColor.primary, 'Mainnet'),
     };
-    return Row(
-      children: [
-        Icon(Icons.circle, size: 12, color: color),
-        const SizedBox(width: KvSpace.s),
-        Expanded(
-          child: Text(
-            label,
-            style: theme.textTheme.bodySmall,
-            overflow: TextOverflow.ellipsis,
+
+    final live = state == BeaconState.connected;
+    final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final dot = AnimatedOpacity(
+      // The breath: full ↔ dimmed with each tick; static when motion is
+      // reduced or the link is not live.
+      opacity: (!live || reduced || pulsePhase) ? 1.0 : 0.45,
+      duration: KvMotion.slow,
+      curve: KvMotion.out,
+      child: Container(
+        width: KvSpace.s,
+        height: KvSpace.s,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: color,
+          // Glow is rationed to live-data emphasis (§3) — a live link only.
+          boxShadow: live
+              ? const [BoxShadow(color: KvColor.glow, blurRadius: 8)]
+              : null,
+        ),
+      ),
+    );
+
+    // The pill is visually compact but the tap area honours the 48 dp law
+    // (§9): the InkWell spans the full target height, the pill centres in it.
+    return Semantics(
+      button: onTap != null,
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const StadiumBorder(),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+          alignment: Alignment.center,
+          child: Container(
+            decoration: const ShapeDecoration(
+              color: KvColor.surfaceAlt,
+              shape: StadiumBorder(side: BorderSide(color: KvColor.border)),
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: KvSpace.sm,
+              vertical: KvSpace.s,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ExcludeSemantics(child: dot),
+                const SizedBox(width: KvSpace.s),
+                Flexible(
+                  child: Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: KvColor.textSecondary,
+                      fontFamily: KvFont.ui,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-      ],
+      ),
     );
   }
 }

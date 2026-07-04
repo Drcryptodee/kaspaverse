@@ -108,10 +108,43 @@ TextTheme kvTextTheme() {
   );
 }
 
+/// Screen transitions in the vault register (§6): fade + a small decelerating
+/// rise — no zoom, no overshoot, spatial and calm. Honors reduced motion by
+/// dropping the translation (opacity-only, §6 rule).
+class KvPageTransitionsBuilder extends PageTransitionsBuilder {
+  const KvPageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final curved = CurvedAnimation(parent: animation, curve: KvMotion.out);
+    final fade = FadeTransition(opacity: curved, child: child);
+    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) return fade;
+    return SlideTransition(
+      position: Tween<Offset>(
+        begin: const Offset(0, 0.03),
+        end: Offset.zero,
+      ).animate(curved),
+      child: fade,
+    );
+  }
+}
+
 /// The app theme. Seeded from the real `primary` (this is where the D-027
 /// `0xFF00E5C7` drift dies), then the design's exact tokens are pinned over the
 /// generated tonal roles. Elevation is lightness + hairline border, never a
 /// drop shadow (§3), so surface tint and shadows are zeroed.
+///
+/// Component themes carry the system so screens stay free of styling: buttons
+/// (§9 heights, §9 radii), inputs (filled `surface-alt`, `primary` focus — §3
+/// interactive-boundary rule), sheets/snackbars/dividers, and the §6 page
+/// transition. Hierarchy: filled = primary action, tonal = secondary money
+/// action, outlined = tertiary path, text = link (`primary-muted`, §3).
 ThemeData kvDarkTheme() {
   final scheme =
       ColorScheme.fromSeed(
@@ -122,6 +155,9 @@ ThemeData kvDarkTheme() {
         onPrimary: KvColor.abyss,
         secondary: KvColor.primaryMuted,
         onSecondary: KvColor.abyss,
+        // FilledButton.tonal reads these — the secondary money action.
+        secondaryContainer: KvColor.surfaceAlt,
+        onSecondaryContainer: KvColor.textPrimary,
         surface: KvColor.surface,
         onSurface: KvColor.textPrimary,
         surfaceContainerHighest: KvColor.surfaceAlt,
@@ -131,6 +167,10 @@ ThemeData kvDarkTheme() {
         error: KvColor.error,
         onError: KvColor.abyss,
       );
+  final text = kvTextTheme();
+  final buttonShape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(KvRadius.button),
+  );
 
   return ThemeData(
     useMaterial3: true,
@@ -139,15 +179,134 @@ ThemeData kvDarkTheme() {
     scaffoldBackgroundColor: KvColor.abyss,
     canvasColor: KvColor.abyss,
     fontFamily: KvFont.ui,
-    textTheme: kvTextTheme(),
+    textTheme: text,
     splashColor: KvColor.glow,
     highlightColor: KvColor.glow,
-    appBarTheme: const AppBarTheme(
+    iconTheme: const IconThemeData(color: KvColor.textSecondary),
+    appBarTheme: AppBarTheme(
       backgroundColor: KvColor.abyss,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       scrolledUnderElevation: 0,
       centerTitle: false,
+      iconTheme: const IconThemeData(color: KvColor.textPrimary),
+      // §4 section-title role, not M3's default titleLarge.
+      titleTextStyle: text.titleMedium?.copyWith(color: KvColor.textPrimary),
+    ),
+    pageTransitionsTheme: PageTransitionsTheme(
+      builders: {
+        for (final platform in TargetPlatform.values)
+          platform: const KvPageTransitionsBuilder(),
+      },
+    ),
+    // Colours flow from the scheme (so filled stays primary and tonal stays
+    // surface-alt); shape/size/type are pinned here once for both variants.
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(KvSpace.touchTarget, KvSpace.control),
+        shape: buttonShape,
+        textStyle: text.titleMedium,
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(KvSpace.touchTarget, KvSpace.control),
+        shape: buttonShape,
+        textStyle: text.titleMedium,
+        foregroundColor: KvColor.textPrimary,
+        // An outlined button's border IS its affordance — it must read (≥3:1,
+        // §3), so it rides `primary-muted`, never the decorative hairline.
+        side: const BorderSide(color: KvColor.primaryMuted),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        minimumSize: const Size(KvSpace.touchTarget, KvSpace.touchTarget),
+        shape: buttonShape,
+        foregroundColor: KvColor.primaryMuted, // links are muted teal (§3)
+      ),
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: KvColor.surfaceAlt,
+      hintStyle: const TextStyle(color: KvColor.textTertiary),
+      suffixIconColor: KvColor.textSecondary,
+      suffixStyle: text.bodyLarge?.copyWith(color: KvColor.textSecondary),
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.m,
+        vertical: KvSpace.m,
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+        borderSide: const BorderSide(color: KvColor.border),
+      ),
+      // Focus carries meaning → `primary`, ≥3:1 (§3 hard rule).
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+        borderSide: const BorderSide(color: KvColor.primary, width: 1.5),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+        borderSide: const BorderSide(color: KvColor.error),
+      ),
+      focusedErrorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+        borderSide: const BorderSide(color: KvColor.error, width: 1.5),
+      ),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+        borderSide: const BorderSide(color: KvColor.border),
+      ),
+    ),
+    dividerTheme: const DividerThemeData(
+      color: KvColor.border,
+      thickness: 1,
+      space: 1,
+    ),
+    snackBarTheme: SnackBarThemeData(
+      backgroundColor: KvColor.surfaceAlt,
+      contentTextStyle: text.bodyMedium?.copyWith(color: KvColor.textPrimary),
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(KvRadius.button),
+      ),
+      actionTextColor: KvColor.primary,
+    ),
+    bottomSheetTheme: const BottomSheetThemeData(
+      backgroundColor: KvColor.surface,
+      modalBackgroundColor: KvColor.surface,
+      surfaceTintColor: Colors.transparent,
+      dragHandleColor: KvColor.border,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(KvRadius.card),
+        ),
+      ),
+    ),
+    listTileTheme: const ListTileThemeData(
+      iconColor: KvColor.textSecondary,
+      textColor: KvColor.textPrimary,
+    ),
+    progressIndicatorTheme: const ProgressIndicatorThemeData(
+      color: KvColor.primaryMuted,
+      linearTrackColor: KvColor.surfaceAlt,
+    ),
+    chipTheme: ChipThemeData(
+      backgroundColor: KvColor.surfaceAlt,
+      side: const BorderSide(color: KvColor.border),
+      labelStyle: text.bodyMedium?.copyWith(color: KvColor.textPrimary),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(KvRadius.data),
+      ),
+    ),
+    segmentedButtonTheme: SegmentedButtonThemeData(
+      style: SegmentedButton.styleFrom(
+        selectedBackgroundColor: KvColor.glow,
+        selectedForegroundColor: KvColor.primary,
+        foregroundColor: KvColor.textSecondary,
+        side: const BorderSide(color: KvColor.border),
+      ),
     ),
   );
 }

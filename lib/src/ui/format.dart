@@ -31,6 +31,18 @@ final BigInt _sompiPerKas = BigInt.from(100000000);
   return (integer: groupThousands(kas.toString()), fraction: fraction);
 }
 
+/// Trim trailing zeros from an 8-digit KAS fraction, keeping at least [min]
+/// digits — the §5 feeds/lists rule (`"50000000"` → `"50"`, `"00000000"` →
+/// `"00"`). **Never** used on a signing surface: there the full 8 digits are
+/// the truth at the moment of commitment (DS-2/DS-3).
+String trimFraction(String fraction, {int min = 2}) {
+  var end = fraction.length;
+  while (end > min && fraction[end - 1] == '0') {
+    end--;
+  }
+  return fraction.substring(0, end);
+}
+
 /// Parse a user-typed KAS amount into sompi (`BigInt`) — the inverse of
 /// [kasParts], for the send screen (DS-2). **String math only, never a
 /// `double`** (custody: a float can't represent 8-decimal sompi exactly).

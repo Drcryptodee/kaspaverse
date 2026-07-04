@@ -9,7 +9,7 @@ import 'package:kaspaverse/src/services/wallet_service.dart';
 import 'package:kaspaverse/src/ui/app_shell.dart';
 import 'package:kaspaverse/src/ui/dev_transport_panel.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
-import 'package:kaspaverse/src/ui/hello_dag_screen.dart';
+import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
@@ -67,7 +67,7 @@ class KaspaVerseApp extends StatelessWidget {
         locked: const UnlockSurface(
           debugFooter: kDebugMode ? _DevPanelLink() : null,
         ),
-        home: HelloDagScreen(
+        home: HomeScreen(
           connected: chain.connected,
           endpoint: chain.endpoint,
           virtualDaaScore: chain.virtualDaaScore,

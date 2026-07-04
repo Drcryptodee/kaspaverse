@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../services/vault_service.dart';
 import 'passphrase_unlock_screen.dart';
 import 'theme/tokens.dart';
+import 'widgets/ceremony_mark.dart';
 
 /// The locked-state surface (P1.3 shell, decision D-036: biometric-first). A
 /// vault exists but is sealed; this offers the Path-A biometric unlock — the
@@ -118,11 +119,7 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  Icons.lock_outline,
-                  size: KvSpace.xxl,
-                  color: KvColor.primaryMuted,
-                ),
+                const CeremonyMark(Icons.lock_outline),
                 const SizedBox(height: KvSpace.l),
                 Text('Vault locked', style: theme.textTheme.headlineSmall),
                 const SizedBox(height: KvSpace.s),
@@ -184,9 +181,6 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
       return SizedBox(
         width: double.infinity,
         child: FilledButton(
-          style: FilledButton.styleFrom(
-            minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-          ),
           onPressed: _openPassphrase,
           child: const Text('Unlock with passphrase'),
         ),
@@ -195,10 +189,6 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
     return SizedBox(
       width: double.infinity,
       child: FilledButton(
-        // 48 dp minimum touch target (§9).
-        style: FilledButton.styleFrom(
-          minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-        ),
         onPressed: _unlocking ? null : _unlock,
         child: Text(_unlocking ? 'Unlocking…' : 'Unlock vault'),
       ),

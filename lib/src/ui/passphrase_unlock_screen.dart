@@ -109,11 +109,6 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton(
-                          style: FilledButton.styleFrom(
-                            minimumSize: const Size.fromHeight(
-                              KvSpace.touchTarget,
-                            ),
-                          ),
                           onPressed: _busy ? null : _submit,
                           child: Text(_busy ? 'Unlocking…' : 'Unlock'),
                         ),

@@ -7,6 +7,7 @@ import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'theme/tokens.dart';
+import 'widgets/ceremony_mark.dart';
 
 /// The create-wallet ceremony (P1.4 deliverable 2; D-037/D-038/D-039). Drives the
 /// two-step bridge end to end:
@@ -364,11 +365,6 @@ class _CreateScreenState extends State<CreateScreen> {
                         SizedBox(
                           width: double.infinity,
                           child: FilledButton(
-                            style: FilledButton.styleFrom(
-                              minimumSize: const Size.fromHeight(
-                                KvSpace.touchTarget,
-                              ),
-                            ),
                             onPressed: onPrimary,
                             child: Text(primaryLabel),
                           ),
@@ -420,11 +416,7 @@ class _CreateScreenState extends State<CreateScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  Icons.fingerprint,
-                  size: KvSpace.xxl,
-                  color: KvColor.primaryMuted,
-                ),
+                const CeremonyMark(Icons.fingerprint),
                 const SizedBox(height: KvSpace.l),
                 Text(
                   'Unlock with your fingerprint?',
@@ -444,9 +436,6 @@ class _CreateScreenState extends State<CreateScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(KvSpace.touchTarget),
-                    ),
                     onPressed: _busy ? null : _enrollNow,
                     child: Text(
                       _busy ? 'Setting up…' : 'Enable fingerprint unlock',
