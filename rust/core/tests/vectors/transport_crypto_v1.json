@@ -1,0 +1,342 @@
+{
+ "version": 1,
+ "construction": "ciph_msg v1 envelope: ephemeral-static ECDH secp256k1 (recipient x-only lifted EVEN) -> x-coordinate -> HKDF-SHA256(zero salt, empty info, L=32) -> ChaCha20-Poly1305(96-bit nonce, no AAD); wire = nonce(12) || ephemeral_pk(33, SEC1 compressed) || ciphertext+tag",
+ "oracle": "github.com/K-Kluster/Kasia cipher crate @ acd3cf65ec67e56141b068c2aa5525f55e43e560",
+ "generated": "2026-07-04 scratchpad harness (P2.2; oracle never enters this tree — L43)",
+ "notes": [
+  "All keys are synthetic test values, never custody material.",
+  "oracle_verified: envelope was decrypted by the oracle crate at generation (our-encrypt -> their-decrypt).",
+  "encrypt_deterministic pins our encrypt byte-exactly via the crate-private ephemeral/nonce seam.",
+  "Envelope byte 12 (SEC1 tag parity bit) is inherently malleable under x-only ECDH - both implementations decrypt the flip to identical plaintext; covered by a unit test, deliberately absent here."
+ ],
+ "decrypt": [
+  {
+   "name": "oracle-even-001",
+   "encrypted_by": "oracle",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "Kasia oracle vector 001 — plain ASCII body",
+   "envelope_hex": "cf37e5857f1d242d69f57b9e02ca3eab9adbc31d66a313ee6c6c1ba28e30a182192748ca247351d41c6027cb0abfd490a17155c71ba7043d2a067f7c5c6d73304f81c597f7bc2ecdeff1a960e72b4eca34611a2f04579b1c4266aaf1732705437da021e569ad6f9835",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-even-002",
+   "encrypted_by": "oracle",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "⚔️ RPS challenge — open in KaspaVerse · kv:1:challenge:{\"g\":\"rps\",\"stake\":\"0.2\"}",
+   "envelope_hex": "31214a27a5b1748fc6ca1d58027e46861318da3bb91358312e33bbb0f5569d2cba75d927981082055ca410cc275e05b65b98460706f3003367356d5cae9bd3321b149c52005f82e73218309db30ce80208e8b0c2fe6975dc172b819f237d361f3e35966c9a9ce10233c4be2035b0fbdc1e63be05f067abbd2eb7c5dd56c7edac70f4c578787d3d01313b9864b229552f4b36ace1",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-even-003",
+   "encrypted_by": "oracle",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "",
+   "envelope_hex": "2993af11eb0ae5318bca5d4303a49ea9a8747e1cafa0c127fa3f640058864bab0923edb01f65f6e28308a8af21ba1488c7f2a4a01fcd5b43c293e999e5",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-even-004",
+   "encrypted_by": "oracle",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body ",
+   "envelope_hex": "027414ec899bbc22a2cb292403a466308ffeecc399c233ec6fc5943a53692b3c2cf6364539cb833eed43887c82b417d5df9f674412af3067e083e79d1a4622482bebd16b64f2adcf8dc965437533ae4f4ee960dfc110c1622bebf9de1fa1146f75018b8bacb7818833ffee34e53cdf88f327daf7527b7315363ec346cae0de16e3f7b0931f541dc39af32a16b321f98d06f0853d947aedd9a4ecc2cf5a29c26b5704fc3a43260c771823afea514e4b7d7c1712455bc9d1aa37f7f095f7779e5f10230280eef9c827117957edca8406ccc45d80ba719cb9679fa7309402407c14923a58ec92e47c003f4bcce1145d53dde33a8db8e9c833a3887385aeb9e4c9a0cf69bbc0ac20aa4782903c8d4c7a206341ffee5184092d4474602114cab6191dce4b92185fac56acc165a6bb6102e51a93574f9b3b8e447dabfe7258731a3178b669d362ae00af87f56285e42f7664fa56f681f9887480a39d95e31b9d49175b6981567e667ea1d92e04023112a3f9b77a72e02ce0cd3a946066633164f941c54ab73886110367b92b6fd6665adb536c2f2882f79352cee31627344489bb760d33e16ce08b00e2a1d6621eed52197cef960f03dc9a704bfd77ba3880cc183c2012a8050242071dc091b7f68338",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-odd-001",
+   "encrypted_by": "oracle",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "Kasia oracle vector 001 — plain ASCII body",
+   "envelope_hex": "620dfe10483a87330edf01a303ff182922876dc9298e733d7a4e657698eb5e975cd3533dec4fe09252516d623d31a9e83b1977fdff6f5b6043747ff2b4c8b5305165295829a19a4efe6eead4df7ac35d1039a6f629695f0f60027d603873ad5a4fb04900b990dddaef",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-odd-002",
+   "encrypted_by": "oracle",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "⚔️ RPS challenge — open in KaspaVerse · kv:1:challenge:{\"g\":\"rps\",\"stake\":\"0.2\"}",
+   "envelope_hex": "f20e007adf711d56abd0019e02f7f40629f4aba3667406af3a5d262a1f29b65cd2d93442fdc5ee149e7fe6042cec050ae79a2cfbbe84879b3b8ae73b5aecab241f101eff1596b026ff7c85ed617b994c2a6ec7eb969be41c28b4a5e3de92244931e5fde1b4f364177889c00fcdc4ed780134d9b9757cc8fd00158da096bc7e89fe42371d020f58627cba487f86eb82c21645bdcd",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-odd-003",
+   "encrypted_by": "oracle",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "",
+   "envelope_hex": "420152fd9e0fad1d8eb4e254021763a110fc8cc32ca0be54640d11141e2f3fe200e3fbd22f89373e8cd62f1a22e0a46eb1500dc3f8abb819b4878d1982",
+   "oracle_verified": true
+  },
+  {
+   "name": "oracle-odd-004",
+   "encrypted_by": "oracle",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body ",
+   "envelope_hex": "afe96ff121fa331e5309bc3e039bd5b8baee9653e75b13aecd387b23d3bcf806c77866f1015cf9f09351b46eda0fec50e2dec4aa3274d30464f454dc08ae099506e7b143f2272d3babbf7e8cb862a434cc2d1f4d9d93efdf54c37c58efd9b32ce61271deaa24625480652914fdc8e01b35f0746e488b7de0fe6a052e022fcb6a6cd98c72fa32c0f4266f8427970f99723420f5008728937f8676754197427fa31d2777b6fe1e5933f21584e8e928be81bcc119350936719367ab543ade4e23bb4df7a2babad34d4015f5407b2617d5eae4ba952f994b33cb7536228f66b0c00155986bc20013c56f3e8b6c17be17ba18034d74e0b302a9e0f59f7c3fe2585cc9120db82c0ebecee0f2a8d71c62c44e48024e695d816ed9ed8a2fce58d913f89401c92cfa2239765e6af2471c63acc046a6e22a8202ea58d9cb7d5cace456b5dea6115f3791cd3b77b3d3c0dc3154091c1183878ec648eec758de8ed26d061f6be7817b833058f9cba25ac100b8f5ee4c82349fb09df85c5ce1f11c4ff8544282c94a394000f174379dd3ff59bd722ac6fff3cbc668c53e34b81f82d75c57d1afe642a7bd69906417eb3f73ebed89b020e742a4ec87e138390ca390ee8cd3845bd7800311a99f9a4c8dbff259a6",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-even-001",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "KaspaVerse parity vector 001 — plain ASCII body",
+   "envelope_hex": "202122232425262728292a2b03ab5d2e79cfd621b1b027ffb24e2453ed7fb571ba9a841ff0e2473466cabd168d39494361853ed8880c6224c346ab20062468a93d2c318ff7cb6dd65033ed0838ff55c2594d491af889efb6237890a949657d4bde1d7b8eaf31077f2cad554350fe",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-even-002",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "⚔️ RPS challenge — open in KaspaVerse · kv:1:challenge:{\"g\":\"rps\",\"stake\":\"0.2\"}",
+   "envelope_hex": "303132333435363738393a3b036b7eb04e07af07b5d82e463660f9e3e4eaf9c854e5aa47391d6daa8e9ac01a35b21655e2641a1f2d26ad76bdbc81f7a8b400fa04e20a053a8eda815810604a47aef75015462729f9975d7d57c1e2de837b7e8678c7afac3ac8f8e7885b43db96dbe0fbd285ac8743bada997b201286b1a96cfe7f23776dcf888d338bdecea756172c693cfb1dc8",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-even-003",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "",
+   "envelope_hex": "404142434445464748494a4b03def24e149639253723c9876cf0078a0567f21cc32d0c9454c863930b26f11fadbb2eb4b85899a076be05e19727507c71",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-even-004",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body ",
+   "envelope_hex": "505152535455565758595a5b036c84cce49f2187fb80d41efa851aa62def60c74bcc07b9eb78d880f2bf9940f63d656dbe98a57fbef8affae60a7137fd032a841acc7116d1402e5c0fa6e7f9c1ac8eb1fee2ab53a6679a2ab9f48edf61d76f8f298ae14143cfae5a9a18cb798b3152a6e6bd3cbfec2ccb7d23fecff5f0abb7c7f88d70e8ec77abc5f96a628cb8d4f6ac03b196f994e259c054f0b832c6c0256a17271c5684c01919d133b50f65c81d0c2fd439ccc73688cca507d4bbd7e9c10a4bef557ba885b50b8046ab0ab88d5aba01439b51118570bedff65c291936218a7fdc28c1a76ab04b32e4554b5ced8d428449c381046d29f5440a0630b0149d7767b7e24bb577adb95793d1d52c74b57c1dd025c991728eb787d96ca2eb61e113d086576bfd64f0c0d75e8dacddbce14a5c5595545de33324df1c0a9f0df0f96a9fabaaed204323c40d06ba16586b9b22a79c04f607b01421438211f9ea97a38653921023da5f4ecad20c22522b66f43f104647d04b46f24c691290a4e2d6285093e2899bfda8be3c75a7b78f0fed50ab4b4cf4c945151dbea9c0e77400ef7564d9f068bbb3f34d824b7c81fde3ecf0bb5df2e1bbebf8673e2d49066f4a19e5e86c57b1667c1c7d0dcd02839573",
+   "oracle_verified": true
+  },
+  {
+   "name": "rand-even-001",
+   "encrypted_by": "ours-random",
+   "recipient_parity": "even",
+   "recipient_secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "plaintext_utf8": "random-path cross-check",
+   "envelope_hex": "342f6d1dfa8f483f9807921b03293fe27d09eb2bcb5a2f36e8c47dded74e7332f3aa115a6c23a33004d0a099b2db10f4e88af99a996e40f66237d3edaee9a3c7762c3dbc323b0f08bdc7cab5ae3b7b28df66c48e",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-odd-001",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "KaspaVerse parity vector 001 — plain ASCII body",
+   "envelope_hex": "202122232425262728292a2b03eef017846ec31a44edc6c7e8d26347f9914749ff5ca31eeb51841d501e74ed70b762b532c7405acbbf16d435ef5b3ccbb885827afaf5a9f2196f2fde85b5bf43931aa1ead8d49d576a62a53330644aca56293ec49f0e75969f77660e64741b6e1c",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-odd-002",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "⚔️ RPS challenge — open in KaspaVerse · kv:1:challenge:{\"g\":\"rps\",\"stake\":\"0.2\"}",
+   "envelope_hex": "303132333435363738393a3b036aa3da9b5c1d61956076cb3014ffdaa0996bacdae29ba4b89e39b4088f86ec78e06d7abb70fe444d7406ec44a72f5d49eb8756d7511311bafa0ece2a93ed6f746d827291ec62c1576cc34a97fb28b2aca5fd37340b9615ecd0e2b1c0c7cedfe4fe63ff8968f48037be96de88435c48b3ee6e3c066f5d1e676aa858aef59b2306e71b30e26f263c",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-odd-003",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "",
+   "envelope_hex": "404142434445464748494a4b02a28d56b9e90fe12994febd70faa1d366a8144758a5853bbb4d155968076254746cd28b4e5e9771d28baf0b59a7b0d75c",
+   "oracle_verified": true
+  },
+  {
+   "name": "det-odd-004",
+   "encrypted_by": "ours-deterministic",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body ",
+   "envelope_hex": "505152535455565758595a5b027913680157c9a67f3cf07e5e834b6825f07ed759c98e296e76cb6ccbdd2a084674ede2fd0c8cd7b60cdc7888b08062941ea415c2f1a19012b2b2b63a3213cc724c35c77968e91b6ceae2084924794f7fef5f839ab699f702080f55f83a935f247af79b3a0a23e9f1c9d6d04214b3f275c63e120133b6eb802056a372b98e849967eaa67439865461bf6d0868c91f6855de0a95f6ac2cbcc276e7236f2427b89fd2e02d3f1c8be68af89c9a6f9a1f17a6efd6ee6e17e6dd10086575148b97ecfc658c738cfcb12dd9a730b29d508c5245a19f77b2a214af4ca2a2c993a26ed927d0a2c3dccb964e64e850b914d0e6c726f7a5878094af3eb330e733bb84414c37e280df34668fd54459621df4fd146fe212eaf86784fb96fed1e59e35b9d008e5a3e3b7cae759df48a3a277a530f1155709381724154887e55350f58bbda57967471a62246985c2af266f630c4bd36ff5e1c621d4d471a1c50732ff165a13b3fff61ca8c4285e4946eddac32284cc0124aa9f41279e51ffa44f7ac1ceadeef9e2ef33c97d4a45fbcd3e6d550fd85aebe7721506d635919036bfa7468eb148c642727b2e7ea9991e67025bb5c411eeca78e6eab55586b9d8c7c5accde11f5864ec",
+   "oracle_verified": true
+  },
+  {
+   "name": "rand-odd-001",
+   "encrypted_by": "ours-random",
+   "recipient_parity": "odd",
+   "recipient_secret_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "plaintext_utf8": "random-path cross-check",
+   "envelope_hex": "d0d520e65db7fd9d4f321fc803bd41f4df64bf8458821e124d16cacc7bdf3ae21e6526a46bcad406e0866e066ef90d5e860500bdd201aa74f4be53b2f17ed4248d59bc9353b4e10bd5777dc89a19eff7ad4836b6",
+   "oracle_verified": true
+  }
+ ],
+ "encrypt_deterministic": [
+  {
+   "name": "det-even-001",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "ephemeral_secret_hex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+   "nonce_hex": "202122232425262728292a2b",
+   "plaintext_utf8": "KaspaVerse parity vector 001 — plain ASCII body",
+   "expected_envelope_hex": "202122232425262728292a2b03ab5d2e79cfd621b1b027ffb24e2453ed7fb571ba9a841ff0e2473466cabd168d39494361853ed8880c6224c346ab20062468a93d2c318ff7cb6dd65033ed0838ff55c2594d491af889efb6237890a949657d4bde1d7b8eaf31077f2cad554350fe",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-even-002",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "ephemeral_secret_hex": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+   "nonce_hex": "303132333435363738393a3b",
+   "plaintext_utf8": "⚔️ RPS challenge — open in KaspaVerse · kv:1:challenge:{\"g\":\"rps\",\"stake\":\"0.2\"}",
+   "expected_envelope_hex": "303132333435363738393a3b036b7eb04e07af07b5d82e463660f9e3e4eaf9c854e5aa47391d6daa8e9ac01a35b21655e2641a1f2d26ad76bdbc81f7a8b400fa04e20a053a8eda815810604a47aef75015462729f9975d7d57c1e2de837b7e8678c7afac3ac8f8e7885b43db96dbe0fbd285ac8743bada997b201286b1a96cfe7f23776dcf888d338bdecea756172c693cfb1dc8",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-even-003",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "ephemeral_secret_hex": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+   "nonce_hex": "404142434445464748494a4b",
+   "plaintext_utf8": "",
+   "expected_envelope_hex": "404142434445464748494a4b03def24e149639253723c9876cf0078a0567f21cc32d0c9454c863930b26f11fadbb2eb4b85899a076be05e19727507c71",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-even-004",
+   "recipient_x_only_hex": "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "ephemeral_secret_hex": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+   "nonce_hex": "505152535455565758595a5b",
+   "plaintext_utf8": "long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body ",
+   "expected_envelope_hex": "505152535455565758595a5b036c84cce49f2187fb80d41efa851aa62def60c74bcc07b9eb78d880f2bf9940f63d656dbe98a57fbef8affae60a7137fd032a841acc7116d1402e5c0fa6e7f9c1ac8eb1fee2ab53a6679a2ab9f48edf61d76f8f298ae14143cfae5a9a18cb798b3152a6e6bd3cbfec2ccb7d23fecff5f0abb7c7f88d70e8ec77abc5f96a628cb8d4f6ac03b196f994e259c054f0b832c6c0256a17271c5684c01919d133b50f65c81d0c2fd439ccc73688cca507d4bbd7e9c10a4bef557ba885b50b8046ab0ab88d5aba01439b51118570bedff65c291936218a7fdc28c1a76ab04b32e4554b5ced8d428449c381046d29f5440a0630b0149d7767b7e24bb577adb95793d1d52c74b57c1dd025c991728eb787d96ca2eb61e113d086576bfd64f0c0d75e8dacddbce14a5c5595545de33324df1c0a9f0df0f96a9fabaaed204323c40d06ba16586b9b22a79c04f607b01421438211f9ea97a38653921023da5f4ecad20c22522b66f43f104647d04b46f24c691290a4e2d6285093e2899bfda8be3c75a7b78f0fed50ab4b4cf4c945151dbea9c0e77400ef7564d9f068bbb3f34d824b7c81fde3ecf0bb5df2e1bbebf8673e2d49066f4a19e5e86c57b1667c1c7d0dcd02839573",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-odd-001",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "ephemeral_secret_hex": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+   "nonce_hex": "202122232425262728292a2b",
+   "plaintext_utf8": "KaspaVerse parity vector 001 — plain ASCII body",
+   "expected_envelope_hex": "202122232425262728292a2b03eef017846ec31a44edc6c7e8d26347f9914749ff5ca31eeb51841d501e74ed70b762b532c7405acbbf16d435ef5b3ccbb885827afaf5a9f2196f2fde85b5bf43931aa1ead8d49d576a62a53330644aca56293ec49f0e75969f77660e64741b6e1c",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-odd-002",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "ephemeral_secret_hex": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+   "nonce_hex": "303132333435363738393a3b",
+   "plaintext_utf8": "⚔️ RPS challenge — open in KaspaVerse · kv:1:challenge:{\"g\":\"rps\",\"stake\":\"0.2\"}",
+   "expected_envelope_hex": "303132333435363738393a3b036aa3da9b5c1d61956076cb3014ffdaa0996bacdae29ba4b89e39b4088f86ec78e06d7abb70fe444d7406ec44a72f5d49eb8756d7511311bafa0ece2a93ed6f746d827291ec62c1576cc34a97fb28b2aca5fd37340b9615ecd0e2b1c0c7cedfe4fe63ff8968f48037be96de88435c48b3ee6e3c066f5d1e676aa858aef59b2306e71b30e26f263c",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-odd-003",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "ephemeral_secret_hex": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+   "nonce_hex": "404142434445464748494a4b",
+   "plaintext_utf8": "",
+   "expected_envelope_hex": "404142434445464748494a4b02a28d56b9e90fe12994febd70faa1d366a8144758a5853bbb4d155968076254746cd28b4e5e9771d28baf0b59a7b0d75c",
+   "oracle_decrypted": true
+  },
+  {
+   "name": "det-odd-004",
+   "recipient_x_only_hex": "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+   "ephemeral_secret_hex": "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+   "nonce_hex": "505152535455565758595a5b",
+   "plaintext_utf8": "long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body long-body ",
+   "expected_envelope_hex": "505152535455565758595a5b027913680157c9a67f3cf07e5e834b6825f07ed759c98e296e76cb6ccbdd2a084674ede2fd0c8cd7b60cdc7888b08062941ea415c2f1a19012b2b2b63a3213cc724c35c77968e91b6ceae2084924794f7fef5f839ab699f702080f55f83a935f247af79b3a0a23e9f1c9d6d04214b3f275c63e120133b6eb802056a372b98e849967eaa67439865461bf6d0868c91f6855de0a95f6ac2cbcc276e7236f2427b89fd2e02d3f1c8be68af89c9a6f9a1f17a6efd6ee6e17e6dd10086575148b97ecfc658c738cfcb12dd9a730b29d508c5245a19f77b2a214af4ca2a2c993a26ed927d0a2c3dccb964e64e850b914d0e6c726f7a5878094af3eb330e733bb84414c37e280df34668fd54459621df4fd146fe212eaf86784fb96fed1e59e35b9d008e5a3e3b7cae759df48a3a277a530f1155709381724154887e55350f58bbda57967471a62246985c2af266f630c4bd36ff5e1c621d4d471a1c50732ff165a13b3fff61ca8c4285e4946eddac32284cc0124aa9f41279e51ffa44f7ac1ceadeef9e2ef33c97d4a45fbcd3e6d550fd85aebe7721506d635919036bfa7468eb148c642727b2e7ea9991e67025bb5c411eeca78e6eab55586b9d8c7c5accde11f5864ec",
+   "oracle_decrypted": true
+  }
+ ],
+ "tamper": [
+  {
+   "name": "tamper-oracle-even-001-nonce",
+   "base": "oracle-even-001",
+   "flip_byte_offset": 3,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-even-001-ephemeral-key-x",
+   "base": "oracle-even-001",
+   "flip_byte_offset": 20,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-even-001-ciphertext",
+   "base": "oracle-even-001",
+   "flip_byte_offset": 47,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-even-001-tag",
+   "base": "oracle-even-001",
+   "flip_byte_offset": 104,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-odd-001-nonce",
+   "base": "oracle-odd-001",
+   "flip_byte_offset": 3,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-odd-001-ephemeral-key-x",
+   "base": "oracle-odd-001",
+   "flip_byte_offset": 20,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-odd-001-ciphertext",
+   "base": "oracle-odd-001",
+   "flip_byte_offset": 47,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-oracle-odd-001-tag",
+   "base": "oracle-odd-001",
+   "flip_byte_offset": 104,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-det-even-001-nonce",
+   "base": "det-even-001",
+   "flip_byte_offset": 3,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-det-even-001-ephemeral-key-x",
+   "base": "det-even-001",
+   "flip_byte_offset": 20,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-det-even-001-ciphertext",
+   "base": "det-even-001",
+   "flip_byte_offset": 47,
+   "expect": "reject"
+  },
+  {
+   "name": "tamper-det-even-001-tag",
+   "base": "det-even-001",
+   "flip_byte_offset": 109,
+   "expect": "reject"
+  }
+ ]
+}
