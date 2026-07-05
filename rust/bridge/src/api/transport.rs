@@ -834,9 +834,15 @@ pub async fn transport_prepare_accept(
 }
 
 /// Phase 1 (a message in an active conversation): seal to the contact's
-/// address key, tag the wire with OUR alias (the live convention), and carry
-/// the honest computed minimum value to the recipient (§0.6 — the D-054
-/// floor machinery, never a hardcoded number).
+/// address key, tag the wire with OUR alias (the live convention), and
+/// **self-send the value** — the tx destination is our OWN bound address, so
+/// the message value returns to us as change and the only real cost is the
+/// network fee (§0.6 amended by D-069, founder-approved at the P2.3b sitting).
+/// This matches the live population: Kasia comms are self-sends (Gate K §K6);
+/// the recipient discovers the message by scanning for our alias in the
+/// payload, never by receiving value (their comm intake ignores outputs). The
+/// earlier value-to-recipient reading cost ~0.1 KAS/message on the anti-dust
+/// floor — proven unusable at the sitting.
 pub async fn transport_prepare_comm(
     conversation_id: String,
     text: String,
@@ -864,17 +870,20 @@ pub async fn transport_prepare_comm(
             ),
         )
     };
-    let dest = validate_mainnet_address(&contact_address)?;
-    let recipient_x_only = x_only_of(&dest)?;
-    // The conversation's bound own address — the source-address discipline
-    // target for BOTH the floor probe (change lands here) and the actual send
-    // (input[0] + change here), so the counterpart keeps seeing one identity.
+    // The recipient address is the ENCRYPTION target only — the envelope is
+    // sealed to their key so they can decrypt. The tx VALUE goes to us (below).
+    let recipient = validate_mainnet_address(&contact_address)?;
+    let recipient_x_only = x_only_of(&recipient)?;
+    // The conversation's bound own address — the destination (self-send, D-069),
+    // the input[0] source, and the change target all at once, so the counterpart
+    // keeps seeing one identity and the value never leaves our wallet.
     let own_address = vault::wallet_address_at(bound.0, bound.1)?;
 
-    // §0.6: every message carries value — the honest computed minimum for
-    // THIS wallet's live coin shape (D-054), recomputed per send. The floor
-    // probe uses the SAME change address the real send will (own_address), so
-    // the storage-mass boundary it finds matches what gets built.
+    // The self-send output still clears Kaspa's anti-dust floor (storage mass is
+    // charged on every output, ours included) — the honest computed minimum for
+    // THIS wallet's live coin shape (D-054), recomputed per send. The probe
+    // already models payment-to-own_address + change-to-own_address, exactly the
+    // self-send shape, so the floor it finds is the one that gets built.
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
     let floor = engine
@@ -893,10 +902,10 @@ pub async fn transport_prepare_comm(
 
     let timestamp_ms = now_unix_ms();
     prepare_transport_send(
-        dest,
+        own_address.clone(), // SELF-SEND (D-069): value returns as change — cost = fee
         floor,
         wire,
-        own_address, // source-address discipline: input[0] + change = bound addr
+        own_address, // source discipline: input[0] + change = the same bound addr
         TransportIntent::Comm {
             conversation_id,
             alias_on_wire: my_alias,

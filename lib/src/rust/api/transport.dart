@@ -56,9 +56,15 @@ Future<TransportSendSummaryDto> transportPrepareAccept({
 );
 
 /// Phase 1 (a message in an active conversation): seal to the contact's
-/// address key, tag the wire with OUR alias (the live convention), and carry
-/// the honest computed minimum value to the recipient (§0.6 — the D-054
-/// floor machinery, never a hardcoded number).
+/// address key, tag the wire with OUR alias (the live convention), and
+/// **self-send the value** — the tx destination is our OWN bound address, so
+/// the message value returns to us as change and the only real cost is the
+/// network fee (§0.6 amended by D-069, founder-approved at the P2.3b sitting).
+/// This matches the live population: Kasia comms are self-sends (Gate K §K6);
+/// the recipient discovers the message by scanning for our alias in the
+/// payload, never by receiving value (their comm intake ignores outputs). The
+/// earlier value-to-recipient reading cost ~0.1 KAS/message on the anti-dust
+/// floor — proven unusable at the sitting.
 Future<TransportSendSummaryDto> transportPrepareComm({
   required String conversationId,
   required String text,

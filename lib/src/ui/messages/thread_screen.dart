@@ -117,13 +117,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
           commit: _messaging.commit,
           abandon: _messaging.abandon,
           title: 'Confirm message',
-          // B7: payload facts decoded from the BUILT tx, never assumed.
+          // A message is a self-send (D-069): the value returns as change, the
+          // sheet leads with the fee. B7: payload facts from the BUILT tx.
+          selfSend: true,
           contextNote:
-              'The value rides to your contact with the encrypted message — '
-              "Kaspa's anti-spam floor, computed for your coins.\n"
-              'Carries: ${summary.payloadKind} payload, '
-              '${summary.payloadLen} bytes (decoded from the built '
-              'transaction).',
+              'Carries a ${summary.payloadKind} payload, ${summary.payloadLen} '
+              'bytes (decoded from the built transaction).',
         ),
       );
       if (outcome != null && outcome.submitted > 0) {
