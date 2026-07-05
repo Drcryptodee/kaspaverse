@@ -131,6 +131,22 @@ class _ContactsScreenState extends State<ContactsScreen> {
     );
   }
 
+  /// The zombie-cleanup affordance (D-068): long-press → confirm → hide. Local
+  /// only; nothing leaves the device and a fresh handshake re-creates the row.
+  Future<void> _hide(ConversationDto conversation) async {
+    KvHaptic.selection();
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (_) => _HideSheet(label: contactLabel(conversation)),
+    );
+    if (confirmed != true) return;
+    await _messaging.hide(conversation.conversationId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Conversation hidden.')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -175,6 +191,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     conversation: conversation,
                     onOpen: () => _openThread(conversation),
                     onAccept: () => _accept(conversation),
+                    onHide: () => _hide(conversation),
                   ),
                 );
               },
@@ -213,11 +230,13 @@ class _ConversationCard extends StatelessWidget {
     required this.conversation,
     required this.onOpen,
     required this.onAccept,
+    required this.onHide,
   });
 
   final ConversationDto conversation;
   final VoidCallback onOpen;
   final VoidCallback onAccept;
+  final VoidCallback onHide;
 
   @override
   Widget build(BuildContext context) {
@@ -239,6 +258,8 @@ class _ConversationCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(KvRadius.card),
         // A pending-inbound card's action is the accept button, not a thread.
         onTap: pendingIn ? null : onOpen,
+        // Long-press anywhere on the card → hide (zombie cleanup, D-068).
+        onLongPress: onHide,
         child: Padding(
           padding: const EdgeInsets.all(KvSpace.m),
           child: Column(
@@ -294,6 +315,69 @@ class _ConversationCard extends StatelessWidget {
               ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Confirm hiding a conversation (the zombie-cleanup affordance). Honest copy:
+/// this is local only — it removes nothing from the chain and tells the
+/// counterpart nothing.
+class _HideSheet extends StatelessWidget {
+  const _HideSheet({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          KvSpace.m,
+          KvSpace.gutter,
+          KvSpace.l,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Text(
+                'Hide conversation',
+                style: theme.textTheme.titleMedium,
+              ),
+            ),
+            const SizedBox(height: KvSpace.m),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontFamily: KvFont.mono,
+              ),
+            ),
+            const SizedBox(height: KvSpace.sm),
+            Text(
+              'Removes this thread from your device only. Nothing is deleted '
+              "on-chain and the other side isn't notified — a new request "
+              'from them starts a fresh conversation.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+              ),
+            ),
+            const SizedBox(height: KvSpace.l),
+            FilledButton.tonal(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Hide'),
+            ),
+            const SizedBox(height: KvSpace.s),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+          ],
         ),
       ),
     );

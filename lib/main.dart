@@ -75,6 +75,8 @@ class KaspaVerseApp extends StatelessWidget {
           virtualDaaScore: chain.virtualDaaScore,
           error: chain.error,
           lastUpdate: chain.lastUpdate,
+          reconnecting: chain.reconnecting,
+          onReconnect: chain.reconnect,
           mature: wallet.mature,
           pending: wallet.pending,
           outgoing: wallet.outgoing,

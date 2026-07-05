@@ -8,11 +8,12 @@
 //! event must re-register the listener and its scopes.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kaspa_addresses::Prefix;
+use kaspa_consensus_core::Hash;
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
@@ -24,6 +25,20 @@ use crate::transport::{self, TransportEvent};
 /// resolver (P1.5 re-audit: connection latency — a bounded first try, never a
 /// hang; a dead cached node costs at most this before discovery proceeds).
 const CACHED_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Throttle for the catch-up cursor write in the hot BlockAdded path: at most
+/// one tiny hash write this often. A killed app loses at most this much scan
+/// progress, which the next open's catch-up re-covers anyway (idempotent — the
+/// fold dedups by txid), so a coarse throttle costs nothing but I/O churn.
+const TRANSPORT_CURSOR_MIN_WRITE_SECS: u64 = 3;
+
+/// Bound on one catch-up replay (P5). `get_blocks` returns up to
+/// ~`mergeset_size_limit`+1 blocks/page (mainnet ≈ 180), so this caps the walk
+/// at a few thousand recent blocks ≈ several minutes of gap — enough for a
+/// backgrounded/killed app, while keeping the work (and the wRPC payload)
+/// bounded. A longer outage is NOT fully recovered: that is an indexer's job
+/// (INV-8), and the honest liveness surface (P3) tells the user to reconnect.
+const MAX_CATCHUP_PAGES: u32 = 24;
 
 /// A chain event observed by the [`DagMonitor`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +99,23 @@ struct Inner {
     /// deliberate grace-drop also emits `Disconnected`, and the rotation-restore
     /// logic must not treat it as a dead node and dial right back.
     paused: AtomicBool,
+    /// App-private file holding the hash of the last block whose transport scan
+    /// we advanced past — the catch-up cursor (P5/D-067). Public chain data
+    /// (INV-3). `None` until transport arms it (`set_transport_cursor`); while
+    /// armed, the BlockAdded scan persists it (throttled) so a killed app can
+    /// replay the gap on next open ([`catch_up_transport`]). Node-only (INV-8):
+    /// the replay is `get_blocks` from this hash, never an indexer.
+    transport_cursor: Mutex<Option<PathBuf>>,
+    /// Unix-seconds of the last cursor write — throttles the hot BlockAdded path
+    /// to one small write every [`TRANSPORT_CURSOR_MIN_WRITE_SECS`].
+    transport_cursor_written: AtomicU64,
+    /// Unix-seconds of the last BlockAdded we scanned (0 = none yet). The
+    /// foreground watchdog's liveness signal (P3/D-068): a healthy mainnet
+    /// delivers ~10 blocks/s, so a large age while the app is foreground means
+    /// the wRPC socket died silently (the "midnight DAA stall") — the UI polls
+    /// [`last_block_age_secs`] and forces a [`reconnect`]. A plain atomic store
+    /// every block (no I/O), unlike the throttled cursor write.
+    last_block_at: AtomicU64,
 }
 
 /// Owns one wRPC client plus the event task that tracks its connection state
@@ -126,6 +158,9 @@ impl DagMonitor {
                 endpoint_cache: Mutex::new(None),
                 forced_cached_url: AtomicBool::new(false),
                 paused: AtomicBool::new(false),
+                transport_cursor: Mutex::new(None),
+                transport_cursor_written: AtomicU64::new(0),
+                last_block_at: AtomicU64::new(0),
             }),
         })
     }
@@ -166,6 +201,146 @@ impl DagMonitor {
             if let Err(e) = std::fs::write(&path, url) {
                 log::warn!("dag-monitor: endpoint cache write failed: {e}");
             }
+        }
+    }
+
+    /// Arm the transport catch-up cursor at `path` (called by the transport hub
+    /// on start, AFTER it has read the prior value for its replay — see
+    /// [`take_transport_cursor`]). Once set, the BlockAdded scan persists the
+    /// last-scanned block hash here (throttled), so the next open can replay the
+    /// gap. Idempotent; changing paths mid-run just re-homes the cursor.
+    pub fn set_transport_cursor(&self, path: PathBuf) {
+        *self
+            .inner
+            .transport_cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+    }
+
+    fn transport_cursor_path(&self) -> Option<PathBuf> {
+        self.inner
+            .transport_cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Read the persisted cursor hash from a file WITHOUT arming persistence —
+    /// the transport hub calls this at open to get the PRIOR session's last
+    /// scan point for the catch-up replay, before it arms the live cursor.
+    /// A missing/corrupt file yields `None` (first run, or nothing to recover).
+    pub fn read_transport_cursor(path: &PathBuf) -> Option<Hash> {
+        let text = std::fs::read_to_string(path).ok()?;
+        text.trim().parse::<Hash>().ok()
+    }
+
+    /// Best-effort, throttled persist of the last-scanned block hash. Called
+    /// from the BlockAdded scan; a write happens at most every
+    /// [`TRANSPORT_CURSOR_MIN_WRITE_SECS`] so the ~10 blocks/s stream never
+    /// hammers the disk. No-op until the cursor is armed.
+    fn persist_transport_cursor(&self, hash: &Hash) {
+        let Some(path) = self.transport_cursor_path() else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = self.inner.transport_cursor_written.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < TRANSPORT_CURSOR_MIN_WRITE_SECS {
+            return;
+        }
+        self.inner
+            .transport_cursor_written
+            .store(now, Ordering::Relaxed);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, hash.to_string()) {
+            log::warn!("dag-monitor: transport cursor write failed: {e}");
+        }
+    }
+
+    /// Replay the transport scan over the blocks the app missed while closed —
+    /// the P5/D-067 catch-up. From `from` (the prior session's cursor), walk the
+    /// DAG forward with `get_blocks` (node-only, INV-8), run the SAME
+    /// [`transport::scan_block`] the live path uses, and fan the matches out on
+    /// the transport channel so the hub folds them exactly like live arrivals
+    /// (dedup-by-txid makes the boundary-block overlap harmless). Bounded by
+    /// [`MAX_CATCHUP_PAGES`]; a pruned/unknown cursor just ends the walk (the
+    /// live scan takes over). Returns the number of matches re-emitted.
+    ///
+    /// `from = None` (first run / no prior cursor) seeds the cursor at the
+    /// current sink so the NEXT gap is coverable, and replays nothing — there is
+    /// no prior session whose arrivals could have been missed.
+    pub async fn catch_up_transport(&self, from: Option<Hash>) -> Result<usize> {
+        let rpc = self.inner.client.rpc_api();
+        let Some(mut low) = from else {
+            if let Ok(sink) = rpc.get_sink().await {
+                self.write_cursor_now(&sink.sink);
+            }
+            return Ok(0);
+        };
+
+        let mut emitted = 0usize;
+        let mut last_hash = low;
+        for _page in 0..MAX_CATCHUP_PAGES {
+            // include_blocks + include_transactions: we need the payloads.
+            let resp = match rpc.get_blocks(Some(low), true, true).await {
+                Ok(resp) => resp,
+                // A pruned or unknown cursor (long outage / reorg) can't be
+                // walked — stop honestly; live scan continues from here.
+                Err(e) => {
+                    log::warn!("dag-monitor: catch-up get_blocks ended: {e}");
+                    break;
+                }
+            };
+            // `low_hash` is returned inclusively; a page of just it = caught up.
+            if resp.block_hashes.len() <= 1 {
+                if let Some(h) = resp.block_hashes.last() {
+                    last_hash = *h;
+                }
+                break;
+            }
+            for block in &resp.blocks {
+                for event in transport::scan_block(block, self.inner.address_prefix) {
+                    if self.inner.transport_events.send(event).is_ok() {
+                        emitted += 1;
+                    }
+                }
+            }
+            if let Some(h) = resp.block_hashes.last() {
+                last_hash = *h;
+            }
+            // Next page starts at the last hash (re-included, then skipped by
+            // the dedup fold). Reaching the sink returns a short/So single page.
+            low = last_hash;
+        }
+        // Advance the persisted cursor to where the replay reached, so a second
+        // open doesn't redo the same walk.
+        self.write_cursor_now(&last_hash);
+        log::info!("dag-monitor: transport catch-up re-emitted {emitted} match(es)");
+        Ok(emitted)
+    }
+
+    /// Force-write the cursor now (bypassing the throttle) — used at the ends of
+    /// catch-up and on seeding, where the exact point matters.
+    fn write_cursor_now(&self, hash: &Hash) {
+        let Some(path) = self.transport_cursor_path() else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.inner
+            .transport_cursor_written
+            .store(now, Ordering::Relaxed);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, hash.to_string()) {
+            log::warn!("dag-monitor: transport cursor write failed: {e}");
         }
     }
 
@@ -299,6 +474,43 @@ impl DagMonitor {
         self.connect_preferring_cache().await
     }
 
+    /// Force a fresh connection — the P3 honest-liveness Reconnect control and
+    /// the foreground watchdog's recovery (D-068). Unlike [`resume`], it does
+    /// NOT short-circuit on `is_connected()`: a silently dead wRPC socket can
+    /// still report connected, so recovering it needs a hard disconnect+redial.
+    /// Disconnect on an already-dead socket is harmless. Rides the same
+    /// cached-endpoint fast path as every other connect.
+    pub async fn reconnect(&self) -> Result<()> {
+        self.inner.paused.store(false, Ordering::SeqCst);
+        self.inner.forced_cached_url.store(false, Ordering::SeqCst);
+        let _ = self.inner.client.disconnect().await;
+        self.connect_preferring_cache().await
+    }
+
+    /// Record that a block just arrived (the watchdog heartbeat).
+    fn mark_block_seen(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.inner.last_block_at.store(now, Ordering::Relaxed);
+    }
+
+    /// Seconds since the last BlockAdded, or `None` if none has arrived yet
+    /// (fresh boot / never connected). The watchdog's honest-liveness reading:
+    /// a healthy mainnet keeps this near zero; a stalled socket lets it grow.
+    pub fn last_block_age_secs(&self) -> Option<u64> {
+        let last = self.inner.last_block_at.load(Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Some(now.saturating_sub(last))
+    }
+
     /// Disconnects, then signals the event task and waits for it to drain.
     pub async fn stop(&self) -> Result<()> {
         self.inner.client.disconnect().await?;
@@ -407,6 +619,12 @@ impl DagMonitor {
                                 // Send fails only with zero subscribers — fine.
                                 let _ = self.inner.transport_events.send(event);
                             }
+                            // Liveness heartbeat for the watchdog (P3): a block
+                            // arrived, the socket is alive right now.
+                            self.mark_block_seen();
+                            // Advance the catch-up cursor past this scanned block
+                            // (throttled; no-op until transport arms it). P5/D-067.
+                            self.persist_transport_cursor(&added.block.header.hash);
                         }
                         Ok(notification) => {
                             if let Some(event) = map_notification(&notification) {
@@ -531,6 +749,33 @@ mod tests {
         // non-websocket scheme (it would fail anyway — refuse early).
         std::fs::write(&path, "https://evil.example/steal").unwrap();
         assert_eq!(monitor.read_cached_endpoint(), None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn transport_cursor_round_trips_and_rejects_garbage() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let dir = std::env::temp_dir().join(format!("kv-tcursor-{}", std::process::id()));
+        let path = dir.join("scan.cursor");
+        let _ = std::fs::remove_file(&path);
+
+        // No file → None (first run / nothing to recover).
+        assert_eq!(DagMonitor::read_transport_cursor(&path), None);
+        // Unarmed: persist is a no-op, no crash.
+        monitor.write_cursor_now(&Hash::from_bytes([1u8; 32]));
+        assert_eq!(DagMonitor::read_transport_cursor(&path), None);
+
+        // Armed: a forced write round-trips as the exact block hash.
+        monitor.set_transport_cursor(path.clone());
+        let h = Hash::from_bytes([7u8; 32]);
+        monitor.write_cursor_now(&h);
+        assert_eq!(DagMonitor::read_transport_cursor(&path), Some(h));
+
+        // A corrupt cursor never misdirects the walk — it reads as None (the
+        // replay then just seeds from the current sink).
+        std::fs::write(&path, "not-a-hash").unwrap();
+        assert_eq!(DagMonitor::read_transport_cursor(&path), None);
 
         let _ = std::fs::remove_file(&path);
     }

@@ -11,15 +11,24 @@ void main() {
   late StreamController<DagSnapshot> controller;
   late int pauseCalls;
   late int resumeCalls;
+  late int reconnectCalls;
+  late DagStatusDto statusValue;
 
   setUp(() async {
     controller = StreamController<DagSnapshot>();
     ChainService.streamFactory = () => controller.stream;
     pauseCalls = 0;
     resumeCalls = 0;
+    reconnectCalls = 0;
     ChainService.pauseBridge = () async => pauseCalls++;
     ChainService.resumeBridge = () async => resumeCalls++;
     ChainService.graceDuration = const Duration(milliseconds: 20);
+    // Watchdog: fast cadence + low stall threshold, healthy by default.
+    statusValue = const DagStatusDto(connected: true, lastBlockAgeSecs: null);
+    ChainService.statusFn = () async => statusValue;
+    ChainService.reconnectFn = () async => reconnectCalls++;
+    ChainService.watchdogPeriod = const Duration(milliseconds: 10);
+    ChainService.watchdogStallSecs = 5;
     await ChainService.instance.reset();
   });
 
@@ -120,5 +129,65 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(pauseCalls, 1);
     });
+  });
+
+  group('foreground liveness watchdog (P3/D-068)', () {
+    test('a stalled chain while foreground forces a reconnect', () async {
+      ChainService.instance.start();
+      // Block-age past the stall threshold: the socket went silently dead.
+      statusValue = DagStatusDto(
+        connected: true,
+        lastBlockAgeSecs: BigInt.from(30),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(
+        reconnectCalls,
+        greaterThanOrEqualTo(1),
+        reason: 'the watchdog recovered the dead socket',
+      );
+    });
+
+    test('a live chain never triggers a reconnect', () async {
+      ChainService.instance.start();
+      // Fresh blocks arriving — nothing to recover.
+      statusValue = DagStatusDto(
+        connected: true,
+        lastBlockAgeSecs: BigInt.from(1),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(reconnectCalls, 0);
+    });
+
+    test('the watchdog stays quiet while backgrounded', () async {
+      final service = ChainService.instance..start();
+      // Stalled, but we're backgrounded — the grace-drop owns the socket.
+      statusValue = DagStatusDto(
+        connected: true,
+        lastBlockAgeSecs: BigInt.from(30),
+      );
+      service.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(
+        reconnectCalls,
+        0,
+        reason: 'no watchdog reconnects while the app is backgrounded',
+      );
+    });
+
+    test(
+      'the reconnecting indicator toggles around a manual reconnect',
+      () async {
+        final service = ChainService.instance..start();
+        final seen = <bool>[];
+        service.reconnecting.addListener(
+          () => seen.add(service.reconnecting.value),
+        );
+        await service.reconnect();
+        expect(reconnectCalls, 1);
+        // It rose to true (honest indicator) and settled back to false.
+        expect(seen, contains(true));
+        expect(service.reconnecting.value, isFalse);
+      },
+    );
   });
 }

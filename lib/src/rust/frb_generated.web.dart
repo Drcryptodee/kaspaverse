@@ -78,6 +78,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DagSnapshot dco_decode_dag_snapshot(dynamic raw);
 
   @protected
+  DagStatusDto dco_decode_dag_status_dto(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -198,6 +201,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DagSnapshot sse_decode_dag_snapshot(SseDeserializer deserializer);
+
+  @protected
+  DagStatusDto sse_decode_dag_status_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -349,6 +355,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_dag_snapshot(DagSnapshot self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dag_status_dto(DagStatusDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);

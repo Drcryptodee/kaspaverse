@@ -115,11 +115,37 @@ fn all_change_addresses(addresses: &[Option<Address>], change_set: &HashSet<Addr
             .all(|a| a.as_ref().is_some_and(|a| change_set.contains(a)))
 }
 
+/// A record wallet-core classifies as a receive (an inbound deposit or an
+/// externally-observed credit). The two shapes a re-scan can wrongly attach to
+/// one of OUR txids after losing outgoing context.
+fn is_incoming_data(record: &TransactionRecord) -> bool {
+    matches!(
+        record.transaction_data(),
+        TransactionData::Incoming { .. } | TransactionData::External { .. }
+    )
+}
+
+/// A record wallet-core classifies as a spend WE originated. If we already hold
+/// a txid in one of these shapes, that txid is ours — a later incoming
+/// re-report of it is stale context, never a new deposit ([`ActivityStore::upsert`]).
+fn is_outgoing_data(record: &TransactionRecord) -> bool {
+    matches!(
+        record.transaction_data(),
+        TransactionData::Outgoing { .. }
+            | TransactionData::Change { .. }
+            | TransactionData::Batch { .. }
+            | TransactionData::TransferOutgoing { .. }
+    )
+}
+
 /// Whether a record is our own change re-reported as an incoming deposit. After
 /// a restart, wallet-core loses its in-memory "this was my send" context, so a
 /// re-scan files our returning change as an `Incoming` (`context.rs`
 /// handle_utxo_added, `outgoing()` = None). Such a record is NOT a deposit — its
-/// UTXOs are all at our change addresses (device find 2026-06-15).
+/// UTXOs are all at our change addresses (device find 2026-06-15). The txid-
+/// provenance guard in [`ActivityStore::upsert`] now catches the same class when
+/// the returning change lands on the conversation-bound RECEIVE address (D2);
+/// this address-set check remains for a cold re-scan that never saw the send.
 fn is_own_change(record: &TransactionRecord, change_set: &HashSet<Address>) -> bool {
     let utxos = match record.transaction_data() {
         TransactionData::Incoming { utxo_entries, .. }
@@ -295,6 +321,26 @@ impl ActivityStore {
     }
 
     fn upsert(&mut self, record: TransactionRecord) -> Result<()> {
+        // Provenance guard (D2/P4): once we hold a txid as a SEND we originated
+        // (Outgoing / Change / Batch / TransferOutgoing), a later re-scan that
+        // re-reports the SAME txid as an Incoming/External deposit is the
+        // lost-outgoing-context phenomenon (context.rs handle_utxo_added, restart
+        // re-scan), NOT a new receive — refuse the downgrade. Without this,
+        // conversation change returning to the bound RECEIVE address (source
+        // discipline routes it there, so the address stays funded for the next
+        // input[0]) would surface as a phantom "received" row after a restart.
+        // The address-set heuristic ([`is_own_change`]) can't catch it — the
+        // bound address is a receive address, and marking receive addresses
+        // internal would hide REAL deposits to them. Txid provenance is exact:
+        // a genuine deposit or a counterpart's bond refund carries THEIR txid,
+        // never one we already filed as outgoing.
+        if is_incoming_data(&record) {
+            if let Some(existing) = self.records.get(record.id()) {
+                if is_outgoing_data(existing) {
+                    return Ok(());
+                }
+            }
+        }
         self.append(&StoreFrame::Upsert(Box::new(record.clone())))?;
         self.records.insert(*record.id(), record);
         Ok(())
@@ -617,6 +663,29 @@ mod tests {
         )
     }
 
+    /// An Outgoing record for `id_byte` — a send WE originated. Minimal empty
+    /// `Transaction` (the classifier reads the variant + values, not the tx).
+    fn outgoing(id_byte: u8, payment: u64, daa: u64) -> TransactionRecord {
+        use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
+        use kaspa_consensus_core::tx::Transaction as CoreTx;
+        let tx = CoreTx::new(0, vec![], vec![], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        record(
+            id_byte,
+            payment,
+            daa,
+            TransactionData::Outgoing {
+                fees: 1000,
+                aggregate_input_value: payment + 5000,
+                aggregate_output_value: payment,
+                transaction: tx,
+                payment_value: Some(payment),
+                change_value: 4000,
+                accepted_daa_score: Some(daa),
+                utxo_entries: vec![],
+            },
+        )
+    }
+
     fn record(id_byte: u8, value: u64, daa: u64, data: TransactionData) -> TransactionRecord {
         TransactionRecord {
             id: TransactionId::from_bytes([id_byte; 32]),
@@ -760,6 +829,48 @@ mod tests {
         // Reload from disk → the same three survive (replay round-trip).
         let reloaded = ActivityStore::load(path.clone()).unwrap();
         assert_eq!(reloaded.records.len(), 3);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The D2 provenance guard: once a txid is a SEND we originated, a restart
+    /// re-scan re-reporting that SAME txid as an incoming deposit is refused —
+    /// so conversation change returning to the bound RECEIVE address (source
+    /// discipline) never surfaces as a phantom "received" row. A DIFFERENT
+    /// txid (a real deposit / a counterpart's bond refund) is unaffected.
+    #[test]
+    fn incoming_never_downgrades_an_originated_send() {
+        let dir = std::env::temp_dir().join(format!("kv-wsync-guard-{}", std::process::id()));
+        let path = dir.join("activity.kvlog");
+        let _ = std::fs::remove_file(&path);
+        let mut store = ActivityStore::load(path.clone()).unwrap();
+
+        // We sent tx 7 (a comm; change returns to our receive address).
+        store.upsert(outgoing(7, 20_000, 100)).unwrap();
+        // Restart re-scan re-reports tx 7's returning change as an Incoming.
+        store.upsert(incoming(7, 4_000, 120)).unwrap();
+
+        // The row stays our outgoing send — not a phantom deposit.
+        let rows = store.list(1_000_000, &HashSet::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].direction, ActivityDirection::Outgoing);
+
+        // A genuine deposit under a DIFFERENT txid is untouched by the guard.
+        store.upsert(incoming(9, 50_000, 130)).unwrap();
+        let rows = store.list(1_000_000, &HashSet::new());
+        let deposit = rows
+            .iter()
+            .find(|r| r.direction == ActivityDirection::Incoming);
+        assert!(deposit.is_some(), "a real deposit still shows");
+
+        // The guard survives a reload (the rejected incoming was never appended).
+        let reloaded = ActivityStore::load(path.clone()).unwrap();
+        assert!(is_outgoing_data(
+            reloaded
+                .records
+                .get(&TransactionId::from_bytes([7; 32]))
+                .unwrap()
+        ));
 
         let _ = std::fs::remove_file(&path);
     }

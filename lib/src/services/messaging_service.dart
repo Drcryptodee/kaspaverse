@@ -63,6 +63,11 @@ class MessagingService {
   @visibleForTesting
   static Future<void> Function() abandonFn = transportAbandon;
 
+  @visibleForTesting
+  static Future<void> Function(String conversationId) hideFn =
+      (conversationId) =>
+          transportHideConversation(conversationId: conversationId);
+
   /// All conversations, most recently active first (public-wire-class data).
   final ValueNotifier<List<ConversationDto>> conversations = ValueNotifier(
     const <ConversationDto>[],
@@ -132,6 +137,18 @@ class MessagingService {
   Future<SendOutcomeDto> commit(BigInt nonce) => commitFn(nonce);
 
   Future<void> abandon() => abandonFn();
+
+  /// Hide (tombstone) a conversation locally — the zombie-cleanup affordance
+  /// (D-068). Removes nothing on-chain; a fresh handshake re-creates the row.
+  /// Re-pulls the list so the row drops immediately.
+  Future<void> hide(String conversationId) async {
+    try {
+      await hideFn(conversationId);
+      await refresh();
+    } on AppError catch (e) {
+      error.value = e.message;
+    }
+  }
 
   @visibleForTesting
   Future<void> reset() async {

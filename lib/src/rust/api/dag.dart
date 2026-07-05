@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `fold`, `shared_monitor`, `snapshots`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// Background grace-drop (PERFORMANCE_BUDGET battery posture): close the wRPC
 /// socket and stop the retry loop. Dart's ChainService calls this ~30 s after
@@ -18,6 +18,18 @@ Future<void> dagPause() => RustLib.instance.api.crateApiDagDagPause();
 /// Foreground resume after a grace-drop: reconnect, preferring the last-good
 /// endpoint (fast path), resolver fallback. No-op while already connected.
 Future<void> dagResume() => RustLib.instance.api.crateApiDagDagResume();
+
+/// Read the current connection health (see [`DagStatusDto`]). Endpoint + DAA
+/// come from the folded snapshot; connected + block-age come straight from the
+/// monitor so a silently dead socket (still `connected` in the snapshot) is
+/// caught by a growing block-age.
+Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
+
+/// Force a fresh wRPC connection — the Reconnect button and the watchdog's
+/// recovery (P3/D-068). Hard-drops even a socket the client believes is alive,
+/// then re-dials (cached endpoint fast path). A no-op before the first connect
+/// exists (nothing to bounce).
+Future<void> dagReconnect() => RustLib.instance.api.crateApiDagDagReconnect();
 
 /// Subscribe to live DAG snapshots from mainnet. The first call connects;
 /// later calls share the same connection. Each stream ends only when its
@@ -61,4 +73,44 @@ class DagSnapshot {
           endpoint == other.endpoint &&
           virtualDaaScore == other.virtualDaaScore &&
           sinkBlueScore == other.sinkBlueScore;
+}
+
+/// Honest-liveness snapshot for the connection-health sheet AND the foreground
+/// watchdog (P3/D-068). A PULL surface (not the stream): the sheet paints it on
+/// open and the watchdog polls it. `last_block_age_secs` is the load-bearing
+/// field — a healthy mainnet keeps it near zero (~10 blocks/s); a large value
+/// while foreground means a silently dead socket (the midnight DAA stall), the
+/// watchdog's trigger to [`dag_reconnect`]. `None` before the first connect.
+class DagStatusDto {
+  final bool connected;
+  final String? endpoint;
+  final BigInt? lastBlockAgeSecs;
+  final BigInt? virtualDaaScore;
+
+  const DagStatusDto({
+    required this.connected,
+    this.endpoint,
+    this.lastBlockAgeSecs,
+    this.virtualDaaScore,
+  });
+
+  static Future<DagStatusDto> default_() =>
+      RustLib.instance.api.crateApiDagDagStatusDtoDefault();
+
+  @override
+  int get hashCode =>
+      connected.hashCode ^
+      endpoint.hashCode ^
+      lastBlockAgeSecs.hashCode ^
+      virtualDaaScore.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DagStatusDto &&
+          runtimeType == other.runtimeType &&
+          connected == other.connected &&
+          endpoint == other.endpoint &&
+          lastBlockAgeSecs == other.lastBlockAgeSecs &&
+          virtualDaaScore == other.virtualDaaScore;
 }
