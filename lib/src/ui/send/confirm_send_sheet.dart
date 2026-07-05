@@ -23,6 +23,7 @@ class ConfirmSendSheet extends StatefulWidget {
     required this.abandon,
     this.title = 'Confirm send',
     this.contextNote,
+    this.selfSend = false,
   });
 
   final SendSummaryDto summary;
@@ -38,6 +39,13 @@ class ConfirmSendSheet extends StatefulWidget {
   /// carries beyond value (e.g. the bond-refund rule). Never a number the
   /// summary doesn't back (B7: the DTO stays the only source of figures).
   final String? contextNote;
+
+  /// A **self-send** (D-069): the payment output returns to the sender's own
+  /// address as change, so the message value never leaves the wallet and the
+  /// real cost is the network fee alone. The sheet then leads with the FEE (not
+  /// the amount), drops the raw self "To" address, and states the returning
+  /// value plainly — never showing a self-send as if 0.1 KAS were spent.
+  final bool selfSend;
 
   @override
   State<ConfirmSendSheet> createState() => _ConfirmSendSheetState();
@@ -111,43 +119,54 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
     final theme = Theme.of(context);
     final s = widget.summary;
     final amount = kasParts(s.amountSompi);
+    final selfSend = widget.selfSend;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Center(child: Text(widget.title, style: theme.textTheme.titleMedium)),
         const SizedBox(height: KvSpace.l),
-        // The headline: what leaves, exact (screen-level amount role, §4).
+        // The headline is the honest COST. For a payment that is the amount
+        // leaving; for a self-send message the value returns as change, so the
+        // cost is the network fee — never the returning value (D-069).
         Center(
           child: Text(
-            'Sending',
+            selfSend ? 'Costs you' : 'Sending',
             style: theme.textTheme.labelSmall?.copyWith(
               color: KvColor.textSecondary,
             ),
           ),
         ),
         const SizedBox(height: KvSpace.xs),
-        Center(child: AmountText(s.amountSompi, role: AmountRole.screen)),
+        Center(
+          child: AmountText(
+            selfSend ? s.feeSompi : s.amountSompi,
+            role: AmountRole.screen,
+          ),
+        ),
         const SizedBox(height: KvSpace.l),
-        _Field(
-          label: 'To',
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(KvSpace.sm),
-            decoration: BoxDecoration(
-              color: KvColor.surfaceAlt,
-              borderRadius: BorderRadius.circular(KvRadius.data),
-            ),
-            child: Text(
-              chunkAddress(s.destination),
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: KvFont.mono,
+        // A self-send goes to our OWN address — showing that raw address reads
+        // as "sending to a stranger". Drop it; the thread is the destination.
+        if (!selfSend)
+          _Field(
+            label: 'To',
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(KvSpace.sm),
+              decoration: BoxDecoration(
+                color: KvColor.surfaceAlt,
+                borderRadius: BorderRadius.circular(KvRadius.data),
+              ),
+              child: Text(
+                chunkAddress(s.destination),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontFamily: KvFont.mono,
+                ),
               ),
             ),
           ),
-        ),
         if (widget.contextNote != null) ...[
-          const SizedBox(height: KvSpace.s),
+          if (!selfSend) const SizedBox(height: KvSpace.s),
           Text(
             widget.contextNote!,
             style: theme.textTheme.bodySmall?.copyWith(
@@ -157,7 +176,9 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         ],
         const SizedBox(height: KvSpace.m),
         // The exact costs — never "≈ free" (KIP-9 storage mass can be
-        // non-trivial); all 8 decimals on a signing surface (DS-2).
+        // non-trivial); all 8 decimals on a signing surface (DS-2). For a
+        // self-send the "Total" is replaced by the returning value, stated as
+        // a return, not a cost.
         Container(
           padding: const EdgeInsets.symmetric(
             horizontal: KvSpace.m,
@@ -171,10 +192,23 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
             children: [
               _CostRow(label: 'Network fee', sompi: s.feeSompi),
               const Divider(),
-              _CostRow(label: 'Total', sompi: s.totalSompi),
+              if (selfSend)
+                _CostRow(label: 'Returns to you', sompi: s.amountSompi)
+              else
+                _CostRow(label: 'Total', sompi: s.totalSompi),
             ],
           ),
         ),
+        if (selfSend) ...[
+          const SizedBox(height: KvSpace.s),
+          Text(
+            'Your message rides the Kaspa L1 to your contact; the value above '
+            'returns to you as change, so you only pay the network fee.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textTertiary,
+            ),
+          ),
+        ],
         if (s.txCount > 1) ...[
           const SizedBox(height: KvSpace.m),
           Text(
@@ -187,7 +221,9 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         ],
         const SizedBox(height: KvSpace.xl),
         _HoldToSign(
-          label: 'Hold to send ${amount.integer}.${amount.fraction} KAS',
+          label: selfSend
+              ? 'Hold to send message'
+              : 'Hold to send ${amount.integer}.${amount.fraction} KAS',
           onComplete: _commit,
         ),
         const SizedBox(height: KvSpace.s),

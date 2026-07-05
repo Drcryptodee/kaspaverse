@@ -276,11 +276,13 @@ void main() {
 
       expect(sentText, 'challenge you to RPS');
       expect(find.text('Confirm message'), findsOneWidget);
-      // The value line is the computed floor, exact — never a magic 0.2.
-      expect(
-        find.textContaining('Hold to send 0.12000000 KAS'),
-        findsOneWidget,
-      );
+      // A message is a self-send (D-069): the hold button never quotes the
+      // returning value as if it were spent, the headline is the fee, and the
+      // value is shown as returning to you — not a cost.
+      expect(find.text('Hold to send message'), findsOneWidget);
+      expect(find.textContaining('Hold to send 0.12000000'), findsNothing);
+      expect(find.text('Costs you'), findsOneWidget);
+      expect(find.text('Returns to you'), findsOneWidget);
     });
 
     testWidgets('a ping for another conversation does not re-pull', (

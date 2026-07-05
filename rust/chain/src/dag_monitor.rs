@@ -33,12 +33,27 @@ const CACHED_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TRANSPORT_CURSOR_MIN_WRITE_SECS: u64 = 3;
 
 /// Bound on one catch-up replay (P5). `get_blocks` returns up to
-/// ~`mergeset_size_limit`+1 blocks/page (mainnet ≈ 180), so this caps the walk
-/// at a few thousand recent blocks ≈ several minutes of gap — enough for a
-/// backgrounded/killed app, while keeping the work (and the wRPC payload)
-/// bounded. A longer outage is NOT fully recovered: that is an indexer's job
-/// (INV-8), and the honest liveness surface (P3) tells the user to reconnect.
-const MAX_CATCHUP_PAGES: u32 = 24;
+/// ~`mergeset_size_limit`+1 blocks/page (mainnet = 2·ghostdag_k+1 = 249 at
+/// 10 bps), so 48 pages ≈ 12k blocks ≈ **~20 min** of gap — a comfortable
+/// idle/background window (the P2.3b sitting's first miss came from a 9-min
+/// gap that was borderline under the old 24-page cap). The common small gap
+/// stops early (a page of just the low_hash = caught up), so this ceiling only
+/// costs work on a genuinely long outage — which is NOT fully recovered (an
+/// indexer's job, INV-8; the P3 liveness surface tells the user to reconnect).
+const MAX_CATCHUP_PAGES: u32 = 48;
+
+/// Per-page `get_blocks` retry budget for the catch-up. The replay fires the
+/// instant transport starts — often BEFORE the wRPC reconnect completes on a
+/// cold reopen — so the first page routinely races a not-yet-live socket. We
+/// retry (rather than give up after one error, the P2.3b sitting's
+/// first-of-three miss) so a message that arrived while the app was closed is
+/// never lost to a connect-timing race. Exhausting the budget = the node is
+/// truly unreachable or the cursor is pruned; the walk then stops honestly.
+const CATCHUP_RPC_ATTEMPTS: u32 = 15;
+/// Delay between catch-up `get_blocks` retries — long enough to let a cold
+/// wRPC socket finish connecting (cached fast-path ≤3 s; resolver a little
+/// more), short enough that the recovery feels immediate.
+const CATCHUP_RETRY_DELAY: Duration = Duration::from_millis(1000);
 
 /// A chain event observed by the [`DagMonitor`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,15 +300,11 @@ impl DagMonitor {
         let mut emitted = 0usize;
         let mut last_hash = low;
         for _page in 0..MAX_CATCHUP_PAGES {
-            // include_blocks + include_transactions: we need the payloads.
-            let resp = match rpc.get_blocks(Some(low), true, true).await {
-                Ok(resp) => resp,
-                // A pruned or unknown cursor (long outage / reorg) can't be
-                // walked — stop honestly; live scan continues from here.
-                Err(e) => {
-                    log::warn!("dag-monitor: catch-up get_blocks ended: {e}");
-                    break;
-                }
+            // Retry across a still-connecting socket so a cold-reopen race never
+            // strands a closed-app arrival. `None` = unreachable/pruned → stop.
+            let Some(resp) = self.catch_up_get_blocks(low).await else {
+                log::warn!("dag-monitor: catch-up get_blocks unreachable — stopping");
+                break;
             };
             // `low_hash` is returned inclusively; a page of just it = caught up.
             if resp.block_hashes.len() <= 1 {
@@ -321,6 +332,30 @@ impl DagMonitor {
         self.write_cursor_now(&last_hash);
         log::info!("dag-monitor: transport catch-up re-emitted {emitted} match(es)");
         Ok(emitted)
+    }
+
+    /// One catch-up page, tolerant of a still-connecting or briefly-flaky wRPC
+    /// socket. `include_blocks + include_transactions` because we need the
+    /// payloads. Retries up to [`CATCHUP_RPC_ATTEMPTS`] with a
+    /// [`CATCHUP_RETRY_DELAY`] pause — the first page on a cold reopen commonly
+    /// runs before the reconnect lands, and a single failure must NOT abandon
+    /// the walk (the closed-app arrival would be lost, the sitting bug).
+    /// `None` after the whole budget = the node is unreachable or the cursor is
+    /// pruned.
+    async fn catch_up_get_blocks(&self, low: Hash) -> Option<GetBlocksResponse> {
+        let rpc = self.inner.client.rpc_api();
+        for attempt in 0..CATCHUP_RPC_ATTEMPTS {
+            match rpc.get_blocks(Some(low), true, true).await {
+                Ok(resp) => return Some(resp),
+                Err(e) => {
+                    log::debug!(
+                        "dag-monitor: catch-up get_blocks attempt {attempt} failed ({e}); retrying"
+                    );
+                    tokio::time::sleep(CATCHUP_RETRY_DELAY).await;
+                }
+            }
+        }
+        None
     }
 
     /// Force-write the cursor now (bypassing the throttle) — used at the ends of
