@@ -71,6 +71,7 @@ void main() {
       partial: false,
     );
     MessagingService.abandonFn = () async {};
+    MessagingService.hideFn = (_) async {};
     await MessagingService.instance.reset();
   });
 
@@ -177,6 +178,44 @@ void main() {
       await tester.tap(find.text('Active'));
       await tester.pumpAndSettle();
       expect(find.byType(ThreadScreen), findsOneWidget);
+    });
+
+    testWidgets('long-press → confirm hides a conversation (D-068)', (
+      tester,
+    ) async {
+      String? hidden;
+      MessagingService.hideFn = (id) async => hidden = id;
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      // The confirm sheet is honest about being local-only.
+      expect(find.text('Hide conversation'), findsOneWidget);
+      expect(find.textContaining('your device only'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Hide'));
+      await tester.pumpAndSettle();
+      expect(hidden, 'c1', reason: 'the bridge hide ran for this conversation');
+    });
+
+    testWidgets('cancelling the hide sheet leaves the conversation', (
+      tester,
+    ) async {
+      var hideCalls = 0;
+      MessagingService.hideFn = (_) async => hideCalls++;
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(hideCalls, 0);
     });
   });
 

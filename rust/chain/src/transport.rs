@@ -178,11 +178,15 @@ pub fn compose_handshake_wire(sealed_envelope: &[u8]) -> Result<Vec<u8>> {
     Ok(wire)
 }
 
-/// Compose `ciph_msg:1:comm:<alias>:<raw envelope bytes>`. We emit RAW
-/// envelope bytes (the indexer's native form; cheaper mass than the current
-/// app's base64 emission, which its own decode-tolerance shim accepts either
-/// way — `utils/payload-encoding.ts`). The alias head sits OUTSIDE the
-/// envelope by wire law. Refuses non-sealed bodies (§4 type separation).
+/// Compose `ciph_msg:1:comm:<alias>:<base64 envelope text>`. We emit the
+/// envelope as **base64 text — the live emitter's shape** (`btoa` at Kasia
+/// `account-service.ts:801-804`; Gate K row K2, D-068 amending D-066: emit
+/// what the emitter emits, not merely what the tolerance shim accepts). The
+/// +33% body mass is priced by the D-054 floor machinery automatically (the
+/// Generator masses these exact wire bytes). We PARSE both encodings forever
+/// ([`decode_envelope_body`]). The alias head sits OUTSIDE the envelope by
+/// wire law. Refuses non-sealed bodies (§4 type separation — validated on
+/// the RAW envelope before encoding).
 pub fn compose_comm_wire(alias: &str, sealed_envelope: &[u8]) -> Result<Vec<u8>> {
     if alias.is_empty() || alias.as_bytes().contains(&b':') {
         return Err(ChainError::Message(
@@ -194,16 +198,40 @@ pub fn compose_comm_wire(alias: &str, sealed_envelope: &[u8]) -> Result<Vec<u8>>
             "comm body must be a sealed envelope".into(),
         ));
     }
+    let body = encode_base64(sealed_envelope);
     let mut wire = Vec::with_capacity(
-        CIPH_MSG_PREFIX.len() + WIRE_V1.len() + 5 + alias.len() + 1 + sealed_envelope.len(),
+        CIPH_MSG_PREFIX.len() + WIRE_V1.len() + 5 + alias.len() + 1 + body.len(),
     );
     wire.extend_from_slice(CIPH_MSG_PREFIX);
     wire.extend_from_slice(WIRE_V1);
     wire.extend_from_slice(b"comm:");
     wire.extend_from_slice(alias.as_bytes());
     wire.push(b':');
-    wire.extend_from_slice(sealed_envelope);
+    wire.extend_from_slice(body.as_bytes());
     Ok(wire)
+}
+
+/// Standard-alphabet padded base64 ENCODER — the exact `btoa` output shape the
+/// live population emits for comm bodies (K2). Hand-rolled mirror of
+/// [`decode_base64`] below (same INV-7 posture: one call site, test-pinned
+/// against RFC 4648 vectors and round-tripped through the decoder).
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut acc = 0u32;
+        for (i, &b) in chunk.iter().enumerate() {
+            acc |= (b as u32) << (16 - 8 * i);
+        }
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((acc >> (18 - 6 * i)) & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Split a `comm` kind body into `(alias, envelope bytes)` — the alias head
@@ -530,16 +558,37 @@ mod tests {
         assert_eq!(body, envelope.as_slice(), "raw envelope bytes, untouched");
     }
 
+    /// THE K2 EMISSION LAW (D-068 amending D-066): comm bodies leave here as
+    /// base64 TEXT — byte-identical to the live emitter's `btoa` shape — and
+    /// round-trip through our own tolerance decoder back to the envelope.
     #[test]
-    fn comm_wire_round_trips_and_the_alias_head_splits_off_first() {
+    fn comm_wire_emits_base64_and_round_trips_via_the_tolerance_decoder() {
         let envelope = sealed_shape(80);
         let wire = compose_comm_wire("fa6d1afa79e1", &envelope).unwrap();
         let (kind, body) = parse_payload(&wire).unwrap();
         assert_eq!(kind, "comm");
         // The alias head sits OUTSIDE the envelope (P2.2 handover law).
-        let (alias, sealed) = split_comm_body(body).unwrap();
+        let (alias, encoded) = split_comm_body(body).unwrap();
         assert_eq!(alias, "fa6d1afa79e1");
-        assert_eq!(sealed, envelope.as_slice());
+        // The body on the wire is base64 text (the live emitter's shape),
+        // never the raw envelope…
+        assert!(encoded.iter().all(|&b| is_base64_char(b)));
+        assert_ne!(encoded, envelope.as_slice());
+        // …and the tolerance decoder recovers the exact envelope bytes.
+        assert_eq!(decode_envelope_body(encoded), envelope);
+    }
+
+    /// Raw comm bodies (our own P2.3-era emission, already live on mainnet)
+    /// must keep parsing forever — tolerate what the population ever emitted.
+    #[test]
+    fn raw_comm_bodies_stay_parseable_forever() {
+        let envelope = sealed_shape(80);
+        let mut wire = b"ciph_msg:1:comm:fa6d1afa79e1:".to_vec();
+        wire.extend_from_slice(&envelope);
+        let (kind, body) = parse_payload(&wire).unwrap();
+        assert_eq!(kind, "comm");
+        let (_, raw) = split_comm_body(body).unwrap();
+        assert_eq!(decode_envelope_body(raw), envelope);
     }
 
     /// §4 type separation: the encrypted-kind composers refuse anything that
@@ -579,10 +628,15 @@ mod tests {
         let raw = sealed_shape(75);
         assert_eq!(decode_envelope_body(&raw), raw);
 
-        // The app's btoa output for those same bytes decodes back to them.
-        // "pQI=" style vectors pinned below; here the full shape.
-        let b64 = base64_of(&raw);
+        // The app's btoa output for those same bytes decodes back to them —
+        // and our own encoder IS that shape (encoder/decoder round-trip).
+        let b64 = encode_base64(&raw);
         assert_eq!(decode_envelope_body(b64.as_bytes()), raw);
+        // RFC 4648 vectors pin the ENCODER too (the decoder's are below).
+        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(encode_base64(b"foob"), "Zm9vYg==");
+        assert_eq!(encode_base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(encode_base64(b""), "");
 
         // Known vectors (RFC 4648 test strings, padded standard alphabet).
         assert_eq!(decode_envelope_body(b"Zm9vYmFy"), b"foobar");
@@ -594,27 +648,6 @@ mod tests {
         assert_eq!(decode_envelope_body(b"Zm9vY"), b"Zm9vY"); // length % 4
         assert_eq!(decode_envelope_body(b"Zm==9vYmFy"), b"Zm==9vYmFy"); // mid-pad
         assert_eq!(decode_envelope_body(b""), b"");
-    }
-
-    /// Test-only standard-alphabet base64 ENCODER (the app's btoa) — checks
-    /// our decoder against independently-constructed input.
-    fn base64_of(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let mut acc = 0u32;
-            for (i, &b) in chunk.iter().enumerate() {
-                acc |= (b as u32) << (16 - 8 * i);
-            }
-            for i in 0..4 {
-                if i <= chunk.len() {
-                    out.push(ALPHABET[((acc >> (18 - 6 * i)) & 0x3F) as usize] as char);
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        out
     }
 
     /// The REAL legacy VNone payload from the population's own repo

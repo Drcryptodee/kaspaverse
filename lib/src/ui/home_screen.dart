@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../rust/api/dag.dart';
 import '../rust/api/wallet.dart';
 import 'format.dart';
 import 'theme/tokens.dart';
 import 'widgets/amount_text.dart';
 import 'widgets/entrance.dart';
 import 'widgets/glass_panel.dart';
+import 'widgets/haptics.dart';
 import 'widgets/status_beacon.dart';
 
 /// Group digits in threes for the node-status readout: 458174109 →
@@ -34,6 +36,9 @@ class HomeScreen extends StatefulWidget {
     required this.virtualDaaScore,
     required this.error,
     required this.lastUpdate,
+    // Connection health (P3/D-068): the manual reconnect + its in-flight flag.
+    this.reconnecting,
+    this.onReconnect,
     // Wallet (WalletService): balance + activity.
     required this.mature,
     required this.pending,
@@ -56,6 +61,12 @@ class HomeScreen extends StatefulWidget {
 
   /// Time of the last fresh node snapshot — the link freshness clock (DS-1).
   final ValueListenable<DateTime?> lastUpdate;
+
+  /// True while a reconnect is in flight (P3) — the sheet's honest indicator.
+  final ValueListenable<bool>? reconnecting;
+
+  /// Force a fresh connection — the network sheet's Reconnect action (P3).
+  final Future<void> Function()? onReconnect;
 
   final ValueListenable<BigInt?> mature;
   final ValueListenable<BigInt?> pending;
@@ -149,6 +160,8 @@ class _HomeScreenState extends State<HomeScreen> {
         error: widget.error,
         lastUpdate: widget.lastUpdate,
         clock: widget.clock,
+        reconnecting: widget.reconnecting,
+        onReconnect: widget.onReconnect,
       ),
     );
   }
@@ -581,7 +594,7 @@ class _ActivityRow extends StatelessWidget {
 /// how fresh, what the chain clock reads. Frosted (§8: the screen's one blur,
 /// over real content). Values stay live via the same listenables the home
 /// watches.
-class _NetworkSheet extends StatelessWidget {
+class _NetworkSheet extends StatefulWidget {
   const _NetworkSheet({
     required this.connected,
     required this.endpoint,
@@ -589,6 +602,8 @@ class _NetworkSheet extends StatelessWidget {
     required this.error,
     required this.lastUpdate,
     required this.clock,
+    this.reconnecting,
+    this.onReconnect,
   });
 
   final ValueListenable<bool> connected;
@@ -597,6 +612,56 @@ class _NetworkSheet extends StatelessWidget {
   final ValueListenable<String?> error;
   final ValueListenable<DateTime?> lastUpdate;
   final DateTime Function() clock;
+  final ValueListenable<bool>? reconnecting;
+  final Future<void> Function()? onReconnect;
+
+  @override
+  State<_NetworkSheet> createState() => _NetworkSheetState();
+}
+
+class _NetworkSheetState extends State<_NetworkSheet> {
+  Timer? _poll;
+  int? _blockAgeSecs;
+  bool _haveStatus = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshStatus();
+    // Poll the honest block-age while the sheet is open (P3): the precise
+    // scan-liveness signal, straight from the monitor's heartbeat.
+    _poll = Timer.periodic(const Duration(seconds: 2), (_) => _refreshStatus());
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshStatus() async {
+    try {
+      final status = await dagStatus();
+      if (!mounted) return;
+      setState(() {
+        _blockAgeSecs = status.lastBlockAgeSecs?.toInt();
+        _haveStatus = true;
+      });
+    } catch (_) {
+      // A failed pull just leaves the last-known age; never crash the sheet.
+    }
+  }
+
+  /// The transport-scan liveness line: the scan runs on every block, so the
+  /// block-age IS its freshness. Honest about "never" before the first block.
+  String get _scanLine {
+    if (!_haveStatus || _blockAgeSecs == null) {
+      return 'waiting for first block…';
+    }
+    final age = _blockAgeSecs!;
+    if (age <= 5) return 'live — scanning every block';
+    return '$age s since last block';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -610,22 +675,23 @@ class _NetworkSheet extends StatelessWidget {
         padding: const EdgeInsets.all(KvSpace.gutter),
         child: AnimatedBuilder(
           animation: Listenable.merge([
-            connected,
-            endpoint,
-            virtualDaaScore,
-            error,
-            lastUpdate,
+            widget.connected,
+            widget.endpoint,
+            widget.virtualDaaScore,
+            widget.error,
+            widget.lastUpdate,
+            if (widget.reconnecting != null) widget.reconnecting!,
           ]),
           builder: (context, _) {
-            final last = lastUpdate.value;
-            final age = last == null ? null : clock().difference(last);
+            final last = widget.lastUpdate.value;
+            final age = last == null ? null : widget.clock().difference(last);
             final state = evaluateBeacon(
-              connected: connected.value,
+              connected: widget.connected.value,
               age: age,
-              error: error.value,
+              error: widget.error.value,
             );
             final status = switch (state) {
-              BeaconState.error => error.value ?? 'connection error',
+              BeaconState.error => widget.error.value ?? 'connection error',
               BeaconState.connecting => 'connecting to mainnet…',
               BeaconState.stale =>
                 age == null
@@ -633,6 +699,7 @@ class _NetworkSheet extends StatelessWidget {
                     : 'as of ${formatAge(age)} ago',
               BeaconState.connected => 'live',
             };
+            final busy = widget.reconnecting?.value ?? false;
             return Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -642,14 +709,36 @@ class _NetworkSheet extends StatelessWidget {
                 _DetailRow(label: 'Status', value: status),
                 _DetailRow(
                   label: 'DAA score',
-                  value: formatScore(virtualDaaScore.value),
+                  value: formatScore(widget.virtualDaaScore.value),
                   mono: true,
                 ),
+                _DetailRow(label: 'Transport scan', value: _scanLine),
                 _DetailRow(
                   label: 'Node',
-                  value: endpoint.value ?? '—',
+                  value: widget.endpoint.value ?? '—',
                   mono: true,
                 ),
+                const SizedBox(height: KvSpace.m),
+                if (widget.onReconnect != null)
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.tonalIcon(
+                      onPressed: busy
+                          ? null
+                          : () {
+                              KvHaptic.selection();
+                              widget.onReconnect!();
+                            },
+                      icon: busy
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh, size: 18),
+                      label: Text(busy ? 'Reconnecting…' : 'Reconnect'),
+                    ),
+                  ),
                 const SizedBox(height: KvSpace.m),
                 Text(
                   'KaspaVerse talks to public Kaspa nodes directly — '

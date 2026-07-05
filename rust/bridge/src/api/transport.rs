@@ -258,8 +258,12 @@ pub async fn transport_start() -> Result<(), AppError> {
         }
     }
 
-    let store =
-        TransportStore::load(vault::transport_store_dir()?.clone()).map_err(AppError::chain)?;
+    let transport_dir = vault::transport_store_dir()?;
+    let store = TransportStore::load(transport_dir.clone()).map_err(AppError::chain)?;
+    let cursor_path = transport_dir.join("scan.cursor");
+    // The PRIOR session's last scan point, read BEFORE we arm the live cursor —
+    // the anchor for the catch-up replay (P5/D-067). None on first ever run.
+    let catch_up_from = kaspaverse_chain::DagMonitor::read_transport_cursor(&cursor_path);
     let decryptor = vault::transport_decryptor()?;
     let (watched_addresses, _) =
         vault::derive_wallet_addresses(wallet::GAP_LIMIT, wallet::change_window())?;
@@ -279,6 +283,8 @@ pub async fn transport_start() -> Result<(), AppError> {
     *HUB.lock().unwrap_or_else(PoisonError::into_inner) = Some(hub.clone());
 
     let monitor = dag::shared_monitor().await?;
+    // Subscribe BEFORE the catch-up so its re-emitted matches land in this
+    // receiver's buffer and are folded, not dropped.
     let mut events = monitor.subscribe_transport();
     let task = tokio::spawn(async move {
         loop {
@@ -301,6 +307,19 @@ pub async fn transport_start() -> Result<(), AppError> {
     if let Some(old) = old {
         old.abort();
     }
+
+    // Arm the live cursor (the BlockAdded scan now persists scan progress), then
+    // run the catch-up replay in the BACKGROUND so unlock returns immediately
+    // and missed messages surface as the walk finds them (P5/D-067). The fold
+    // task above is already draining, so the replay's matches are folded (and
+    // deduped by txid against anything the live scan already caught).
+    monitor.set_transport_cursor(cursor_path);
+    let catch_up_monitor = monitor.clone();
+    tokio::spawn(async move {
+        if let Err(e) = catch_up_monitor.catch_up_transport(catch_up_from).await {
+            log::warn!("transport-hub: catch-up ended early: {e}");
+        }
+    });
     log::info!("transport-hub: started");
     Ok(())
 }
@@ -575,23 +594,49 @@ pub async fn transport_prepare_bcast(
 
 /// Build + stash one encrypted-kind transport send over the shared two-phase
 /// seam; returns the B7 summary (payload kind decoded from the BUILT tx).
+///
+/// **Source-address discipline (D2/P4/D-067, the L47 scar).** Every send to a
+/// conversation PINS input[0] to the conversation's bound own address `source`
+/// and routes change back to it, so a Kasia-class counterpart — which resolves
+/// who a tx is from by input[0]'s return address and drops/splits on a
+/// mismatch (`conversation-manager-service.ts:181`, `messaging.store.ts:768`) —
+/// sees exactly ONE identity for us, forever, and the address stays funded for
+/// the next send. If `source` holds no spendable UTXO we surface an honest
+/// "still confirming" message rather than silently spend from another address
+/// (which fragments that identity — the whole bug).
 async fn prepare_transport_send(
     dest: Address,
     amount_sompi: u64,
     wire: Vec<u8>,
+    source: Address,
     intent: TransportIntent,
 ) -> Result<TransportSendSummaryDto, AppError> {
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
-    let cursor = vault::change_cursor();
-    let change = vault::change_address_at(cursor)?;
+    let priority = engine
+        .mature_utxos_at(&source)
+        .await
+        .map_err(AppError::chain)?;
+    if priority.is_empty() {
+        return Err(AppError::msg(
+            "this conversation's address is waiting on confirming funds — try again in a few seconds",
+        ));
+    }
     let signer = vault::build_wallet_signer(wallet::GAP_LIMIT, wallet::change_window())?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
     let rpc = dag::shared_monitor().await?.rpc();
 
     let prepared = engine
-        .prepare_send(dest, amount_sompi, change, signer, rpc, Some(wire))
+        .prepare_send_pinned(
+            dest,
+            amount_sompi,
+            priority,
+            source,
+            signer,
+            rpc,
+            Some(wire),
+        )
         .await
         .map_err(friendly_prepare_error)?;
 
@@ -661,9 +706,12 @@ pub async fn transport_prepare_handshake(
     let envelope = encrypt(&recipient_x_only, &payload).map_err(AppError::core)?;
     let wire = compose_handshake_wire(&envelope.to_bytes()).map_err(AppError::chain)?;
 
-    // Provisional §0.7 binding for an outbound conversation: receive/0. The
-    // acceptance response rebinds to whichever of our keys the counterparty
-    // actually resolved (handle_inbound_handshake).
+    // §0.7 binding for an outbound conversation: receive/0 — which is also THE
+    // address the wallet hands out (`vault_receive_address`), so our whole
+    // transport identity is this one address (D2/P4). Source-address discipline
+    // pins the handshake's input[0] to it and returns change to it, so the
+    // address Kasia resolves for us == the address we seal with == receive/0,
+    // and it self-funds for every later message in the conversation.
     let bound: KeySlot = (Branch::Receive, 0);
     let own_address = vault::wallet_address_at(bound.0, bound.1)?;
     let reseal = encrypt(&x_only_of(&own_address)?, &payload)
@@ -688,6 +736,7 @@ pub async fn transport_prepare_handshake(
         dest,
         HANDSHAKE_BOND_SOMPI,
         wire,
+        own_address, // source-address discipline: input[0] + change = receive/0
         TransportIntent::Handshake {
             conversation,
             reseal,
@@ -756,6 +805,13 @@ pub async fn transport_prepare_accept(
     let envelope = encrypt(&recipient_x_only, &payload).map_err(AppError::core)?;
     let wire = compose_handshake_wire(&envelope.to_bytes()).map_err(AppError::chain)?;
 
+    // `bound` is the slot whose key opened THEIR handshake — i.e. the address
+    // the counterpart already knows us by (they encrypted to it). Source-address
+    // discipline pins our acceptance's input[0] to exactly this address so Kasia
+    // matches the response to the pending conversation by sender address
+    // (`conversation-manager-service.ts:181`) instead of minting a second
+    // "stranger" contact — the precise D-067 failure. Non-negotiable here: the
+    // counterpart resolves us by input[0], so we cannot spend from elsewhere.
     let own_address = vault::wallet_address_at(bound.0, bound.1)?;
     let reseal = encrypt(&x_only_of(&own_address)?, &payload)
         .map_err(AppError::core)?
@@ -765,6 +821,7 @@ pub async fn transport_prepare_accept(
         dest.clone(),
         HANDSHAKE_BOND_SOMPI, // the refund — the same provenance-cited norm
         wire,
+        own_address, // source-address discipline: input[0] = the address they know
         TransportIntent::Accept {
             conversation_id,
             contact_address: dest.to_string(),
@@ -809,13 +866,19 @@ pub async fn transport_prepare_comm(
     };
     let dest = validate_mainnet_address(&contact_address)?;
     let recipient_x_only = x_only_of(&dest)?;
+    // The conversation's bound own address — the source-address discipline
+    // target for BOTH the floor probe (change lands here) and the actual send
+    // (input[0] + change here), so the counterpart keeps seeing one identity.
+    let own_address = vault::wallet_address_at(bound.0, bound.1)?;
 
     // §0.6: every message carries value — the honest computed minimum for
-    // THIS wallet's live coin shape (D-054), recomputed per send.
+    // THIS wallet's live coin shape (D-054), recomputed per send. The floor
+    // probe uses the SAME change address the real send will (own_address), so
+    // the storage-mass boundary it finds matches what gets built.
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
     let floor = engine
-        .minimum_sendable(vault::change_address_at(vault::change_cursor())?)
+        .minimum_sendable(own_address.clone())
         .map_err(AppError::chain)?
         .ok_or_else(|| {
             AppError::msg("your balance can't cover a message right now (anti-dust floor)")
@@ -824,7 +887,6 @@ pub async fn transport_prepare_comm(
     let envelope = encrypt(&recipient_x_only, text.as_bytes()).map_err(AppError::core)?;
     let wire = compose_comm_wire(&my_alias, &envelope.to_bytes()).map_err(AppError::chain)?;
 
-    let own_address = vault::wallet_address_at(bound.0, bound.1)?;
     let reseal = encrypt(&x_only_of(&own_address)?, text.as_bytes())
         .map_err(AppError::core)?
         .to_bytes();
@@ -834,6 +896,7 @@ pub async fn transport_prepare_comm(
         dest,
         floor,
         wire,
+        own_address, // source-address discipline: input[0] + change = bound addr
         TransportIntent::Comm {
             conversation_id,
             alias_on_wire: my_alias,
@@ -982,6 +1045,35 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
             last_activity_unix_ms: c.last_activity_unix_ms,
         })
         .collect())
+}
+
+/// Hide a conversation — tombstone the row (and its messages replay-drop with
+/// it via the store's own remove path). The P2.3b cleanup affordance for zombie
+/// pending rows (D-068): the KaChat-era pending contacts and the counterpart's
+/// own stranger-conversation the sitting surfaced. Local-only bookkeeping — it
+/// removes nothing on-chain and signals nothing to the counterpart; a future
+/// handshake from the same address simply re-creates a fresh row. Idempotent:
+/// hiding an unknown id is a no-op success.
+pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppError> {
+    let hub = hub()?;
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    // Cascade: tombstone the conversation's messages first so no orphaned
+    // sealed rows linger, then the conversation row itself.
+    let txids: Vec<String> = store
+        .messages_for(&conversation_id)
+        .into_iter()
+        .map(|m| m.txid)
+        .collect();
+    for txid in txids {
+        warn_store(store.tombstone_message(&txid));
+    }
+    store
+        .remove_conversation(&conversation_id)
+        .map_err(AppError::chain)?;
+    drop(store);
+    // Nudge any open list to re-pull (the thread, if open, will 404 and pop).
+    ping(&conversation_id);
+    Ok(())
 }
 
 /// A conversation's thread, oldest first — DECRYPT-ON-VIEW (§0.4): sealed

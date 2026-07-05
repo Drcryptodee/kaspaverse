@@ -82,6 +82,18 @@ Future<void> transportAbandon() =>
 Future<List<ConversationDto>> transportConversations() =>
     RustLib.instance.api.crateApiTransportTransportConversations();
 
+/// Hide a conversation — tombstone the row (and its messages replay-drop with
+/// it via the store's own remove path). The P2.3b cleanup affordance for zombie
+/// pending rows (D-068): the KaChat-era pending contacts and the counterpart's
+/// own stranger-conversation the sitting surfaced. Local-only bookkeeping — it
+/// removes nothing on-chain and signals nothing to the counterpart; a future
+/// handshake from the same address simply re-creates a fresh row. Idempotent:
+/// hiding an unknown id is a no-op success.
+Future<void> transportHideConversation({required String conversationId}) =>
+    RustLib.instance.api.crateApiTransportTransportHideConversation(
+      conversationId: conversationId,
+    );
+
 /// A conversation's thread, oldest first — DECRYPT-ON-VIEW (§0.4): sealed
 /// rows open here, per call, while the vault is unlocked; the plaintext
 /// crosses once as the display DTO and Dart drops it with the widget. Vault

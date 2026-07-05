@@ -31,10 +31,27 @@ class ChainService with WidgetsBindingObserver {
   @visibleForTesting
   static Future<void> Function() resumeBridge = dagResume;
 
+  /// Test seams for the foreground watchdog (P3/D-068): the liveness pull and
+  /// the forced reconnect.
+  @visibleForTesting
+  static Future<DagStatusDto> Function() statusFn = dagStatus;
+  @visibleForTesting
+  static Future<void> Function() reconnectFn = dagReconnect;
+
   /// Background window before the socket is dropped (PERFORMANCE_BUDGET:
   /// "after 30 s grace"). Tests shorten it.
   @visibleForTesting
   static Duration graceDuration = const Duration(seconds: 30);
+
+  /// Foreground watchdog cadence and stall threshold (P3/D-068). A healthy
+  /// mainnet delivers ~10 blocks/s, so a block-age past [watchdogStallSecs]
+  /// while foreground means the wRPC socket died silently (the midnight DAA
+  /// stall) — the watchdog forces a reconnect. Generous enough not to fire on
+  /// brief hiccups; tests shorten both.
+  @visibleForTesting
+  static Duration watchdogPeriod = const Duration(seconds: 10);
+  @visibleForTesting
+  static int watchdogStallSecs = 30;
 
   final ValueNotifier<bool> connected = ValueNotifier(false);
   final ValueNotifier<String?> endpoint = ValueNotifier(null);
@@ -51,12 +68,19 @@ class ChainService with WidgetsBindingObserver {
   /// the StatusBeacon stale state (DS-1); null until the first fresh tip.
   final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
 
+  /// True while a reconnect is in flight (watchdog-triggered OR the manual
+  /// Reconnect button). The honest-liveness indicator — never a silent stall.
+  final ValueNotifier<bool> reconnecting = ValueNotifier(false);
+
   StreamSubscription<DagSnapshot>? _subscription;
   Timer? _graceTimer;
   bool _droppedByGrace = false;
+  Timer? _watchdogTimer;
+  bool _foreground = true;
 
   /// Idempotent: the first call attaches the app-lifetime subscription and
-  /// registers the lifecycle observer for the background grace-drop.
+  /// registers the lifecycle observer for the background grace-drop, and arms
+  /// the foreground liveness watchdog.
   void start() {
     if (_subscription == null) {
       WidgetsBinding.instance.addObserver(this);
@@ -67,6 +91,44 @@ class ChainService with WidgetsBindingObserver {
         error.value = e is AppError ? e.message : e.toString();
       },
     );
+    _watchdogTimer ??= Timer.periodic(watchdogPeriod, (_) => _watchdogTick());
+  }
+
+  /// Foreground liveness check (P3/D-068): pull the honest block-age; if the
+  /// chain has gone quiet past the stall threshold while we're foreground, the
+  /// socket is silently dead — force a reconnect rather than let the DAA readout
+  /// freeze. Skipped while backgrounded (the grace-drop owns the socket then)
+  /// or while a reconnect is already in flight.
+  Future<void> _watchdogTick() async {
+    if (!_foreground || _droppedByGrace || reconnecting.value) return;
+    final DagStatusDto status;
+    try {
+      status = await statusFn();
+    } catch (_) {
+      return; // a failed pull is not itself evidence of a stall
+    }
+    final age = status.lastBlockAgeSecs;
+    if (age != null && age.toInt() > watchdogStallSecs) {
+      await reconnect();
+    }
+  }
+
+  /// Force a fresh connection and surface the honest indicator while it runs —
+  /// the watchdog's recovery and the sheet's Reconnect button. Idempotent under
+  /// the [reconnecting] guard (a second press is ignored until the first ends).
+  Future<void> reconnect() async {
+    if (reconnecting.value) return;
+    reconnecting.value = true;
+    try {
+      await reconnectFn();
+      error.value = null;
+    } on AppError catch (e) {
+      error.value = e.message;
+    } catch (e) {
+      error.value = e.toString();
+    } finally {
+      reconnecting.value = false;
+    }
   }
 
   /// Battery posture (PERFORMANCE_BUDGET): background → after [graceDuration],
@@ -77,6 +139,7 @@ class ChainService with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _foreground = false;
       _graceTimer ??= Timer(graceDuration, () {
         _graceTimer = null;
         _droppedByGrace = true;
@@ -88,6 +151,7 @@ class ChainService with WidgetsBindingObserver {
         );
       });
     } else if (state == AppLifecycleState.resumed) {
+      _foreground = true;
       _graceTimer?.cancel();
       _graceTimer = null;
       if (_droppedByGrace) {
@@ -128,12 +192,16 @@ class ChainService with WidgetsBindingObserver {
     _subscription = null;
     _graceTimer?.cancel();
     _graceTimer = null;
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
     _droppedByGrace = false;
+    _foreground = true;
     connected.value = false;
     endpoint.value = null;
     virtualDaaScore.value = null;
     sinkBlueScore.value = null;
     error.value = null;
     lastUpdate.value = null;
+    reconnecting.value = false;
   }
 }

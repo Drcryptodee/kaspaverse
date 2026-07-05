@@ -33,6 +33,7 @@ use kaspa_wallet_core::tx::generator::{
     Generator, GeneratorSettings, GeneratorSummary, PendingTransaction,
 };
 use kaspa_wallet_core::tx::{Fees, PaymentDestination, PaymentOutputs};
+use kaspa_wallet_core::utxo::UtxoEntryReference;
 
 use crate::error::{ChainError, Result};
 use crate::wallet_sync::WalletEngine;
@@ -184,10 +185,109 @@ impl WalletEngine {
         rpc: Rpc,
         payload: Option<Vec<u8>>,
     ) -> Result<PreparedSend> {
+        // A plain payment: no priority selection — the Generator draws inputs in
+        // its own order. UTXO hygiene (fresh change) is the caller's choice.
+        self.prepare_send_inner(
+            destination,
+            amount_sompi,
+            None,
+            change,
+            signer,
+            rpc,
+            payload,
+        )
+        .await
+    }
+
+    /// The mature UTXO entries the live context holds at `address` — the source
+    /// pool for source-address discipline (D2/P4/D-067). Empty ⇒ the address
+    /// has no spendable UTXO right now; the caller decides whether to pin
+    /// elsewhere or surface an honest "still confirming" message rather than
+    /// silently spend from a different address (which would fragment the
+    /// counterpart's view of our identity — the L47 scar). Reads the SAME
+    /// `UtxoContext` the balance reflects (no node round-trip): the pinned
+    /// `get_utxos` filters the mature set by address (context.rs:757 @ `cfafeb4`).
+    pub async fn mature_utxos_at(&self, address: &Address) -> Result<Vec<UtxoEntryReference>> {
+        let entries = self
+            .context()
+            .get_utxos(Some(vec![address.clone()]), None)
+            .await?;
+        Ok(entries.into_iter().map(Into::into).collect())
+    }
+
+    /// Build (unsigned) a send that PINS input[0] to a chosen source address and
+    /// routes change back to it — the D2 source-address discipline (P4/D-067,
+    /// the L47 scar): a conversation always presents ONE input[0] return address
+    /// to the counterpart (Kasia resolves peers by `getUtxoReturnAddress` =
+    /// input[0]'s prev-output, `conversation-manager-service.ts:181`), and the
+    /// returned change keeps that address funded for the next send.
+    ///
+    /// The mechanism is the pinned Generator's OWN priority-UTXO facility, not a
+    /// consensus edit (INV-9): priority entries are consumed BEFORE the general
+    /// UTXO iterator (`generator.rs:588-614` @ `cfafeb4` — stash, then the
+    /// first-stage iterator which is `None` on a fresh build, then priority,
+    /// then the source iterator) and pushed as inputs in consumption order
+    /// (`generator.rs:735-763`), so `priority[0]` lands at input[0]. The entries
+    /// are filtered out of the source iterator by outpoint identity
+    /// (`UtxoEntryReference` hashes/eqs on its outpoint — consensus/client
+    /// `utxo.rs:225/266`), so there is no double-spend. `priority` MUST be
+    /// UTXOs of `source` (fetch via [`mature_utxos_at`]); an empty `priority` is
+    /// rejected here — a pinned send with nothing to pin is a silent identity
+    /// change, exactly the bug this guards against.
+    // Mirrors the pinned Generator's own many-param builder (`try_new_with_context`,
+    // 10 args); bundling these public tx facts into a struct would obscure, not
+    // clarify, a custody-critical call site.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_send_pinned(
+        &self,
+        destination: Address,
+        amount_sompi: u64,
+        priority: Vec<UtxoEntryReference>,
+        source: Address,
+        signer: Arc<dyn SignerT>,
+        rpc: Rpc,
+        payload: Option<Vec<u8>>,
+    ) -> Result<PreparedSend> {
+        if priority.is_empty() {
+            return Err(ChainError::Message(
+                "source address has no spendable UTXO to pin input[0]".into(),
+            ));
+        }
+        // Change returns to `source` (not a fresh change address): the discipline
+        // is input[0] AND change on the bound address so it self-funds.
+        self.prepare_send_inner(
+            destination,
+            amount_sompi,
+            Some(priority),
+            source,
+            signer,
+            rpc,
+            payload,
+        )
+        .await
+    }
+
+    /// Shared build core for [`prepare_send`] and [`prepare_send_pinned`]:
+    /// register the change address, run the pinned Generator over the live
+    /// context, iterate the whole (possibly chained) tx set unsigned, and
+    /// project the B7 summary from the BUILT txs. `priority` = `None` is the
+    /// plain path (byte-identical to the pre-D2 behaviour); `Some(entries)`
+    /// pins input[0].
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_send_inner(
+        &self,
+        destination: Address,
+        amount_sompi: u64,
+        priority: Option<Vec<UtxoEntryReference>>,
+        change: Address,
+        signer: Arc<dyn SignerT>,
+        rpc: Rpc,
+        payload: Option<Vec<u8>>,
+    ) -> Result<PreparedSend> {
         let context = self.context();
-        // (ii) Watch the fresh change so the change UTXO this send returns is
-        // visible + spendable (else it would be stranded). A fresh address has
-        // no UTXOs yet, so this scan is cheap.
+        // (ii) Watch the change address so the change UTXO this send returns is
+        // visible + spendable (else it would be stranded). Idempotent for an
+        // already-watched address (the pinned source is always in the window).
         context
             .scan_and_register_addresses(vec![change.clone()], None)
             .await?;
@@ -196,10 +296,10 @@ impl WalletEngine {
             PaymentOutputs::from((destination.clone(), amount_sompi)).into();
         let settings = GeneratorSettings::try_new_with_context(
             context,
-            None,   // priority_utxo_entries
-            change, // change_address (registered above + on the signer)
-            1,      // sig_op_count — single-sig (§0.2)
-            1,      // minimum_signatures
+            priority, // None = plain draw; Some = input[0] pinned to the source
+            change,   // change_address (registered above + on the signer)
+            1,        // sig_op_count — single-sig (§0.2)
+            1,        // minimum_signatures
             payment,
             None,                // fee_rate — normal priority
             Fees::SenderPays(0), // priority fee 0; NOT Fees::None (generator.rs:384)
@@ -495,6 +595,86 @@ mod tests {
             pending.push(tx);
         }
         pending
+    }
+
+    /// A generator whose general pool is `pool_kas` at random addresses and whose
+    /// PRIORITY set is the single `priority` entry — the D2 pinning shape (the
+    /// production path uses `try_new_with_context`; the priority mechanism is the
+    /// shared `Context`, so the iterator path proves the identical behaviour).
+    fn offline_generator_pinned(
+        pool_kas: &[f64],
+        priority: UtxoEntryReference,
+        send_kas: f64,
+        change: Address,
+    ) -> Generator {
+        let pool: Vec<UtxoEntryReference> = pool_kas
+            .iter()
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+            .collect();
+        let payment: PaymentDestination =
+            PaymentOutputs::from((addr(DEST), kaspa_to_sompi(send_kas))).into();
+        let settings = GeneratorSettings::try_new_with_iterator(
+            mainnet(),
+            Box::new(pool.into_iter()),
+            Some(vec![priority]),
+            change,
+            1,
+            1,
+            payment,
+            None,
+            Fees::SenderPays(0),
+            None,
+            None,
+        )
+        .unwrap();
+        Generator::try_new(settings, None, None).unwrap()
+    }
+
+    /// THE D2 CONSENSUS-TRUTH TEST (P4/D-067): the pinned Generator consumes the
+    /// PRIORITY utxo before the general pool, so `priority[0]` lands at input[0]
+    /// — the byte the counterpart resolves as our identity
+    /// (`getUtxoReturnAddress` = input[0]'s prev-output). Proven for BOTH the
+    /// covered case (priority alone suffices → it is the only input) and the
+    /// shortfall case (priority + pool → priority is still input[0]). If this
+    /// fails, the pinned Generator's ordering changed and the L47 identity-split
+    /// scar is back — re-read `generator.rs:588-614` at the pin before touching.
+    #[test]
+    fn pinned_priority_utxo_is_always_input_zero() {
+        let bound = addr(CHANGE);
+        // Covered: a 10-KAS priority UTXO funds a 1-KAS send. (The pinned
+        // Generator may pull ONE extra pool input to lower KIP-9 storage mass —
+        // generator.rs:838-852 — but the priority is consumed first, so it is
+        // input[0] regardless.)
+        let priority = UtxoEntryReference::simulated_with_address(kaspa_to_sompi(10.0), &bound);
+        let priority_txid = priority.transaction_id();
+        let generator = offline_generator_pinned(&[100.0], priority, 1.0, bound.clone());
+        let pending = drain(&generator);
+        let tx = pending
+            .iter()
+            .find(|pt| pt.is_final())
+            .unwrap()
+            .transaction();
+        assert_eq!(
+            tx.inputs[0].previous_outpoint.transaction_id, priority_txid,
+            "input[0] is the pinned priority UTXO"
+        );
+
+        // Shortfall: a 2-KAS priority UTXO cannot alone cover a 50-KAS send, so
+        // the pool is drawn for the REST — but the priority is STILL input[0].
+        let priority = UtxoEntryReference::simulated_with_address(kaspa_to_sompi(2.0), &bound);
+        let priority_txid = priority.transaction_id();
+        let generator = offline_generator_pinned(&[100.0], priority, 50.0, bound.clone());
+        let pending = drain(&generator);
+        let tx = pending
+            .iter()
+            .find(|pt| pt.is_final())
+            .unwrap()
+            .transaction();
+        assert!(tx.inputs.len() >= 2, "the pool is drawn for the shortfall");
+        assert_eq!(
+            tx.inputs[0].previous_outpoint.transaction_id, priority_txid,
+            "input[0] is the pinned priority UTXO even when it can't cover alone"
+        );
     }
 
     #[test]

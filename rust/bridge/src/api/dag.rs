@@ -79,6 +79,53 @@ pub async fn dag_resume() -> Result<(), AppError> {
     Ok(())
 }
 
+/// Honest-liveness snapshot for the connection-health sheet AND the foreground
+/// watchdog (P3/D-068). A PULL surface (not the stream): the sheet paints it on
+/// open and the watchdog polls it. `last_block_age_secs` is the load-bearing
+/// field — a healthy mainnet keeps it near zero (~10 blocks/s); a large value
+/// while foreground means a silently dead socket (the midnight DAA stall), the
+/// watchdog's trigger to [`dag_reconnect`]. `None` before the first connect.
+#[derive(Clone, Default)]
+pub struct DagStatusDto {
+    pub connected: bool,
+    pub endpoint: Option<String>,
+    pub last_block_age_secs: Option<u64>,
+    pub virtual_daa_score: Option<u64>,
+}
+
+/// Read the current connection health (see [`DagStatusDto`]). Endpoint + DAA
+/// come from the folded snapshot; connected + block-age come straight from the
+/// monitor so a silently dead socket (still `connected` in the snapshot) is
+/// caught by a growing block-age.
+pub fn dag_status() -> DagStatusDto {
+    let latest = LATEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_default();
+    let (connected, last_block_age_secs) = match MONITOR.get() {
+        Some(monitor) => (monitor.is_connected(), monitor.last_block_age_secs()),
+        None => (false, None),
+    };
+    DagStatusDto {
+        connected,
+        endpoint: latest.endpoint,
+        last_block_age_secs,
+        virtual_daa_score: latest.virtual_daa_score,
+    }
+}
+
+/// Force a fresh wRPC connection — the Reconnect button and the watchdog's
+/// recovery (P3/D-068). Hard-drops even a socket the client believes is alive,
+/// then re-dials (cached endpoint fast path). A no-op before the first connect
+/// exists (nothing to bounce).
+pub async fn dag_reconnect() -> Result<(), AppError> {
+    if let Some(monitor) = MONITOR.get() {
+        monitor.reconnect().await.map_err(AppError::chain)?;
+    }
+    Ok(())
+}
+
 /// Events carry absolute values, so folding is plain assignment (INV-9:
 /// nothing is computed locally).
 fn fold(snapshot: &mut DagSnapshot, event: DagEvent) {
