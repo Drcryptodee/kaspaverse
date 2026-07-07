@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_transport_send`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `warn_store`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `split_frame`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `warn_store`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Start (or restart after a re-unlock) the transport hub: load the stores,
 /// take a vault-scoped decryptor, derive the PUBLIC watched window, and
@@ -69,6 +69,42 @@ Future<TransportSendSummaryDto> transportPrepareComm({
   required String conversationId,
   required String text,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareComm(
+  conversationId: conversationId,
+  text: text,
+);
+
+/// Phase 1 — compose a `kv:1:challenge` (Attack & Defend) as a self-send comm.
+/// `stake` is a DISPLAY value in KAS (`None` ⇒ a friendly, no-stake duel); it
+/// binds NO value here — frames are hints, the real wager binds at the P3
+/// covenant. The readable invite line is GENERATED in `core::frames` from the
+/// fields (never free-typed), so it can't misrepresent the card. Rides the
+/// shared comm prepare above — no new send-path economics.
+Future<TransportSendSummaryDto> transportPrepareChallenge({
+  required String conversationId,
+  String? stake,
+}) => RustLib.instance.api.crateApiTransportTransportPrepareChallenge(
+  conversationId: conversationId,
+  stake: stake,
+);
+
+/// Phase 1 — compose a social `kv:1:accept` for the challenge `ref_id`. This is
+/// NOT a wager and NEVER auto-spends: it is a self-send comm the user confirms
+/// through the normal hold-to-sign ceremony (§0.5 law a). NB: deliberately
+/// distinct from [`transport_prepare_accept`], the handshake-bond acceptance.
+Future<TransportSendSummaryDto> transportPrepareChallengeAccept({
+  required String conversationId,
+  required String refId,
+}) => RustLib.instance.api.crateApiTransportTransportPrepareChallengeAccept(
+  conversationId: conversationId,
+  refId: refId,
+);
+
+/// Phase 1 — compose a `kv:1:taunt` (personality) as a self-send comm. The text
+/// is the frame's own content; empty text is refused in `core::frames`.
+Future<TransportSendSummaryDto> transportPrepareTaunt({
+  required String conversationId,
+  required String text,
+}) => RustLib.instance.api.crateApiTransportTransportPrepareTaunt(
   conversationId: conversationId,
   text: text,
 );
@@ -179,6 +215,54 @@ class ConversationDto {
           lastActivityUnixMs == other.lastActivityUnixMs;
 }
 
+/// A parsed `kv:1:` game frame (P2.4 §0.5). Fields come from the frame JSON, so
+/// a tampered readable line can't misstate the card. Nothing here binds value —
+/// the `stake` is a DISPLAY number; the real wager binds at the P3 covenant.
+class FrameDto {
+  /// `challenge` | `accept` | `result` | `taunt`.
+  final String kind;
+
+  /// `challenge`: the game slug (P2.4: `attack_defend`); empty otherwise.
+  final String game;
+
+  /// `challenge`: the DISPLAY stake in KAS; empty ⇒ a friendly, no-stake duel.
+  final String stake;
+
+  /// The challenge id this frame concerns (a `challenge`'s own id, or the id
+  /// an `accept`/`result` references) — enables card pairing; empty otherwise.
+  final String id;
+
+  /// `result`: the reported outcome (a claim). `taunt`: the text. Else empty.
+  final String detail;
+
+  const FrameDto({
+    required this.kind,
+    required this.game,
+    required this.stake,
+    required this.id,
+    required this.detail,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      game.hashCode ^
+      stake.hashCode ^
+      id.hashCode ^
+      detail.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FrameDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          game == other.game &&
+          stake == other.stake &&
+          id == other.id &&
+          detail == other.detail;
+}
+
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
 /// cross this bridge (user content post-decrypt, D-056; ffi-leak pre-cleared
 /// shape). Produced only by [`transport_thread`] (decrypt-on-view, §0.4):
@@ -191,11 +275,19 @@ class ThreadMessageDto {
   final bool outbound;
   final BigInt unixMs;
 
-  /// Decrypted message text for readable `comm` rows; empty otherwise.
+  /// Decrypted message text for readable `comm` rows; empty otherwise. When
+  /// [`frame`](Self::frame) is set this is the frame's readable line (what a
+  /// Kasia user sees; the KaspaVerse card fallback), not the machine tail.
   final String text;
 
   /// False when no watched key opens the envelope (kept honest, not hidden).
   final bool readable;
+
+  /// Set when the decrypted body carried a RECOGNIZED `kv:1:` game frame —
+  /// the tappable arcade half. `None` for a plain message OR an unknown /
+  /// forward-version tail (which render as an ordinary bubble from `text`,
+  /// P5). Display-only: a frame binds no value (§0.3).
+  final FrameDto? frame;
 
   const ThreadMessageDto({
     required this.txid,
@@ -204,6 +296,7 @@ class ThreadMessageDto {
     required this.unixMs,
     required this.text,
     required this.readable,
+    this.frame,
   });
 
   @override
@@ -213,7 +306,8 @@ class ThreadMessageDto {
       outbound.hashCode ^
       unixMs.hashCode ^
       text.hashCode ^
-      readable.hashCode;
+      readable.hashCode ^
+      frame.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -225,7 +319,8 @@ class ThreadMessageDto {
           outbound == other.outbound &&
           unixMs == other.unixMs &&
           text == other.text &&
-          readable == other.readable;
+          readable == other.readable &&
+          frame == other.frame;
 }
 
 /// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).

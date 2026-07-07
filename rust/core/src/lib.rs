@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod frames;
 pub mod handshake;
 pub mod keychain;
 pub mod mnemonic;
@@ -31,6 +32,7 @@ pub mod transport_keys;
 pub mod vault;
 
 pub use error::{CoreError, Result};
+pub use frames::{build_accept, build_challenge, build_taunt, FrameKind, KvFrame, Parsed};
 pub use handshake::HandshakePayload;
 pub use keychain::{Branch, KeyChain};
 pub use mnemonic::MnemonicCeremony;

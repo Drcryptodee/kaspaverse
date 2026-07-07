@@ -7,7 +7,8 @@
   "All keys are synthetic test values, never custody material.",
   "oracle_verified: envelope was decrypted by the oracle crate at generation (our-encrypt -> their-decrypt).",
   "encrypt_deterministic pins our encrypt byte-exactly via the crate-private ephemeral/nonce seam.",
-  "Envelope byte 12 (SEC1 tag parity bit) is inherently malleable under x-only ECDH - both implementations decrypt the flip to identical plaintext; covered by a unit test, deliberately absent here."
+  "Envelope byte 12 (SEC1 tag parity bit) is inherently malleable under x-only ECDH - both implementations decrypt the flip to identical plaintext; covered by a unit test, deliberately absent here.",
+  "oracle-even-002's plaintext carries an inline kv:1:challenge string as a PRE-P2.4 illustrative sample (RPS placeholder, ' . ' separator). It is a cipher-parity vector, not a schema vector; the frozen kv:1: frame schema is defined and tested in frames_v1.json + frames.rs. Left byte-for-byte intact so its oracle-verified ciphertext is not disturbed."
  ],
  "decrypt": [
   {
