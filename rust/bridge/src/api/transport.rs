@@ -34,6 +34,9 @@ use kaspaverse_chain::{
     ConversationStatus, KeyBranch, MessageDirection, MessageRecord, PreparedSend, SignerT,
     StoredKind, TransportEvent, TransportStore, HANDSHAKE_BOND_SOMPI,
 };
+use kaspaverse_core::frames::{
+    self, build_accept, build_challenge, build_taunt, fresh_challenge_id, GAME_ATTACK_DEFEND,
+};
 use kaspaverse_core::handshake::{fresh_alias, fresh_conversation_id, HandshakePayload};
 use kaspaverse_core::transport_crypto::{encrypt, Envelope};
 use kaspaverse_core::{Branch, CoreError, KeySlot, TransportDecryptor};
@@ -115,10 +118,35 @@ pub struct ThreadMessageDto {
     pub kind: String,
     pub outbound: bool,
     pub unix_ms: u64,
-    /// Decrypted message text for readable `comm` rows; empty otherwise.
+    /// Decrypted message text for readable `comm` rows; empty otherwise. When
+    /// [`frame`](Self::frame) is set this is the frame's readable line (what a
+    /// Kasia user sees; the KaspaVerse card fallback), not the machine tail.
     pub text: String,
     /// False when no watched key opens the envelope (kept honest, not hidden).
     pub readable: bool,
+    /// Set when the decrypted body carried a RECOGNIZED `kv:1:` game frame —
+    /// the tappable arcade half. `None` for a plain message OR an unknown /
+    /// forward-version tail (which render as an ordinary bubble from `text`,
+    /// P5). Display-only: a frame binds no value (§0.3).
+    pub frame: Option<FrameDto>,
+}
+
+/// A parsed `kv:1:` game frame (P2.4 §0.5). Fields come from the frame JSON, so
+/// a tampered readable line can't misstate the card. Nothing here binds value —
+/// the `stake` is a DISPLAY number; the real wager binds at the P3 covenant.
+#[derive(Clone, Debug)]
+pub struct FrameDto {
+    /// `challenge` | `accept` | `result` | `taunt`.
+    pub kind: String,
+    /// `challenge`: the game slug (P2.4: `attack_defend`); empty otherwise.
+    pub game: String,
+    /// `challenge`: the DISPLAY stake in KAS; empty ⇒ a friendly, no-stake duel.
+    pub stake: String,
+    /// The challenge id this frame concerns (a `challenge`'s own id, or the id
+    /// an `accept`/`result` references) — enables card pairing; empty otherwise.
+    pub id: String,
+    /// `result`: the reported outcome (a claim). `taunt`: the text. Else empty.
+    pub detail: String,
 }
 
 /// Single-slot stash for the built-but-unsigned transport send — SEPARATE from
@@ -850,6 +878,20 @@ pub async fn transport_prepare_comm(
     if text.trim().is_empty() {
         return Err(AppError::msg("enter a message"));
     }
+    prepare_comm_plaintext(conversation_id, text).await
+}
+
+/// The shared self-send comm PREPARE (D-069). Seal `text` to the contact,
+/// self-send the computed floor to our OWN bound address (input[0] + change =
+/// that address, D2/D-068), and stash the built-but-unsigned plan. Every
+/// comm-carried plaintext — a plain message OR a `kv:1:` game frame — funnels
+/// through here, so the tx-construction / self-send / source-address path is
+/// IDENTICAL for all of them; only the plaintext bytes differ (frames are
+/// hints, never a new send path — the send-path audit surface is unchanged).
+async fn prepare_comm_plaintext(
+    conversation_id: String,
+    text: String,
+) -> Result<TransportSendSummaryDto, AppError> {
     let hub = hub()?;
     let (contact_address, my_alias, bound) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -915,6 +957,44 @@ pub async fn transport_prepare_comm(
         },
     )
     .await
+}
+
+/// Phase 1 — compose a `kv:1:challenge` (Attack & Defend) as a self-send comm.
+/// `stake` is a DISPLAY value in KAS (`None` ⇒ a friendly, no-stake duel); it
+/// binds NO value here — frames are hints, the real wager binds at the P3
+/// covenant. The readable invite line is GENERATED in `core::frames` from the
+/// fields (never free-typed), so it can't misrepresent the card. Rides the
+/// shared comm prepare above — no new send-path economics.
+pub async fn transport_prepare_challenge(
+    conversation_id: String,
+    stake: Option<String>,
+) -> Result<TransportSendSummaryDto, AppError> {
+    let id = fresh_challenge_id();
+    let plaintext =
+        build_challenge(GAME_ATTACK_DEFEND, stake.as_deref(), &id).map_err(AppError::core)?;
+    prepare_comm_plaintext(conversation_id, plaintext).await
+}
+
+/// Phase 1 — compose a social `kv:1:accept` for the challenge `ref_id`. This is
+/// NOT a wager and NEVER auto-spends: it is a self-send comm the user confirms
+/// through the normal hold-to-sign ceremony (§0.5 law a). NB: deliberately
+/// distinct from [`transport_prepare_accept`], the handshake-bond acceptance.
+pub async fn transport_prepare_challenge_accept(
+    conversation_id: String,
+    ref_id: String,
+) -> Result<TransportSendSummaryDto, AppError> {
+    let plaintext = build_accept(GAME_ATTACK_DEFEND, &ref_id).map_err(AppError::core)?;
+    prepare_comm_plaintext(conversation_id, plaintext).await
+}
+
+/// Phase 1 — compose a `kv:1:taunt` (personality) as a self-send comm. The text
+/// is the frame's own content; empty text is refused in `core::frames`.
+pub async fn transport_prepare_taunt(
+    conversation_id: String,
+    text: String,
+) -> Result<TransportSendSummaryDto, AppError> {
+    let plaintext = build_taunt(&text).map_err(AppError::core)?;
+    prepare_comm_plaintext(conversation_id, plaintext).await
 }
 
 /// Phase 2: sign + broadcast the stashed transport plan identified by `nonce`.
@@ -1113,10 +1193,11 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
                     unix_ms: record.unix_ms,
                     text: String::new(),
                     readable: true,
+                    frame: None,
                 });
             }
             StoredKind::Comm => {
-                let (text, readable) = match Envelope::from_bytes(&record.envelope) {
+                let (text, frame, readable) = match Envelope::from_bytes(&record.envelope) {
                     Ok(envelope) => {
                         let slot = record
                             .sealed_to
@@ -1124,17 +1205,22 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
                             .unwrap_or(bound);
                         match open_with_fallback(&hub, slot, &envelope) {
                             Ok(plaintext) => {
-                                (String::from_utf8_lossy(&plaintext).into_owned(), true)
+                                // Split the readable line from any `kv:1:` frame.
+                                // Only the parsed result crosses the bridge; an
+                                // unknown/forward tail degrades to its line (P5).
+                                let body = String::from_utf8_lossy(&plaintext).into_owned();
+                                let (text, frame) = split_frame(&body);
+                                (text, frame, true)
                             }
                             Err(CoreError::VaultLocked) => {
                                 return Err(AppError::msg(
                                     "wallet is locked — unlock to read messages",
                                 ))
                             }
-                            Err(_) => (String::new(), false),
+                            Err(_) => (String::new(), None, false),
                         }
                     }
-                    Err(_) => (String::new(), false),
+                    Err(_) => (String::new(), None, false),
                 };
                 thread.push(ThreadMessageDto {
                     txid: record.txid,
@@ -1143,11 +1229,52 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
                     unix_ms: record.unix_ms,
                     text,
                     readable,
+                    frame,
                 });
             }
         }
     }
     Ok(thread)
+}
+
+/// Split a decrypted comm body into its display text and any recognized `kv:1:`
+/// frame. Pure and total — `core::frames::parse` never touches value-bearing
+/// state, so a forged frame changes only this display DTO (§0.3). A plain
+/// message or an unknown/forward-version tail carries no frame and renders as
+/// an ordinary bubble; a recognized frame's readable line becomes the text (the
+/// machine tail stays out of Dart) with the card fields taken from the JSON.
+fn split_frame(body: &str) -> (String, Option<FrameDto>) {
+    match frames::parse(body) {
+        frames::Parsed::Plain(text) => (text, None),
+        frames::Parsed::Unknown { line } => (line, None),
+        frames::Parsed::Frame(f) => (f.line.clone(), Some(frame_dto(f))),
+    }
+}
+
+fn frame_dto(f: frames::KvFrame) -> FrameDto {
+    FrameDto {
+        kind: f.kind.as_token().to_string(),
+        game: clamp_display(f.game),
+        stake: clamp_display(f.stake),
+        // A challenge's own id, or the id an accept/result references.
+        id: clamp_display(f.id.or(f.ref_id)),
+        detail: clamp_display(f.detail),
+    }
+}
+
+/// Bound a counterparty-controlled frame field before it crosses to the card.
+/// A frame binds no value and is already tx-mass-bounded on the wire, so this is
+/// display defence-in-depth (wallet-security/ux P2.4 note) — a hostile inbound
+/// frame can't inject an over-long string into a card. Char-wise (never splits a
+/// UTF-8 code point); matches the build-side `core::frames` field cap.
+fn clamp_display(field: Option<String>) -> String {
+    const MAX: usize = 64;
+    let s = field.unwrap_or_default();
+    if s.chars().count() > MAX {
+        s.chars().take(MAX).collect()
+    } else {
+        s
+    }
 }
 
 /// Bound slot first, watched window second (robust against rebinds without

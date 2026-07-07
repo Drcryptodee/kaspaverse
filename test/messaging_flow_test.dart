@@ -31,6 +31,7 @@ ThreadMessageDto message(
   bool outbound = false,
   String text = 'hello over L1',
   bool readable = true,
+  FrameDto? frame,
 }) => ThreadMessageDto(
   txid: txid,
   kind: kind,
@@ -38,7 +39,16 @@ ThreadMessageDto message(
   unixMs: BigInt.one,
   text: text,
   readable: readable,
+  frame: frame,
 );
+
+FrameDto frameDto({
+  required String kind,
+  String game = '',
+  String stake = '',
+  String id = '',
+  String detail = '',
+}) => FrameDto(kind: kind, game: game, stake: stake, id: id, detail: detail);
 
 TransportSendSummaryDto summary({BigInt? amount}) => TransportSendSummaryDto(
   nonce: BigInt.from(7),
@@ -332,6 +342,177 @@ void main() {
             'a second message in the SAME conversation must still refresh '
             'the open thread (ValueNotifier equality trap — sitting find)',
       );
+    });
+  });
+
+  group('ThreadScreen — kv:1: game frames (the safety spine)', () {
+    Widget screen() => const MaterialApp(
+      home: ThreadScreen(
+        conversationId: 'c1',
+        contactLabel: 'kaspa:qz7u…j43pf',
+      ),
+    );
+
+    ThreadMessageDto challengeRow({
+      bool outbound = false,
+      String stake = '10',
+    }) => message(
+      'txc',
+      outbound: outbound,
+      text: '⚔️ Attack & Defend challenge — a duel.',
+      frame: frameDto(
+        kind: 'challenge',
+        game: 'attack_defend',
+        stake: stake,
+        id: 'a1b2c3d4',
+      ),
+    );
+
+    testWidgets('a challenge renders a card from its FIELDS, with actions', (
+      tester,
+    ) async {
+      MessagingService.threadFn = (_) async => [challengeRow()];
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      // The card is built from the JSON fields (game/stake), not the line.
+      expect(find.text('Attack & Defend'), findsOneWidget);
+      expect(find.textContaining('10 KAS'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Accept'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Decline'), findsOneWidget);
+    });
+
+    testWidgets('a friendly (no-stake) challenge reads "Friendly"', (
+      tester,
+    ) async {
+      MessagingService.threadFn = (_) async => [challengeRow(stake: '')];
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Friendly'), findsOneWidget);
+    });
+
+    // Law (b): Accept opens the confirm ceremony and NEVER auto-broadcasts.
+    testWidgets('Accept prepares + opens the ceremony, never auto-spends', (
+      tester,
+    ) async {
+      var accepted = '';
+      var commits = 0;
+      MessagingService.prepareChallengeAcceptFn = (id, refId) async {
+        accepted = '$id/$refId';
+        return summary();
+      };
+      MessagingService.commitFn = (_) async {
+        commits++;
+        return const SendOutcomeDto(
+          finalTxid: 'ab',
+          submitted: 1,
+          total: 1,
+          partial: false,
+        );
+      };
+      MessagingService.threadFn = (_) async => [challengeRow()];
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Accept'));
+      await tester.pumpAndSettle();
+
+      expect(accepted, 'c1/a1b2c3d4', reason: 'accept references the id');
+      expect(find.text('Confirm accept'), findsOneWidget);
+      // The only broadcast path is a completed hold-to-sign; a tap must not.
+      expect(commits, 0, reason: 'Accept never auto-broadcasts (§0.5 law a)');
+    });
+
+    // Law (a): a forged result frame changes only pixels — inert, no action,
+    // no spend, and framed as an unverified claim.
+    testWidgets(
+      'a forged result frame is an inert claim — no action, no spend',
+      (tester) async {
+        var commits = 0;
+        MessagingService.commitFn = (_) async {
+          commits++;
+          return const SendOutcomeDto(
+            finalTxid: 'ab',
+            submitted: 1,
+            total: 1,
+            partial: false,
+          );
+        };
+        MessagingService.threadFn = (_) async => [
+          message(
+            'txr',
+            text: '🏁 I won',
+            frame: frameDto(kind: 'result', id: 'a1b2c3d4', detail: 'win'),
+          ),
+        ];
+        await tester.pumpWidget(screen());
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('Reported result'), findsOneWidget);
+        expect(find.text('🏁 I won'), findsOneWidget);
+        // Inert: no tappable action wired to a result, and nothing broadcast.
+        expect(find.widgetWithText(FilledButton, 'Accept'), findsNothing);
+        expect(commits, 0, reason: 'a frame binds no value (§0.3)');
+      },
+    );
+
+    testWidgets('Decline retires the actions locally, sending nothing', (
+      tester,
+    ) async {
+      var accepts = 0;
+      MessagingService.prepareChallengeAcceptFn = (_, _) async {
+        accepts++;
+        return summary();
+      };
+      MessagingService.threadFn = (_) async => [challengeRow()];
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(TextButton, 'Decline'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Declined'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Accept'), findsNothing);
+      expect(accepts, 0, reason: 'Decline sends no frame (no decline kind)');
+    });
+
+    testWidgets('an outbound challenge shows sent, not Accept', (tester) async {
+      MessagingService.threadFn = (_) async => [challengeRow(outbound: true)];
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+      expect(find.text('Challenge sent'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Accept'), findsNothing);
+    });
+
+    testWidgets('composing a challenge runs prepare + the confirm ceremony', (
+      tester,
+    ) async {
+      String? convId;
+      String? stake;
+      MessagingService.prepareChallengeFn = (id, s) async {
+        convId = id;
+        stake = s;
+        return summary();
+      };
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.sports_esports_outlined));
+      await tester.pumpAndSettle();
+      expect(find.text('Attack & Defend'), findsOneWidget);
+
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == 'e.g. 10',
+        ),
+        '5',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Review challenge'));
+      await tester.pumpAndSettle();
+
+      expect(convId, 'c1');
+      expect(stake, '5', reason: 'the display stake flows to the frame');
+      expect(find.text('Confirm challenge'), findsOneWidget);
     });
   });
 

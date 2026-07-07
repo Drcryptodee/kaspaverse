@@ -1,0 +1,116 @@
+{
+ "version": "kv:1",
+ "game": "attack_defend",
+ "generated": "2026-07-07 (P2.4)",
+ "notes": [
+  "Canonical kv:1: game-frame vectors (P2.4 §0.5). A frame rides inside a decrypted comm plaintext as `<generated line>\\n<kv:1:<kind>:<json>>`.",
+  "build[]: pins build_* emission byte-for-byte (the line is generated from the fields, law P4). parse[]: pins parse() classification + card fields.",
+  "This is the schema authority for kv:1: frames. The transport_crypto_v1.json oracle-even-002 inline sample predates this freeze (see its notes).",
+  "This JSON-vectors-plus-harness shape mirrors transport_crypto_v1.json + transport_parity.rs — the P3 contract-vectors seed pattern (§0.10)."
+ ],
+ "build": [
+  {
+   "name": "challenge-staked",
+   "kind": "challenge",
+   "game": "attack_defend",
+   "stake": "10",
+   "id": "a1b2c3d4",
+   "wire": "⚔️ Attack & Defend challenge — 10 KAS. Open in KaspaVerse to play.\nkv:1:challenge:{\"game\":\"attack_defend\",\"stake\":\"10\",\"id\":\"a1b2c3d4\"}"
+  },
+  {
+   "name": "challenge-fractional-stake",
+   "kind": "challenge",
+   "game": "attack_defend",
+   "stake": "2.5",
+   "id": "deadbeef",
+   "wire": "⚔️ Attack & Defend challenge — 2.5 KAS. Open in KaspaVerse to play.\nkv:1:challenge:{\"game\":\"attack_defend\",\"stake\":\"2.5\",\"id\":\"deadbeef\"}"
+  },
+  {
+   "name": "challenge-friendly",
+   "kind": "challenge",
+   "game": "attack_defend",
+   "id": "00ff00ff",
+   "wire": "⚔️ Attack & Defend challenge — friendly. Open in KaspaVerse to play.\nkv:1:challenge:{\"game\":\"attack_defend\",\"id\":\"00ff00ff\"}"
+  },
+  {
+   "name": "accept",
+   "kind": "accept",
+   "game": "attack_defend",
+   "ref": "a1b2c3d4",
+   "wire": "✓ Accepted the ⚔️ Attack & Defend challenge.\nkv:1:accept:{\"ref\":\"a1b2c3d4\"}"
+  },
+  {
+   "name": "taunt",
+   "kind": "taunt",
+   "text": "prepare to lose",
+   "wire": "prepare to lose\nkv:1:taunt:{\"text\":\"prepare to lose\"}"
+  }
+ ],
+ "parse": [
+  {
+   "name": "parse-challenge-card-from-json",
+   "expect": "frame",
+   "kind": "challenge",
+   "game": "attack_defend",
+   "stake": "10",
+   "id": "a1b2c3d4",
+   "plaintext": "⚔️ Attack & Defend challenge — 10 KAS. Open in KaspaVerse to play.\nkv:1:challenge:{\"game\":\"attack_defend\",\"stake\":\"10\",\"id\":\"a1b2c3d4\"}"
+  },
+  {
+   "name": "parse-tampered-line-uses-json-not-line",
+   "expect": "frame",
+   "kind": "challenge",
+   "game": "attack_defend",
+   "stake": "10",
+   "id": "a1b2c3d4",
+   "plaintext": "⚔️ Attack & Defend challenge — 9999 KAS. Open in KaspaVerse to play.\nkv:1:challenge:{\"game\":\"attack_defend\",\"stake\":\"10\",\"id\":\"a1b2c3d4\"}"
+  },
+  {
+   "name": "parse-accept",
+   "expect": "frame",
+   "kind": "accept",
+   "ref": "a1b2c3d4",
+   "plaintext": "✓ Accepted the ⚔️ Attack & Defend challenge.\nkv:1:accept:{\"ref\":\"a1b2c3d4\"}"
+  },
+  {
+   "name": "parse-result-is-a-claim",
+   "expect": "frame",
+   "kind": "result",
+   "ref": "a1b2c3d4",
+   "detail": "win",
+   "plaintext": "🏁 reported result\nkv:1:result:{\"ref\":\"a1b2c3d4\",\"outcome\":\"win\"}"
+  },
+  {
+   "name": "parse-taunt",
+   "expect": "frame",
+   "kind": "taunt",
+   "detail": "prepare to lose",
+   "plaintext": "prepare to lose\nkv:1:taunt:{\"text\":\"prepare to lose\"}"
+  },
+  {
+   "name": "parse-plain-comm",
+   "expect": "plain",
+   "plaintext": "hey, are you around later?"
+  },
+  {
+   "name": "parse-unknown-kind-degrades",
+   "expect": "unknown",
+   "line": "⚔️ some future game",
+   "plaintext": "⚔️ some future game\nkv:1:duel:{\"x\":1}"
+  },
+  {
+   "name": "parse-future-version-degrades",
+   "expect": "unknown",
+   "line": "opens in a newer app",
+   "plaintext": "opens in a newer app\nkv:2:challenge:{\"game\":\"attack_defend\"}"
+  },
+  {
+   "name": "parse-reserved-params-tolerated",
+   "expect": "frame",
+   "kind": "challenge",
+   "game": "attack_defend",
+   "id": "aa",
+   "plaintext": "⚔️ later\nkv:1:challenge:{\"game\":\"attack_defend\",\"id\":\"aa\",\"params\":{\"covenant\":\"p3\"}}"
+  }
+ ]
+}

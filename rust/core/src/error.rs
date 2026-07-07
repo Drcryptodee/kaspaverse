@@ -56,6 +56,10 @@ pub enum CoreError {
     /// (bad JSON, malformed alias, unsupported version). The reason names the
     /// field, never its value — plaintext never enters an error (§0.4).
     HandshakeShape(&'static str),
+    /// A `kv:1:` game frame could not be BUILT from the given fields (a
+    /// wire-breaking slug/stake/id, or a serialize failure). Parsing never
+    /// errors — it degrades. The reason names the field, never its value.
+    FrameShape(&'static str),
 }
 
 impl fmt::Display for CoreError {
@@ -93,6 +97,7 @@ impl fmt::Display for CoreError {
             }
             Self::TransportSeal => f.write_str("transport encrypt failed"),
             Self::HandshakeShape(what) => write!(f, "handshake payload malformed: {what}"),
+            Self::FrameShape(what) => write!(f, "game frame malformed: {what}"),
         }
     }
 }
