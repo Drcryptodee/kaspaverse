@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `change_window`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `snapshots`
+// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `change_window`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `overlaid`, `snapshots`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Subscribe to live wallet snapshots (balance + activity) for the unlocked
@@ -66,9 +66,15 @@ class ActivityRecord {
           maturity == other.maturity;
 }
 
-/// Maturity of an activity row (from `TransactionRecord::maturity()` at the
-/// live DAA — never our own threshold; INV-9).
-enum MaturityState { pending, confirmed }
+/// Maturity of an activity row. `Pending`/`Confirmed` come from wallet-core
+/// (`TransactionRecord::maturity()` at the live DAA — never our own
+/// threshold; INV-9). `Accepted` is the V1 acceptance-spine overlay: the
+/// chain accepted the txid (VirtualChainChanged, node-read) but wallet-core
+/// hasn't folded it yet — this kills the "Pending" lie the V0 baselines
+/// measured (≥15 s past on-chain acceptance). V1 renders it on the existing
+/// confirmed chip (semantically identical for spends); V2's three-state chip
+/// differentiates.
+enum MaturityState { pending, accepted, confirmed }
 
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI
 /// can tell "not synced yet" (`None` → DS-1 unknown `—`) from a real, live zero

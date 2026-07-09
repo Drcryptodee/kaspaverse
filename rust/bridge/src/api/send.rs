@@ -231,7 +231,29 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
     // The change index this send used (cursor is advanced only on full success,
     // so it still reads as the index we prepared with).
     let used_cursor = vault::change_cursor();
-    let outcome = prepared.commit().await;
+
+    // V1 acceptance spine: resolve the tracker BEFORE committing so every
+    // leg is watched the instant its submit is acked — a fast acceptance of
+    // an early leg must not slip past the live VCC stream while later legs
+    // are still broadcasting (consensus-audit finding 3). Partial-outcome
+    // legs are covered by construction (the hook fired when they submitted).
+    // One hook covers payments AND transport sends (both commit paths flow
+    // through here); a tracker failure never fails the send.
+    let tracker = match super::dag::shared_tracker().await {
+        Ok(tracker) => Some(tracker),
+        Err(e) => {
+            log::warn!(
+                "send: acceptance tracker unavailable ({}) — txids unwatched",
+                e.message
+            );
+            None
+        }
+    };
+    let mut hook = tracker
+        .map(|tracker| move |txid: &str| tracker.watch(txid, kaspaverse_chain::WatchSource::Send));
+    let outcome = prepared
+        .commit(hook.as_mut().map(|h| h as &mut (dyn FnMut(&str) + Send)))
+        .await;
 
     if fully_broadcast(&outcome) {
         // The change at `used_cursor` is now in use → next send uses the next.
@@ -308,6 +330,7 @@ mod tests {
             total: 2,
             partial: false,
             error: None,
+            submitted_txids: vec!["b".repeat(64), "a".repeat(64)],
         };
         assert!(fully_broadcast(&clean));
 
@@ -324,6 +347,7 @@ mod tests {
             partial: false,
             error: Some("boom".into()),
             final_txid: None,
+            submitted_txids: Vec::new(),
         }));
         // Degenerate zero-leg — never advances.
         assert!(!fully_broadcast(&SendOutcome {
@@ -332,6 +356,7 @@ mod tests {
             partial: false,
             error: None,
             final_txid: None,
+            submitted_txids: Vec::new(),
         }));
     }
 

@@ -67,6 +67,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FrameDto dco_decode_box_autoadd_frame_dto(dynamic raw);
 
   @protected
+  GapAgeDto dco_decode_box_autoadd_gap_age_dto(dynamic raw);
+
+  @protected
   BigInt dco_decode_box_autoadd_u_64(dynamic raw);
 
   @protected
@@ -83,6 +86,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FrameDto dco_decode_frame_dto(dynamic raw);
+
+  @protected
+  GapAgeDto dco_decode_gap_age_dto(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -103,6 +109,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<SpanMarkerDto> dco_decode_list_span_marker_dto(dynamic raw);
+
+  @protected
   List<ThreadMessageDto> dco_decode_list_thread_message_dto(dynamic raw);
 
   @protected
@@ -115,6 +124,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FrameDto? dco_decode_opt_box_autoadd_frame_dto(dynamic raw);
 
   @protected
+  GapAgeDto? dco_decode_opt_box_autoadd_gap_age_dto(dynamic raw);
+
+  @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
 
   @protected
@@ -122,6 +134,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SendSummaryDto dco_decode_send_summary_dto(dynamic raw);
+
+  @protected
+  SpanMarkerDto dco_decode_span_marker_dto(dynamic raw);
 
   @protected
   ThreadMessageDto dco_decode_thread_message_dto(dynamic raw);
@@ -199,6 +214,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FrameDto sse_decode_box_autoadd_frame_dto(SseDeserializer deserializer);
 
   @protected
+  GapAgeDto sse_decode_box_autoadd_gap_age_dto(SseDeserializer deserializer);
+
+  @protected
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
@@ -217,6 +235,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FrameDto sse_decode_frame_dto(SseDeserializer deserializer);
+
+  @protected
+  GapAgeDto sse_decode_gap_age_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -241,6 +262,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<SpanMarkerDto> sse_decode_list_span_marker_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ThreadMessageDto> sse_decode_list_thread_message_dto(
     SseDeserializer deserializer,
   );
@@ -255,6 +281,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FrameDto? sse_decode_opt_box_autoadd_frame_dto(SseDeserializer deserializer);
 
   @protected
+  GapAgeDto? sse_decode_opt_box_autoadd_gap_age_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
@@ -262,6 +293,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SendSummaryDto sse_decode_send_summary_dto(SseDeserializer deserializer);
+
+  @protected
+  SpanMarkerDto sse_decode_span_marker_dto(SseDeserializer deserializer);
 
   @protected
   ThreadMessageDto sse_decode_thread_message_dto(SseDeserializer deserializer);
@@ -361,6 +395,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_gap_age_dto(
+    GapAgeDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
 
   @protected
@@ -383,6 +423,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_frame_dto(FrameDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_gap_age_dto(GapAgeDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -412,6 +455,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_span_marker_dto(
+    List<SpanMarkerDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_thread_message_dto(
     List<ThreadMessageDto> self,
     SseSerializer serializer,
@@ -430,6 +479,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_gap_age_dto(
+    GapAgeDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
 
   @protected
@@ -443,6 +498,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     SendSummaryDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_span_marker_dto(SpanMarkerDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_thread_message_dto(

@@ -18,7 +18,9 @@ use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
+use crate::acceptance::VccBatch;
 use crate::error::Result;
+use crate::spans;
 use crate::transport::{self, TransportEvent};
 
 /// How long the cached-endpoint fast path may take before falling back to the
@@ -131,6 +133,15 @@ struct Inner {
     /// [`last_block_age_secs`] and forces a [`reconnect`]. A plain atomic store
     /// every block (no I/O), unlike the throttled cursor write.
     last_block_at: AtomicU64,
+    /// V1 acceptance spine: where the event task forwards VirtualChainChanged
+    /// batches once the tracker is attached ([`DagMonitor::attach_acceptance`]).
+    /// Unattached (or a dead receiver) = batches drop harmlessly — the tracker's
+    /// own reconnect catch-up recovers anything missed while detached.
+    vcc_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<VccBatch>>>,
+    /// True until the first VirtualDaaScore after a connect — drives the
+    /// `first_daa` span marker (V1 observability; closes the L40-scarred
+    /// time-to-first-DAA baseline row).
+    daa_seen_since_connect: AtomicBool,
 }
 
 /// Owns one wRPC client plus the event task that tracks its connection state
@@ -176,8 +187,23 @@ impl DagMonitor {
                 transport_cursor: Mutex::new(None),
                 transport_cursor_written: AtomicU64::new(0),
                 last_block_at: AtomicU64::new(0),
+                vcc_tx: Mutex::new(None),
+                daa_seen_since_connect: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// Attach the acceptance tracker (V1): returns the receiving end of the
+    /// VirtualChainChanged forward. Batches that arrive before attachment
+    /// drop harmlessly (the tracker's connect catch-up covers the gap).
+    pub fn attach_acceptance(&self) -> tokio::sync::mpsc::UnboundedReceiver<VccBatch> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *self
+            .inner
+            .vcc_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx);
+        rx
     }
 
     /// Tell the monitor where to remember the last-good endpoint (app-private
@@ -452,6 +478,8 @@ impl DagMonitor {
     /// re-audit): one TLS+WS dial to a known node instead of resolver
     /// round-trips and a node-quality lottery.
     async fn connect_preferring_cache(&self) -> Result<()> {
+        // V1 span: cold-connect measures from here to `wss_connected`.
+        spans::mark("connect_start");
         if let Some(url) = self.read_cached_endpoint() {
             let started = std::time::Instant::now();
             let options = ConnectOptions {
@@ -502,6 +530,7 @@ impl DagMonitor {
     /// (persisted at most 30 s + grace ago), resolver fallback otherwise.
     /// No-op while already connected (never bounce a healthy socket).
     pub async fn resume(&self) -> Result<()> {
+        spans::mark("resume_start");
         self.inner.paused.store(false, Ordering::SeqCst);
         if self.is_connected() {
             return Ok(());
@@ -592,6 +621,10 @@ impl DagMonitor {
                             match self.handle_connect().await {
                                 Ok(()) => {
                                     self.inner.is_connected.store(true, Ordering::SeqCst);
+                                    // V1 spans: close the cold-connect leg,
+                                    // arm the first-DAA one.
+                                    spans::mark("wss_connected");
+                                    self.inner.daa_seen_since_connect.store(false, Ordering::Relaxed);
                                     log::info!("dag-monitor: connected to {:?}", self.inner.client.url());
                                     // Remember the node that worked — the next cold
                                     // start / post-grace resume dials it directly.
@@ -661,8 +694,39 @@ impl DagMonitor {
                             // (throttled; no-op until transport arms it). P5/D-067.
                             self.persist_transport_cursor(&added.block.header.hash);
                         }
+                        // V1 acceptance spine: forward the batch to the tracker
+                        // task when one is attached (never processed here — the
+                        // event loop stays non-blocking; blue-score resolution
+                        // and persistence live in the tracker).
+                        Ok(Notification::VirtualChainChanged(vcc)) => {
+                            let sender = self
+                                .inner
+                                .vcc_tx
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone();
+                            if let Some(tx) = sender {
+                                let accepted: Vec<(Hash, Vec<Hash>)> = vcc
+                                    .accepted_transaction_ids
+                                    .iter()
+                                    .map(|a| (a.accepting_block_hash, a.accepted_transaction_ids.clone()))
+                                    .collect();
+                                let _ = tx.send(VccBatch {
+                                    removed_chain_block_hashes: vcc.removed_chain_block_hashes.clone(),
+                                    added_chain_block_hashes: vcc.added_chain_block_hashes.clone(),
+                                    accepted: Arc::new(accepted),
+                                });
+                            }
+                        }
                         Ok(notification) => {
                             if let Some(event) = map_notification(&notification) {
+                                // V1 span: the first DAA tick after a connect
+                                // closes the time-to-first-DAA row.
+                                if matches!(event, DagEvent::VirtualDaaScore(_))
+                                    && !self.inner.daa_seen_since_connect.swap(true, Ordering::Relaxed)
+                                {
+                                    spans::mark("first_daa");
+                                }
                                 self.emit(event);
                             }
                         }
@@ -709,6 +773,18 @@ impl DagMonitor {
         // socket (foreground-only posture unchanged).
         rpc.start_notify(listener_id, Scope::BlockAdded(BlockAddedScope {}))
             .await?;
+        // V1 acceptance spine (D-073): which txids each chain block accepted,
+        // plus removed-chain-block hashes on reorg — same listener, same
+        // socket (D-005), re-registered per connect like the rest. The stream
+        // is consumed by the event task and forwarded (sparse-filtered by the
+        // tracker) — it never crosses to Dart.
+        rpc.start_notify(
+            listener_id,
+            Scope::VirtualChainChanged(VirtualChainChangedScope {
+                include_accepted_transaction_ids: true,
+            }),
+        )
+        .await?;
         Ok(())
     }
 

@@ -28,17 +28,19 @@
 //!
 //! Conversations bind to the address key they were established with
 //! ([`KeyBranch`] + index, §0.7) — the carried receive-rotation item can
-//! never break an existing thread. Reorg-tombstone discipline is carried:
-//! both stores replay `Remove` frames; the automatic reorg→tombstone trigger
-//! rides acceptance tracking (P3 lane) and is consciously deferred — frames
-//! are hints (§0.3), nothing here bears value.
+//! never break an existing thread. Reorg-tombstone discipline: the V1
+//! acceptance tracker drives [`TransportStore::tombstone_message`] when a
+//! message's accepting block is displaced past the observed window — a
+//! REVERSIBLE ghost flag (`kvlog::Frame::Tombstone`), never a delete,
+//! because a late re-acceptance must bring the row back. Frames are hints
+//! (§0.3), nothing here bears value.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::error::{ChainError, Result};
+use crate::error::Result;
+use crate::kvlog::Log;
 
 /// Which derivation branch a conversation's bound key lives on. Mirrors
 /// `kaspaverse-core::Branch` (this crate deliberately has no core
@@ -125,96 +127,6 @@ pub struct MessageRecord {
     /// binding later rebinds (a rebind must never strand old rows). Inbound
     /// rows carry `None` (they open with the conversation's bound slot).
     pub sealed_to: Option<(KeyBranch, u32)>,
-}
-
-/// One persisted frame in either append-only log (the P1.5 pattern:
-/// upsert + tombstone; replay reconstructs removals without rewriting).
-#[derive(BorshSerialize, BorshDeserialize)]
-enum Frame<T> {
-    Upsert(T),
-    Remove(String),
-}
-
-/// Length-prefix a frame: `[u32 LE len][borsh body]` (byte-identical framing
-/// to the P1.5 activity log).
-fn frame_bytes<T: BorshSerialize>(frame: &Frame<T>) -> Result<Vec<u8>> {
-    let body = borsh::to_vec(frame)
-        .map_err(|e| ChainError::Message(format!("transport store encode: {e}")))?;
-    let mut out = Vec::with_capacity(4 + body.len());
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&body);
-    Ok(out)
-}
-
-/// Replay an append-only log (last-write-wins per key; tombstones remove).
-/// Tolerates a torn final frame and stops at a corrupt body, keeping
-/// everything decoded so far — same crash posture as the activity store.
-fn replay<T: BorshDeserialize>(bytes: &[u8], key_of: impl Fn(&T) -> String) -> HashMap<String, T> {
-    let mut records = HashMap::new();
-    let mut cursor = bytes;
-    while cursor.len() >= 4 {
-        let len = u32::from_le_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]) as usize;
-        cursor = &cursor[4..];
-        if cursor.len() < len {
-            break; // torn tail
-        }
-        let (body, rest) = cursor.split_at(len);
-        cursor = rest;
-        match Frame::<T>::try_from_slice(body) {
-            Ok(Frame::Upsert(record)) => {
-                records.insert(key_of(&record), record);
-            }
-            Ok(Frame::Remove(key)) => {
-                records.remove(&key);
-            }
-            Err(_) => break, // corrupt frame — keep what we have
-        }
-    }
-    records
-}
-
-/// One append-only log file + its replayed map.
-struct Log<T> {
-    path: PathBuf,
-    records: HashMap<String, T>,
-}
-
-impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
-    fn load(path: PathBuf, key_of: impl Fn(&T) -> String) -> Result<Self> {
-        let records = match std::fs::read(&path) {
-            Ok(bytes) => replay(&bytes, key_of),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => return Err(e.into()),
-        };
-        Ok(Self { path, records })
-    }
-
-    fn append(&self, frame: &Frame<T>) -> Result<()> {
-        use std::io::Write;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        file.write_all(&frame_bytes(frame)?)?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    fn upsert(&mut self, key: String, record: T) -> Result<()> {
-        self.append(&Frame::Upsert(record.clone()))?;
-        self.records.insert(key, record);
-        Ok(())
-    }
-
-    fn remove(&mut self, key: &str) -> Result<()> {
-        if self.records.remove(key).is_some() {
-            self.append(&Frame::Remove(key.to_string()))?;
-        }
-        Ok(())
-    }
 }
 
 /// The P2.3 transport store: conversations + messages over two logs in an
@@ -318,6 +230,15 @@ impl TransportStore {
         self.messages.records.contains_key(txid)
     }
 
+    /// The conversation a stored message belongs to (None = txid not stored)
+    /// — the V1 tombstone consumer's routing lookup.
+    pub fn message_conversation(&self, txid: &str) -> Option<String> {
+        self.messages
+            .records
+            .get(txid)
+            .map(|m| m.conversation_id.clone())
+    }
+
     /// A conversation's messages, oldest first (thread order).
     pub fn messages_for(&self, conversation_id: &str) -> Vec<MessageRecord> {
         let mut rows: Vec<MessageRecord> = self
@@ -331,10 +252,31 @@ impl TransportStore {
         rows
     }
 
-    /// Reorg tombstone (discipline carried from the P1.5 store): removes the
-    /// row and appends a `Remove` frame so replay reconstructs the removal.
-    pub fn tombstone_message(&mut self, txid: &str) -> Result<()> {
+    /// Hard-remove a message row (the hide-conversation purge path — a
+    /// deliberate local delete, NOT the reversible reorg tombstone below).
+    pub fn remove_message(&mut self, txid: &str) -> Result<()> {
         self.messages.remove(txid)
+    }
+
+    /// Reorg tombstone (V1 acceptance-spine lane): flags the row as a ghost —
+    /// the record and its sealed envelope STAY, replay reconstructs the flag,
+    /// and a late re-acceptance reverses it ([`Self::untombstone_message`]).
+    /// Idempotent: returns `false` (no log growth) for an unknown or
+    /// already-tombstoned txid.
+    pub fn tombstone_message(&mut self, txid: &str) -> Result<bool> {
+        self.messages.tombstone(txid)
+    }
+
+    /// Reverse a reorg tombstone — the displaced tx was re-accepted after the
+    /// window fired; the ghost comes back as a live row. Idempotent.
+    pub fn untombstone_message(&mut self, txid: &str) -> Result<bool> {
+        self.messages.untombstone(txid)
+    }
+
+    /// Whether a stored message is currently ghost-flagged (the DTO surfaces
+    /// this so the thread can render displacement honestly).
+    pub fn is_message_tombstoned(&self, txid: &str) -> bool {
+        self.messages.is_tombstoned(txid)
     }
 }
 
@@ -475,20 +417,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The V1 reorg lane: a tombstone is a reversible GHOST flag — the row
+    /// (and its sealed envelope) survives, the flag survives replay, and a
+    /// late re-acceptance brings the row back untouched.
     #[test]
-    fn tombstones_survive_replay() {
+    fn tombstones_are_reversible_ghosts_that_survive_replay() {
         let dir = test_dir("tomb");
         let mut store = TransportStore::load(dir.clone()).unwrap();
         store.record_message(message("tx1", "c1", 100, 1)).unwrap();
         store.record_message(message("tx2", "c1", 101, 2)).unwrap();
-        store.tombstone_message("tx1").unwrap();
-        // Tombstoning an unknown txid is a no-op, not an error.
-        store.tombstone_message("never-seen").unwrap();
+        assert!(store.tombstone_message("tx1").unwrap());
+        // Idempotent + unknown-txid no-ops: no error, no log growth.
+        assert!(!store.tombstone_message("tx1").unwrap());
+        assert!(!store.tombstone_message("never-seen").unwrap());
 
-        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        let mut reloaded = TransportStore::load(dir.clone()).unwrap();
         let thread = reloaded.messages_for("c1");
-        assert_eq!(thread.len(), 1);
-        assert_eq!(thread[0].txid, "tx2");
+        assert_eq!(thread.len(), 2, "the ghost row is still in the thread");
+        assert!(reloaded.is_message_tombstoned("tx1"));
+        assert!(!reloaded.is_message_tombstoned("tx2"));
+        // Dedup still holds — the ghost's txid can't be re-recorded.
+        assert!(!reloaded
+            .record_message(message("tx1", "c1", 100, 9))
+            .unwrap());
+
+        // Re-acceptance reverses the ghost; the reversal survives replay.
+        assert!(reloaded.untombstone_message("tx1").unwrap());
+        let again = TransportStore::load(dir.clone()).unwrap();
+        assert!(!again.is_message_tombstoned("tx1"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

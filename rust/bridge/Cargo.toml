@@ -30,6 +30,16 @@ zeroize.workspace = true
 # the seed path.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21.1", default-features = false }
+# L40 closed for good (hardening V1, findings-register item 6 — the ratified
+# fallback): profile/release builds silently drop BOTH the workflow-log lane
+# AND Flutter's Dart print lane (proven live, 2026-07-09 V1 sitting), so our
+# `log` facade sinks straight into Android's liblog via android_logger —
+# reaches logcat on every build flavor. Android-only (host builds/tests keep
+# the workflow-log forwarder); the unsafe liblog binding stays inside the
+# audited crate, never hand-written here. INV-3 unchanged: this is a SINK —
+# the no-secrets discipline lives at the call sites (wallet-security PASS
+# enumerated every V1 line). dependency-steward audits at name+version.
+android_logger = { version = "0.15", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

@@ -32,6 +32,7 @@ ThreadMessageDto message(
   String text = 'hello over L1',
   bool readable = true,
   FrameDto? frame,
+  bool tombstoned = false,
 }) => ThreadMessageDto(
   txid: txid,
   kind: kind,
@@ -40,6 +41,7 @@ ThreadMessageDto message(
   text: text,
   readable: readable,
   frame: frame,
+  tombstoned: tombstoned,
 );
 
 FrameDto frameDto({

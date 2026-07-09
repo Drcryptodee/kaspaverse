@@ -8,9 +8,14 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `split_frame`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `warn_store`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `split_frame`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `warn_store`, `watch_acceptance`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// The gap-age computed at this open (`None` until resolved / first run).
+/// Pull surface for V2b's notice; also logged + span-marked when resolved.
+Future<GapAgeDto?> transportGapAge() =>
+    RustLib.instance.api.crateApiTransportTransportGapAge();
 
 /// Start (or restart after a re-unlock) the transport hub: load the stores,
 /// take a vault-scoped decryptor, derive the PUBLIC watched window, and
@@ -263,6 +268,35 @@ class FrameDto {
           detail == other.detail;
 }
 
+/// "How much history did this open skip?" — the honest number behind V2b's
+/// gap notice. All node-read data (INV-9): cursor block timestamp vs now.
+class GapAgeDto {
+  /// Minutes between the last-scanned block and now, when knowable.
+  final BigInt? gapMinutes;
+
+  /// True when the node no longer knows the cursor block: the gap is at
+  /// least the pruning horizon (read from the pinned params — see
+  /// `kaspaverse_chain::pruning_horizon_ms`), and history before it is
+  /// unrecoverable from any normal node.
+  final bool beyondHorizon;
+
+  const GapAgeDto({this.gapMinutes, required this.beyondHorizon});
+
+  static Future<GapAgeDto> default_() =>
+      RustLib.instance.api.crateApiTransportGapAgeDtoDefault();
+
+  @override
+  int get hashCode => gapMinutes.hashCode ^ beyondHorizon.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GapAgeDto &&
+          runtimeType == other.runtimeType &&
+          gapMinutes == other.gapMinutes &&
+          beyondHorizon == other.beyondHorizon;
+}
+
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
 /// cross this bridge (user content post-decrypt, D-056; ffi-leak pre-cleared
 /// shape). Produced only by [`transport_thread`] (decrypt-on-view, §0.4):
@@ -289,6 +323,11 @@ class ThreadMessageDto {
   /// P5). Display-only: a frame binds no value (§0.3).
   final FrameDto? frame;
 
+  /// V1 reorg honesty: true when this message's accepting block was
+  /// displaced and not re-accepted within the observed window — the row is
+  /// a ghost (styled affordance lands in V2; the flag is the truth surface).
+  final bool tombstoned;
+
   const ThreadMessageDto({
     required this.txid,
     required this.kind,
@@ -297,6 +336,7 @@ class ThreadMessageDto {
     required this.text,
     required this.readable,
     this.frame,
+    required this.tombstoned,
   });
 
   @override
@@ -307,7 +347,8 @@ class ThreadMessageDto {
       unixMs.hashCode ^
       text.hashCode ^
       readable.hashCode ^
-      frame.hashCode;
+      frame.hashCode ^
+      tombstoned.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -320,7 +361,8 @@ class ThreadMessageDto {
           unixMs == other.unixMs &&
           text == other.text &&
           readable == other.readable &&
-          frame == other.frame;
+          frame == other.frame &&
+          tombstoned == other.tombstoned;
 }
 
 /// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).

@@ -9,13 +9,19 @@
 
 #![forbid(unsafe_code)]
 
+mod acceptance;
 mod dag_monitor;
 mod error;
+mod kvlog;
 mod send;
+pub mod spans;
 mod transport;
 mod transport_store;
 mod wallet_sync;
 
+pub use acceptance::{
+    pruning_horizon_ms, AcceptanceEvent, AcceptanceTracker, TxStatus, VccBatch, WatchSource,
+};
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
 pub use send::{PreparedSend, SendOutcome, SendSummary};
@@ -34,7 +40,9 @@ pub use wallet_sync::{
 // Re-export so downstream crates (bridge) name network types, addresses and the
 // shared wRPC handle from one place.
 pub use kaspa_addresses::Address;
+// Block/tx hash type (the transport cursor + V1 gap-age lookups name it).
 pub use kaspa_addresses::Version as AddressVersion;
+pub use kaspa_consensus_core::Hash;
 pub use kaspa_wallet_core::rpc::Rpc;
 // The signer trait the bridge coerces its `VaultSigner` into (`Arc<dyn SignerT>`)
 // when handing it to [`WalletEngine::prepare_send`] — same trait both crates use.

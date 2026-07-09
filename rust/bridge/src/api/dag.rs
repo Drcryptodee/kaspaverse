@@ -6,9 +6,9 @@
 //! data-carrying Rust enums onto Dart via the `freezed` package, and pulling
 //! that codegen ceremony into every build isn't worth it for one DTO.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use kaspaverse_chain::{DagEvent, DagMonitor};
+use kaspaverse_chain::{AcceptanceTracker, DagEvent, DagMonitor};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::api::error::AppError;
@@ -58,6 +58,60 @@ pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
         })
         .await
         .cloned()
+}
+
+/// The one shared acceptance tracker (V1 keystone, D-073): watch-set +
+/// status fold over the VirtualChainChanged scope on the SAME monitor/socket
+/// (D-005). Persisted in the app-private `chain/` dir (public data, INV-3).
+static TRACKER: tokio::sync::OnceCell<Arc<AcceptanceTracker>> = tokio::sync::OnceCell::const_new();
+
+/// Get the shared acceptance tracker, bootstrapping it on the first call:
+/// load persistence, attach the VCC forward on the shared monitor, spawn the
+/// tracker task (which immediately runs the reopen catch-up).
+pub(crate) async fn shared_tracker() -> Result<Arc<AcceptanceTracker>, AppError> {
+    TRACKER
+        .get_or_try_init(|| async {
+            let dir = super::vault::chain_store_dir()?;
+            let tracker = AcceptanceTracker::load(dir).map_err(AppError::chain)?;
+            let monitor = shared_monitor().await?;
+            let vcc_rx = monitor.attach_acceptance();
+            tracker.run(monitor.rpc(), vcc_rx, monitor.subscribe());
+            log::info!("acceptance: tracker started");
+            Ok::<_, AppError>(tracker)
+        })
+        .await
+        .cloned()
+}
+
+/// Sync peek at the tracker for non-async call sites (the transport fold);
+/// `None` until the first [`shared_tracker`] bootstrap completes.
+pub(crate) fn tracker_handle() -> Option<Arc<AcceptanceTracker>> {
+    TRACKER.get().cloned()
+}
+
+/// One span marker crossing the FFI (V1 observability — findings-register
+/// item 6, founder-ratified): PUBLIC data only (marker name, optional txid,
+/// timestamp). This is the L40-proof lane: Dart prints/collects these on any
+/// build flavor; the perf harness reads the same query.
+#[derive(Clone, Debug)]
+pub struct SpanMarkerDto {
+    pub marker: String,
+    /// A txid or small public value (e.g. gap minutes); `None` for bare marks.
+    pub detail: Option<String>,
+    pub unix_ms: u64,
+}
+
+/// The session's recorded span markers, oldest first. Pull surface — the
+/// harness and the debug screen poll it; nothing streams.
+pub fn perf_spans() -> Vec<SpanMarkerDto> {
+    kaspaverse_chain::spans::snapshot()
+        .into_iter()
+        .map(|s| SpanMarkerDto {
+            marker: s.marker,
+            detail: s.detail,
+            unix_ms: s.unix_ms,
+        })
+        .collect()
 }
 
 /// Background grace-drop (PERFORMANCE_BUDGET battery posture): close the wRPC
