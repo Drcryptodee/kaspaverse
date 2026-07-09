@@ -7,8 +7,13 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `fold`, `shared_monitor`, `snapshots`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
+// These functions are ignored because they are not marked as `pub`: `fold`, `shared_monitor`, `shared_tracker`, `snapshots`, `tracker_handle`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`
+
+/// The session's recorded span markers, oldest first. Pull surface — the
+/// harness and the debug screen poll it; nothing streams.
+Future<List<SpanMarkerDto>> perfSpans() =>
+    RustLib.instance.api.crateApiDagPerfSpans();
 
 /// Background grace-drop (PERFORMANCE_BUDGET battery posture): close the wRPC
 /// socket and stop the retry loop. Dart's ChainService calls this ~30 s after
@@ -113,4 +118,34 @@ class DagStatusDto {
           endpoint == other.endpoint &&
           lastBlockAgeSecs == other.lastBlockAgeSecs &&
           virtualDaaScore == other.virtualDaaScore;
+}
+
+/// One span marker crossing the FFI (V1 observability — findings-register
+/// item 6, founder-ratified): PUBLIC data only (marker name, optional txid,
+/// timestamp). This is the L40-proof lane: Dart prints/collects these on any
+/// build flavor; the perf harness reads the same query.
+class SpanMarkerDto {
+  final String marker;
+
+  /// A txid or small public value (e.g. gap minutes); `None` for bare marks.
+  final String? detail;
+  final BigInt unixMs;
+
+  const SpanMarkerDto({
+    required this.marker,
+    this.detail,
+    required this.unixMs,
+  });
+
+  @override
+  int get hashCode => marker.hashCode ^ detail.hashCode ^ unixMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SpanMarkerDto &&
+          runtimeType == other.runtimeType &&
+          marker == other.marker &&
+          detail == other.detail &&
+          unixMs == other.unixMs;
 }

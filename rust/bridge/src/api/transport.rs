@@ -30,9 +30,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaspaverse_chain::{
     compose_bcast, compose_comm_wire, compose_handshake_wire, decode_envelope_body, parse_payload,
-    resolve_return_address, split_comm_body, Address, ChainError, ConversationRecord,
-    ConversationStatus, KeyBranch, MessageDirection, MessageRecord, PreparedSend, SignerT,
-    StoredKind, TransportEvent, TransportStore, HANDSHAKE_BOND_SOMPI,
+    resolve_return_address, split_comm_body, AcceptanceEvent, Address, ChainError,
+    ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord,
+    PreparedSend, SignerT, StoredKind, TransportEvent, TransportStore, WatchSource,
+    HANDSHAKE_BOND_SOMPI,
 };
 use kaspaverse_core::frames::{
     self, build_accept, build_challenge, build_taunt, fresh_challenge_id, GAME_ATTACK_DEFEND,
@@ -129,6 +130,10 @@ pub struct ThreadMessageDto {
     /// forward-version tail (which render as an ordinary bubble from `text`,
     /// P5). Display-only: a frame binds no value (§0.3).
     pub frame: Option<FrameDto>,
+    /// V1 reorg honesty: true when this message's accepting block was
+    /// displaced and not re-accepted within the observed window — the row is
+    /// a ghost (styled affordance lands in V2; the flag is the truth surface).
+    pub tombstoned: bool,
 }
 
 /// A parsed `kv:1:` game frame (P2.4 §0.5). Fields come from the frame JSON, so
@@ -223,8 +228,38 @@ struct TransportHub {
 
 static HUB: Mutex<Option<Arc<TransportHub>>> = Mutex::new(None);
 static HUB_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+/// V1 consumer #2 (reorg tombstones) — replaced like [`HUB_TASK`] on re-unlock
+/// so one stream never feeds two folders.
+static ACCEPTANCE_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 /// Sparse, content-free change pings (a conversation id) — Dart re-pulls.
 static THREAD_PINGS: OnceLock<broadcast::Sender<String>> = OnceLock::new();
+
+/// The V1 gap-age signal (deliverable 6): computed once per open from the
+/// persisted scan cursor's block time; V2b's fill + honest notice consume it.
+/// `None` = first run (no prior cursor) or not yet resolved this open.
+static GAP_AGE: Mutex<Option<GapAgeDto>> = Mutex::new(None);
+
+/// "How much history did this open skip?" — the honest number behind V2b's
+/// gap notice. All node-read data (INV-9): cursor block timestamp vs now.
+#[derive(Clone, Debug, Default)]
+pub struct GapAgeDto {
+    /// Minutes between the last-scanned block and now, when knowable.
+    pub gap_minutes: Option<u64>,
+    /// True when the node no longer knows the cursor block: the gap is at
+    /// least the pruning horizon (read from the pinned params — see
+    /// `kaspaverse_chain::pruning_horizon_ms`), and history before it is
+    /// unrecoverable from any normal node.
+    pub beyond_horizon: bool,
+}
+
+/// The gap-age computed at this open (`None` until resolved / first run).
+/// Pull surface for V2b's notice; also logged + span-marked when resolved.
+pub fn transport_gap_age() -> Option<GapAgeDto> {
+    GAP_AGE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
 
 fn thread_pings() -> &'static broadcast::Sender<String> {
     THREAD_PINGS.get_or_init(|| broadcast::channel(64).0)
@@ -348,8 +383,128 @@ pub async fn transport_start() -> Result<(), AppError> {
             log::warn!("transport-hub: catch-up ended early: {e}");
         }
     });
+
+    // V1 gap-age signal (deliverable 6): resolve the pre-catch-up cursor's
+    // block time in the background (the socket may still be dialing) and
+    // expose "history gap ≈ N min". First run (no cursor) = no gap concept.
+    *GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    if let Some(cursor) = catch_up_from {
+        let gap_monitor = monitor.clone();
+        tokio::spawn(async move {
+            resolve_gap_age(&gap_monitor, cursor).await;
+        });
+    }
+
+    // V1 consumer #2: reorg tombstones. The tracker signals a displaced-
+    // past-window txid (`DisplacedElapsed`) → ghost-flag the stored row;
+    // a later re-acceptance (`Accepted`) reverses the ghost. Soft
+    // dependency: tracker bootstrap failure degrades to pre-V1 behavior.
+    match dag::shared_tracker().await {
+        Ok(tracker) => {
+            let mut acceptance_rx = tracker.subscribe();
+            let task = tokio::spawn(async move {
+                loop {
+                    match acceptance_rx.recv().await {
+                        Ok(AcceptanceEvent::DisplacedElapsed { txid }) => {
+                            // `self::` — the enclosing scope's `hub` binding
+                            // (the Arc) shadows the accessor fn in this task.
+                            let Ok(hub) = self::hub() else { continue };
+                            let mut store =
+                                hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                            if let Ok(true) = store.tombstone_message(&txid) {
+                                let conversation = store.message_conversation(&txid);
+                                drop(store);
+                                log::info!(
+                                    "transport-hub: {txid} tombstoned (displaced past window)"
+                                );
+                                if let Some(id) = conversation {
+                                    ping(&id);
+                                }
+                            }
+                        }
+                        Ok(AcceptanceEvent::Accepted { txid }) => {
+                            let Ok(hub) = self::hub() else { continue };
+                            let mut store =
+                                hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                            if let Ok(true) = store.untombstone_message(&txid) {
+                                let conversation = store.message_conversation(&txid);
+                                drop(store);
+                                log::info!("transport-hub: {txid} ghost reversed (re-accepted)");
+                                if let Some(id) = conversation {
+                                    ping(&id);
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+            let old = ACCEPTANCE_TASK
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .replace(task);
+            if let Some(old) = old {
+                old.abort();
+            }
+        }
+        Err(e) => log::warn!(
+            "transport-hub: acceptance tracker unavailable ({}) — tombstone lane off",
+            e.message
+        ),
+    }
+
     log::info!("transport-hub: started");
     Ok(())
+}
+
+/// Resolve the gap-age (cursor block time vs now) with a connect-tolerant
+/// retry budget, then store + log + span-mark it. A node that is CONNECTED
+/// yet repeatedly cannot answer for the cursor block has pruned it — the gap
+/// is at least the pin-read pruning horizon (an honest "≥", never a guess).
+async fn resolve_gap_age(monitor: &kaspaverse_chain::DagMonitor, cursor: kaspaverse_chain::Hash) {
+    const ATTEMPTS: u32 = 15;
+    let mut connected_failures = 0u32;
+    for _attempt in 0..ATTEMPTS {
+        match monitor.rpc().rpc_api().get_block(cursor, false).await {
+            Ok(block) => {
+                let now = now_unix_ms();
+                let minutes = now.saturating_sub(block.header.timestamp) / 60_000;
+                *GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner) = Some(GapAgeDto {
+                    gap_minutes: Some(minutes),
+                    beyond_horizon: false,
+                });
+                kaspaverse_chain::spans::mark_with("open_gap_min", &minutes.to_string());
+                log::info!("transport-hub: history gap ≈ {minutes} min at open");
+                return;
+            }
+            Err(_) if monitor.is_connected() => {
+                // Connected but unanswered — tolerate transient node errors
+                // before concluding the block is pruned.
+                connected_failures += 1;
+                if connected_failures >= 3 {
+                    let horizon_min = kaspaverse_chain::pruning_horizon_ms() / 60_000;
+                    *GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner) = Some(GapAgeDto {
+                        gap_minutes: None,
+                        beyond_horizon: true,
+                    });
+                    kaspaverse_chain::spans::mark_with("open_gap_min", "beyond_horizon");
+                    log::info!(
+                        "transport-hub: cursor block pruned — history gap ≥ {horizon_min} min \
+                         (pruning horizon)"
+                    );
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            }
+            Err(_) => {
+                // Still dialing — wait for the socket.
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            }
+        }
+    }
+    log::info!("transport-hub: gap-age unresolved this open (node unreachable)");
 }
 
 /// A store fold must never be silently lossy (consensus-audit in-run finding
@@ -360,6 +515,18 @@ pub async fn transport_start() -> Result<(), AppError> {
 fn warn_store<T>(result: kaspaverse_chain::Result<T>) {
     if let Err(e) = result {
         log::warn!("transport-hub: store append failed: {e}");
+    }
+}
+
+/// V1: put a stored message's txid on the acceptance watch-set. Inbound rows
+/// register as `Transport` (never stall-signalled — the watch may start
+/// after acceptance already passed); outbound rows were already registered
+/// as `Send` by the commit path, and the tracker's first-source-wins
+/// idempotence keeps that. No-op until the tracker bootstraps (its connect
+/// catch-up covers the sliver).
+fn watch_acceptance(txid: &str) {
+    if let Some(tracker) = dag::tracker_handle() {
+        tracker.watch(txid, WatchSource::Transport);
     }
 }
 
@@ -445,6 +612,7 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
                 sealed_to: None,
             }));
             drop(store);
+            watch_acceptance(txid);
             ping(&conversation_id);
             return;
         }
@@ -480,6 +648,7 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
         sealed_to: None,
     }));
     drop(store);
+    watch_acceptance(txid);
     ping(&conversation_id);
 }
 
@@ -553,6 +722,7 @@ fn handle_inbound_comm(hub: &TransportHub, txid: &str, body: &[u8]) {
             warn_store(store.upsert_conversation(conversation));
         }
         drop(store);
+        watch_acceptance(txid);
         ping(&conversation_id);
     }
 }
@@ -1146,15 +1316,17 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
 pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppError> {
     let hub = hub()?;
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-    // Cascade: tombstone the conversation's messages first so no orphaned
-    // sealed rows linger, then the conversation row itself.
+    // Cascade: REMOVE the conversation's messages first so no orphaned
+    // sealed rows linger, then the conversation row itself. (A hard remove —
+    // deliberately not the V1 reversible reorg tombstone: hide is a local
+    // purge the user asked for, not a chain observation.)
     let txids: Vec<String> = store
         .messages_for(&conversation_id)
         .into_iter()
         .map(|m| m.txid)
         .collect();
     for txid in txids {
-        warn_store(store.tombstone_message(&txid));
+        warn_store(store.remove_message(&txid));
     }
     store
         .remove_conversation(&conversation_id)
@@ -1184,6 +1356,7 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
     let mut thread = Vec::new();
     for record in store.messages_for(&conversation_id) {
         let outbound = record.direction == MessageDirection::Outbound;
+        let tombstoned = store.is_message_tombstoned(&record.txid);
         match record.kind {
             StoredKind::Handshake | StoredKind::Legacy => {
                 thread.push(ThreadMessageDto {
@@ -1194,6 +1367,7 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
                     text: String::new(),
                     readable: true,
                     frame: None,
+                    tombstoned,
                 });
             }
             StoredKind::Comm => {
@@ -1230,6 +1404,7 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
                     text,
                     readable,
                     frame,
+                    tombstoned,
                 });
             }
         }

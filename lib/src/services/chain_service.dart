@@ -38,6 +38,12 @@ class ChainService with WidgetsBindingObserver {
   @visibleForTesting
   static Future<void> Function() reconnectFn = dagReconnect;
 
+  /// V1 observability seam: the Rust span-marker pull (hardening V1, findings
+  /// item 6). Dumped to logcat by the watchdog tick — the L40-proof lane
+  /// (Rust log lanes are silent on profile builds; Flutter's print is not).
+  @visibleForTesting
+  static Future<List<SpanMarkerDto>> Function() spansFn = perfSpans;
+
   /// Background window before the socket is dropped (PERFORMANCE_BUDGET:
   /// "after 30 s grace"). Tests shorten it.
   @visibleForTesting
@@ -100,6 +106,7 @@ class ChainService with WidgetsBindingObserver {
   /// freeze. Skipped while backgrounded (the grace-drop owns the socket then)
   /// or while a reconnect is already in flight.
   Future<void> _watchdogTick() async {
+    await _dumpNewSpans();
     if (!_foreground || _droppedByGrace || reconnecting.value) return;
     final DagStatusDto status;
     try {
@@ -110,6 +117,29 @@ class ChainService with WidgetsBindingObserver {
     final age = status.lastBlockAgeSecs;
     if (age != null && age.toInt() > watchdogStallSecs) {
       await reconnect();
+    }
+  }
+
+  /// How many span markers have already been printed (the Rust ring is
+  /// oldest-first; a session produces a few dozen against its 256 cap, so
+  /// index-tracking is safe for a sitting).
+  int _spansPrinted = 0;
+
+  /// Print any NEW Rust span markers to logcat, one line each:
+  /// `kv-span UNIX_MS MARKER [DETAIL]`. Public chain data only (INV-3:
+  /// marker names, txids, timestamps). This closes the V0 `pending — method:
+  /// V1 tracker timestamps` baseline rows on any build flavor.
+  Future<void> _dumpNewSpans() async {
+    try {
+      final spans = await spansFn();
+      for (var i = _spansPrinted; i < spans.length; i++) {
+        final s = spans[i];
+        final detail = s.detail == null ? '' : ' ${s.detail}';
+        debugPrint('kv-span ${s.unixMs} ${s.marker}$detail');
+      }
+      _spansPrinted = spans.length;
+    } catch (_) {
+      // Spans are observability, never load-bearing — a failed pull is noise.
     }
   }
 

@@ -472,6 +472,14 @@ impl WalletEngine {
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
 
         let change_set: HashSet<Address> = change_addresses.into_iter().collect();
+
+        // Emit the PERSISTED activity once at start (2026-07-09 V1 sitting
+        // find): record events are the only other emission trigger, and a
+        // boot where every UTXO is settled own-change fires none — the list
+        // rendered "No recent activity" while activity.kvlog held the full
+        // history. Earlier boots masked this behind instant Discovery events.
+        self.emit_activity(&change_set);
+
         let engine = self.clone();
         let task = tokio::spawn(async move {
             loop {

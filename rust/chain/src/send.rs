@@ -82,6 +82,10 @@ pub struct SendOutcome {
     pub partial: bool,
     /// The typed failure message, if a leg failed.
     pub error: Option<String>,
+    /// EVERY broadcast leg's txid, in submit order — including the legs of a
+    /// partial outcome (they are on-chain and must be acceptance-tracked; V1
+    /// feeds these to the tracker's watch-set).
+    pub submitted_txids: Vec<String>,
 }
 
 /// A built-but-UNSIGNED send, held between the confirm and the hold-to-sign
@@ -118,10 +122,20 @@ impl PreparedSend {
     /// after an earlier broadcast returns a typed partial result (B6) — never a
     /// silent failure that hides spent funds. Consumes `self`, so no tx can be
     /// submitted twice (the upstream double-submit panic is unreachable).
-    pub async fn commit(self) -> SendOutcome {
+    ///
+    /// `on_submitted` fires the moment EACH leg's submit is acked — the V1
+    /// acceptance watch hook. Registering per-leg (not after the whole chain)
+    /// closes the window where a fast acceptance of an early leg would slip
+    /// past the live VCC stream before the watch existed (consensus-audit
+    /// finding 3). Pass `None` when nothing tracks.
+    pub async fn commit(
+        self,
+        mut on_submitted: Option<&mut (dyn FnMut(&str) + Send)>,
+    ) -> SendOutcome {
         let total = self.pending.len() as u32;
         let mut submitted = 0u32;
         let mut final_txid = None;
+        let mut submitted_txids = Vec::new();
         for pt in &self.pending {
             if let Err(e) = pt.try_sign() {
                 return SendOutcome {
@@ -130,12 +144,22 @@ impl PreparedSend {
                     total,
                     partial: submitted > 0,
                     error: Some(e.to_string()),
+                    submitted_txids,
                 };
             }
             match pt.try_submit(self.rpc.rpc_api()).await {
                 Ok(txid) => {
                     submitted += 1;
-                    final_txid = Some(txid.to_string());
+                    let txid = txid.to_string();
+                    // V1 span: the node acked this submit RPC — the anchor
+                    // that decomposes broadcast-lag from chain-lag in the
+                    // submit→accepted baseline (public txid only, INV-3).
+                    crate::spans::mark_with("submit_ok", &txid);
+                    if let Some(hook) = on_submitted.as_deref_mut() {
+                        hook(&txid);
+                    }
+                    final_txid = Some(txid.clone());
+                    submitted_txids.push(txid);
                 }
                 Err(e) => {
                     return SendOutcome {
@@ -144,6 +168,7 @@ impl PreparedSend {
                         total,
                         partial: submitted > 0,
                         error: Some(e.to_string()),
+                        submitted_txids,
                     };
                 }
             }
@@ -154,6 +179,7 @@ impl PreparedSend {
             total,
             partial: false,
             error: None,
+            submitted_txids,
         }
     }
 }

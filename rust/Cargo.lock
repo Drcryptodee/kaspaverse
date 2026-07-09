@@ -3134,6 +3134,7 @@ dependencies = [
 name = "kaspaverse_bridge"
 version = "0.1.0"
 dependencies = [
+ "android_logger",
  "flutter_rust_bridge",
  "jni",
  "kaspaverse-chain",

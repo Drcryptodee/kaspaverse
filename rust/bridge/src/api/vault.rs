@@ -213,6 +213,14 @@ pub(crate) fn transport_store_dir() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("transport"))
 }
 
+/// App-private dir for the V1 acceptance tracker (`acceptance.kvlog` +
+/// `vcc.cursor`). Public chain data only — txids, block hashes, timestamps
+/// (INV-3); node-only reads (INV-8). Sibling of `wallet/` and `transport/`;
+/// serves BOTH (sends and conversation txids), hence its own home.
+pub(crate) fn chain_store_dir() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("chain"))
+}
+
 /// A vault-scoped transport decryptor (core's weak-handle seam, P2.3): every
 /// decrypt starts with a `Weak::upgrade` that fails once the vault locks —
 /// key bytes exist only inside core, never here (INV-1). Errors if locked.
