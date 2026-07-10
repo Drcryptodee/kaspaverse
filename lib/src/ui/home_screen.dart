@@ -12,6 +12,7 @@ import 'widgets/entrance.dart';
 import 'widgets/glass_panel.dart';
 import 'widgets/haptics.dart';
 import 'widgets/status_beacon.dart';
+import 'widgets/tx_status_chip.dart';
 
 /// Group digits in threes for the node-status readout: 458174109 →
 /// "458,174,109". Scores arrive as [BigInt] (L3); formatted only here, at
@@ -46,6 +47,8 @@ class HomeScreen extends StatefulWidget {
     required this.activity,
     required this.syncing,
     required this.utxoIndexMissing,
+    this.depths,
+    this.onRefreshActivity,
     this.onReady,
     this.receiveRoute,
     this.sendRoute,
@@ -74,6 +77,14 @@ class HomeScreen extends StatefulWidget {
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
+
+  /// Live tracker depth per accepted outgoing txid — the chip's
+  /// "N confirmations" counter (`null` ⇒ chips fall back to static labels).
+  final ValueListenable<Map<String, int>>? depths;
+
+  /// Swipe-to-refresh heal (founder request, V2 sitting): pulls the latest
+  /// folded snapshot directly, bypassing the stream. `null` ⇒ no refresh UI.
+  final Future<void> Function()? onRefreshActivity;
 
   /// Called once on mount (post-unlock) — starts the wallet sync engine.
   final VoidCallback? onReady;
@@ -185,6 +196,7 @@ class _HomeScreenState extends State<HomeScreen> {
             widget.activity,
             widget.syncing,
             widget.utxoIndexMissing,
+            widget.depths,
           ]),
           builder: (context, _) {
             final now = widget.clock();
@@ -321,6 +333,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: _ActivityFeed(
                     records: widget.activity.value,
                     now: now,
+                    depths: widget.depths?.value ?? const {},
+                    virtualDaaScore: widget.virtualDaaScore.value,
+                    stale: stale,
+                    onRefresh: widget.onRefreshActivity,
                   ),
                 ),
               ],
@@ -452,10 +468,36 @@ class _StatusCaption extends StatelessWidget {
 
 /// The activity list, or a quiet empty state (live, never a forever-skeleton).
 class _ActivityFeed extends StatelessWidget {
-  const _ActivityFeed({required this.records, required this.now});
+  const _ActivityFeed({
+    required this.records,
+    required this.now,
+    this.depths = const {},
+    this.virtualDaaScore,
+    this.stale = false,
+    this.onRefresh,
+  });
 
   final List<ActivityRecord> records;
   final DateTime now;
+
+  /// DS-1: a stale link must not stream a frozen counter at full presence —
+  /// counters fall back to their static words until the link is live again
+  /// (ux-audit counter finding 1; the P0.3 scar class).
+  final bool stale;
+
+  /// Pull-the-truth heal; `null` ⇒ plain list (tests, reduced wiring).
+  final Future<void> Function()? onRefresh;
+
+  /// Tracker blue-depth per accepted outgoing txid (1 Hz, WalletService).
+  final Map<String, int> depths;
+
+  /// Live DAA — an immature deposit's counter is its DAA distance (both
+  /// node-read). Same SHAPE as the tracker's blue-depth subtraction, but a
+  /// different clock: DAA score ≠ blue score, inclusion ≠ acceptance. The
+  /// two-clocks-one-label display call is deliberate (consensus-audit V2
+  /// counter ruling: plain English beats protocol jargon; the number is
+  /// cosmetic and dies with wallet-core's own truth).
+  final BigInt? virtualDaaScore;
 
   @override
   Widget build(BuildContext context) {
@@ -482,24 +524,63 @@ class _ActivityFeed extends StatelessWidget {
         ),
       );
     }
-    return ListView.builder(
+    final list = ListView.builder(
       padding: const EdgeInsets.fromLTRB(
         KvSpace.gutter,
         KvSpace.s,
         KvSpace.gutter,
         KvSpace.xl,
       ),
+      // A refreshable list must scroll even when short, or the gesture dies.
+      physics: onRefresh == null ? null : const AlwaysScrollableScrollPhysics(),
       itemCount: records.length,
-      itemBuilder: (context, i) => _ActivityRow(record: records[i], now: now),
+      // Txid-keyed so a row keeps its chip's transition state across
+      // reconciles (the list is rebuilt on every snapshot).
+      itemBuilder: (context, i) => _ActivityRow(
+        key: ValueKey(records[i].txid),
+        record: records[i],
+        now: now,
+        confirmations: _confirmations(records[i]),
+      ),
     );
+    if (onRefresh == null) return list;
+    return RefreshIndicator(
+      onRefresh: onRefresh!,
+      color: KvColor.primary,
+      backgroundColor: KvColor.surfaceAlt,
+      child: list,
+    );
+  }
+
+  /// The chip's counter for one row (founder request, V2 sitting): an
+  /// ACCEPTED send counts the tracker's blue depth; an immature DEPOSIT
+  /// counts its DAA distance. Both node-read; `null` ⇒ static label.
+  /// A stale link never counts — the last-known DAA would freeze the number
+  /// at full brightness (DS-1).
+  int? _confirmations(ActivityRecord record) {
+    if (stale) return null;
+    if (record.maturity == MaturityState.accepted) return depths[record.txid];
+    if (record.maturity == MaturityState.pending &&
+        record.direction == ActivityDirection.incoming) {
+      final daa = virtualDaaScore;
+      if (daa == null || daa < record.blockDaaScore) return null;
+      return (daa - record.blockDaaScore).toInt();
+    }
+    return null;
   }
 }
 
 class _ActivityRow extends StatelessWidget {
-  const _ActivityRow({required this.record, required this.now});
+  const _ActivityRow({
+    super.key,
+    required this.record,
+    required this.now,
+    this.confirmations,
+  });
 
   final ActivityRecord record;
   final DateTime now;
+  final int? confirmations;
 
   @override
   Widget build(BuildContext context) {
@@ -527,7 +608,6 @@ class _ActivityRow extends StatelessWidget {
       ActivityDirection.outgoing => '− ',
       ActivityDirection.change => null,
     };
-    final pending = record.maturity == MaturityState.pending;
     final time = record.unixtimeMsec;
 
     return Padding(
@@ -565,15 +645,14 @@ class _ActivityRow extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               AmountText(record.valueSompi, role: AmountRole.row, prefix: sign),
-              // Confirmed is the normal state and stays quiet (Rams #5);
-              // only the exception is labelled.
-              if (pending)
-                Text(
-                  'Pending',
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: KvColor.warning,
-                  ),
-                ),
+              // The V2 three-state chip rides V1's acceptance overlay:
+              // Pending (breathing) → Accepted → quiet. Confirmed stays
+              // unlabelled (Rams #5); a stalled submit escalates honestly.
+              TxStatusChip(
+                state: chipStateOf(record.maturity, stalled: record.stalled),
+                pulsePhase: now.second.isEven,
+                confirmations: confirmations,
+              ),
             ],
           ),
         ],

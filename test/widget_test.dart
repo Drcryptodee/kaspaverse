@@ -68,22 +68,84 @@ void main() {
         txid: 'a' * 64,
         valueSompi: BigInt.from(50000000),
         unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 120000),
-        blockDaaScore: BigInt.from(10),
+        blockDaaScore: BigInt.parse('458174059'), // 50 DAA below the live tip
         direction: ActivityDirection.incoming,
         isCoinbase: false,
         maturity: MaturityState.pending,
+        stalled: false,
       ),
     ];
     await tester.pump();
     expect(find.textContaining('1,234.56789012 KAS'), findsOneWidget);
     expect(find.text('No recent activity'), findsNothing);
-    expect(find.text('Pending'), findsOneWidget); // the activity row maturity
+    // V2 counter (founder request): an immature deposit streams its DAA
+    // distance instead of a static "Pending".
+    expect(find.text('50 confirmations'), findsOneWidget);
+
+    // V2 chip walk: acceptance lands (V1 overlay) → 'Accepted'; a settled
+    // (confirmed) row goes quiet — no permanent label (founder-nodded).
+    activity.value = [
+      ActivityRecord(
+        txid: 'b' * 64,
+        valueSompi: BigInt.from(20000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 5000),
+        blockDaaScore: BigInt.from(20),
+        direction: ActivityDirection.outgoing,
+        isCoinbase: false,
+        maturity: MaturityState.accepted,
+        stalled: false,
+      ),
+      ActivityRecord(
+        txid: 'c' * 64,
+        valueSompi: BigInt.from(30000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 90000),
+        blockDaaScore: BigInt.from(5),
+        direction: ActivityDirection.outgoing,
+        isCoinbase: false,
+        maturity: MaturityState.pending,
+        stalled: true, // 60 s with no acceptance — the V1 stall signal
+      ),
+      ActivityRecord(
+        txid: 'd' * 64,
+        valueSompi: BigInt.from(10000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 900000),
+        blockDaaScore: BigInt.from(1),
+        direction: ActivityDirection.outgoing,
+        isCoinbase: false,
+        maturity: MaturityState.confirmed,
+        stalled: false,
+      ),
+    ];
+    await tester.pump(const Duration(milliseconds: 400)); // chip crossfade
+    expect(find.text('Accepted'), findsOneWidget);
+    expect(find.text('Not accepted yet'), findsOneWidget); // stalled, honest
+    expect(find.text('Pending'), findsNothing);
+    expect(find.text('Confirmed'), findsNothing); // terminal = quiet
+
+    // Back to the pending-deposit shape for the staleness beat below.
+    activity.value = [
+      ActivityRecord(
+        txid: 'a' * 64,
+        valueSompi: BigInt.from(50000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 120000),
+        blockDaaScore: BigInt.from(10),
+        direction: ActivityDirection.incoming,
+        isCoinbase: false,
+        maturity: MaturityState.pending,
+        stalled: false,
+      ),
+    ];
+    await tester.pump(const Duration(milliseconds: 400));
 
     // The link goes quiet: advance past the stale threshold. The beacon ages
     // (the balance dims — opacity is unit-tested in amount_text_test).
     now = now.add(const Duration(seconds: 12));
     await tester.pump(const Duration(seconds: 1)); // the 1 s ticker fires
     expect(find.text('as of 12 s ago'), findsOneWidget);
+    // DS-1: a stale link never streams a counter — the frozen last-known DAA
+    // must not tick at full presence; the chip falls back to its static word.
+    expect(find.textContaining('confirmations'), findsNothing);
+    expect(find.text('Pending'), findsOneWidget);
     expect(
       find.textContaining('1,234.56789012 KAS'),
       findsOneWidget,

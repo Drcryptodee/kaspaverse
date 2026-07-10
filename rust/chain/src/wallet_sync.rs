@@ -320,7 +320,10 @@ impl ActivityStore {
         Ok(())
     }
 
-    fn upsert(&mut self, record: TransactionRecord) -> Result<()> {
+    /// Returns whether the record was written (`false` = refused by the
+    /// provenance guard below) so the caller's log line can say which — the
+    /// finding-8 discriminating lane (V2).
+    fn upsert(&mut self, record: TransactionRecord) -> Result<bool> {
         // Provenance guard (D2/P4): once we hold a txid as a SEND we originated
         // (Outgoing / Change / Batch / TransferOutgoing), a later re-scan that
         // re-reports the SAME txid as an Incoming/External deposit is the
@@ -337,13 +340,13 @@ impl ActivityStore {
         if is_incoming_data(&record) {
             if let Some(existing) = self.records.get(record.id()) {
                 if is_outgoing_data(existing) {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
         self.append(&StoreFrame::Upsert(Box::new(record.clone())))?;
         self.records.insert(*record.id(), record);
-        Ok(())
+        Ok(true)
     }
 
     fn remove(&mut self, id: &TransactionId) -> Result<()> {
@@ -613,19 +616,41 @@ impl WalletEngine {
                 // Our own change re-reported as an incoming deposit (a restart
                 // re-scan lost the outgoing context) is never a deposit — don't
                 // record it (the spend's own record already represents the tx).
+                //
+                // Every verdict is logged (public chain data, INV-3): the V1
+                // sitting's live-deposit miss (finding 8) was undiagnosable
+                // because this arm was silent — balance lines proved the fold
+                // task alive, but nothing said whether a record event ever
+                // arrived or which guard ate it.
+                let txid = record.id().to_string();
                 if is_own_change(&record, change_set) {
+                    log::info!(
+                        "wallet-sync: record txid={txid} verdict=own-change (not a deposit)"
+                    );
                     return;
                 }
-                {
+                let written = {
                     let mut store = self
                         .inner
                         .store
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
-                    if let Err(e) = store.upsert(record) {
-                        log::warn!("wallet-sync: activity append failed: {e}");
+                    match store.upsert(record) {
+                        Ok(written) => written,
+                        Err(e) => {
+                            log::warn!("wallet-sync: activity append failed: {e}");
+                            false
+                        }
                     }
-                }
+                };
+                log::info!(
+                    "wallet-sync: record txid={txid} verdict={}",
+                    if written {
+                        "recorded"
+                    } else {
+                        "provenance-refused"
+                    }
+                );
                 self.emit_activity(change_set);
             }
             Events::Reorg { record } => {
@@ -813,6 +838,67 @@ mod tests {
             !all_change_addresses(&[], &change_set),
             "no UTXOs ⇒ not our change"
         );
+    }
+
+    /// Finding 8 (V2): the app-side live-deposit path, gate by gate. A genuine
+    /// external deposit — an `Incoming` record whose UTXO sits at a RECEIVE
+    /// address, under a txid we never originated — passes `is_own_change`,
+    /// passes the provenance guard, is written, and renders in `list`. Pins
+    /// that a live-arrival row loss is NOT this filter stack as written (the
+    /// device lane's verdict logs discriminate the rest).
+    #[test]
+    fn a_live_external_deposit_passes_every_guard() {
+        use kaspa_consensus_core::tx::ScriptPublicKey;
+        use kaspa_wallet_core::storage::transaction::UtxoRecord;
+
+        let receive = Address::try_from(
+            "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf",
+        )
+        .unwrap();
+        let change = Address::try_from(
+            "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692",
+        )
+        .unwrap();
+        let change_set: HashSet<Address> = [change].into_iter().collect();
+
+        // A 5 KAS deposit to our receive address (the 2026-07-09 live shape).
+        let deposit = record(
+            11,
+            500_000_000,
+            2_000,
+            TransactionData::Incoming {
+                utxo_entries: vec![UtxoRecord {
+                    address: Some(receive),
+                    index: 0,
+                    amount: 500_000_000,
+                    script_public_key: ScriptPublicKey::default(),
+                    is_coinbase: false,
+                }],
+                aggregate_input_value: 500_000_000,
+            },
+        );
+
+        assert!(
+            !is_own_change(&deposit, &change_set),
+            "a receive-address deposit is never own change"
+        );
+
+        let dir = std::env::temp_dir().join(format!("kv-wsync-dep-{}", std::process::id()));
+        let path = dir.join("activity.kvlog");
+        let _ = std::fs::remove_file(&path);
+        let mut store = ActivityStore::load(path.clone()).unwrap();
+        assert!(
+            store.upsert(deposit).unwrap(),
+            "a fresh external txid is written, never provenance-refused"
+        );
+
+        let rows = store.list(2_050, &change_set);
+        assert_eq!(rows.len(), 1, "the deposit renders");
+        assert_eq!(rows[0].direction, ActivityDirection::Incoming);
+        assert_eq!(rows[0].value_sompi, 500_000_000);
+        assert_eq!(rows[0].maturity, ActivityMaturity::Pending);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

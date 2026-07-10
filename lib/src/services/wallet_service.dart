@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../rust/api/error.dart';
 import '../rust/api/send.dart';
+import '../rust/api/transport.dart' show TxStatusDto, txAcceptanceStatus;
 import '../rust/api/wallet.dart';
 
 /// Owns the app's single subscription to the bridge wallet stream (L4): balance
@@ -49,6 +50,87 @@ class WalletService {
   /// Wall-clock of the last synced balance — the freshness clock (DS-1); null
   /// until the first balance.
   final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
+
+  /// Live tracker blue-depth per ACCEPTED outgoing txid (the chip's
+  /// "N confirmations" counter — founder request, V2 sitting). Polled at
+  /// 1 Hz ONLY while an accepted row is on the books; empty otherwise.
+  /// Public chain data (a txid → a node-read count), nothing content-bearing.
+  final ValueNotifier<Map<String, int>> depths = ValueNotifier(const {});
+
+  @visibleForTesting
+  static Future<TxStatusDto?> Function(String txid) txStatusFn = (txid) =>
+      txAcceptanceStatus(txid: txid);
+
+  @visibleForTesting
+  static Future<WalletSnapshot?> Function() snapshotNowFn = walletSnapshotNow;
+
+  /// Display-state marker through the Rust liblog lane (L53: the only
+  /// build-flavor-proof lane — Dart prints die on profile/release). Never
+  /// throws: in tests (no native lib) it becomes a no-op.
+  @visibleForTesting
+  static Future<void> Function(String marker) uiMarkFn = (marker) =>
+      uiMark(marker: marker);
+
+  void _mark(String marker) {
+    try {
+      // Fire-and-forget; a failed marker must never break the pipeline.
+      unawaited(uiMarkFn(marker).catchError((_) {}));
+    } catch (_) {
+      // Native lib absent (widget tests) — silence is fine.
+    }
+  }
+
+  /// Pull the latest folded snapshot and apply it — the swipe-to-refresh
+  /// heal (founder request, V2 sitting): bypasses the stream entirely, so
+  /// the glass can always self-serve the truth the fold already holds.
+  Future<void> refreshNow() async {
+    try {
+      final snapshot = await snapshotNowFn();
+      if (snapshot != null) _apply(snapshot);
+    } on AppError catch (e) {
+      error.value = e.message;
+    }
+  }
+
+  Timer? _depthTicker;
+
+  /// Start/stop the 1 Hz depth poll to match the current activity: counting
+  /// only while something is actually counting (the chip-breath law).
+  void _syncDepthTicker() {
+    final counting = activity.value.any(
+      (r) => r.maturity == MaturityState.accepted,
+    );
+    if (counting && _depthTicker == null) {
+      _depthTicker = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _refreshDepths(),
+      );
+      _refreshDepths();
+    } else if (!counting && _depthTicker != null) {
+      _depthTicker!.cancel();
+      _depthTicker = null;
+      if (depths.value.isNotEmpty) depths.value = const {};
+    }
+  }
+
+  Future<void> _refreshDepths() async {
+    final accepted = activity.value
+        .where((r) => r.maturity == MaturityState.accepted)
+        .map((r) => r.txid)
+        .toList();
+    if (accepted.isEmpty) return;
+    final next = <String, int>{};
+    for (final txid in accepted) {
+      try {
+        final status = await txStatusFn(txid);
+        final depth = status?.blueDepth;
+        if (depth != null) next[txid] = depth.toInt();
+      } on AppError {
+        // Tracker unavailable — the chip simply doesn't count this tick.
+      }
+    }
+    depths.value = next;
+  }
 
   StreamSubscription<WalletSnapshot>? _subscription;
 
@@ -100,6 +182,9 @@ class WalletService {
   Future<void> abandonSend() => sendAbandonFn();
 
   void _apply(WalletSnapshot snapshot) {
+    // The V2 stream-freeze diagnostic: if the bridge logs a fold this line
+    // doesn't echo, the Dart delivery lane dropped it (counts only, INV-3).
+    _mark('apply rows=${snapshot.activity.length}');
     connected.value = snapshot.connected;
     syncing.value = snapshot.syncing;
     utxoIndexMissing.value = snapshot.utxoIndexMissing;
@@ -110,6 +195,7 @@ class WalletService {
     outgoing.value = snapshot.outgoingSompi;
     activity.value = snapshot.activity;
     error.value = snapshot.error;
+    _syncDepthTicker();
     // Freshness clock: a connected snapshot bearing a real balance is fresh.
     if (snapshot.connected && snapshot.matureSompi != null) {
       lastUpdate.value = DateTime.now();
@@ -120,6 +206,9 @@ class WalletService {
   Future<void> reset() async {
     await _subscription?.cancel();
     _subscription = null;
+    _depthTicker?.cancel();
+    _depthTicker = null;
+    depths.value = const {};
     connected.value = false;
     syncing.value = false;
     utxoIndexMissing.value = false;

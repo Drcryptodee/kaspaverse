@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `split_frame`, `stash_intent`, `take_intent`, `thread_pings`, `to_core_branch`, `to_dto`, `to_key_branch`, `warn_store`, `watch_acceptance`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -151,6 +151,44 @@ Future<List<ThreadMessageDto>> transportThread({
 }) => RustLib.instance.api.crateApiTransportTransportThread(
   conversationId: conversationId,
 );
+
+/// Incremental thread pull (V2): decrypt ONLY the rows strictly after
+/// `after_txid` in the store's `(unix_ms, txid)` order, and return the
+/// current status of EVERY row so status transitions of already-rendered
+/// rows (tombstone flips, acceptance progress) land without re-decrypting
+/// the conversation. Cursor semantics:
+///
+/// - rows are write-once (`unix_ms`/`txid` never change after recording), so
+///   a cursor's sort position is stable;
+/// - an absent or UNKNOWN cursor (e.g. the anchor row was removed) degrades
+///   to the full thread — the caller keys rows by txid, so the merge is
+///   idempotent, never duplicating;
+/// - a new row CAN sort behind a live cursor (inbound handshake rows carry
+///   the sender-claimed `payload.timestamp`; same-ms txid tie-breaks) and
+///   would then be absent from `messages` — but never from `statuses`,
+///   which covers every row. THE CALLER CONTRACT: a statuses txid you have
+///   never rendered means a stranded row — do one full re-pull (cursor
+///   `None`), whose statuses ⊇ all rows, so it converges in one step
+///   (consensus-audit V2 finding 1; the thread screen implements this).
+///
+/// §0.4 unchanged: decrypt-on-view, per call, vault-locked errors, plaintext
+/// crosses once and dies with the widget. The tracker is a soft dependency
+/// (V1 law): unavailable ⇒ `acceptance: None`, store truth stands alone.
+Future<ThreadDeltaDto> transportThreadSince({
+  required String conversationId,
+  String? afterTxid,
+}) => RustLib.instance.api.crateApiTransportTransportThreadSince(
+  conversationId: conversationId,
+  afterTxid: afterTxid,
+);
+
+/// The tracker's live answer for one txid (V2 sitting request: the chip
+/// streams "N confirmations"). Depth is computed AT READ from the live sink
+/// blue score (node-read, INV-9 — `AcceptanceTracker::status`), so a 1 Hz
+/// poll of this fn yields a climbing counter. `None` = unwatched / pruned /
+/// tracker unavailable — the caller's chip simply doesn't count.
+Future<TxStatusDto?> txAcceptanceStatus({required String txid}) =>
+    RustLib.instance.api.crateApiTransportTxAcceptanceStatus(txid: txid);
 
 /// Sparse, content-free conversation-change pings (a conversation id) —
 /// Dart re-pulls [`transport_conversations`] / [`transport_thread`] on each.
@@ -295,6 +333,64 @@ class GapAgeDto {
           runtimeType == other.runtimeType &&
           gapMinutes == other.gapMinutes &&
           beyondHorizon == other.beyondHorizon;
+}
+
+/// Per-txid display status for EVERY message in a conversation — the cheap
+/// (no-decrypt) half of [`transport_thread_since`]. Rows already on the glass
+/// apply these in place: a tombstone flip or an acceptance transition of a row
+/// BEHIND the cursor would otherwise be invisible to an incremental pull (the
+/// V2-design resolution of the cursor edge-case research hook).
+class MessageStatusDto {
+  final String txid;
+
+  /// V1 reorg honesty (reversible ghost flag).
+  final bool tombstoned;
+
+  /// `None` = unwatched or horizon-pruned — store/wallet truth stands alone.
+  final TxStatusDto? acceptance;
+
+  const MessageStatusDto({
+    required this.txid,
+    required this.tombstoned,
+    this.acceptance,
+  });
+
+  @override
+  int get hashCode => txid.hashCode ^ tombstoned.hashCode ^ acceptance.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MessageStatusDto &&
+          runtimeType == other.runtimeType &&
+          txid == other.txid &&
+          tombstoned == other.tombstoned &&
+          acceptance == other.acceptance;
+}
+
+/// One incremental thread pull: the decrypted NEW tail plus the status of
+/// every row in the conversation.
+class ThreadDeltaDto {
+  /// Rows strictly after the cursor in the store's `(unix_ms, txid)` order,
+  /// decrypted on view (§0.4). The FULL thread when the cursor is absent or
+  /// unknown — the caller keys rows by txid, so a full merge is idempotent.
+  final List<ThreadMessageDto> messages;
+
+  /// Status for every message txid in the conversation, cursor-independent.
+  final List<MessageStatusDto> statuses;
+
+  const ThreadDeltaDto({required this.messages, required this.statuses});
+
+  @override
+  int get hashCode => messages.hashCode ^ statuses.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThreadDeltaDto &&
+          runtimeType == other.runtimeType &&
+          messages == other.messages &&
+          statuses == other.statuses;
 }
 
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
@@ -474,3 +570,36 @@ class TransportSendSummaryDto {
           payloadLen == other.payloadLen &&
           payloadKind == other.payloadKind;
 }
+
+/// The acceptance tracker's answer for one txid, mirrored for display (V2
+/// status chips). A RENDERING of the chain crate's `TxStatus` — depth is
+/// node-read there (INV-9); nothing is recomputed here.
+class TxStatusDto {
+  final TxStatusKind kind;
+
+  /// Node-read blue depth for `Accepted`/`Confirmed` (the V6
+  /// observe-before-tuning surface); `None` otherwise.
+  final BigInt? blueDepth;
+
+  /// How long a `Stalled` submit has waited; `None` otherwise.
+  final BigInt? waitedMs;
+
+  const TxStatusDto({required this.kind, this.blueDepth, this.waitedMs});
+
+  @override
+  int get hashCode => kind.hashCode ^ blueDepth.hashCode ^ waitedMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TxStatusDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          blueDepth == other.blueDepth &&
+          waitedMs == other.waitedMs;
+}
+
+/// The five acceptance states a chip can wear (V2). Field-less — FRB 2.12
+/// maps an enum-with-fields to a freezed class (the dag.rs DTO note); the
+/// per-state numbers ride [`TxStatusDto`]'s optional fields instead.
+enum TxStatusKind { submitted, accepted, confirmed, displaced, stalled }

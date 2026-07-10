@@ -72,10 +72,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GapAgeDto dco_decode_box_autoadd_gap_age_dto(dynamic raw);
 
   @protected
+  TxStatusDto dco_decode_box_autoadd_tx_status_dto(dynamic raw);
+
+  @protected
   BigInt dco_decode_box_autoadd_u_64(dynamic raw);
 
   @protected
   VaultKdfParams dco_decode_box_autoadd_vault_kdf_params(dynamic raw);
+
+  @protected
+  WalletSnapshot dco_decode_box_autoadd_wallet_snapshot(dynamic raw);
 
   @protected
   ConversationDto dco_decode_conversation_dto(dynamic raw);
@@ -105,6 +111,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ConversationDto> dco_decode_list_conversation_dto(dynamic raw);
 
   @protected
+  List<MessageStatusDto> dco_decode_list_message_status_dto(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
@@ -120,6 +129,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MaturityState dco_decode_maturity_state(dynamic raw);
 
   @protected
+  MessageStatusDto dco_decode_message_status_dto(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -129,7 +141,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GapAgeDto? dco_decode_opt_box_autoadd_gap_age_dto(dynamic raw);
 
   @protected
+  TxStatusDto? dco_decode_opt_box_autoadd_tx_status_dto(dynamic raw);
+
+  @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
+
+  @protected
+  WalletSnapshot? dco_decode_opt_box_autoadd_wallet_snapshot(dynamic raw);
 
   @protected
   SendOutcomeDto dco_decode_send_outcome_dto(dynamic raw);
@@ -141,6 +159,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SpanMarkerDto dco_decode_span_marker_dto(dynamic raw);
 
   @protected
+  ThreadDeltaDto dco_decode_thread_delta_dto(dynamic raw);
+
+  @protected
   ThreadMessageDto dco_decode_thread_message_dto(dynamic raw);
 
   @protected
@@ -148,6 +169,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TransportSendSummaryDto dco_decode_transport_send_summary_dto(dynamic raw);
+
+  @protected
+  TxStatusDto dco_decode_tx_status_dto(dynamic raw);
+
+  @protected
+  TxStatusKind dco_decode_tx_status_kind(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -219,10 +246,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GapAgeDto sse_decode_box_autoadd_gap_age_dto(SseDeserializer deserializer);
 
   @protected
+  TxStatusDto sse_decode_box_autoadd_tx_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
   VaultKdfParams sse_decode_box_autoadd_vault_kdf_params(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WalletSnapshot sse_decode_box_autoadd_wallet_snapshot(
     SseDeserializer deserializer,
   );
 
@@ -258,6 +295,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<MessageStatusDto> sse_decode_list_message_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
@@ -277,6 +319,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MaturityState sse_decode_maturity_state(SseDeserializer deserializer);
 
   @protected
+  MessageStatusDto sse_decode_message_status_dto(SseDeserializer deserializer);
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
@@ -288,7 +333,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  TxStatusDto? sse_decode_opt_box_autoadd_tx_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
+  WalletSnapshot? sse_decode_opt_box_autoadd_wallet_snapshot(
+    SseDeserializer deserializer,
+  );
 
   @protected
   SendOutcomeDto sse_decode_send_outcome_dto(SseDeserializer deserializer);
@@ -298,6 +353,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SpanMarkerDto sse_decode_span_marker_dto(SseDeserializer deserializer);
+
+  @protected
+  ThreadDeltaDto sse_decode_thread_delta_dto(SseDeserializer deserializer);
 
   @protected
   ThreadMessageDto sse_decode_thread_message_dto(SseDeserializer deserializer);
@@ -311,6 +369,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TransportSendSummaryDto sse_decode_transport_send_summary_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  TxStatusDto sse_decode_tx_status_dto(SseDeserializer deserializer);
+
+  @protected
+  TxStatusKind sse_decode_tx_status_kind(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -403,11 +467,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_tx_status_dto(
+    TxStatusDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_vault_kdf_params(
     VaultKdfParams self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_wallet_snapshot(
+    WalletSnapshot self,
     SseSerializer serializer,
   );
 
@@ -448,6 +524,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_message_status_dto(
+    List<MessageStatusDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
@@ -472,6 +554,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_maturity_state(MaturityState self, SseSerializer serializer);
 
   @protected
+  void sse_encode_message_status_dto(
+    MessageStatusDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
@@ -487,7 +575,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_tx_status_dto(
+    TxStatusDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_wallet_snapshot(
+    WalletSnapshot? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_send_outcome_dto(
@@ -503,6 +603,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_span_marker_dto(SpanMarkerDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_delta_dto(
+    ThreadDeltaDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_thread_message_dto(
@@ -521,6 +627,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     TransportSendSummaryDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_tx_status_dto(TxStatusDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tx_status_kind(TxStatusKind self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

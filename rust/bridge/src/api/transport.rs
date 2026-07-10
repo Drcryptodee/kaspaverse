@@ -136,6 +136,57 @@ pub struct ThreadMessageDto {
     pub tombstoned: bool,
 }
 
+/// The five acceptance states a chip can wear (V2). Field-less — FRB 2.12
+/// maps an enum-with-fields to a freezed class (the dag.rs DTO note); the
+/// per-state numbers ride [`TxStatusDto`]'s optional fields instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxStatusKind {
+    Submitted,
+    Accepted,
+    Confirmed,
+    Displaced,
+    Stalled,
+}
+
+/// The acceptance tracker's answer for one txid, mirrored for display (V2
+/// status chips). A RENDERING of the chain crate's `TxStatus` — depth is
+/// node-read there (INV-9); nothing is recomputed here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxStatusDto {
+    pub kind: TxStatusKind,
+    /// Node-read blue depth for `Accepted`/`Confirmed` (the V6
+    /// observe-before-tuning surface); `None` otherwise.
+    pub blue_depth: Option<u64>,
+    /// How long a `Stalled` submit has waited; `None` otherwise.
+    pub waited_ms: Option<u64>,
+}
+
+/// Per-txid display status for EVERY message in a conversation — the cheap
+/// (no-decrypt) half of [`transport_thread_since`]. Rows already on the glass
+/// apply these in place: a tombstone flip or an acceptance transition of a row
+/// BEHIND the cursor would otherwise be invisible to an incremental pull (the
+/// V2-design resolution of the cursor edge-case research hook).
+#[derive(Clone, Debug)]
+pub struct MessageStatusDto {
+    pub txid: String,
+    /// V1 reorg honesty (reversible ghost flag).
+    pub tombstoned: bool,
+    /// `None` = unwatched or horizon-pruned — store/wallet truth stands alone.
+    pub acceptance: Option<TxStatusDto>,
+}
+
+/// One incremental thread pull: the decrypted NEW tail plus the status of
+/// every row in the conversation.
+#[derive(Clone, Debug)]
+pub struct ThreadDeltaDto {
+    /// Rows strictly after the cursor in the store's `(unix_ms, txid)` order,
+    /// decrypted on view (§0.4). The FULL thread when the cursor is absent or
+    /// unknown — the caller keys rows by txid, so a full merge is idempotent.
+    pub messages: Vec<ThreadMessageDto>,
+    /// Status for every message txid in the conversation, cursor-independent.
+    pub statuses: Vec<MessageStatusDto>,
+}
+
 /// A parsed `kv:1:` game frame (P2.4 §0.5). Fields come from the frame JSON, so
 /// a tampered readable line can't misstate the card. Nothing here binds value —
 /// the `stake` is a DISPLAY number; the real wager binds at the P3 covenant.
@@ -404,40 +455,48 @@ pub async fn transport_start() -> Result<(), AppError> {
             let mut acceptance_rx = tracker.subscribe();
             let task = tokio::spawn(async move {
                 loop {
-                    match acceptance_rx.recv().await {
-                        Ok(AcceptanceEvent::DisplacedElapsed { txid }) => {
-                            // `self::` — the enclosing scope's `hub` binding
-                            // (the Arc) shadows the accessor fn in this task.
-                            let Ok(hub) = self::hub() else { continue };
-                            let mut store =
-                                hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                    let event = match acceptance_rx.recv().await {
+                        Ok(event) => event,
+                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Closed) => break,
+                    };
+                    let txid = match &event {
+                        AcceptanceEvent::Accepted { txid }
+                        | AcceptanceEvent::Confirmed { txid, .. }
+                        | AcceptanceEvent::Displaced { txid }
+                        | AcceptanceEvent::DisplacedElapsed { txid }
+                        | AcceptanceEvent::Stalled { txid, .. } => txid.clone(),
+                    };
+                    // `self::` — the enclosing scope's `hub` binding (the
+                    // Arc) shadows the accessor fn in this task.
+                    let Ok(hub) = self::hub() else { continue };
+                    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                    // V1 tombstone lane: flag flips log their own line.
+                    match &event {
+                        AcceptanceEvent::DisplacedElapsed { .. } => {
                             if let Ok(true) = store.tombstone_message(&txid) {
-                                let conversation = store.message_conversation(&txid);
-                                drop(store);
                                 log::info!(
                                     "transport-hub: {txid} tombstoned (displaced past window)"
                                 );
-                                if let Some(id) = conversation {
-                                    ping(&id);
-                                }
                             }
                         }
-                        Ok(AcceptanceEvent::Accepted { txid }) => {
-                            let Ok(hub) = self::hub() else { continue };
-                            let mut store =
-                                hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                        AcceptanceEvent::Accepted { .. } => {
                             if let Ok(true) = store.untombstone_message(&txid) {
-                                let conversation = store.message_conversation(&txid);
-                                drop(store);
                                 log::info!("transport-hub: {txid} ghost reversed (re-accepted)");
-                                if let Some(id) = conversation {
-                                    ping(&id);
-                                }
                             }
                         }
-                        Ok(_) => {}
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        _ => {}
+                    }
+                    // V2 chip lane (sitting find 2026-07-10): EVERY acceptance
+                    // transition of a stored message pings its conversation —
+                    // an OPEN thread otherwise never refreshes its status map
+                    // and the chip sticks on Pending until re-entry. Events
+                    // are one-shot per transition in the tracker, so pings
+                    // stay sparse; the re-pull is the cheap incremental one.
+                    let conversation = store.message_conversation(&txid);
+                    drop(store);
+                    if let Some(id) = conversation {
+                        ping(&id);
                     }
                 }
             });
@@ -1355,61 +1414,188 @@ pub fn transport_thread(conversation_id: String) -> Result<Vec<ThreadMessageDto>
 
     let mut thread = Vec::new();
     for record in store.messages_for(&conversation_id) {
-        let outbound = record.direction == MessageDirection::Outbound;
         let tombstoned = store.is_message_tombstoned(&record.txid);
-        match record.kind {
-            StoredKind::Handshake | StoredKind::Legacy => {
-                thread.push(ThreadMessageDto {
-                    txid: record.txid,
-                    kind: "handshake".to_string(),
-                    outbound,
-                    unix_ms: record.unix_ms,
-                    text: String::new(),
-                    readable: true,
-                    frame: None,
-                    tombstoned,
-                });
-            }
-            StoredKind::Comm => {
-                let (text, frame, readable) = match Envelope::from_bytes(&record.envelope) {
-                    Ok(envelope) => {
-                        let slot = record
-                            .sealed_to
-                            .map(|(b, i)| (to_core_branch(b), i))
-                            .unwrap_or(bound);
-                        match open_with_fallback(&hub, slot, &envelope) {
-                            Ok(plaintext) => {
-                                // Split the readable line from any `kv:1:` frame.
-                                // Only the parsed result crosses the bridge; an
-                                // unknown/forward tail degrades to its line (P5).
-                                let body = String::from_utf8_lossy(&plaintext).into_owned();
-                                let (text, frame) = split_frame(&body);
-                                (text, frame, true)
-                            }
-                            Err(CoreError::VaultLocked) => {
-                                return Err(AppError::msg(
-                                    "wallet is locked — unlock to read messages",
-                                ))
-                            }
-                            Err(_) => (String::new(), None, false),
-                        }
-                    }
-                    Err(_) => (String::new(), None, false),
-                };
-                thread.push(ThreadMessageDto {
-                    txid: record.txid,
-                    kind: "comm".to_string(),
-                    outbound,
-                    unix_ms: record.unix_ms,
-                    text,
-                    readable,
-                    frame,
-                    tombstoned,
-                });
-            }
-        }
+        thread.push(thread_row(&hub, bound, record, tombstoned)?);
     }
     Ok(thread)
+}
+
+/// Build the display row for ONE stored record — the decrypt-on-view unit
+/// (§0.4) shared by [`transport_thread`] and [`transport_thread_since`].
+/// Handshake rows are system rows (no body); comm rows open per call and the
+/// plaintext crosses once as the DTO. Vault locked ⇒ the whole pull errors.
+fn thread_row(
+    hub: &TransportHub,
+    bound: KeySlot,
+    record: MessageRecord,
+    tombstoned: bool,
+) -> Result<ThreadMessageDto, AppError> {
+    let outbound = record.direction == MessageDirection::Outbound;
+    match record.kind {
+        StoredKind::Handshake | StoredKind::Legacy => Ok(ThreadMessageDto {
+            txid: record.txid,
+            kind: "handshake".to_string(),
+            outbound,
+            unix_ms: record.unix_ms,
+            text: String::new(),
+            readable: true,
+            frame: None,
+            tombstoned,
+        }),
+        StoredKind::Comm => {
+            let (text, frame, readable) = match Envelope::from_bytes(&record.envelope) {
+                Ok(envelope) => {
+                    let slot = record
+                        .sealed_to
+                        .map(|(b, i)| (to_core_branch(b), i))
+                        .unwrap_or(bound);
+                    match open_with_fallback(hub, slot, &envelope) {
+                        Ok(plaintext) => {
+                            // Split the readable line from any `kv:1:` frame.
+                            // Only the parsed result crosses the bridge; an
+                            // unknown/forward tail degrades to its line (P5).
+                            let body = String::from_utf8_lossy(&plaintext).into_owned();
+                            let (text, frame) = split_frame(&body);
+                            (text, frame, true)
+                        }
+                        Err(CoreError::VaultLocked) => {
+                            return Err(AppError::msg("wallet is locked — unlock to read messages"))
+                        }
+                        Err(_) => (String::new(), None, false),
+                    }
+                }
+                Err(_) => (String::new(), None, false),
+            };
+            Ok(ThreadMessageDto {
+                txid: record.txid,
+                kind: "comm".to_string(),
+                outbound,
+                unix_ms: record.unix_ms,
+                text,
+                readable,
+                frame,
+                tombstoned,
+            })
+        }
+    }
+}
+
+/// Mirror the chain crate's `TxStatus` for display (nothing recomputed).
+fn tx_status_dto(status: kaspaverse_chain::TxStatus) -> TxStatusDto {
+    use kaspaverse_chain::TxStatus;
+    match status {
+        TxStatus::Submitted => TxStatusDto {
+            kind: TxStatusKind::Submitted,
+            blue_depth: None,
+            waited_ms: None,
+        },
+        TxStatus::Accepted { blue_depth } => TxStatusDto {
+            kind: TxStatusKind::Accepted,
+            blue_depth: Some(blue_depth),
+            waited_ms: None,
+        },
+        TxStatus::Confirmed { blue_depth } => TxStatusDto {
+            kind: TxStatusKind::Confirmed,
+            blue_depth: Some(blue_depth),
+            waited_ms: None,
+        },
+        TxStatus::Displaced => TxStatusDto {
+            kind: TxStatusKind::Displaced,
+            blue_depth: None,
+            waited_ms: None,
+        },
+        TxStatus::Stalled { waited_ms } => TxStatusDto {
+            kind: TxStatusKind::Stalled,
+            blue_depth: None,
+            waited_ms: Some(waited_ms),
+        },
+    }
+}
+
+/// Incremental thread pull (V2): decrypt ONLY the rows strictly after
+/// `after_txid` in the store's `(unix_ms, txid)` order, and return the
+/// current status of EVERY row so status transitions of already-rendered
+/// rows (tombstone flips, acceptance progress) land without re-decrypting
+/// the conversation. Cursor semantics:
+///
+/// - rows are write-once (`unix_ms`/`txid` never change after recording), so
+///   a cursor's sort position is stable;
+/// - an absent or UNKNOWN cursor (e.g. the anchor row was removed) degrades
+///   to the full thread — the caller keys rows by txid, so the merge is
+///   idempotent, never duplicating;
+/// - a new row CAN sort behind a live cursor (inbound handshake rows carry
+///   the sender-claimed `payload.timestamp`; same-ms txid tie-breaks) and
+///   would then be absent from `messages` — but never from `statuses`,
+///   which covers every row. THE CALLER CONTRACT: a statuses txid you have
+///   never rendered means a stranded row — do one full re-pull (cursor
+///   `None`), whose statuses ⊇ all rows, so it converges in one step
+///   (consensus-audit V2 finding 1; the thread screen implements this).
+///
+/// §0.4 unchanged: decrypt-on-view, per call, vault-locked errors, plaintext
+/// crosses once and dies with the widget. The tracker is a soft dependency
+/// (V1 law): unavailable ⇒ `acceptance: None`, store truth stands alone.
+pub async fn transport_thread_since(
+    conversation_id: String,
+    after_txid: Option<String>,
+) -> Result<ThreadDeltaDto, AppError> {
+    // Resolve the tracker BEFORE taking the store lock — never hold a std
+    // MutexGuard across an await (mirrors dag_monitor.rs / wallet.rs).
+    let tracker = super::dag::shared_tracker().await.ok();
+
+    let hub = hub()?;
+    let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let conversation = store
+        .conversation(&conversation_id)
+        .ok_or_else(|| AppError::msg("conversation not found"))?;
+    let bound: KeySlot = (
+        to_core_branch(conversation.bound_branch),
+        conversation.bound_index,
+    );
+
+    let records = store.messages_for(&conversation_id);
+    let start = tail_start(&records, after_txid.as_deref());
+
+    let statuses = records
+        .iter()
+        .map(|record| MessageStatusDto {
+            txid: record.txid.clone(),
+            tombstoned: store.is_message_tombstoned(&record.txid),
+            acceptance: tracker
+                .as_ref()
+                .and_then(|t| t.status(&record.txid))
+                .map(tx_status_dto),
+        })
+        .collect();
+
+    let mut messages = Vec::new();
+    for record in records.into_iter().skip(start) {
+        let tombstoned = store.is_message_tombstoned(&record.txid);
+        messages.push(thread_row(&hub, bound, record, tombstoned)?);
+    }
+    Ok(ThreadDeltaDto { messages, statuses })
+}
+
+/// The tracker's live answer for one txid (V2 sitting request: the chip
+/// streams "N confirmations"). Depth is computed AT READ from the live sink
+/// blue score (node-read, INV-9 — `AcceptanceTracker::status`), so a 1 Hz
+/// poll of this fn yields a climbing counter. `None` = unwatched / pruned /
+/// tracker unavailable — the caller's chip simply doesn't count.
+pub async fn tx_acceptance_status(txid: String) -> Result<Option<TxStatusDto>, AppError> {
+    let Ok(tracker) = super::dag::shared_tracker().await else {
+        return Ok(None);
+    };
+    Ok(tracker.status(&txid).map(tx_status_dto))
+}
+
+/// Where the decrypt tail begins for an incremental pull: strictly after the
+/// cursor row in the store's `(unix_ms, txid)` sort order. An absent or
+/// UNKNOWN cursor (anchor removed / foreign txid) yields 0 — the full thread,
+/// which a txid-keyed caller merges idempotently. Pure; tested.
+fn tail_start(records: &[MessageRecord], after_txid: Option<&str>) -> usize {
+    after_txid
+        .and_then(|txid| records.iter().position(|r| r.txid == txid))
+        .map(|i| i + 1)
+        .unwrap_or(0)
 }
 
 /// Split a decrypted comm body into its display text and any recognized `kv:1:`
@@ -1573,6 +1759,42 @@ mod tests {
         assert!(take_intent(7).is_none());
     }
 
+    /// A minimal comm record for cursor tests — envelope bytes never opened
+    /// (tail_start reads only txid/ordering).
+    fn rec(txid: &str, unix_ms: u64) -> MessageRecord {
+        MessageRecord {
+            txid: txid.to_string(),
+            conversation_id: "c1".to_string(),
+            direction: MessageDirection::Outbound,
+            kind: StoredKind::Comm,
+            envelope: Vec::new(),
+            unix_ms,
+            alias_on_wire: None,
+            sealed_to: None,
+        }
+    }
+
+    /// The V2 cursor law (`transport_thread_since`): strictly-after on a known
+    /// anchor; full thread on an absent or unknown one (idempotent for a
+    /// txid-keyed caller); a cursor at the tail yields an empty pull.
+    #[test]
+    fn tail_start_resolves_the_cursor_edge_cases() {
+        let records = vec![rec("aa", 10), rec("bb", 20), rec("cc", 30)];
+
+        // No cursor → the whole thread.
+        assert_eq!(tail_start(&records, None), 0);
+        // A known anchor → strictly after it.
+        assert_eq!(tail_start(&records, Some("aa")), 1);
+        assert_eq!(tail_start(&records, Some("bb")), 2);
+        // The newest row as anchor → nothing new (empty tail).
+        assert_eq!(tail_start(&records, Some("cc")), 3);
+        // An unknown/removed anchor degrades to the full thread, never an
+        // error and never a stranded gap.
+        assert_eq!(tail_start(&records, Some("zz")), 0);
+        // An empty thread tolerates any cursor.
+        assert_eq!(tail_start(&[], Some("aa")), 0);
+    }
+
     #[test]
     fn branch_mapping_round_trips() {
         for branch in [Branch::Receive, Branch::Change] {
@@ -1606,10 +1828,11 @@ mod tests {
     }
 
     /// The §4 plaintext-discipline grep-tripwire for THIS module: the only
-    /// place decrypted text may exist is `transport_thread`'s return path.
+    /// place decrypted text may exist is the `thread_row` return path (shared
+    /// by `transport_thread` and `transport_thread_since`).
     /// No `log::`/`tracing` call in this file may reference a plaintext,
-    /// text, or body binding — reviewed by ffi-leak; this test pins the two
-    /// log lines the module is allowed to have.
+    /// text, or body binding — reviewed by ffi-leak; this test scans every
+    /// log line the module has (content words, not an allowlist).
     #[test]
     fn module_logs_are_lifecycle_only() {
         let source = include_str!("transport.rs");

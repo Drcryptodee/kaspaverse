@@ -83,6 +83,8 @@ class KaspaVerseApp extends StatelessWidget {
           activity: wallet.activity,
           syncing: wallet.syncing,
           utxoIndexMissing: wallet.utxoIndexMissing,
+          depths: wallet.depths,
+          onRefreshActivity: wallet.refreshNow,
           onReady: () {
             wallet.start();
             // P2.3 transport hub: needs the unlocked vault (this screen only
