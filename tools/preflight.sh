@@ -10,6 +10,8 @@ echo "• dirty:   $(git status --porcelain 2>/dev/null | wc -l) uncommitted pat
 echo "• last 5 commits:"
 git log --oneline -5 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 echo "• active phase: $(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null || echo 'NONE — check PHASE_INDEX')"
+# Reasoning playbook (ops-layer; absent in public clones — conditional on purpose).
+[ -f .claude/playbook/INDEX.md ] && echo "• playbook: $(grep -c '^- PB-' .claude/playbook/INDEX.md) reasoning patterns — read .claude/playbook/INDEX.md before building"
 echo "• rust workspace: $([ -f rust/Cargo.toml ] && echo present || echo absent)"
 if [ -f rust/Cargo.toml ]; then
   echo "    rusty-kaspa pin: $(grep -m1 -E 'rusty-kaspa|kaspa-wrpc-client' rust/Cargo.toml rust/*/Cargo.toml 2>/dev/null | head -1 || echo 'not found')"
