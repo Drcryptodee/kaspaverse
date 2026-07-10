@@ -92,6 +92,36 @@ fn fully_broadcast(outcome: &SendOutcome) -> bool {
         && outcome.submitted == outcome.total
 }
 
+/// Classify an `InsufficientFunds` refusal honestly against the live balance
+/// buckets (the Generator spends only MATURE UTXOs). Change from our own
+/// just-broadcast send rides the `outgoing` bucket until the network hands it
+/// back — that is "still settling", never "insufficient" (V2, finding 7).
+/// Incoming value still maturing rides `pending`. A "try again" is promised
+/// ONLY when the amount fits inside everything the wallet could ever settle
+/// (mature + pending + outgoing, all node-read) — an impossible amount is a
+/// true shortfall however much is in flight (consensus-audit V2 finding 2;
+/// the fee can still push a fitting retry over, and that retry then reads
+/// the honest refusal). Pure; tested.
+fn shortfall_message(
+    amount_sompi: u64,
+    mature_sompi: u64,
+    pending_sompi: u64,
+    outgoing_sompi: u64,
+) -> &'static str {
+    let ever_settles = amount_sompi
+        <= mature_sompi
+            .saturating_add(pending_sompi)
+            .saturating_add(outgoing_sompi);
+    if ever_settles && outgoing_sompi > 0 {
+        "still settling from your last send — your change is on its way back. \
+         Try again in a few seconds."
+    } else if ever_settles && pending_sompi > 0 {
+        "not yet spendable — some funds are still confirming. Try again in a few seconds."
+    } else {
+        "insufficient funds — the amount plus the network fee is more than your spendable balance."
+    }
+}
+
 /// Display a sompi amount as KAS with trailing zeros trimmed (display-only —
 /// never consensus math). Pure; tested.
 fn kas_display(sompi: u64) -> String {
@@ -150,16 +180,26 @@ pub async fn send_prepare(
     {
         Ok(prepared) => prepared,
         Err(ChainError::InsufficientFunds { .. }) => {
-            // Distinguish a true shortfall from "still maturing" using the live
-            // balance (INV-8 honesty; the Generator spends only MATURE UTXOs).
-            let pending = wallet::latest_snapshot()
-                .and_then(|s| s.pending_sompi)
-                .unwrap_or(0);
-            return Err(AppError::msg(if pending > 0 {
-                "not yet spendable — some funds are still confirming. Try again in a few seconds."
-            } else {
-                "insufficient funds — the amount plus the network fee is more than your spendable balance."
-            }));
+            // Distinguish a true shortfall from funds in flight using the live
+            // balance (INV-8 honesty) — both the maturing-incoming bucket and
+            // our own settling change (finding 7: the classifier used to read
+            // only `pending`, so a send minutes after a send said
+            // "insufficient" at ample balance).
+            let (mature, pending, outgoing) = wallet::latest_snapshot()
+                .map(|s| {
+                    (
+                        s.mature_sompi.unwrap_or(0),
+                        s.pending_sompi.unwrap_or(0),
+                        s.outgoing_sompi.unwrap_or(0),
+                    )
+                })
+                .unwrap_or((0, 0, 0));
+            return Err(AppError::msg(shortfall_message(
+                amount_sompi,
+                mature,
+                pending,
+                outgoing,
+            )));
         }
         Err(ChainError::StorageMassExceeded { .. }) => {
             // KIP-9: a tiny output relative to the wallet's UTXOs is penalized
@@ -358,6 +398,26 @@ mod tests {
             final_txid: None,
             submitted_txids: Vec::new(),
         }));
+    }
+
+    #[test]
+    fn shortfall_classifier_reads_both_in_flight_buckets() {
+        // Our own settling change (outgoing bucket) — never "insufficient",
+        // and outgoing wins even while incoming value is also maturing
+        // (finding 7: the observed refusal minutes after a send).
+        assert!(shortfall_message(1, 0, 0, 1).contains("still settling from your last send"));
+        assert!(shortfall_message(10, 5, 5, 5).contains("still settling from your last send"));
+        // Incoming value maturing — "not yet spendable".
+        assert!(shortfall_message(1, 0, 1, 0).contains("not yet spendable"));
+        // A true shortfall stays a true shortfall.
+        assert!(shortfall_message(1, 0, 0, 0).contains("insufficient funds"));
+        // An amount NOTHING in flight could ever cover is a true shortfall,
+        // never a "try again in a few seconds" (consensus-audit V2 finding 2).
+        assert!(shortfall_message(100, 10, 20, 30).contains("insufficient funds"));
+        assert!(shortfall_message(100, 0, 0, 99).contains("insufficient funds"));
+        // At the exact boundary the funds could settle — the transient
+        // message stands (the fee may still refuse the retry, honestly).
+        assert!(shortfall_message(60, 10, 20, 30).contains("still settling"));
     }
 
     #[test]

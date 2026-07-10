@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../rust/api/send.dart';
@@ -6,15 +8,24 @@ import '../../services/messaging_service.dart';
 import '../send/confirm_send_sheet.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
+import '../widgets/tx_status_chip.dart';
 import 'contacts_screen.dart' show displayError;
 
-/// One conversation thread (P2.3 plain view + P2.4 `kv:1:` game frames).
+/// One conversation thread (P2.3 plain view + P2.4 `kv:1:` game frames +
+/// V2 incremental pulls, status chips and the reorg ghost).
 ///
 /// Decrypt-on-view (§0.4): every render PULLS the thread from Rust — sealed
 /// rows open there while the vault is unlocked; the decrypted text lives in
 /// this widget's ephemeral state exactly as long as the screen shows it, and
 /// is dropped on dispose. Nothing is cached in a service; vault locked ⇒ the
 /// pull errs and the locked state renders instead of content.
+///
+/// V2: pulls are INCREMENTAL (`transport_thread_since` decrypts only the new
+/// tail past the last rendered txid); every pull also carries the live status
+/// of EVERY row, so tombstone flips and acceptance transitions of rows behind
+/// the cursor land without re-decrypting the conversation. Rows are
+/// txid-keyed in an [AnimatedList]; arrivals glide in and never yank a reader
+/// who has scrolled up.
 ///
 /// P2.4: a recognized `kv:1:` frame renders as a tappable card (challenge) or a
 /// light surface (accept/result/taunt); the card is built from the frame's JSON
@@ -50,8 +61,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   final _compose = TextEditingController();
   final _scroll = ScrollController();
+  final _listKey = GlobalKey<AnimatedListState>();
 
-  List<ThreadMessageDto> _messages = const [];
+  /// Append-only within a view (the store never reorders or removes rows in
+  /// a live conversation); txid-keyed via [_seen] so a full re-pull after a
+  /// degraded cursor can never duplicate (V2 cursor law).
+  final List<ThreadMessageDto> _messages = [];
+  final Set<String> _seen = {};
+
+  /// Live per-txid status (tombstone + acceptance) — refreshed WHOLE on every
+  /// pull, so rows behind the cursor keep telling the truth.
+  Map<String, MessageStatusDto> _statuses = const {};
 
   /// Challenge ids the user has locally declined this view. Decline sends no
   /// frame (no `decline` kind exists, §0.5) — it just retires the card's
@@ -60,6 +80,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   String? _lockedMessage;
   bool _loading = true;
+
+  /// First paint lands at the bottom instantly; later arrivals glide.
+  bool _settled = false;
+
+  /// The chip breath (StatusBeacon contract): ticks only while a pending
+  /// chip is on the glass, stops the moment everything resolves (DS-1).
+  Timer? _breath;
+  bool _pulse = false;
 
   @override
   void initState() {
@@ -73,8 +101,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _messaging.lastPing.removeListener(_onPing);
     _compose.dispose();
     _scroll.dispose();
+    _breath?.cancel();
     // The decrypted rows die with this state object (§0.4 — view-scoped).
-    _messages = const [];
+    _messages.clear();
     super.dispose();
   }
 
@@ -82,27 +111,112 @@ class _ThreadScreenState extends State<ThreadScreen> {
     if (_messaging.lastPing.value == widget.conversationId) _pull();
   }
 
+  /// Chip state for a row: outbound comm rows ride the tracker's answer;
+  /// everything else stays quiet.
+  TxChipState _chipFor(ThreadMessageDto m) {
+    if (!m.outbound || m.kind != 'comm') return TxChipState.none;
+    return chipStateOfAcceptance(_statuses[m.txid]?.acceptance?.kind);
+  }
+
+  /// Ghost truth: the live status map wins over the decrypt-time flag.
+  bool _ghostFor(ThreadMessageDto m) =>
+      _statuses[m.txid]?.tombstoned ?? m.tombstoned;
+
+  void _syncBreath() {
+    // Only a chip actually on the glass keeps the ticker alive — a ghosted
+    // row suppresses its chip (the ghost line renders instead), so it must
+    // not count (ux finding 4). No counting here: chat accepts near-
+    // instantly, so the confirmations counter is an Activity-surface
+    // affordance only (founder call, V2 sitting) — thread chips walk their
+    // states via acceptance pings and stay numberless.
+    final live = _messages.any(
+      (m) => _chipFor(m) == TxChipState.pending && !_ghostFor(m),
+    );
+    if (live && _breath == null) {
+      _breath = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() => _pulse = !_pulse);
+      });
+    } else if (!live && _breath != null) {
+      _breath!.cancel();
+      _breath = null;
+    }
+  }
+
+  /// Merge one delta into the view: append unseen rows (txid-keyed — a full
+  /// answer merges idempotently) and replace the status map whole.
+  void _merge(ThreadDeltaDto delta) {
+    setState(() {
+      for (final m in delta.messages) {
+        if (_seen.add(m.txid)) {
+          _messages.add(m);
+          // Null until the list first builds — initialItemCount covers it.
+          _listKey.currentState?.insertItem(
+            _messages.length - 1,
+            duration: KvMotion.normal,
+          );
+        }
+      }
+      _statuses = {for (final s in delta.statuses) s.txid: s};
+      _lockedMessage = null;
+      _loading = false;
+    });
+  }
+
   Future<void> _pull() async {
     try {
-      final messages = await _messaging.thread(widget.conversationId);
+      var delta = await _messaging.threadSince(
+        widget.conversationId,
+        _messages.isEmpty ? null : _messages.last.txid,
+      );
       if (!mounted) return;
-      setState(() {
-        _messages = messages;
-        _lockedMessage = null;
-        _loading = false;
-      });
+      // Read the reader's position BEFORE inserts move the extent.
+      final wasAtBottom =
+          !_scroll.hasClients ||
+          (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 96;
+      _merge(delta);
+      // Stranding heal (consensus-audit V2 finding 1): statuses cover EVERY
+      // row, so a txid we have never rendered means a row sorted BEHIND the
+      // cursor (sender-claimed handshake timestamp / same-ms tie-break).
+      // One full re-pull materializes it; the merge cannot duplicate, and a
+      // full answer's statuses ⊇ all rows, so this converges in one step.
+      if (delta.statuses.any((s) => !_seen.contains(s.txid))) {
+        delta = await _messaging.threadSince(widget.conversationId, null);
+        if (!mounted) return;
+        _merge(delta);
+      }
+      _syncBreath();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) {
-          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        if (!mounted || !_scroll.hasClients) return;
+        final bottom = _scroll.position.maxScrollExtent;
+        final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+        if (!_settled) {
+          _scroll.jumpTo(bottom);
+          _settled = true;
+        } else if (wasAtBottom) {
+          // An arrival glides down; a reader scrolled up is never yanked;
+          // reduced motion lands instantly (§6).
+          if (reduced) {
+            _scroll.jumpTo(bottom);
+          } else {
+            _scroll.animateTo(
+              bottom,
+              duration: KvMotion.normal,
+              curve: KvMotion.out,
+            );
+          }
         }
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _messages = const [];
+        _messages.clear();
+        _seen.clear();
+        _statuses = const {};
         _lockedMessage = displayError(e);
         _loading = false;
+        _settled = false;
       });
+      _syncBreath();
     }
   }
 
@@ -299,18 +413,41 @@ class _ThreadScreenState extends State<ThreadScreen> {
         ),
       );
     }
-    return ListView.builder(
+    return AnimatedList(
+      key: _listKey,
       controller: _scroll,
       padding: const EdgeInsets.all(KvSpace.m),
-      itemCount: _messages.length,
-      itemBuilder: (context, index) {
+      initialItemCount: _messages.length,
+      itemBuilder: (context, index, animation) {
         final m = _messages[index];
-        return _MessageRow(
+        // The DS entrance for inserted rows: a fixed 24dp rise + fade
+        // (§6 — never row-height-relative, so a tall challenge card rises
+        // exactly as far as a one-liner), decelerate-only; reduced motion
+        // degrades to the fade alone; initial rows build with a completed
+        // animation (no replay).
+        final curved = CurvedAnimation(parent: animation, curve: KvMotion.out);
+        final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+        Widget row = _MessageRow(
+          key: ValueKey(m.txid),
           message: m,
+          chip: _chipFor(m),
+          ghost: _ghostFor(m),
+          pulsePhase: _pulse,
           declined: m.frame != null && _declined.contains(m.frame!.id),
           onAccept: _acceptChallenge,
           onDecline: _declineChallenge,
         );
+        if (!reduced) {
+          row = AnimatedBuilder(
+            animation: curved,
+            builder: (context, child) => Transform.translate(
+              offset: Offset(0, (1 - curved.value) * KvMotion.entranceOffset),
+              child: child,
+            ),
+            child: row,
+          );
+        }
+        return FadeTransition(opacity: curved, child: row);
       },
     );
   }
@@ -330,20 +467,71 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
 class _MessageRow extends StatelessWidget {
   const _MessageRow({
+    super.key,
     required this.message,
     required this.declined,
+    this.chip = TxChipState.none,
+    this.ghost = false,
+    this.pulsePhase = false,
     this.onAccept,
     this.onDecline,
   });
 
   final ThreadMessageDto message;
   final bool declined;
+
+  /// V2 status chip for outbound rows ([TxChipState.none] renders nothing).
+  final TxChipState chip;
+
+  /// V2 reorg ghost: the accepting block was displaced and hasn't returned —
+  /// the row dims to the DS-1 stale opacity with an honest line, and lifts
+  /// again if the network re-accepts it (reversible by construction).
+  final bool ghost;
+
+  final bool pulsePhase;
   final void Function(String refId)? onAccept;
   final void Function(String refId)? onDecline;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final m = message;
+    final body = _content(context, theme);
+
+    final ghosted = AnimatedOpacity(
+      opacity: ghost ? KvFreshness.opacityStale : 1.0,
+      duration: KvMotion.normal,
+      curve: KvMotion.out,
+      child: body,
+    );
+    if (!ghost && chip == TxChipState.none) return ghosted;
+
+    final annotation = ghost
+        ? Text(
+            'Displaced by the network',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: KvColor.textTertiary,
+            ),
+          )
+        : TxStatusChip(state: chip, pulsePhase: pulsePhase);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ghosted,
+        Padding(
+          padding: const EdgeInsets.only(bottom: KvSpace.xs),
+          child: Align(
+            alignment: m.outbound
+                ? Alignment.centerRight
+                : Alignment.centerLeft,
+            child: annotation,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _content(BuildContext context, ThemeData theme) {
     final m = message;
 
     if (m.kind == 'handshake') {

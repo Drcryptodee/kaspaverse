@@ -10,6 +10,19 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These functions are ignored because they are not marked as `pub`: `apply_overrides`, `change_window`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `overlaid`, `snapshots`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
+/// The latest folded snapshot as a PULL (V2 sitting: the founder's
+/// swipe-to-refresh; also the stream-freeze diagnostic — a pull that shows a
+/// row the stream missed convicts the delivery lane, not the fold). `None`
+/// until the engine has folded anything.
+Future<WalletSnapshot?> walletSnapshotNow() =>
+    RustLib.instance.api.crateApiWalletWalletSnapshotNow();
+
+/// A Dart-side display-state marker routed through the ONE build-flavor-proof
+/// log lane (L53 — profile builds drop Dart prints). Markers are OUR OWN
+/// short state constants + counts, never content (INV-3); clamped defensively.
+Future<void> uiMark({required String marker}) =>
+    RustLib.instance.api.crateApiWalletUiMark(marker: marker);
+
 /// Subscribe to live wallet snapshots (balance + activity) for the unlocked
 /// vault's addresses. The first call starts the sync engine; later calls share
 /// it. Errors if the vault is locked (the Dart side retries after unlock).
@@ -32,6 +45,12 @@ class ActivityRecord {
   final bool isCoinbase;
   final MaturityState maturity;
 
+  /// V2 chip honesty: the tracker has seen no acceptance for this SUBMITTED
+  /// txid past the stall threshold (Send-sourced watches only — V1 signal
+  /// #3). Rides alongside `maturity` (a stalled row is still Pending);
+  /// never persisted — recomputed from the live overrides on every fold.
+  final bool stalled;
+
   const ActivityRecord({
     required this.txid,
     required this.valueSompi,
@@ -40,6 +59,7 @@ class ActivityRecord {
     required this.direction,
     required this.isCoinbase,
     required this.maturity,
+    required this.stalled,
   });
 
   @override
@@ -50,7 +70,8 @@ class ActivityRecord {
       blockDaaScore.hashCode ^
       direction.hashCode ^
       isCoinbase.hashCode ^
-      maturity.hashCode;
+      maturity.hashCode ^
+      stalled.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -63,7 +84,8 @@ class ActivityRecord {
           blockDaaScore == other.blockDaaScore &&
           direction == other.direction &&
           isCoinbase == other.isCoinbase &&
-          maturity == other.maturity;
+          maturity == other.maturity &&
+          stalled == other.stalled;
 }
 
 /// Maturity of an activity row. `Pending`/`Confirmed` come from wallet-core

@@ -52,6 +52,29 @@ FrameDto frameDto({
   String detail = '',
 }) => FrameDto(kind: kind, game: game, stake: stake, id: id, detail: detail);
 
+/// Wrap a message list as the V2 incremental pull's answer — statuses mirror
+/// each row's tombstone flag; [acceptance] (txid → status) drives the chips.
+ThreadDeltaDto delta(
+  List<ThreadMessageDto> messages, {
+  Map<String, TxStatusDto> acceptance = const {},
+}) => ThreadDeltaDto(
+  messages: messages,
+  statuses: [
+    for (final m in messages)
+      MessageStatusDto(
+        txid: m.txid,
+        tombstoned: m.tombstoned,
+        acceptance: acceptance[m.txid],
+      ),
+  ],
+);
+
+TxStatusDto status(TxStatusKind kind, {int? depth}) => TxStatusDto(
+  kind: kind,
+  blueDepth: depth == null ? null : BigInt.from(depth),
+  waitedMs: null,
+);
+
 TransportSendSummaryDto summary({BigInt? amount}) => TransportSendSummaryDto(
   nonce: BigInt.from(7),
   destination:
@@ -76,6 +99,7 @@ void main() {
     MessagingService.startFn = () async {};
     MessagingService.conversationsFn = () async => const [];
     MessagingService.threadFn = (_) async => const [];
+    MessagingService.threadSinceFn = (_, _) async => delta(const []);
     MessagingService.commitFn = (_) async => const SendOutcomeDto(
       finalTxid: 'ab',
       submitted: 1,
@@ -126,6 +150,16 @@ void main() {
         2,
         reason: 'every view pull decrypts fresh — nothing cached',
       );
+
+      // The V2 incremental pull holds the same law: a pure forward, no cache.
+      var deltas = 0;
+      MessagingService.threadSinceFn = (_, _) async {
+        deltas++;
+        return delta([message('tx1')]);
+      };
+      await service.threadSince('c1', null);
+      await service.threadSince('c1', 'tx1');
+      expect(deltas, 2, reason: 'threadSince decrypts fresh per call too');
     });
   });
 
@@ -242,12 +276,12 @@ void main() {
     testWidgets('renders decrypted rows and system handshake rows', (
       tester,
     ) async {
-      MessagingService.threadFn = (_) async => [
+      MessagingService.threadSinceFn = (_, _) async => delta([
         message('tx0', kind: 'handshake'),
         message('tx1', text: 'gm — first L1 DM'),
         message('tx2', outbound: true, text: 'gm right back'),
         message('tx3', readable: false, text: ''),
-      ];
+      ]);
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
@@ -261,7 +295,7 @@ void main() {
     testWidgets('a locked vault shows the locked state, not content', (
       tester,
     ) async {
-      MessagingService.threadFn = (_) async =>
+      MessagingService.threadSinceFn = (_, _) async =>
           throw StateError('wallet is locked — unlock to read messages');
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
@@ -301,9 +335,9 @@ void main() {
       tester,
     ) async {
       var pulls = 0;
-      MessagingService.threadFn = (_) async {
+      MessagingService.threadSinceFn = (_, _) async {
         pulls++;
-        return const [];
+        return delta(const []);
       };
       // Attach the service's ping pipeline.
       await MessagingService.instance.start();
@@ -324,9 +358,9 @@ void main() {
       tester,
     ) async {
       var pulls = 0;
-      MessagingService.threadFn = (_) async {
+      MessagingService.threadSinceFn = (_, _) async {
         pulls++;
-        return const [];
+        return delta(const []);
       };
       await MessagingService.instance.start();
       await tester.pumpWidget(screen());
@@ -344,6 +378,210 @@ void main() {
             'a second message in the SAME conversation must still refresh '
             'the open thread (ValueNotifier equality trap — sitting find)',
       );
+    });
+  });
+
+  group('ThreadScreen — V2 chips, ghost & incremental merge', () {
+    Widget screen() => const MaterialApp(
+      home: ThreadScreen(
+        conversationId: 'c1',
+        contactLabel: 'kaspa:qz7u…j43pf',
+      ),
+    );
+
+    // NOTE: a live pending chip runs the 1 s breath ticker, so these tests
+    // pump fixed durations instead of pumpAndSettle (which would never
+    // settle) — the ticker dies with the screen (dispose).
+    Future<void> settle(WidgetTester tester) async {
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }
+
+    testWidgets(
+      'outbound rows wear the tracker-driven chip; terminal rows stay quiet',
+      (tester) async {
+        MessagingService.threadSinceFn = (_, _) async => delta(
+          [
+            message('t1', outbound: true, text: 'one'),
+            message('t2', outbound: true, text: 'two'),
+            message('t3', outbound: true, text: 'three'),
+            message('t4', outbound: true, text: 'four'),
+            message('t5', text: 'inbound never wears a chip'),
+          ],
+          acceptance: {
+            't1': status(TxStatusKind.submitted),
+            't2': status(TxStatusKind.accepted),
+            't3': status(TxStatusKind.stalled),
+            't4': status(TxStatusKind.confirmed),
+            't5': status(TxStatusKind.submitted),
+          },
+        );
+        await tester.pumpWidget(screen());
+        await settle(tester);
+
+        expect(find.text('Pending'), findsOneWidget);
+        expect(find.text('Accepted'), findsOneWidget);
+        expect(find.text('Not accepted yet'), findsOneWidget);
+        // Confirmed dissolves to quiet (founder-nodded); the inbound row is
+        // chipless even while its watch reads submitted.
+        expect(find.text('Confirmed'), findsNothing);
+      },
+    );
+
+    testWidgets('thread chips stay numberless — the counter is an Activity '
+        'affordance (founder call)', (tester) async {
+      MessagingService.threadSinceFn = (_, _) async => delta(
+        [message('t1', outbound: true, text: 'counting')],
+        acceptance: {'t1': status(TxStatusKind.accepted, depth: 37)},
+      );
+      await tester.pumpWidget(screen());
+      await settle(tester);
+      expect(find.text('Accepted'), findsOneWidget);
+      expect(find.textContaining('confirmations'), findsNothing);
+    });
+
+    testWidgets('a displaced send honestly reads Pending again', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta(
+        [message('t1', outbound: true, text: 'reorged')],
+        acceptance: {'t1': status(TxStatusKind.displaced)},
+      );
+      await tester.pumpWidget(screen());
+      await settle(tester);
+      expect(find.text('Pending'), findsOneWidget);
+    });
+
+    testWidgets('a tombstoned row dims to the ghost with the honest line', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('t1', text: 'ghosted', tombstoned: true),
+        message('t2', text: 'alive'),
+      ]);
+      await tester.pumpWidget(screen());
+      await settle(tester);
+
+      expect(find.text('Displaced by the network'), findsOneWidget);
+      // Exactly one row wears the DS-1 stale dim (the ghost).
+      final dimmed = tester
+          .widgetList<AnimatedOpacity>(find.byType(AnimatedOpacity))
+          .where((w) => w.opacity == 0.45);
+      expect(dimmed.length, 1);
+      // The content still renders — a ghost is dimmed truth, never hidden.
+      expect(find.text('ghosted'), findsOneWidget);
+    });
+
+    testWidgets('a full re-pull after a degraded cursor never duplicates', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([message('t1', text: 'only once')]);
+      await MessagingService.instance.start();
+      await tester.pumpWidget(screen());
+      await settle(tester);
+
+      pings.add('c1');
+      await settle(tester);
+      expect(
+        find.text('only once'),
+        findsOneWidget,
+        reason:
+            'rows are txid-keyed — a full-thread answer merges, '
+            'never duplicates',
+      );
+    });
+
+    testWidgets(
+      'a row stranded behind the cursor heals via the statuses contract',
+      (tester) async {
+        // Consensus-audit V2 finding 1: an inbound handshake with a
+        // sender-claimed old timestamp sorts BEHIND the cursor — the
+        // incremental answer omits it from messages but its txid rides
+        // statuses; the screen must full-re-pull once and render it.
+        MessagingService.threadSinceFn = (_, after) async {
+          if (after == null) {
+            // Full pulls see everything, including the stranded row.
+            return delta([
+              message('t0', kind: 'handshake'),
+              message('t1', text: 'anchor'),
+            ]);
+          }
+          // Incremental answer: no new messages, but statuses reveal a
+          // txid the view has never rendered.
+          return ThreadDeltaDto(
+            messages: const [],
+            statuses: [
+              MessageStatusDto(txid: 't0', tombstoned: false),
+              MessageStatusDto(txid: 't1', tombstoned: false),
+            ],
+          );
+        };
+        await MessagingService.instance.start();
+        await tester.pumpWidget(screen());
+        await settle(tester);
+        // First pull was already full (cursor null) — both rows render.
+        expect(find.text('anchor'), findsOneWidget);
+
+        // Simulate the stranded case: drop the handshake from the view by
+        // starting a FRESH screen whose first (full) answer lacks t0, then
+        // ping with the stranding incremental answer.
+        var full = 0;
+        MessagingService.threadSinceFn = (_, after) async {
+          if (after == null) {
+            full++;
+            return delta([
+              if (full > 1) message('t0', kind: 'handshake'),
+              message('t1', text: 'anchor'),
+            ]);
+          }
+          return ThreadDeltaDto(
+            messages: const [],
+            statuses: [
+              MessageStatusDto(txid: 't0', tombstoned: false),
+              MessageStatusDto(txid: 't1', tombstoned: false),
+            ],
+          );
+        };
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(screen());
+        await settle(tester);
+        expect(find.text('Handshake received'), findsNothing);
+
+        pings.add('c1');
+        await settle(tester);
+        expect(
+          find.text('Handshake received'),
+          findsOneWidget,
+          reason:
+              'an unknown statuses txid triggers ONE full re-pull that '
+              'materializes the stranded row',
+        );
+        expect(find.text('anchor'), findsOneWidget); // still exactly one
+      },
+    );
+
+    testWidgets('incremental pulls anchor on the last rendered txid', (
+      tester,
+    ) async {
+      final cursors = <String?>[];
+      MessagingService.threadSinceFn = (_, after) async {
+        cursors.add(after);
+        return delta([
+          if (after == null) message('t1', text: 'first'),
+          if (after == 't1') message('t2', text: 'second'),
+        ]);
+      };
+      await MessagingService.instance.start();
+      await tester.pumpWidget(screen());
+      await settle(tester);
+      expect(cursors, [null], reason: 'first pull takes the full thread');
+
+      pings.add('c1');
+      await settle(tester);
+      expect(cursors, [null, 't1'], reason: 'later pulls decrypt the tail');
+      expect(find.text('first'), findsOneWidget);
+      expect(find.text('second'), findsOneWidget);
     });
   });
 
@@ -373,7 +611,7 @@ void main() {
     testWidgets('a challenge renders a card from its FIELDS, with actions', (
       tester,
     ) async {
-      MessagingService.threadFn = (_) async => [challengeRow()];
+      MessagingService.threadSinceFn = (_, _) async => delta([challengeRow()]);
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
@@ -387,7 +625,8 @@ void main() {
     testWidgets('a friendly (no-stake) challenge reads "Friendly"', (
       tester,
     ) async {
-      MessagingService.threadFn = (_) async => [challengeRow(stake: '')];
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([challengeRow(stake: '')]);
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
       expect(find.textContaining('Friendly'), findsOneWidget);
@@ -412,7 +651,7 @@ void main() {
           partial: false,
         );
       };
-      MessagingService.threadFn = (_) async => [challengeRow()];
+      MessagingService.threadSinceFn = (_, _) async => delta([challengeRow()]);
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
@@ -440,13 +679,13 @@ void main() {
             partial: false,
           );
         };
-        MessagingService.threadFn = (_) async => [
+        MessagingService.threadSinceFn = (_, _) async => delta([
           message(
             'txr',
             text: '🏁 I won',
             frame: frameDto(kind: 'result', id: 'a1b2c3d4', detail: 'win'),
           ),
-        ];
+        ]);
         await tester.pumpWidget(screen());
         await tester.pumpAndSettle();
 
@@ -466,7 +705,7 @@ void main() {
         accepts++;
         return summary();
       };
-      MessagingService.threadFn = (_) async => [challengeRow()];
+      MessagingService.threadSinceFn = (_, _) async => delta([challengeRow()]);
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
@@ -479,7 +718,8 @@ void main() {
     });
 
     testWidgets('an outbound challenge shows sent, not Accept', (tester) async {
-      MessagingService.threadFn = (_) async => [challengeRow(outbound: true)];
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([challengeRow(outbound: true)]);
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
       expect(find.text('Challenge sent'), findsOneWidget);

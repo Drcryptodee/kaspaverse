@@ -39,6 +39,16 @@ class MessagingService {
       transportThread(conversationId: conversationId);
 
   @visibleForTesting
+  static Future<ThreadDeltaDto> Function(
+    String conversationId,
+    String? afterTxid,
+  )
+  threadSinceFn = (conversationId, afterTxid) => transportThreadSince(
+    conversationId: conversationId,
+    afterTxid: afterTxid,
+  );
+
+  @visibleForTesting
   static Future<TransportSendSummaryDto> Function(String destination)
   prepareHandshakeFn = (destination) =>
       transportPrepareHandshake(destination: destination);
@@ -147,6 +157,16 @@ class MessagingService {
   /// [AppError] with a locked message while the vault is locked.
   Future<List<ThreadMessageDto>> thread(String conversationId) =>
       threadFn(conversationId);
+
+  /// Incremental thread pull (V2): decrypts only the rows after [afterTxid]
+  /// (null ⇒ the full thread) and returns the live status of EVERY row —
+  /// tombstone flips and acceptance transitions of already-rendered rows
+  /// land without re-decrypting the conversation. Same §0.4 discipline and
+  /// locked-vault behavior as [thread].
+  Future<ThreadDeltaDto> threadSince(
+    String conversationId,
+    String? afterTxid,
+  ) => threadSinceFn(conversationId, afterTxid);
 
   /// Phase 1 flows — each returns the Rust-decoded summary (B7) for the
   /// shared hold-to-sign confirm; phase 2 is [commit] with the nonce.

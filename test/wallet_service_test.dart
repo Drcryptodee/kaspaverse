@@ -11,6 +11,8 @@ void main() {
   setUp(() async {
     controller = StreamController<WalletSnapshot>();
     WalletService.streamFactory = () => controller.stream;
+    // No native lib in tests: the glass marker must resolve, not hang.
+    WalletService.uiMarkFn = (_) async {};
     await WalletService.instance.reset();
   });
 
@@ -62,6 +64,33 @@ void main() {
     expect(wallet.lastUpdate.value, isNotNull);
   });
 
+  test(
+    'refreshNow pulls the latest snapshot past the stream (V2 heal)',
+    () async {
+      // Attach the stream listener so tearDown's controller.close() completes
+      // (a single-subscription controller with no listener never closes).
+      wallet.start();
+      WalletService.snapshotNowFn = () async => snap(
+        mature: BigInt.from(777),
+        activity: [
+          ActivityRecord(
+            txid: 'e' * 64,
+            valueSompi: BigInt.from(100000000),
+            unixtimeMsec: BigInt.from(1),
+            blockDaaScore: BigInt.from(10),
+            direction: ActivityDirection.outgoing,
+            isCoinbase: false,
+            maturity: MaturityState.pending,
+            stalled: false,
+          ),
+        ],
+      );
+      await wallet.refreshNow();
+      expect(wallet.mature.value, BigInt.from(777));
+      expect(wallet.activity.value, hasLength(1));
+    },
+  );
+
   test('balance + activity land in the notifiers (BigInt, L3)', () async {
     wallet.start();
     final record = ActivityRecord(
@@ -72,6 +101,7 @@ void main() {
       direction: ActivityDirection.incoming,
       isCoinbase: false,
       maturity: MaturityState.pending,
+      stalled: false,
     );
     controller.add(
       snap(mature: BigInt.parse('12300000000'), activity: [record]),

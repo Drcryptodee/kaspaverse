@@ -77,6 +77,11 @@ pub struct ActivityRecord {
     pub direction: ActivityDirection,
     pub is_coinbase: bool,
     pub maturity: MaturityState,
+    /// V2 chip honesty: the tracker has seen no acceptance for this SUBMITTED
+    /// txid past the stall threshold (Send-sourced watches only — V1 signal
+    /// #3). Rides alongside `maturity` (a stalled row is still Pending);
+    /// never persisted — recomputed from the live overrides on every fold.
+    pub stalled: bool,
 }
 
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI
@@ -145,6 +150,7 @@ fn map_activity(record: WalletActivityRecord) -> ActivityRecord {
             ChainMaturity::Pending => MaturityState::Pending,
             ChainMaturity::Confirmed => MaturityState::Confirmed,
         },
+        stalled: false,
     }
 }
 
@@ -170,11 +176,16 @@ fn overlaid(current: MaturityState, status: &TxStatus) -> MaturityState {
 
 /// Apply the tracker overrides to every matching activity row (cheap: the
 /// list is capped by the chain layer, the map by the tracker's watch cap).
+/// `stalled` is recomputed for EVERY row — a row whose override cleared
+/// (acceptance landed, or the watch pruned) must drop the flag, never wear
+/// it stale.
 fn apply_overrides(snapshot: &mut WalletSnapshot, overrides: &HashMap<String, TxStatus>) {
     for row in &mut snapshot.activity {
-        if let Some(status) = overrides.get(&row.txid) {
+        let status = overrides.get(&row.txid);
+        if let Some(status) = status {
             row.maturity = overlaid(row.maturity, status);
         }
+        row.stalled = matches!(status, Some(TxStatus::Stalled { .. }));
     }
 }
 
@@ -301,6 +312,18 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                     apply_overrides(&mut current, &overrides);
                                     *LATEST.lock().unwrap_or_else(PoisonError::into_inner) =
                                         Some(current.clone());
+                                    // Counts only (INV-3). The V2 sitting saw
+                                    // live sends recorded by the chain layer
+                                    // yet missing on the glass — this line +
+                                    // the receiver count convict which side
+                                    // of the fan-out dropped them.
+                                    if refresh_rows {
+                                        log::info!(
+                                            "wallet: activity fold rows={} receivers={}",
+                                            current.activity.len(),
+                                            fan_out.receiver_count()
+                                        );
+                                    }
                                     let _ = fan_out.send(current.clone());
                                 }
                                 // Lagged: values are absolute — skipping ahead is safe.
@@ -350,6 +373,22 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
         .await
 }
 
+/// The latest folded snapshot as a PULL (V2 sitting: the founder's
+/// swipe-to-refresh; also the stream-freeze diagnostic — a pull that shows a
+/// row the stream missed convicts the delivery lane, not the fold). `None`
+/// until the engine has folded anything.
+pub fn wallet_snapshot_now() -> Option<WalletSnapshot> {
+    latest_snapshot()
+}
+
+/// A Dart-side display-state marker routed through the ONE build-flavor-proof
+/// log lane (L53 — profile builds drop Dart prints). Markers are OUR OWN
+/// short state constants + counts, never content (INV-3); clamped defensively.
+pub fn ui_mark(marker: String) {
+    let m: String = marker.chars().take(64).collect();
+    log::info!("glass: {m}");
+}
+
 /// Subscribe to live wallet snapshots (balance + activity) for the unlocked
 /// vault's addresses. The first call starts the sync engine; later calls share
 /// it. Errors if the vault is locked (the Dart side retries after unlock).
@@ -365,12 +404,17 @@ pub async fn subscribe_wallet_updates(sink: StreamSink<WalletSnapshot>) -> Resul
     if let Some(snapshot) = latest {
         let _ = sink.add(snapshot);
     }
+    log::info!("wallet: snapshot subscriber attached");
     tokio::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(snapshot) => {
                     if sink.add(snapshot).is_err() {
-                        break; // Dart listener gone (e.g. hot restart).
+                        // Dart listener gone (e.g. hot restart). Logged so a
+                        // glass that stops updating is diagnosable from the
+                        // liblog lane (V2 sitting: live send rows missing).
+                        log::warn!("wallet: snapshot sink detached — forwarding stopped");
+                        break;
                     }
                 }
                 Err(RecvError::Lagged(_)) => continue,
