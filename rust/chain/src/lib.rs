@@ -14,6 +14,7 @@ mod dag_monitor;
 mod error;
 pub mod history_fill;
 mod kvlog;
+pub mod link;
 mod send;
 pub mod spans;
 mod transport;
@@ -25,6 +26,10 @@ pub use acceptance::{
 };
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
+pub use link::{EscalationOutcome, SignedTxRetention};
+// The signed-tx DTO the retention/escalation path carries (a broadcast public
+// tx — no key material). Named here so the bridge never imports rpc-core.
+pub use kaspa_wrpc_client::prelude::RpcTransaction;
 pub use send::{PreparedSend, SendOutcome, SendSummary};
 pub use transport::{
     compose_bcast, compose_comm_wire, compose_handshake_wire, decode_envelope_body, parse_payload,

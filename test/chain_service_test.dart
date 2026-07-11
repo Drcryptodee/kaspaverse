@@ -26,7 +26,7 @@ void main() {
     // Watchdog: fast cadence + low stall threshold, healthy by default.
     statusValue = const DagStatusDto(connected: true, lastBlockAgeSecs: null);
     ChainService.statusFn = () async => statusValue;
-    ChainService.reconnectFn = () async => reconnectCalls++;
+    ChainService.reconnectFn = (stalled) async => reconnectCalls++;
     ChainService.watchdogPeriod = const Duration(milliseconds: 10);
     ChainService.watchdogStallSecs = 5;
     await ChainService.instance.reset();
@@ -189,5 +189,64 @@ void main() {
         expect(service.reconnecting.value, isFalse);
       },
     );
+
+    // ── V3: the stall evidence bit (demotion's control-group input) ────────
+
+    test(
+      'a watchdog reconnect carries stalled=true; manual carries false',
+      () async {
+        final stalledSeen = <bool>[];
+        ChainService.reconnectFn = (stalled) async => stalledSeen.add(stalled);
+        final service = ChainService.instance..start();
+        // Manual button first: bouncing a healthy node is never evidence.
+        await service.reconnect();
+        expect(stalledSeen, [false]);
+        // Then a genuine stall: 30 s past threshold while foreground.
+        statusValue = DagStatusDto(
+          connected: true,
+          lastBlockAgeSecs: BigInt.from(30),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(stalledSeen, contains(true));
+      },
+    );
+
+    // ── V3: register item 10 — the freshness watchdog's local pull ─────────
+
+    test('a connected-but-quiet wallet lane gets a local pull', () async {
+      var pulls = 0;
+      final service = ChainService.instance;
+      service.walletLastApply = () =>
+          DateTime.now().subtract(const Duration(seconds: 60));
+      service.onWalletQuiet = () => pulls++;
+      service.start();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(pulls, greaterThan(0));
+    });
+
+    test('a fresh wallet lane is left alone', () async {
+      var pulls = 0;
+      final service = ChainService.instance;
+      service.walletLastApply = () => DateTime.now();
+      service.onWalletQuiet = () => pulls++;
+      service.start();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(pulls, 0);
+    });
+
+    test('a disconnected link never triggers the wallet pull', () async {
+      var pulls = 0;
+      statusValue = const DagStatusDto(
+        connected: false,
+        lastBlockAgeSecs: null,
+      );
+      final service = ChainService.instance;
+      service.walletLastApply = () =>
+          DateTime.now().subtract(const Duration(seconds: 60));
+      service.onWalletQuiet = () => pulls++;
+      service.start();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(pulls, 0, reason: 'quiet-while-down is the LINK\'s problem');
+    });
   });
 }

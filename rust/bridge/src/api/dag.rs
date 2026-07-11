@@ -6,9 +6,12 @@
 //! data-carrying Rust enums onto Dart via the `freezed` package, and pulling
 //! that codegen ceremony into every build isn't worth it for one DTO.
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use kaspaverse_chain::{AcceptanceTracker, DagEvent, DagMonitor};
+use kaspaverse_chain::{
+    link, AcceptanceEvent, AcceptanceTracker, DagEvent, DagMonitor, SignedTxRetention,
+};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::api::error::AppError;
@@ -67,7 +70,8 @@ static TRACKER: tokio::sync::OnceCell<Arc<AcceptanceTracker>> = tokio::sync::Onc
 
 /// Get the shared acceptance tracker, bootstrapping it on the first call:
 /// load persistence, attach the VCC forward on the shared monitor, spawn the
-/// tracker task (which immediately runs the reopen catch-up).
+/// tracker task (which immediately runs the reopen catch-up) and the V3
+/// stall-escalation task beside it.
 pub(crate) async fn shared_tracker() -> Result<Arc<AcceptanceTracker>, AppError> {
     TRACKER
         .get_or_try_init(|| async {
@@ -77,10 +81,94 @@ pub(crate) async fn shared_tracker() -> Result<Arc<AcceptanceTracker>, AppError>
             let vcc_rx = monitor.attach_acceptance();
             tracker.run(monitor.rpc(), vcc_rx, monitor.subscribe());
             log::info!("acceptance: tracker started");
+            tokio::spawn(escalation_task(tracker.subscribe(), monitor));
             Ok::<_, AppError>(tracker)
         })
         .await
         .cloned()
+}
+
+/// Signed-tx retention for stall escalation (V3): the send path deposits every
+/// submitted leg's signed wire form here; [`escalation_task`] takes it on the
+/// tracker's one-shot `Stalled`. In-memory only — after a restart there is
+/// nothing to resubmit and escalation logs an honest skip.
+pub(crate) fn retention() -> &'static SignedTxRetention {
+    static RETENTION: OnceLock<SignedTxRetention> = OnceLock::new();
+    RETENTION.get_or_init(SignedTxRetention::default)
+}
+
+/// Sync peek at the live endpoint (submit-time provenance for retention);
+/// `None` before the monitor exists or connects.
+pub(crate) fn current_endpoint_url() -> Option<String> {
+    MONITOR.get().and_then(|monitor| monitor.current_url())
+}
+
+/// V3 deliverable 2 — answer a real stall with evidence, exactly once per
+/// txid (the tracker's `Stalled` is one-shot and the retention take is
+/// destructive): resubmit the already-signed tx via ONE freshly resolved
+/// node (duplicate submission is a clean idempotent error at the node), log
+/// the outcome, and strike the incumbent endpoint — with network-alive
+/// evidence in hand, since a fresh node just answered. NO blanket fan-out;
+/// NO RBF (D-008-deferred; the node itself rebroadcasts High-priority txs
+/// ~30 s and they never expire).
+async fn escalation_task(mut events: broadcast::Receiver<AcceptanceEvent>, monitor: DagMonitor) {
+    loop {
+        match events.recv().await {
+            Ok(AcceptanceEvent::Stalled { txid, waited_ms }) => {
+                let Some((signed_tx, submit_url)) = retention().take(&txid) else {
+                    // Restart between submit and stall, or TTL/cap eviction:
+                    // resubmission is impossible and saying so beats guessing.
+                    log::warn!(
+                        "escalation: {txid} stalled ({waited_ms} ms) — no retained signed tx (restart?); skipping resubmit"
+                    );
+                    continue;
+                };
+                kaspaverse_chain::spans::mark_with("escalate_start", &txid);
+                match link::escalate_stalled_tx(
+                    &monitor.resolver(),
+                    monitor.network_id(),
+                    &txid,
+                    signed_tx,
+                    std::time::Duration::from_secs(4),
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        let (via, note) = match &outcome {
+                            link::EscalationOutcome::Resubmitted { via } => {
+                                (via.clone(), "resubmitted".to_string())
+                            }
+                            link::EscalationOutcome::AlreadyKnown { via, detail } => {
+                                (via.clone(), format!("already known ({detail})"))
+                            }
+                        };
+                        log::info!("escalation: {txid} via {via} — {note}");
+                        kaspaverse_chain::spans::mark_with("escalate_ok", &txid);
+                        // The fresh node answered → network alive → the
+                        // SUBMIT-TIME endpoint earned this strike (it took
+                        // the submit that stalled; whoever the socket has
+                        // re-raced to since is innocent — control-group rule,
+                        // consensus-audit finding).
+                        match &submit_url {
+                            Some(url) => monitor.strike_endpoint(url, "stalled submit"),
+                            None => {
+                                log::info!("escalation: {txid} submit endpoint unknown — no strike")
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Offline or the fresh node refused: no network-alive
+                        // evidence, no strike — honesty over blame.
+                        log::warn!("escalation: {txid} failed: {e}");
+                        kaspaverse_chain::spans::mark_with("escalate_failed", &txid);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => break,
+        }
+    }
 }
 
 /// Sync peek at the tracker for non-async call sites (the transport fold);
@@ -171,13 +259,52 @@ pub fn dag_status() -> DagStatusDto {
 
 /// Force a fresh wRPC connection — the Reconnect button and the watchdog's
 /// recovery (P3/D-068). Hard-drops even a socket the client believes is alive,
-/// then re-dials (cached endpoint fast path). A no-op before the first connect
-/// exists (nothing to bounce).
-pub async fn dag_reconnect() -> Result<(), AppError> {
+/// then re-races (the cached endpoint is candidate 0 — the fast path). A no-op
+/// before the first connect exists (nothing to bounce).
+///
+/// `stalled = true` when the CALLER has failure evidence against the current
+/// endpoint (the watchdog's 30 s block silence): it becomes a pending strike
+/// the race commits only if another healthy node answers (V3 demotion,
+/// control-group rule). The manual Reconnect button passes `false` — bouncing
+/// a healthy node must never demote it.
+pub async fn dag_reconnect(stalled: bool) -> Result<(), AppError> {
     if let Some(monitor) = MONITOR.get() {
-        monitor.reconnect().await.map_err(AppError::chain)?;
+        monitor.reconnect(stalled).await.map_err(AppError::chain)?;
     }
     Ok(())
+}
+
+/// Minimum spacing between pull-heal resyncs — a swipe is a cheap gesture and
+/// a full reconnect + 60-address rescan is not; repeated pulls inside the
+/// window re-serve the fold without bouncing the socket.
+const RESYNC_MIN_INTERVAL_SECS: u64 = 20;
+
+/// V3 register item 12: the pull heal asks the NODE. A swipe-to-refresh calls
+/// this to force a resync — a hard reconnect through the race, which lands in
+/// wallet-core's `UtxoProcStart` and a fresh address scan, exactly the
+/// detection path a kill/relaunch used to be needed for. Rate-limited; returns
+/// `true` when a resync was actually triggered, `false` when the window
+/// swallowed it (the caller still re-serves the fold — delivery heal — so a
+/// swallowed pull is never a dead gesture).
+pub async fn dag_resync() -> Result<bool, AppError> {
+    static LAST_RESYNC: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_RESYNC.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < RESYNC_MIN_INTERVAL_SECS {
+        log::info!(
+            "dag: resync request inside the {RESYNC_MIN_INTERVAL_SECS}s window — re-serve only"
+        );
+        return Ok(false);
+    }
+    LAST_RESYNC.store(now, Ordering::Relaxed);
+    if let Some(monitor) = MONITOR.get() {
+        log::info!("dag: pull-heal resync — forcing reconnect + rescan");
+        monitor.reconnect(false).await.map_err(AppError::chain)?;
+    }
+    Ok(true)
 }
 
 /// Events carry absolute values, so folding is plain assignment (INV-9:

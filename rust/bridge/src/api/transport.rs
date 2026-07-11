@@ -602,6 +602,14 @@ fn thread_pings() -> &'static broadcast::Sender<String> {
 }
 
 fn ping(conversation_id: &str) {
+    // Three-lights producer log (V3, L55 extension): a frozen ping lane would
+    // silently kill thread refresh exactly like the wallet lane's item 10.
+    // Counts + a sentinel flag only — never the id's owner or content (INV-3).
+    let receivers = thread_pings().receiver_count();
+    log::info!(
+        "transport: ping emit sentinel={} receivers={receivers}",
+        conversation_id.is_empty()
+    );
     let _ = thread_pings().send(conversation_id.to_string());
 }
 
@@ -2020,11 +2028,15 @@ fn open_with_fallback(
 /// Nothing decrypted ever streams (§0.4: no Dart state manager holds content).
 pub async fn subscribe_thread_pings(sink: StreamSink<String>) -> Result<(), AppError> {
     let mut pings = thread_pings().subscribe();
+    log::info!("transport: ping subscriber attached");
     tokio::spawn(async move {
         loop {
             match pings.recv().await {
                 Ok(conversation_id) => {
                     if sink.add(conversation_id).is_err() {
+                        // Three lights (V3/L55): a dead Dart listener is loud —
+                        // a silent one is where a frozen thread list hides.
+                        log::warn!("transport: ping sink detached — forwarding stopped");
                         break;
                     }
                 }
@@ -2046,6 +2058,7 @@ pub async fn subscribe_transport_events(
 ) -> Result<(), AppError> {
     let monitor = dag::shared_monitor().await?;
     let mut events = monitor.subscribe_transport();
+    log::info!("transport: event subscriber attached");
     // Runs on FRB's tokio runtime; exits when the Dart listener goes away
     // (sink.add fails) — e.g. on hot restart, leaving the connection up (L4).
     tokio::spawn(async move {
@@ -2053,6 +2066,9 @@ pub async fn subscribe_transport_events(
             match events.recv().await {
                 Ok(event) => {
                     if sink.add(to_dto(event)).is_err() {
+                        // Three lights (V3/L55): the live wire's Dart listener
+                        // died — messages now arrive only via store catch-up.
+                        log::warn!("transport: event sink detached — forwarding stopped");
                         break;
                     }
                 }

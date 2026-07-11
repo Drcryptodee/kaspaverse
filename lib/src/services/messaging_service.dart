@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../rust/api/error.dart';
 import '../rust/api/send.dart';
 import '../rust/api/transport.dart';
+import '../rust/api/wallet.dart' show uiMark;
 
 /// Conversations + threads over the P2.3 bridge surface. PULL-shaped by
 /// design (§0.4 plaintext discipline): the only stream is a content-free
@@ -144,11 +145,30 @@ class MessagingService {
 
   StreamSubscription<String>? _subscription;
 
+  /// Consumer apply-echo through the ONE build-flavor-proof log lane (three
+  /// lights, V3/L55 — Dart prints die on profile builds). Content-free:
+  /// sentinel flag only, never an id or text (INV-3). Never throws.
+  @visibleForTesting
+  static Future<void> Function(String marker) uiMarkFn = (marker) =>
+      uiMark(marker: marker);
+
+  void _mark(String marker) {
+    try {
+      unawaited(uiMarkFn(marker).catchError((_) {}));
+    } catch (_) {
+      // Native lib absent (widget tests) — silence is fine.
+    }
+  }
+
   /// Start the Rust transport hub and attach the app-lifetime ping
   /// subscription; then pull the initial conversation list. Idempotent.
   Future<void> start() async {
     _subscription ??= pingFactory().listen(
       (conversationId) {
+        // Three-lights apply echo: pairs with the producer's
+        // "transport: ping emit" (a fold without this echo convicts the
+        // Dart delivery lane — the register item 10 method, on this lane).
+        _mark('ping apply sentinel=${conversationId.isEmpty}');
         // The EMPTY id is the V2b notice sentinel (content-free like every
         // ping): Rust sends it when the gap-age resolves or a fill run
         // reports — the notice inputs changed, no conversation did.
@@ -164,6 +184,13 @@ class MessagingService {
       },
       onError: (Object e) {
         error.value = e is AppError ? e.message : e.toString();
+      },
+      // Detach light only — no blind re-attach: this lane has no diagnosed
+      // death mode yet (the wallet lane's heal followed its diagnosis; L55
+      // lights come BEFORE heals). The pull twin ([refresh]) still serves.
+      onDone: () {
+        _subscription = null;
+        _mark('ping stream done');
       },
     );
     try {

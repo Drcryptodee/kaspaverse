@@ -289,10 +289,27 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
             None
         }
     };
-    let mut hook = tracker
-        .map(|tracker| move |txid: &str| tracker.watch(txid, kaspaverse_chain::WatchSource::Send));
+    let mut hook = tracker.map(|tracker| {
+        move |txid: &str, signed_tx: kaspaverse_chain::RpcTransaction| {
+            tracker.watch(txid, kaspaverse_chain::WatchSource::Send);
+            // V3 stall escalation: retain the signed wire form so a
+            // stalled(T) can resubmit it via a fresh node (public broadcast
+            // data only — INV-1/3 untouched; in-memory, TTL-pruned).
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            // Submit-time endpoint captured WITH the tx: a later stall must
+            // strike the node that took this submit, not whoever the socket
+            // re-raced to since (consensus-audit finding).
+            dag::retention().retain(txid, signed_tx, dag::current_endpoint_url(), now_ms);
+        }
+    });
     let outcome = prepared
-        .commit(hook.as_mut().map(|h| h as &mut (dyn FnMut(&str) + Send)))
+        .commit(
+            hook.as_mut()
+                .map(|h| h as &mut (dyn FnMut(&str, kaspaverse_chain::RpcTransaction) + Send)),
+        )
         .await;
 
     if fully_broadcast(&outcome) {

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `fold`, `shared_monitor`, `shared_tracker`, `snapshots`, `tracker_handle`
+// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `escalation_task`, `fold`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `tracker_handle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
@@ -32,9 +32,25 @@ Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
 
 /// Force a fresh wRPC connection — the Reconnect button and the watchdog's
 /// recovery (P3/D-068). Hard-drops even a socket the client believes is alive,
-/// then re-dials (cached endpoint fast path). A no-op before the first connect
-/// exists (nothing to bounce).
-Future<void> dagReconnect() => RustLib.instance.api.crateApiDagDagReconnect();
+/// then re-races (the cached endpoint is candidate 0 — the fast path). A no-op
+/// before the first connect exists (nothing to bounce).
+///
+/// `stalled = true` when the CALLER has failure evidence against the current
+/// endpoint (the watchdog's 30 s block silence): it becomes a pending strike
+/// the race commits only if another healthy node answers (V3 demotion,
+/// control-group rule). The manual Reconnect button passes `false` — bouncing
+/// a healthy node must never demote it.
+Future<void> dagReconnect({required bool stalled}) =>
+    RustLib.instance.api.crateApiDagDagReconnect(stalled: stalled);
+
+/// V3 register item 12: the pull heal asks the NODE. A swipe-to-refresh calls
+/// this to force a resync — a hard reconnect through the race, which lands in
+/// wallet-core's `UtxoProcStart` and a fresh address scan, exactly the
+/// detection path a kill/relaunch used to be needed for. Rate-limited; returns
+/// `true` when a resync was actually triggered, `false` when the window
+/// swallowed it (the caller still re-serves the fold — delivery heal — so a
+/// swallowed pull is never a dead gesture).
+Future<bool> dagResync() => RustLib.instance.api.crateApiDagDagResync();
 
 /// Subscribe to live DAG snapshots from mainnet. The first call connects;
 /// later calls share the same connection. Each stream ends only when its
