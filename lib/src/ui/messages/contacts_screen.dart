@@ -9,6 +9,7 @@ import '../send/confirm_send_sheet.dart';
 import '../theme/tokens.dart';
 import '../widgets/entrance.dart';
 import '../widgets/haptics.dart';
+import 'history_fill_sheet.dart';
 import 'thread_screen.dart';
 
 /// Transport contacts (P2.3 — §4: transport UI, not a messenger): the
@@ -34,6 +35,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
   void initState() {
     super.initState();
     _messaging.refresh();
+    // The gap notice's inputs resolve in Rust seconds-to-minutes after
+    // unlock (gap-age retry budget; the auto-fill runs after the node
+    // catch-up) — with fill OFF and no inbound traffic no ping ever fires,
+    // so re-ask on every entry to this surface (consensus-audit finding:
+    // "never silence" must not depend on luck).
+    _messaging.refreshFillState();
   }
 
   /// Map the transport summary onto the payment DTO the shared confirm sheet
@@ -151,7 +158,21 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Messages')),
+      appBar: AppBar(
+        title: const Text('Messages'),
+        actions: [
+          // The V2b visible toggle's home (D-074): reachable ALWAYS, not
+          // only when the gap banner shows.
+          IconButton(
+            tooltip: 'Message history',
+            icon: const Icon(Icons.history),
+            onPressed: () {
+              KvHaptic.selection();
+              showHistoryFillSheet(context, _messaging);
+            },
+          ),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
         tooltip: 'Add contact',
         onPressed: () {
@@ -161,42 +182,52 @@ class _ContactsScreenState extends State<ContactsScreen> {
         child: const Icon(Icons.person_add_alt),
       ),
       body: SafeArea(
-        child: ValueListenableBuilder<List<ConversationDto>>(
-          valueListenable: _messaging.conversations,
-          builder: (context, conversations, _) {
-            if (conversations.isEmpty) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(KvSpace.xl),
-                  child: Text(
-                    'No conversations yet.\nAdd a contact by address — the '
-                    'handshake rides the Kaspa L1 itself.',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textSecondary,
-                    ),
-                  ),
-                ),
-              );
-            }
-            return ListView.separated(
-              padding: const EdgeInsets.all(KvSpace.gutter),
-              itemCount: conversations.length,
-              separatorBuilder: (_, _) => const SizedBox(height: KvSpace.sm),
-              itemBuilder: (context, index) {
-                final conversation = conversations[index];
-                return Entrance(
-                  index: index,
-                  child: _ConversationCard(
-                    conversation: conversation,
-                    onOpen: () => _openThread(conversation),
-                    onAccept: () => _accept(conversation),
-                    onHide: () => _hide(conversation),
-                  ),
-                );
-              },
-            );
-          },
+        child: Column(
+          children: [
+            // The honest gap notice (D-074: never silence) — renders only
+            // when history may be incomplete; tap opens the fill sheet.
+            HistoryNoticeBanner(messaging: _messaging),
+            Expanded(
+              child: ValueListenableBuilder<List<ConversationDto>>(
+                valueListenable: _messaging.conversations,
+                builder: (context, conversations, _) {
+                  if (conversations.isEmpty) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(KvSpace.xl),
+                        child: Text(
+                          'No conversations yet.\nAdd a contact by address — '
+                          'the handshake rides the Kaspa L1 itself.',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: KvColor.textSecondary,
+                          ),
+                        ),
+                      ),
+                    );
+                  }
+                  return ListView.separated(
+                    padding: const EdgeInsets.all(KvSpace.gutter),
+                    itemCount: conversations.length,
+                    separatorBuilder: (_, _) =>
+                        const SizedBox(height: KvSpace.sm),
+                    itemBuilder: (context, index) {
+                      final conversation = conversations[index];
+                      return Entrance(
+                        index: index,
+                        child: _ConversationCard(
+                          conversation: conversation,
+                          onOpen: () => _openThread(conversation),
+                          onAccept: () => _accept(conversation),
+                          onHide: () => _hide(conversation),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );

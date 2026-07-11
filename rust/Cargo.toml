@@ -69,3 +69,16 @@ async-channel = "2"
 # zero new transitive code — the D-028 §0.2 pattern).
 log = "0.4"
 workflow-log = "0.18.0"
+# V2b history fill (D-074): the HTTP lane for the ciph_msg indexer client is
+# the resolver's OWN client from the pinned tree (workflow-http — resolver.rs:14
+# at the pin uses `workflow_http::get_json`), pinned-crates-first per the D-074
+# ruling. serde/serde_json carry its response DTOs. All three were ALREADY
+# resolved and compiled via the pinned tree (workflow-http 0.18.0 through
+# kaspa-wrpc-client; serde everywhere) — direct lines at the locked versions
+# add zero new packages (the D-076/D-022a containment class).
+# Feature set mirrored VERBATIM from the pin's own declaration (rusty-kaspa
+# Cargo.toml:320) — default-features would enable reqwest's native-tls and
+# break the Android cross-compile on OpenSSL (L16); the pin rides rustls.
+workflow-http = { version = "0.18.0", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

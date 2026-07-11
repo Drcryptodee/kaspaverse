@@ -100,6 +100,24 @@ class MessagingService {
   @visibleForTesting
   static Future<void> Function() abandonFn = transportAbandon;
 
+  // V2b history-fill seams (D-074).
+  @visibleForTesting
+  static Future<GapAgeDto?> Function() gapAgeFn = transportGapAge;
+
+  @visibleForTesting
+  static Future<FillConfigDto> Function() fillConfigFn = transportFillConfig;
+
+  @visibleForTesting
+  static Future<void> Function(bool enabled, String endpoint) setFillConfigFn =
+      (enabled, endpoint) =>
+          transportSetFillConfig(enabled: enabled, endpoint: endpoint);
+
+  @visibleForTesting
+  static Future<FillReportDto> Function() fillNowFn = transportFillNow;
+
+  @visibleForTesting
+  static Future<FillReportDto?> Function() fillStatusFn = transportFillStatus;
+
   @visibleForTesting
   static Future<void> Function(String conversationId) hideFn =
       (conversationId) =>
@@ -117,6 +135,13 @@ class MessagingService {
   /// Last bridge/stream error message, null while healthy.
   final ValueNotifier<String?> error = ValueNotifier(null);
 
+  /// V2b honest-notice inputs (D-074): this open's history gap (V1 signal),
+  /// the fill posture, and the last fill run's report. All public-wire-class
+  /// metadata — counts and flags, never content.
+  final ValueNotifier<GapAgeDto?> gapAge = ValueNotifier(null);
+  final ValueNotifier<FillConfigDto?> fillConfig = ValueNotifier(null);
+  final ValueNotifier<FillReportDto?> lastFill = ValueNotifier(null);
+
   StreamSubscription<String>? _subscription;
 
   /// Start the Rust transport hub and attach the app-lifetime ping
@@ -124,6 +149,13 @@ class MessagingService {
   Future<void> start() async {
     _subscription ??= pingFactory().listen(
       (conversationId) {
+        // The EMPTY id is the V2b notice sentinel (content-free like every
+        // ping): Rust sends it when the gap-age resolves or a fill run
+        // reports — the notice inputs changed, no conversation did.
+        if (conversationId.isEmpty) {
+          refreshFillState();
+          return;
+        }
         // ValueNotifier skips equal values — a second message in the SAME
         // conversation must still re-notify open thread views.
         if (lastPing.value == conversationId) lastPing.value = null;
@@ -137,6 +169,7 @@ class MessagingService {
     try {
       await startFn();
       await refresh();
+      await refreshFillState();
       error.value = null;
     } on AppError catch (e) {
       error.value = e.message;
@@ -149,6 +182,47 @@ class MessagingService {
       conversations.value = await conversationsFn();
     } on AppError catch (e) {
       error.value = e.message;
+    }
+  }
+
+  /// Re-pull the V2b notice inputs (gap age, fill config, last report).
+  /// Cheap (file/memory-backed in Rust); errors are non-fatal — the notice
+  /// simply keeps its last inputs.
+  Future<void> refreshFillState() async {
+    try {
+      gapAge.value = await gapAgeFn();
+      fillConfig.value = await fillConfigFn();
+      lastFill.value = await fillStatusFn();
+    } on AppError {
+      // Locked vault / hub restarting — keep prior values; never a crash lane.
+    }
+  }
+
+  /// Persist the fill posture, then run a fill immediately when enabling
+  /// (the founder's test: flip on → history appears without a restart).
+  /// Returns THAT run's report (null = disabled, or the run failed at the
+  /// bridge) so the sheet reports this tap's outcome, never a stale one.
+  Future<FillReportDto?> setFillConfig({
+    required bool enabled,
+    required String endpoint,
+  }) async {
+    await setFillConfigFn(enabled, endpoint);
+    await refreshFillState();
+    if (!enabled) return null;
+    return fillNow();
+  }
+
+  /// Run the fill now (the sheet's explicit check; also used on enable).
+  /// Returns the report; state notifiers refresh alongside.
+  Future<FillReportDto?> fillNow() async {
+    try {
+      final report = await fillNowFn();
+      lastFill.value = report;
+      await refresh();
+      return report;
+    } on AppError catch (e) {
+      error.value = e.message;
+      return null;
     }
   }
 
@@ -225,5 +299,8 @@ class MessagingService {
     conversations.value = const <ConversationDto>[];
     lastPing.value = null;
     error.value = null;
+    gapAge.value = null;
+    fillConfig.value = null;
+    lastFill.value = null;
   }
 }

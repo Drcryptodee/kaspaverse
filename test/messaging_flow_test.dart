@@ -7,6 +7,7 @@ import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/transport.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
+import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 
 ConversationDto conversation(
@@ -108,6 +109,23 @@ void main() {
     );
     MessagingService.abandonFn = () async {};
     MessagingService.hideFn = (_) async {};
+    // V2b fill seams: default = no gap, fill off, no run (the fresh-install
+    // §0 posture) — individual tests override.
+    MessagingService.gapAgeFn = () async => null;
+    MessagingService.fillConfigFn = () async => const FillConfigDto(
+      enabled: false,
+      endpoint: 'https://indexer.kasia.fyi',
+      defaultEndpoint: 'https://indexer.kasia.fyi',
+    );
+    MessagingService.setFillConfigFn = (_, _) async {};
+    MessagingService.fillNowFn = () async => FillReportDto(
+      ran: true,
+      complete: true,
+      pages: 0,
+      newRows: 0,
+      atUnixMs: BigInt.zero,
+    );
+    MessagingService.fillStatusFn = () async => null;
     await MessagingService.instance.reset();
   });
 
@@ -134,6 +152,127 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(pulls, 2, reason: 'a ping re-pulls the list');
       expect(service.lastPing.value, 'c1');
+    });
+
+    test(
+      'the empty sentinel ping refreshes notice inputs, never threads',
+      () async {
+        var conversationPulls = 0;
+        var gapPulls = 0;
+        MessagingService.conversationsFn = () async {
+          conversationPulls++;
+          return const [];
+        };
+        MessagingService.gapAgeFn = () async {
+          gapPulls++;
+          return null;
+        };
+        final service = MessagingService.instance;
+        await service.start(); // one pull of each at start
+        pings.add(''); // Rust: gap resolved / fill reported
+        await Future<void>.delayed(Duration.zero);
+        expect(gapPulls, 2, reason: 'the sentinel re-pulls the notice inputs');
+        expect(conversationPulls, 1, reason: 'no conversation changed');
+        expect(
+          service.lastPing.value,
+          isNull,
+          reason: 'thread views never see the sentinel',
+        );
+      },
+    );
+
+    test('enabling the fill saves config then runs a fill at once', () async {
+      final calls = <String>[];
+      MessagingService.setFillConfigFn = (enabled, endpoint) async {
+        calls.add('set:$enabled:$endpoint');
+      };
+      MessagingService.fillConfigFn = () async => const FillConfigDto(
+        enabled: true,
+        endpoint: 'https://indexer.kasia.fyi',
+        defaultEndpoint: 'https://indexer.kasia.fyi',
+      );
+      MessagingService.fillNowFn = () async {
+        calls.add('fill');
+        return FillReportDto(
+          ran: true,
+          complete: true,
+          pages: 2,
+          newRows: 3,
+          atUnixMs: BigInt.one,
+        );
+      };
+      final service = MessagingService.instance;
+      await service.setFillConfig(enabled: true, endpoint: '  ');
+      expect(calls, [
+        'set:true:  ',
+        'fill',
+      ], reason: 'the founder test: flip on → history arrives, no restart');
+      expect(service.lastFill.value?.newRows, 3);
+
+      // Turning OFF must not fire a network check.
+      calls.clear();
+      await service.setFillConfig(enabled: false, endpoint: 'x');
+      expect(calls, ['set:false:x']);
+    });
+
+    test('historyNotice: every gap × fill-posture cell is honest', () {
+      GapAgeDto gap(int? minutes, {bool horizon = false}) => GapAgeDto(
+        gapMinutes: minutes == null ? null : BigInt.from(minutes),
+        beyondHorizon: horizon,
+      );
+      const off = FillConfigDto(
+        enabled: false,
+        endpoint: 'e',
+        defaultEndpoint: 'e',
+      );
+      const on = FillConfigDto(
+        enabled: true,
+        endpoint: 'e',
+        defaultEndpoint: 'e',
+      );
+      FillReportDto report({bool complete = true, String? error}) =>
+          FillReportDto(
+            ran: true,
+            complete: complete,
+            pages: 1,
+            newRows: 0,
+            error: error,
+            atUnixMs: BigInt.one,
+          );
+
+      // No gap signal / gap the node rewind already covers → quiet.
+      expect(historyNotice(gap: null, config: off, report: null), isNull);
+      expect(historyNotice(gap: gap(5), config: off, report: null), isNull);
+      expect(historyNotice(gap: gap(20), config: off, report: null), isNull);
+
+      // A real residual gap, fill OFF → the notice invites the fix.
+      expect(
+        historyNotice(gap: gap(235), config: off, report: null),
+        contains('may be missing'),
+      );
+      // Beyond the pruning horizon → notice even with no minute figure.
+      expect(
+        historyNotice(gap: gap(null, horizon: true), config: off, report: null),
+        contains('may be missing'),
+      );
+
+      // Fill ON: complete run heals; a failed or absent run never silences.
+      expect(
+        historyNotice(gap: gap(235), config: on, report: report()),
+        isNull,
+      );
+      expect(
+        historyNotice(
+          gap: gap(235),
+          config: on,
+          report: report(complete: false, error: 'timed out'),
+        ),
+        contains('incomplete'),
+      );
+      expect(
+        historyNotice(gap: gap(235), config: on, report: null),
+        contains('missing'),
+      );
     });
 
     test('threads are pulled per call, never cached (§0.4)', () async {
@@ -169,6 +308,65 @@ void main() {
       await tester.pump();
       expect(find.textContaining('No conversations yet'), findsOneWidget);
       expect(find.byIcon(Icons.person_add_alt), findsOneWidget);
+    });
+
+    testWidgets('a residual gap raises the banner; tap opens the sheet with '
+        'the toggle and the plain disclosure (D-074: never silence)', (
+      tester,
+    ) async {
+      // Stub the SOURCES (the screen re-pulls on entry — the never-dark law),
+      // then let the screen's own initState pull them.
+      MessagingService.gapAgeFn = () async =>
+          GapAgeDto(gapMinutes: BigInt.from(235), beyondHorizon: false);
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('may be missing'), findsOneWidget);
+
+      await tester.tap(find.textContaining('may be missing'));
+      await tester.pumpAndSettle();
+      // The sheet: title, toggle, and the disclosure's two load-bearing
+      // claims — what the operator LEARNS and what they can NEVER do.
+      expect(find.text('Message history'), findsOneWidget);
+      expect(find.byType(SwitchListTile), findsOneWidget);
+      expect(find.textContaining('operator learns'), findsOneWidget);
+      expect(find.textContaining('never'), findsWidgets);
+
+      // Flip it on: config saves, a fill runs, the sheet reports counts.
+      MessagingService.fillConfigFn = () async => const FillConfigDto(
+        enabled: true,
+        endpoint: 'https://indexer.kasia.fyi',
+        defaultEndpoint: 'https://indexer.kasia.fyi',
+      );
+      MessagingService.fillNowFn = () async => FillReportDto(
+        ran: true,
+        complete: true,
+        pages: 1,
+        newRows: 2,
+        atUnixMs: BigInt.one,
+      );
+      await tester.tap(find.byType(SwitchListTile));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('2 recovered messages'), findsOneWidget);
+      // The endpoint surface appears with the enabled state (configurable —
+      // D-070 clause 3: the hosted default is replaceable, not a dependency).
+      expect(find.textContaining('indexer.kasia.fyi'), findsOneWidget);
+
+      // The complete fill heals the banner (notice logic; live via merge).
+      await tester.tap(find.text('Messages')); // dismiss the sheet
+      await tester.pumpAndSettle();
+      expect(find.textContaining('may be missing'), findsNothing);
+    });
+
+    testWidgets('the history sheet is reachable with NO gap (visible toggle)', (
+      tester,
+    ) async {
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('may be missing'), findsNothing);
+      await tester.tap(find.byIcon(Icons.history));
+      await tester.pumpAndSettle();
+      expect(find.text('Message history'), findsOneWidget);
     });
 
     testWidgets('an inbound-pending row is an accept card, not a thread', (

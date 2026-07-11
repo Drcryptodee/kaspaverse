@@ -312,12 +312,306 @@ pub fn transport_gap_age() -> Option<GapAgeDto> {
         .clone()
 }
 
+// ── V2b history fill (D-074 — the indexer as a verifiable hint) ────────────
+
+/// The user's fill posture, for the settings surface. `default_endpoint`
+/// rides along so the UI can offer "reset to default" without hardcoding it.
+#[derive(Clone, Debug)]
+pub struct FillConfigDto {
+    /// Defaults OFF — the §0 lock (founder-ruled 2026-07-10): node-only out
+    /// of the box; enabling is an explicit opt-in beside the disclosure.
+    pub enabled: bool,
+    pub endpoint: String,
+    pub default_endpoint: String,
+}
+
+/// One fill run's outcome — row counts and shape only, never content. The
+/// honest-notice logic reads this: `!ran || !complete` keeps the "history
+/// before X may be incomplete" notice up (never silence — D-074).
+#[derive(Clone, Debug)]
+pub struct FillReportDto {
+    /// False when the fill is disabled or another run was already in flight.
+    pub ran: bool,
+    /// Every walk drained within budget and without a network error.
+    pub complete: bool,
+    pub pages: u32,
+    /// New rows folded into the store (post verify-by-decrypt + txid dedup).
+    pub new_rows: u32,
+    /// First network/HTTP error text, when any walk failed.
+    pub error: Option<String>,
+    pub at_unix_ms: u64,
+}
+
+/// Last run's report (per process; the notice re-derives on each open).
+static LAST_FILL: Mutex<Option<FillReportDto>> = Mutex::new(None);
+/// One fill at a time — an open-time auto-run and a settings-sheet "check
+/// now" must not double-walk (txid dedup would make it correct; the guard
+/// makes it cheap).
+static FILL_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Current fill config (file-backed; defaults OFF + the hosted default).
+pub fn transport_fill_config() -> Result<FillConfigDto, AppError> {
+    let dir = vault::transport_store_dir()?;
+    let config = kaspaverse_chain::history_fill::FillConfig::load(&dir);
+    Ok(FillConfigDto {
+        enabled: config.enabled,
+        endpoint: config.endpoint,
+        default_endpoint: kaspaverse_chain::history_fill::DEFAULT_INDEXER.to_string(),
+    })
+}
+
+/// Persist the fill posture. The endpoint is validated (http/https) here —
+/// a rejected save leaves the previous config untouched.
+pub fn transport_set_fill_config(enabled: bool, endpoint: String) -> Result<(), AppError> {
+    let dir = vault::transport_store_dir()?;
+    let endpoint = endpoint.trim().to_string();
+    let endpoint = if endpoint.is_empty() {
+        kaspaverse_chain::history_fill::DEFAULT_INDEXER.to_string()
+    } else {
+        endpoint
+    };
+    let config = kaspaverse_chain::history_fill::FillConfig { enabled, endpoint };
+    config.save(&dir).map_err(AppError::chain)?;
+    log::info!(
+        "history-fill: config saved (enabled={}, endpoint set)",
+        enabled
+    );
+    Ok(())
+}
+
+/// The last fill run's report (`None` = no run this process).
+pub fn transport_fill_status() -> Option<FillReportDto> {
+    LAST_FILL
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Run the fill immediately (the settings sheet's "check now"; the open-time
+/// auto-run uses the same path). Returns the report it also stores.
+pub async fn transport_fill_now() -> Result<FillReportDto, AppError> {
+    let hub = hub()?;
+    Ok(run_fill(&hub).await)
+}
+
+/// The fill itself: page-walk the configured indexer per Gate K §K7 —
+/// handshakes by receiver (each receive-branch address; recovers NEW inbound
+/// contacts), comms by (contact address, THEIR alias) per active conversation
+/// — and feed every row through the EXISTING inbound pipeline
+/// ([`handle_inbound`]): verify-by-decrypt, txid dedup, ciphertext-at-rest
+/// §0.4 — the fill has no decrypt surface of its own. Our own sent comms are
+/// deliberately not queried (sealed to the counterparty; unrecoverable by
+/// design — the K8 restore posture).
+async fn run_fill(hub: &Arc<TransportHub>) -> FillReportDto {
+    use kaspaverse_chain::history_fill::FillConfig;
+    use std::sync::atomic::Ordering;
+
+    let idle = FillReportDto {
+        ran: false,
+        complete: false,
+        pages: 0,
+        new_rows: 0,
+        error: None,
+        at_unix_ms: now_unix_ms(),
+    };
+    let Ok(dir) = vault::transport_store_dir() else {
+        return idle;
+    };
+    let config = FillConfig::load(&dir);
+    if !config.enabled {
+        return idle;
+    }
+    // Verify-by-decrypt needs a LIVE vault: with it locked, every genuine
+    // envelope would fail decryption locally and the cursor would advance
+    // past recoverable history while reporting complete (consensus-audit
+    // finding, V2b). Refuse honestly instead.
+    if !hub.decryptor.is_live() {
+        let mut report = idle;
+        report.ran = true;
+        report.error = Some("wallet is locked — unlock and check again".to_string());
+        *LAST_FILL.lock().unwrap_or_else(PoisonError::into_inner) = Some(report.clone());
+        return report;
+    }
+    if FILL_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        log::info!("history-fill: a run is already in flight — skipped");
+        return idle;
+    }
+    // Everything below must release the guard — one exit point at the end.
+    let report = fill_walks(hub, &dir, &config).await;
+    FILL_RUNNING.store(false, Ordering::SeqCst);
+    *LAST_FILL.lock().unwrap_or_else(PoisonError::into_inner) = Some(report.clone());
+    log::info!(
+        "history-fill: run finished (complete={}, pages={}, new_rows={}, error={})",
+        report.complete,
+        report.pages,
+        report.new_rows,
+        report.error.is_some(),
+    );
+    kaspaverse_chain::spans::mark_with("fill_rows", &report.new_rows.to_string());
+    ping_notice_inputs();
+    report
+}
+
+/// The walk half of [`run_fill`] (guard-free; caller owns the run lock).
+async fn fill_walks(
+    hub: &Arc<TransportHub>,
+    dir: &std::path::Path,
+    config: &kaspaverse_chain::history_fill::FillConfig,
+) -> FillReportDto {
+    use kaspaverse_chain::history_fill::{encode_hex, walk_pages, FillCursors, IndexerClient};
+
+    let mut report = FillReportDto {
+        ran: true,
+        complete: true,
+        pages: 0,
+        new_rows: 0,
+        error: None,
+        at_unix_ms: now_unix_ms(),
+    };
+    let client = match IndexerClient::new(&config.endpoint) {
+        Ok(client) => client,
+        Err(e) => {
+            report.complete = false;
+            report.error = Some(e.to_string());
+            return report;
+        }
+    };
+    let mut cursors = FillCursors::load(dir);
+
+    // Handshake sweep: the receive branch only — handshakes bond an address
+    // we hand out; the change branch is internal and never receives one.
+    let receive_addresses = match vault::derive_wallet_addresses(wallet::GAP_LIMIT, 0) {
+        Ok((receive, _)) => receive,
+        Err(e) => {
+            report.complete = false;
+            report.error = Some(e.message);
+            return report;
+        }
+    };
+    for address in &receive_addresses {
+        let address = address.to_string();
+        let start = cursors.handshakes.get(&address).copied().unwrap_or(0);
+        let outcome = walk_pages(
+            |cursor| client.handshakes_by_receiver(&address, cursor),
+            start,
+            now_unix_ms(),
+        )
+        .await;
+        report.pages += outcome.pages;
+        for row in &outcome.items {
+            let Some(body) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
+            else {
+                continue; // malformed hint row — omitted data, never an error
+            };
+            let event = TransportEvent {
+                txid: Some(row.tx_id.clone()),
+                kind: "handshake".to_string(),
+                body,
+                addresses: vec![row.receiver.clone()],
+                block_time_ms: Some(row.block_time),
+            };
+            if handle_inbound(hub, event) {
+                report.new_rows += 1;
+            }
+        }
+        if outcome.cursor > start {
+            cursors.handshakes.insert(address, outcome.cursor);
+        }
+        if !outcome.complete {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = outcome.error;
+            }
+        }
+    }
+
+    // Comm sweep: per ACTIVE conversation, by (contact address, THEIR alias)
+    // — the sender tags comms with their own alias (§K7 partition key).
+    let conversations: Vec<(String, String, String)> = {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store
+            .list_conversations()
+            .into_iter()
+            .filter(|c| c.status == ConversationStatus::Active)
+            .filter_map(|c| {
+                let their_alias = c.their_alias.clone()?;
+                if c.contact_address.is_empty() || their_alias.is_empty() {
+                    return None;
+                }
+                Some((
+                    c.conversation_id.clone(),
+                    c.contact_address.clone(),
+                    their_alias,
+                ))
+            })
+            .collect()
+    };
+    for (conversation_id, contact_address, their_alias) in conversations {
+        let alias_hex = encode_hex(their_alias.as_bytes());
+        let start = cursors.comms.get(&conversation_id).copied().unwrap_or(0);
+        let outcome = walk_pages(
+            |cursor| client.comms_by_sender(&contact_address, &alias_hex, cursor),
+            start,
+            now_unix_ms(),
+        )
+        .await;
+        report.pages += outcome.pages;
+        for row in &outcome.items {
+            let Some(sealed) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
+            else {
+                continue;
+            };
+            // Reassemble the wire body the live scan would have seen:
+            // `<alias>:<sealed>` — the alias head sits OUTSIDE the envelope.
+            let mut body = their_alias.clone().into_bytes();
+            body.push(b':');
+            body.extend_from_slice(&sealed);
+            let event = TransportEvent {
+                txid: Some(row.tx_id.clone()),
+                kind: "comm".to_string(),
+                body,
+                addresses: Vec::new(),
+                block_time_ms: Some(row.block_time),
+            };
+            if handle_inbound(hub, event) {
+                report.new_rows += 1;
+            }
+        }
+        if outcome.cursor > start {
+            cursors.comms.insert(conversation_id, outcome.cursor);
+        }
+        if !outcome.complete {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = outcome.error;
+            }
+        }
+    }
+
+    if let Err(e) = cursors.save(dir) {
+        log::warn!("history-fill: cursor save failed: {e}");
+    }
+    report
+}
+
 fn thread_pings() -> &'static broadcast::Sender<String> {
     THREAD_PINGS.get_or_init(|| broadcast::channel(64).0)
 }
 
 fn ping(conversation_id: &str) {
     let _ = thread_pings().send(conversation_id.to_string());
+}
+
+/// The V2b notice sentinel: an EMPTY ping (content-free like every ping)
+/// telling Dart the notice INPUTS changed — the gap-age resolved or a fill
+/// run reported. Event-driven so the honest notice can never stay dark on a
+/// quiet wire (consensus-audit finding; a Dart-side timer poll would leak
+/// into widget-test fake time — the L48 async-seam family).
+fn ping_notice_inputs() {
+    ping("");
 }
 
 fn hub() -> Result<Arc<TransportHub>, AppError> {
@@ -400,10 +694,13 @@ pub async fn transport_start() -> Result<(), AppError> {
     // Subscribe BEFORE the catch-up so its re-emitted matches land in this
     // receiver's buffer and are folded, not dropped.
     let mut events = monitor.subscribe_transport();
+    let fold_hub = hub.clone();
     let task = tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(event) => handle_inbound(&hub, event),
+                Ok(event) => {
+                    handle_inbound(&fold_hub, event);
+                }
                 // Sparse stream — lag is exotic; missed live events are the
                 // live-only law's accepted cost (D-049), not silent data loss:
                 // the store holds only what the wire delivered.
@@ -429,10 +726,22 @@ pub async fn transport_start() -> Result<(), AppError> {
     // deduped by txid against anything the live scan already caught).
     monitor.set_transport_cursor(cursor_path);
     let catch_up_monitor = monitor.clone();
+    let fill_hub = hub.clone();
     tokio::spawn(async move {
         if let Err(e) = catch_up_monitor.catch_up_transport(catch_up_from).await {
             log::warn!("transport-hub: catch-up ended early: {e}");
         }
+        // V2b auto-fill (D-074) — SEQUENCED after the node catch-up so node
+        // truth folds first: a fill row's txid is an indexer CLAIM (we hold
+        // only its payload, so the pinned recompute cannot check it); folding
+        // node-scanned rows first means a mislabeled hint cannot suppress a
+        // message the node was about to deliver (consensus-audit finding,
+        // V2b). Config-gated inside (defaults OFF, the §0 lock); a first-ever
+        // run (no cursor) still fills — that IS the restore-from-seed case
+        // the V0 casualty lived. Deliberately unconditional on gap size: the
+        // rewind covers ~20 min, the indexer covers the rest, and txid dedup
+        // makes the overlap free.
+        run_fill(&fill_hub).await;
     });
 
     // V1 gap-age signal (deliverable 6): resolve the pre-catch-up cursor's
@@ -536,6 +845,7 @@ async fn resolve_gap_age(monitor: &kaspaverse_chain::DagMonitor, cursor: kaspave
                 });
                 kaspaverse_chain::spans::mark_with("open_gap_min", &minutes.to_string());
                 log::info!("transport-hub: history gap ≈ {minutes} min at open");
+                ping_notice_inputs();
                 return;
             }
             Err(_) if monitor.is_connected() => {
@@ -553,6 +863,7 @@ async fn resolve_gap_age(monitor: &kaspaverse_chain::DagMonitor, cursor: kaspave
                         "transport-hub: cursor block pruned — history gap ≥ {horizon_min} min \
                          (pruning horizon)"
                     );
+                    ping_notice_inputs();
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -577,13 +888,28 @@ fn warn_store<T>(result: kaspaverse_chain::Result<T>) {
     }
 }
 
+/// Only rows this fresh register acceptance watches. The tracker's VCC
+/// catch-up resolves acceptances within roughly this window; a watch for an
+/// OLDER txid (a fill row from hours/days back) can never resolve — it would
+/// sit `Submitted`, dress settled history in a breathing Pending chip
+/// (DS-1), and a first-enable fill would flood the 512-entry watch cap,
+/// evicting genuine in-flight Send watches (consensus-audit finding, V2b).
+const WATCH_FRESH_MS: u64 = 60 * 60 * 1000;
+
 /// V1: put a stored message's txid on the acceptance watch-set. Inbound rows
 /// register as `Transport` (never stall-signalled — the watch may start
 /// after acceptance already passed); outbound rows were already registered
 /// as `Send` by the commit path, and the tracker's first-source-wins
 /// idempotence keeps that. No-op until the tracker bootstraps (its connect
-/// catch-up covers the sliver).
-fn watch_acceptance(txid: &str) {
+/// catch-up covers the sliver). `block_time_ms` gates stale rows out
+/// entirely: unwatched settled history renders quiet (`chipStateOfAcceptance
+/// (null)` = none), which is exactly the honest state.
+fn watch_acceptance(txid: &str, block_time_ms: Option<u64>) {
+    if let Some(t) = block_time_ms {
+        if now_unix_ms().saturating_sub(t) > WATCH_FRESH_MS {
+            return;
+        }
+    }
     if let Some(tracker) = dag::tracker_handle() {
         tracker.watch(txid, WatchSource::Transport);
     }
@@ -591,58 +917,77 @@ fn watch_acceptance(txid: &str) {
 
 /// One scan match → store/conversation fold. Content never reaches a log
 /// line from here (§4: message plaintext is treated like key material for
-/// logging; even sealed bodies are logged as shapes only).
-fn handle_inbound(hub: &TransportHub, event: TransportEvent) {
+/// logging; even sealed bodies are logged as shapes only). Returns whether a
+/// NEW row was recorded — the live scan ignores it; the V2b fill counts it
+/// (its report is row-counts, never content).
+fn handle_inbound(hub: &TransportHub, event: TransportEvent) -> bool {
     // The store law keys on txid (D-065); an id-less event (exotic — both the
     // node's verbose data AND the pinned recompute failed) cannot be stored.
-    let Some(txid) = event.txid else { return };
+    let Some(txid) = event.txid else { return false };
     match event.kind.as_str() {
-        "handshake" => handle_inbound_handshake(hub, &txid, &event.body, &event.addresses),
-        "comm" => handle_inbound_comm(hub, &txid, &event.body),
+        "handshake" => handle_inbound_handshake(
+            hub,
+            &txid,
+            &event.body,
+            &event.addresses,
+            event.block_time_ms,
+        ),
+        "comm" => handle_inbound_comm(hub, &txid, &event.body, event.block_time_ms),
         // `legacy` (VNone): parse-layer tolerance is fixture-pinned in chain;
         // conversation semantics for the unversioned generation are
         // consciously deferred (the population emits versioned forms since
         // 2025). `payment` memos: deferred (not a P2.3 deliverable). `bcast`:
         // plaintext dev/broadcast lane, rendered by the dev panel. Unknown
         // kinds: forward-compat opaque (§0.5) — visible on the dev wire view.
-        _ => {}
+        _ => false,
     }
 }
 
-fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], addresses: &[String]) {
+fn handle_inbound_handshake(
+    hub: &TransportHub,
+    txid: &str,
+    body: &[u8],
+    addresses: &[String],
+    block_time_ms: Option<u64>,
+) -> bool {
     {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        // Dedup BEFORE any crypto: DAG re-delivery, and our own outbound
-        // handshakes echoing back through the scan (stored at commit).
+        // Dedup BEFORE any crypto: DAG re-delivery, our own outbound
+        // handshakes echoing back through the scan (stored at commit), and
+        // fill rows the live scan already caught.
         if store.has_handshake_txid(txid) || store.has_message_txid(txid) {
-            return;
+            return false;
         }
     }
     // Relevance without crypto: a real handshake bonds the recipient, so one
     // of OUR watched addresses must be among the outputs.
     if !addresses.iter().any(|a| hub.watched.contains(a)) {
-        return;
+        return false;
     }
     let envelope_bytes = decode_envelope_body(body);
     let Ok(envelope) = Envelope::from_bytes(&envelope_bytes) else {
-        return;
+        return false;
     };
     // Establishment scan: whichever watched key opens it becomes the §0.7
     // binding. Not ours / vault locked ⇒ skip (live-only law: an envelope
-    // seen while locked is missed, same as one seen while offline).
+    // seen while locked is missed, same as one seen while offline). This
+    // decrypt is ALSO the fill's verify step: an indexer row no watched key
+    // opens is dropped here — omission is possible, forgery is not (D-074).
     let Ok((slot, plaintext)) = hub
         .decryptor
         .decrypt_scanning(hub.window.iter().copied(), &envelope)
     else {
-        return;
+        return false;
     };
     let Ok(payload) = HandshakePayload::from_plaintext(&plaintext) else {
         log::debug!("transport-hub: undecodable handshake payload skipped");
-        return;
+        return false;
     };
     drop(plaintext); // Zeroizing — wiped here; the store keeps ciphertext only
 
-    let now = now_unix_ms();
+    // Conversation clocks ride the block time when the source knows it (the
+    // fill; the scans since V2b) so filled history lands in true order.
+    let now = block_time_ms.unwrap_or_else(now_unix_ms);
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
 
     // An acceptance response completes a conversation we initiated: their
@@ -657,7 +1002,9 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
             // the counterparty resolved for us and will keep sealing to.
             conversation.bound_branch = to_key_branch(slot.0);
             conversation.bound_index = slot.1;
-            conversation.last_activity_unix_ms = now;
+            // Never regress the activity clock: a FILLED old acceptance must
+            // not re-sort the conversation above newer traffic.
+            conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
             let conversation_id = conversation.conversation_id.clone();
             warn_store(store.upsert_conversation(conversation));
             warn_store(store.record_message(MessageRecord {
@@ -671,9 +1018,9 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
                 sealed_to: None,
             }));
             drop(store);
-            watch_acceptance(txid);
+            watch_acceptance(txid, block_time_ms);
             ping(&conversation_id);
-            return;
+            return true;
         }
         // An acceptance we have no pending side for — fall through and treat
         // it as a fresh inbound handshake (the live app does the same).
@@ -707,28 +1054,34 @@ fn handle_inbound_handshake(hub: &TransportHub, txid: &str, body: &[u8], address
         sealed_to: None,
     }));
     drop(store);
-    watch_acceptance(txid);
+    watch_acceptance(txid, block_time_ms);
     ping(&conversation_id);
+    true
 }
 
-fn handle_inbound_comm(hub: &TransportHub, txid: &str, body: &[u8]) {
+fn handle_inbound_comm(
+    hub: &TransportHub,
+    txid: &str,
+    body: &[u8],
+    block_time_ms: Option<u64>,
+) -> bool {
     {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         if store.has_message_txid(txid) {
-            return; // DAG re-delivery, or our own sent row echoing back
+            return false; // DAG re-delivery, or our own sent row echoing back
         }
     }
     // The alias head sits OUTSIDE the envelope — split BEFORE any envelope
     // parse (P2.2 handover law).
     let Some((alias, sealed)) = split_comm_body(body) else {
-        return;
+        return false;
     };
     // Relevance without crypto: the alias must belong to one of our
     // conversations (either side's — senders tag with their own).
     let (conversation_id, bound) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(conversation) = store.conversation_by_alias(&alias) else {
-            return;
+            return false;
         };
         (
             conversation.conversation_id.clone(),
@@ -740,11 +1093,13 @@ fn handle_inbound_comm(hub: &TransportHub, txid: &str, body: &[u8]) {
     };
     let envelope_bytes = decode_envelope_body(sealed);
     let Ok(envelope) = Envelope::from_bytes(&envelope_bytes) else {
-        return;
+        return false;
     };
     // Validation decrypt: bound slot first (§0.7 fast path), then the window
     // (robustness against a counterparty that re-resolved our address). The
     // plaintext is DROPPED here — decrypt-on-view happens at thread pull.
+    // This is ALSO the fill's verify step (D-074): an indexer can OMIT an
+    // envelope, never forge one past this decrypt.
     let sealed_to = match hub.decryptor.decrypt_at(bound, &envelope) {
         Ok(_) => None,
         Err(CoreError::TransportOpen) => {
@@ -753,13 +1108,15 @@ fn handle_inbound_comm(hub: &TransportHub, txid: &str, body: &[u8]) {
                 .decrypt_scanning(hub.window.iter().copied(), &envelope)
             {
                 Ok((slot, _)) => Some((to_key_branch(slot.0), slot.1)),
-                Err(_) => return, // alias matched but no key opens it — spoofed head
+                Err(_) => return false, // alias matched but no key opens it — spoofed head
             }
         }
-        Err(_) => return, // vault locked mid-stream — live-only law
+        Err(_) => return false, // vault locked mid-stream — live-only law
     };
 
-    let now = now_unix_ms();
+    // Row clock = block time when the source knows it (fill + scans since
+    // V2b): filled history sorts into its true position, not "now".
+    let now = block_time_ms.unwrap_or_else(now_unix_ms);
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
     let recorded = store.record_message(MessageRecord {
         txid: txid.to_string(),
@@ -777,13 +1134,17 @@ fn handle_inbound_comm(hub: &TransportHub, txid: &str, body: &[u8]) {
     if let Ok(true) = recorded {
         if let Some(existing) = store.conversation(&conversation_id) {
             let mut conversation = existing.clone();
-            conversation.last_activity_unix_ms = now;
+            // Max, never assignment: an old filled row must not re-sort the
+            // conversation list above genuinely newer traffic.
+            conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
             warn_store(store.upsert_conversation(conversation));
         }
         drop(store);
-        watch_acceptance(txid);
+        watch_acceptance(txid, block_time_ms);
         ping(&conversation_id);
+        return true;
     }
+    false
 }
 
 /// Phase 1 (dev/broadcast lane): compose `ciph_msg:1:bcast:<channel>:<text>`,
@@ -1741,6 +2102,7 @@ mod tests {
             kind: "bcast".into(),
             body: b"kv-dev:hi".to_vec(),
             addresses: vec!["kaspa:qz...".into()],
+            block_time_ms: None,
         });
         assert_eq!(dto.txid.as_deref(), Some("ab".repeat(32).as_str()));
         assert_eq!(dto.kind, "bcast");

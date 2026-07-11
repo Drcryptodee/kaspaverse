@@ -12,6 +12,7 @@
 mod acceptance;
 mod dag_monitor;
 mod error;
+pub mod history_fill;
 mod kvlog;
 mod send;
 pub mod spans;

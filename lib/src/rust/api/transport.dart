@@ -8,14 +8,37 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `fill_walks`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
 Future<GapAgeDto?> transportGapAge() =>
     RustLib.instance.api.crateApiTransportTransportGapAge();
+
+/// Current fill config (file-backed; defaults OFF + the hosted default).
+Future<FillConfigDto> transportFillConfig() =>
+    RustLib.instance.api.crateApiTransportTransportFillConfig();
+
+/// Persist the fill posture. The endpoint is validated (http/https) here —
+/// a rejected save leaves the previous config untouched.
+Future<void> transportSetFillConfig({
+  required bool enabled,
+  required String endpoint,
+}) => RustLib.instance.api.crateApiTransportTransportSetFillConfig(
+  enabled: enabled,
+  endpoint: endpoint,
+);
+
+/// The last fill run's report (`None` = no run this process).
+Future<FillReportDto?> transportFillStatus() =>
+    RustLib.instance.api.crateApiTransportTransportFillStatus();
+
+/// Run the fill immediately (the settings sheet's "check now"; the open-time
+/// auto-run uses the same path). Returns the report it also stores.
+Future<FillReportDto> transportFillNow() =>
+    RustLib.instance.api.crateApiTransportTransportFillNow();
 
 /// Start (or restart after a re-unlock) the transport hub: load the stores,
 /// take a vault-scoped decryptor, derive the PUBLIC watched window, and
@@ -256,6 +279,84 @@ class ConversationDto {
           initiatedByMe == other.initiatedByMe &&
           createdUnixMs == other.createdUnixMs &&
           lastActivityUnixMs == other.lastActivityUnixMs;
+}
+
+/// The user's fill posture, for the settings surface. `default_endpoint`
+/// rides along so the UI can offer "reset to default" without hardcoding it.
+class FillConfigDto {
+  /// Defaults OFF — the §0 lock (founder-ruled 2026-07-10): node-only out
+  /// of the box; enabling is an explicit opt-in beside the disclosure.
+  final bool enabled;
+  final String endpoint;
+  final String defaultEndpoint;
+
+  const FillConfigDto({
+    required this.enabled,
+    required this.endpoint,
+    required this.defaultEndpoint,
+  });
+
+  @override
+  int get hashCode =>
+      enabled.hashCode ^ endpoint.hashCode ^ defaultEndpoint.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FillConfigDto &&
+          runtimeType == other.runtimeType &&
+          enabled == other.enabled &&
+          endpoint == other.endpoint &&
+          defaultEndpoint == other.defaultEndpoint;
+}
+
+/// One fill run's outcome — row counts and shape only, never content. The
+/// honest-notice logic reads this: `!ran || !complete` keeps the "history
+/// before X may be incomplete" notice up (never silence — D-074).
+class FillReportDto {
+  /// False when the fill is disabled or another run was already in flight.
+  final bool ran;
+
+  /// Every walk drained within budget and without a network error.
+  final bool complete;
+  final int pages;
+
+  /// New rows folded into the store (post verify-by-decrypt + txid dedup).
+  final int newRows;
+
+  /// First network/HTTP error text, when any walk failed.
+  final String? error;
+  final BigInt atUnixMs;
+
+  const FillReportDto({
+    required this.ran,
+    required this.complete,
+    required this.pages,
+    required this.newRows,
+    this.error,
+    required this.atUnixMs,
+  });
+
+  @override
+  int get hashCode =>
+      ran.hashCode ^
+      complete.hashCode ^
+      pages.hashCode ^
+      newRows.hashCode ^
+      error.hashCode ^
+      atUnixMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FillReportDto &&
+          runtimeType == other.runtimeType &&
+          ran == other.ran &&
+          complete == other.complete &&
+          pages == other.pages &&
+          newRows == other.newRows &&
+          error == other.error &&
+          atUnixMs == other.atUnixMs;
 }
 
 /// A parsed `kv:1:` game frame (P2.4 §0.5). Fields come from the frame JSON, so

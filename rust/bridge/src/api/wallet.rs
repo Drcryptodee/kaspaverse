@@ -58,12 +58,15 @@ pub enum ActivityDirection {
 /// hasn't folded it yet — this kills the "Pending" lie the V0 baselines
 /// measured (≥15 s past on-chain acceptance). V1 renders it on the existing
 /// confirmed chip (semantically identical for spends); V2's three-state chip
-/// differentiates.
+/// differentiates. `Unknown` is the V2b cold-start honesty state (finding
+/// 13): a receive folded before the processor has live DAA is unresolvable —
+/// it renders quiet (no chip), never a fake Pending streaming a huge counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaturityState {
     Pending,
     Accepted,
     Confirmed,
+    Unknown,
 }
 
 /// One activity row crossing the FFI. `*_sompi` / DAA stay `u64` (Dart `BigInt`,
@@ -149,6 +152,7 @@ fn map_activity(record: WalletActivityRecord) -> ActivityRecord {
         maturity: match record.maturity {
             ChainMaturity::Pending => MaturityState::Pending,
             ChainMaturity::Confirmed => MaturityState::Confirmed,
+            ChainMaturity::Unknown => MaturityState::Unknown,
         },
         stalled: false,
     }
@@ -161,7 +165,9 @@ fn map_activity(record: WalletActivityRecord) -> ActivityRecord {
 /// Displaced drops the row to Pending — even from Confirmed — because its
 /// accepting block left the selected chain (honesty over comfort; wallet-core
 /// converges via its own reorg handling). Submitted/Stalled change nothing
-/// here (stall surfaces in V3).
+/// here (stall surfaces in V3). An `Unknown` row (V2b — no live DAA yet)
+/// upgrades on the same rules: the tracker's node-read knowledge is exactly
+/// what resolves the cold-start unknown.
 fn overlaid(current: MaturityState, status: &TxStatus) -> MaturityState {
     match status {
         TxStatus::Accepted { .. } => match current {

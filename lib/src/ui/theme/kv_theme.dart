@@ -183,6 +183,26 @@ ThemeData kvDarkTheme() {
     splashColor: KvColor.glow,
     highlightColor: KvColor.glow,
     iconTheme: const IconThemeData(color: KvColor.textSecondary),
+    // Toggles read as health/state, not brand: active = success GREEN
+    // (founder directive 2026-07-11 — "green, not kaspa teal"; the widened
+    // success law in tokens.dart).
+    switchTheme: SwitchThemeData(
+      thumbColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? KvColor.abyss
+            : KvColor.textSecondary,
+      ),
+      trackColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? KvColor.success
+            : KvColor.surfaceAlt,
+      ),
+      trackOutlineColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? KvColor.success
+            : KvColor.border,
+      ),
+    ),
     appBarTheme: AppBarTheme(
       backgroundColor: KvColor.abyss,
       surfaceTintColor: Colors.transparent,

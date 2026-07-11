@@ -648,8 +648,13 @@ class _ActivityRow extends StatelessWidget {
               // The V2 three-state chip rides V1's acceptance overlay:
               // Pending (breathing) → Accepted → quiet. Confirmed stays
               // unlabelled (Rams #5); a stalled submit escalates honestly.
+              // The depth gate (finding 13): at/above the ceiling the chip
+              // extinguishes — a settled row streams nothing on cold start.
               TxStatusChip(
-                state: chipStateOf(record.maturity, stalled: record.stalled),
+                state: gateByDepth(
+                  chipStateOf(record.maturity, stalled: record.stalled),
+                  confirmations,
+                ),
                 pulsePhase: now.second.isEven,
                 confirmations: confirmations,
               ),

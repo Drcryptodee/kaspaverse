@@ -95,8 +95,10 @@ class ActivityRecord {
 /// hasn't folded it yet — this kills the "Pending" lie the V0 baselines
 /// measured (≥15 s past on-chain acceptance). V1 renders it on the existing
 /// confirmed chip (semantically identical for spends); V2's three-state chip
-/// differentiates.
-enum MaturityState { pending, accepted, confirmed }
+/// differentiates. `Unknown` is the V2b cold-start honesty state (finding
+/// 13): a receive folded before the processor has live DAA is unresolvable —
+/// it renders quiet (no chip), never a fake Pending streaming a huge counter.
+enum MaturityState { pending, accepted, confirmed, unknown }
 
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI
 /// can tell "not synced yet" (`None` → DS-1 unknown `—`) from a real, live zero

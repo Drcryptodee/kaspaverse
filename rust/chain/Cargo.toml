@@ -22,3 +22,9 @@ borsh = { version = "1", features = ["derive"] }
 tokio.workspace = true
 async-channel.workspace = true
 log.workspace = true
+# V2b history fill (D-074): the indexer client rides the resolver's own HTTP
+# crate from the pinned tree (pinned-crates-first); serde/serde_json parse its
+# JSON responses. All already in the lock — see the workspace manifest note.
+workflow-http.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true

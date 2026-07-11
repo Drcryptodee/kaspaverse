@@ -80,7 +80,10 @@ class StatusBeacon extends StatelessWidget {
         KvColor.warning,
         age == null ? 'no recent update' : 'as of ${formatAge(age!)} ago',
       ),
-      BeaconState.connected => (KvColor.primary, 'Mainnet'),
+      // Live mainnet = success GREEN (founder directive 2026-07-11, V2b wrap:
+      // "green, not kaspa teal" — a healthy link reads as the universal
+      // all-good colour; teal stays the brand/CTA voice).
+      BeaconState.connected => (KvColor.success, 'Mainnet'),
     };
 
     final live = state == BeaconState.connected;
@@ -97,9 +100,10 @@ class StatusBeacon extends StatelessWidget {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: color,
-          // Glow is rationed to live-data emphasis (§3) — a live link only.
+          // Glow is rationed to live-data emphasis (§3) — a live link only;
+          // tinted to match the live dot (green since the founder call).
           boxShadow: live
-              ? const [BoxShadow(color: KvColor.glow, blurRadius: 8)]
+              ? const [BoxShadow(color: KvColor.successGlow, blurRadius: 8)]
               : null,
         ),
       ),
