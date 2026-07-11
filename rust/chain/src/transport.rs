@@ -60,6 +60,11 @@ pub struct TransportEvent {
     /// Output addresses (recipients, including change), extracted with the
     /// pinned txscript standard decoder; non-standard outputs are skipped.
     pub addresses: Vec<String>,
+    /// The carrying block's header timestamp (unix ms), when the source knows
+    /// it: the live/catch-up scans read it off the block; the V2b fill reads
+    /// it off the indexer row. `None` only for sources with no block context —
+    /// consumers fall back to the local clock (the pre-V2b behavior).
+    pub block_time_ms: Option<u64>,
 }
 
 /// Parse a raw tx payload into `(kind, body)` — pure, version-neutral, shared
@@ -89,18 +94,23 @@ pub fn scan_block(block: &RpcBlock, prefix: Prefix) -> Vec<TransportEvent> {
     block
         .transactions
         .iter()
-        .filter_map(|tx| scan_transaction(tx, prefix))
+        .filter_map(|tx| scan_transaction(tx, prefix, Some(block.header.timestamp)))
         .collect()
 }
 
 /// Match one transaction — payload prefix only (never `tx.version`, §0.2).
-fn scan_transaction(tx: &RpcTransaction, prefix: Prefix) -> Option<TransportEvent> {
+fn scan_transaction(
+    tx: &RpcTransaction,
+    prefix: Prefix,
+    block_time_ms: Option<u64>,
+) -> Option<TransportEvent> {
     let (kind, body) = parse_payload(&tx.payload)?;
     Some(TransportEvent {
         txid: resolve_txid(tx),
         kind,
         body: body.to_vec(),
         addresses: output_addresses(tx, prefix),
+        block_time_ms,
     })
 }
 

@@ -36,7 +36,15 @@ abstract final class KvColor {
   static const Color textDisabled = Color(0xFF55555F); // decoration only
 
   // Semantic — meaning is rationed (§3). Each colour means exactly one thing.
-  static const Color success = Color(0xFF34D399); // chain-confirmed. only that.
+  // success widened by founder directive (2026-07-11, V2b wrap): green =
+  // "chain-confirmed OR healthy/active" — the live mainnet beacon and active
+  // toggles wear it; teal stays the brand/CTA voice, never a health signal.
+  static const Color success = Color(
+    0xFF34D399,
+  ); // chain-confirmed; healthy/active
+  static const Color successGlow = Color(
+    0x3334D399,
+  ); // #34D399 @ 20% — live-dot glow
   static const Color warning = Color(0xFFFBBF24); // degraded: stale link
   static const Color error = Color(0xFFF87171); // fund risk + destruction only
   static const Color info = Color(0xFF60A5FA); // explanatory callouts

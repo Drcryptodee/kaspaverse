@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 
 void main() {
   testWidgets('wallet home: connecting → live empty zero → funds → stale', (
@@ -187,5 +188,93 @@ void main() {
     expect(formatScore(BigInt.from(0)), '0');
     expect(formatScore(BigInt.from(1000)), '1,000');
     expect(formatScore(BigInt.parse('458174109')), '458,174,109');
+  });
+
+  test(
+    'chip honesty: unknown is quiet, the depth gate extinguishes at 100',
+    () {
+      // Finding 13 upstream half: a cold-start fold with no live DAA yields
+      // maturity `unknown` — the chip claims nothing (and a stall still shows).
+      expect(
+        chipStateOf(MaturityState.unknown, stalled: false),
+        TxChipState.none,
+      );
+      expect(
+        chipStateOf(MaturityState.unknown, stalled: true),
+        TxChipState.stalled,
+      );
+
+      // Finding 13 display half (founder-ruled ceiling 100): a counter at or
+      // above the ceiling renders NO chip, whatever the state; below it the
+      // state stands; stalled never gates (it carries no depth).
+      expect(gateByDepth(TxChipState.pending, 19000), TxChipState.none);
+      expect(gateByDepth(TxChipState.accepted, 100), TxChipState.none);
+      expect(gateByDepth(TxChipState.accepted, 99), TxChipState.accepted);
+      expect(gateByDepth(TxChipState.pending, null), TxChipState.pending);
+      expect(gateByDepth(TxChipState.stalled, 19000), TxChipState.stalled);
+    },
+  );
+
+  testWidgets('cold start: settled history streams NO counters (finding 13)', (
+    tester,
+  ) async {
+    // The founder-reported storm: on restart, hours-old rows briefly streamed
+    // ">19,000 confirmations". Reproduce the exact pre-fix conditions — the
+    // Dart-side DAA is live while the first fold classified the old rows —
+    // and pin both halves of the fix: an `unknown` row (the fixed first fold)
+    // shows nothing, and even a stale-classified `pending` row (any other
+    // path to a huge counter) is extinguished by the depth gate.
+    final daa = ValueNotifier<BigInt?>(BigInt.from(458174109));
+    final now = DateTime(2026, 7, 10, 12);
+    final activity = ValueNotifier<List<ActivityRecord>>([
+      // The fixed cold-start fold: maturity unknown (no DAA at fold time).
+      ActivityRecord(
+        txid: 'e' * 64,
+        valueSompi: BigInt.from(500000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 7200000),
+        blockDaaScore: BigInt.from(458154109), // 20,000 DAA old
+        direction: ActivityDirection.incoming,
+        isCoinbase: false,
+        maturity: MaturityState.unknown,
+        stalled: false,
+      ),
+      // Defense in depth: were an old row ever to classify Pending with the
+      // live DAA far ahead, the gate still renders nothing at ≥100.
+      ActivityRecord(
+        txid: 'f' * 64,
+        valueSompi: BigInt.from(100000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 7200000),
+        blockDaaScore: BigInt.from(458154109),
+        direction: ActivityDirection.incoming,
+        isCoinbase: false,
+        maturity: MaturityState.pending,
+        stalled: false,
+      ),
+    ]);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        home: HomeScreen(
+          connected: ValueNotifier(true),
+          endpoint: ValueNotifier('wss://node.example/borsh'),
+          virtualDaaScore: daa,
+          error: ValueNotifier(null),
+          lastUpdate: ValueNotifier(now),
+          mature: ValueNotifier(BigInt.from(600000000)),
+          pending: ValueNotifier(BigInt.zero),
+          outgoing: ValueNotifier(BigInt.zero),
+          activity: activity,
+          syncing: ValueNotifier(false),
+          utxoIndexMissing: ValueNotifier(false),
+          clock: () => now,
+        ),
+      ),
+    );
+
+    // Neither old row wears ANY chip: no streamed counter, no static word.
+    expect(find.textContaining('confirmations'), findsNothing);
+    expect(find.text('Pending'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
   });
 }

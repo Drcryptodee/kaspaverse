@@ -51,10 +51,17 @@ pub enum ActivityDirection {
 /// at the latest DAA (`record.rs:391` — Pending until the DAA-based maturity
 /// period elapses, then Confirmed). Stasis collapses into Pending (coinbase
 /// stasis is never surfaced as a user row).
+///
+/// `Unknown` is the V2b honesty state (finding 13): a receive folded while the
+/// processor has NO live DAA yet (the cold-start boot emit) cannot be
+/// classified — calling it Pending made hours-settled history masquerade as
+/// in-flight and stream huge counters. Unknown renders quiet; the first
+/// DAA-bearing fold (or the V1 acceptance overlay) resolves it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityMaturity {
     Pending,
     Confirmed,
+    Unknown,
 }
 
 /// A single activity row — the chain-layer projection of a wallet-core
@@ -161,7 +168,11 @@ fn is_own_change(record: &TransactionRecord, change_set: &HashSet<Address>) -> b
 /// Project a wallet-core record onto a row, classifying with the record's own
 /// helpers (INV-9). `current_daa_score` drives maturity — pass the processor's
 /// live DAA so a reloaded Pending row promotes the instant the chain advances.
-fn map_record(record: &TransactionRecord, current_daa_score: u64) -> WalletActivityRecord {
+/// `None` (no DAA yet — the pre-connect boot emit) classifies receives as
+/// [`ActivityMaturity::Unknown`], never a guessed Pending (finding 13: the
+/// cold-start confirmation storm was `unwrap_or(0)` here — with DAA 0 every
+/// settled receive re-pended and the glass streamed its huge DAA distance).
+fn map_record(record: &TransactionRecord, current_daa_score: Option<u64>) -> WalletActivityRecord {
     // A transaction the wallet ORIGINATED (a send) reaches us as TWO records on
     // one txid: an `Outgoing` (pending, on submit) and — when the change UTXO
     // confirms — a `Change` record (wallet-core, context.rs:handle_utxo_added).
@@ -212,16 +223,19 @@ fn map_record(record: &TransactionRecord, current_daa_score: u64) -> WalletActiv
         _ => (ActivityDirection::Incoming, record.value(), None),
     };
 
-    let maturity = match spend_accepted {
+    let maturity = match (spend_accepted, current_daa_score) {
         // A spend: Confirmed once the DAG accepts it; Pending until then.
-        Some(accepted) if accepted => ActivityMaturity::Confirmed,
-        Some(_) => ActivityMaturity::Pending,
+        // (Acceptance is persisted in the record — no live DAA needed.)
+        (Some(accepted), _) if accepted => ActivityMaturity::Confirmed,
+        (Some(_), _) => ActivityMaturity::Pending,
         // A receive: matures over the UTXO maturity period (INV-9 — the record's
         // own helper at the live DAA, never our own threshold).
-        None => match record.maturity(current_daa_score) {
+        (None, Some(daa)) => match record.maturity(daa) {
             Maturity::Confirmed => ActivityMaturity::Confirmed,
             Maturity::Pending | Maturity::Stasis => ActivityMaturity::Pending,
         },
+        // A receive with no live DAA: honestly unresolved (finding 13).
+        (None, None) => ActivityMaturity::Unknown,
     };
 
     WalletActivityRecord {
@@ -356,12 +370,13 @@ impl ActivityStore {
         Ok(())
     }
 
-    /// Newest-first rows, capped, with maturity resolved at `current_daa_score`.
+    /// Newest-first rows, capped, with maturity resolved at `current_daa_score`
+    /// (`None` — no live DAA yet — resolves receives as Unknown, finding 13).
     /// Hides any record that is our own returning change misfiled as an incoming
     /// (cleans entries a pre-fix restart re-scan may have already persisted).
     fn list(
         &self,
-        current_daa_score: u64,
+        current_daa_score: Option<u64>,
         change_set: &HashSet<Address>,
     ) -> Vec<WalletActivityRecord> {
         let mut records: Vec<&TransactionRecord> = self
@@ -546,8 +561,11 @@ impl WalletEngine {
         let _ = self.inner.events.send(event);
     }
 
-    fn current_daa(&self) -> u64 {
-        self.inner.processor.current_daa_score().unwrap_or(0)
+    /// The processor's live DAA — `None` until it has connected and synced
+    /// (never a fabricated 0: with DAA 0 every receive classifies Pending,
+    /// the finding-13 storm).
+    fn current_daa(&self) -> Option<u64> {
+        self.inner.processor.current_daa_score()
     }
 
     fn emit_activity(&self, change_set: &HashSet<Address>) {
@@ -777,7 +795,7 @@ mod tests {
         // Mainnet user-tx maturity period is 100 DAA (utxo/settings.rs).
         let rec = incoming(3, 1_234, 1_000);
 
-        let pending = map_record(&rec, 1_050);
+        let pending = map_record(&rec, Some(1_050));
         assert_eq!(pending.direction, ActivityDirection::Incoming);
         assert_eq!(pending.maturity, ActivityMaturity::Pending);
         assert_eq!(pending.value_sompi, 1_234);
@@ -785,8 +803,14 @@ mod tests {
         assert_eq!(pending.block_daa_score, 1_000);
         assert_eq!(pending.txid.len(), 64, "txid is 32-byte hash hex");
 
-        let confirmed = map_record(&rec, 1_200);
+        let confirmed = map_record(&rec, Some(1_200));
         assert_eq!(confirmed.maturity, ActivityMaturity::Confirmed);
+
+        // Finding 13 (the cold-start confirmation storm): NO live DAA must
+        // resolve a receive as Unknown — never a guessed Pending that lets
+        // hours-settled history stream in-flight counters at boot.
+        let unknown = map_record(&rec, None);
+        assert_eq!(unknown.maturity, ActivityMaturity::Unknown);
     }
 
     #[test]
@@ -892,7 +916,7 @@ mod tests {
             "a fresh external txid is written, never provenance-refused"
         );
 
-        let rows = store.list(2_050, &change_set);
+        let rows = store.list(Some(2_050), &change_set);
         assert_eq!(rows.len(), 1, "the deposit renders");
         assert_eq!(rows[0].direction, ActivityDirection::Incoming);
         assert_eq!(rows[0].value_sompi, 500_000_000);
@@ -913,7 +937,7 @@ mod tests {
         store.upsert(incoming(2, 20, 10)).unwrap();
         store.upsert(incoming(3, 30, 20)).unwrap();
 
-        let rows = store.list(1_000_000, &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new());
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].block_daa_score, 30);
         assert_eq!(rows[1].block_daa_score, 20);
@@ -945,13 +969,13 @@ mod tests {
         store.upsert(incoming(7, 4_000, 120)).unwrap();
 
         // The row stays our outgoing send — not a phantom deposit.
-        let rows = store.list(1_000_000, &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].direction, ActivityDirection::Outgoing);
 
         // A genuine deposit under a DIFFERENT txid is untouched by the guard.
         store.upsert(incoming(9, 50_000, 130)).unwrap();
-        let rows = store.list(1_000_000, &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new());
         let deposit = rows
             .iter()
             .find(|r| r.direction == ActivityDirection::Incoming);

@@ -51,14 +51,21 @@ const TOMBSTONE_WINDOW_MS: u64 = 120_000;
 const STALL_AFTER_MS: u64 = 60_000;
 
 /// Snapshot-level "Confirmed" depth (blue-score depth, read not computed).
-/// PROVISIONAL: ~10 s of chain at 10 bps — a display state, not a consensus
-/// claim; V2's status chips are the real consumer.
-const CONFIRMED_DEPTH_BLUE: u64 = 100;
+/// PROVISIONAL 1000 — the founder's Kaspium-like security framing, ruled at
+/// the V2b session (2026-07-10, was 100): ~100 s of chain at 10 bps — a
+/// display state, not a consensus claim. The feed chip renders its counter
+/// only below the Dart-side `chipCounterCeiling` (100) and goes quiet above
+/// it; the 100→1000 tail is the future transaction-details screen's range.
+/// V6's observe-before-tuning review re-examines both numbers.
+const CONFIRMED_DEPTH_BLUE: u64 = 1_000;
 
 /// Watch hygiene: an accepted watch this deep is terminal — displacement at
 /// this depth is exceptional (finality is far deeper; this is bookkeeping,
 /// not a finality claim) and the watch is pruned to keep the log bounded.
-const TERMINAL_DEPTH_BLUE: u64 = 1_000;
+/// Raised with the Confirmed ruling (2026-07-10) to stay strictly deeper than
+/// [`CONFIRMED_DEPTH_BLUE`] — reorg tracking must outlive the Confirmed
+/// crossing, not finalize in the same sweep.
+const TERMINAL_DEPTH_BLUE: u64 = 2_000;
 
 /// Watch-set cap. Eviction (oldest first) is LOGGED, never silent.
 const WATCH_CAP: usize = 512;

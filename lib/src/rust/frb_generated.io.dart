@@ -64,6 +64,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  FillReportDto dco_decode_box_autoadd_fill_report_dto(dynamic raw);
+
+  @protected
   FrameDto dco_decode_box_autoadd_frame_dto(dynamic raw);
 
   @protected
@@ -89,6 +92,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DagStatusDto dco_decode_dag_status_dto(dynamic raw);
+
+  @protected
+  FillConfigDto dco_decode_fill_config_dto(dynamic raw);
+
+  @protected
+  FillReportDto dco_decode_fill_report_dto(dynamic raw);
 
   @protected
   FrameDto dco_decode_frame_dto(dynamic raw);
@@ -131,6 +140,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  FillReportDto? dco_decode_opt_box_autoadd_fill_report_dto(dynamic raw);
 
   @protected
   FrameDto? dco_decode_opt_box_autoadd_frame_dto(dynamic raw);
@@ -238,6 +250,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  FillReportDto sse_decode_box_autoadd_fill_report_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FrameDto sse_decode_box_autoadd_frame_dto(SseDeserializer deserializer);
 
   @protected
@@ -269,6 +286,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DagStatusDto sse_decode_dag_status_dto(SseDeserializer deserializer);
+
+  @protected
+  FillConfigDto sse_decode_fill_config_dto(SseDeserializer deserializer);
+
+  @protected
+  FillReportDto sse_decode_fill_report_dto(SseDeserializer deserializer);
 
   @protected
   FrameDto sse_decode_frame_dto(SseDeserializer deserializer);
@@ -321,6 +344,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  FillReportDto? sse_decode_opt_box_autoadd_fill_report_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   FrameDto? sse_decode_opt_box_autoadd_frame_dto(SseDeserializer deserializer);
@@ -453,6 +481,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_fill_report_dto(
+    FillReportDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_frame_dto(
     FrameDto self,
     SseSerializer serializer,
@@ -496,6 +530,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_dag_status_dto(DagStatusDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_fill_config_dto(FillConfigDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_fill_report_dto(FillReportDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_frame_dto(FrameDto self, SseSerializer serializer);
@@ -559,6 +599,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_fill_report_dto(
+    FillReportDto? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_frame_dto(
