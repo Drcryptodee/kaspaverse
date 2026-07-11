@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
@@ -34,6 +36,16 @@ Future<void> main() async {
   // Live `ciph_msg:` wire (P2.1) — same shared socket, matches only; the
   // Rust-side scan pauses/resumes with the chain service's battery posture.
   TransportService.instance.start();
+  // V3 freshness watchdog (register item 10): when the link is up but the
+  // wallet lane has applied nothing past the quiet threshold, the chain
+  // watchdog tick pulls the fold's latest — a cheap local re-serve that heals
+  // a dropped stream delivery within one tick. Wired by callback so the two
+  // services stay decoupled.
+  ChainService.instance.walletLastApply = () =>
+      WalletService.instance.lastApply;
+  ChainService.instance.onWalletQuiet = () {
+    unawaited(WalletService.instance.refreshLocal());
+  };
   // WalletService is NOT started here — its stream derives addresses from the
   // unlocked vault, so the home screen starts it on mount (post-unlock).
   runApp(

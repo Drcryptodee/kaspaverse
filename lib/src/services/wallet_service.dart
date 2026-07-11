@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../rust/api/dag.dart' show dagResync;
 import '../rust/api/error.dart';
 import '../rust/api/send.dart';
 import '../rust/api/transport.dart' show TxStatusDto, txAcceptanceStatus;
@@ -64,6 +65,17 @@ class WalletService {
   @visibleForTesting
   static Future<WalletSnapshot?> Function() snapshotNowFn = walletSnapshotNow;
 
+  /// V3 register item 12: the pull heal's DETECTION half — ask the NODE
+  /// (a forced reconnect + rescan through the race; rate-limited in Rust).
+  /// Returns true when a resync was actually triggered.
+  @visibleForTesting
+  static Future<bool> Function() resyncFn = dagResync;
+
+  /// Backoff before the onDone re-attach (register item 10 heal); tests
+  /// shorten it.
+  @visibleForTesting
+  static Duration reattachDelay = const Duration(seconds: 1);
+
   /// Display-state marker through the Rust liblog lane (L53: the only
   /// build-flavor-proof lane — Dart prints die on profile/release). Never
   /// throws: in tests (no native lib) it becomes a no-op.
@@ -80,10 +92,12 @@ class WalletService {
     }
   }
 
-  /// Pull the latest folded snapshot and apply it — the swipe-to-refresh
-  /// heal (founder request, V2 sitting): bypasses the stream entirely, so
-  /// the glass can always self-serve the truth the fold already holds.
-  Future<void> refreshNow() async {
+  /// Pull the latest folded snapshot and apply it — the DELIVERY heal
+  /// (founder request, V2 sitting): bypasses the stream entirely, so the
+  /// glass can always self-serve the truth the fold already holds. Local
+  /// only — never node traffic; the freshness watchdog calls this each
+  /// connected-but-quiet tick (register item 10).
+  Future<void> refreshLocal() async {
     try {
       final snapshot = await snapshotNowFn();
       if (snapshot != null) _apply(snapshot);
@@ -91,6 +105,27 @@ class WalletService {
       error.value = e.message;
     }
   }
+
+  /// The swipe-to-refresh pull heal, both halves (V3 register item 12):
+  /// re-serve the fold NOW (delivery), then force a node resync (detection —
+  /// a deposit the store never saw needs the node re-asked, not the fold
+  /// re-read). The resync is rate-limited on the Rust side, so pull-spam
+  /// degrades to re-serve-only, never socket-bouncing.
+  Future<void> refreshNow() async {
+    await refreshLocal();
+    try {
+      final resynced = await resyncFn();
+      _mark(resynced ? 'pull resync' : 'pull resync window — re-serve only');
+    } on AppError catch (e) {
+      error.value = e.message;
+    } catch (_) {
+      // Native lib absent (widget tests) — the local half already ran.
+    }
+  }
+
+  /// Wall-clock of the last [_apply] (stream OR pull) — the freshness
+  /// watchdog's quiet detector (wired in main.dart). Null until the first.
+  DateTime? lastApply;
 
   Timer? _depthTicker;
 
@@ -133,16 +168,47 @@ class WalletService {
   }
 
   StreamSubscription<WalletSnapshot>? _subscription;
+  Timer? _reattachTimer;
+  bool _everApplied = false;
+  bool _stopped = false;
+  int _reattachAttempts = 0;
+
+  /// Backoff ceiling for repeated re-attach failures (wallet-security audit:
+  /// a locked-vault error→done loop must decay, not spin at 1 Hz forever).
+  static const Duration _reattachCap = Duration(seconds: 60);
 
   /// Idempotent: the first call (post-unlock) attaches the app-lifetime
   /// subscription, which starts the Rust sync engine.
   void start() {
+    _stopped = false;
     _subscription ??= streamFactory().listen(
       _apply,
       onError: (Object e) {
         error.value = e is AppError ? e.message : e.toString();
       },
+      onDone: _onStreamDone,
     );
+  }
+
+  /// Register item 10 heal (shipped WITH the lane fully instrumented, V3): a
+  /// stream that ENDS mid-session is re-attached after [reattachDelay] — the
+  /// restart/Reconnect "kick" the V2 sitting needed, done by the service
+  /// itself. Guarded: never before the engine proved live (a pre-unlock error
+  /// stream would loop), never after [reset] (test teardown). Repeated deaths
+  /// (e.g. a background-locked vault refusing the re-subscribe) back off
+  /// exponentially to [_reattachCap]; a successful apply resets the ladder.
+  void _onStreamDone() {
+    _subscription = null;
+    if (_stopped || !_everApplied) return;
+    var delay = reattachDelay * (1 << _reattachAttempts.clamp(0, 10));
+    if (delay > _reattachCap) delay = _reattachCap;
+    _reattachAttempts++;
+    _mark('stream done — re-attach in ${delay.inMilliseconds}ms');
+    _reattachTimer?.cancel();
+    _reattachTimer = Timer(delay, () {
+      _reattachTimer = null;
+      if (!_stopped) start();
+    });
   }
 
   // ── Send (P1.6) ──────────────────────────────────────────────────────────
@@ -185,6 +251,9 @@ class WalletService {
     // The V2 stream-freeze diagnostic: if the bridge logs a fold this line
     // doesn't echo, the Dart delivery lane dropped it (counts only, INV-3).
     _mark('apply rows=${snapshot.activity.length}');
+    _everApplied = true;
+    _reattachAttempts = 0; // a live lane resets the backoff ladder
+    lastApply = DateTime.now();
     connected.value = snapshot.connected;
     syncing.value = snapshot.syncing;
     utxoIndexMissing.value = snapshot.utxoIndexMissing;
@@ -204,6 +273,12 @@ class WalletService {
 
   @visibleForTesting
   Future<void> reset() async {
+    _stopped = true;
+    _everApplied = false;
+    _reattachAttempts = 0;
+    lastApply = null;
+    _reattachTimer?.cancel();
+    _reattachTimer = null;
     await _subscription?.cancel();
     _subscription = null;
     _depthTicker?.cancel();

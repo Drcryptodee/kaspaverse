@@ -20,13 +20,27 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::acceptance::VccBatch;
 use crate::error::Result;
+use crate::link::{self, EndpointHealth};
 use crate::spans;
 use crate::transport::{self, TransportEvent};
 
-/// How long the cached-endpoint fast path may take before falling back to the
-/// resolver (P1.5 re-audit: connection latency — a bounded first try, never a
-/// hang; a dead cached node costs at most this before discovery proceeds).
-const CACHED_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Per-candidate probe budget in the connect race (dial + `get_server_info`).
+/// Bounded like the old cached fast path (3 s) plus one health round-trip.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Bind budget for the shared socket's dial to the race winner — the node
+/// answered a probe milliseconds ago, so a healthy bind is fast; a node that
+/// died in between just re-enters the race.
+const BIND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Parallel `Resolver::get_node` fetches per race round (the resolver API
+/// returns ONE node per fetch — spec verified against the pinned source).
+const RACE_FETCHES: usize = 3;
+
+/// Pause between race rounds when NO candidate was healthy (offline, resolver
+/// unreachable) — the app-owned replacement for the abandoned ws-level
+/// `ConnectStrategy::Retry` loop (D-081).
+const RACE_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// Throttle for the catch-up cursor write in the hot BlockAdded path: at most
 /// one tiny hash write this often. A killed app loses at most this much scan
@@ -107,11 +121,42 @@ struct Inner {
     /// remembering its last answer adds no new trust). `None` until the bridge
     /// learns the app dir.
     endpoint_cache: Mutex<Option<PathBuf>>,
-    /// True while the live connection was dialed directly to the cached URL.
-    /// A direct URL bypasses resolver rotation, so on disconnect we must
-    /// re-issue a resolver-mode connect or a dead cached node would be
-    /// retried forever (regression guard vs. the pure-resolver behavior).
-    forced_cached_url: AtomicBool,
+    /// V3/D-081 link layer: our own resolver handle (race fetches + stall
+    /// escalation) and the network this monitor serves. The shared client's
+    /// internal resolver is never exercised — every shared-socket connect
+    /// passes an explicit URL picked by the race.
+    resolver: Resolver,
+    network_id: NetworkId,
+    /// The demotion ledger (finding 11) + its persistence path (a sibling of
+    /// the endpoint cache). Loaded when the cache path arrives; advisory —
+    /// a missing ledger never blocks connectivity.
+    health: Mutex<EndpointHealth>,
+    health_path: Mutex<Option<PathBuf>>,
+    /// Single-flight guard for the race task — one reconnect authority means
+    /// at most ONE race loop alive (D-081; the V2 sitting's doubled
+    /// `Connected` was two concurrent ws connect loops).
+    race_running: AtomicBool,
+    /// The endpoint whose failure awaits network-alive evidence: committed as
+    /// a strike by the NEXT `Connected` event (whoever produced it — even the
+    /// same node reconnecting proves the network worked while it dropped us),
+    /// discarded when stale ([`link::PENDING_STRIKE_TTL_SECS`] — a phone that
+    /// spent minutes offline blames no one). Robust to every event ordering,
+    /// including a phantom redial the ws layer can land before our
+    /// disconnect() takes effect (its dial cannot be aborted mid-flight).
+    pending_strike: Mutex<Option<(String, u64)>>,
+    /// True while the live bind KNOWINGLY went to a demoted endpoint (two
+    /// whole race rounds found nothing healthy — connectivity over hygiene).
+    /// Gates the Connected-time demotion refusal so the advisory bind isn't
+    /// bounced by our own enforcement.
+    hygiene_advisory: AtomicBool,
+    /// Unix-seconds of the last `Connected` (0 = never) — a drop after a run
+    /// of ≥ [`link::CLEAN_RUN_SECS`] clears the endpoint's strikes instead of
+    /// adding one.
+    connected_at: AtomicU64,
+    /// `try_new(url = Some(..))` pins a node explicitly (dev/tests): the race
+    /// and demotion machinery stand down and the ws client's own Retry loop
+    /// keeps the pinned URL alive — loyalty is CORRECT for a pinned node.
+    direct_url: Option<String>,
     /// True between [`DagMonitor::pause`] and [`DagMonitor::resume`] — a
     /// deliberate grace-drop also emits `Disconnected`, and the rotation-restore
     /// logic must not treat it as a dead node and dial right back.
@@ -152,17 +197,17 @@ pub struct DagMonitor {
 }
 
 impl DagMonitor {
-    /// `url = None` uses the public-node resolver (PNN) for endpoint discovery.
+    /// `url = None` uses the public-node resolver (PNN) for endpoint discovery
+    /// via the connect race (D-081); `url = Some` pins that node (dev/tests).
     pub fn try_new(network_id: NetworkId, url: Option<String>) -> Result<Self> {
-        let (resolver, url) = if let Some(url) = url {
-            (None, Some(url))
-        } else {
-            (Some(Resolver::default()), None)
-        };
+        let resolver = Resolver::default();
         let client = Arc::new(KaspaRpcClient::new_with_args(
             WrpcEncoding::Borsh,
             url.as_deref(),
-            resolver,
+            // The client's internal resolver is a construction requirement for
+            // url-less clients; the race supplies explicit URLs so it never
+            // actually resolves (D-081).
+            url.is_none().then(|| resolver.clone()),
             Some(network_id),
             None,
         )?);
@@ -182,7 +227,15 @@ impl DagMonitor {
                 event_task: Mutex::new(None),
                 shutdown: Mutex::new(None),
                 endpoint_cache: Mutex::new(None),
-                forced_cached_url: AtomicBool::new(false),
+                resolver,
+                network_id,
+                health: Mutex::new(EndpointHealth::default()),
+                health_path: Mutex::new(None),
+                race_running: AtomicBool::new(false),
+                pending_strike: Mutex::new(None),
+                hygiene_advisory: AtomicBool::new(false),
+                connected_at: AtomicU64::new(0),
+                direct_url: url,
                 paused: AtomicBool::new(false),
                 transport_cursor: Mutex::new(None),
                 transport_cursor_written: AtomicU64::new(0),
@@ -208,13 +261,139 @@ impl DagMonitor {
 
     /// Tell the monitor where to remember the last-good endpoint (app-private
     /// file; public data — a wss URL). Callable any time; connects that happen
-    /// before this is set simply skip the fast path.
+    /// before this is set simply skip the fast path. The demotion ledger
+    /// (V3, finding 11) lives beside it as `endpoint.health` and loads here.
     pub fn set_endpoint_cache(&self, path: PathBuf) {
+        let health_path = path.with_file_name("endpoint.health");
+        *self
+            .inner
+            .health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            EndpointHealth::load(&health_path);
+        *self
+            .inner
+            .health_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(health_path);
         *self
             .inner
             .endpoint_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+    }
+
+    /// Current unix-seconds (0 on a pre-epoch clock — never panics).
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Record a strike against `url` and persist the ledger. Called only with
+    /// network-alive evidence in hand (a race just found another healthy node,
+    /// or a fresh node just took an escalation resubmit) — a phone in a tunnel
+    /// never demotes an innocent endpoint (D-081 control-group rule).
+    fn commit_strike(&self, url: &str, reason: &str) {
+        let now = Self::now_unix();
+        let demoted = {
+            let mut health = self
+                .inner
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let demoted = health.strike(url, now);
+            self.save_health(&health);
+            demoted
+        };
+        log::info!(
+            "link: strike ({reason}) on {url}{}",
+            if demoted { " — DEMOTED" } else { "" }
+        );
+        spans::mark_with(
+            if demoted {
+                "endpoint_demoted"
+            } else {
+                "endpoint_strike"
+            },
+            url,
+        );
+    }
+
+    /// A connection outlived [`link::CLEAN_RUN_SECS`] — clear its strikes.
+    fn commit_clean_run(&self, url: &str) {
+        let mut health = self
+            .inner
+            .health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        health.clean_run(url);
+        self.save_health(&health);
+    }
+
+    fn save_health(&self, health: &EndpointHealth) {
+        if let Some(path) = self
+            .inner
+            .health_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            health.save(path);
+        }
+    }
+
+    /// Strike a NAMED endpoint — the escalation task's demotion hook (V3
+    /// deliverable 2): the stall convicts the SUBMIT-TIME endpoint (retained
+    /// with the tx), never whoever the socket re-raced to since
+    /// (consensus-audit finding). Only called after a fresh node answered,
+    /// so the evidence rule holds.
+    pub fn strike_endpoint(&self, url: &str, reason: &str) {
+        self.commit_strike(url, reason);
+    }
+
+    /// The endpoint the shared socket is (or was last) bound to — captured by
+    /// the send hook at submit time so a later stall strikes the right node.
+    pub fn current_url(&self) -> Option<String> {
+        self.inner.client.url()
+    }
+
+    /// Park a strike until network-alive evidence arrives (the next
+    /// `Connected` commits it; staleness discards it).
+    fn set_pending_strike(&self, url: String) {
+        *self
+            .inner
+            .pending_strike
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((url, Self::now_unix()));
+    }
+
+    /// Commit-or-discard the parked strike — called on every `Connected`
+    /// (the connect itself is the network-alive proof).
+    fn settle_pending_strike(&self) {
+        let taken = self
+            .inner
+            .pending_strike
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((url, at)) = taken {
+            if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
+                self.commit_strike(&url, "connection lost");
+            } else {
+                log::info!("link: pending strike on {url} expired unproven — discarded");
+            }
+        }
+    }
+
+    /// The resolver handle the race + escalation share (cheap Arc clone).
+    pub fn resolver(&self) -> Resolver {
+        self.inner.resolver.clone()
+    }
+
+    pub fn network_id(&self) -> NetworkId {
+        self.inner.network_id
     }
 
     fn cache_path(&self) -> Option<PathBuf> {
@@ -375,7 +554,8 @@ impl DagMonitor {
                 Ok(resp) => return Some(resp),
                 Err(e) => {
                     log::debug!(
-                        "dag-monitor: catch-up get_blocks attempt {attempt} failed ({e}); retrying"
+                        "dag-monitor: catch-up get_blocks attempt {attempt} failed ({}); retrying",
+                        link::sanitize_node_text(&e.to_string())
                     );
                     tokio::time::sleep(CATCHUP_RETRY_DELAY).await;
                 }
@@ -440,9 +620,10 @@ impl DagMonitor {
         )
     }
 
-    /// Spawns the event task and starts a non-blocking connect with
-    /// `ConnectStrategy::Retry`: the client itself keeps reconnecting forever;
-    /// our event task re-registers notifications on every `Connected`.
+    /// Spawns the event task and initiates the first connect. Resolver mode
+    /// starts the race task (non-blocking, D-081 — the app is the one
+    /// reconnect authority); an explicitly pinned URL keeps the ws client's
+    /// own Retry loop (loyalty is correct for a pinned node).
     ///
     /// Must be called from within a tokio runtime.
     pub async fn start(&self) -> Result<()> {
@@ -468,87 +649,206 @@ impl DagMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
 
-        self.connect_preferring_cache().await?;
+        if let Some(url) = &self.inner.direct_url {
+            let options = ConnectOptions {
+                url: Some(url.clone()),
+                block_async_connect: false,
+                strategy: ConnectStrategy::Retry,
+                ..Default::default()
+            };
+            self.inner.client.connect(Some(options)).await?;
+        } else {
+            self.spawn_race();
+        }
         Ok(())
     }
 
-    /// Connect, preferring the last-good endpoint (bounded fast path), falling
-    /// back to resolver discovery with endless retry (the original behavior).
-    /// The fast path is what makes cold start + post-grace resume fast (P1.5
-    /// re-audit): one TLS+WS dial to a known node instead of resolver
-    /// round-trips and a node-quality lottery.
-    async fn connect_preferring_cache(&self) -> Result<()> {
+    /// Spawn the race task unless one is already running (single-flight —
+    /// exactly one reconnect authority, D-081).
+    fn spawn_race(&self) {
+        if self.inner.direct_url.is_some() {
+            return; // pinned mode: the ws Retry loop owns the link
+        }
+        if self.inner.race_running.swap(true, Ordering::SeqCst) {
+            return; // a race loop is already on it
+        }
+        let monitor = self.clone();
+        tokio::spawn(async move {
+            monitor.race_loop().await;
+            monitor.inner.race_running.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// The connect race (V3 deliverable 1): candidates = the cached last-good
+    /// endpoint (immediate dial — the fast path; it wins every tie because
+    /// resolver candidates first spend an HTTP round-trip) + [`RACE_FETCHES`]
+    /// parallel resolver fetches, demoted endpoints excluded; first HEALTHY
+    /// probe wins and the shared socket binds to it. Loops (bounded pause)
+    /// until bound, paused, or shut down — the replacement for the ws-level
+    /// endless Retry.
+    async fn race_loop(&self) {
         // V1 span: cold-connect measures from here to `wss_connected`.
         spans::mark("connect_start");
-        if let Some(url) = self.read_cached_endpoint() {
-            let started = std::time::Instant::now();
+        let mut empty_rounds = 0u32;
+        loop {
+            if self.inner.paused.load(Ordering::SeqCst) || self.is_connected() {
+                return;
+            }
+            let now = Self::now_unix();
+            let advisory = empty_rounds >= 2;
+            let demoted = if advisory {
+                // Never strand the wallet on hygiene: two whole rounds found
+                // nothing healthy, so demotion degrades to advisory — a
+                // flaky node beats no node (connectivity over cleanliness).
+                Default::default()
+            } else {
+                self.inner
+                    .health
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .demoted_set(now)
+            };
+            let cached = self.read_cached_endpoint();
+            let outcome = link::race(
+                &self.inner.resolver,
+                self.inner.network_id,
+                cached,
+                &demoted,
+                RACE_FETCHES,
+                PROBE_TIMEOUT,
+            )
+            .await;
+
+            let Some(winner) = outcome.winner else {
+                empty_rounds += 1;
+                log::info!(
+                    "link: race round {empty_rounds} found no healthy endpoint ({} probe failure(s)) — retrying in {:?}",
+                    outcome.failed.len(),
+                    RACE_RETRY_DELAY
+                );
+                tokio::time::sleep(RACE_RETRY_DELAY).await;
+                continue;
+            };
+            empty_rounds = 0;
+
+            // A healthy node answered → the network is alive → probe failures
+            // were the NODES' fault: strike them. (The drop that triggered
+            // this race is parked as the pending strike and settles at the
+            // Connected event — robust to a phantom redial winning first.)
+            for url in &outcome.failed {
+                self.commit_strike(url, "probe failed");
+            }
+
+            // Someone else (a ws-level phantom redial) may have connected
+            // while the race ran; the Connected-time demotion check has
+            // already judged them. Never bind over a live socket.
+            if self.inner.paused.load(Ordering::SeqCst) || self.is_connected() {
+                return;
+            }
+
+            log::info!(
+                "link: race winner {} (server {}, daa {}){}",
+                winner.url,
+                winner.server_version,
+                winner.virtual_daa_score,
+                if advisory { " [hygiene advisory]" } else { "" }
+            );
+            spans::mark_with("race_winner", &winner.url);
+            // An advisory bind to a still-demoted endpoint must not be
+            // bounced by our own Connected-time enforcement.
+            self.inner.hygiene_advisory.store(
+                advisory
+                    && self
+                        .inner
+                        .health
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_demoted(&winner.url, Self::now_unix()),
+                Ordering::SeqCst,
+            );
+
             let options = ConnectOptions {
-                url: Some(url.clone()),
-                strategy: ConnectStrategy::Fallback, // fail once, never retry a pinned URL
+                url: Some(winner.url.clone()),
+                strategy: ConnectStrategy::Fallback,
                 block_async_connect: true,
-                connect_timeout: Some(CACHED_CONNECT_TIMEOUT),
+                connect_timeout: Some(BIND_TIMEOUT),
                 ..Default::default()
             };
             match self.inner.client.connect(Some(options)).await {
                 Ok(_) => {
-                    self.inner.forced_cached_url.store(true, Ordering::SeqCst);
-                    log::info!(
-                        "dag-monitor: connected via cached endpoint {url} in {:?}",
-                        started.elapsed()
-                    );
-                    return Ok(());
+                    // A pause that landed mid-bind wins: drop the socket.
+                    if self.inner.paused.load(Ordering::SeqCst) {
+                        let _ = self.inner.client.disconnect().await;
+                    }
+                    return;
                 }
                 Err(e) => {
-                    log::info!(
-                        "dag-monitor: cached endpoint {url} unreachable ({e}) after {:?} — falling back to resolver",
-                        started.elapsed()
+                    // Died between probe and bind — strike (network known
+                    // alive: it just answered a probe elsewhere) and re-race.
+                    log::warn!(
+                        "link: bind to race winner {} failed: {}",
+                        winner.url,
+                        link::sanitize_node_text(&e.to_string())
                     );
+                    self.commit_strike(&winner.url, "bind failed");
                 }
             }
         }
-        let options = ConnectOptions {
-            block_async_connect: false,
-            strategy: ConnectStrategy::Retry,
-            ..Default::default()
-        };
-        self.inner.client.connect(Some(options)).await?;
-        Ok(())
     }
 
     /// Background grace-drop (PERFORMANCE_BUDGET "battery posture"): close the
-    /// socket and stop the retry loop, keeping the event task and every
+    /// socket and stand the race down, keeping the event task and every
     /// subscriber attached. The wallet processor pauses with the shared ctl and
     /// resyncs in lockstep on [`Self::resume`] (§0.8 / D-005).
     pub async fn pause(&self) -> Result<()> {
         self.inner.paused.store(true, Ordering::SeqCst);
-        self.inner.forced_cached_url.store(false, Ordering::SeqCst);
         self.inner.client.disconnect().await?;
         Ok(())
     }
 
-    /// Foreground resume after a grace-drop: dial the last-good endpoint first
-    /// (persisted at most 30 s + grace ago), resolver fallback otherwise.
-    /// No-op while already connected (never bounce a healthy socket).
+    /// Foreground resume after a grace-drop: re-race (the cached last-good
+    /// endpoint, persisted at most 30 s + grace ago, is candidate 0 and wins
+    /// every tie). No-op while already connected (never bounce a healthy
+    /// socket).
     pub async fn resume(&self) -> Result<()> {
         spans::mark("resume_start");
         self.inner.paused.store(false, Ordering::SeqCst);
         if self.is_connected() {
             return Ok(());
         }
-        self.connect_preferring_cache().await
+        self.spawn_race();
+        Ok(())
     }
 
-    /// Force a fresh connection — the P3 honest-liveness Reconnect control and
-    /// the foreground watchdog's recovery (D-068). Unlike [`resume`], it does
-    /// NOT short-circuit on `is_connected()`: a silently dead wRPC socket can
-    /// still report connected, so recovering it needs a hard disconnect+redial.
-    /// Disconnect on an already-dead socket is harmless. Rides the same
-    /// cached-endpoint fast path as every other connect.
-    pub async fn reconnect(&self) -> Result<()> {
+    /// Force a fresh connection — the P3 honest-liveness Reconnect control,
+    /// the foreground watchdog's recovery (D-068) and the V3 pull-heal resync.
+    /// Unlike [`resume`], it does NOT short-circuit on `is_connected()`: a
+    /// silently dead wRPC socket can still report connected, so recovering it
+    /// needs a hard disconnect + re-race.
+    ///
+    /// `stalled = true` means the caller HAS failure evidence against the
+    /// current endpoint (the watchdog's 30 s block silence) — it enters the
+    /// race as a pending strike, committed only if the race finds a healthy
+    /// node (control-group rule). A manual Reconnect passes `false`: bouncing
+    /// a healthy node must never demote it.
+    pub async fn reconnect(&self, stalled: bool) -> Result<()> {
         self.inner.paused.store(false, Ordering::SeqCst);
-        self.inner.forced_cached_url.store(false, Ordering::SeqCst);
+        if stalled {
+            if let Some(url) = self.inner.client.url() {
+                self.set_pending_strike(url);
+            }
+        }
+        // Mark down BEFORE dropping the socket: the ctl Disconnected can be
+        // processed DURING disconnect().await, and the event arm's swap-once
+        // guard must see "already down" — a deliberate reconnect (pull heal,
+        // manual button) must never park a strike against the healthy
+        // endpoint it is bouncing (caught live at the V3 sitting: a
+        // swipe-to-refresh demoted the innocent incumbent). Also keeps the
+        // race loop we spawn from reading a stale `connected` and exiting.
+        self.inner.is_connected.store(false, Ordering::SeqCst);
         let _ = self.inner.client.disconnect().await;
-        self.connect_preferring_cache().await
+        self.spawn_race();
+        Ok(())
     }
 
     /// Record that a block just arrived (the watchdog heartbeat).
@@ -576,7 +876,9 @@ impl DagMonitor {
     }
 
     /// Disconnects, then signals the event task and waits for it to drain.
+    /// Sets `paused` so a live race loop stands down instead of redialing.
     pub async fn stop(&self) -> Result<()> {
+        self.inner.paused.store(true, Ordering::SeqCst);
         self.inner.client.disconnect().await?;
         let shutdown = self
             .inner
@@ -618,49 +920,97 @@ impl DagMonitor {
                 msg = ctl_rx.recv() => {
                     match msg {
                         Ok(RpcState::Connected) => {
+                            // This connect IS the network-alive proof: settle
+                            // the parked strike (commit fresh, discard stale).
+                            self.settle_pending_strike();
+                            // Demotion enforcement at the one choke point
+                            // every connection passes — a demoted endpoint
+                            // that sneaks back in (a ws-level phantom redial,
+                            // a poisoned cache) is refused and re-raced,
+                            // UNLESS the race itself bound it knowingly
+                            // (hygiene advisory: nothing healthier exists).
+                            if self.inner.direct_url.is_none()
+                                && !self.inner.hygiene_advisory.load(Ordering::SeqCst)
+                                && !self.inner.paused.load(Ordering::SeqCst)
+                            {
+                                let demoted_url = self.inner.client.url().filter(|url| {
+                                    self.inner
+                                        .health
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .is_demoted(url, Self::now_unix())
+                                });
+                                if let Some(url) = demoted_url {
+                                    log::warn!(
+                                        "link: demoted endpoint reconnected — refusing {url} and re-racing"
+                                    );
+                                    let _ = self.inner.client.disconnect().await;
+                                    self.spawn_race();
+                                    continue;
+                                }
+                            }
                             match self.handle_connect().await {
                                 Ok(()) => {
                                     self.inner.is_connected.store(true, Ordering::SeqCst);
+                                    self.inner.connected_at.store(Self::now_unix(), Ordering::Relaxed);
                                     // V1 spans: close the cold-connect leg,
                                     // arm the first-DAA one.
                                     spans::mark("wss_connected");
                                     self.inner.daa_seen_since_connect.store(false, Ordering::Relaxed);
                                     log::info!("dag-monitor: connected to {:?}", self.inner.client.url());
-                                    // Remember the node that worked — the next cold
-                                    // start / post-grace resume dials it directly.
+                                    // Remember the node that worked — it is
+                                    // candidate 0 (the fast path) of the next
+                                    // cold start / post-grace race.
                                     if let Some(url) = self.inner.client.url() {
                                         self.persist_endpoint(&url);
                                     }
                                     self.emit(DagEvent::Connected { url: self.inner.client.url() });
                                 }
-                                // Stay "disconnected"; the client's Retry
-                                // strategy will produce a fresh Connected event.
+                                // Stay "disconnected"; the race re-heal below
+                                // answers the Disconnected this failure ends in.
                                 // KNOWN GAP (audited 2026-06-12, [→ P1]): if the
                                 // node accepts the socket but rejects a
                                 // subscription, the link idles half-set-up until
                                 // the next natural reconnect.
-                                Err(e) => log::warn!("dag-monitor: subscription setup failed: {e}"),
+                                Err(e) => log::warn!(
+                                    "dag-monitor: subscription setup failed: {}",
+                                    link::sanitize_node_text(&e.to_string())
+                                ),
                             }
                         }
                         Ok(RpcState::Disconnected) => {
-                            log::info!("dag-monitor: disconnected (client keeps retrying)");
+                            // Swap-once: only a drop of a connection we KNEW
+                            // was live re-heals (bind failures and our own
+                            // deliberate disconnects also surface here).
+                            let was_connected =
+                                self.inner.is_connected.swap(false, Ordering::SeqCst);
+                            log::info!("dag-monitor: disconnected");
                             self.handle_disconnect().await;
-                            // A direct-dialed cached URL has no resolver rotation
-                            // behind it: restore resolver mode so a node that died
-                            // mid-session is replaced, never retried forever. A
-                            // deliberate pause() is not a dead node — stay down.
-                            if !self.inner.paused.load(Ordering::SeqCst)
-                                && self.inner.forced_cached_url.swap(false, Ordering::SeqCst)
+                            if was_connected
+                                && !self.inner.paused.load(Ordering::SeqCst)
+                                && self.inner.direct_url.is_none()
                             {
-                                log::info!("dag-monitor: cached endpoint dropped — restoring resolver rotation");
-                                let options = ConnectOptions {
-                                    block_async_connect: false,
-                                    strategy: ConnectStrategy::Retry,
-                                    ..Default::default()
-                                };
-                                if let Err(e) = self.inner.client.connect(Some(options)).await {
-                                    log::warn!("dag-monitor: resolver re-connect failed: {e}");
+                                // The app is the one reconnect authority
+                                // (D-081): kill the ws-level loop still loyal
+                                // to the dropped URL (best-effort — a dial
+                                // already in flight can't be aborted; the
+                                // Connected-time checks above judge whatever
+                                // it lands), judge the run (a clean run
+                                // clears strikes; a short one parks a strike
+                                // for the next connect to settle), re-race.
+                                let dropped = self.inner.client.url();
+                                let _ = self.inner.client.disconnect().await;
+                                let run_secs = Self::now_unix().saturating_sub(
+                                    self.inner.connected_at.load(Ordering::Relaxed),
+                                );
+                                match dropped {
+                                    Some(url) if run_secs >= link::CLEAN_RUN_SECS => {
+                                        self.commit_clean_run(&url);
+                                    }
+                                    Some(url) => self.set_pending_strike(url),
+                                    None => {}
                                 }
+                                self.spawn_race();
                             }
                         }
                         // Ctl channel closed: client is gone, nothing to track.
@@ -679,9 +1029,16 @@ impl DagMonitor {
                         Ok(Notification::BlockAdded(added)) => {
                             let matches = transport::scan_block(&added.block, self.inner.address_prefix);
                             if !matches.is_empty() {
-                                // Count only — payload bodies are never logged
-                                // (§4 plaintext discipline).
-                                log::debug!("dag-monitor: {} transport match(es) in block", matches.len());
+                                // Three-lights producer log (V3/L55): count +
+                                // receiver count only — payload bodies are
+                                // never logged (§4 plaintext discipline).
+                                // `info`: the liblog lane is Info-max, a
+                                // `debug` light is dark on device (L53).
+                                log::info!(
+                                    "dag-monitor: transport emit matches={} receivers={}",
+                                    matches.len(),
+                                    self.inner.transport_events.receiver_count()
+                                );
                             }
                             for event in matches {
                                 // Send fails only with zero subscribers — fine.
@@ -747,6 +1104,24 @@ impl DagMonitor {
     /// Scopes are per-connection node state — re-register on every connect.
     async fn handle_connect(&self) -> Result<()> {
         let rpc = self.inner.client.rpc_api();
+        // Item 9 (V2 sitting, doubled Connected): a listener from a prior
+        // connect that survived to here would ALSO receive every notification
+        // — same channel, doubled stream bandwidth. The double-connect race
+        // is architecturally gone (one reconnect authority, D-081), but a
+        // leaked listener must still be impossible: unregister before
+        // registering, and say so if one is ever found.
+        let prior = self
+            .inner
+            .listener_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(id) = prior {
+            log::warn!(
+                "dag-monitor: prior listener survived to a new connect — unregistering (item 9)"
+            );
+            let _ = rpc.unregister_listener(id).await;
+        }
         let listener_id = rpc.register_new_listener(ChannelConnection::new(
             "kaspaverse-dag-monitor",
             self.inner.notification_tx.clone(),

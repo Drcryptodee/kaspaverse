@@ -32,15 +32,21 @@ class ChainService with WidgetsBindingObserver {
   static Future<void> Function() resumeBridge = dagResume;
 
   /// Test seams for the foreground watchdog (P3/D-068): the liveness pull and
-  /// the forced reconnect.
+  /// the forced reconnect. `stalled` carries the caller's evidence: the
+  /// watchdog passes true (30 s block silence — a pending strike the Rust race
+  /// commits only with network-alive proof, V3 demotion); the manual button
+  /// passes false (bouncing a healthy node must never demote it).
   @visibleForTesting
   static Future<DagStatusDto> Function() statusFn = dagStatus;
   @visibleForTesting
-  static Future<void> Function() reconnectFn = dagReconnect;
+  static Future<void> Function(bool stalled) reconnectFn = (stalled) =>
+      dagReconnect(stalled: stalled);
 
   /// V1 observability seam: the Rust span-marker pull (hardening V1, findings
-  /// item 6). Dumped to logcat by the watchdog tick — the L40-proof lane
-  /// (Rust log lanes are silent on profile builds; Flutter's print is not).
+  /// item 6). NOTE the build-flavor-proof `kv-span` lane is Rust's own
+  /// twin-emit through liblog (D-076/L53) — the [_dumpNewSpans] debugPrint
+  /// below is a debug-build courtesy duplicate, dead on profile/release
+  /// (L53 proved Dart prints silent there).
   @visibleForTesting
   static Future<List<SpanMarkerDto>> Function() spansFn = perfSpans;
 
@@ -58,6 +64,19 @@ class ChainService with WidgetsBindingObserver {
   static Duration watchdogPeriod = const Duration(seconds: 10);
   @visibleForTesting
   static int watchdogStallSecs = 30;
+
+  /// V3 freshness watchdog (register item 10's second heal): when the link is
+  /// up but the WALLET lane has applied nothing for this long, the tick pulls
+  /// the fold's latest via [onWalletQuiet] — a cheap local re-serve that heals
+  /// a dropped stream delivery within one tick, and never touches the node.
+  @visibleForTesting
+  static int walletQuietSecs = 30;
+
+  /// Wired in main.dart (WalletService.refreshLocal / .lastApply); null = off
+  /// (tests, or before wiring). Callbacks, not imports: this service stays
+  /// ignorant of the wallet lane's type.
+  void Function()? onWalletQuiet;
+  DateTime? Function()? walletLastApply;
 
   final ValueNotifier<bool> connected = ValueNotifier(false);
   final ValueNotifier<String?> endpoint = ValueNotifier(null);
@@ -116,7 +135,19 @@ class ChainService with WidgetsBindingObserver {
     }
     final age = status.lastBlockAgeSecs;
     if (age != null && age.toInt() > watchdogStallSecs) {
-      await reconnect();
+      // Watchdog evidence: the node went quiet on us — a pending strike.
+      await reconnect(stalled: true);
+      return;
+    }
+    // Connected-but-quiet wallet lane → pull the fold's latest (local
+    // re-serve). Ships now that the delivery lane is instrumented end-to-end
+    // (L55): it heals a diagnosed disease, it can't mask one — every heal
+    // paints through the same 'apply' echo the diagnostics watch.
+    final lastApply = walletLastApply?.call();
+    if (status.connected &&
+        lastApply != null &&
+        DateTime.now().difference(lastApply).inSeconds > walletQuietSecs) {
+      onWalletQuiet?.call();
     }
   }
 
@@ -125,10 +156,11 @@ class ChainService with WidgetsBindingObserver {
   /// index-tracking is safe for a sitting).
   int _spansPrinted = 0;
 
-  /// Print any NEW Rust span markers to logcat, one line each:
+  /// Print any NEW Rust span markers, one line each:
   /// `kv-span UNIX_MS MARKER [DETAIL]`. Public chain data only (INV-3:
-  /// marker names, txids, timestamps). This closes the V0 `pending — method:
-  /// V1 tracker timestamps` baseline rows on any build flavor.
+  /// marker names, txids, timestamps). Debug-build courtesy ONLY — on
+  /// profile/release these debugPrints are silent (L53); the lines that
+  /// reach logcat there are Rust's own twin-emits at mark time (D-076).
   Future<void> _dumpNewSpans() async {
     try {
       final spans = await spansFn();
@@ -146,11 +178,12 @@ class ChainService with WidgetsBindingObserver {
   /// Force a fresh connection and surface the honest indicator while it runs —
   /// the watchdog's recovery and the sheet's Reconnect button. Idempotent under
   /// the [reconnecting] guard (a second press is ignored until the first ends).
-  Future<void> reconnect() async {
+  /// [stalled] = the caller holds failure evidence (watchdog only).
+  Future<void> reconnect({bool stalled = false}) async {
     if (reconnecting.value) return;
     reconnecting.value = true;
     try {
-      await reconnectFn();
+      await reconnectFn(stalled);
       error.value = null;
     } on AppError catch (e) {
       error.value = e.message;
@@ -226,6 +259,8 @@ class ChainService with WidgetsBindingObserver {
     _watchdogTimer = null;
     _droppedByGrace = false;
     _foreground = true;
+    onWalletQuiet = null;
+    walletLastApply = null;
     connected.value = false;
     endpoint.value = null;
     virtualDaaScore.value = null;

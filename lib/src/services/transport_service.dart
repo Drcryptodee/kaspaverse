@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../rust/api/error.dart';
 import '../rust/api/transport.dart';
+import '../rust/api/wallet.dart' show uiMark;
 
 /// Owns the app's single subscription to the bridge transport-event stream
 /// (P2.1 raw receive) — one `ciph_msg:` match per event, straight off the
@@ -41,6 +42,21 @@ class TransportService {
 
   StreamSubscription<TransportEventDto>? _subscription;
 
+  /// Consumer apply-echo through the ONE build-flavor-proof log lane (three
+  /// lights, V3/L55). Counts/flags only — never payload bodies (§4). Never
+  /// throws.
+  @visibleForTesting
+  static Future<void> Function(String marker) uiMarkFn = (marker) =>
+      uiMark(marker: marker);
+
+  void _mark(String marker) {
+    try {
+      unawaited(uiMarkFn(marker).catchError((_) {}));
+    } catch (_) {
+      // Native lib absent (widget tests) — silence is fine.
+    }
+  }
+
   /// Idempotent: the first call attaches the app-lifetime subscription.
   void start() {
     _subscription ??= streamFactory().listen(
@@ -48,10 +64,19 @@ class TransportService {
       onError: (Object e) {
         error.value = e is AppError ? e.message : e.toString();
       },
+      // Detach light only (no blind re-attach — L55: lights precede heals).
+      // The message store's catch-up remains this lane's pull twin.
+      onDone: () {
+        _subscription = null;
+        _mark('transport stream done');
+      },
     );
   }
 
   void _apply(TransportEventDto event) {
+    // Three-lights apply echo: pairs with the producer's
+    // "dag-monitor: transport emit matches=N receivers=M".
+    _mark('transport apply txid=${event.txid != null}');
     final current = events.value;
     // Display dedup: a DAG can include the same tx in more than one block, so
     // the scan may legitimately emit one match twice. The wire stays raw

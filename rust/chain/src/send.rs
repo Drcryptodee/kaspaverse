@@ -88,6 +88,11 @@ pub struct SendOutcome {
     pub submitted_txids: Vec<String>,
 }
 
+/// Per-leg submit hook: fires with the acked txid and the leg's signed wire
+/// form (a broadcast public tx) — the V1 watch hook + V3 escalation retention.
+pub type SubmitHook<'a> =
+    &'a mut (dyn FnMut(&str, kaspa_wrpc_client::prelude::RpcTransaction) + Send);
+
 /// A built-but-UNSIGNED send, held between the confirm and the hold-to-sign
 /// commit. Holding the SAME pending transactions the [`SendSummary`] describes
 /// is what makes the confirm honest (B7). The generator inside each pending tx
@@ -128,10 +133,13 @@ impl PreparedSend {
     /// closes the window where a fast acceptance of an early leg would slip
     /// past the live VCC stream before the watch existed (consensus-audit
     /// finding 3). Pass `None` when nothing tracks.
-    pub async fn commit(
-        self,
-        mut on_submitted: Option<&mut (dyn FnMut(&str) + Send)>,
-    ) -> SendOutcome {
+    ///
+    /// V3: the hook also receives the leg's SIGNED `RpcTransaction` (a
+    /// broadcast public tx — no key material crosses anywhere) so the caller
+    /// can retain it for stall escalation; the `PendingTransaction` itself is
+    /// consumed here and its `try_submit` panics on reuse, so a resubmit must
+    /// ride this extracted copy.
+    pub async fn commit(self, mut on_submitted: Option<SubmitHook<'_>>) -> SendOutcome {
         let total = self.pending.len() as u32;
         let mut submitted = 0u32;
         let mut final_txid = None;
@@ -156,7 +164,10 @@ impl PreparedSend {
                     // submit→accepted baseline (public txid only, INV-3).
                     crate::spans::mark_with("submit_ok", &txid);
                     if let Some(hook) = on_submitted.as_deref_mut() {
-                        hook(&txid);
+                        // Extracted AFTER try_sign: this is the signed wire
+                        // form the node just accepted (escalation resubmits
+                        // it verbatim, V3).
+                        hook(&txid, pt.rpc_transaction());
                     }
                     final_txid = Some(txid.clone());
                     submitted_txids.push(txid);
