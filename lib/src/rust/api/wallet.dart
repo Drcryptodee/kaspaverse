@@ -41,6 +41,12 @@ class ActivityRecord {
   final BigInt valueSompi;
   final BigInt? unixtimeMsec;
   final BigInt blockDaaScore;
+
+  /// DAA score at which the DAG accepted this spend (`None` for a receive or a
+  /// not-yet-accepted spend) — the honest anchor for a send's confirmation-
+  /// depth counter (`current_daa − accepted_daa_score`), where
+  /// `block_daa_score` on a send is submit time and would overstate.
+  final BigInt? acceptedDaaScore;
   final ActivityDirection direction;
   final bool isCoinbase;
   final MaturityState maturity;
@@ -56,6 +62,7 @@ class ActivityRecord {
     required this.valueSompi,
     this.unixtimeMsec,
     required this.blockDaaScore,
+    this.acceptedDaaScore,
     required this.direction,
     required this.isCoinbase,
     required this.maturity,
@@ -68,6 +75,7 @@ class ActivityRecord {
       valueSompi.hashCode ^
       unixtimeMsec.hashCode ^
       blockDaaScore.hashCode ^
+      acceptedDaaScore.hashCode ^
       direction.hashCode ^
       isCoinbase.hashCode ^
       maturity.hashCode ^
@@ -82,6 +90,7 @@ class ActivityRecord {
           valueSompi == other.valueSompi &&
           unixtimeMsec == other.unixtimeMsec &&
           blockDaaScore == other.blockDaaScore &&
+          acceptedDaaScore == other.acceptedDaaScore &&
           direction == other.direction &&
           isCoinbase == other.isCoinbase &&
           maturity == other.maturity &&

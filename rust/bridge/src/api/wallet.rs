@@ -77,6 +77,11 @@ pub struct ActivityRecord {
     pub value_sompi: u64,
     pub unixtime_msec: Option<u64>,
     pub block_daa_score: u64,
+    /// DAA score at which the DAG accepted this spend (`None` for a receive or a
+    /// not-yet-accepted spend) — the honest anchor for a send's confirmation-
+    /// depth counter (`current_daa − accepted_daa_score`), where
+    /// `block_daa_score` on a send is submit time and would overstate.
+    pub accepted_daa_score: Option<u64>,
     pub direction: ActivityDirection,
     pub is_coinbase: bool,
     pub maturity: MaturityState,
@@ -143,6 +148,7 @@ fn map_activity(record: WalletActivityRecord) -> ActivityRecord {
         value_sompi: record.value_sompi,
         unixtime_msec: record.unixtime_msec,
         block_daa_score: record.block_daa_score,
+        accepted_daa_score: record.accepted_daa_score,
         direction: match record.direction {
             ChainDirection::Incoming => ActivityDirection::Incoming,
             ChainDirection::Outgoing => ActivityDirection::Outgoing,
@@ -441,6 +447,7 @@ mod tests {
             value_sompi: 1_000,
             unixtime_msec: Some(1),
             block_daa_score: daa,
+            accepted_daa_score: None,
             direction: ChainDirection::Incoming,
             is_coinbase: false,
             maturity: ChainMaturity::Pending,

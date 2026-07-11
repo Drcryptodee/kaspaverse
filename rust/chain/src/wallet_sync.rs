@@ -73,6 +73,12 @@ pub struct WalletActivityRecord {
     pub value_sompi: u64,
     pub unixtime_msec: Option<u64>,
     pub block_daa_score: u64,
+    /// DAA score at which the DAG ACCEPTED this spend (`None` for a receive, or
+    /// a spend not yet accepted). The honest anchor for a send's confirmation-
+    /// depth counter — `current_daa − accepted_daa_score` is true depth from
+    /// acceptance, where `block_daa_score` on a send is only submit time and
+    /// would overstate. Surfaced from `TransactionData::Outgoing` (pin).
+    pub accepted_daa_score: Option<u64>,
     pub direction: ActivityDirection,
     pub is_coinbase: bool,
     pub maturity: ActivityMaturity,
@@ -182,46 +188,49 @@ fn map_record(record: &TransactionRecord, current_daa_score: Option<u64>) -> Wal
     // — NOT when its change UTXO separately matures (that left sends stuck on
     // "Pending" until the next event). `record.value()` (= change for a `Change`
     // record) is wrong for this row; we read the typed data instead.
-    let (direction, value_sompi, spend_accepted) = match record.transaction_data() {
-        TransactionData::Outgoing {
-            payment_value,
-            aggregate_input_value,
-            change_value,
-            accepted_daa_score,
-            ..
-        }
-        | TransactionData::Change {
-            payment_value,
-            aggregate_input_value,
-            change_value,
-            accepted_daa_score,
-            ..
-        }
-        | TransactionData::TransferOutgoing {
-            payment_value,
-            aggregate_input_value,
-            change_value,
-            accepted_daa_score,
-            ..
-        } => (
-            ActivityDirection::Outgoing,
-            spend_value(*payment_value, *aggregate_input_value, *change_value),
-            Some(accepted_daa_score.is_some()),
-        ),
-        // Internal compounding leg of a >100k-mass chained send.
-        TransactionData::Batch {
-            aggregate_input_value,
-            accepted_daa_score,
-            ..
-        } => (
-            ActivityDirection::Change,
-            *aggregate_input_value,
-            Some(accepted_daa_score.is_some()),
-        ),
-        // Incoming / External / TransferIncoming: a receive (Reorg/Stasis never
-        // reach the feed — the engine tombstones / ignores them).
-        _ => (ActivityDirection::Incoming, record.value(), None),
-    };
+    let (direction, value_sompi, spend_accepted, accepted_daa_score) =
+        match record.transaction_data() {
+            TransactionData::Outgoing {
+                payment_value,
+                aggregate_input_value,
+                change_value,
+                accepted_daa_score,
+                ..
+            }
+            | TransactionData::Change {
+                payment_value,
+                aggregate_input_value,
+                change_value,
+                accepted_daa_score,
+                ..
+            }
+            | TransactionData::TransferOutgoing {
+                payment_value,
+                aggregate_input_value,
+                change_value,
+                accepted_daa_score,
+                ..
+            } => (
+                ActivityDirection::Outgoing,
+                spend_value(*payment_value, *aggregate_input_value, *change_value),
+                Some(accepted_daa_score.is_some()),
+                *accepted_daa_score,
+            ),
+            // Internal compounding leg of a >100k-mass chained send.
+            TransactionData::Batch {
+                aggregate_input_value,
+                accepted_daa_score,
+                ..
+            } => (
+                ActivityDirection::Change,
+                *aggregate_input_value,
+                Some(accepted_daa_score.is_some()),
+                *accepted_daa_score,
+            ),
+            // Incoming / External / TransferIncoming: a receive (Reorg/Stasis never
+            // reach the feed — the engine tombstones / ignores them).
+            _ => (ActivityDirection::Incoming, record.value(), None, None),
+        };
 
     let maturity = match (spend_accepted, current_daa_score) {
         // A spend: Confirmed once the DAG accepts it; Pending until then.
@@ -243,6 +252,7 @@ fn map_record(record: &TransactionRecord, current_daa_score: Option<u64>) -> Wal
         value_sompi,
         unixtime_msec: record.unixtime_msec(),
         block_daa_score: record.block_daa_score(),
+        accepted_daa_score,
         direction,
         is_coinbase: record.is_coinbase(),
         maturity,
