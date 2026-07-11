@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'create_screen.dart';
 import 'restore_screen.dart';
+import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
 import 'widgets/entrance.dart';
@@ -59,7 +60,7 @@ class OnboardingSurface extends StatelessWidget {
                         width: double.infinity,
                         child: FilledButton(
                           onPressed: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
+                            KvPageRoute<void>(
                               builder: (_) => const CreateScreen(),
                             ),
                           ),
@@ -71,7 +72,7 @@ class OnboardingSurface extends StatelessWidget {
                         width: double.infinity,
                         child: OutlinedButton(
                           onPressed: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
+                            KvPageRoute<void>(
                               builder: (_) => const RestoreScreen(),
                             ),
                           ),

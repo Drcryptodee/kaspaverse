@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
+import 'kv_breath.dart';
 
 /// The four honest states of a chain link (DS-1, design_system §8). Colour is
 /// never the only signal — every state pairs a dot colour with a text label
@@ -39,29 +40,25 @@ String formatAge(Duration age) {
 /// detail and lives behind [onTap], the network details sheet); the other
 /// states keep their honest lines verbatim.
 ///
-/// The live dot breathes on [pulsePhase] — flipped by the parent's existing
-/// 1 s freshness ticker, so the pulse IS the freshness clock made visible
-/// (§6 attention-guidance; honest under DS-1: it stops the moment the link
-/// stops being live). Value-driven and stateless so widget tests drive it
-/// directly.
+/// The live dot breathes via [KvBreath] (§8 v2.2) — a self-animated sine,
+/// honest under DS-1: it stops the moment the link stops being live, and
+/// freezes to a static dot under reduced motion. The beacon itself stays
+/// value-driven and stateless so widget tests drive it directly.
 class StatusBeacon extends StatelessWidget {
   const StatusBeacon({
     super.key,
     required this.state,
-    required this.endpoint,
     required this.error,
     required this.age,
-    this.pulsePhase = true,
     this.onTap,
   });
 
   final BeaconState state;
-  final String? endpoint;
   final String? error;
-  final Duration? age;
 
-  /// Alternates each freshness tick; drives the live breath.
-  final bool pulsePhase;
+  /// Consumed only by the stale label ("as of N ago") — a connected beacon
+  /// may pass null so its subtree stays rebuild-free between state changes.
+  final Duration? age;
 
   /// Opens the network details (endpoint, DAA, age) — plain chip if null.
   final VoidCallback? onTap;
@@ -87,13 +84,8 @@ class StatusBeacon extends StatelessWidget {
     };
 
     final live = state == BeaconState.connected;
-    final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    final dot = AnimatedOpacity(
-      // The breath: full ↔ dimmed with each tick; static when motion is
-      // reduced or the link is not live.
-      opacity: (!live || reduced || pulsePhase) ? 1.0 : 0.45,
-      duration: KvMotion.slow,
-      curve: KvMotion.out,
+    final dot = KvBreath(
+      active: live,
       child: Container(
         width: KvSpace.s,
         height: KvSpace.s,

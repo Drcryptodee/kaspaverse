@@ -169,6 +169,15 @@ impl EndpointHealth {
         }
     }
 
+    /// Test seam: age an endpoint's last strike so the same-incident dedup
+    /// window doesn't swallow the next one (crate tests only).
+    #[cfg(test)]
+    pub(crate) fn backdate_last_strike(&mut self, url: &str, secs: u64) {
+        if let Some(r) = self.records.get_mut(url) {
+            r.last_strike_unix = r.last_strike_unix.saturating_sub(secs);
+        }
+    }
+
     pub fn is_demoted(&self, url: &str, now_unix: u64) -> bool {
         self.records
             .get(url)

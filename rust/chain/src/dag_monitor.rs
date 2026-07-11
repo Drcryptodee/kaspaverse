@@ -137,8 +137,11 @@ struct Inner {
     /// `Connected` was two concurrent ws connect loops).
     race_running: AtomicBool,
     /// The endpoint whose failure awaits network-alive evidence: committed as
-    /// a strike by the NEXT `Connected` event (whoever produced it — even the
-    /// same node reconnecting proves the network worked while it dropped us),
+    /// a strike by the NEXT `Connected` event from a DIFFERENT endpoint (the
+    /// control-group — the network worked via B while this one stayed dark).
+    /// REFUTED (discarded) if the struck endpoint's OWN reconnect produces the
+    /// event — an endpoint can't be its own alibi-witness, and under Wi-Fi
+    /// churn that self-commit strand-locked the whole ledger (D-084). Also
     /// discarded when stale ([`link::PENDING_STRIKE_TTL_SECS`] — a phone that
     /// spent minutes offline blames no one). Robust to every event ordering,
     /// including a phantom redial the ws layer can land before our
@@ -370,8 +373,19 @@ impl DagMonitor {
     }
 
     /// Commit-or-discard the parked strike — called on every `Connected`
-    /// (the connect itself is the network-alive proof).
-    fn settle_pending_strike(&self) {
+    /// (the connect itself is the network-alive proof). `prover_url` is the
+    /// endpoint that just connected: when it IS the struck endpoint, the
+    /// strike is REFUTED, not proven — the hypothesis behind a strike is
+    /// "this endpoint is unhealthy", and its own successful reconnect is the
+    /// strongest possible counter-evidence. Committing it anyway is how the
+    /// V4 sitting's live-lock spun up (D-084): post-airplane Wi-Fi churn
+    /// parked a strike per drop, each endpoint's own reconnect ≤30 s
+    /// committed it, the demotion tripped the Connected-time refusal, the
+    /// re-race walked to the next endpoint and repeated until the whole
+    /// resolver set sat demoted — a connectivity strand. Commit stays for
+    /// the true control-group: a DIFFERENT endpoint proved the network alive
+    /// while the struck one stayed dark.
+    fn settle_pending_strike(&self, prover_url: Option<&str>) {
         let taken = self
             .inner
             .pending_strike
@@ -379,7 +393,11 @@ impl DagMonitor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some((url, at)) = taken {
-            if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
+            if prover_url == Some(url.as_str()) {
+                log::info!(
+                    "link: pending strike on {url} refuted by its own reconnect — discarded"
+                );
+            } else if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
                 self.commit_strike(&url, "connection lost");
             } else {
                 log::info!("link: pending strike on {url} expired unproven — discarded");
@@ -921,8 +939,10 @@ impl DagMonitor {
                     match msg {
                         Ok(RpcState::Connected) => {
                             // This connect IS the network-alive proof: settle
-                            // the parked strike (commit fresh, discard stale).
-                            self.settle_pending_strike();
+                            // the parked strike (commit fresh from a DIFFERENT
+                            // prover; discard stale or self-refuted — D-084).
+                            let prover = self.inner.client.url();
+                            self.settle_pending_strike(prover.as_deref());
                             // Demotion enforcement at the one choke point
                             // every connection passes — a demoted endpoint
                             // that sneaks back in (a ws-level phantom redial,
@@ -1209,6 +1229,47 @@ mod tests {
     fn constructs_mainnet_monitor_without_network() {
         let monitor = DagMonitor::mainnet().expect("resolver-based client construction is offline");
         assert!(!monitor.is_connected());
+    }
+
+    /// D-084 (V4 sitting live-lock): a parked strike settled by the struck
+    /// endpoint's OWN successful reconnect is REFUTED — never committed. A
+    /// different prover still commits (the true control-group). Without the
+    /// self-refute rule, post-airplane Wi-Fi churn demoted every endpoint via
+    /// its own reconnect and the Connected-time refusal stranded connectivity.
+    #[test]
+    fn own_reconnect_refutes_parked_strike_other_prover_commits() {
+        const URL: &str = "wss://emma.example/kaspa/mainnet/wrpc/borsh";
+        const OTHER: &str = "wss://lena.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let demoted = |m: &DagMonitor| {
+            m.inner
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_demoted(URL, DagMonitor::now_unix())
+        };
+
+        // Self-refute, twice over (would demote at 2 commits): stays clean.
+        for _ in 0..2 {
+            monitor.set_pending_strike(URL.to_string());
+            monitor.settle_pending_strike(Some(URL));
+        }
+        assert!(!demoted(&monitor), "own reconnect must refute, not convict");
+
+        // Control group intact: a DIFFERENT prover commits; two commits demote.
+        for _ in 0..2 {
+            monitor.set_pending_strike(URL.to_string());
+            monitor.settle_pending_strike(Some(OTHER));
+            // Past the same-incident dedup window the ledger counts each
+            // commit separately; simulate by backdating the last strike.
+            monitor
+                .inner
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .backdate_last_strike(URL, link::STRIKE_DEDUP_SECS + 1);
+        }
+        assert!(demoted(&monitor), "a different prover still convicts");
     }
 
     #[test]

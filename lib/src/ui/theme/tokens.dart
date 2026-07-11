@@ -99,6 +99,10 @@ abstract final class KvMotion {
   static const Duration deliberate =
       Durations.extralong2; // 800ms — hold-to-sign
 
+  /// One full live-dot breathing cycle (§6 v2.2) — a calm resting cadence
+  /// (~20 breaths/min), consumed only by KvBreath (§8).
+  static const Duration breath = Duration(milliseconds: 3000);
+
   /// Default vault easing — decelerate, no overshoot (DS-5).
   static const Curve out = Easing.emphasizedDecelerate;
 

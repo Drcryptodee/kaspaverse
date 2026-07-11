@@ -6,6 +6,7 @@ import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
 import '../format.dart';
 import '../send/confirm_send_sheet.dart';
+import '../theme/kv_page_route.dart';
 import '../theme/tokens.dart';
 import '../widgets/entrance.dart';
 import '../widgets/haptics.dart';
@@ -128,7 +129,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   void _openThread(ConversationDto conversation) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
+      KvPageRoute<void>(
         builder: (_) => ThreadScreen(
           conversationId: conversation.conversationId,
           contactLabel: contactLabel(conversation),

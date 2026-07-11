@@ -6,11 +6,13 @@ import 'package:flutter/material.dart';
 import '../rust/api/dag.dart';
 import '../rust/api/wallet.dart';
 import 'format.dart';
+import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/amount_text.dart';
 import 'widgets/entrance.dart';
 import 'widgets/glass_panel.dart';
 import 'widgets/haptics.dart';
+import 'widgets/kv_loader.dart';
 import 'widgets/status_beacon.dart';
 import 'widgets/tx_status_chip.dart';
 
@@ -24,10 +26,16 @@ String formatScore(BigInt? value) =>
 /// panel: the balance with its freshness truth (DS-1), the link state worn as
 /// a compact beacon chip (endpoint detail behind a tap, §12), the two money
 /// actions in the thumb zone, and the activity feed. State is injected as
-/// listenables so widget tests run without the native library; a 1 s ticker
-/// advances the freshness age (DS-1) so the beacon goes stale and the balance
-/// dims even when no new snapshot arrives — the same tick drives the live
-/// dot's breath.
+/// listenables so widget tests run without the native library; a 1 s clock
+/// notifier advances the freshness age (DS-1) so the beacon goes stale and
+/// the balance dims even when no new snapshot arrives.
+///
+/// V4 scoping: each region listens only to what it renders (derived,
+/// value-gated notifiers — see [_Derived]). A balance tick never rebuilds the
+/// activity list, a DAA tick repaints only the chain-clock line and the feed,
+/// and the 1 s tick lands in the clock notifier, never a whole-screen
+/// `setState`. The injected listenables are the test seam and must be stable
+/// for the life of the state (asserted in [State.didUpdateWidget]).
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
@@ -43,7 +51,6 @@ class HomeScreen extends StatefulWidget {
     // Wallet (WalletService): balance + activity.
     required this.mature,
     required this.pending,
-    required this.outgoing,
     required this.activity,
     required this.syncing,
     required this.utxoIndexMissing,
@@ -73,7 +80,6 @@ class HomeScreen extends StatefulWidget {
 
   final ValueListenable<BigInt?> mature;
   final ValueListenable<BigInt?> pending;
-  final ValueListenable<BigInt?> outgoing;
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
@@ -111,8 +117,61 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+/// What the beacon chip renders, compared by value — connected steady-state
+/// produces ZERO beacon rebuilds; stale walks once per second as the age
+/// line advances. Records compare structurally, which is what lets
+/// [_Derived] swallow the no-op ticks.
+typedef _LinkView = ({BeaconState state, String? error, Duration? age});
+
+/// What the balance panel renders (the DAA line is scoped separately inside
+/// the panel — the chain clock must not rebuild the money number).
+typedef _BalanceView = ({
+  BigInt? mature,
+  BigInt? pending,
+  bool stale,
+  bool syncing,
+  bool utxoIndexMissing,
+});
+
+/// The V4 scoping primitive: recomputes [_compute] whenever any source
+/// notifies, and — because [ValueNotifier] only notifies when the new value
+/// differs — swallows every tick that would not change pixels.
+class _Derived<T> extends ValueNotifier<T> {
+  _Derived(this._sources, this._compute) : super(_compute()) {
+    for (final s in _sources) {
+      s.addListener(_recompute);
+    }
+  }
+
+  final List<Listenable> _sources;
+  final T Function() _compute;
+
+  void _recompute() => value = _compute();
+
+  @override
+  void dispose() {
+    for (final s in _sources) {
+      s.removeListener(_recompute);
+    }
+    super.dispose();
+  }
+}
+
 class _HomeScreenState extends State<HomeScreen> {
   Timer? _ticker;
+
+  /// The freshness clock (DS-1) — ticked once per second. Regions that render
+  /// time listen to THIS, so the tick never lands as a whole-screen setState.
+  late final ValueNotifier<DateTime> _now;
+
+  late final _Derived<_LinkView> _link;
+  late final _Derived<bool> _stale;
+  late final _Derived<_BalanceView> _balance;
+
+  /// Everything the activity feed reads. The feed rebuilds on activity
+  /// snapshots, depth ticks, DAA ticks and the 1 s clock (its counters and
+  /// relative ages are live by design) — but never on a balance change.
+  late final Listenable _feedInputs;
 
   @override
   void initState() {
@@ -120,40 +179,114 @@ class _HomeScreenState extends State<HomeScreen> {
     // Start the wallet sync engine now that the vault is unlocked (the shell
     // only mounts this screen when unlocked). Idempotent in the service.
     widget.onReady?.call();
+    _now = ValueNotifier(widget.clock());
+    _link = _Derived([
+      widget.connected,
+      widget.error,
+      widget.lastUpdate,
+      _now,
+    ], _computeLink);
+    _stale = _Derived([_link], () => _link.value.state == BeaconState.stale);
+    _balance = _Derived(
+      [
+        widget.mature,
+        widget.pending,
+        widget.syncing,
+        widget.utxoIndexMissing,
+        _stale,
+      ],
+      () => (
+        mature: widget.mature.value,
+        pending: widget.pending.value,
+        stale: _stale.value,
+        syncing: widget.syncing.value,
+        utxoIndexMissing: widget.utxoIndexMissing.value,
+      ),
+    );
+    _feedInputs = Listenable.merge([
+      widget.activity,
+      if (widget.depths != null) widget.depths!,
+      widget.virtualDaaScore,
+      _stale,
+      _now,
+    ]);
     // Re-evaluate freshness every second so the stale state and "as of N ago"
     // line advance without a new snapshot (DS-1).
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
+      if (mounted) _now.value = widget.clock();
     });
+  }
+
+  @override
+  void didUpdateWidget(HomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The derived notifiers subscribed at mount; silently swapping a seam
+    // would leave them wired to the old one.
+    assert(
+      identical(oldWidget.connected, widget.connected) &&
+          identical(oldWidget.error, widget.error) &&
+          identical(oldWidget.lastUpdate, widget.lastUpdate) &&
+          identical(oldWidget.mature, widget.mature) &&
+          identical(oldWidget.pending, widget.pending) &&
+          identical(oldWidget.syncing, widget.syncing) &&
+          identical(oldWidget.utxoIndexMissing, widget.utxoIndexMissing) &&
+          identical(oldWidget.activity, widget.activity) &&
+          identical(oldWidget.depths, widget.depths) &&
+          identical(oldWidget.virtualDaaScore, widget.virtualDaaScore),
+      'HomeScreen listenables must stay identical for the life of the state',
+    );
   }
 
   @override
   void dispose() {
     _ticker?.cancel();
+    // Chained deriveds unhook in reverse dependency order.
+    _balance.dispose();
+    _stale.dispose();
+    _link.dispose();
+    _now.dispose();
     super.dispose();
   }
 
   Duration? _age() {
     final last = widget.lastUpdate.value;
-    return last == null ? null : widget.clock().difference(last);
+    return last == null ? null : _now.value.difference(last);
+  }
+
+  _LinkView _computeLink() {
+    final age = _age();
+    final state = evaluateBeacon(
+      connected: widget.connected.value,
+      age: age,
+      error: widget.error.value,
+    );
+    return (
+      state: state,
+      error: widget.error.value,
+      // Only the stale label renders an age; floored to the second it shows,
+      // so record equality gates out every sub-label tick.
+      age: state == BeaconState.stale && age != null
+          ? Duration(seconds: age.inSeconds)
+          : null,
+    );
   }
 
   void _openSend() {
     final builder = widget.sendRoute;
     if (builder == null) return;
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
+    Navigator.of(context).push(KvPageRoute<void>(builder: builder));
   }
 
   void _openReceive() {
     final builder = widget.receiveRoute;
     if (builder == null) return;
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
+    Navigator.of(context).push(KvPageRoute<void>(builder: builder));
   }
 
   void _openMessages() {
     final builder = widget.messagesRoute;
     if (builder == null) return;
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
+    Navigator.of(context).push(KvPageRoute<void>(builder: builder));
   }
 
   /// The §12 power-user tap: endpoint, DAA and freshness in plain sight —
@@ -180,168 +313,149 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final hasActions =
+        widget.sendRoute != null ||
+        widget.receiveRoute != null ||
+        widget.messagesRoute != null;
+
     return Scaffold(
       floatingActionButton: widget.floatingActionButton,
       body: SafeArea(
-        child: AnimatedBuilder(
-          animation: Listenable.merge([
-            widget.connected,
-            widget.endpoint,
-            widget.error,
-            widget.lastUpdate,
-            widget.virtualDaaScore,
-            widget.mature,
-            widget.pending,
-            widget.outgoing,
-            widget.activity,
-            widget.syncing,
-            widget.utxoIndexMissing,
-            widget.depths,
-          ]),
-          builder: (context, _) {
-            final now = widget.clock();
-            final age = _age();
-            final state = evaluateBeacon(
-              connected: widget.connected.value,
-              age: age,
-              error: widget.error.value,
-            );
-            final stale = state == BeaconState.stale;
-            final mature = widget.mature.value;
-            final pending = widget.pending.value;
-            final hasActions =
-                widget.sendRoute != null ||
-                widget.receiveRoute != null ||
-                widget.messagesRoute != null;
-
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    KvSpace.gutter,
-                    KvSpace.m,
-                    KvSpace.gutter,
-                    0,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                KvSpace.m,
+                KvSpace.gutter,
+                0,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
                     children: [
-                      Row(
-                        children: [
-                          Text(
-                            'KaspaVerse',
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              letterSpacing: 0.2,
-                            ),
-                          ),
-                          const Spacer(),
-                          StatusBeacon(
-                            state: state,
-                            endpoint: widget.endpoint.value,
-                            error: widget.error.value,
-                            age: age,
-                            pulsePhase: now.second.isEven,
-                            onTap: _openNetworkSheet,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: KvSpace.l),
-                      Entrance(
-                        child: _BalancePanel(
-                          mature: mature,
-                          pending: pending,
-                          stale: stale,
-                          daaLine:
-                              'DAA ${formatScore(widget.virtualDaaScore.value)}',
-                          utxoIndexMissing: widget.utxoIndexMissing.value,
-                          syncing: widget.syncing.value && mature == null,
+                      Text(
+                        'KaspaVerse',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          letterSpacing: 0.2,
                         ),
                       ),
-                      if (hasActions) ...[
-                        const SizedBox(height: KvSpace.m),
-                        Entrance(
-                          index: 1,
-                          child: Column(
+                      const Spacer(),
+                      // Scoped: connected steady-state never rebuilds here —
+                      // the breath animates itself (KvBreath).
+                      ValueListenableBuilder<_LinkView>(
+                        valueListenable: _link,
+                        builder: (context, link, _) => StatusBeacon(
+                          state: link.state,
+                          error: link.error,
+                          age: link.age,
+                          onTap: _openNetworkSheet,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: KvSpace.l),
+                  Entrance(
+                    child: ValueListenableBuilder<_BalanceView>(
+                      valueListenable: _balance,
+                      builder: (context, b, _) => _BalancePanel(
+                        mature: b.mature,
+                        pending: b.pending,
+                        stale: b.stale,
+                        daa: widget.virtualDaaScore,
+                        utxoIndexMissing: b.utxoIndexMissing,
+                        syncing: b.syncing && b.mature == null,
+                      ),
+                    ),
+                  ),
+                  if (hasActions) ...[
+                    const SizedBox(height: KvSpace.m),
+                    Entrance(
+                      index: 1,
+                      // Static — the money actions listen to nothing.
+                      child: Column(
+                        children: [
+                          // Send + Receive share the row; Message gets its
+                          // own full-width line so no label ever wraps
+                          // (three-across broke on the V60 — sitting note).
+                          Row(
                             children: [
-                              // Send + Receive share the row; Message gets its
-                              // own full-width line so no label ever wraps
-                              // (three-across broke on the V60 — sitting note).
-                              Row(
-                                children: [
-                                  if (widget.sendRoute != null)
-                                    Expanded(
-                                      child: FilledButton.icon(
-                                        onPressed: _openSend,
-                                        icon: const Icon(
-                                          Icons.north_east,
-                                          size: 18,
-                                        ),
-                                        label: const Text('Send'),
-                                      ),
-                                    ),
-                                  if (widget.sendRoute != null &&
-                                      widget.receiveRoute != null)
-                                    const SizedBox(width: KvSpace.sm),
-                                  if (widget.receiveRoute != null)
-                                    Expanded(
-                                      child: FilledButton.tonalIcon(
-                                        onPressed: _openReceive,
-                                        icon: const Icon(
-                                          Icons.south_west,
-                                          size: 18,
-                                          color: KvColor.primaryMuted,
-                                        ),
-                                        label: const Text('Receive'),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                              if (widget.messagesRoute != null) ...[
-                                const SizedBox(height: KvSpace.sm),
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: FilledButton.tonalIcon(
-                                    onPressed: _openMessages,
+                              if (widget.sendRoute != null)
+                                Expanded(
+                                  child: FilledButton.icon(
+                                    onPressed: _openSend,
                                     icon: const Icon(
-                                      Icons.forum_outlined,
+                                      Icons.north_east,
+                                      size: 18,
+                                    ),
+                                    label: const Text('Send'),
+                                  ),
+                                ),
+                              if (widget.sendRoute != null &&
+                                  widget.receiveRoute != null)
+                                const SizedBox(width: KvSpace.sm),
+                              if (widget.receiveRoute != null)
+                                Expanded(
+                                  child: FilledButton.tonalIcon(
+                                    onPressed: _openReceive,
+                                    icon: const Icon(
+                                      Icons.south_west,
                                       size: 18,
                                       color: KvColor.primaryMuted,
                                     ),
-                                    label: const Text('Message'),
+                                    label: const Text('Receive'),
                                   ),
                                 ),
-                              ],
                             ],
                           ),
-                        ),
-                      ],
-                      const SizedBox(height: KvSpace.xl),
-                      Entrance(
-                        index: 2,
-                        child: Text(
-                          'Activity',
-                          style: theme.textTheme.titleMedium,
-                        ),
+                          if (widget.messagesRoute != null) ...[
+                            const SizedBox(height: KvSpace.sm),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FilledButton.tonalIcon(
+                                onPressed: _openMessages,
+                                icon: const Icon(
+                                  Icons.forum_outlined,
+                                  size: 18,
+                                  color: KvColor.primaryMuted,
+                                ),
+                                label: const Text('Message'),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
-                      const SizedBox(height: KvSpace.s),
-                    ],
+                    ),
+                  ],
+                  const SizedBox(height: KvSpace.xl),
+                  Entrance(
+                    index: 2,
+                    child: Text('Activity', style: theme.textTheme.titleMedium),
                   ),
+                  const SizedBox(height: KvSpace.s),
+                ],
+              ),
+            ),
+            const Divider(),
+            Expanded(
+              // The feed's counters and relative ages are live by design, so
+              // it listens to the clock and the chain — but a balance tick
+              // never lands here (and the feed never rebuilds the panel).
+              child: ListenableBuilder(
+                listenable: _feedInputs,
+                builder: (context, _) => _ActivityFeed(
+                  records: widget.activity.value,
+                  now: _now.value,
+                  depths: widget.depths?.value ?? const {},
+                  virtualDaaScore: widget.virtualDaaScore.value,
+                  stale: _stale.value,
+                  onRefresh: widget.onRefreshActivity,
                 ),
-                const Divider(),
-                Expanded(
-                  child: _ActivityFeed(
-                    records: widget.activity.value,
-                    now: now,
-                    depths: widget.depths?.value ?? const {},
-                    virtualDaaScore: widget.virtualDaaScore.value,
-                    stale: stale,
-                    onRefresh: widget.onRefreshActivity,
-                  ),
-                ),
-              ],
-            );
-          },
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -356,7 +470,7 @@ class _BalancePanel extends StatelessWidget {
     required this.mature,
     required this.pending,
     required this.stale,
-    required this.daaLine,
+    required this.daa,
     required this.utxoIndexMissing,
     required this.syncing,
   });
@@ -364,7 +478,11 @@ class _BalancePanel extends StatelessWidget {
   final BigInt? mature;
   final BigInt? pending;
   final bool stale;
-  final String daaLine;
+
+  /// Listened to INSIDE the panel — the chain clock ticks ~10×/s and must
+  /// repaint only its own line, never the money number above it (V4 scoping).
+  final ValueListenable<BigInt?> daa;
+
   final bool utxoIndexMissing;
   final bool syncing;
 
@@ -394,10 +512,13 @@ class _BalancePanel extends StatelessWidget {
           AnimatedOpacity(
             opacity: stale ? KvFreshness.opacityStale : 1.0,
             duration: KvMotion.instant,
-            child: Text(
-              daaLine,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textTertiary,
+            child: ValueListenableBuilder<BigInt?>(
+              valueListenable: daa,
+              builder: (context, score, _) => Text(
+                'DAA ${formatScore(score)}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: KvColor.textTertiary,
+                ),
               ),
             ),
           ),
@@ -655,7 +776,6 @@ class _ActivityRow extends StatelessWidget {
                   chipStateOf(record.maturity, stalled: record.stalled),
                   confirmations,
                 ),
-                pulsePhase: now.second.isEven,
                 confirmations: confirmations,
               ),
             ],
@@ -814,11 +934,7 @@ class _NetworkSheetState extends State<_NetworkSheet> {
                               widget.onReconnect!();
                             },
                       icon: busy
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
+                          ? const KvLoader.inline()
                           : const Icon(Icons.refresh, size: 18),
                       label: Text(busy ? 'Reconnecting…' : 'Reconnect'),
                     ),

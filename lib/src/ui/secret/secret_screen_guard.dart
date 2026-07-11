@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../services/vault_service.dart';
 import '../theme/tokens.dart';
+import '../widgets/kv_loader.dart';
 
 /// Wraps a §0.6 secret screen with the two platform guarantees locked at
 /// P1 §0.6 (D-028):
@@ -126,18 +127,7 @@ class _GuardSplash extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: SizedBox(
-          width: KvSpace.l,
-          height: KvSpace.l,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            color: KvColor.primaryMuted,
-          ),
-        ),
-      ),
-    );
+    return const Scaffold(body: Center(child: KvLoader()));
   }
 }
 

@@ -9,6 +9,7 @@ import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'theme/tokens.dart';
 import 'widgets/haptics.dart';
+import 'widgets/kv_loader.dart';
 
 enum _Step { words, extraWord, preview, passphrase }
 
@@ -178,12 +179,7 @@ class _RestoreScreenState extends State<RestoreScreen> {
 
   Widget _body() {
     if (_wordlist == null) {
-      return const Center(
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          color: KvColor.primaryMuted,
-        ),
-      );
+      return const Center(child: KvLoader());
     }
     switch (_step) {
       case _Step.words:

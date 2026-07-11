@@ -5,6 +5,7 @@ import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/amount_text.dart';
 import '../widgets/haptics.dart';
+import '../widgets/kv_loader.dart';
 
 /// The anti-blind-signing confirm (consensus B7 — the heart of P1.6). Everything
 /// here renders the [SendSummaryDto] Rust decoded from the ACTUAL transactions it
@@ -102,7 +103,7 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
     if (_sending) {
       return const Padding(
         padding: EdgeInsets.all(KvSpace.xl),
-        child: Center(child: CircularProgressIndicator()),
+        child: Center(child: KvLoader()),
       );
     }
     if (_outcome != null || _error != null) {
