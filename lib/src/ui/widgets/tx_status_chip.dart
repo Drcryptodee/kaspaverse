@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../rust/api/transport.dart';
 import '../../rust/api/wallet.dart';
 import '../theme/tokens.dart';
+import 'kv_breath.dart';
 
 /// The V2 chip states a transaction row can wear. `none` is the terminal
 /// quiet: a settled row carries no label (Rams #5 — only the exception is
@@ -63,9 +64,9 @@ TxChipState chipStateOfAcceptance(TxStatusKind? kind) {
 /// The three-state transaction status chip (V2, founder-nodded design):
 /// dot + label, never color alone (design_system §11).
 ///
-/// - **pending** — quiet `textTertiary`, dot breathing on [pulsePhase] (the
-///   StatusBeacon contract: parent supplies the tick; the breath stops the
-///   instant the state resolves — DS-1-honest attention guidance).
+/// - **pending** — quiet `textTertiary`, dot breathing via [KvBreath] (§8
+///   v2.2 — self-animated sine; the breath stops the instant the state
+///   resolves — DS-1-honest attention guidance).
 /// - **accepted** — `success` (the chain accepted it; on Kaspa this IS the
 ///   user-meaningful confirmation, DS-3).
 /// - **stalled** — `warning`, steady: degraded is not "in progress". Amber is
@@ -75,18 +76,9 @@ TxChipState chipStateOfAcceptance(TxStatusKind? kind) {
 /// State changes crossfade at `fast`; the dissolve to quiet takes `normal`.
 /// Vault register throughout: decelerate-only, no celebration (DS-5).
 class TxStatusChip extends StatelessWidget {
-  const TxStatusChip({
-    super.key,
-    required this.state,
-    this.pulsePhase = false,
-    this.confirmations,
-  });
+  const TxStatusChip({super.key, required this.state, this.confirmations});
 
   final TxChipState state;
-
-  /// Parent-driven breath tick (e.g. `now.second.isEven`) — only the pending
-  /// state consumes it.
-  final bool pulsePhase;
 
   /// Live depth for the counting states (founder request, V2 sitting): when
   /// set, the label streams "N confirmations" instead of the static word —
@@ -114,11 +106,11 @@ class TxStatusChip extends StatelessWidget {
           child: fade,
         );
       },
-      child: KeyedSubtree(key: ValueKey(state), child: _body(context, reduced)),
+      child: KeyedSubtree(key: ValueKey(state), child: _body(context)),
     );
   }
 
-  Widget _body(BuildContext context, bool reduced) {
+  Widget _body(BuildContext context) {
     var (color, label) = switch (state) {
       TxChipState.pending => (KvColor.textTertiary, 'Pending'),
       TxChipState.accepted => (KvColor.success, 'Accepted'),
@@ -141,18 +133,10 @@ class TxStatusChip extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // The breath rides the dot only (the label stays legible) and
-        // freezes to a static full-opacity dot under reduced motion — the
+        // The breath rides the dot only (the label stays legible); KvBreath
+        // freezes it to a static full-opacity dot under reduced motion — the
         // StatusBeacon contract, exactly (§6/§11).
-        if (state == TxChipState.pending && !reduced)
-          AnimatedOpacity(
-            opacity: pulsePhase ? 1.0 : KvFreshness.opacityStale,
-            duration: KvMotion.normal,
-            curve: KvMotion.out,
-            child: dot,
-          )
-        else
-          dot,
+        KvBreath(active: state == TxChipState.pending, child: dot),
         const SizedBox(width: KvSpace.xs),
         Text(
           label,

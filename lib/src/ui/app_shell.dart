@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../rust/api/vault.dart' as vault_api;
 import 'theme/tokens.dart';
+import 'widgets/kv_loader.dart';
 
 /// The top-level navigation shell. Routes purely on the vault status stream
 /// (`VaultService.status`):
@@ -118,14 +119,7 @@ class KvSplash extends StatelessWidget {
           children: [
             Text('KaspaVerse', style: theme.textTheme.headlineSmall),
             const SizedBox(height: KvSpace.l),
-            const SizedBox(
-              width: KvSpace.l,
-              height: KvSpace.l,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: KvColor.primaryMuted,
-              ),
-            ),
+            const KvLoader(),
           ],
         ),
       ),

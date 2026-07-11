@@ -8,6 +8,7 @@ import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
+import 'widgets/kv_loader.dart';
 
 /// The create-wallet ceremony (P1.4 deliverable 2; D-037/D-038/D-039). Drives the
 /// two-step bridge end to end:
@@ -294,14 +295,7 @@ class _CreateScreenState extends State<CreateScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const SizedBox(
-                width: KvSpace.l,
-                height: KvSpace.l,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: KvColor.primaryMuted,
-                ),
-              ),
+              const KvLoader(),
               const SizedBox(height: KvSpace.l),
               Text(
                 'Preparing your recovery words…',

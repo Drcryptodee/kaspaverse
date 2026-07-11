@@ -16,7 +16,6 @@ void main() {
     final lastUpdate = ValueNotifier<DateTime?>(null);
     final mature = ValueNotifier<BigInt?>(null);
     final pending = ValueNotifier<BigInt?>(null);
-    final outgoing = ValueNotifier<BigInt?>(null);
     final activity = ValueNotifier<List<ActivityRecord>>(const []);
     final syncing = ValueNotifier<bool>(false);
     final utxoMissing = ValueNotifier<bool>(false);
@@ -33,7 +32,6 @@ void main() {
           lastUpdate: lastUpdate,
           mature: mature,
           pending: pending,
-          outgoing: outgoing,
           activity: activity,
           syncing: syncing,
           utxoIndexMissing: utxoMissing,
@@ -169,7 +167,6 @@ void main() {
           lastUpdate: ValueNotifier(DateTime(2026, 6, 14, 12)),
           mature: ValueNotifier(null), // no balance — but NOT a fake zero
           pending: ValueNotifier(null),
-          outgoing: ValueNotifier(null),
           activity: ValueNotifier(const []),
           syncing: ValueNotifier(false),
           utxoIndexMissing: ValueNotifier(true),
@@ -180,6 +177,60 @@ void main() {
 
     expect(find.textContaining('no UTXO index'), findsOneWidget);
     expect(find.text('—'), findsOneWidget); // unknown, never a fabricated 0
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('V4 scoping: a balance tick repaints the panel, NOT the feed', (
+    tester,
+  ) async {
+    // The discriminator: the feed renders relative ages from the SCOPED 1 s
+    // clock notifier. Advance the test clock WITHOUT letting the ticker fire,
+    // then tick only the balance — a mega-rebuild (the pre-V4 shape) would
+    // re-read the clock and walk the age line; the scoped feed must not.
+    final mature = ValueNotifier<BigInt?>(BigInt.from(100000000));
+    var now = DateTime(2026, 7, 11, 12);
+    final row = ActivityRecord(
+      txid: 'a' * 64,
+      valueSompi: BigInt.from(50000000),
+      unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 120000),
+      blockDaaScore: BigInt.from(1),
+      direction: ActivityDirection.incoming,
+      isCoinbase: false,
+      maturity: MaturityState.confirmed,
+      stalled: false,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        home: HomeScreen(
+          connected: ValueNotifier(true),
+          endpoint: ValueNotifier('wss://node.example/borsh'),
+          virtualDaaScore: ValueNotifier(BigInt.from(1)),
+          error: ValueNotifier(null),
+          lastUpdate: ValueNotifier(now),
+          mature: mature,
+          pending: ValueNotifier(BigInt.zero),
+          activity: ValueNotifier([row]),
+          syncing: ValueNotifier(false),
+          utxoIndexMissing: ValueNotifier(false),
+          clock: () => now,
+        ),
+      ),
+    );
+    expect(find.text('2 m ago'), findsOneWidget);
+
+    // A minute passes on the wall clock, but the 1 s ticker never fires
+    // (zero-duration pumps) — only the balance notifies.
+    now = now.add(const Duration(minutes: 1));
+    mature.value = BigInt.from(300000000);
+    await tester.pump();
+    await tester.pump();
+
+    // The panel repainted (new number), the feed did not (old age line).
+    expect(find.textContaining('3.00000000 KAS'), findsOneWidget);
+    expect(find.text('2 m ago'), findsOneWidget);
+    expect(find.text('3 m ago'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -263,7 +314,6 @@ void main() {
           lastUpdate: ValueNotifier(now),
           mature: ValueNotifier(BigInt.from(600000000)),
           pending: ValueNotifier(BigInt.zero),
-          outgoing: ValueNotifier(BigInt.zero),
           activity: activity,
           syncing: ValueNotifier(false),
           utxoIndexMissing: ValueNotifier(false),

@@ -17,6 +17,7 @@ import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
+import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
 
@@ -91,7 +92,6 @@ class KaspaVerseApp extends StatelessWidget {
           onReconnect: chain.reconnect,
           mature: wallet.mature,
           pending: wallet.pending,
-          outgoing: wallet.outgoing,
           activity: wallet.activity,
           syncing: wallet.syncing,
           utxoIndexMissing: wallet.utxoIndexMissing,
@@ -131,7 +131,7 @@ class _DevPanelLink extends StatelessWidget {
     return TextButton.icon(
       onPressed: () => Navigator.of(
         context,
-      ).push(MaterialPageRoute<void>(builder: (_) => const DevVaultPanel())),
+      ).push(KvPageRoute<void>(builder: (_) => const DevVaultPanel())),
       icon: const Icon(Icons.build_outlined),
       label: const Text('Dev vault panel'),
     );
@@ -151,18 +151,18 @@ class _DevFabs extends StatelessWidget {
         FloatingActionButton.small(
           heroTag: 'dev-transport',
           tooltip: 'DEV transport panel',
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const DevTransportPanel()),
-          ),
+          onPressed: () => Navigator.of(
+            context,
+          ).push(KvPageRoute<void>(builder: (_) => const DevTransportPanel())),
           child: const Icon(Icons.satellite_alt_outlined),
         ),
         const SizedBox(height: 8),
         FloatingActionButton.small(
           heroTag: 'dev-vault',
           tooltip: 'DEV vault panel',
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const DevVaultPanel()),
-          ),
+          onPressed: () => Navigator.of(
+            context,
+          ).push(KvPageRoute<void>(builder: (_) => const DevVaultPanel())),
           child: const Icon(Icons.build_outlined),
         ),
       ],

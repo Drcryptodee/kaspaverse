@@ -592,6 +592,35 @@ impl WalletEngine {
                     "wallet-sync: utxo-proc start — scanning {} addresses",
                     addresses.len()
                 );
+                // Re-arm the LIVE UtxosChanged subscription on THIS connection
+                // (V4 sitting conviction, D-083). The pin's per-connect listener
+                // subscribes ONLY VirtualDaaScoreChanged (processor.rs:624);
+                // UtxosChanged is issued inside register_addresses — but the
+                // context filters against its own address set (context.rs:714),
+                // which SURVIVES a disconnect (cleanup() clears the processor
+                // map, not the context set), so on every reconnect the filtered
+                // list is empty and the node is never re-subscribed: the wallet
+                // goes deaf to live deposits after the first drop. Calling the
+                // processor-level register_addresses directly is unconditional
+                // (map insert + start_notify while connected) and idempotent
+                // node-side; the context scan below then extends UTXO state.
+                let arc_addresses: Vec<Arc<Address>> =
+                    addresses.iter().cloned().map(Arc::new).collect();
+                match self
+                    .inner
+                    .processor
+                    .register_addresses(arc_addresses, &self.inner.context)
+                    .await
+                {
+                    // Logged on success ONLY (wallet-security audit nit): a
+                    // failed re-arm must never print an "armed" line — this
+                    // lane exists to diagnose exactly that deafness.
+                    Ok(()) => log::info!(
+                        "wallet-sync: live utxos-changed re-armed for {} addresses",
+                        addresses.len()
+                    ),
+                    Err(e) => self.emit(WalletEvent::Error(e.to_string())),
+                }
                 // Register the address window and fetch the initial UTXO set;
                 // this drives Discovery + Balance events (the latter even for an
                 // empty wallet → a live zero). DAA is already stored by

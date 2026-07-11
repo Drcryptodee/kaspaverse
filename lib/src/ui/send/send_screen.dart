@@ -6,6 +6,7 @@ import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
+import '../widgets/kv_loader.dart';
 import 'confirm_send_sheet.dart';
 
 /// Send entry (P1.6 · T3): amount (DS-2 floor) + destination (DS-8 paste →
@@ -221,11 +222,7 @@ class _SendScreenState extends State<SendScreen> {
               FilledButton(
                 onPressed: _canReview ? _review : null,
                 child: _building
-                    ? const SizedBox(
-                        height: 18,
-                        width: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
+                    ? const KvLoader.inline()
                     : const Text('Review'),
               ),
             ],

@@ -3,8 +3,10 @@ import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
 import 'passphrase_unlock_screen.dart';
+import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
+import 'widgets/kv_loader.dart';
 
 /// The locked-state surface (P1.3 shell, decision D-036: biometric-first). A
 /// vault exists but is sealed; this offers the Path-A biometric unlock — the
@@ -103,9 +105,9 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
   /// shell; on success the status stream flips unlocked and the shell shows home
   /// beneath, and that screen pops itself.
   void _openPassphrase() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const PassphraseUnlockScreen()),
-    );
+    Navigator.of(
+      context,
+    ).push(KvPageRoute<void>(builder: (_) => const PassphraseUnlockScreen()));
   }
 
   @override
@@ -167,14 +169,7 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
 
   Widget _action(ThemeData theme) {
     if (_biometricReady == null) {
-      return const SizedBox(
-        width: KvSpace.l,
-        height: KvSpace.l,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          color: KvColor.primaryMuted,
-        ),
-      );
+      return const Center(child: KvLoader());
     }
     if (_biometricReady == false) {
       // No Path-A enrolled (or unavailable) — Path B is the unlock lane (P1.4).

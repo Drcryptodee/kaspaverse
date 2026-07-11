@@ -4,6 +4,7 @@ import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
+import '../widgets/kv_loader.dart';
 import '../widgets/status_beacon.dart' show formatAge;
 import 'contacts_screen.dart' show displayError;
 
@@ -364,11 +365,7 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
               FilledButton.tonalIcon(
                 onPressed: _busy ? null : _checkNow,
                 icon: _busy
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
+                    ? const KvLoader.inline()
                     : const Icon(Icons.cloud_download_outlined, size: 18),
                 label: const Text('Check now'),
               ),

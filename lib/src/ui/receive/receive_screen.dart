@@ -5,6 +5,7 @@ import '../address_text.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/entrance.dart';
+import '../widgets/kv_loader.dart';
 import '../widgets/haptics.dart';
 import 'qr_tile.dart';
 
@@ -31,7 +32,7 @@ class ReceiveScreen extends StatelessWidget {
           future: fetch(),
           builder: (context, snapshot) {
             if (snapshot.connectionState != ConnectionState.done) {
-              return const Center(child: CircularProgressIndicator());
+              return const Center(child: KvLoader());
             }
             if (snapshot.hasError || !snapshot.hasData) {
               return _ErrorBody(error: snapshot.error);

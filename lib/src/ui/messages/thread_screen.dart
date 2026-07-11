@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../../rust/api/send.dart';
@@ -8,6 +6,7 @@ import '../../services/messaging_service.dart';
 import '../send/confirm_send_sheet.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
+import '../widgets/kv_loader.dart';
 import '../widgets/tx_status_chip.dart';
 import 'contacts_screen.dart' show displayError;
 
@@ -84,11 +83,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// First paint lands at the bottom instantly; later arrivals glide.
   bool _settled = false;
 
-  /// The chip breath (StatusBeacon contract): ticks only while a pending
-  /// chip is on the glass, stops the moment everything resolves (DS-1).
-  Timer? _breath;
-  bool _pulse = false;
-
   @override
   void initState() {
     super.initState();
@@ -101,7 +95,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _messaging.lastPing.removeListener(_onPing);
     _compose.dispose();
     _scroll.dispose();
-    _breath?.cancel();
     // The decrypted rows die with this state object (§0.4 — view-scoped).
     _messages.clear();
     super.dispose();
@@ -121,26 +114,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// Ghost truth: the live status map wins over the decrypt-time flag.
   bool _ghostFor(ThreadMessageDto m) =>
       _statuses[m.txid]?.tombstoned ?? m.tombstoned;
-
-  void _syncBreath() {
-    // Only a chip actually on the glass keeps the ticker alive — a ghosted
-    // row suppresses its chip (the ghost line renders instead), so it must
-    // not count (ux finding 4). No counting here: chat accepts near-
-    // instantly, so the confirmations counter is an Activity-surface
-    // affordance only (founder call, V2 sitting) — thread chips walk their
-    // states via acceptance pings and stay numberless.
-    final live = _messages.any(
-      (m) => _chipFor(m) == TxChipState.pending && !_ghostFor(m),
-    );
-    if (live && _breath == null) {
-      _breath = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() => _pulse = !_pulse);
-      });
-    } else if (!live && _breath != null) {
-      _breath!.cancel();
-      _breath = null;
-    }
-  }
 
   /// Merge one delta into the view: append unseen rows (txid-keyed — a full
   /// answer merges idempotently) and replace the status map whole.
@@ -184,7 +157,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
         if (!mounted) return;
         _merge(delta);
       }
-      _syncBreath();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || !_scroll.hasClients) return;
         final bottom = _scroll.position.maxScrollExtent;
@@ -216,7 +188,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
         _loading = false;
         _settled = false;
       });
-      _syncBreath();
     }
   }
 
@@ -376,7 +347,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   Widget _body(ThemeData theme) {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: KvLoader());
     }
     if (_lockedMessage != null) {
       return Center(
@@ -432,7 +403,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
           message: m,
           chip: _chipFor(m),
           ghost: _ghostFor(m),
-          pulsePhase: _pulse,
           declined: m.frame != null && _declined.contains(m.frame!.id),
           onAccept: _acceptChallenge,
           onDecline: _declineChallenge,
@@ -472,7 +442,6 @@ class _MessageRow extends StatelessWidget {
     required this.declined,
     this.chip = TxChipState.none,
     this.ghost = false,
-    this.pulsePhase = false,
     this.onAccept,
     this.onDecline,
   });
@@ -488,7 +457,6 @@ class _MessageRow extends StatelessWidget {
   /// again if the network re-accepts it (reversible by construction).
   final bool ghost;
 
-  final bool pulsePhase;
   final void Function(String refId)? onAccept;
   final void Function(String refId)? onDecline;
 
@@ -513,7 +481,7 @@ class _MessageRow extends StatelessWidget {
               color: KvColor.textTertiary,
             ),
           )
-        : TxStatusChip(state: chip, pulsePhase: pulsePhase);
+        : TxStatusChip(state: chip);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

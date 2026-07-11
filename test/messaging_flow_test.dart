@@ -587,9 +587,10 @@ void main() {
       ),
     );
 
-    // NOTE: a live pending chip runs the 1 s breath ticker, so these tests
-    // pump fixed durations instead of pumpAndSettle (which would never
-    // settle) — the ticker dies with the screen (dispose).
+    // NOTE: a live pending chip breathes on a repeating controller
+    // (KvBreath), so these tests pump fixed durations instead of
+    // pumpAndSettle (which would never settle) — the controller dies with
+    // the screen (dispose).
     Future<void> settle(WidgetTester tester) async {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
