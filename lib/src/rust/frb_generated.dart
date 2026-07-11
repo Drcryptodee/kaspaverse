@@ -2011,17 +2011,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ActivityRecord dco_decode_activity_record(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return ActivityRecord(
       txid: dco_decode_String(arr[0]),
       valueSompi: dco_decode_u_64(arr[1]),
       unixtimeMsec: dco_decode_opt_box_autoadd_u_64(arr[2]),
       blockDaaScore: dco_decode_u_64(arr[3]),
-      direction: dco_decode_activity_direction(arr[4]),
-      isCoinbase: dco_decode_bool(arr[5]),
-      maturity: dco_decode_maturity_state(arr[6]),
-      stalled: dco_decode_bool(arr[7]),
+      acceptedDaaScore: dco_decode_opt_box_autoadd_u_64(arr[4]),
+      direction: dco_decode_activity_direction(arr[5]),
+      isCoinbase: dco_decode_bool(arr[6]),
+      maturity: dco_decode_maturity_state(arr[7]),
+      stalled: dco_decode_bool(arr[8]),
     );
   }
 
@@ -2566,6 +2567,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_valueSompi = sse_decode_u_64(deserializer);
     var var_unixtimeMsec = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_blockDaaScore = sse_decode_u_64(deserializer);
+    var var_acceptedDaaScore = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_direction = sse_decode_activity_direction(deserializer);
     var var_isCoinbase = sse_decode_bool(deserializer);
     var var_maturity = sse_decode_maturity_state(deserializer);
@@ -2575,6 +2577,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       valueSompi: var_valueSompi,
       unixtimeMsec: var_unixtimeMsec,
       blockDaaScore: var_blockDaaScore,
+      acceptedDaaScore: var_acceptedDaaScore,
       direction: var_direction,
       isCoinbase: var_isCoinbase,
       maturity: var_maturity,
@@ -3308,6 +3311,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.valueSompi, serializer);
     sse_encode_opt_box_autoadd_u_64(self.unixtimeMsec, serializer);
     sse_encode_u_64(self.blockDaaScore, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.acceptedDaaScore, serializer);
     sse_encode_activity_direction(self.direction, serializer);
     sse_encode_bool(self.isCoinbase, serializer);
     sse_encode_maturity_state(self.maturity, serializer);

@@ -54,7 +54,6 @@ class HomeScreen extends StatefulWidget {
     required this.activity,
     required this.syncing,
     required this.utxoIndexMissing,
-    this.depths,
     this.onRefreshActivity,
     this.onReady,
     this.receiveRoute,
@@ -83,10 +82,6 @@ class HomeScreen extends StatefulWidget {
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
-
-  /// Live tracker depth per accepted outgoing txid — the chip's
-  /// "N confirmations" counter (`null` ⇒ chips fall back to static labels).
-  final ValueListenable<Map<String, int>>? depths;
 
   /// Swipe-to-refresh heal (founder request, V2 sitting): pulls the latest
   /// folded snapshot directly, bypassing the stream. `null` ⇒ no refresh UI.
@@ -205,7 +200,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     _feedInputs = Listenable.merge([
       widget.activity,
-      if (widget.depths != null) widget.depths!,
       widget.virtualDaaScore,
       _stale,
       _now,
@@ -231,7 +225,6 @@ class _HomeScreenState extends State<HomeScreen> {
           identical(oldWidget.syncing, widget.syncing) &&
           identical(oldWidget.utxoIndexMissing, widget.utxoIndexMissing) &&
           identical(oldWidget.activity, widget.activity) &&
-          identical(oldWidget.depths, widget.depths) &&
           identical(oldWidget.virtualDaaScore, widget.virtualDaaScore),
       'HomeScreen listenables must stay identical for the life of the state',
     );
@@ -448,7 +441,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 builder: (context, _) => _ActivityFeed(
                   records: widget.activity.value,
                   now: _now.value,
-                  depths: widget.depths?.value ?? const {},
                   virtualDaaScore: widget.virtualDaaScore.value,
                   stale: _stale.value,
                   onRefresh: widget.onRefreshActivity,
@@ -592,7 +584,6 @@ class _ActivityFeed extends StatelessWidget {
   const _ActivityFeed({
     required this.records,
     required this.now,
-    this.depths = const {},
     this.virtualDaaScore,
     this.stale = false,
     this.onRefresh,
@@ -609,15 +600,12 @@ class _ActivityFeed extends StatelessWidget {
   /// Pull-the-truth heal; `null` ⇒ plain list (tests, reduced wiring).
   final Future<void> Function()? onRefresh;
 
-  /// Tracker blue-depth per accepted outgoing txid (1 Hz, WalletService).
-  final Map<String, int> depths;
-
-  /// Live DAA — an immature deposit's counter is its DAA distance (both
-  /// node-read). Same SHAPE as the tracker's blue-depth subtraction, but a
-  /// different clock: DAA score ≠ blue score, inclusion ≠ acceptance. The
-  /// two-clocks-one-label display call is deliberate (consensus-audit V2
-  /// counter ruling: plain English beats protocol jargon; the number is
-  /// cosmetic and dies with wallet-core's own truth).
+  /// Live DAA — the streaming counter for both directions is a DAA-distance:
+  /// a deposit counts from its inclusion DAA (`blockDaaScore`), a send from its
+  /// DAG-acceptance DAA (`acceptedDaaScore`). Both node-read and cosmetic (the
+  /// number dies with wallet-core's own maturity truth; finding 18 replaced the
+  /// send's laggy 1 Hz tracker-depth poll with this synchronous path so it
+  /// streams as fluidly as a deposit).
   final BigInt? virtualDaaScore;
 
   @override
@@ -673,18 +661,29 @@ class _ActivityFeed extends StatelessWidget {
     );
   }
 
-  /// The chip's counter for one row (founder request, V2 sitting): an
-  /// ACCEPTED send counts the tracker's blue depth; an immature DEPOSIT
-  /// counts its DAA distance. Both node-read; `null` ⇒ static label.
-  /// A stale link never counts — the last-known DAA would freeze the number
-  /// at full brightness (DS-1).
+  /// The chip's streaming counter for one row — a DAA-distance depth, node-read
+  /// and cosmetic (it dies with wallet-core's own maturity truth; the depth
+  /// gate quiets it once deep). `null` ⇒ static label. A stale link never
+  /// counts (a frozen last-known DAA must not read live — DS-1).
+  ///
+  /// A SEND counts from the DAG-ACCEPTANCE DAA (`acceptedDaaScore`) — the honest
+  /// anchor. Its `blockDaaScore` is only submit time and would overstate the
+  /// depth (finding 18: the old path polled the tracker's blue-depth at 1 Hz,
+  /// which stuttered — the async gap plus wallet-core's Pending→Confirmed
+  /// collapse meant the count often never rendered). A DEPOSIT counts its own
+  /// inclusion-DAA distance (its maturity clock).
   int? _confirmations(ActivityRecord record) {
     if (stale) return null;
-    if (record.maturity == MaturityState.accepted) return depths[record.txid];
+    final daa = virtualDaaScore;
+    if (daa == null) return null;
+    if (record.direction == ActivityDirection.outgoing) {
+      final accepted = record.acceptedDaaScore;
+      if (accepted == null || daa < accepted) return null;
+      return (daa - accepted).toInt();
+    }
     if (record.maturity == MaturityState.pending &&
         record.direction == ActivityDirection.incoming) {
-      final daa = virtualDaaScore;
-      if (daa == null || daa < record.blockDaaScore) return null;
+      if (daa < record.blockDaaScore) return null;
       return (daa - record.blockDaaScore).toInt();
     }
     return null;
@@ -702,6 +701,25 @@ class _ActivityRow extends StatelessWidget {
   final ActivityRecord record;
   final DateTime now;
   final int? confirmations;
+
+  /// The chip state, with the finding-18 revival: a send whose base state is
+  /// the quiet terminal (`none` — wallet-core confirmed it at acceptance) but
+  /// which still has a live sub-ceiling acceptance-depth counts as `accepted`
+  /// (green, streaming), exactly like a maturing deposit; the depth gate quiets
+  /// it once deep. Every other row keeps its base state. Pure display; the
+  /// underlying maturity truth is untouched.
+  TxChipState _chipState() {
+    final base = gateByDepth(
+      chipStateOf(record.maturity, stalled: record.stalled),
+      confirmations,
+    );
+    if (base == TxChipState.none &&
+        confirmations != null &&
+        record.direction == ActivityDirection.outgoing) {
+      return gateByDepth(TxChipState.accepted, confirmations);
+    }
+    return base;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -766,18 +784,16 @@ class _ActivityRow extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               AmountText(record.valueSompi, role: AmountRole.row, prefix: sign),
-              // The V2 three-state chip rides V1's acceptance overlay:
-              // Pending (breathing) → Accepted → quiet. Confirmed stays
-              // unlabelled (Rams #5); a stalled submit escalates honestly.
-              // The depth gate (finding 13): at/above the ceiling the chip
-              // extinguishes — a settled row streams nothing on cold start.
-              TxStatusChip(
-                state: gateByDepth(
-                  chipStateOf(record.maturity, stalled: record.stalled),
-                  confirmations,
-                ),
-                confirmations: confirmations,
-              ),
+              // The chip rides V1's acceptance overlay: Pending (breathing) →
+              // Accepted → quiet; a stalled submit escalates honestly. A SEND,
+              // once accepted, keeps STREAMING its acceptance-depth counter
+              // (green) until the depth gate quiets it — parity with a maturing
+              // deposit, and the fix for finding 18 (wallet-core collapses a
+              // send straight to Confirmed, so its base chip is `none`; a live
+              // sub-ceiling depth on an outgoing row revives the counting
+              // state). The depth gate (finding 13) extinguishes any row at or
+              // above the ceiling, so a settled/cold-start row streams nothing.
+              TxStatusChip(state: _chipState(), confirmations: confirmations),
             ],
           ),
         ],

@@ -234,6 +234,61 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets(
+    'finding 18: a confirmed send streams its acceptance-depth, then quiets',
+    (tester) async {
+      // wallet-core confirms a send at acceptance (maturity Confirmed), so its
+      // base chip is the quiet terminal. The fix revives a streaming counter
+      // from acceptedDaaScore (NOT blockDaaScore, which is submit time and
+      // would overstate) until the depth gate quiets it.
+      final daa = ValueNotifier<BigInt?>(BigInt.from(1000));
+      final now = DateTime(2026, 7, 11, 12);
+      ActivityRecord send(int acceptedDaa) => ActivityRecord(
+        txid: 's' * 64,
+        valueSompi: BigInt.from(20000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 3000),
+        blockDaaScore: BigInt.from(500), // submit time — must NOT be the anchor
+        acceptedDaaScore: BigInt.from(acceptedDaa),
+        direction: ActivityDirection.outgoing,
+        isCoinbase: false,
+        maturity: MaturityState.confirmed,
+        stalled: false,
+      );
+      final activity = ValueNotifier<List<ActivityRecord>>([send(993)]);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: kvDarkTheme(),
+          home: HomeScreen(
+            connected: ValueNotifier(true),
+            endpoint: ValueNotifier('wss://node.example/borsh'),
+            virtualDaaScore: daa,
+            error: ValueNotifier(null),
+            lastUpdate: ValueNotifier(now),
+            mature: ValueNotifier(BigInt.from(100000000)),
+            pending: ValueNotifier(BigInt.zero),
+            activity: activity,
+            syncing: ValueNotifier(false),
+            utxoIndexMissing: ValueNotifier(false),
+            clock: () => now,
+          ),
+        ),
+      );
+      // Accepted 7 DAA ago (1000 − 993) → streams "7 confirmations", NOT the
+      // 500 the submit-time blockDaaScore would have given.
+      expect(find.text('7 confirmations'), findsOneWidget);
+
+      // Deep past the ceiling (200 > 100) → the chip dissolves (Rams #5). The
+      // AnimatedSwitcher out-transition takes `normal`; pump past it (a
+      // repeating breath controller forbids pumpAndSettle).
+      activity.value = [send(800)];
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.textContaining('confirmations'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   test('formatScore groups digits and handles null', () {
     expect(formatScore(null), '—');
     expect(formatScore(BigInt.from(0)), '0');
