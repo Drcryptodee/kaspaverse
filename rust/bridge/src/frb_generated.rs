@@ -2123,6 +2123,7 @@ impl SseDecode for crate::api::wallet::ActivityRecord {
         let mut var_valueSompi = <u64>::sse_decode(deserializer);
         let mut var_unixtimeMsec = <Option<u64>>::sse_decode(deserializer);
         let mut var_blockDaaScore = <u64>::sse_decode(deserializer);
+        let mut var_acceptedDaaScore = <Option<u64>>::sse_decode(deserializer);
         let mut var_direction = <crate::api::wallet::ActivityDirection>::sse_decode(deserializer);
         let mut var_isCoinbase = <bool>::sse_decode(deserializer);
         let mut var_maturity = <crate::api::wallet::MaturityState>::sse_decode(deserializer);
@@ -2132,6 +2133,7 @@ impl SseDecode for crate::api::wallet::ActivityRecord {
             value_sompi: var_valueSompi,
             unixtime_msec: var_unixtimeMsec,
             block_daa_score: var_blockDaaScore,
+            accepted_daa_score: var_acceptedDaaScore,
             direction: var_direction,
             is_coinbase: var_isCoinbase,
             maturity: var_maturity,
@@ -2957,6 +2959,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::wallet::ActivityRecord {
             self.value_sompi.into_into_dart().into_dart(),
             self.unixtime_msec.into_into_dart().into_dart(),
             self.block_daa_score.into_into_dart().into_dart(),
+            self.accepted_daa_score.into_into_dart().into_dart(),
             self.direction.into_into_dart().into_dart(),
             self.is_coinbase.into_into_dart().into_dart(),
             self.maturity.into_into_dart().into_dart(),
@@ -3570,6 +3573,7 @@ impl SseEncode for crate::api::wallet::ActivityRecord {
         <u64>::sse_encode(self.value_sompi, serializer);
         <Option<u64>>::sse_encode(self.unixtime_msec, serializer);
         <u64>::sse_encode(self.block_daa_score, serializer);
+        <Option<u64>>::sse_encode(self.accepted_daa_score, serializer);
         <crate::api::wallet::ActivityDirection>::sse_encode(self.direction, serializer);
         <bool>::sse_encode(self.is_coinbase, serializer);
         <crate::api::wallet::MaturityState>::sse_encode(self.maturity, serializer);
