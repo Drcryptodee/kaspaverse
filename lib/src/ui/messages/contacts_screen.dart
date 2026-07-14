@@ -318,7 +318,7 @@ class _ConversationCard extends StatelessWidget {
                 Text(
                   // Honest terminal copy (founder-ruled wording, V5): the
                   // bond is pruned — no transient promise, and an exit.
-                  'This invitation has expired — ask them to send a new one.',
+                  'This invitation has expired and can no longer be accepted.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: KvColor.textSecondary,
                   ),

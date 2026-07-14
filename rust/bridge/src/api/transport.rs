@@ -1543,7 +1543,7 @@ pub async fn transport_prepare_accept(
             now_unix_ms(),
         ) {
             return Err(AppError::msg(
-                "this invitation has expired — ask them to send a new one",
+                "this invitation has expired and can no longer be accepted",
             ));
         }
         let their_alias = conversation
