@@ -32,7 +32,7 @@ use kaspaverse_chain::{
     compose_bcast, compose_comm_wire, compose_handshake_wire, decode_envelope_body, parse_payload,
     resolve_return_address, split_comm_body, AcceptanceEvent, Address, ChainError,
     ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord,
-    PreparedSend, SignerT, StoredKind, TransportEvent, TransportStore, WatchSource,
+    PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore, WatchSource,
     HANDSHAKE_BOND_SOMPI,
 };
 use kaspaverse_core::frames::{
@@ -45,36 +45,11 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::api::error::AppError;
 use crate::api::send::{
-    commit_and_advance, next_nonce, take_stashed, validate_mainnet_address, SendOutcomeDto,
+    commit_and_advance, next_nonce, project_signable, shortfall_message, take_stashed,
+    validate_mainnet_address, SendOutcomeDto, SignableKind, SignableSummaryDto,
 };
 use crate::api::{dag, vault, wallet};
 use crate::frb_generated::StreamSink;
-
-/// The Rust-decoded summary the transport confirm renders (B7 — never the form
-/// echo). Superset of the payment summary: `payload_len`/`payload_kind` are
-/// decoded FROM THE BUILT final transaction, so the user confirms what will
-/// actually be signed, payload included (anti-blind-signing parity with P1.6).
-#[derive(Clone, Debug)]
-pub struct TransportSendSummaryDto {
-    /// Opaque token tying this summary to its stashed transactions.
-    pub nonce: u64,
-    /// The mainnet address Rust validated and built into the payment output.
-    pub destination: String,
-    pub amount_sompi: u64,
-    /// The Generator's exact aggregate fee — payload mass is priced in here
-    /// (KIP-9; the P2.1 fee-delta proof reads this field).
-    pub fee_sompi: u64,
-    /// `amount + fee` (what leaves the wallet, excluding returned change).
-    pub total_sompi: u64,
-    pub mass: u64,
-    pub tx_count: u32,
-    pub utxo_count: u32,
-    /// Payload bytes on the built final tx (read back, not echoed).
-    pub payload_len: u32,
-    /// Wire kind decoded from the built payload (`bcast` here) — same parser
-    /// the receive scan uses.
-    pub payload_kind: String,
-}
 
 /// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).
 /// Raw by design: kind is the verbatim wire token, `body` the raw bytes after
@@ -106,6 +81,14 @@ pub struct ConversationDto {
     pub initiated_by_me: bool,
     pub created_unix_ms: u64,
     pub last_activity_unix_ms: u64,
+    /// A `pending_in` invitation whose bond tx is past the node's pruning
+    /// horizon (V5, finding 15): the accept can NEVER resolve — the bond
+    /// UTXO is spent/pruned and the return-address RPC is gone with it. The
+    /// card renders the honest terminal copy + a Dismiss exit instead of the
+    /// transient promise. Computed in Rust from the pin-read horizon
+    /// (INV-9); only this bool crosses the FFI. Always `false` for other
+    /// statuses.
+    pub invite_expired: bool,
 }
 
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
@@ -513,7 +496,7 @@ async fn fill_walks(
                 addresses: vec![row.receiver.clone()],
                 block_time_ms: Some(row.block_time),
             };
-            if handle_inbound(hub, event) {
+            if handle_inbound(hub, event, EventOrigin::Fill) {
                 report.new_rows += 1;
             }
         }
@@ -576,7 +559,7 @@ async fn fill_walks(
                 addresses: Vec::new(),
                 block_time_ms: Some(row.block_time),
             };
-            if handle_inbound(hub, event) {
+            if handle_inbound(hub, event, EventOrigin::Fill) {
                 report.new_rows += 1;
             }
         }
@@ -707,7 +690,7 @@ pub async fn transport_start() -> Result<(), AppError> {
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    handle_inbound(&fold_hub, event);
+                    handle_inbound(&fold_hub, event, EventOrigin::Node);
                 }
                 // Sparse stream — lag is exotic; missed live events are the
                 // live-only law's accepted cost (D-049), not silent data loss:
@@ -923,12 +906,32 @@ fn watch_acceptance(txid: &str, block_time_ms: Option<u64>) {
     }
 }
 
+/// Where an inbound event came from — the fold's provenance input (V5,
+/// finding 14). Everything delivered through the monitor's broadcast lane
+/// (live BlockAdded scan + catch-up walk) is node truth; only the fill's
+/// direct calls are indexer claims. A parameter, not a `TransportEvent`
+/// field: the event type (and its dev wire view) stays untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventOrigin {
+    Node,
+    Fill,
+}
+
+impl EventOrigin {
+    fn row_source(self) -> RowSource {
+        match self {
+            EventOrigin::Node => RowSource::NodeScanned,
+            EventOrigin::Fill => RowSource::FillSourced,
+        }
+    }
+}
+
 /// One scan match → store/conversation fold. Content never reaches a log
 /// line from here (§4: message plaintext is treated like key material for
 /// logging; even sealed bodies are logged as shapes only). Returns whether a
 /// NEW row was recorded — the live scan ignores it; the V2b fill counts it
 /// (its report is row-counts, never content).
-fn handle_inbound(hub: &TransportHub, event: TransportEvent) -> bool {
+fn handle_inbound(hub: &TransportHub, event: TransportEvent, origin: EventOrigin) -> bool {
     // The store law keys on txid (D-065); an id-less event (exotic — both the
     // node's verbose data AND the pinned recompute failed) cannot be stored.
     let Some(txid) = event.txid else { return false };
@@ -939,8 +942,9 @@ fn handle_inbound(hub: &TransportHub, event: TransportEvent) -> bool {
             &event.body,
             &event.addresses,
             event.block_time_ms,
+            origin,
         ),
-        "comm" => handle_inbound_comm(hub, &txid, &event.body, event.block_time_ms),
+        "comm" => handle_inbound_comm(hub, &txid, &event.body, event.block_time_ms, origin),
         // `legacy` (VNone): parse-layer tolerance is fixture-pinned in chain;
         // conversation semantics for the unversioned generation are
         // consciously deferred (the population emits versioned forms since
@@ -957,16 +961,31 @@ fn handle_inbound_handshake(
     body: &[u8],
     addresses: &[String],
     block_time_ms: Option<u64>,
+    origin: EventOrigin,
 ) -> bool {
-    {
+    // Dedup BEFORE any crypto: DAG re-delivery, our own outbound handshakes
+    // echoing back through the scan (stored at commit — Own/Outbound rows
+    // keep the cheap pre-crypto skip), and fill rows the live scan already
+    // caught. ONE exception (V5, finding 14): a NODE event whose stored row
+    // is an indexer claim (`FillSourced`) or pre-V5 (`Unknown`) proceeds in
+    // OVERRIDE mode — node truth replaces the claim after the full
+    // verify-by-decrypt below.
+    let override_row = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        // Dedup BEFORE any crypto: DAG re-delivery, our own outbound
-        // handshakes echoing back through the scan (stored at commit), and
-        // fill rows the live scan already caught.
         if store.has_handshake_txid(txid) || store.has_message_txid(txid) {
-            return false;
+            let overridable = origin == EventOrigin::Node
+                && store.message(txid).is_some_and(|m| {
+                    m.direction == MessageDirection::Inbound
+                        && matches!(m.provenance, RowSource::FillSourced | RowSource::Unknown)
+                });
+            if !overridable {
+                return false;
+            }
+            store.message(txid).cloned()
+        } else {
+            None
         }
-    }
+    };
     // Relevance without crypto: a real handshake bonds the recipient, so one
     // of OUR watched addresses must be among the outputs.
     if !addresses.iter().any(|a| hub.watched.contains(a)) {
@@ -998,6 +1017,55 @@ fn handle_inbound_handshake(
     let now = block_time_ms.unwrap_or_else(now_unix_ms);
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
 
+    // OVERRIDE mode (V5, finding 14): node truth replaces the stored claim's
+    // row in place — never a second conversation. The owning conversation is
+    // refreshed only while it is still PendingInbound (node block time
+    // hardens the expiry discriminator; the alias is the node-decrypted
+    // truth); an Active conversation is NEVER touched — the user already
+    // accepted, and regressing status or rebinding is worse than the
+    // documented open-thread residual.
+    if let Some(old) = override_row {
+        let record = MessageRecord {
+            txid: txid.to_string(),
+            conversation_id: old.conversation_id.clone(),
+            direction: MessageDirection::Inbound,
+            kind: StoredKind::Handshake,
+            envelope: envelope_bytes,
+            unix_ms: payload.timestamp,
+            alias_on_wire: None,
+            sealed_to: None,
+            provenance: RowSource::NodeScanned,
+        };
+        match store.override_message(record) {
+            Ok(Some(_)) => {}
+            Ok(None) => return false, // a racing writer settled it first
+            Err(e) => {
+                log::warn!("transport-hub: store append failed: {e}");
+                return false;
+            }
+        }
+        if let Some(existing) = store.conversation(&old.conversation_id) {
+            if existing.status == ConversationStatus::PendingInbound {
+                let mut conversation = existing.clone();
+                conversation.created_unix_ms = now;
+                conversation.their_alias = Some(payload.alias.clone());
+                // Rebind to the slot that opened the NODE envelope (same as
+                // the fresh-inbound fold): a mislabeled fill could have bound
+                // a different slot, and a later accept would pin input[0] to
+                // an address the counterpart doesn't know (the D-067
+                // identity-fragmentation class). Safe while PendingInbound —
+                // nothing was accepted against the stale binding.
+                conversation.bound_branch = to_key_branch(slot.0);
+                conversation.bound_index = slot.1;
+                warn_store(store.upsert_conversation(conversation));
+            }
+        }
+        drop(store);
+        watch_acceptance(txid, block_time_ms);
+        ping(&old.conversation_id);
+        return true;
+    }
+
     // An acceptance response completes a conversation we initiated: their
     // fresh alias arrives in `alias`, OUR alias echoes back in `their_alias`.
     if payload.is_acceptance() {
@@ -1024,6 +1092,7 @@ fn handle_inbound_handshake(
                 unix_ms: payload.timestamp,
                 alias_on_wire: None,
                 sealed_to: None,
+                provenance: origin.row_source(),
             }));
             drop(store);
             watch_acceptance(txid, block_time_ms);
@@ -1060,6 +1129,7 @@ fn handle_inbound_handshake(
         unix_ms: payload.timestamp,
         alias_on_wire: None,
         sealed_to: None,
+        provenance: origin.row_source(),
     }));
     drop(store);
     watch_acceptance(txid, block_time_ms);
@@ -1072,13 +1142,27 @@ fn handle_inbound_comm(
     txid: &str,
     body: &[u8],
     block_time_ms: Option<u64>,
+    origin: EventOrigin,
 ) -> bool {
-    {
+    // DAG re-delivery / our own sent row echoing back: pre-crypto skip —
+    // except a NODE event over a stored indexer claim (`FillSourced`) or
+    // pre-V5 row (`Unknown`), which proceeds in OVERRIDE mode (V5,
+    // finding 14) through the full verify-by-decrypt below.
+    let override_row = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        if store.has_message_txid(txid) {
-            return false; // DAG re-delivery, or our own sent row echoing back
+        match store.message(txid) {
+            Some(row) => {
+                let overridable = origin == EventOrigin::Node
+                    && row.direction == MessageDirection::Inbound
+                    && matches!(row.provenance, RowSource::FillSourced | RowSource::Unknown);
+                if !overridable {
+                    return false;
+                }
+                Some(row.clone())
+            }
+            None => None,
         }
-    }
+    };
     // The alias head sits OUTSIDE the envelope — split BEFORE any envelope
     // parse (P2.2 handover law).
     let Some((alias, sealed)) = split_comm_body(body) else {
@@ -1126,7 +1210,7 @@ fn handle_inbound_comm(
     // V2b): filled history sorts into its true position, not "now".
     let now = block_time_ms.unwrap_or_else(now_unix_ms);
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-    let recorded = store.record_message(MessageRecord {
+    let record = MessageRecord {
         txid: txid.to_string(),
         conversation_id: conversation_id.clone(),
         direction: MessageDirection::Inbound,
@@ -1135,7 +1219,36 @@ fn handle_inbound_comm(
         unix_ms: now,
         alias_on_wire: Some(alias),
         sealed_to,
-    });
+        provenance: origin.row_source(),
+    };
+
+    // OVERRIDE mode (V5, finding 14): the node-resolved conversation is the
+    // row's true home — when the claim had filed it elsewhere, both threads
+    // get the re-pull nudge.
+    if let Some(old) = override_row {
+        match store.override_message(record) {
+            Ok(Some(_)) => {}
+            Ok(None) => return false, // a racing writer settled it first
+            Err(e) => {
+                log::warn!("transport-hub: store append failed: {e}");
+                return false;
+            }
+        }
+        if let Some(existing) = store.conversation(&conversation_id) {
+            let mut conversation = existing.clone();
+            conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
+            warn_store(store.upsert_conversation(conversation));
+        }
+        drop(store);
+        watch_acceptance(txid, block_time_ms);
+        ping(&conversation_id);
+        if old.conversation_id != conversation_id {
+            ping(&old.conversation_id);
+        }
+        return true;
+    }
+
+    let recorded = store.record_message(record);
     if let Err(e) = &recorded {
         log::warn!("transport-hub: store append failed: {e}");
     }
@@ -1164,7 +1277,7 @@ pub async fn transport_prepare_bcast(
     amount_sompi: u64,
     channel: String,
     message: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let dest = validate_mainnet_address(&destination)?;
     if amount_sompi == 0 {
         // The Generator needs a real payment output; message value floors are
@@ -1204,18 +1317,12 @@ pub async fn transport_prepare_bcast(
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
 
-    Ok(TransportSendSummaryDto {
+    Ok(project_signable(
         nonce,
-        destination: summary.destination,
-        amount_sompi: summary.amount_sompi,
-        fee_sompi: summary.fee_sompi,
-        total_sompi: summary.total_sompi,
-        mass: summary.mass,
-        tx_count: summary.tx_count,
-        utxo_count: summary.utxo_count,
-        payload_len: summary.payload_len,
-        payload_kind,
-    })
+        SignableKind::Bcast,
+        &summary,
+        Some(payload_kind),
+    ))
 }
 
 /// Build + stash one encrypted-kind transport send over the shared two-phase
@@ -1236,7 +1343,16 @@ async fn prepare_transport_send(
     wire: Vec<u8>,
     source: Address,
     intent: TransportIntent,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
+    // D-069 structural check: a comm-carried kind IS a self-send — its
+    // destination and pinned source are the same bound address (value
+    // returns as change; the sheet leads with the fee). Debug-only belt: the
+    // kind the DTO carries must never claim self-send over a tx that pays a
+    // stranger. Never crosses the bridge (release-stripped).
+    debug_assert!(
+        !matches!(intent, TransportIntent::Comm { .. }) || dest == source,
+        "a Comm intent must be a self-send (D-069): dest == source"
+    );
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
@@ -1264,7 +1380,20 @@ async fn prepare_transport_send(
             Some(wire),
         )
         .await
-        .map_err(friendly_prepare_error)?;
+        .map_err(|e| {
+            // Live buckets for the shortfall classifier (same read as the
+            // payment path, send.rs — INV-8 honesty over node-read balance).
+            let (mature, pending, outgoing) = wallet::latest_snapshot()
+                .map(|s| {
+                    (
+                        s.mature_sompi.unwrap_or(0),
+                        s.pending_sompi.unwrap_or(0),
+                        s.outgoing_sompi.unwrap_or(0),
+                    )
+                })
+                .unwrap_or((0, 0, 0));
+            friendly_prepare_error(e, amount_sompi, mature, pending, outgoing)
+        })?;
 
     let built = prepared.final_payload();
     let payload_kind = parse_payload(&built)
@@ -1272,37 +1401,52 @@ async fn prepare_transport_send(
         .unwrap_or_else(|| "none".to_string());
 
     let nonce = next_nonce();
+    let kind = kind_of_intent(&intent);
     stash_intent(nonce, intent);
     let summary = prepared.summary().clone();
     *PENDING_TRANSPORT
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
 
-    Ok(TransportSendSummaryDto {
-        nonce,
-        destination: summary.destination,
-        amount_sompi: summary.amount_sompi,
-        fee_sompi: summary.fee_sompi,
-        total_sompi: summary.total_sompi,
-        mass: summary.mass,
-        tx_count: summary.tx_count,
-        utxo_count: summary.utxo_count,
-        payload_len: summary.payload_len,
-        payload_kind,
-    })
+    Ok(project_signable(nonce, kind, &summary, Some(payload_kind)))
+}
+
+/// The flow mode a stashed intent describes — RUST's knowledge, carried on
+/// the canonical summary so the sheet's rendering can never be steered by a
+/// caller flag (V5; the D-069 self-send semantics ride `SelfSendFrame`).
+fn kind_of_intent(intent: &TransportIntent) -> SignableKind {
+    match intent {
+        TransportIntent::Bcast => SignableKind::Bcast,
+        TransportIntent::Handshake { .. } => SignableKind::Bond,
+        TransportIntent::Accept { .. } => SignableKind::BondRefund,
+        TransportIntent::Comm { .. } => SignableKind::SelfSendFrame,
+    }
 }
 
 /// Honest friendly mapping of the Generator's typed errors for the compose
 /// surfaces (the carried L-pattern from `StorageMassExceeded`, P2.1 note).
-fn friendly_prepare_error(e: ChainError) -> AppError {
+/// `InsufficientFunds` routes through the SAME shortfall classifier as the
+/// payment path (V5, finding 7's second half): settling change from a
+/// just-broadcast send rides the `outgoing` bucket, and a comm/handshake
+/// minutes after a send must say "still settling", never "insufficient" at
+/// ample balance. Pure over its inputs; tested.
+fn friendly_prepare_error(
+    e: ChainError,
+    amount_sompi: u64,
+    mature_sompi: u64,
+    pending_sompi: u64,
+    outgoing_sompi: u64,
+) -> AppError {
     match e {
         ChainError::TransactionTooHeavy => AppError::msg(
             "this message is too large for one transaction — shorten it and try again",
         ),
-        ChainError::InsufficientFunds { .. } => AppError::msg(
-            "insufficient funds — the message value plus the network fee is more than your \
-             spendable balance",
-        ),
+        ChainError::InsufficientFunds { .. } => AppError::msg(shortfall_message(
+            amount_sompi,
+            mature_sompi,
+            pending_sompi,
+            outgoing_sompi,
+        )),
         ChainError::StorageMassExceeded { .. } => AppError::msg(
             "this send is too small for your current coins (Kaspa's anti-dust rule) — \
              wait for pending funds or add to your balance",
@@ -1317,7 +1461,7 @@ fn friendly_prepare_error(e: ChainError) -> AppError {
 /// re-sealed to self HERE so the stash holds ciphertext only (§0.4).
 pub async fn transport_prepare_handshake(
     destination: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let dest = validate_mainnet_address(&destination)?;
     let recipient_x_only = x_only_of(&dest)?;
     hub()?; // the store must be live before we can promise persistence
@@ -1378,7 +1522,7 @@ pub async fn transport_prepare_handshake(
 /// KAS bond (§0.6).
 pub async fn transport_prepare_accept(
     conversation_id: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let hub = hub()?;
     let (their_alias, handshake_txid, bound) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1387,6 +1531,20 @@ pub async fn transport_prepare_accept(
             .ok_or_else(|| AppError::msg("conversation not found"))?;
         if conversation.status != ConversationStatus::PendingInbound {
             return Err(AppError::msg("this conversation isn't awaiting an accept"));
+        }
+        // Terminal-vs-transient taxonomy (V5, finding 15): past the pruning
+        // horizon the bond can never resolve — the honest refusal is
+        // permanent, never "try again in a few seconds". Defense in depth
+        // with the card's own `invite_expired` gate (a row can cross the
+        // horizon while on screen).
+        if invite_expired(
+            conversation.status,
+            conversation.created_unix_ms,
+            now_unix_ms(),
+        ) {
+            return Err(AppError::msg(
+                "this invitation has expired — ask them to send a new one",
+            ));
         }
         let their_alias = conversation
             .their_alias
@@ -1472,7 +1630,7 @@ pub async fn transport_prepare_accept(
 pub async fn transport_prepare_comm(
     conversation_id: String,
     text: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     if text.trim().is_empty() {
         return Err(AppError::msg("enter a message"));
     }
@@ -1489,7 +1647,7 @@ pub async fn transport_prepare_comm(
 async fn prepare_comm_plaintext(
     conversation_id: String,
     text: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let hub = hub()?;
     let (contact_address, my_alias, bound) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1566,7 +1724,7 @@ async fn prepare_comm_plaintext(
 pub async fn transport_prepare_challenge(
     conversation_id: String,
     stake: Option<String>,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let id = fresh_challenge_id();
     let plaintext =
         build_challenge(GAME_ATTACK_DEFEND, stake.as_deref(), &id).map_err(AppError::core)?;
@@ -1580,7 +1738,7 @@ pub async fn transport_prepare_challenge(
 pub async fn transport_prepare_challenge_accept(
     conversation_id: String,
     ref_id: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let plaintext = build_accept(GAME_ATTACK_DEFEND, &ref_id).map_err(AppError::core)?;
     prepare_comm_plaintext(conversation_id, plaintext).await
 }
@@ -1590,7 +1748,7 @@ pub async fn transport_prepare_challenge_accept(
 pub async fn transport_prepare_taunt(
     conversation_id: String,
     text: String,
-) -> Result<TransportSendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let plaintext = build_taunt(&text).map_err(AppError::core)?;
     prepare_comm_plaintext(conversation_id, plaintext).await
 }
@@ -1637,6 +1795,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 unix_ms: timestamp_ms,
                 alias_on_wire: None,
                 sealed_to,
+                provenance: RowSource::Own,
             }));
             drop(store);
             ping(&conversation_id);
@@ -1665,6 +1824,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                     unix_ms: timestamp_ms,
                     alias_on_wire: None,
                     sealed_to,
+                    provenance: RowSource::Own,
                 }));
             }
             drop(store);
@@ -1686,6 +1846,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 unix_ms: timestamp_ms,
                 alias_on_wire: Some(alias_on_wire),
                 sealed_to: Some(sealed_to),
+                provenance: RowSource::Own,
             }));
             if let Some(existing) = store.conversation(&conversation_id) {
                 let mut conversation = existing.clone();
@@ -1710,14 +1871,31 @@ pub fn transport_abandon() {
 
 // ── Pull surfaces (Dart renders and drops; nothing content-bearing streams) ─
 
+/// Whether a pending-inbound invitation is PERMANENTLY dead (V5, finding
+/// 15): its bond is older than the node's pruning horizon, so
+/// `transport_prepare_accept`'s sender resolution can never succeed — the
+/// bond UTXO is long spent and the tx pruned (the return-address RPC is gone
+/// with it), the sealed payload carries no sender address, and a funds
+/// destination may never ride an unverifiable indexer hint (D-070). The
+/// discriminator is the conversation's block-time `created_unix_ms` (V2b)
+/// against the PIN-READ horizon (INV-9 — computed here, never re-derived in
+/// Dart; only the bool crosses the FFI). Saturating: a future-dated clock
+/// never expires anything. Pure; tested.
+fn invite_expired(status: ConversationStatus, created_unix_ms: u64, now_ms: u64) -> bool {
+    status == ConversationStatus::PendingInbound
+        && now_ms.saturating_sub(created_unix_ms) > kaspaverse_chain::pruning_horizon_ms()
+}
+
 /// All conversations, most recently active first.
 pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
     let hub = hub()?;
     let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = now_unix_ms();
     Ok(store
         .list_conversations()
         .into_iter()
         .map(|c| ConversationDto {
+            invite_expired: invite_expired(c.status, c.created_unix_ms, now),
             conversation_id: c.conversation_id,
             contact_address: c.contact_address,
             my_alias: c.my_alias,
@@ -2097,6 +2275,74 @@ fn to_dto(event: TransportEvent) -> TransportEventDto {
 mod tests {
     use super::*;
 
+    /// Finding 7, second half (V5): the transport prepare path classifies an
+    /// `InsufficientFunds` refusal through the SAME shortfall classifier as
+    /// the payment path — settling change (`outgoing`) reads as "still
+    /// settling", maturing deposits (`pending`) as "not yet spendable", and
+    /// an amount nothing in flight could cover as a true shortfall. The
+    /// non-funds arms keep their compose-surface copy untouched.
+    #[test]
+    fn insufficient_funds_routes_through_the_shortfall_classifier() {
+        let funds = |mature, pending, outgoing| {
+            friendly_prepare_error(
+                ChainError::InsufficientFunds {
+                    additional_needed: 1,
+                },
+                50,
+                mature,
+                pending,
+                outgoing,
+            )
+            .message
+        };
+        // Change from our own last send is on its way back.
+        assert!(funds(10, 0, 45).contains("still settling from your last send"));
+        // A maturing deposit covers it.
+        assert!(funds(10, 45, 0).contains("not yet spendable"));
+        // Nothing in flight could ever cover it — the honest refusal.
+        assert!(funds(10, 5, 5).contains("insufficient funds"));
+        // Non-funds arms keep their own compose-surface copy.
+        assert!(
+            friendly_prepare_error(ChainError::TransactionTooHeavy, 50, 0, 0, 0)
+                .message
+                .contains("too large for one transaction")
+        );
+        assert!(friendly_prepare_error(
+            ChainError::StorageMassExceeded { storage_mass: 9 },
+            50,
+            0,
+            0,
+            0
+        )
+        .message
+        .contains("anti-dust rule"));
+    }
+
+    /// Finding 15 (V5): the expiry discriminator flips EXACTLY past the
+    /// pin-read pruning horizon — at the horizon the transient copy is still
+    /// truthful; one ms past it the invitation is permanently dead. Only a
+    /// PendingInbound row can expire, and a future-dated clock (skew) never
+    /// expires anything (saturating).
+    #[test]
+    fn invite_expiry_flips_exactly_past_the_pinned_horizon() {
+        let horizon = kaspaverse_chain::pruning_horizon_ms();
+        let created = 1_000_000_u64;
+        let pending = ConversationStatus::PendingInbound;
+        assert!(!invite_expired(pending, created, created + horizon));
+        assert!(invite_expired(pending, created, created + horizon + 1));
+        assert!(!invite_expired(
+            ConversationStatus::Active,
+            created,
+            created + horizon + 1
+        ));
+        assert!(!invite_expired(
+            ConversationStatus::PendingOutbound,
+            created,
+            created + horizon + 1
+        ));
+        assert!(!invite_expired(pending, created + 10, created));
+    }
+
     #[test]
     fn abandon_clears_the_transport_stash_and_intent() {
         stash_intent(99, TransportIntent::Bcast);
@@ -2149,6 +2395,7 @@ mod tests {
             unix_ms,
             alias_on_wire: None,
             sealed_to: None,
+            provenance: RowSource::Own,
         }
     }
 

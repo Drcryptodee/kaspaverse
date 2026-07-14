@@ -13,6 +13,7 @@ import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 ConversationDto conversation(
   String id, {
   String status = 'active',
+  bool inviteExpired = false,
   String address =
       'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf',
 }) => ConversationDto(
@@ -24,6 +25,7 @@ ConversationDto conversation(
   initiatedByMe: status != 'pending_in',
   createdUnixMs: BigInt.one,
   lastActivityUnixMs: BigInt.two,
+  inviteExpired: inviteExpired,
 );
 
 ThreadMessageDto message(
@@ -76,8 +78,13 @@ TxStatusDto status(TxStatusKind kind, {int? depth}) => TxStatusDto(
   waitedMs: null,
 );
 
-TransportSendSummaryDto summary({BigInt? amount}) => TransportSendSummaryDto(
+SignableSummaryDto summary({
+  BigInt? amount,
+  SignableKind kind = SignableKind.bondRefund,
+  String payloadKind = 'handshake',
+}) => SignableSummaryDto(
   nonce: BigInt.from(7),
+  kind: kind,
   destination:
       'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf',
   amountSompi: amount ?? BigInt.from(20000000),
@@ -87,7 +94,9 @@ TransportSendSummaryDto summary({BigInt? amount}) => TransportSendSummaryDto(
   txCount: 1,
   utxoCount: 1,
   payloadLen: 154,
-  payloadKind: 'handshake',
+  payloadKind: payloadKind,
+  feeStrategy: FeeStrategyKind.senderPays,
+  priorityFeeSompi: BigInt.zero,
 );
 
 void main() {
@@ -386,6 +395,57 @@ void main() {
       expect(find.text('Unknown sender'), findsOneWidget);
     });
 
+    testWidgets(
+      'an expired invite shows the terminal copy and Dismiss, never Accept',
+      (tester) async {
+        // Rust's taxonomy (V5, finding 15): past the pruning horizon the
+        // accept can never resolve — no transient promise, and an exit.
+        MessagingService.conversationsFn = () async => [
+          conversation('c1', status: 'pending_in', inviteExpired: true),
+        ];
+        String? hidden;
+        MessagingService.hideFn = (id) async => hidden = id;
+        await MessagingService.instance.refresh();
+        await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Invitation expired'), findsOneWidget);
+        expect(
+          find.text(
+            'This invitation has expired — ask them to send a new one.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Dismiss'), findsOneWidget);
+        // The dead affordances are GONE, not disabled: no Accept, no
+        // transient bond copy, no accept ceremony reachable.
+        expect(find.text('Accept'), findsNothing);
+        expect(find.textContaining('0.2 KAS bond'), findsNothing);
+
+        // One tap dismisses (founder-ruled: the copy already explains) —
+        // through the same reversible tombstone lane as hide.
+        await tester.tap(find.text('Dismiss'));
+        await tester.pumpAndSettle();
+        expect(hidden, 'c1');
+        expect(find.text('Invitation dismissed.'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a fresh inbound invite keeps the accept card', (tester) async {
+      // The within-horizon half of the taxonomy: today's card unchanged.
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Accept'), findsOneWidget);
+      expect(find.text('Wants to connect'), findsOneWidget);
+      expect(find.text('Dismiss'), findsNothing);
+      expect(find.text('Invitation expired'), findsNothing);
+    });
+
     testWidgets('accept runs prepare and opens the confirm ceremony', (
       tester,
     ) async {
@@ -509,7 +569,11 @@ void main() {
       String? sentText;
       MessagingService.prepareCommFn = (id, text) async {
         sentText = text;
-        return summary(amount: BigInt.from(12000000));
+        return summary(
+          amount: BigInt.from(12000000),
+          kind: SignableKind.selfSendFrame,
+          payloadKind: 'comm',
+        );
       };
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
@@ -839,7 +903,7 @@ void main() {
       var commits = 0;
       MessagingService.prepareChallengeAcceptFn = (id, refId) async {
         accepted = '$id/$refId';
-        return summary();
+        return summary(kind: SignableKind.selfSendFrame, payloadKind: 'comm');
       };
       MessagingService.commitFn = (_) async {
         commits++;
@@ -933,7 +997,7 @@ void main() {
       MessagingService.prepareChallengeFn = (id, s) async {
         convId = id;
         stake = s;
-        return summary();
+        return summary(kind: SignableKind.selfSendFrame, payloadKind: 'comm');
       };
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();

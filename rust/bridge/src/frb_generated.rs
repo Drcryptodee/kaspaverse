@@ -2170,6 +2170,7 @@ impl SseDecode for crate::api::transport::ConversationDto {
         let mut var_initiatedByMe = <bool>::sse_decode(deserializer);
         let mut var_createdUnixMs = <u64>::sse_decode(deserializer);
         let mut var_lastActivityUnixMs = <u64>::sse_decode(deserializer);
+        let mut var_inviteExpired = <bool>::sse_decode(deserializer);
         return crate::api::transport::ConversationDto {
             conversation_id: var_conversationId,
             contact_address: var_contactAddress,
@@ -2179,6 +2180,7 @@ impl SseDecode for crate::api::transport::ConversationDto {
             initiated_by_me: var_initiatedByMe,
             created_unix_ms: var_createdUnixMs,
             last_activity_unix_ms: var_lastActivityUnixMs,
+            invite_expired: var_inviteExpired,
         };
     }
 }
@@ -2211,6 +2213,17 @@ impl SseDecode for crate::api::dag::DagStatusDto {
             endpoint: var_endpoint,
             last_block_age_secs: var_lastBlockAgeSecs,
             virtual_daa_score: var_virtualDaaScore,
+        };
+    }
+}
+
+impl SseDecode for crate::api::send::FeeStrategyKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::send::FeeStrategyKind::SenderPays,
+            _ => unreachable!("Invalid variant for FeeStrategyKind: {}", inner),
         };
     }
 }
@@ -2466,6 +2479,17 @@ impl SseDecode for Option<crate::api::transport::TxStatusDto> {
     }
 }
 
+impl SseDecode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<u64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2508,10 +2532,27 @@ impl SseDecode for crate::api::send::SendOutcomeDto {
     }
 }
 
-impl SseDecode for crate::api::send::SendSummaryDto {
+impl SseDecode for crate::api::send::SignableKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::send::SignableKind::Payment,
+            1 => crate::api::send::SignableKind::Bond,
+            2 => crate::api::send::SignableKind::BondRefund,
+            3 => crate::api::send::SignableKind::SelfSendFrame,
+            4 => crate::api::send::SignableKind::Stake,
+            5 => crate::api::send::SignableKind::Bcast,
+            _ => unreachable!("Invalid variant for SignableKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::send::SignableSummaryDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_nonce = <u64>::sse_decode(deserializer);
+        let mut var_kind = <crate::api::send::SignableKind>::sse_decode(deserializer);
         let mut var_destination = <String>::sse_decode(deserializer);
         let mut var_amountSompi = <u64>::sse_decode(deserializer);
         let mut var_feeSompi = <u64>::sse_decode(deserializer);
@@ -2519,8 +2560,13 @@ impl SseDecode for crate::api::send::SendSummaryDto {
         let mut var_mass = <u64>::sse_decode(deserializer);
         let mut var_txCount = <u32>::sse_decode(deserializer);
         let mut var_utxoCount = <u32>::sse_decode(deserializer);
-        return crate::api::send::SendSummaryDto {
+        let mut var_payloadLen = <Option<u32>>::sse_decode(deserializer);
+        let mut var_payloadKind = <Option<String>>::sse_decode(deserializer);
+        let mut var_feeStrategy = <crate::api::send::FeeStrategyKind>::sse_decode(deserializer);
+        let mut var_priorityFeeSompi = <u64>::sse_decode(deserializer);
+        return crate::api::send::SignableSummaryDto {
             nonce: var_nonce,
+            kind: var_kind,
             destination: var_destination,
             amount_sompi: var_amountSompi,
             fee_sompi: var_feeSompi,
@@ -2528,6 +2574,10 @@ impl SseDecode for crate::api::send::SendSummaryDto {
             mass: var_mass,
             tx_count: var_txCount,
             utxo_count: var_utxoCount,
+            payload_len: var_payloadLen,
+            payload_kind: var_payloadKind,
+            fee_strategy: var_feeStrategy,
+            priority_fee_sompi: var_priorityFeeSompi,
         };
     }
 }
@@ -2596,34 +2646,6 @@ impl SseDecode for crate::api::transport::TransportEventDto {
             kind: var_kind,
             body: var_body,
             addresses: var_addresses,
-        };
-    }
-}
-
-impl SseDecode for crate::api::transport::TransportSendSummaryDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_nonce = <u64>::sse_decode(deserializer);
-        let mut var_destination = <String>::sse_decode(deserializer);
-        let mut var_amountSompi = <u64>::sse_decode(deserializer);
-        let mut var_feeSompi = <u64>::sse_decode(deserializer);
-        let mut var_totalSompi = <u64>::sse_decode(deserializer);
-        let mut var_mass = <u64>::sse_decode(deserializer);
-        let mut var_txCount = <u32>::sse_decode(deserializer);
-        let mut var_utxoCount = <u32>::sse_decode(deserializer);
-        let mut var_payloadLen = <u32>::sse_decode(deserializer);
-        let mut var_payloadKind = <String>::sse_decode(deserializer);
-        return crate::api::transport::TransportSendSummaryDto {
-            nonce: var_nonce,
-            destination: var_destination,
-            amount_sompi: var_amountSompi,
-            fee_sompi: var_feeSompi,
-            total_sompi: var_totalSompi,
-            mass: var_mass,
-            tx_count: var_txCount,
-            utxo_count: var_utxoCount,
-            payload_len: var_payloadLen,
-            payload_kind: var_payloadKind,
         };
     }
 }
@@ -3005,6 +3027,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::transport::ConversationDto {
             self.initiated_by_me.into_into_dart().into_dart(),
             self.created_unix_ms.into_into_dart().into_dart(),
             self.last_activity_unix_ms.into_into_dart().into_dart(),
+            self.invite_expired.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3057,6 +3080,26 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::dag::DagStatusDto>
     for crate::api::dag::DagStatusDto
 {
     fn into_into_dart(self) -> crate::api::dag::DagStatusDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::send::FeeStrategyKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::SenderPays => 0.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::send::FeeStrategyKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::send::FeeStrategyKind>
+    for crate::api::send::FeeStrategyKind
+{
+    fn into_into_dart(self) -> crate::api::send::FeeStrategyKind {
         self
     }
 }
@@ -3222,10 +3265,36 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::send::SendOutcomeDto>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::send::SendSummaryDto {
+impl flutter_rust_bridge::IntoDart for crate::api::send::SignableKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Payment => 0.into_dart(),
+            Self::Bond => 1.into_dart(),
+            Self::BondRefund => 2.into_dart(),
+            Self::SelfSendFrame => 3.into_dart(),
+            Self::Stake => 4.into_dart(),
+            Self::Bcast => 5.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::send::SignableKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::send::SignableKind>
+    for crate::api::send::SignableKind
+{
+    fn into_into_dart(self) -> crate::api::send::SignableKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::send::SignableSummaryDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.nonce.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
             self.destination.into_into_dart().into_dart(),
             self.amount_sompi.into_into_dart().into_dart(),
             self.fee_sompi.into_into_dart().into_dart(),
@@ -3233,18 +3302,22 @@ impl flutter_rust_bridge::IntoDart for crate::api::send::SendSummaryDto {
             self.mass.into_into_dart().into_dart(),
             self.tx_count.into_into_dart().into_dart(),
             self.utxo_count.into_into_dart().into_dart(),
+            self.payload_len.into_into_dart().into_dart(),
+            self.payload_kind.into_into_dart().into_dart(),
+            self.fee_strategy.into_into_dart().into_dart(),
+            self.priority_fee_sompi.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
 }
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::send::SendSummaryDto
+    for crate::api::send::SignableSummaryDto
 {
 }
-impl flutter_rust_bridge::IntoIntoDart<crate::api::send::SendSummaryDto>
-    for crate::api::send::SendSummaryDto
+impl flutter_rust_bridge::IntoIntoDart<crate::api::send::SignableSummaryDto>
+    for crate::api::send::SignableSummaryDto
 {
-    fn into_into_dart(self) -> crate::api::send::SendSummaryDto {
+    fn into_into_dart(self) -> crate::api::send::SignableSummaryDto {
         self
     }
 }
@@ -3338,35 +3411,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::transport::TransportEventDto>
     for crate::api::transport::TransportEventDto
 {
     fn into_into_dart(self) -> crate::api::transport::TransportEventDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::transport::TransportSendSummaryDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.nonce.into_into_dart().into_dart(),
-            self.destination.into_into_dart().into_dart(),
-            self.amount_sompi.into_into_dart().into_dart(),
-            self.fee_sompi.into_into_dart().into_dart(),
-            self.total_sompi.into_into_dart().into_dart(),
-            self.mass.into_into_dart().into_dart(),
-            self.tx_count.into_into_dart().into_dart(),
-            self.utxo_count.into_into_dart().into_dart(),
-            self.payload_len.into_into_dart().into_dart(),
-            self.payload_kind.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::transport::TransportSendSummaryDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::transport::TransportSendSummaryDto>
-    for crate::api::transport::TransportSendSummaryDto
-{
-    fn into_into_dart(self) -> crate::api::transport::TransportSendSummaryDto {
         self
     }
 }
@@ -3606,6 +3650,7 @@ impl SseEncode for crate::api::transport::ConversationDto {
         <bool>::sse_encode(self.initiated_by_me, serializer);
         <u64>::sse_encode(self.created_unix_ms, serializer);
         <u64>::sse_encode(self.last_activity_unix_ms, serializer);
+        <bool>::sse_encode(self.invite_expired, serializer);
     }
 }
 
@@ -3626,6 +3671,21 @@ impl SseEncode for crate::api::dag::DagStatusDto {
         <Option<String>>::sse_encode(self.endpoint, serializer);
         <Option<u64>>::sse_encode(self.last_block_age_secs, serializer);
         <Option<u64>>::sse_encode(self.virtual_daa_score, serializer);
+    }
+}
+
+impl SseEncode for crate::api::send::FeeStrategyKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::send::FeeStrategyKind::SenderPays => 0,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -3823,6 +3883,16 @@ impl SseEncode for Option<crate::api::transport::TxStatusDto> {
     }
 }
 
+impl SseEncode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u32>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<u64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3854,10 +3924,31 @@ impl SseEncode for crate::api::send::SendOutcomeDto {
     }
 }
 
-impl SseEncode for crate::api::send::SendSummaryDto {
+impl SseEncode for crate::api::send::SignableKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::send::SignableKind::Payment => 0,
+                crate::api::send::SignableKind::Bond => 1,
+                crate::api::send::SignableKind::BondRefund => 2,
+                crate::api::send::SignableKind::SelfSendFrame => 3,
+                crate::api::send::SignableKind::Stake => 4,
+                crate::api::send::SignableKind::Bcast => 5,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::send::SignableSummaryDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <u64>::sse_encode(self.nonce, serializer);
+        <crate::api::send::SignableKind>::sse_encode(self.kind, serializer);
         <String>::sse_encode(self.destination, serializer);
         <u64>::sse_encode(self.amount_sompi, serializer);
         <u64>::sse_encode(self.fee_sompi, serializer);
@@ -3865,6 +3956,10 @@ impl SseEncode for crate::api::send::SendSummaryDto {
         <u64>::sse_encode(self.mass, serializer);
         <u32>::sse_encode(self.tx_count, serializer);
         <u32>::sse_encode(self.utxo_count, serializer);
+        <Option<u32>>::sse_encode(self.payload_len, serializer);
+        <Option<String>>::sse_encode(self.payload_kind, serializer);
+        <crate::api::send::FeeStrategyKind>::sse_encode(self.fee_strategy, serializer);
+        <u64>::sse_encode(self.priority_fee_sompi, serializer);
     }
 }
 
@@ -3906,22 +4001,6 @@ impl SseEncode for crate::api::transport::TransportEventDto {
         <String>::sse_encode(self.kind, serializer);
         <Vec<u8>>::sse_encode(self.body, serializer);
         <Vec<String>>::sse_encode(self.addresses, serializer);
-    }
-}
-
-impl SseEncode for crate::api::transport::TransportSendSummaryDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <u64>::sse_encode(self.nonce, serializer);
-        <String>::sse_encode(self.destination, serializer);
-        <u64>::sse_encode(self.amount_sompi, serializer);
-        <u64>::sse_encode(self.fee_sompi, serializer);
-        <u64>::sse_encode(self.total_sompi, serializer);
-        <u64>::sse_encode(self.mass, serializer);
-        <u32>::sse_encode(self.tx_count, serializer);
-        <u32>::sse_encode(self.utxo_count, serializer);
-        <u32>::sse_encode(self.payload_len, serializer);
-        <String>::sse_encode(self.payload_kind, serializer);
     }
 }
 

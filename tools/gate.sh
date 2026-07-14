@@ -68,13 +68,17 @@ if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
   if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
     codegen_drift() {
       flutter_rust_bridge_codegen generate >/dev/null 2>&1 || return 1
-      git -C "$ROOT" diff --exit-code --quiet -- lib/src/rust/ || {
+      # BOTH generated trees: the Dart bindings AND the Rust side. gate.sh
+      # regenerates before cargo builds, so a stale committed frb_generated.rs
+      # is invisible to every earlier check — only this diff can see it (L61).
+      git -C "$ROOT" diff --exit-code --quiet -- lib/src/rust/ rust/bridge/src/frb_generated.rs || {
         echo "   generated bindings differ from the index — after an API change,"
-        echo "   stage them ('git add lib/src/rust/') before gating (L20)"
+        echo "   stage BOTH generated trees ('git add lib/src/rust/ rust/bridge/src/frb_generated.rs')"
+        echo "   before gating (L20/L61)"
         return 1
       }
     }
-    run_check "codegen drift (lib/src/rust/)" codegen_drift
+    run_check "codegen drift (lib/src/rust/ + frb_generated.rs)" codegen_drift
   else
     skip_check "codegen drift" "flutter_rust_bridge_codegen not installed"
   fi

@@ -37,8 +37,8 @@ pub use transport::{
     KIND_UNKNOWN,
 };
 pub use transport_store::{
-    ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord, StoredKind,
-    TransportStore,
+    ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord, RowSource,
+    StoredKind, TransportStore,
 };
 pub use wallet_sync::{
     ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,

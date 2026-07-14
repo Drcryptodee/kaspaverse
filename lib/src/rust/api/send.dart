@@ -7,8 +7,8 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `next_nonce`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `next_nonce`, `project_signable`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
 /// floor for the live UTXO shape, computed by probing the pinned Generator —
@@ -21,7 +21,7 @@ Future<BigInt?> sendMinimum() => RustLib.instance.api.crateApiSendSendMinimum();
 /// Errors honestly: malformed/wrong-network address, locked/unready wallet, or
 /// a funds shortfall classified as "not yet spendable" vs "insufficient" using
 /// the live balance.
-Future<SendSummaryDto> sendPrepare({
+Future<SignableSummaryDto> sendPrepare({
   required String destination,
   required BigInt amountSompi,
 }) => RustLib.instance.api.crateApiSendSendPrepare(
@@ -37,6 +37,13 @@ Future<SendOutcomeDto> sendCommit({required BigInt nonce}) =>
 
 /// Drop any stashed send (confirm dismissed / back-gesture). Idempotent.
 Future<void> sendAbandon() => RustLib.instance.api.crateApiSendSendAbandon();
+
+/// Reserved fee-strategy discriminant (V5). One variant today — every flow
+/// pays `Fees::SenderPays(priority)` at the pinned Generator
+/// (`chain::send::prepare_send_inner`) with `priority_fee_sompi = 0`. The
+/// seam for a later estimate/fee-choice (★ Send-UX pass, D-008/RBF-deferred);
+/// fee ESTIMATION is deliberately not built here.
+enum FeeStrategyKind { senderPays }
 
 /// The outcome of broadcasting. `partial` (B6): some legs are already on-chain
 /// (their UTXOs really spent) — surfaced, never hidden; the next sync reconciles.
@@ -75,18 +82,58 @@ class SendOutcomeDto {
           error == other.error;
 }
 
-/// The Rust-decoded summary the confirm screen renders (B7) — NOT the form echo.
-/// `nonce` guards [`send_commit`] against a stale plan; `*_sompi`/`mass` cross as
-/// Dart `BigInt` (L3).
-class SendSummaryDto {
+/// Which send-like flow a signable summary describes — set by RUST from its
+/// own flow knowledge, never caller-supplied (V5: the Dart `selfSend` bool
+/// was the last un-Rust-vouched fact on the signing surface; the mode now
+/// rides the same B7-decoded DTO as the numbers). Field-less by the FRB DTO
+/// law (dag.rs note): per-kind facts ride [`SignableSummaryDto`]'s `Option`
+/// fields — payment mode never sees frame fields.
+enum SignableKind {
+  /// Plain payment: value to a counterparty, no payload.
+  payment,
+
+  /// Outbound handshake: the 0.2 KAS bond to the counterparty + sealed
+  /// payload (§0.6 — refunded in their acceptance).
+  bond,
+
+  /// Accept: the bond REFUNDED to the sender + sealed payload. Value moves
+  /// to the counterparty — deliberately NOT a self-send (D-069 keeps
+  /// bonds unchanged).
+  bondRefund,
+
+  /// Comm/frame self-send (D-069): destination is our OWN bound address,
+  /// value returns as change — the honest cost is the fee alone. The
+  /// sheet leads with the fee and never states the value as spend.
+  selfSendFrame,
+
+  /// The P4 challenge/stake seam: value at RISK into a covenant + game
+  /// frame. No producer yet — reserved so P4 adds a producer, never a
+  /// sixth confirm sheet (the V5 variant-coverage bar; render-pinned by
+  /// the Dart B7 suite).
+  stake,
+
+  /// Dev/broadcast lane: plaintext payload to an arbitrary address.
+  bcast,
+}
+
+/// THE canonical Rust-decoded summary every signable flow renders (B7 — NOT
+/// the form echo; V5 consolidation, one signing surface for P4 to extend).
+/// `nonce` guards the commit against a stale plan; `*_sompi`/`mass` cross as
+/// Dart `BigInt` (L3); `payload_*` are decoded from the BUILT final tx and
+/// are `None` exactly when the flow carries no payload.
+class SignableSummaryDto {
   /// Opaque token tying this summary to its stashed transactions.
   final BigInt nonce;
+
+  /// The flow mode — Rust's knowledge, the sheet's render switch.
+  final SignableKind kind;
 
   /// The mainnet address Rust validated and built into the payment output.
   final String destination;
   final BigInt amountSompi;
 
-  /// The Generator's exact aggregate fee — never "≈ free" (KIP-9 storage mass).
+  /// The Generator's exact aggregate fee — never "≈ free" (KIP-9 storage
+  /// mass; payload mass is priced in here for payload-bearing flows).
   final BigInt feeSompi;
 
   /// `amount + fee` (what leaves the wallet, excluding returned change).
@@ -97,8 +144,23 @@ class SendSummaryDto {
   final int txCount;
   final int utxoCount;
 
-  const SendSummaryDto({
+  /// Payload bytes on the built final tx (read back, not echoed); `None`
+  /// on a payload-less flow — payment mode never sees frame fields.
+  final int? payloadLen;
+
+  /// Wire kind decoded from the built payload (same parser the receive
+  /// scan uses); `None` on a payload-less flow.
+  final String? payloadKind;
+
+  /// Reserved (V5): the strategy the stashed plan was built with.
+  final FeeStrategyKind feeStrategy;
+
+  /// Reserved (V5): the priority component — 0 today, everywhere.
+  final BigInt priorityFeeSompi;
+
+  const SignableSummaryDto({
     required this.nonce,
+    required this.kind,
     required this.destination,
     required this.amountSompi,
     required this.feeSompi,
@@ -106,30 +168,44 @@ class SendSummaryDto {
     required this.mass,
     required this.txCount,
     required this.utxoCount,
+    this.payloadLen,
+    this.payloadKind,
+    required this.feeStrategy,
+    required this.priorityFeeSompi,
   });
 
   @override
   int get hashCode =>
       nonce.hashCode ^
+      kind.hashCode ^
       destination.hashCode ^
       amountSompi.hashCode ^
       feeSompi.hashCode ^
       totalSompi.hashCode ^
       mass.hashCode ^
       txCount.hashCode ^
-      utxoCount.hashCode;
+      utxoCount.hashCode ^
+      payloadLen.hashCode ^
+      payloadKind.hashCode ^
+      feeStrategy.hashCode ^
+      priorityFeeSompi.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is SendSummaryDto &&
+      other is SignableSummaryDto &&
           runtimeType == other.runtimeType &&
           nonce == other.nonce &&
+          kind == other.kind &&
           destination == other.destination &&
           amountSompi == other.amountSompi &&
           feeSompi == other.feeSompi &&
           totalSompi == other.totalSompi &&
           mass == other.mass &&
           txCount == other.txCount &&
-          utxoCount == other.utxoCount;
+          utxoCount == other.utxoCount &&
+          payloadLen == other.payloadLen &&
+          payloadKind == other.payloadKind &&
+          feeStrategy == other.feeStrategy &&
+          priorityFeeSompi == other.priorityFeeSompi;
 }

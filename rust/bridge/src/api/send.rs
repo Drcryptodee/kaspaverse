@@ -16,23 +16,68 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use kaspaverse_chain::{Address, ChainError, PreparedSend, SendOutcome, SignerT};
+use kaspaverse_chain::{Address, ChainError, PreparedSend, SendOutcome, SendSummary, SignerT};
 use kaspaverse_core::Prefix;
 
 use crate::api::error::AppError;
 use crate::api::{dag, vault, wallet};
 
-/// The Rust-decoded summary the confirm screen renders (B7) — NOT the form echo.
-/// `nonce` guards [`send_commit`] against a stale plan; `*_sompi`/`mass` cross as
-/// Dart `BigInt` (L3).
+/// Which send-like flow a signable summary describes — set by RUST from its
+/// own flow knowledge, never caller-supplied (V5: the Dart `selfSend` bool
+/// was the last un-Rust-vouched fact on the signing surface; the mode now
+/// rides the same B7-decoded DTO as the numbers). Field-less by the FRB DTO
+/// law (dag.rs note): per-kind facts ride [`SignableSummaryDto`]'s `Option`
+/// fields — payment mode never sees frame fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignableKind {
+    /// Plain payment: value to a counterparty, no payload.
+    Payment,
+    /// Outbound handshake: the 0.2 KAS bond to the counterparty + sealed
+    /// payload (§0.6 — refunded in their acceptance).
+    Bond,
+    /// Accept: the bond REFUNDED to the sender + sealed payload. Value moves
+    /// to the counterparty — deliberately NOT a self-send (D-069 keeps
+    /// bonds unchanged).
+    BondRefund,
+    /// Comm/frame self-send (D-069): destination is our OWN bound address,
+    /// value returns as change — the honest cost is the fee alone. The
+    /// sheet leads with the fee and never states the value as spend.
+    SelfSendFrame,
+    /// The P4 challenge/stake seam: value at RISK into a covenant + game
+    /// frame. No producer yet — reserved so P4 adds a producer, never a
+    /// sixth confirm sheet (the V5 variant-coverage bar; render-pinned by
+    /// the Dart B7 suite).
+    Stake,
+    /// Dev/broadcast lane: plaintext payload to an arbitrary address.
+    Bcast,
+}
+
+/// Reserved fee-strategy discriminant (V5). One variant today — every flow
+/// pays `Fees::SenderPays(priority)` at the pinned Generator
+/// (`chain::send::prepare_send_inner`) with `priority_fee_sompi = 0`. The
+/// seam for a later estimate/fee-choice (★ Send-UX pass, D-008/RBF-deferred);
+/// fee ESTIMATION is deliberately not built here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeeStrategyKind {
+    SenderPays,
+}
+
+/// THE canonical Rust-decoded summary every signable flow renders (B7 — NOT
+/// the form echo; V5 consolidation, one signing surface for P4 to extend).
+/// `nonce` guards the commit against a stale plan; `*_sompi`/`mass` cross as
+/// Dart `BigInt` (L3); `payload_*` are decoded from the BUILT final tx and
+/// are `None` exactly when the flow carries no payload.
 #[derive(Clone, Debug)]
-pub struct SendSummaryDto {
+pub struct SignableSummaryDto {
     /// Opaque token tying this summary to its stashed transactions.
     pub nonce: u64,
+    /// The flow mode — Rust's knowledge, the sheet's render switch.
+    pub kind: SignableKind,
     /// The mainnet address Rust validated and built into the payment output.
     pub destination: String,
     pub amount_sompi: u64,
-    /// The Generator's exact aggregate fee — never "≈ free" (KIP-9 storage mass).
+    /// The Generator's exact aggregate fee — never "≈ free" (KIP-9 storage
+    /// mass; payload mass is priced in here for payload-bearing flows).
     pub fee_sompi: u64,
     /// `amount + fee` (what leaves the wallet, excluding returned change).
     pub total_sompi: u64,
@@ -40,6 +85,50 @@ pub struct SendSummaryDto {
     /// 1 normally; >1 when the send chained past one tx's 100k-gram mass.
     pub tx_count: u32,
     pub utxo_count: u32,
+    /// Payload bytes on the built final tx (read back, not echoed); `None`
+    /// on a payload-less flow — payment mode never sees frame fields.
+    pub payload_len: Option<u32>,
+    /// Wire kind decoded from the built payload (same parser the receive
+    /// scan uses); `None` on a payload-less flow.
+    pub payload_kind: Option<String>,
+    /// Reserved (V5): the strategy the stashed plan was built with.
+    pub fee_strategy: FeeStrategyKind,
+    /// Reserved (V5): the priority component — 0 today, everywhere.
+    pub priority_fee_sompi: u64,
+}
+
+/// The ONE stash-side projection every prepare path shares (V5 — replaces
+/// three copy-pasted blocks). `payload_kind` presence drives BOTH payload
+/// fields; the reserved fee-strategy constants live here, cross-referenced
+/// to the Generator call (`chain::send::prepare_send_inner`,
+/// `Fees::SenderPays(0)`) — a future fee-choice originates its real value in
+/// chain, never here.
+pub(crate) fn project_signable(
+    nonce: u64,
+    kind: SignableKind,
+    summary: &SendSummary,
+    payload_kind: Option<String>,
+) -> SignableSummaryDto {
+    debug_assert!(
+        kind != SignableKind::Payment || payload_kind.is_none(),
+        "payment mode never carries payload fields (B7 variant law)"
+    );
+    let payload_len = payload_kind.as_ref().map(|_| summary.payload_len);
+    SignableSummaryDto {
+        nonce,
+        kind,
+        destination: summary.destination.clone(),
+        amount_sompi: summary.amount_sompi,
+        fee_sompi: summary.fee_sompi,
+        total_sompi: summary.total_sompi,
+        mass: summary.mass,
+        tx_count: summary.tx_count,
+        utxo_count: summary.utxo_count,
+        payload_len,
+        payload_kind,
+        fee_strategy: FeeStrategyKind::SenderPays,
+        priority_fee_sompi: 0,
+    }
 }
 
 /// The outcome of broadcasting. `partial` (B6): some legs are already on-chain
@@ -101,8 +190,9 @@ fn fully_broadcast(outcome: &SendOutcome) -> bool {
 /// (mature + pending + outgoing, all node-read) — an impossible amount is a
 /// true shortfall however much is in flight (consensus-audit V2 finding 2;
 /// the fee can still push a fitting retry over, and that retry then reads
-/// the honest refusal). Pure; tested.
-fn shortfall_message(
+/// the honest refusal). Shared with the transport prepare path (V5 — the
+/// finding-7 fix must not fork per surface). Pure; tested.
+pub(crate) fn shortfall_message(
     amount_sompi: u64,
     mature_sompi: u64,
     pending_sompi: u64,
@@ -155,7 +245,7 @@ pub fn send_minimum() -> Result<Option<u64>, AppError> {
 pub async fn send_prepare(
     destination: String,
     amount_sompi: u64,
-) -> Result<SendSummaryDto, AppError> {
+) -> Result<SignableSummaryDto, AppError> {
     let dest = validate_mainnet_address(&destination)?;
     if amount_sompi == 0 {
         return Err(AppError::msg("enter an amount greater than zero"));
@@ -229,16 +319,12 @@ pub async fn send_prepare(
     let summary = prepared.summary().clone();
     *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
 
-    Ok(SendSummaryDto {
+    Ok(project_signable(
         nonce,
-        destination: summary.destination,
-        amount_sompi: summary.amount_sompi,
-        fee_sompi: summary.fee_sompi,
-        total_sompi: summary.total_sompi,
-        mass: summary.mass,
-        tx_count: summary.tx_count,
-        utxo_count: summary.utxo_count,
-    })
+        SignableKind::Payment,
+        &summary,
+        None,
+    ))
 }
 
 /// Take the plan identified by `nonce` out of a stash. Refuses a
@@ -345,6 +431,52 @@ mod tests {
 
     // An upstream gen1 mainnet vector (keychain.rs / hd.rs) — valid checksum.
     const MAINNET: &str = "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf";
+
+    fn summary_fixture() -> SendSummary {
+        SendSummary {
+            destination: MAINNET.to_string(),
+            amount_sompi: 20_000_000,
+            fee_sompi: 31_000,
+            total_sompi: 20_031_000,
+            mass: 2_000,
+            tx_count: 1,
+            utxo_count: 1,
+            payload_len: 154,
+        }
+    }
+
+    /// V5: the reserved fee-strategy seam holds the ONE live strategy —
+    /// `SenderPays` with zero priority (the Generator's `Fees::SenderPays(0)`)
+    /// — on every projection, regardless of kind.
+    #[test]
+    fn project_signable_defaults_the_reserved_fee_strategy() {
+        let dto = project_signable(
+            7,
+            SignableKind::SelfSendFrame,
+            &summary_fixture(),
+            Some("comm".to_string()),
+        );
+        assert_eq!(dto.fee_strategy, FeeStrategyKind::SenderPays);
+        assert_eq!(dto.priority_fee_sompi, 0);
+        assert_eq!(dto.nonce, 7);
+        assert_eq!(dto.kind, SignableKind::SelfSendFrame);
+        // Payload facts ride together, decoded from the built tx.
+        assert_eq!(dto.payload_len, Some(154));
+        assert_eq!(dto.payload_kind.as_deref(), Some("comm"));
+    }
+
+    /// V5 variant law: payment mode NEVER carries payload fields — the sheet
+    /// can trust `None` structurally, not by caller convention.
+    #[test]
+    fn payment_kind_never_carries_payload_fields() {
+        let dto = project_signable(1, SignableKind::Payment, &summary_fixture(), None);
+        assert_eq!(dto.payload_len, None);
+        assert_eq!(dto.payload_kind, None);
+        // The numbers are the chain summary's, untouched (B7).
+        assert_eq!(dto.amount_sompi, 20_000_000);
+        assert_eq!(dto.fee_sompi, 31_000);
+        assert_eq!(dto.total_sompi, 20_031_000);
+    }
 
     #[test]
     fn validate_accepts_a_mainnet_address() {

@@ -1,9 +1,43 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
+
+/// Builds a [HomeScreen] from loose notifiers via the V5 scope objects —
+/// keeps the pre-V5 test shape while proving the scopes construct from
+/// hand-built [ValueNotifier]s (the no-native-library seam, V4 law).
+HomeScreen homeScreen({
+  required ValueListenable<bool> connected,
+  required ValueListenable<String?> endpoint,
+  required ValueListenable<BigInt?> virtualDaaScore,
+  required ValueListenable<String?> error,
+  required ValueListenable<DateTime?> lastUpdate,
+  required ValueListenable<BigInt?> mature,
+  required ValueListenable<BigInt?> pending,
+  required ValueListenable<List<ActivityRecord>> activity,
+  required ValueListenable<bool> syncing,
+  required ValueListenable<bool> utxoIndexMissing,
+  required DateTime Function() clock,
+}) => HomeScreen(
+  chain: ChainScope(
+    connected: connected,
+    endpoint: endpoint,
+    virtualDaaScore: virtualDaaScore,
+    error: error,
+    lastUpdate: lastUpdate,
+  ),
+  wallet: WalletScope(
+    mature: mature,
+    pending: pending,
+    activity: activity,
+    syncing: syncing,
+    utxoIndexMissing: utxoIndexMissing,
+  ),
+  clock: clock,
+);
 
 void main() {
   testWidgets('wallet home: connecting → live empty zero → funds → stale', (
@@ -24,7 +58,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
-        home: HomeScreen(
+        home: homeScreen(
           connected: connected,
           endpoint: endpoint,
           virtualDaaScore: daa,
@@ -159,7 +193,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
-        home: HomeScreen(
+        home: homeScreen(
           connected: ValueNotifier(true),
           endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),
@@ -203,7 +237,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
-        home: HomeScreen(
+        home: homeScreen(
           connected: ValueNotifier(true),
           endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),
@@ -259,7 +293,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: kvDarkTheme(),
-          home: HomeScreen(
+          home: homeScreen(
             connected: ValueNotifier(true),
             endpoint: ValueNotifier('wss://node.example/borsh'),
             virtualDaaScore: daa,
@@ -285,6 +319,70 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
       expect(find.textContaining('confirmations'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'rebuilding with fresh scope objects over the same notifiers keeps the '
+    'V4 identity contract',
+    (tester) async {
+      // The V5 wiring law: ChainScope/WalletScope are pure groupings — a
+      // parent rebuild may mint NEW scope instances freely, because the
+      // didUpdateWidget assert pins the identity of the INNER notifiers
+      // (the derived notifiers subscribed to them at mount). This fails if
+      // the assert ever compares scope-object identity, or if a refactor
+      // swaps the notifier instances mid-life.
+      final connected = ValueNotifier<bool>(true);
+      final endpoint = ValueNotifier<String?>('wss://node.example/borsh');
+      final daa = ValueNotifier<BigInt?>(BigInt.one);
+      final error = ValueNotifier<String?>(null);
+      final lastUpdate = ValueNotifier<DateTime?>(DateTime(2026, 7, 14, 12));
+      final mature = ValueNotifier<BigInt?>(BigInt.zero);
+      final pending = ValueNotifier<BigInt?>(BigInt.zero);
+      final activity = ValueNotifier<List<ActivityRecord>>(const []);
+      final syncing = ValueNotifier<bool>(false);
+      final utxoMissing = ValueNotifier<bool>(false);
+      final rebuild = ValueNotifier<int>(0);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: kvDarkTheme(),
+          home: ValueListenableBuilder<int>(
+            valueListenable: rebuild,
+            builder: (_, _, _) => HomeScreen(
+              // FRESH scope objects on every build — deliberately.
+              chain: ChainScope(
+                connected: connected,
+                endpoint: endpoint,
+                virtualDaaScore: daa,
+                error: error,
+                lastUpdate: lastUpdate,
+              ),
+              wallet: WalletScope(
+                mature: mature,
+                pending: pending,
+                activity: activity,
+                syncing: syncing,
+                utxoIndexMissing: utxoMissing,
+              ),
+              clock: () => DateTime(2026, 7, 14, 12),
+            ),
+          ),
+        ),
+      );
+
+      rebuild.value = 1; // parent rebuild → didUpdateWidget with new scopes
+      await tester.pump();
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'same inner notifiers ⇒ the seam-identity assert holds',
+      );
+      // And the screen still renders from the SAME notifiers.
+      mature.value = BigInt.from(300000000);
+      await tester.pump();
+      expect(find.textContaining('3.00000000 KAS'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     },
   );
@@ -361,7 +459,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
-        home: HomeScreen(
+        home: homeScreen(
           connected: ValueNotifier(true),
           endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: daa,

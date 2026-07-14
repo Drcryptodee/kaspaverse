@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `fill_walks`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `now_unix_ms`, `open_with_fallback`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `x_only_of`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `clamp_display`, `fill_walks`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `hub`, `invite_expired`, `kind_of_intent`, `now_unix_ms`, `open_with_fallback`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `EventOrigin`, `TransportHub`, `TransportIntent`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -51,7 +51,7 @@ Future<void> transportStart() =>
 /// build the tx chain over the live UTXO context with the payload on the final
 /// tx, and stash it unsigned. Returns the Rust-decoded summary (incl. the
 /// payload the BUILT tx carries) for the confirm step.
-Future<TransportSendSummaryDto> transportPrepareBcast({
+Future<SignableSummaryDto> transportPrepareBcast({
   required String destination,
   required BigInt amountSompi,
   required String channel,
@@ -67,7 +67,7 @@ Future<TransportSendSummaryDto> transportPrepareBcast({
 /// JSON, sealed to the recipient's address key; 0.2 KAS bond (§0.6 — THE one
 /// provenance-cited constant, refunded in their acceptance). The plaintext is
 /// re-sealed to self HERE so the stash holds ciphertext only (§0.4).
-Future<TransportSendSummaryDto> transportPrepareHandshake({
+Future<SignableSummaryDto> transportPrepareHandshake({
   required String destination,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareHandshake(
   destination: destination,
@@ -77,7 +77,7 @@ Future<TransportSendSummaryDto> transportPrepareHandshake({
 /// own return-address lookup (consensus data, never payload content — §0.3:
 /// this flow commits value), build the acceptance response, refund the 0.2
 /// KAS bond (§0.6).
-Future<TransportSendSummaryDto> transportPrepareAccept({
+Future<SignableSummaryDto> transportPrepareAccept({
   required String conversationId,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareAccept(
   conversationId: conversationId,
@@ -93,7 +93,7 @@ Future<TransportSendSummaryDto> transportPrepareAccept({
 /// payload, never by receiving value (their comm intake ignores outputs). The
 /// earlier value-to-recipient reading cost ~0.1 KAS/message on the anti-dust
 /// floor — proven unusable at the sitting.
-Future<TransportSendSummaryDto> transportPrepareComm({
+Future<SignableSummaryDto> transportPrepareComm({
   required String conversationId,
   required String text,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareComm(
@@ -107,7 +107,7 @@ Future<TransportSendSummaryDto> transportPrepareComm({
 /// covenant. The readable invite line is GENERATED in `core::frames` from the
 /// fields (never free-typed), so it can't misrepresent the card. Rides the
 /// shared comm prepare above — no new send-path economics.
-Future<TransportSendSummaryDto> transportPrepareChallenge({
+Future<SignableSummaryDto> transportPrepareChallenge({
   required String conversationId,
   String? stake,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareChallenge(
@@ -119,7 +119,7 @@ Future<TransportSendSummaryDto> transportPrepareChallenge({
 /// NOT a wager and NEVER auto-spends: it is a self-send comm the user confirms
 /// through the normal hold-to-sign ceremony (§0.5 law a). NB: deliberately
 /// distinct from [`transport_prepare_accept`], the handshake-bond acceptance.
-Future<TransportSendSummaryDto> transportPrepareChallengeAccept({
+Future<SignableSummaryDto> transportPrepareChallengeAccept({
   required String conversationId,
   required String refId,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareChallengeAccept(
@@ -129,7 +129,7 @@ Future<TransportSendSummaryDto> transportPrepareChallengeAccept({
 
 /// Phase 1 — compose a `kv:1:taunt` (personality) as a self-send comm. The text
 /// is the frame's own content; empty text is refused in `core::frames`.
-Future<TransportSendSummaryDto> transportPrepareTaunt({
+Future<SignableSummaryDto> transportPrepareTaunt({
   required String conversationId,
   required String text,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareTaunt(
@@ -244,6 +244,15 @@ class ConversationDto {
   final BigInt createdUnixMs;
   final BigInt lastActivityUnixMs;
 
+  /// A `pending_in` invitation whose bond tx is past the node's pruning
+  /// horizon (V5, finding 15): the accept can NEVER resolve — the bond
+  /// UTXO is spent/pruned and the return-address RPC is gone with it. The
+  /// card renders the honest terminal copy + a Dismiss exit instead of the
+  /// transient promise. Computed in Rust from the pin-read horizon
+  /// (INV-9); only this bool crosses the FFI. Always `false` for other
+  /// statuses.
+  final bool inviteExpired;
+
   const ConversationDto({
     required this.conversationId,
     required this.contactAddress,
@@ -253,6 +262,7 @@ class ConversationDto {
     required this.initiatedByMe,
     required this.createdUnixMs,
     required this.lastActivityUnixMs,
+    required this.inviteExpired,
   });
 
   @override
@@ -264,7 +274,8 @@ class ConversationDto {
       status.hashCode ^
       initiatedByMe.hashCode ^
       createdUnixMs.hashCode ^
-      lastActivityUnixMs.hashCode;
+      lastActivityUnixMs.hashCode ^
+      inviteExpired.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -278,7 +289,8 @@ class ConversationDto {
           status == other.status &&
           initiatedByMe == other.initiatedByMe &&
           createdUnixMs == other.createdUnixMs &&
-          lastActivityUnixMs == other.lastActivityUnixMs;
+          lastActivityUnixMs == other.lastActivityUnixMs &&
+          inviteExpired == other.inviteExpired;
 }
 
 /// The user's fill posture, for the settings surface. `default_endpoint`
@@ -598,78 +610,6 @@ class TransportEventDto {
           kind == other.kind &&
           body == other.body &&
           addresses == other.addresses;
-}
-
-/// The Rust-decoded summary the transport confirm renders (B7 — never the form
-/// echo). Superset of the payment summary: `payload_len`/`payload_kind` are
-/// decoded FROM THE BUILT final transaction, so the user confirms what will
-/// actually be signed, payload included (anti-blind-signing parity with P1.6).
-class TransportSendSummaryDto {
-  /// Opaque token tying this summary to its stashed transactions.
-  final BigInt nonce;
-
-  /// The mainnet address Rust validated and built into the payment output.
-  final String destination;
-  final BigInt amountSompi;
-
-  /// The Generator's exact aggregate fee — payload mass is priced in here
-  /// (KIP-9; the P2.1 fee-delta proof reads this field).
-  final BigInt feeSompi;
-
-  /// `amount + fee` (what leaves the wallet, excluding returned change).
-  final BigInt totalSompi;
-  final BigInt mass;
-  final int txCount;
-  final int utxoCount;
-
-  /// Payload bytes on the built final tx (read back, not echoed).
-  final int payloadLen;
-
-  /// Wire kind decoded from the built payload (`bcast` here) — same parser
-  /// the receive scan uses.
-  final String payloadKind;
-
-  const TransportSendSummaryDto({
-    required this.nonce,
-    required this.destination,
-    required this.amountSompi,
-    required this.feeSompi,
-    required this.totalSompi,
-    required this.mass,
-    required this.txCount,
-    required this.utxoCount,
-    required this.payloadLen,
-    required this.payloadKind,
-  });
-
-  @override
-  int get hashCode =>
-      nonce.hashCode ^
-      destination.hashCode ^
-      amountSompi.hashCode ^
-      feeSompi.hashCode ^
-      totalSompi.hashCode ^
-      mass.hashCode ^
-      txCount.hashCode ^
-      utxoCount.hashCode ^
-      payloadLen.hashCode ^
-      payloadKind.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is TransportSendSummaryDto &&
-          runtimeType == other.runtimeType &&
-          nonce == other.nonce &&
-          destination == other.destination &&
-          amountSompi == other.amountSompi &&
-          feeSompi == other.feeSompi &&
-          totalSompi == other.totalSompi &&
-          mass == other.mass &&
-          txCount == other.txCount &&
-          utxoCount == other.utxoCount &&
-          payloadLen == other.payloadLen &&
-          payloadKind == other.payloadKind;
 }
 
 /// The acceptance tracker's answer for one txid, mirrored for display (V2

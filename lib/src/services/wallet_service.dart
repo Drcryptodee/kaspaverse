@@ -165,7 +165,10 @@ class WalletService {
   // [streamFactory]) let widget tests run without the native library.
 
   @visibleForTesting
-  static Future<SendSummaryDto> Function(String destination, BigInt amountSompi)
+  static Future<SignableSummaryDto> Function(
+    String destination,
+    BigInt amountSompi,
+  )
   sendPrepareFn = (destination, amountSompi) =>
       sendPrepare(destination: destination, amountSompi: amountSompi);
 
@@ -181,8 +184,10 @@ class WalletService {
 
   /// Phase 1: build + stash the send in Rust; returns the Rust-decoded summary
   /// the confirm renders (B7). Throws [AppError] on a bad address / shortfall.
-  Future<SendSummaryDto> prepareSend(String destination, BigInt amountSompi) =>
-      sendPrepareFn(destination, amountSompi);
+  Future<SignableSummaryDto> prepareSend(
+    String destination,
+    BigInt amountSompi,
+  ) => sendPrepareFn(destination, amountSompi);
 
   /// The smallest currently-sendable amount (sompi) for the wallet's live coin
   /// shape — the KIP-9 floor probed from the pinned Generator (D-054). Advisory

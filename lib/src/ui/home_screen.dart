@@ -39,22 +39,8 @@ String formatScore(BigInt? value) =>
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
-    // Node / link (ChainService): the beacon + the live DAA readout.
-    required this.connected,
-    required this.endpoint,
-    required this.virtualDaaScore,
-    required this.error,
-    required this.lastUpdate,
-    // Connection health (P3/D-068): the manual reconnect + its in-flight flag.
-    this.reconnecting,
-    this.onReconnect,
-    // Wallet (WalletService): balance + activity.
-    required this.mature,
-    required this.pending,
-    required this.activity,
-    required this.syncing,
-    required this.utxoIndexMissing,
-    this.onRefreshActivity,
+    required this.chain,
+    required this.wallet,
     this.onReady,
     this.receiveRoute,
     this.sendRoute,
@@ -63,29 +49,15 @@ class HomeScreen extends StatefulWidget {
     this.floatingActionButton,
   });
 
-  final ValueListenable<bool> connected;
-  final ValueListenable<String?> endpoint;
-  final ValueListenable<BigInt?> virtualDaaScore;
-  final ValueListenable<String?> error;
+  /// Node / link scope (ChainService): the beacon + the live DAA readout +
+  /// the manual reconnect. A grouping of the SAME injected listenables the
+  /// V4 seam law protects — the scope object may be rebuilt per parent
+  /// build; the notifiers inside must stay identical (asserted in
+  /// [State.didUpdateWidget]).
+  final ChainScope chain;
 
-  /// Time of the last fresh node snapshot — the link freshness clock (DS-1).
-  final ValueListenable<DateTime?> lastUpdate;
-
-  /// True while a reconnect is in flight (P3) — the sheet's honest indicator.
-  final ValueListenable<bool>? reconnecting;
-
-  /// Force a fresh connection — the network sheet's Reconnect action (P3).
-  final Future<void> Function()? onReconnect;
-
-  final ValueListenable<BigInt?> mature;
-  final ValueListenable<BigInt?> pending;
-  final ValueListenable<List<ActivityRecord>> activity;
-  final ValueListenable<bool> syncing;
-  final ValueListenable<bool> utxoIndexMissing;
-
-  /// Swipe-to-refresh heal (founder request, V2 sitting): pulls the latest
-  /// folded snapshot directly, bypassing the stream. `null` ⇒ no refresh UI.
-  final Future<void> Function()? onRefreshActivity;
+  /// Wallet scope (WalletService): balance + activity + the pull heal.
+  final WalletScope wallet;
 
   /// Called once on mount (post-unlock) — starts the wallet sync engine.
   final VoidCallback? onReady;
@@ -110,6 +82,60 @@ class HomeScreen extends StatefulWidget {
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
+}
+
+/// The chain-facing wiring [HomeScreen] consumes, as ONE parameter (V5 —
+/// retires the 18-arg hand-threading in `main.dart`). Pure grouping: the
+/// fields ARE the injected listenables/callbacks (the widget-test seam —
+/// tests construct this from hand-built [ValueNotifier]s, no native
+/// library); identity stability is asserted on the INNER notifiers, so a
+/// rebuilt scope object over the same notifiers is fine.
+class ChainScope {
+  const ChainScope({
+    required this.connected,
+    required this.endpoint,
+    required this.virtualDaaScore,
+    required this.error,
+    required this.lastUpdate,
+    this.reconnecting,
+    this.onReconnect,
+  });
+
+  final ValueListenable<bool> connected;
+  final ValueListenable<String?> endpoint;
+  final ValueListenable<BigInt?> virtualDaaScore;
+  final ValueListenable<String?> error;
+
+  /// Time of the last fresh node snapshot — the link freshness clock (DS-1).
+  final ValueListenable<DateTime?> lastUpdate;
+
+  /// True while a reconnect is in flight (P3) — the sheet's honest indicator.
+  final ValueListenable<bool>? reconnecting;
+
+  /// Force a fresh connection — the network sheet's Reconnect action (P3).
+  final Future<void> Function()? onReconnect;
+}
+
+/// The wallet-facing wiring [HomeScreen] consumes — same law as [ChainScope].
+class WalletScope {
+  const WalletScope({
+    required this.mature,
+    required this.pending,
+    required this.activity,
+    required this.syncing,
+    required this.utxoIndexMissing,
+    this.onRefreshActivity,
+  });
+
+  final ValueListenable<BigInt?> mature;
+  final ValueListenable<BigInt?> pending;
+  final ValueListenable<List<ActivityRecord>> activity;
+  final ValueListenable<bool> syncing;
+  final ValueListenable<bool> utxoIndexMissing;
+
+  /// Swipe-to-refresh heal (founder request, V2 sitting): pulls the latest
+  /// folded snapshot directly, bypassing the stream. `null` ⇒ no refresh UI.
+  final Future<void> Function()? onRefreshActivity;
 }
 
 /// What the beacon chip renders, compared by value — connected steady-state
@@ -176,31 +202,31 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.onReady?.call();
     _now = ValueNotifier(widget.clock());
     _link = _Derived([
-      widget.connected,
-      widget.error,
-      widget.lastUpdate,
+      widget.chain.connected,
+      widget.chain.error,
+      widget.chain.lastUpdate,
       _now,
     ], _computeLink);
     _stale = _Derived([_link], () => _link.value.state == BeaconState.stale);
     _balance = _Derived(
       [
-        widget.mature,
-        widget.pending,
-        widget.syncing,
-        widget.utxoIndexMissing,
+        widget.wallet.mature,
+        widget.wallet.pending,
+        widget.wallet.syncing,
+        widget.wallet.utxoIndexMissing,
         _stale,
       ],
       () => (
-        mature: widget.mature.value,
-        pending: widget.pending.value,
+        mature: widget.wallet.mature.value,
+        pending: widget.wallet.pending.value,
         stale: _stale.value,
-        syncing: widget.syncing.value,
-        utxoIndexMissing: widget.utxoIndexMissing.value,
+        syncing: widget.wallet.syncing.value,
+        utxoIndexMissing: widget.wallet.utxoIndexMissing.value,
       ),
     );
     _feedInputs = Listenable.merge([
-      widget.activity,
-      widget.virtualDaaScore,
+      widget.wallet.activity,
+      widget.chain.virtualDaaScore,
       _stale,
       _now,
     ]);
@@ -217,15 +243,21 @@ class _HomeScreenState extends State<HomeScreen> {
     // The derived notifiers subscribed at mount; silently swapping a seam
     // would leave them wired to the old one.
     assert(
-      identical(oldWidget.connected, widget.connected) &&
-          identical(oldWidget.error, widget.error) &&
-          identical(oldWidget.lastUpdate, widget.lastUpdate) &&
-          identical(oldWidget.mature, widget.mature) &&
-          identical(oldWidget.pending, widget.pending) &&
-          identical(oldWidget.syncing, widget.syncing) &&
-          identical(oldWidget.utxoIndexMissing, widget.utxoIndexMissing) &&
-          identical(oldWidget.activity, widget.activity) &&
-          identical(oldWidget.virtualDaaScore, widget.virtualDaaScore),
+      identical(oldWidget.chain.connected, widget.chain.connected) &&
+          identical(oldWidget.chain.error, widget.chain.error) &&
+          identical(oldWidget.chain.lastUpdate, widget.chain.lastUpdate) &&
+          identical(oldWidget.wallet.mature, widget.wallet.mature) &&
+          identical(oldWidget.wallet.pending, widget.wallet.pending) &&
+          identical(oldWidget.wallet.syncing, widget.wallet.syncing) &&
+          identical(
+            oldWidget.wallet.utxoIndexMissing,
+            widget.wallet.utxoIndexMissing,
+          ) &&
+          identical(oldWidget.wallet.activity, widget.wallet.activity) &&
+          identical(
+            oldWidget.chain.virtualDaaScore,
+            widget.chain.virtualDaaScore,
+          ),
       'HomeScreen listenables must stay identical for the life of the state',
     );
   }
@@ -242,20 +274,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Duration? _age() {
-    final last = widget.lastUpdate.value;
+    final last = widget.chain.lastUpdate.value;
     return last == null ? null : _now.value.difference(last);
   }
 
   _LinkView _computeLink() {
     final age = _age();
     final state = evaluateBeacon(
-      connected: widget.connected.value,
+      connected: widget.chain.connected.value,
       age: age,
-      error: widget.error.value,
+      error: widget.chain.error.value,
     );
     return (
       state: state,
-      error: widget.error.value,
+      error: widget.chain.error.value,
       // Only the stale label renders an age; floored to the second it shows,
       // so record equality gates out every sub-label tick.
       age: state == BeaconState.stale && age != null
@@ -291,14 +323,14 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: Colors.transparent,
       elevation: 0,
       builder: (_) => _NetworkSheet(
-        connected: widget.connected,
-        endpoint: widget.endpoint,
-        virtualDaaScore: widget.virtualDaaScore,
-        error: widget.error,
-        lastUpdate: widget.lastUpdate,
+        connected: widget.chain.connected,
+        endpoint: widget.chain.endpoint,
+        virtualDaaScore: widget.chain.virtualDaaScore,
+        error: widget.chain.error,
+        lastUpdate: widget.chain.lastUpdate,
         clock: widget.clock,
-        reconnecting: widget.reconnecting,
-        onReconnect: widget.onReconnect,
+        reconnecting: widget.chain.reconnecting,
+        onReconnect: widget.chain.onReconnect,
       ),
     );
   }
@@ -357,7 +389,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         mature: b.mature,
                         pending: b.pending,
                         stale: b.stale,
-                        daa: widget.virtualDaaScore,
+                        daa: widget.chain.virtualDaaScore,
                         utxoIndexMissing: b.utxoIndexMissing,
                         syncing: b.syncing && b.mature == null,
                       ),
@@ -439,11 +471,11 @@ class _HomeScreenState extends State<HomeScreen> {
               child: ListenableBuilder(
                 listenable: _feedInputs,
                 builder: (context, _) => _ActivityFeed(
-                  records: widget.activity.value,
+                  records: widget.wallet.activity.value,
                   now: _now.value,
-                  virtualDaaScore: widget.virtualDaaScore.value,
+                  virtualDaaScore: widget.chain.virtualDaaScore.value,
                   stale: _stale.value,
-                  onRefresh: widget.onRefreshActivity,
+                  onRefresh: widget.wallet.onRefreshActivity,
                 ),
               ),
             ),
