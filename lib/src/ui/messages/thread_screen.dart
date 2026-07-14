@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
-import '../send/confirm_send_sheet.dart';
+import '../send/confirm_send_flow.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_loader.dart';
@@ -191,41 +191,22 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
-  /// The ONE spend path for every comm-carried kind: prepare in Rust, then open
-  /// the shared hold-to-sign ceremony. Never auto-broadcasts (broadcast fires
-  /// only inside a completed hold, [ConfirmSendSheet]). Returns whether the
-  /// user actually submitted. Re-pulls the thread afterwards.
+  /// The ONE spend path for every comm-carried kind, over the shared
+  /// [runConfirmSend] ceremony (V5): the summary — self-send mode and payload
+  /// facts included — is Rust's decode (B7); this surface keeps only its own
+  /// error style (snackbar), the thread re-pull, and the submitted signal.
+  /// Never auto-broadcasts (broadcast fires only inside a completed hold).
   Future<bool> _confirmSend({
-    required Future<TransportSendSummaryDto> Function() prepare,
+    required Future<SignableSummaryDto> Function() prepare,
     required String title,
   }) async {
     try {
-      final summary = await prepare();
-      if (!mounted) return false;
-      final outcome = await showModalBottomSheet<SendOutcomeDto>(
-        context: context,
-        isScrollControlled: true,
-        builder: (_) => ConfirmSendSheet(
-          summary: SendSummaryDto(
-            nonce: summary.nonce,
-            destination: summary.destination,
-            amountSompi: summary.amountSompi,
-            feeSompi: summary.feeSompi,
-            totalSompi: summary.totalSompi,
-            mass: summary.mass,
-            txCount: summary.txCount,
-            utxoCount: summary.utxoCount,
-          ),
-          commit: _messaging.commit,
-          abandon: _messaging.abandon,
-          title: title,
-          // Comm-carried kinds are self-sends (D-069): value returns as change,
-          // the sheet leads with the fee. B7: payload facts from the BUILT tx.
-          selfSend: true,
-          contextNote:
-              'Carries a ${summary.payloadKind} payload, ${summary.payloadLen} '
-              'bytes (decoded from the built transaction).',
-        ),
+      final outcome = await runConfirmSend(
+        context,
+        prepare: prepare,
+        commit: _messaging.commit,
+        abandon: _messaging.abandon,
+        title: title,
       );
       await _pull();
       return outcome != null && outcome.submitted > 0;

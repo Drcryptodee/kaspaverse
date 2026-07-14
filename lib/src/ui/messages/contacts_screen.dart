@@ -5,7 +5,7 @@ import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
 import '../format.dart';
-import '../send/confirm_send_sheet.dart';
+import '../send/confirm_send_flow.dart';
 import '../theme/kv_page_route.dart';
 import '../theme/tokens.dart';
 import '../widgets/entrance.dart';
@@ -44,44 +44,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
     _messaging.refreshFillState();
   }
 
-  /// Map the transport summary onto the payment DTO the shared confirm sheet
-  /// renders — field-for-field; the numbers stay Rust's (B7).
-  SendSummaryDto _asSendSummary(TransportSendSummaryDto s) => SendSummaryDto(
-    nonce: s.nonce,
-    destination: s.destination,
-    amountSompi: s.amountSompi,
-    feeSompi: s.feeSompi,
-    totalSompi: s.totalSompi,
-    mass: s.mass,
-    txCount: s.txCount,
-    utxoCount: s.utxoCount,
-  );
-
-  Future<void> _confirmTransportSend(
-    TransportSendSummaryDto summary, {
-    required String title,
-    required String contextNote,
-  }) async {
-    if (!mounted) return;
-    await showModalBottomSheet<SendOutcomeDto>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => ConfirmSendSheet(
-        summary: _asSendSummary(summary),
-        commit: _messaging.commit,
-        abandon: _messaging.abandon,
-        title: title,
-        // B7: the payload line renders what Rust decoded from the BUILT tx
-        // (kind + size), never an assumption about what was requested.
-        contextNote:
-            '$contextNote\n'
-            'Carries: ${summary.payloadKind} payload, '
-            '${summary.payloadLen} bytes (decoded from the built transaction).',
-      ),
-    );
-    await _messaging.refresh();
-  }
-
   Future<void> _addContact() async {
     final address = await showModalBottomSheet<String>(
       context: context,
@@ -91,7 +53,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (address == null || address.isEmpty) return;
     await _runPrepare(
       () => _messaging.prepareHandshake(address),
-      title: 'Confirm contact request',
       contextNote:
           'Carries a 0.2 KAS bond — the network norm; it comes back to you '
           'when they accept.',
@@ -101,22 +62,24 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _accept(ConversationDto conversation) async {
     await _runPrepare(
       () => _messaging.prepareAccept(conversation.conversationId),
-      title: 'Confirm accept',
       contextNote:
           'Returns the 0.2 KAS bond to the sender and opens the conversation.',
     );
   }
 
+  /// The shared ceremony over [runConfirmSend] (V5): the summary — mode,
+  /// title, payload facts included — is Rust's decode (B7); this surface
+  /// keeps only its own error style (snackbar) and list refresh.
   Future<void> _runPrepare(
-    Future<TransportSendSummaryDto> Function() prepare, {
-    required String title,
+    Future<SignableSummaryDto> Function() prepare, {
     required String contextNote,
   }) async {
     try {
-      final summary = await prepare();
-      await _confirmTransportSend(
-        summary,
-        title: title,
+      await runConfirmSend(
+        context,
+        prepare: prepare,
+        commit: _messaging.commit,
+        abandon: _messaging.abandon,
         contextNote: contextNote,
       );
     } catch (e) {
@@ -125,6 +88,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
         context,
       ).showSnackBar(SnackBar(content: Text(displayError(e))));
     }
+    await _messaging.refresh();
   }
 
   void _openThread(ConversationDto conversation) {
@@ -137,6 +101,20 @@ class _ContactsScreenState extends State<ContactsScreen> {
         ),
       ),
     );
+  }
+
+  /// The expired-invitation exit (V5, finding 15 — INV-6 instinct: every
+  /// state has a unilateral out). One tap, founder-ruled: the card's copy
+  /// already explains, so no second confirm. Same reversible tombstone lane
+  /// as hide — dismissal loses nothing (the bond is pruned; a fresh
+  /// handshake re-creates a row).
+  Future<void> _dismissExpired(ConversationDto conversation) async {
+    KvHaptic.selection();
+    await _messaging.hide(conversation.conversationId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Invitation dismissed.')));
   }
 
   /// The zombie-cleanup affordance (D-068): long-press → confirm → hide. Local
@@ -221,6 +199,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                           onOpen: () => _openThread(conversation),
                           onAccept: () => _accept(conversation),
                           onHide: () => _hide(conversation),
+                          onDismissExpired: () => _dismissExpired(conversation),
                         ),
                       );
                     },
@@ -263,21 +242,29 @@ class _ConversationCard extends StatelessWidget {
     required this.onOpen,
     required this.onAccept,
     required this.onHide,
+    required this.onDismissExpired,
   });
 
   final ConversationDto conversation;
   final VoidCallback onOpen;
   final VoidCallback onAccept;
   final VoidCallback onHide;
+  final VoidCallback onDismissExpired;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final c = conversation;
-    final pendingIn = c.status == 'pending_in';
+    // Rust's expiry taxonomy (V5, finding 15): an expired pending-inbound
+    // invitation can NEVER be accepted (its bond is pruned) — the card tells
+    // the truth and offers the exit instead of a dead Accept.
+    final expired = c.status == 'pending_in' && c.inviteExpired;
+    final pendingIn = c.status == 'pending_in' && !expired;
     final pendingOut = c.status == 'pending_out';
 
-    final (String statusLine, Color statusColor) = pendingIn
+    final (String statusLine, Color statusColor) = expired
+        ? ('Invitation expired', KvColor.textTertiary)
+        : pendingIn
         ? ('Wants to connect', KvColor.info)
         : pendingOut
         ? ('Awaiting their accept', KvColor.textTertiary)
@@ -288,8 +275,9 @@ class _ConversationCard extends StatelessWidget {
       borderRadius: BorderRadius.circular(KvRadius.card),
       child: InkWell(
         borderRadius: BorderRadius.circular(KvRadius.card),
-        // A pending-inbound card's action is the accept button, not a thread.
-        onTap: pendingIn ? null : onOpen,
+        // A pending-inbound card's action is its own button (Accept, or the
+        // expired-invitation Dismiss), not a thread.
+        onTap: (pendingIn || expired) ? null : onOpen,
         // Long-press anywhere on the card → hide (zombie cleanup, D-068).
         onLongPress: onHide,
         child: Padding(
@@ -300,7 +288,9 @@ class _ConversationCard extends StatelessWidget {
               Row(
                 children: [
                   Icon(
-                    pendingIn
+                    expired
+                        ? Icons.mail_outline
+                        : pendingIn
                         ? Icons.mark_email_unread_outlined
                         : Icons.forum_outlined,
                     size: 20,
@@ -323,7 +313,26 @@ class _ConversationCard extends StatelessWidget {
                 statusLine,
                 style: theme.textTheme.labelSmall?.copyWith(color: statusColor),
               ),
-              if (pendingIn) ...[
+              if (expired) ...[
+                const SizedBox(height: KvSpace.sm),
+                Text(
+                  // Honest terminal copy (founder-ruled wording, V5): the
+                  // bond is pruned — no transient promise, and an exit.
+                  'This invitation has expired — ask them to send a new one.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: KvColor.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: KvSpace.sm),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.tonalIcon(
+                    onPressed: onDismissExpired,
+                    icon: const Icon(Icons.close, size: 18),
+                    label: const Text('Dismiss'),
+                  ),
+                ),
+              ] else if (pendingIn) ...[
                 const SizedBox(height: KvSpace.sm),
                 Text(
                   'Accepting returns their 0.2 KAS bond and opens an '

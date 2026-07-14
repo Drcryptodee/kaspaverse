@@ -30,7 +30,10 @@ class SendScreen extends StatefulWidget {
   /// authoritative check (incl. the KIP-9 fee) is Rust's `prepare`.
   final ValueListenable<BigInt?> mature;
 
-  final Future<SendSummaryDto> Function(String destination, BigInt amountSompi)
+  final Future<SignableSummaryDto> Function(
+    String destination,
+    BigInt amountSompi,
+  )
   prepare;
   final Future<SendOutcomeDto> Function(BigInt nonce) commit;
   final Future<void> Function() abandon;

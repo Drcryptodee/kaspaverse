@@ -50,25 +50,22 @@ class MessagingService {
   );
 
   @visibleForTesting
-  static Future<TransportSendSummaryDto> Function(String destination)
+  static Future<SignableSummaryDto> Function(String destination)
   prepareHandshakeFn = (destination) =>
       transportPrepareHandshake(destination: destination);
 
   @visibleForTesting
-  static Future<TransportSendSummaryDto> Function(String conversationId)
+  static Future<SignableSummaryDto> Function(String conversationId)
   prepareAcceptFn = (conversationId) =>
       transportPrepareAccept(conversationId: conversationId);
 
   @visibleForTesting
-  static Future<TransportSendSummaryDto> Function(
-    String conversationId,
-    String text,
-  )
+  static Future<SignableSummaryDto> Function(String conversationId, String text)
   prepareCommFn = (conversationId, text) =>
       transportPrepareComm(conversationId: conversationId, text: text);
 
   @visibleForTesting
-  static Future<TransportSendSummaryDto> Function(
+  static Future<SignableSummaryDto> Function(
     String conversationId,
     String? stake,
   )
@@ -76,7 +73,7 @@ class MessagingService {
       transportPrepareChallenge(conversationId: conversationId, stake: stake);
 
   @visibleForTesting
-  static Future<TransportSendSummaryDto> Function(
+  static Future<SignableSummaryDto> Function(
     String conversationId,
     String refId,
   )
@@ -87,10 +84,7 @@ class MessagingService {
       );
 
   @visibleForTesting
-  static Future<TransportSendSummaryDto> Function(
-    String conversationId,
-    String text,
-  )
+  static Future<SignableSummaryDto> Function(String conversationId, String text)
   prepareTauntFn = (conversationId, text) =>
       transportPrepareTaunt(conversationId: conversationId, text: text);
 
@@ -271,37 +265,33 @@ class MessagingService {
 
   /// Phase 1 flows — each returns the Rust-decoded summary (B7) for the
   /// shared hold-to-sign confirm; phase 2 is [commit] with the nonce.
-  Future<TransportSendSummaryDto> prepareHandshake(String destination) =>
+  Future<SignableSummaryDto> prepareHandshake(String destination) =>
       prepareHandshakeFn(destination);
 
-  Future<TransportSendSummaryDto> prepareAccept(String conversationId) =>
+  Future<SignableSummaryDto> prepareAccept(String conversationId) =>
       prepareAcceptFn(conversationId);
 
-  Future<TransportSendSummaryDto> prepareComm(
-    String conversationId,
-    String text,
-  ) => prepareCommFn(conversationId, text);
+  Future<SignableSummaryDto> prepareComm(String conversationId, String text) =>
+      prepareCommFn(conversationId, text);
 
   /// Compose a `kv:1:` Attack & Defend challenge (self-send comm). [stake] is a
   /// DISPLAY value in KAS (null ⇒ a friendly duel); it binds no value — the
   /// wager binds at the P3 covenant. Confirmed through the shared ceremony.
-  Future<TransportSendSummaryDto> prepareChallenge(
+  Future<SignableSummaryDto> prepareChallenge(
     String conversationId,
     String? stake,
   ) => prepareChallengeFn(conversationId, stake);
 
   /// Compose a social `kv:1:accept` for challenge [refId] — a self-send comm,
   /// NOT a wager: confirmed through the normal ceremony, never auto-broadcast.
-  Future<TransportSendSummaryDto> prepareChallengeAccept(
+  Future<SignableSummaryDto> prepareChallengeAccept(
     String conversationId,
     String refId,
   ) => prepareChallengeAcceptFn(conversationId, refId);
 
   /// Compose a `kv:1:taunt` (personality) as a self-send comm.
-  Future<TransportSendSummaryDto> prepareTaunt(
-    String conversationId,
-    String text,
-  ) => prepareTauntFn(conversationId, text);
+  Future<SignableSummaryDto> prepareTaunt(String conversationId, String text) =>
+      prepareTauntFn(conversationId, text);
 
   Future<SendOutcomeDto> commit(BigInt nonce) => commitFn(nonce);
 

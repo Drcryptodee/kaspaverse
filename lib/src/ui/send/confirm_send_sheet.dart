@@ -7,50 +7,57 @@ import '../widgets/amount_text.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_loader.dart';
 
-/// The anti-blind-signing confirm (consensus B7 — the heart of P1.6). Everything
-/// here renders the [SendSummaryDto] Rust decoded from the ACTUAL transactions it
-/// will sign — never the form's echo of the user's intent. The hold-to-sign
-/// ceremony (DS-3) is decelerate-only with no double-tap path to broadcast, and
-/// every amount on this surface is exact to all 8 decimals (DS-2: the full
-/// truth at the moment of commitment).
+/// The anti-blind-signing confirm (consensus B7 — the heart of P1.6; ONE
+/// signing surface for every send-like flow since V5). Everything here
+/// renders the [SignableSummaryDto] Rust decoded from the ACTUAL transactions
+/// it will sign — never the form's echo of the user's intent. That includes
+/// the MODE: the self-send rendering (D-069) derives from the summary's
+/// Rust-set [SignableKind], never a caller flag, and the payload facts line
+/// renders the DTO's own built-tx decode. The hold-to-sign ceremony (DS-3) is
+/// decelerate-only with no double-tap path to broadcast, and every amount on
+/// this surface is exact to all 8 decimals (DS-2: the full truth at the
+/// moment of commitment).
 ///
-/// Dismissing before the hold completes calls [abandon] (drops the Rust stash);
-/// a completed send pops with its [SendOutcomeDto].
+/// Dismissing before the hold completes calls [abandon] (drops the Rust
+/// stash); a completed send pops with its [SendOutcomeDto].
 class ConfirmSendSheet extends StatefulWidget {
   const ConfirmSendSheet({
     super.key,
     required this.summary,
     required this.commit,
     required this.abandon,
-    this.title = 'Confirm send',
+    this.title,
     this.contextNote,
-    this.selfSend = false,
   });
 
-  final SendSummaryDto summary;
+  final SignableSummaryDto summary;
   final Future<SendOutcomeDto> Function(BigInt nonce) commit;
   final Future<void> Function() abandon;
 
-  /// Sheet heading — transport sends (P2.3) rename the ceremony honestly
-  /// ("Confirm contact request", "Confirm message") without touching the
-  /// B7 numbers or the hold-to-sign discipline.
-  final String title;
+  /// Sheet heading override. Defaults by the summary's kind ("Confirm send",
+  /// "Confirm contact request", …); thread flows rename the ceremony honestly
+  /// ("Confirm challenge") without touching the B7 numbers or the
+  /// hold-to-sign discipline.
+  final String? title;
 
   /// One optional plain-English line under the destination — what this send
   /// carries beyond value (e.g. the bond-refund rule). Never a number the
   /// summary doesn't back (B7: the DTO stays the only source of figures).
   final String? contextNote;
 
-  /// A **self-send** (D-069): the payment output returns to the sender's own
-  /// address as change, so the message value never leaves the wallet and the
-  /// real cost is the network fee alone. The sheet then leads with the FEE (not
-  /// the amount), drops the raw self "To" address, and states the returning
-  /// value plainly — never showing a self-send as if 0.1 KAS were spent.
-  final bool selfSend;
-
   @override
   State<ConfirmSendSheet> createState() => _ConfirmSendSheetState();
 }
+
+/// Kind-derived ceremony heading — the one place flow modes name themselves.
+String _defaultTitle(SignableKind kind) => switch (kind) {
+  SignableKind.payment => 'Confirm send',
+  SignableKind.bond => 'Confirm contact request',
+  SignableKind.bondRefund => 'Confirm accept',
+  SignableKind.selfSendFrame => 'Confirm message',
+  SignableKind.stake => 'Confirm stake',
+  SignableKind.bcast => 'Confirm broadcast',
+};
 
 class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
   bool _committed = false;
@@ -113,19 +120,25 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         onDone: () => Navigator.of(context).pop(_outcome),
       );
     }
-    return _confirm(context);
+    // Scrolls only when the viewport can't fit the whole ceremony (small
+    // screens / large text scale): every fact stays reachable — content is
+    // never clipped on a signing surface (DS-2 spirit).
+    return SingleChildScrollView(child: _confirm(context));
   }
 
   Widget _confirm(BuildContext context) {
     final theme = Theme.of(context);
     final s = widget.summary;
     final amount = kasParts(s.amountSompi);
-    final selfSend = widget.selfSend;
+    // The mode is Rust's decode (SignableKind on the summary), never a
+    // caller flag — the last un-Rust-vouched fact left this surface at V5.
+    final selfSend = s.kind == SignableKind.selfSendFrame;
+    final title = widget.title ?? _defaultTitle(s.kind);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Center(child: Text(widget.title, style: theme.textTheme.titleMedium)),
+        Center(child: Text(title, style: theme.textTheme.titleMedium)),
         const SizedBox(height: KvSpace.l),
         // The headline is the honest COST. For a payment that is the amount
         // leaving; for a self-send message the value returns as change, so the
@@ -170,6 +183,20 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
           if (!selfSend) const SizedBox(height: KvSpace.s),
           Text(
             widget.contextNote!,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+        ],
+        // B7: the payload facts are the SHEET's rendering of the summary's
+        // built-tx decode — present exactly when the flow carries a payload
+        // (payment mode never sees these fields), never a caller string.
+        if (s.payloadKind != null) ...[
+          if (!selfSend || widget.contextNote != null)
+            const SizedBox(height: KvSpace.s),
+          Text(
+            'Carries: ${s.payloadKind} payload, ${s.payloadLen} bytes '
+            '(decoded from the built transaction).',
             style: theme.textTheme.bodySmall?.copyWith(
               color: KvColor.textSecondary,
             ),

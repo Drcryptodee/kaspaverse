@@ -83,19 +83,26 @@ class KaspaVerseApp extends StatelessWidget {
           debugFooter: kDebugMode ? _DevPanelLink() : null,
         ),
         home: HomeScreen(
-          connected: chain.connected,
-          endpoint: chain.endpoint,
-          virtualDaaScore: chain.virtualDaaScore,
-          error: chain.error,
-          lastUpdate: chain.lastUpdate,
-          reconnecting: chain.reconnecting,
-          onReconnect: chain.reconnect,
-          mature: wallet.mature,
-          pending: wallet.pending,
-          activity: wallet.activity,
-          syncing: wallet.syncing,
-          utxoIndexMissing: wallet.utxoIndexMissing,
-          onRefreshActivity: wallet.refreshNow,
+          // V5 service scopes: the SAME service notifiers as ever, grouped —
+          // inner identities stay stable for the life of the state (the V4
+          // seam law; scope objects themselves may rebuild freely).
+          chain: ChainScope(
+            connected: chain.connected,
+            endpoint: chain.endpoint,
+            virtualDaaScore: chain.virtualDaaScore,
+            error: chain.error,
+            lastUpdate: chain.lastUpdate,
+            reconnecting: chain.reconnecting,
+            onReconnect: chain.reconnect,
+          ),
+          wallet: WalletScope(
+            mature: wallet.mature,
+            pending: wallet.pending,
+            activity: wallet.activity,
+            syncing: wallet.syncing,
+            utxoIndexMissing: wallet.utxoIndexMissing,
+            onRefreshActivity: wallet.refreshNow,
+          ),
           onReady: () {
             wallet.start();
             // P2.3 transport hub: needs the unlocked vault (this screen only
