@@ -412,7 +412,7 @@ void main() {
         expect(find.text('Invitation expired'), findsOneWidget);
         expect(
           find.text(
-            'This invitation has expired — ask them to send a new one.',
+            'This invitation has expired and can no longer be accepted.',
           ),
           findsOneWidget,
         );
