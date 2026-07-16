@@ -32,7 +32,7 @@ use kaspa_wallet_core::utxo::{Maturity, UtxoContext, UtxoContextBinding, UtxoPro
 use kaspa_wrpc_client::prelude::NetworkId;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::error::Result;
+use crate::error::{ChainError, Result};
 
 /// Most rows the feed carries — "recent activity", not full history (§0.10).
 const ACTIVITY_CAP: usize = 100;
@@ -414,6 +414,10 @@ struct Inner {
     store: Mutex<ActivityStore>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    /// The watched address window `start()` was given — kept so
+    /// [`WalletEngine::rescan`] can re-ask the node for the SAME set the
+    /// balance reflects (public strings only, INV-3).
+    watch: Mutex<Vec<Address>>,
 }
 
 /// Drives one [`UtxoProcessor`] + [`UtxoContext`] over a shared [`Rpc`], folding
@@ -441,6 +445,7 @@ impl WalletEngine {
                 store: Mutex::new(store),
                 event_task: Mutex::new(None),
                 shutdown: Mutex::new(None),
+                watch: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -500,6 +505,11 @@ impl WalletEngine {
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
 
         let change_set: HashSet<Address> = change_addresses.into_iter().collect();
+        *self
+            .inner
+            .watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = addresses.clone();
 
         // Emit the PERSISTED activity once at start (2026-07-09 V1 sitting
         // find): record events are the only other emission trigger, and a
@@ -535,6 +545,35 @@ impl WalletEngine {
             .unwrap_or_else(PoisonError::into_inner) = Some(task);
 
         self.inner.processor.start().await?;
+        Ok(())
+    }
+
+    /// In-place node re-ask (V6 soft pull-refresh, amending the V3 pull heal
+    /// — register item 12): re-fetch the watched window's UTXO set over the
+    /// LIVE connection using the pin's own scan primitive — the same
+    /// `scan_and_register_addresses` call the `UtxoProcStart` arm makes
+    /// (INV-9; the known-address filter only gates the subscription half,
+    /// the UTXO fetch always runs the full list). No socket drop, no
+    /// `UtxoProcStart`, no beacon flicker; Balance/Discovery events flow
+    /// through the normal fold. Errs when the engine hasn't started or the
+    /// processor has no live DAA — callers treat an `Err` as "soft path
+    /// unavailable" and escalate to the hard reconnect.
+    pub async fn rescan(&self) -> Result<()> {
+        let addresses = self
+            .inner
+            .watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if addresses.is_empty() {
+            return Err(ChainError::Message("wallet engine not started".into()));
+        }
+        let count = addresses.len();
+        self.inner
+            .context
+            .scan_and_register_addresses(addresses, None)
+            .await?;
+        log::info!("wallet-sync: in-place rescan re-asked the node for {count} addresses");
         Ok(())
     }
 

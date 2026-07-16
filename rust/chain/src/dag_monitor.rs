@@ -765,9 +765,10 @@ impl DagMonitor {
             }
 
             log::info!(
-                "link: race winner {} (server {}, daa {}){}",
+                "link: race winner {} (server {}, rpc v{}, daa {}){}",
                 winner.url,
                 winner.server_version,
+                winner.rpc_api_version,
                 winner.virtual_daa_score,
                 if advisory { " [hygiene advisory]" } else { "" }
             );
@@ -1023,12 +1024,22 @@ impl DagMonitor {
                                 let run_secs = Self::now_unix().saturating_sub(
                                     self.inner.connected_at.load(Ordering::Relaxed),
                                 );
-                                match dropped {
-                                    Some(url) if run_secs >= link::CLEAN_RUN_SECS => {
+                                match (dropped, link::judge_run(run_secs)) {
+                                    (Some(url), link::RunJudgment::CleanRun) => {
                                         self.commit_clean_run(&url);
                                     }
-                                    Some(url) => self.set_pending_strike(url),
-                                    None => {}
+                                    (Some(url), link::RunJudgment::Strike) => {
+                                        self.set_pending_strike(url)
+                                    }
+                                    (Some(url), link::RunJudgment::ChurnNoise) => {
+                                        // V6 churn-smoothing (item 16): a run
+                                        // this short never lived — its death
+                                        // says nothing about the endpoint.
+                                        log::info!(
+                                            "link: drop after {run_secs}s run on {url} — churn noise, no strike"
+                                        );
+                                    }
+                                    (None, _) => {}
                                 }
                                 self.spawn_race();
                             }
