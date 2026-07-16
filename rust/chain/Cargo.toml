@@ -28,3 +28,12 @@ log.workspace = true
 workflow-http.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# V6 probe hardening: `api::ops::RPC_API_VERSION` for the wrong-RPC-major
+# refusal in link::probe_endpoint (wallet-core's own handshake gate is the
+# precedent — processor.rs:504-515 at the pin). Same pin, zero new packages.
+kaspa-rpc-core.workspace = true
+
+[dev-dependencies]
+# Reconnect-survival regression harness (V6, guards D-083/L59/PB-022): the
+# test fake implements the pin's #[async_trait] RpcApi. Never ships.
+async-trait.workspace = true

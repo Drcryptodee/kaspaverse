@@ -43,13 +43,16 @@ Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
 Future<void> dagReconnect({required bool stalled}) =>
     RustLib.instance.api.crateApiDagDagReconnect(stalled: stalled);
 
-/// V3 register item 12: the pull heal asks the NODE. A swipe-to-refresh calls
-/// this to force a resync — a hard reconnect through the race, which lands in
-/// wallet-core's `UtxoProcStart` and a fresh address scan, exactly the
-/// detection path a kill/relaunch used to be needed for. Rate-limited; returns
-/// `true` when a resync was actually triggered, `false` when the window
-/// swallowed it (the caller still re-serves the fold — delivery heal — so a
-/// swallowed pull is never a dead gesture).
+/// The pull heal asks the NODE — soft-first since V6 (amends the V3 register
+/// item 12 design, whose unconditional hard reconnect predates the D-083 root
+/// cause): on a HEALTHY connection the swipe re-fetches the watched UTXO set
+/// in place over the live socket (no teardown, no race, no `UtxoProcStart`
+/// storm, no beacon flicker); on an unhealthy one — or when the soft path
+/// fails or times out — it falls back to the V3 hard reconnect through the
+/// race, exactly the detection path a kill/relaunch used to be needed for.
+/// Returns `true` when the node was actually re-asked (either path), `false`
+/// when a rate window swallowed the pull (the caller still re-serves the
+/// fold — delivery heal — so a swallowed pull is never a dead gesture).
 Future<bool> dagResync() => RustLib.instance.api.crateApiDagDagResync();
 
 /// Subscribe to live DAG snapshots from mainnet. The first call connects;

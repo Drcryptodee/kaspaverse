@@ -274,36 +274,106 @@ pub async fn dag_reconnect(stalled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Minimum spacing between pull-heal resyncs — a swipe is a cheap gesture and
-/// a full reconnect + 60-address rescan is not; repeated pulls inside the
-/// window re-serve the fold without bouncing the socket.
+/// Minimum spacing between HARD pull-heal resyncs — socket teardown + race +
+/// full rescan is not a cheap gesture; repeated pulls inside the window
+/// re-serve the fold without bouncing the socket.
 const RESYNC_MIN_INTERVAL_SECS: u64 = 20;
 
-/// V3 register item 12: the pull heal asks the NODE. A swipe-to-refresh calls
-/// this to force a resync — a hard reconnect through the race, which lands in
-/// wallet-core's `UtxoProcStart` and a fresh address scan, exactly the
-/// detection path a kill/relaunch used to be needed for. Rate-limited; returns
-/// `true` when a resync was actually triggered, `false` when the window
-/// swallowed it (the caller still re-serves the fold — delivery heal — so a
-/// swallowed pull is never a dead gesture).
+/// Minimum spacing between SOFT pull refreshes — one `get_utxos_by_addresses`
+/// round trip on the live socket, priced accordingly. Independent of the hard
+/// window: a soft pull must never delay a genuinely needed hard heal, and a
+/// recent hard reconnect must not block a healthy soft pull on its fresh
+/// socket.
+const SOFT_RESYNC_MIN_INTERVAL_SECS: u64 = 5;
+
+/// Healthy = connected AND blocks flowing within the same stall threshold the
+/// Dart watchdog uses (`chain_service.dart` `watchdogStallSecs` = 30) — Rust
+/// and Dart agree on what "healthy" means. A `None` block age (no block since
+/// BOOT — `last_block_at` is process-lifetime, not per-connection) is NOT
+/// healthy: no evidence, hard path. Within ≤30 s of a rebind the age can
+/// still carry the PRIOR connection's last block, so a just-reconnected deaf
+/// socket can read healthy for that bounded window — the soft rescan is a
+/// real node round-trip that errs/times out on a dead lane and escalates, so
+/// the window costs one probe, never a missed heal (consensus-audit note).
+const SOFT_REFRESH_MAX_BLOCK_AGE_SECS: u64 = 30;
+
+/// Budget for the in-place rescan — a "healthy" socket that hangs the scan
+/// was lying; the timeout escalates to the hard reconnect, so the pull's
+/// recovery guarantee is never weaker than the V3 behavior.
+const SOFT_RESCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The pull heal asks the NODE — soft-first since V6 (amends the V3 register
+/// item 12 design, whose unconditional hard reconnect predates the D-083 root
+/// cause): on a HEALTHY connection the swipe re-fetches the watched UTXO set
+/// in place over the live socket (no teardown, no race, no `UtxoProcStart`
+/// storm, no beacon flicker); on an unhealthy one — or when the soft path
+/// fails or times out — it falls back to the V3 hard reconnect through the
+/// race, exactly the detection path a kill/relaunch used to be needed for.
+/// Returns `true` when the node was actually re-asked (either path), `false`
+/// when a rate window swallowed the pull (the caller still re-serves the
+/// fold — delivery heal — so a swallowed pull is never a dead gesture).
 pub async fn dag_resync() -> Result<bool, AppError> {
-    static LAST_RESYNC: AtomicU64 = AtomicU64::new(0);
+    static LAST_HARD: AtomicU64 = AtomicU64::new(0);
+    static LAST_SOFT: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let last = LAST_RESYNC.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < RESYNC_MIN_INTERVAL_SECS {
+    let Some(monitor) = MONITOR.get() else {
+        return Ok(false);
+    };
+
+    let healthy = monitor.is_connected()
+        && monitor
+            .last_block_age_secs()
+            .is_some_and(|age| age <= SOFT_REFRESH_MAX_BLOCK_AGE_SECS);
+    if healthy {
+        if now.saturating_sub(LAST_SOFT.load(Ordering::Relaxed)) < SOFT_RESYNC_MIN_INTERVAL_SECS {
+            log::info!(
+                "dag: soft resync inside the {SOFT_RESYNC_MIN_INTERVAL_SECS}s window — re-serve only"
+            );
+            return Ok(false);
+        }
+        let Some(engine) = super::wallet::engine_handle() else {
+            // Healthy connection, wallet not started (pre-unlock): the DAG
+            // lane needs no heal and there is no watched set to re-ask for —
+            // a hard reconnect would buy nothing here.
+            return Ok(false);
+        };
+        LAST_SOFT.store(now, Ordering::Relaxed);
+        match tokio::time::timeout(SOFT_RESCAN_TIMEOUT, engine.rescan()).await {
+            Ok(Ok(())) => {
+                log::info!("dag: pull soft rescan — node re-asked in place, socket kept");
+                kaspaverse_chain::spans::mark_with("pull_resync", "soft");
+                return Ok(true);
+            }
+            Ok(Err(e)) => {
+                // Node-controllable error text is sanitized before the
+                // evidence lane (INV-10/L53 — the link.rs discipline).
+                log::warn!(
+                    "dag: soft rescan failed ({}) — escalating to hard reconnect",
+                    kaspaverse_chain::link::sanitize_node_text(&e.to_string())
+                );
+            }
+            Err(_) => {
+                log::warn!(
+                    "dag: soft rescan exceeded {SOFT_RESCAN_TIMEOUT:?} — escalating to hard reconnect"
+                );
+            }
+        }
+        // The health reading lied — fall through to the hard path.
+    }
+
+    if now.saturating_sub(LAST_HARD.load(Ordering::Relaxed)) < RESYNC_MIN_INTERVAL_SECS {
         log::info!(
             "dag: resync request inside the {RESYNC_MIN_INTERVAL_SECS}s window — re-serve only"
         );
         return Ok(false);
     }
-    LAST_RESYNC.store(now, Ordering::Relaxed);
-    if let Some(monitor) = MONITOR.get() {
-        log::info!("dag: pull-heal resync — forcing reconnect + rescan");
-        monitor.reconnect(false).await.map_err(AppError::chain)?;
-    }
+    LAST_HARD.store(now, Ordering::Relaxed);
+    log::info!("dag: pull-heal resync — forcing reconnect + rescan");
+    kaspaverse_chain::spans::mark_with("pull_resync", "hard");
+    monitor.reconnect(false).await.map_err(AppError::chain)?;
     Ok(true)
 }
 

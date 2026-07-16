@@ -32,13 +32,18 @@
 //!   error at the node (mempool/errors strings pinned in
 //!   [`is_idempotent_submit_error`]); no fan-out, no RBF (D-008-deferred).
 //!
-//! Thresholds are PROVISIONAL (V6 owns tuning against sitting data).
+//! Thresholds TUNED AT V6 against the V3/V4 sitting evidence (D-081 trail):
+//! the demotion constants below held up as designed in `v3_sitting.log`
+//! (demotion walked the dial list, control-group discard fired, refusal
+//! re-raced) and are CONFIRMED unchanged; the one evidence-convicted change
+//! is [`MIN_STRIKE_RUN_SECS`] — the churn-noise floor (register item 16).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use kaspa_rpc_core::api::ops::RPC_API_VERSION;
 use kaspa_wrpc_client::prelude::{
     ConnectOptions, ConnectStrategy, KaspaRpcClient, NetworkId, Resolver, RpcApi, RpcTransaction,
     WrpcEncoding,
@@ -63,6 +68,40 @@ pub const STRIKE_DEDUP_SECS: u64 = 10;
 /// (the next successful connect) arrived too late to convict the endpoint —
 /// a phone that spent minutes in a tunnel blames no one (control-group rule).
 pub const PENDING_STRIKE_TTL_SECS: u64 = 30;
+/// A drop that ends a run SHORTER than this parks no strike at all — the
+/// connection never lived long enough for its death to say anything about
+/// the endpoint (V6 churn-smoothing, register item 16: the V3 sitting's
+/// first mia strike punished a 25 ms run — pure Wi-Fi re-association noise;
+/// `v3_sitting.log` 13:42:30.698→.723). Ten seconds ≈ ~100 BlockAdded
+/// heartbeats at 10 bps: a run that survives it proves the interface
+/// genuinely held, so a later drop is admissible evidence (and D-084's
+/// self-refutation still acquits it if the same endpoint reconnects).
+pub const MIN_STRIKE_RUN_SECS: u64 = 10;
+
+/// Judgment of a dropped connection by run length (the V6 three-way split of
+/// the old clean-or-strike coin flip). Pure — the boundaries are pinned by
+/// unit test; the DagMonitor's disconnect arm consumes the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunJudgment {
+    /// Survived [`CLEAN_RUN_SECS`] — clears the endpoint's strikes.
+    CleanRun,
+    /// A real run that ended early — park a strike for the control group
+    /// (and D-084 self-refutation) to settle.
+    Strike,
+    /// Died inside [`MIN_STRIKE_RUN_SECS`] — interface churn noise; the drop
+    /// is inadmissible against the endpoint. No strike, no clean-run.
+    ChurnNoise,
+}
+
+pub fn judge_run(run_secs: u64) -> RunJudgment {
+    if run_secs >= CLEAN_RUN_SECS {
+        RunJudgment::CleanRun
+    } else if run_secs >= MIN_STRIKE_RUN_SECS {
+        RunJudgment::Strike
+    } else {
+        RunJudgment::ChurnNoise
+    }
+}
 
 /// Per-endpoint health record (all public data: a wss URL + counters).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +247,19 @@ pub struct ProbeOutcome {
     pub url: String,
     pub server_version: String,
     pub virtual_daa_score: u64,
+    /// The node's RPC API major — carried for forensics (winners' majors
+    /// climbing is the early signal of a network-wide upgrade wave).
+    pub rpc_api_version: u16,
+}
+
+/// Whether a node's RPC API major is servable by this pinned client. `<=`,
+/// not `==`, mirroring the pin's own handshake gate (wallet-core
+/// processor.rs refuses only NEWER majors): an older major has already
+/// proven wire compatibility by answering the probe, while a newer one can
+/// carry call semantics the pin cannot parse. A stricter `!=` here would
+/// make the probe disagree with the wallet-core gate on the same socket.
+fn rpc_major_supported(server_major: u16) -> bool {
+    server_major <= RPC_API_VERSION
 }
 
 /// Dial `url` on an EPHEMERAL client and health-check it via
@@ -258,10 +310,21 @@ pub async fn probe_endpoint(
         if !info.has_utxo_index {
             return Err(ChainError::Message(format!("probe {url}: no utxo index")));
         }
+        // Wrong-major refusal (V6 ecosystem rider): a node speaking a newer
+        // RPC major than the pin would strand the shared socket half-up at
+        // wallet-core's own handshake gate — refuse at candidacy instead,
+        // where the race just walks to the next node.
+        if !rpc_major_supported(info.rpc_api_version) {
+            return Err(ChainError::Message(format!(
+                "probe {url}: rpc major v{} newer than pinned v{RPC_API_VERSION}",
+                info.rpc_api_version
+            )));
+        }
         Ok(ProbeOutcome {
             url: url.to_string(),
             server_version: info.server_version,
             virtual_daa_score: info.virtual_daa_score,
+            rpc_api_version: info.rpc_api_version,
         })
     }
     .await;
@@ -553,6 +616,28 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("kv-link-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn run_judgment_boundaries_hold() {
+        // The churn-noise floor and the clean-run ceiling (item 16, V6):
+        // 25 ms-class interface deaths are inadmissible; a run past the
+        // floor strikes; a run past CLEAN_RUN_SECS clears.
+        assert_eq!(judge_run(0), RunJudgment::ChurnNoise);
+        assert_eq!(judge_run(MIN_STRIKE_RUN_SECS - 1), RunJudgment::ChurnNoise);
+        assert_eq!(judge_run(MIN_STRIKE_RUN_SECS), RunJudgment::Strike);
+        assert_eq!(judge_run(CLEAN_RUN_SECS - 1), RunJudgment::Strike);
+        assert_eq!(judge_run(CLEAN_RUN_SECS), RunJudgment::CleanRun);
+    }
+
+    #[test]
+    fn rpc_major_gate_refuses_only_newer_majors() {
+        // Pin the boundary: older majors have proven wire-compat by
+        // answering the probe; only a NEWER major is refused (the
+        // wallet-core handshake-gate semantics, never stricter).
+        assert!(rpc_major_supported(0));
+        assert!(rpc_major_supported(RPC_API_VERSION));
+        assert!(!rpc_major_supported(RPC_API_VERSION + 1));
     }
 
     #[test]
