@@ -44,6 +44,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use kaspa_rpc_core::api::ops::RPC_API_VERSION;
+use kaspa_wrpc_client::node::NodeDescriptor;
 use kaspa_wrpc_client::prelude::{
     ConnectOptions, ConnectStrategy, KaspaRpcClient, NetworkId, Resolver, RpcApi, RpcTransaction,
     WrpcEncoding,
@@ -77,6 +78,29 @@ pub const PENDING_STRIKE_TTL_SECS: u64 = 30;
 /// genuinely held, so a later drop is admissible evidence (and D-084's
 /// self-refutation still acquits it if the same endpoint reconnects).
 pub const MIN_STRIKE_RUN_SECS: u64 = 10;
+/// Deadline for ONE `Resolver::get_node` fetch (D-089 root cause, C1). The
+/// pinned resolver walks its seeder URLs SEQUENTIALLY inside a single
+/// `fetch()` (pin `rpc/wrpc/client/src/resolver.rs:155-167`), and the HTTP
+/// layer beneath is a default `reqwest::Client::new()` with NO timeout
+/// anywhere in the crate (`workflow-http 0.18.0 src/native.rs`) — one
+/// silently blackholed request (Wi-Fi power-save, AP roam, Wi-Fi↔cell
+/// handoff: no RST ever arrives) used to hang the whole race loop forever.
+/// 5 s because it caps the pin's WHOLE sequential seeder walk, not one
+/// seeder: a healthy seeder answers well under 1 s, so a walk that needs
+/// 5 s is a walk that is not going to succeed; the race round's worst case
+/// becomes fetch 5 s + probe ~8 s and the loop CYCLES instead of wedging.
+pub const RESOLVER_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for AWAITING a client's teardown (probe/escalation/shared).
+/// `disconnect()` at the pin is a dispatcher handshake that a blackholed
+/// socket can starve (`workflow-websocket 0.18.0 client/native.rs:322-334`:
+/// `ws_sender.send().await` runs INSIDE a select arm body, so the shutdown
+/// arm is unpolled while it blocks) — and a dispatcher that exits via its
+/// ERROR path never answers the handshake at all, so a starved teardown may
+/// NEVER complete. The teardown is therefore detached (never aborted — the
+/// reaper finding) and never awaited raw, and nothing bounded may gate on
+/// its completion; only the caller's WAIT is bounded, so a probe task can
+/// never wedge the race's drain.
+pub const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Judgment of a dropped connection by run length (the V6 three-way split of
 /// the old clean-or-strike coin flip). Pure — the boundaries are pinned by
@@ -103,12 +127,28 @@ pub fn judge_run(run_secs: u64) -> RunJudgment {
     }
 }
 
+/// How many recent-healthy pantry candidates join the cached endpoint as
+/// immediate parallel dials in the race (C6/D-089 ruling 5): enough that one
+/// live node among them makes the common reconnect resolver-free, small
+/// enough that a race round stays a handful of sockets.
+pub const PANTRY_DIALS: usize = 3;
+/// A pantry candidate must have been seen healthy within this window — a
+/// node that hasn't answered in a week is the resolver's job to re-find,
+/// not a dial-list squatter.
+pub const PANTRY_FRESH_SECS: u64 = 7 * 24 * 3600;
+
 /// Per-endpoint health record (all public data: a wss URL + counters).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HealthRecord {
     strikes: u32,
     last_strike_unix: u64,
     demoted_until_unix: u64,
+    /// Unix-seconds this endpoint last PROVED healthy (won a probe, or the
+    /// shared socket connected to it); 0 = never observed healthy. Feeds the
+    /// race pantry (C6): recent-healthy nodes dial immediately, without the
+    /// resolver on the critical path (INV-8 posture — the resolver is an
+    /// untrusted accelerator, and now it isn't load-bearing either).
+    last_healthy_unix: u64,
 }
 
 /// The demotion ledger — finding 11's cure. Loaded from / persisted to an
@@ -138,12 +178,19 @@ impl EndpointHealth {
                 let (Ok(strikes), Ok(last), Ok(until)) = (s.parse(), l.parse(), d.parse()) else {
                     continue;
                 };
+                // 5th field added at C6 (D-089): ABSENT in every pre-R0
+                // ledger, so absent = 0 (never-observed-healthy), and a
+                // malformed value degrades the same way — the IO contract
+                // (PB-023) splits absent-vs-corrupt from error kinds; health
+                // data is advisory either way.
+                let last_healthy_unix = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 records.insert(
                     url.to_string(),
                     HealthRecord {
                         strikes,
                         last_strike_unix: last,
                         demoted_until_unix: until,
+                        last_healthy_unix,
                     },
                 );
             }
@@ -156,8 +203,8 @@ impl EndpointHealth {
         let mut out = String::new();
         for (url, r) in &self.records {
             out.push_str(&format!(
-                "{url}\t{}\t{}\t{}\n",
-                r.strikes, r.last_strike_unix, r.demoted_until_unix
+                "{url}\t{}\t{}\t{}\t{}\n",
+                r.strikes, r.last_strike_unix, r.demoted_until_unix, r.last_healthy_unix
             ));
         }
         if let Some(parent) = path.parent() {
@@ -177,6 +224,7 @@ impl EndpointHealth {
             strikes: 0,
             last_strike_unix: 0,
             demoted_until_unix: 0,
+            last_healthy_unix: 0,
         });
         if record.strikes > 0
             && now_unix.saturating_sub(record.last_strike_unix) < STRIKE_DEDUP_SECS
@@ -206,6 +254,48 @@ impl EndpointHealth {
         if let Some(record) = self.records.get_mut(url) {
             record.strikes = 0;
         }
+    }
+
+    /// Stamp `url` as observed-healthy NOW (C6): a probe win or a shared-
+    /// socket `Connected`. Feeds [`Self::race_pantry`].
+    pub fn mark_healthy(&mut self, url: &str, now_unix: u64) {
+        let record = self.records.entry(url.to_string()).or_insert(HealthRecord {
+            strikes: 0,
+            last_strike_unix: 0,
+            demoted_until_unix: 0,
+            last_healthy_unix: 0,
+        });
+        record.last_healthy_unix = now_unix;
+    }
+
+    /// The race's immediate-dial pantry (C6, pure — boundaries pinned by unit
+    /// test): up to `k` endpoints seen healthy within [`PANTRY_FRESH_SECS`],
+    /// not currently demoted, deduped against the cached endpoint —
+    /// most-recently-healthy first (URL as the deterministic tie-break).
+    /// These dial in parallel WITHOUT waiting for any resolver HTTP: the
+    /// common reconnect re-dials a node the wallet trusted an hour ago and
+    /// a slow resolver network stops being load-bearing (INV-8 posture).
+    pub fn race_pantry(&self, cached: Option<&str>, now_unix: u64, k: usize) -> Vec<String> {
+        let mut fresh: Vec<(&String, &HealthRecord)> = self
+            .records
+            .iter()
+            .filter(|(url, r)| {
+                r.last_healthy_unix > 0
+                    && now_unix.saturating_sub(r.last_healthy_unix) <= PANTRY_FRESH_SECS
+                    && r.demoted_until_unix <= now_unix
+                    && Some(url.as_str()) != cached
+            })
+            .collect();
+        fresh.sort_by(|(a_url, a), (b_url, b)| {
+            b.last_healthy_unix
+                .cmp(&a.last_healthy_unix)
+                .then_with(|| a_url.cmp(b_url))
+        });
+        fresh
+            .into_iter()
+            .take(k)
+            .map(|(url, _)| url.clone())
+            .collect()
     }
 
     /// Test seam: age an endpoint's last strike so the same-incident dedup
@@ -260,6 +350,44 @@ pub struct ProbeOutcome {
 /// make the probe disagree with the wallet-core gate on the same socket.
 fn rpc_major_supported(server_major: u16) -> bool {
     server_major <= RPC_API_VERSION
+}
+
+/// The ONE bounded doorway to `Resolver::get_node` (D-089 bounded-await law,
+/// C1): every resolver fetch in this crate goes through here, never raw —
+/// the raw call has no deadline at any layer beneath it (see
+/// [`RESOLVER_FETCH_TIMEOUT`]) and a blackholed fetch wedged the whole
+/// recovery engine. Errors are sanitized before the evidence lane.
+pub async fn bounded_get_node(
+    resolver: &Resolver,
+    network_id: NetworkId,
+    timeout: Duration,
+) -> Result<NodeDescriptor> {
+    tokio::time::timeout(timeout, resolver.get_node(WrpcEncoding::Borsh, network_id))
+        .await
+        .map_err(|_| ChainError::Message(format!("resolver fetch: timeout after {timeout:?}")))?
+        .map_err(|e| {
+            ChainError::Message(format!(
+                "resolver fetch: {}",
+                sanitize_node_text(&e.to_string())
+            ))
+        })
+}
+
+/// Detach-and-bound a client's teardown (C2 fix, same class as C1): the
+/// teardown task is detached, never cancelled (aborting it would leak a
+/// detached ws loop — the reaper finding) and never awaited raw; it MAY
+/// never complete (a starved handshake can be orphaned forever — see
+/// [`DISCONNECT_WAIT_TIMEOUT`]), which is precisely why the caller's WAIT
+/// is bounded and why nothing on a bounded path may gate on the teardown
+/// finishing (the winner bind carries its own envelope for the guard this
+/// teardown can hold — `BIND_ENVELOPE_TIMEOUT`).
+pub(crate) async fn bounded_disconnect(client: KaspaRpcClient, wait: Duration) {
+    let teardown = tokio::spawn(async move {
+        let _ = client.disconnect().await;
+    });
+    if tokio::time::timeout(wait, teardown).await.is_err() {
+        log::warn!("link: disconnect wait exceeded {wait:?} — teardown continues detached");
+    }
 }
 
 /// Dial `url` on an EPHEMERAL client and health-check it via
@@ -328,7 +456,7 @@ pub async fn probe_endpoint(
         })
     }
     .await;
-    let _ = client.disconnect().await;
+    bounded_disconnect(client, DISCONNECT_WAIT_TIMEOUT).await;
     result
 }
 
@@ -342,21 +470,26 @@ pub struct RaceOutcome {
     pub failed: Vec<String>,
 }
 
-/// Race-to-connect (V3 deliverable 1): the cached endpoint (if provided and
-/// not demoted) starts dialing IMMEDIATELY — that is the fast path, it wins
-/// every tie because resolver candidates first spend an HTTP round-trip on
-/// `get_node` — while `fetches` parallel resolver fetches feed parallel
-/// probes. First healthy endpoint wins; in-flight losers finish their
-/// bounded probes in a detached reaper (aborting would leak ws loops).
+/// Race-to-connect (V3 deliverable 1, pantry since C6/D-089): the cached
+/// endpoint plus up to [`PANTRY_DIALS`] recent-healthy pantry candidates
+/// (if provided and not demoted) start dialing IMMEDIATELY — the fast path;
+/// they win every tie because resolver candidates first spend an HTTP
+/// round-trip on `get_node` — while `fetches` parallel resolver fetches feed
+/// parallel probes, joining as they land. First healthy endpoint wins;
+/// in-flight losers finish their bounded probes in a detached reaper
+/// (aborting would leak ws loops). The common reconnect therefore does ZERO
+/// HTTP before dialing a node it trusted recently.
 ///
-/// `demoted` URLs never enter the race — UNLESS the cached endpoint and every
-/// fetched node are all demoted and the race would be empty; connectivity
-/// always beats hygiene, so demotion filtering degrades to advisory when it
-/// would otherwise strand the wallet (the ledger heals as cooldowns lapse).
+/// `demoted` URLs never enter the race — UNLESS the cached endpoint, the
+/// pantry and every fetched node are all demoted and the race would be
+/// empty; connectivity always beats hygiene, so demotion filtering degrades
+/// to advisory when it would otherwise strand the wallet (the ledger heals
+/// as cooldowns lapse).
 pub async fn race(
     resolver: &Resolver,
     network_id: NetworkId,
     cached: Option<String>,
+    pantry: Vec<String>,
     demoted: &HashSet<String>,
     fetches: usize,
     probe_timeout: Duration,
@@ -364,17 +497,22 @@ pub async fn race(
     let mut tasks: JoinSet<std::result::Result<ProbeOutcome, Option<String>>> = JoinSet::new();
     let mut entered: HashSet<String> = HashSet::new();
 
-    let cached_allowed = cached
-        .as_ref()
-        .filter(|url| !demoted.contains(*url))
-        .cloned();
-    if let Some(url) = cached_allowed {
-        entered.insert(url.clone());
+    // Cached first, then the pantry: identical immediate-dial treatment, and
+    // `entered` dedups (race_pantry already excludes the cached URL, but a
+    // caller-composed pantry must not double-dial either way).
+    let immediate = cached
+        .into_iter()
+        .chain(pantry)
+        .filter(|url| !demoted.contains(url));
+    for url in immediate {
+        if !entered.insert(url.clone()) {
+            continue;
+        }
         tasks.spawn(async move {
             probe_endpoint(&url, network_id, probe_timeout)
                 .await
                 .map_err(|e| {
-                    log::info!("link: race probe failed (cached): {e}");
+                    log::info!("link: race probe failed (immediate): {e}");
                     Some(url)
                 })
         });
@@ -388,14 +526,12 @@ pub async fn race(
         let demoted = demoted.clone();
         let seen = seen.clone();
         tasks.spawn(async move {
-            let node = resolver
-                .get_node(WrpcEncoding::Borsh, network_id)
+            // Bounded doorway (C1): the raw get_node has no deadline at any
+            // layer and one blackholed fetch wedged the race loop forever.
+            let node = bounded_get_node(&resolver, network_id, RESOLVER_FETCH_TIMEOUT)
                 .await
                 .map_err(|e| {
-                    log::info!(
-                        "link: resolver fetch failed: {}",
-                        sanitize_node_text(&e.to_string())
-                    );
+                    log::info!("link: {e}");
                     None
                 })?;
             let url = node.url;
@@ -551,15 +687,11 @@ pub async fn escalate_stalled_tx(
     tx: RpcTransaction,
     probe_timeout: Duration,
 ) -> Result<EscalationOutcome> {
-    let node = resolver
-        .get_node(WrpcEncoding::Borsh, network_id)
+    // Bounded doorway (C1): the same blackhole that wedged the race would
+    // otherwise wedge the stuck-payment rescue path silently.
+    let node = bounded_get_node(resolver, network_id, RESOLVER_FETCH_TIMEOUT)
         .await
-        .map_err(|e| {
-            ChainError::Message(format!(
-                "escalation resolver fetch: {}",
-                sanitize_node_text(&e.to_string())
-            ))
-        })?;
+        .map_err(|e| ChainError::Message(format!("escalation {e}")))?;
     let url = node.url;
     let client = KaspaRpcClient::new_with_args(
         WrpcEncoding::Borsh,
@@ -606,7 +738,7 @@ pub async fn escalate_stalled_tx(
         }
     }
     .await;
-    let _ = client.disconnect().await;
+    bounded_disconnect(client, DISCONNECT_WAIT_TIMEOUT).await;
     result
 }
 
@@ -718,6 +850,125 @@ mod tests {
     fn missing_ledger_is_empty_not_error() {
         let health = EndpointHealth::load(Path::new("/nonexistent/kv/health"));
         assert!(health.demoted_set(1).is_empty());
+    }
+
+    /// PB-023 (C6/D-089 ruling 5): the ledger on every device that ran a
+    /// pre-R0 build is 4-field lines — EXACTLY this fixture's format (copied
+    /// from a real V6 `endpoint.health` line shape). It must parse with
+    /// `last_healthy_unix` defaulting to 0, all other fields intact; a
+    /// malformed 5th field degrades to 0 the same way (absent-vs-corrupt by
+    /// IO contract, and health data is advisory either way).
+    #[test]
+    fn old_format_ledger_parses_with_last_healthy_defaulting_to_zero() {
+        let path = tmp("health-pb023");
+        std::fs::write(
+            &path,
+            "wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh\t2\t5100\t5700\n\
+             wss://lena.kaspa.stream/kaspa/mainnet/wrpc/borsh\t1\t6000\t0\n\
+             wss://mia.kaspa.stream/kaspa/mainnet/wrpc/borsh\t0\t0\t0\tgarbage\n",
+        )
+        .unwrap();
+        let loaded = EndpointHealth::load(&path);
+        // Old fields intact: nora is demoted until 5700, lena is not.
+        assert!(loaded.is_demoted("wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh", 5_600));
+        assert!(!loaded.is_demoted("wss://lena.kaspa.stream/kaspa/mainnet/wrpc/borsh", 5_600));
+        // Absent (and corrupt) 5th field = never-observed-healthy: nothing
+        // qualifies for the pantry.
+        assert!(loaded.race_pantry(None, 6_000, PANTRY_DIALS).is_empty());
+        // And the migrated ledger round-trips in the NEW format.
+        loaded.save(&path);
+        let reloaded = EndpointHealth::load(&path);
+        assert!(reloaded.is_demoted("wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh", 5_600));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pantry_selects_fresh_undemoted_deduped_most_recent_first() {
+        let now = 1_000_000u64;
+        let mut health = EndpointHealth::default();
+        // Fresh and clean — candidates, ordered by recency.
+        health.mark_healthy("wss://recent.example/borsh", now - 60);
+        health.mark_healthy("wss://older.example/borsh", now - 3_600);
+        health.mark_healthy("wss://oldest.example/borsh", now - 86_400);
+        // Exactly at the freshness boundary — still in.
+        health.mark_healthy("wss://boundary.example/borsh", now - PANTRY_FRESH_SECS);
+        // One second past the boundary — out.
+        health.mark_healthy("wss://stale.example/borsh", now - PANTRY_FRESH_SECS - 1);
+        // Fresh but demoted — out while the cooldown holds.
+        health.mark_healthy("wss://demoted.example/borsh", now - 30);
+        health.strike("wss://demoted.example/borsh", now - 20);
+        health.backdate_last_strike("wss://demoted.example/borsh", STRIKE_DEDUP_SECS + 1);
+        health.strike("wss://demoted.example/borsh", now - 5); // second strike demotes
+        assert!(health.is_demoted("wss://demoted.example/borsh", now));
+
+        // The cached endpoint is deduped out even when it is the freshest.
+        let pantry = health.race_pantry(Some("wss://recent.example/borsh"), now, PANTRY_DIALS);
+        assert_eq!(
+            pantry,
+            vec![
+                "wss://older.example/borsh".to_string(),
+                "wss://oldest.example/borsh".to_string(),
+                "wss://boundary.example/borsh".to_string(),
+            ]
+        );
+
+        // Without the dedup, K caps the list and recency orders it.
+        let pantry = health.race_pantry(None, now, PANTRY_DIALS);
+        assert_eq!(
+            pantry,
+            vec![
+                "wss://recent.example/borsh".to_string(),
+                "wss://older.example/borsh".to_string(),
+                "wss://oldest.example/borsh".to_string(),
+            ]
+        );
+
+        // A lapsed demotion cooldown restores pantry candidacy.
+        let after_cooldown = now + DEMOTION_COOLDOWN_SECS;
+        let pantry = health.race_pantry(None, after_cooldown, 10);
+        assert!(pantry.contains(&"wss://demoted.example/borsh".to_string()));
+    }
+
+    /// C1 (D-089): the wedge test. A seeder that ACCEPTS the TCP connection
+    /// and never answers (the silent-blackhole shape — no RST, no response)
+    /// must error within [`bounded_get_node`]'s bound instead of hanging the
+    /// caller forever. The outer 10 s guard is the negative-proof detector
+    /// (PB-011): with the timeout wrap reverted this test goes RED on the
+    /// guard's expect instead of hanging the suite.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_get_node_errors_within_bound_on_hanging_seeder() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Accept and HOLD each socket open, never writing a byte.
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+        // Point the pin's Resolver at the hanging listener via its public
+        // constructor — `Resolver::new(urls: Option<Vec<Arc<String>>>, tls:
+        // bool)` (pin rpc/wrpc/client/src/resolver.rs:106).
+        let resolver = Resolver::new(
+            Some(vec![std::sync::Arc::new(format!("http://{addr}"))]),
+            false,
+        );
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            bounded_get_node(&resolver, network_id, Duration::from_millis(400)),
+        )
+        .await
+        .expect("bounded_get_node must return within its bound — it hung (the D-089 wedge)");
+        assert!(result.is_err(), "a hanging seeder cannot yield a node");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "errored, but not within the configured bound"
+        );
     }
 
     #[test]

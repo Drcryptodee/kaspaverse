@@ -274,6 +274,22 @@ pub async fn dag_reconnect(stalled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// OS default-network transition (C5/D-089): Android's `ConnectivityManager`
+/// default-network callback, relayed by the host activity over the platform
+/// channel and forwarded here by Dart. One `bool` in, unit out — no secret
+/// material can touch this surface structurally (INV-1 untouched; the
+/// ffi-leak auditor samples this fn). Rust decides what the signal means
+/// (ruling 4): available with a dead link → redial NOW; available while
+/// connected → log only (the watchdog owns staleness); lost → log + span
+/// only. A no-op before the monitor exists (nothing to redial yet — the
+/// first connect races on its own).
+pub async fn dag_network_changed(available: bool) -> Result<(), AppError> {
+    if let Some(monitor) = MONITOR.get() {
+        monitor.network_changed(available);
+    }
+    Ok(())
+}
+
 /// Minimum spacing between HARD pull-heal resyncs — socket teardown + race +
 /// full rescan is not a cheap gesture; repeated pulls inside the window
 /// re-serve the fold without bouncing the socket.

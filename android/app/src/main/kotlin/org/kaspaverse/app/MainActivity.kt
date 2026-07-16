@@ -2,6 +2,8 @@ package org.kaspaverse.app
 
 import android.app.Activity
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -20,6 +22,12 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterFragmentActivity() {
     private val channel = "org.kaspaverse.app/ceremony"
+
+    // OS default-network signal (C5/D-089, ruling 3: zero new dependencies).
+    // Only a boolean crosses this channel — availability, never identity.
+    private val networkChannelName = "org.kaspaverse.app/network"
+    private var networkChannel: MethodChannel? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     // The pending Dart reply for an in-flight native reveal (D-039). RevealActivity
     // returns RESULT_OK only after the verify quiz passes; RESULT_CANCELED otherwise.
@@ -92,5 +100,35 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // C5 (D-089): relay the OS default-network transitions to Dart → Rust.
+        // Callbacks arrive on a ConnectivityManager binder thread — marshal to
+        // the main thread before touching the channel (host-side crash class).
+        networkChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger, networkChannelName,
+        )
+        if (networkCallback == null) {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    runOnUiThread { networkChannel?.invokeMethod("networkChanged", true) }
+                }
+
+                override fun onLost(network: Network) {
+                    runOnUiThread { networkChannel?.invokeMethod("networkChanged", false) }
+                }
+            }
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        }
+    }
+
+    override fun onDestroy() {
+        networkCallback?.let {
+            getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it)
+        }
+        networkCallback = null
+        networkChannel = null
+        super.onDestroy()
     }
 }

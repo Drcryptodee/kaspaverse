@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../rust/api/dag.dart';
@@ -41,6 +42,19 @@ class ChainService with WidgetsBindingObserver {
   @visibleForTesting
   static Future<void> Function(bool stalled) reconnectFn = (stalled) =>
       dagReconnect(stalled: stalled);
+
+  /// OS network signal relay (C5/D-089): MainActivity's
+  /// `ConnectivityManager` default-network callback arrives on this channel;
+  /// the handler forwards the bool to Rust, which owns ALL semantics
+  /// (redial / log-only / passive). Pure relay — no policy lives in Dart.
+  static const MethodChannel _networkChannel = MethodChannel(
+    'org.kaspaverse.app/network',
+  );
+
+  /// Test seam for the network-signal bridge call (no native lib in tests).
+  @visibleForTesting
+  static Future<void> Function(bool available) networkChangedBridge =
+      (available) => dagNetworkChanged(available: available);
 
   /// V1 observability seam: the Rust span-marker pull (hardening V1, findings
   /// item 6). NOTE the build-flavor-proof `kv-span` lane is Rust's own
@@ -109,6 +123,17 @@ class ChainService with WidgetsBindingObserver {
   void start() {
     if (_subscription == null) {
       WidgetsBinding.instance.addObserver(this);
+      // OS network signal (C5): native → Dart → Rust, a pure relay. The
+      // signal is an accelerator, never load-bearing — a failed forward is
+      // swallowed (the watchdog and the race's own retry still recover).
+      _networkChannel.setMethodCallHandler((call) async {
+        if (call.method == 'networkChanged' && call.arguments is bool) {
+          try {
+            await networkChangedBridge(call.arguments as bool);
+          } catch (_) {}
+        }
+        return null;
+      });
     }
     _subscription ??= streamFactory().listen(
       _apply,
@@ -253,6 +278,7 @@ class ChainService with WidgetsBindingObserver {
   Future<void> reset() async {
     await _subscription?.cancel();
     _subscription = null;
+    _networkChannel.setMethodCallHandler(null);
     _graceTimer?.cancel();
     _graceTimer = null;
     _watchdogTimer?.cancel();

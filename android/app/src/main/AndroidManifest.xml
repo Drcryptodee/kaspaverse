@@ -2,6 +2,9 @@
     <!-- wRPC to public Kaspa nodes. Debug builds inject this permission;
          profile/release would silently fail to connect without it. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- OS default-network callback (C5/D-089): the instant-redial signal.
+         Normal permission, no runtime prompt; reads availability only. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
         android:label="KaspaVerse"
         android:name="${applicationName}"
