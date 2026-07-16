@@ -43,6 +43,18 @@ Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
 Future<void> dagReconnect({required bool stalled}) =>
     RustLib.instance.api.crateApiDagDagReconnect(stalled: stalled);
 
+/// OS default-network transition (C5/D-089): Android's `ConnectivityManager`
+/// default-network callback, relayed by the host activity over the platform
+/// channel and forwarded here by Dart. One `bool` in, unit out — no secret
+/// material can touch this surface structurally (INV-1 untouched; the
+/// ffi-leak auditor samples this fn). Rust decides what the signal means
+/// (ruling 4): available with a dead link → redial NOW; available while
+/// connected → log only (the watchdog owns staleness); lost → log + span
+/// only. A no-op before the monitor exists (nothing to redial yet — the
+/// first connect races on its own).
+Future<void> dagNetworkChanged({required bool available}) =>
+    RustLib.instance.api.crateApiDagDagNetworkChanged(available: available);
+
 /// The pull heal asks the NODE — soft-first since V6 (amends the V3 register
 /// item 12 design, whose unconditional hard reconnect predates the D-083 root
 /// cause): on a HEALTHY connection the swipe re-fetches the watched UTXO set

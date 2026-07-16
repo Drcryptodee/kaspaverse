@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/dag.dart';
@@ -81,6 +82,48 @@ void main() {
     controller.add(const DagSnapshot(connected: true));
     await Future<void>.delayed(Duration.zero);
     expect(service.error.value, isNull);
+  });
+
+  group('OS network signal relay (C5/D-089)', () {
+    // Drive the platform channel exactly as MainActivity's native
+    // invokeMethod would; the relay must reach the bridge seam untouched —
+    // Rust owns the semantics, Dart carries the bool.
+    Future<void> nativeNetworkChanged(Object? payload) async {
+      final messenger =
+          TestWidgetsFlutterBinding.instance.defaultBinaryMessenger;
+      await messenger.handlePlatformMessage(
+        'org.kaspaverse.app/network',
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('networkChanged', payload),
+        ),
+        (_) {},
+      );
+    }
+
+    test('networkChanged reaches the bridge with the OS bool', () async {
+      final forwarded = <bool>[];
+      ChainService.networkChangedBridge = (available) async =>
+          forwarded.add(available);
+      ChainService.instance.start();
+
+      await nativeNetworkChanged(true);
+      await nativeNetworkChanged(false);
+      expect(forwarded, [true, false]);
+    });
+
+    test('a non-bool payload and a bridge failure are swallowed', () async {
+      var calls = 0;
+      ChainService.networkChangedBridge = (available) async {
+        calls++;
+        throw const AppError(message: 'bridge down');
+      };
+      ChainService.instance.start();
+
+      await nativeNetworkChanged('garbage'); // ignored: not a bool
+      expect(calls, 0);
+      await nativeNetworkChanged(true); // forwarded; failure swallowed
+      expect(calls, 1);
+    });
   });
 
   group('background grace-drop (PERFORMANCE_BUDGET battery posture)', () {

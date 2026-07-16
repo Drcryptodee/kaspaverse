@@ -37,6 +37,19 @@ const BIND_TIMEOUT: Duration = Duration::from_secs(3);
 /// returns ONE node per fetch — spec verified against the pinned source).
 const RACE_FETCHES: usize = 3;
 
+/// Envelope bound for the WHOLE winner-bind call (consensus-audit BLOCK at
+/// R0): the dial itself is bounded by [`BIND_TIMEOUT`], but
+/// `KaspaRpcClient::connect`'s `Fallback` ERROR arm then locks
+/// `disconnect_guard` and runs the shutdown handshake (pin
+/// `client.rs:463-467`) — the same guard a starved detached teardown can
+/// hold indefinitely (a dispatcher that exits via its error path never
+/// answers `close()`'s shutdown handshake, so that teardown may never
+/// finish). Sized dial 3 s + teardown-wait 5 s + margin. A timeout here is
+/// treated as a failed bind and re-raced with NO strike: the endpoint just
+/// won a probe — the block is our own guard, and convicting the node for it
+/// would be a self-inflicted verdict (auditor item 18).
+const BIND_ENVELOPE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Pause between race rounds when NO candidate was healthy (offline, resolver
 /// unreachable) — the app-owned replacement for the abandoned ws-level
 /// `ConnectStrategy::Retry` loop (D-081).
@@ -136,6 +149,13 @@ struct Inner {
     /// at most ONE race loop alive (D-081; the V2 sitting's doubled
     /// `Connected` was two concurrent ws connect loops).
     race_running: AtomicBool,
+    /// The race-kick (C4/D-089 ruling 2): a Reconnect tap, resume, or OS
+    /// network-available signal during a live search interrupts the retry
+    /// PAUSE — never the in-flight probes (the reaper finding), never a
+    /// second search authority. `Notify`'s stored permit means an unconsumed
+    /// kick lets the next pause skip once — one spurious immediate round,
+    /// accepted (register C4 note).
+    race_kick: tokio::sync::Notify,
     /// The endpoint whose failure awaits network-alive evidence: committed as
     /// a strike by the NEXT `Connected` event from a DIFFERENT endpoint (the
     /// control-group — the network worked via B while this one stayed dark).
@@ -209,7 +229,13 @@ impl DagMonitor {
             url.as_deref(),
             // The client's internal resolver is a construction requirement for
             // url-less clients; the race supplies explicit URLs so it never
-            // actually resolves (D-081).
+            // actually resolves (D-081). LOAD-BEARING for the bounded-await
+            // law (D-089/L64): the ws connect loop's resolver hook runs raw
+            // `get_node` OUTSIDE `connect_timeout` (pin ws native.rs:150-156,
+            // :178 vs :182; client.rs:233-235) — an unbounded HTTP that
+            // cannot fire only because EVERY connect on this client passes
+            // `options.url: Some(..)`. A url-less connect here re-opens the
+            // D-089 wedge (sweep-table tripwire, CONNECTIVITY_PASS §5).
             url.is_none().then(|| resolver.clone()),
             Some(network_id),
             None,
@@ -235,6 +261,7 @@ impl DagMonitor {
                 health: Mutex::new(EndpointHealth::default()),
                 health_path: Mutex::new(None),
                 race_running: AtomicBool::new(false),
+                race_kick: tokio::sync::Notify::new(),
                 pending_strike: Mutex::new(None),
                 hygiene_advisory: AtomicBool::new(false),
                 connected_at: AtomicU64::new(0),
@@ -332,6 +359,18 @@ impl DagMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         health.clean_run(url);
+        self.save_health(&health);
+    }
+
+    /// Stamp an observed-healthy moment (C6): a probe win or a `Connected`
+    /// on the shared socket. Persisted — the pantry survives restarts.
+    fn mark_endpoint_healthy(&self, url: &str) {
+        let mut health = self
+            .inner
+            .health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        health.mark_healthy(url, Self::now_unix());
         self.save_health(&health);
     }
 
@@ -682,19 +721,58 @@ impl DagMonitor {
     }
 
     /// Spawn the race task unless one is already running (single-flight —
-    /// exactly one reconnect authority, D-081).
-    fn spawn_race(&self) {
+    /// exactly one reconnect authority, D-081). Returns whether a NEW loop
+    /// was spawned; the already-running path is never silent (C4/D-089 — the
+    /// old silent return here was half of the dead-Reconnect symptom) and
+    /// callers holding a user gesture escalate it to a [`Self::kick_race`].
+    fn spawn_race(&self) -> bool {
         if self.inner.direct_url.is_some() {
-            return; // pinned mode: the ws Retry loop owns the link
+            return false; // pinned mode: the ws Retry loop owns the link
         }
         if self.inner.race_running.swap(true, Ordering::SeqCst) {
-            return; // a race loop is already on it
+            log::info!("link: spawn_race — a race loop is already hunting");
+            return false;
         }
         let monitor = self.clone();
         tokio::spawn(async move {
             monitor.race_loop().await;
             monitor.inner.race_running.store(false, Ordering::SeqCst);
         });
+        true
+    }
+
+    /// The tap always acts (C4): when a race is already hunting, interrupt
+    /// its retry PAUSE — kicks never abort in-flight probes (the reaper
+    /// finding) and never spawn a second search authority (D-081, ruling 2).
+    fn kick_race(&self, source: &str) {
+        log::info!("link: reconnect tap — race already hunting; kicked the retry pause ({source})");
+        spans::mark_with("race_kick", source);
+        self.inner.race_kick.notify_one();
+    }
+
+    /// Spawn-or-kick (C4): the one entry every recovery gesture routes
+    /// through — a fresh race if none is running, a kick into the live one's
+    /// retry pause otherwise. Pinned mode does neither (the ws Retry loop
+    /// owns a pinned link).
+    fn spawn_or_kick_race(&self, source: &str) {
+        if !self.spawn_race() && self.inner.direct_url.is_none() {
+            self.kick_race(source);
+        }
+    }
+
+    /// Bound the wait on the SHARED client's teardown (C2 fix, the C1 class):
+    /// the pin's `disconnect()` is a dispatcher handshake a blackholed socket
+    /// can starve (`workflow-websocket 0.18.0 client/native.rs:322-334` —
+    /// `ws_sender.send().await` inside a select arm body), and
+    /// `KaspaRpcClient::disconnect` serializes callers on `disconnect_guard`
+    /// (pin `client.rs:476-482`), so ONE hung teardown would wedge every
+    /// later caller — including the event loop, which calls this inline. The
+    /// teardown is detached, never cancelled (the reaper rule), and MAY
+    /// never complete (an error-path dispatcher exit orphans the handshake);
+    /// the wait is bounded, and the guard it can hold is why the winner bind
+    /// carries [`BIND_ENVELOPE_TIMEOUT`].
+    async fn bounded_disconnect(&self) {
+        link::bounded_disconnect((*self.inner.client).clone(), link::DISCONNECT_WAIT_TIMEOUT).await;
     }
 
     /// The connect race (V3 deliverable 1): candidates = the cached last-good
@@ -714,23 +792,33 @@ impl DagMonitor {
             }
             let now = Self::now_unix();
             let advisory = empty_rounds >= 2;
-            let demoted = if advisory {
-                // Never strand the wallet on hygiene: two whole rounds found
-                // nothing healthy, so demotion degrades to advisory — a
-                // flaky node beats no node (connectivity over cleanliness).
-                Default::default()
-            } else {
-                self.inner
+            let cached = self.read_cached_endpoint();
+            let (demoted, pantry) = {
+                let health = self
+                    .inner
                     .health
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .demoted_set(now)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let demoted = if advisory {
+                    // Never strand the wallet on hygiene: two whole rounds
+                    // found nothing healthy, so demotion degrades to advisory
+                    // — a flaky node beats no node (connectivity over
+                    // cleanliness).
+                    Default::default()
+                } else {
+                    health.demoted_set(now)
+                };
+                // The pantry (C6): recent-healthy nodes dial immediately, in
+                // parallel with the cached endpoint — the common reconnect
+                // does zero HTTP before dialing a node it trusted recently.
+                let pantry = health.race_pantry(cached.as_deref(), now, link::PANTRY_DIALS);
+                (demoted, pantry)
             };
-            let cached = self.read_cached_endpoint();
             let outcome = link::race(
                 &self.inner.resolver,
                 self.inner.network_id,
                 cached,
+                pantry,
                 &demoted,
                 RACE_FETCHES,
                 PROBE_TIMEOUT,
@@ -744,7 +832,17 @@ impl DagMonitor {
                     outcome.failed.len(),
                     RACE_RETRY_DELAY
                 );
-                tokio::time::sleep(RACE_RETRY_DELAY).await;
+                // Kickable pause (C4): a Reconnect tap / resume / OS
+                // network-available signal skips the wait and races NOW.
+                // Kicks interrupt the SLEEP only — in-flight probes were
+                // already drained by race() above (the reaper finding
+                // stands: probes are never aborted).
+                tokio::select! {
+                    _ = tokio::time::sleep(RACE_RETRY_DELAY) => {}
+                    _ = self.inner.race_kick.notified() => {
+                        log::info!("link: retry pause kicked — racing immediately");
+                    }
+                }
                 continue;
             };
             empty_rounds = 0;
@@ -773,6 +871,8 @@ impl DagMonitor {
                 if advisory { " [hygiene advisory]" } else { "" }
             );
             spans::mark_with("race_winner", &winner.url);
+            // Pantry stamp (C6): a probe win IS an observed-healthy moment.
+            self.mark_endpoint_healthy(&winner.url);
             // An advisory bind to a still-demoted endpoint must not be
             // bounced by our own Connected-time enforcement.
             self.inner.hygiene_advisory.store(
@@ -793,15 +893,27 @@ impl DagMonitor {
                 connect_timeout: Some(BIND_TIMEOUT),
                 ..Default::default()
             };
-            match self.inner.client.connect(Some(options)).await {
-                Ok(_) => {
+            // Envelope-bounded (BLOCK fix at R0): the connect's error arm
+            // can block on the pin's disconnect_guard behind a starved
+            // teardown — bound the whole call at OUR boundary (item 19).
+            // A dropped connect future is safe under existing law: a
+            // Fallback dial failure self-terminates, AlreadyConnected
+            // returns before a loop spawns, and a late success is judged
+            // at Connected (D-084 machinery — no second authority).
+            match tokio::time::timeout(
+                BIND_ENVELOPE_TIMEOUT,
+                self.inner.client.connect(Some(options)),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
                     // A pause that landed mid-bind wins: drop the socket.
                     if self.inner.paused.load(Ordering::SeqCst) {
-                        let _ = self.inner.client.disconnect().await;
+                        self.bounded_disconnect().await;
                     }
                     return;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     // Died between probe and bind — strike (network known
                     // alive: it just answered a probe elsewhere) and re-race.
                     log::warn!(
@@ -810,6 +922,15 @@ impl DagMonitor {
                         link::sanitize_node_text(&e.to_string())
                     );
                     self.commit_strike(&winner.url, "bind failed");
+                }
+                Err(_) => {
+                    // NO strike: the node just won a probe — this is our own
+                    // teardown guard blocking, not the endpoint's fault.
+                    log::warn!(
+                        "link: bind to race winner {} exceeded {BIND_ENVELOPE_TIMEOUT:?} \
+                         (teardown guard suspected) — re-racing, no strike",
+                        winner.url
+                    );
                 }
             }
         }
@@ -821,21 +942,21 @@ impl DagMonitor {
     /// resyncs in lockstep on [`Self::resume`] (§0.8 / D-005).
     pub async fn pause(&self) -> Result<()> {
         self.inner.paused.store(true, Ordering::SeqCst);
-        self.inner.client.disconnect().await?;
+        self.bounded_disconnect().await;
         Ok(())
     }
 
     /// Foreground resume after a grace-drop: re-race (the cached last-good
     /// endpoint, persisted at most 30 s + grace ago, is candidate 0 and wins
     /// every tie). No-op while already connected (never bounce a healthy
-    /// socket).
+    /// socket); a race already hunting gets kicked instead of ignored (C4).
     pub async fn resume(&self) -> Result<()> {
         spans::mark("resume_start");
         self.inner.paused.store(false, Ordering::SeqCst);
         if self.is_connected() {
             return Ok(());
         }
-        self.spawn_race();
+        self.spawn_or_kick_race("resume");
         Ok(())
     }
 
@@ -865,9 +986,43 @@ impl DagMonitor {
         // swipe-to-refresh demoted the innocent incumbent). Also keeps the
         // race loop we spawn from reading a stale `connected` and exiting.
         self.inner.is_connected.store(false, Ordering::SeqCst);
-        let _ = self.inner.client.disconnect().await;
-        self.spawn_race();
+        self.bounded_disconnect().await;
+        // Spawn-or-kick (C4): the tap always acts. The old path silently
+        // no-opped here whenever a wedged race loop still held the
+        // single-flight flag — the dead-Reconnect symptom's second half.
+        self.spawn_or_kick_race("reconnect");
         Ok(())
+    }
+
+    /// OS default-network transition (C5/D-089 ruling 4), relayed from
+    /// Android's `ConnectivityManager` over the platform channel + bridge.
+    /// Semantics: available with a dead link → redial NOW (spawn-or-kick)
+    /// instead of waiting out a retry pause or the 30 s watchdog; available
+    /// while connected → log only (the watchdog owns staleness — OS
+    /// callbacks can flap, and a handoff-killed socket fires its own
+    /// Disconnected); lost → log + span only (passive first: the socket's
+    /// own death drives recovery; more aggression only if the soak proves
+    /// the watchdog gap hurts). Paused (backgrounded) → observe, never dial:
+    /// the battery posture owns the socket then, and resume() re-races.
+    pub fn network_changed(&self, available: bool) {
+        if !available {
+            spans::mark("network_lost");
+            log::info!("link: OS network lost — passive (the socket's own death drives recovery)");
+            return;
+        }
+        spans::mark("network_available");
+        if self.inner.paused.load(Ordering::SeqCst) {
+            log::info!(
+                "link: OS network available while paused — background posture holds, no dial"
+            );
+        } else if self.is_connected() {
+            log::info!(
+                "link: OS network available while connected — no action (watchdog owns staleness)"
+            );
+        } else {
+            log::info!("link: OS network available while disconnected — racing now");
+            self.spawn_or_kick_race("network_available");
+        }
     }
 
     /// Record that a block just arrived (the watchdog heartbeat).
@@ -898,7 +1053,7 @@ impl DagMonitor {
     /// Sets `paused` so a live race loop stands down instead of redialing.
     pub async fn stop(&self) -> Result<()> {
         self.inner.paused.store(true, Ordering::SeqCst);
-        self.inner.client.disconnect().await?;
+        self.bounded_disconnect().await;
         let shutdown = self
             .inner
             .shutdown
@@ -965,7 +1120,7 @@ impl DagMonitor {
                                     log::warn!(
                                         "link: demoted endpoint reconnected — refusing {url} and re-racing"
                                     );
-                                    let _ = self.inner.client.disconnect().await;
+                                    self.bounded_disconnect().await;
                                     self.spawn_race();
                                     continue;
                                 }
@@ -981,9 +1136,11 @@ impl DagMonitor {
                                     log::info!("dag-monitor: connected to {:?}", self.inner.client.url());
                                     // Remember the node that worked — it is
                                     // candidate 0 (the fast path) of the next
-                                    // cold start / post-grace race.
+                                    // cold start / post-grace race — and stamp
+                                    // it observed-healthy for the pantry (C6).
                                     if let Some(url) = self.inner.client.url() {
                                         self.persist_endpoint(&url);
+                                        self.mark_endpoint_healthy(&url);
                                     }
                                     self.emit(DagEvent::Connected { url: self.inner.client.url() });
                                 }
@@ -1020,7 +1177,7 @@ impl DagMonitor {
                                 // clears strikes; a short one parks a strike
                                 // for the next connect to settle), re-race.
                                 let dropped = self.inner.client.url();
-                                let _ = self.inner.client.disconnect().await;
+                                self.bounded_disconnect().await;
                                 let run_secs = Self::now_unix().saturating_sub(
                                     self.inner.connected_at.load(Ordering::Relaxed),
                                 );
@@ -1336,6 +1493,43 @@ mod tests {
         assert_eq!(DagMonitor::read_transport_cursor(&path), None);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// C4 (D-089): a Reconnect while a race already holds the single-flight
+    /// flag must KICK the live loop's retry pause — the old path silently
+    /// no-opped (the dead-Reconnect symptom's second half). Deterministic
+    /// seam: the flag is held manually (a live loop's pause, minus the
+    /// loop); the kick must reach a waiter on the Notify. The device flap
+    /// sitting is the authoritative end-to-end proof (register C8).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconnect_during_a_live_race_kicks_the_retry_pause() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        let inner = monitor.inner.clone();
+        let waiter = tokio::spawn(async move { inner.race_kick.notified().await });
+        tokio::task::yield_now().await;
+        // reconnect() on a never-connected client: the disconnect is a fast
+        // no-op; spawn_or_kick sees the held flag and kicks.
+        monitor.reconnect(false).await.expect("reconnect");
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("the kick must reach the race pause — silent no-op regression")
+            .expect("waiter task");
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// C4 stored-permit note: a kick with no pause armed is NOT lost — the
+    /// next `notified()` consumes it immediately (one spurious immediate
+    /// round, the accepted trade in the register).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unconsumed_kick_is_stored_not_lost() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        monitor.reconnect(false).await.expect("reconnect");
+        tokio::time::timeout(Duration::from_secs(2), monitor.inner.race_kick.notified())
+            .await
+            .expect("the stored permit must satisfy the next pause");
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
     }
 
     #[tokio::test(flavor = "multi_thread")]
