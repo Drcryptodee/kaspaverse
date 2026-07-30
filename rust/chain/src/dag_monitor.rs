@@ -351,7 +351,13 @@ impl DagMonitor {
     /// network-alive evidence in hand (a race just found another healthy node,
     /// or a fresh node just took an escalation resubmit) — a phone in a tunnel
     /// never demotes an innocent endpoint (D-081 control-group rule).
-    fn commit_strike(&self, url: &str, reason: link::StrikeReason, event_at_unix: u64) {
+    fn commit_strike(
+        &self,
+        url: &str,
+        reason: link::StrikeReason,
+        event_at_unix: u64,
+        dns_correlated: bool,
+    ) {
         let now = Self::now_unix();
         // R2 D3 — admissibility is judged at the ONE choke point every strike
         // passes, for the same reason the demotion refusal sits at the one
@@ -368,6 +374,7 @@ impl DagMonitor {
             event_at_unix,
             self.inner.os_lost_at.load(Ordering::SeqCst),
             self.inner.doubled_connect_at.load(Ordering::SeqCst),
+            dns_correlated,
         );
         let reason = match verdict {
             link::Admissibility::Convict(reason) => reason,
@@ -460,7 +467,7 @@ impl DagMonitor {
     /// (consensus-audit finding). Only called after a fresh node answered,
     /// so the evidence rule holds.
     pub fn strike_endpoint(&self, url: &str, reason: link::StrikeReason) {
-        self.commit_strike(url, reason, Self::now_unix());
+        self.commit_strike(url, reason, Self::now_unix(), false);
     }
 
     /// The endpoint the shared socket is (or was last) bound to — captured by
@@ -506,7 +513,7 @@ impl DagMonitor {
                 );
             } else if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
                 // `at` is when the socket DIED, not now — see commit_strike.
-                self.commit_strike(&url, link::StrikeReason::Drop, at);
+                self.commit_strike(&url, link::StrikeReason::Drop, at, false);
             } else {
                 log::info!("link: pending strike on {url} expired unproven — discarded");
             }
@@ -972,8 +979,20 @@ impl DagMonitor {
             // were the NODES' fault: strike them. (The drop that triggered
             // this race is parked as the pending strike and settles at the
             // Connected event — robust to a phantom redial winning first.)
+            // Judge the ROUND before judging its members (R2 field addendum):
+            // whether a DNS failure is the node's fault or our resolver's is
+            // not visible in any single failure, only in how many distinct
+            // hosts failed the same way at the same moment.
+            let dns_outage = link::dns_outage_in_round(&outcome.failed);
+            if dns_outage {
+                log::info!(
+                    "link: DNS failed across {}+ distinct endpoints this round — reading it as \
+                     the phone's resolver, not the nodes (strikes withheld)",
+                    link::DNS_CORRELATION_MIN
+                );
+            }
             for (url, reason) in &outcome.failed {
-                self.commit_strike(url, *reason, now);
+                self.commit_strike(url, *reason, now, dns_outage);
             }
 
             // Someone else (a ws-level phantom redial) may have connected
@@ -1046,6 +1065,7 @@ impl DagMonitor {
                         &winner.url,
                         link::StrikeReason::BindFailed,
                         Self::now_unix(),
+                        false,
                     );
                 }
                 Err(_) => {

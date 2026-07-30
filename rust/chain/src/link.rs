@@ -154,6 +154,12 @@ pub enum StrikeReason {
     BindFailed,
     /// A submitted tx stalled on the endpoint that took it.
     Stall,
+    /// The endpoint's hostname did not resolve. Kept DISTINCT from
+    /// [`Self::ProbeFailed`] because it is the one probe failure that may say
+    /// nothing about the node at all — we never reached it. Admissibility is
+    /// decided by correlation, not by the token alone: see
+    /// [`dns_outage_in_round`].
+    DnsFailure,
     /// WITHHELD (R2 D3): the event sat next to the OS reporting the phone's
     /// own network lost, so it is evidence about the link, not the node.
     OsLostAdjacent,
@@ -178,6 +184,7 @@ impl StrikeReason {
             Self::HttpServerError => "http-5xx",
             Self::BindFailed => "bind-failed",
             Self::Stall => "stall",
+            Self::DnsFailure => "dns-failure",
             Self::OsLostAdjacent => "os-lost-adjacent",
             Self::SelfInflicted => "self-inflicted",
             Self::Unknown => "unknown",
@@ -197,6 +204,7 @@ impl StrikeReason {
             "http-5xx" => Self::HttpServerError,
             "bind-failed" => Self::BindFailed,
             "stall" => Self::Stall,
+            "dns-failure" => Self::DnsFailure,
             "os-lost-adjacent" => Self::OsLostAdjacent,
             "self-inflicted" => Self::SelfInflicted,
             _ => Self::Unknown,
@@ -232,6 +240,15 @@ impl StrikeReason {
             || lower.contains("504 gateway timeout")
         {
             Self::HttpServerError
+        } else if lower.contains("no address associated with hostname")
+            || lower.contains("failed to lookup address information")
+            || lower.contains("name or service not known")
+            || lower.contains("temporary failure in name resolution")
+        {
+            // The exact strings the V60 produced through a scripted outage
+            // (`DNS: No address associated with hostname`, 8/8 failures) plus
+            // the other glibc/getaddrinfo phrasings for the same condition.
+            Self::DnsFailure
         } else if lower.contains("timeout") || lower.contains("timed out") {
             Self::DialTimeout
         } else {
@@ -265,6 +282,35 @@ pub const OS_LOST_ADJACENCY_SECS: u64 = 5;
 /// neighbourhood cannot be pinned on a node.
 pub const SELF_INFLICTED_ADJACENCY_SECS: u64 = 5;
 
+/// How many DISTINCT endpoints must fail DNS in one race round before the
+/// round is read as a resolver outage rather than as dead nodes.
+///
+/// **Two is a logical minimum, not a tuned threshold** — which is the whole
+/// reason this rule could be written the day it was found, under D-091
+/// ruling 6. One endpoint failing DNS is genuinely ambiguous: an operator who
+/// tears down a node may well pull its record, and that endpoint SHOULD stay
+/// convictable. But the immediate candidates are distinct hosts across
+/// distinct domains (`kaspa.stream`, `kaspa.red`, `kaspa.blue`,
+/// `kaspa.green` in the 2026-07-30 field capture) under different operators.
+/// Two of those losing DNS in the same round is not two coincident outages;
+/// it is our own resolver. There is no number here to get wrong, so there is
+/// nothing for a second incident to re-tune.
+pub const DNS_CORRELATION_MIN: usize = 2;
+
+/// Does this round's failure set show a PHONE-side DNS outage (R2 field
+/// addendum)? Pure — the caller supplies the round.
+///
+/// Correlation is measured over distinct HOSTS, not over entries: the same
+/// endpoint answering twice must never look like corroboration.
+pub fn dns_outage_in_round(failed: &[(String, StrikeReason)]) -> bool {
+    let hosts: HashSet<&str> = failed
+        .iter()
+        .filter(|(_, reason)| *reason == StrikeReason::DnsFailure)
+        .map(|(url, _)| endpoint_host(url))
+        .collect();
+    hosts.len() >= DNS_CORRELATION_MIN
+}
+
 /// What to do with a strike-worthy event (R2 D3). `Withhold` is not
 /// forgiveness — the event is still recorded against the endpoint via
 /// [`EndpointHealth::withhold`], it just does not count toward demotion.
@@ -295,10 +341,20 @@ pub fn judge_admissibility(
     event_at_unix: u64,
     os_lost_at_unix: u64,
     doubled_connect_at_unix: u64,
+    dns_correlated: bool,
 ) -> Admissibility {
     // Earned guilt is not excusable. Checked before every other arm.
     if reason == StrikeReason::HttpServerError {
         return Admissibility::Convict(reason);
+    }
+    // Checked before the time windows because it is the more SPECIFIC cause:
+    // the field case that motivated it convicted four endpoints 58 s after
+    // `network_lost` — long outside the OS window — while the phone's
+    // resolver was still cold from a Wi-Fi re-association. A lone DNS failure
+    // never reaches here as correlated, so a genuinely dead node's pulled
+    // record stays convictable.
+    if dns_correlated && reason == StrikeReason::DnsFailure {
+        return Admissibility::Withhold(StrikeReason::DnsFailure);
     }
     // `abs_diff`, not "since": the OS is routinely SLOWER than the socket to
     // notice a dead link (the socket errors first, ConnectivityService's
@@ -1374,6 +1430,84 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The field-found defect, pinned: the exact string the V60 produced
+    /// through a scripted outage must classify as DNS, not as a node fault.
+    #[test]
+    fn the_devices_own_dns_failure_text_classifies_as_dns() {
+        // Verbatim from ~/device_captures/r2_field_20260730_201322/r2_outage.log
+        let device_text = "probe dial wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh: \
+                           wRPC -> WebSocket -> IO error: failed to lookup address \
+                           information: No address associated with hostname";
+        assert_eq!(
+            StrikeReason::classify_probe_failure(device_text),
+            StrikeReason::DnsFailure,
+            "the failure that convicted four healthy endpoints must be recognisable"
+        );
+    }
+
+    /// The correlation rule. A resolver outage hits every candidate at once;
+    /// a dead node's pulled record hits exactly one.
+    #[test]
+    fn dns_is_the_resolvers_fault_only_when_distinct_hosts_fail_together() {
+        let f = |host: &str, r| (format!("wss://{host}/kaspa/mainnet/wrpc/borsh"), r);
+
+        // The field case: four distinct hosts, four distinct domains, one round.
+        let outage = vec![
+            f("nora.kaspa.stream", StrikeReason::DnsFailure),
+            f("tess.kaspa.red", StrikeReason::DnsFailure),
+            f("vivi.kaspa.blue", StrikeReason::DnsFailure),
+            f("eva.kaspa.green", StrikeReason::DnsFailure),
+        ];
+        assert!(dns_outage_in_round(&outage));
+
+        // ONE node's record pulled — genuinely that node's problem. This is
+        // the case the rule must NOT excuse, or a dead endpoint becomes
+        // permanently unstrikeable.
+        let lone = vec![f("nora.kaspa.stream", StrikeReason::DnsFailure)];
+        assert!(!dns_outage_in_round(&lone));
+        assert_eq!(
+            judge_admissibility(StrikeReason::DnsFailure, 10_000, 0, 0, false),
+            Admissibility::Convict(StrikeReason::DnsFailure)
+        );
+
+        // The SAME host twice is one witness, not two — corroboration must
+        // come from distinct endpoints or the rule corroborates itself.
+        let repeated = vec![
+            f("nora.kaspa.stream", StrikeReason::DnsFailure),
+            f("nora.kaspa.stream", StrikeReason::DnsFailure),
+        ];
+        assert!(!dns_outage_in_round(&repeated));
+
+        // A DNS failure beside an unrelated failure is still one DNS witness.
+        let mixed = vec![
+            f("nora.kaspa.stream", StrikeReason::DnsFailure),
+            f("tess.kaspa.red", StrikeReason::HttpServerError),
+        ];
+        assert!(!dns_outage_in_round(&mixed));
+    }
+
+    /// Correlated DNS is withheld — and the ivy bar still holds inside the
+    /// very round that excuses everything else.
+    #[test]
+    fn a_correlated_dns_round_withholds_dns_but_never_an_answering_node() {
+        assert_eq!(
+            judge_admissibility(StrikeReason::DnsFailure, 10_000, 0, 0, true),
+            Admissibility::Withhold(StrikeReason::DnsFailure)
+        );
+        // A node that ANSWERED with a 500 in the same round proved it was
+        // reachable — the resolver outage is no alibi for it.
+        assert_eq!(
+            judge_admissibility(StrikeReason::HttpServerError, 10_000, 0, 0, true),
+            Admissibility::Convict(StrikeReason::HttpServerError)
+        );
+        // And a non-DNS failure in a DNS-correlated round is judged on its
+        // own merits, not swept up by the round's verdict.
+        assert_eq!(
+            judge_admissibility(StrikeReason::ProbeFailed, 10_000, 0, 0, true),
+            Admissibility::Convict(StrikeReason::ProbeFailed)
+        );
+    }
+
     /// **R2 D5 — the exhaustion floor, with the WHOLE pantry demoted.**
     /// D-095 burned six of eleven endpoints in 108 s with 600 s cooldowns, so
     /// "what happens at 11 of 11?" stopped being hypothetical. Read from the
@@ -1446,7 +1580,7 @@ mod tests {
     fn no_excuse_acquits_a_node_that_answered_with_an_error() {
         let at = 10_000;
         assert_eq!(
-            judge_admissibility(StrikeReason::HttpServerError, at, at, at),
+            judge_admissibility(StrikeReason::HttpServerError, at, at, at, false),
             Admissibility::Convict(StrikeReason::HttpServerError),
             "ivy's earned strike must survive every excuse the rule can offer"
         );
@@ -1465,7 +1599,7 @@ mod tests {
             StrikeReason::Stall,
         ] {
             assert_eq!(
-                judge_admissibility(reason, 10_000, 0, 0),
+                judge_admissibility(reason, 10_000, 0, 0, false),
                 Admissibility::Convict(reason),
                 "{} was withheld with no signal to justify it",
                 reason.as_token()
@@ -1480,7 +1614,7 @@ mod tests {
     fn an_os_adjacent_drop_is_withheld_and_still_recorded() {
         let drop_at = 10_000;
         assert_eq!(
-            judge_admissibility(StrikeReason::Drop, drop_at, drop_at, 0),
+            judge_admissibility(StrikeReason::Drop, drop_at, drop_at, 0, false),
             Admissibility::Withhold(StrikeReason::OsLostAdjacent)
         );
 
@@ -1505,7 +1639,7 @@ mod tests {
         let drop_at = 10_000;
         // OS notices three seconds LATER — the common real ordering.
         assert_eq!(
-            judge_admissibility(StrikeReason::Drop, drop_at, drop_at + 3, 0),
+            judge_admissibility(StrikeReason::Drop, drop_at, drop_at + 3, 0, false),
             Admissibility::Withhold(StrikeReason::OsLostAdjacent)
         );
         // Outside the window in either direction, the node answers for it.
@@ -1514,7 +1648,8 @@ mod tests {
                 StrikeReason::Drop,
                 drop_at,
                 drop_at + OS_LOST_ADJACENCY_SECS + 1,
-                0
+                0,
+                false
             ),
             Admissibility::Convict(StrikeReason::Drop)
         );
@@ -1523,7 +1658,8 @@ mod tests {
                 StrikeReason::Drop,
                 drop_at,
                 drop_at - OS_LOST_ADJACENCY_SECS - 1,
-                0
+                0,
+                false
             ),
             Admissibility::Convict(StrikeReason::Drop)
         );
@@ -1536,7 +1672,7 @@ mod tests {
     fn a_drop_next_to_a_doubled_connect_is_ours_not_the_nodes() {
         let at = 10_000;
         assert_eq!(
-            judge_admissibility(StrikeReason::Drop, at, 0, at + 1),
+            judge_admissibility(StrikeReason::Drop, at, 0, at + 1, false),
             Admissibility::Withhold(StrikeReason::SelfInflicted)
         );
         // An old tripwire is not a standing amnesty.
@@ -1545,7 +1681,8 @@ mod tests {
                 StrikeReason::Drop,
                 at,
                 0,
-                at - SELF_INFLICTED_ADJACENCY_SECS - 1
+                at - SELF_INFLICTED_ADJACENCY_SECS - 1,
+                false
             ),
             Admissibility::Convict(StrikeReason::Drop)
         );
@@ -1558,7 +1695,7 @@ mod tests {
     #[test]
     fn a_never_observed_signal_is_not_an_amnesty_at_the_epoch() {
         assert_eq!(
-            judge_admissibility(StrikeReason::Drop, 1, 0, 0),
+            judge_admissibility(StrikeReason::Drop, 1, 0, 0, false),
             Admissibility::Convict(StrikeReason::Drop)
         );
     }
