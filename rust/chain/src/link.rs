@@ -1777,8 +1777,19 @@ mod tests {
             .await
             .expect("the loopback ws server must accept the first dial");
 
+        // At least one dial reached the server — but deliberately NOT `== 1`.
+        // That equality was the original assertion and it is FLAKY, because the
+        // very behaviour under test defeats it: the pin's loop can re-dial
+        // before `connect()` has even returned to us, so a "baseline" reading
+        // of exactly one dial is a moment that need not exist. Observed failing
+        // at 2 on a warm run. Asserting it would have bought intermittent CI
+        // reds — and the failure is itself evidence, so it is recorded here
+        // rather than tuned away with a sleep.
         let after_first = dials.load(AtomicOrdering::SeqCst);
-        assert_eq!(after_first, 1, "exactly one dial should follow one connect");
+        assert!(
+            after_first >= 1,
+            "the loopback server must have seen the initial dial"
+        );
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let total = dials.load(AtomicOrdering::SeqCst);
