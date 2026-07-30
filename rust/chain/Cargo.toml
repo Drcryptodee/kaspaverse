@@ -37,3 +37,6 @@ kaspa-rpc-core.workspace = true
 # Reconnect-survival regression harness (V6, guards D-083/L59/PB-022): the
 # test fake implements the pin's #[async_trait] RpcApi. Never ships.
 async-trait.workspace = true
+# R2 D2 reproduction harness: a loopback ws server for the self-reconnect
+# proof. Never ships (see the workspace note).
+tokio-tungstenite.workspace = true

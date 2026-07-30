@@ -127,6 +127,195 @@ pub fn judge_run(run_secs: u64) -> RunJudgment {
     }
 }
 
+/// WHY an endpoint was struck (R2 D1). `endpoint.health` recorded *when* a
+/// node was convicted and never *why*, so D-095's central question — were the
+/// six endpoints demoted in 108 s innocent? — was unanswerable once the log
+/// ring rolled (L65). A closed token set, never free text: the value is
+/// written into a TAB-separated durable record, so "no tabs, no newlines, no
+/// node-supplied bytes" is guaranteed BY CONSTRUCTION here rather than by
+/// remembering to call [`sanitize_node_text`] at each call site.
+///
+/// The tokens are a stable on-disk vocabulary — renaming one silently
+/// reinterprets every ledger already on a user's phone. Add variants; never
+/// repurpose a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StrikeReason {
+    /// A live connection died (the parked strike settled against the node).
+    Drop,
+    /// A race probe failed and the failure was not classified further.
+    ProbeFailed,
+    /// A dial or probe never answered — no bytes came back at all.
+    DialTimeout,
+    /// The node ANSWERED with a server-side error (`ivy`'s real HTTP 500).
+    /// The most load-bearing token: this is earned guilt, and D3's
+    /// inadmissibility rule must never acquit it (D-092 ruling 6).
+    HttpServerError,
+    /// The probe won but the shared socket could not bind to it.
+    BindFailed,
+    /// A submitted tx stalled on the endpoint that took it.
+    Stall,
+    /// WITHHELD (R2 D3): the event sat next to the OS reporting the phone's
+    /// own network lost, so it is evidence about the link, not the node.
+    OsLostAdjacent,
+    /// WITHHELD (R2 D3): the event sat next to the item-9 tripwire, which
+    /// proves a socket existed that our reconnect authority did not create
+    /// (R2 D2 — the pinned ws client re-dials on its own). A strike earned by
+    /// our own churn is exactly as unjust as one earned by a dead Wi-Fi.
+    SelfInflicted,
+    /// Read back from a ledger written before R2 — the record predates the
+    /// reason field, so its `why` is genuinely unknown rather than absent.
+    #[default]
+    Unknown,
+}
+
+impl StrikeReason {
+    /// The durable token. Stable on disk — see the type's note.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Drop => "drop",
+            Self::ProbeFailed => "probe-failed",
+            Self::DialTimeout => "dial-timeout",
+            Self::HttpServerError => "http-5xx",
+            Self::BindFailed => "bind-failed",
+            Self::Stall => "stall",
+            Self::OsLostAdjacent => "os-lost-adjacent",
+            Self::SelfInflicted => "self-inflicted",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a token from disk. An unrecognised token degrades to
+    /// [`Self::Unknown`] — a FORWARD-compatibility clause as much as a
+    /// corruption one: a ledger written by a newer build that learned a new
+    /// reason must still load in an older one (health data is advisory,
+    /// never load-bearing for connectivity).
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "drop" => Self::Drop,
+            "probe-failed" => Self::ProbeFailed,
+            "dial-timeout" => Self::DialTimeout,
+            "http-5xx" => Self::HttpServerError,
+            "bind-failed" => Self::BindFailed,
+            "stall" => Self::Stall,
+            "os-lost-adjacent" => Self::OsLostAdjacent,
+            "self-inflicted" => Self::SelfInflicted,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Classify a probe/dial failure from its own error text. The
+    /// classification only ever narrows [`Self::ProbeFailed`] — an
+    /// unrecognised failure stays the generic token rather than guessing.
+    ///
+    /// The 5xx arm exists because it is the one reason that must survive D3
+    /// untouched: a node answering `500` proved it was reachable, so no
+    /// phone-side or self-inflicted excuse applies to it.
+    ///
+    /// **URLs are scrubbed BEFORE matching, and that is load-bearing, not
+    /// tidiness.** Our own error wrapper embeds the endpoint URL in the text
+    /// (`probe dial <url>: …`), so a node that simply NAMED itself
+    /// `wss://timeout.example/` would otherwise classify its every failure as
+    /// [`Self::DialTimeout`] — buying itself whatever leniency D3 grants that
+    /// token, purely by choosing a hostname. Classifying node-chosen bytes is
+    /// a stag-hunt hole: match only on text WE or the transport wrote.
+    /// Scrubbing lives here rather than at the call sites so it cannot be
+    /// forgotten by the next caller.
+    pub fn classify_probe_failure(text: &str) -> Self {
+        // Scrub BEFORE sanitize: `sanitize_node_text` caps at 200 chars, and
+        // the URL is the longest single run in our wrapper — sanitizing first
+        // can push the informative tail ("… 500 Internal Server Error") past
+        // the cap and silently downgrade an EARNED http-5xx to probe-failed.
+        let lower = sanitize_node_text(&scrub_urls(text)).to_ascii_lowercase();
+        if lower.contains("500 internal server error")
+            || lower.contains("502 bad gateway")
+            || lower.contains("503 service unavailable")
+            || lower.contains("504 gateway timeout")
+        {
+            Self::HttpServerError
+        } else if lower.contains("timeout") || lower.contains("timed out") {
+            Self::DialTimeout
+        } else {
+            Self::ProbeFailed
+        }
+    }
+}
+
+/// A strike-worthy event within this many seconds of the OS reporting the
+/// PHONE's own network lost is phone-side evidence, inadmissible against the
+/// endpoint (R2 D3; the parked rule from D-092 ruling 6, whose gate fired six
+/// times over in D-095).
+///
+/// Sized, per D-091 ruling 6, as a NEW rule rather than a re-tuned threshold —
+/// so the discipline is "what does the evidence bound?", not "what number
+/// feels better?". R1 timestamped the one clean sample to the millisecond:
+/// `tess` was struck **86 ms** after `network_lost` under a scripted Wi-Fi
+/// kill. Five seconds is ~58× that observed gap — headroom for scheduling
+/// jitter on a loaded phone, while staying two orders of magnitude below the
+/// 600 s cooldown a wrongful strike would impose. It is deliberately generous
+/// in TIME and narrow in SCOPE: the window can only open when the OS actually
+/// reported a loss, so on a healthy link it never opens at all.
+///
+/// Widening this is the wrong repair if it ever proves too narrow — the fix
+/// would be a better phone-side signal, not a longer amnesty.
+pub const OS_LOST_ADJACENCY_SECS: u64 = 5;
+/// The same window for SELF-inflicted churn (R2 D2/D3). The detector is the
+/// item-9 tripwire — a prior listener surviving into a new connect proves two
+/// `Connected` arrived with no `Disconnected` between them, i.e. a socket
+/// exists that our reconnect authority did not create. Anything dying in that
+/// neighbourhood cannot be pinned on a node.
+pub const SELF_INFLICTED_ADJACENCY_SECS: u64 = 5;
+
+/// What to do with a strike-worthy event (R2 D3). `Withhold` is not
+/// forgiveness — the event is still recorded against the endpoint via
+/// [`EndpointHealth::withhold`], it just does not count toward demotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admissibility {
+    /// Charge it: this is evidence about the node.
+    Convict(StrikeReason),
+    /// Record it, do not charge it: the evidence is about the phone or about
+    /// us. Carries the reason that explains WHY it was withheld.
+    Withhold(StrikeReason),
+}
+
+/// Decide whether a strike-worthy event is admissible against the endpoint
+/// (R2 D3). Pure — no clock, no locks — so the boundaries are pinned by unit
+/// test exactly like [`judge_run`]; the caller supplies the timestamps.
+///
+/// `0` means "never observed" for either signal, which is why the checks are
+/// explicit rather than arithmetic: at unix 0 everything is adjacent to
+/// everything.
+///
+/// **The `http-5xx` guard comes first and is absolute.** A node that answered
+/// `500` proved it was reachable and proved the fault was its own, so no
+/// phone-side or self-inflicted excuse can apply to it. This is the D-092
+/// ruling 6 regression bar in code: `ivy` was convicted on merit, and a rule
+/// that acquits ivy is a worse bug than the flapping it set out to cure.
+pub fn judge_admissibility(
+    reason: StrikeReason,
+    event_at_unix: u64,
+    os_lost_at_unix: u64,
+    doubled_connect_at_unix: u64,
+) -> Admissibility {
+    // Earned guilt is not excusable. Checked before every other arm.
+    if reason == StrikeReason::HttpServerError {
+        return Admissibility::Convict(reason);
+    }
+    // `abs_diff`, not "since": the OS is routinely SLOWER than the socket to
+    // notice a dead link (the socket errors first, ConnectivityService's
+    // `onLost` lands after), so a window that only looked backwards would
+    // miss the common ordering entirely — which is how this rule could look
+    // implemented and still convict every innocent node.
+    if doubled_connect_at_unix != 0
+        && event_at_unix.abs_diff(doubled_connect_at_unix) <= SELF_INFLICTED_ADJACENCY_SECS
+    {
+        return Admissibility::Withhold(StrikeReason::SelfInflicted);
+    }
+    if os_lost_at_unix != 0 && event_at_unix.abs_diff(os_lost_at_unix) <= OS_LOST_ADJACENCY_SECS {
+        return Admissibility::Withhold(StrikeReason::OsLostAdjacent);
+    }
+    Admissibility::Convict(reason)
+}
+
 /// How many recent-healthy pantry candidates join the cached endpoint as
 /// immediate parallel dials in the race (C6/D-089 ruling 5): enough that one
 /// live node among them makes the common reconnect resolver-free, small
@@ -138,7 +327,7 @@ pub const PANTRY_DIALS: usize = 3;
 pub const PANTRY_FRESH_SECS: u64 = 7 * 24 * 3600;
 
 /// Per-endpoint health record (all public data: a wss URL + counters).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct HealthRecord {
     strikes: u32,
     last_strike_unix: u64,
@@ -149,6 +338,29 @@ struct HealthRecord {
     /// resolver on the critical path (INV-8 posture — the resolver is an
     /// untrusted accelerator, and now it isn't load-bearing either).
     last_healthy_unix: u64,
+    /// WHY the last strike event landed (R2 D1). Covers the last COMMITTED
+    /// strike or the last WITHHELD one — whichever happened most recently;
+    /// `withheld` says which kind it was.
+    last_reason: StrikeReason,
+    /// How many strikes were WITHHELD from this endpoint (R2 D3) — evidence
+    /// ruled inadmissible, recorded rather than erased. A ledger that only
+    /// showed convictions could not be audited for wrongful acquittals, and
+    /// a rising count here is the tripwire for an inadmissibility rule that
+    /// is too generous (it would look like a suspiciously clean pantry).
+    withheld: u32,
+    /// Seconds the endpoint's last connection lasted before it dropped
+    /// (0 = no drop recorded). Written for EVERY judged drop — clean run,
+    /// strike, and churn-noise alike — because R2 D4 could not be decided on
+    /// the evidence available: D-095 found four convicting runs landing
+    /// exactly on [`MIN_STRIKE_RUN_SECS`], but the second incident's run
+    /// lengths had already rolled out of the log ring (L65), and D-091
+    /// ruling 6 forbids sizing a threshold on one incident.
+    ///
+    /// The churn-noise case is the one that MUST be recorded even though it
+    /// convicts nobody: a floor can only be judged by the drops it absorbs,
+    /// so a ledger that stores only the strikes would keep proving the floor
+    /// correct by construction.
+    last_run_secs: u64,
 }
 
 /// The demotion ledger — finding 11's cure. Loaded from / persisted to an
@@ -184,6 +396,17 @@ impl EndpointHealth {
                 // (PB-023) splits absent-vs-corrupt from error kinds; health
                 // data is advisory either way.
                 let last_healthy_unix = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                // 6th + 7th fields added at R2 (D1), and they inherit exactly
+                // the forgiveness the 5th earned: a pre-R2 ledger is missing
+                // BOTH, and a phone that upgrades mid-cooldown must keep its
+                // demotions rather than have the row dropped for being short.
+                // Absent reason = `Unknown` (honest: the record predates the
+                // field), absent withheld-count = 0.
+                let last_reason = parts
+                    .next()
+                    .map_or(StrikeReason::Unknown, StrikeReason::from_token);
+                let withheld = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let last_run_secs = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 records.insert(
                     url.to_string(),
                     HealthRecord {
@@ -191,6 +414,9 @@ impl EndpointHealth {
                         last_strike_unix: last,
                         demoted_until_unix: until,
                         last_healthy_unix,
+                        last_reason,
+                        withheld,
+                        last_run_secs,
                     },
                 );
             }
@@ -202,9 +428,17 @@ impl EndpointHealth {
     pub fn save(&self, path: &Path) {
         let mut out = String::new();
         for (url, r) in &self.records {
+            // The reason token is a closed enum (never node text), so it can
+            // carry no tab or newline into this TSV by construction.
             out.push_str(&format!(
-                "{url}\t{}\t{}\t{}\t{}\n",
-                r.strikes, r.last_strike_unix, r.demoted_until_unix, r.last_healthy_unix
+                "{url}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                r.strikes,
+                r.last_strike_unix,
+                r.demoted_until_unix,
+                r.last_healthy_unix,
+                r.last_reason.as_token(),
+                r.withheld,
+                r.last_run_secs
             ));
         }
         if let Some(parent) = path.parent() {
@@ -219,13 +453,8 @@ impl EndpointHealth {
     /// endpoint is demoted as of this strike. A strike older than
     /// [`STRIKE_WINDOW_SECS`] restarts the count at 1; a strike within
     /// [`STRIKE_DEDUP_SECS`] of the last is the SAME incident and is ignored.
-    pub fn strike(&mut self, url: &str, now_unix: u64) -> bool {
-        let record = self.records.entry(url.to_string()).or_insert(HealthRecord {
-            strikes: 0,
-            last_strike_unix: 0,
-            demoted_until_unix: 0,
-            last_healthy_unix: 0,
-        });
+    pub fn strike(&mut self, url: &str, now_unix: u64, reason: StrikeReason) -> bool {
+        let record = self.records.entry(url.to_string()).or_default();
         if record.strikes > 0
             && now_unix.saturating_sub(record.last_strike_unix) < STRIKE_DEDUP_SECS
         {
@@ -236,16 +465,60 @@ impl EndpointHealth {
         }
         record.strikes += 1;
         record.last_strike_unix = now_unix;
+        record.last_reason = reason;
         if record.strikes >= DEMOTE_AT_STRIKES {
             record.demoted_until_unix = now_unix + DEMOTION_COOLDOWN_SECS;
             log::warn!(
-                "link: endpoint demoted for {DEMOTION_COOLDOWN_SECS}s after {} strike(s): {url}",
-                record.strikes
+                "link: endpoint demoted for {DEMOTION_COOLDOWN_SECS}s after {} strike(s) ({}): {url}",
+                record.strikes,
+                reason.as_token()
             );
             true
         } else {
             false
         }
+    }
+
+    /// Record a strike that was ruled INADMISSIBLE (R2 D3) — the endpoint is
+    /// not convicted, but the event is not erased either. `strikes` and
+    /// `demoted_until_unix` are deliberately untouched: this is the whole
+    /// point of withholding rather than striking-then-forgiving, which would
+    /// briefly demote an innocent node and let a concurrent race skip it.
+    ///
+    /// Counted per event with no dedup window: [`Self::strike`] dedups
+    /// because repeated convictions compound into a demotion, whereas a
+    /// withheld count is pure audit evidence — under-counting it would hide
+    /// exactly the over-generous rule it exists to expose.
+    pub fn withhold(&mut self, url: &str, reason: StrikeReason) {
+        let record = self.records.entry(url.to_string()).or_default();
+        record.withheld = record.withheld.saturating_add(1);
+        record.last_reason = reason;
+    }
+
+    /// The last recorded strike reason for `url` (committed or withheld), and
+    /// how many strikes have been withheld from it. Read by the summary
+    /// decode and the tests; `None` for an endpoint with no record.
+    pub fn last_reason(&self, url: &str) -> Option<(StrikeReason, u32)> {
+        self.records.get(url).map(|r| (r.last_reason, r.withheld))
+    }
+
+    /// Record how long a connection lasted before dropping — for EVERY
+    /// judgment, including the churn-noise drops that convict nobody. This is
+    /// the durable twin of the `drop after Ns run` log line, which is the
+    /// datum R2 D4 needed and could not get: on the weak link the ring
+    /// retains ~1 minute (L65), so a second incident's run lengths are gone
+    /// long before anyone asks.
+    pub fn record_run(&mut self, url: &str, run_secs: u64) {
+        self.records
+            .entry(url.to_string())
+            .or_default()
+            .last_run_secs = run_secs;
+    }
+
+    /// The last recorded run length for `url` (0 = none). Feeds the D4
+    /// re-examination once a second incident exists.
+    pub fn last_run_secs(&self, url: &str) -> Option<u64> {
+        self.records.get(url).map(|r| r.last_run_secs)
     }
 
     /// A connection survived [`CLEAN_RUN_SECS`] — the endpoint earned its
@@ -259,12 +532,7 @@ impl EndpointHealth {
     /// Stamp `url` as observed-healthy NOW (C6): a probe win or a shared-
     /// socket `Connected`. Feeds [`Self::race_pantry`].
     pub fn mark_healthy(&mut self, url: &str, now_unix: u64) {
-        let record = self.records.entry(url.to_string()).or_insert(HealthRecord {
-            strikes: 0,
-            last_strike_unix: 0,
-            demoted_until_unix: 0,
-            last_healthy_unix: 0,
-        });
+        let record = self.records.entry(url.to_string()).or_default();
         record.last_healthy_unix = now_unix;
     }
 
@@ -275,14 +543,29 @@ impl EndpointHealth {
     /// These dial in parallel WITHOUT waiting for any resolver HTTP: the
     /// common reconnect re-dials a node the wallet trusted an hour ago and
     /// a slow resolver network stops being load-bearing (INV-8 posture).
-    pub fn race_pantry(&self, cached: Option<&str>, now_unix: u64, k: usize) -> Vec<String> {
+    /// `ignore_demotions` is the hygiene-advisory degradation (R2 D5). Without
+    /// it the exhaustion floor was half a floor: `race_loop` empties the
+    /// `demoted` SET after two barren rounds so demoted endpoints may be
+    /// dialed again, but the pantry kept filtering them out on its own — so at
+    /// 11-of-11 demoted the fast path stayed dark exactly when it was needed,
+    /// and the wallet fell back to the cached endpoint plus resolver HTTP.
+    /// That put an untrusted accelerator on the critical path (INV-8 posture)
+    /// at the worst possible moment. When connectivity beats hygiene it has to
+    /// beat it here too.
+    pub fn race_pantry(
+        &self,
+        cached: Option<&str>,
+        now_unix: u64,
+        k: usize,
+        ignore_demotions: bool,
+    ) -> Vec<String> {
         let mut fresh: Vec<(&String, &HealthRecord)> = self
             .records
             .iter()
             .filter(|(url, r)| {
                 r.last_healthy_unix > 0
                     && now_unix.saturating_sub(r.last_healthy_unix) <= PANTRY_FRESH_SECS
-                    && r.demoted_until_unix <= now_unix
+                    && (ignore_demotions || r.demoted_until_unix <= now_unix)
                     && Some(url.as_str()) != cached
             })
             .collect();
@@ -592,7 +875,12 @@ pub async fn probe_endpoint(
 #[derive(Debug, Default)]
 pub struct RaceOutcome {
     pub winner: Option<ProbeOutcome>,
-    pub failed: Vec<String>,
+    /// `(url, why)` per candidate whose probe failed outright. The reason
+    /// rides along from the point of failure (R2 D1) — reconstructing it
+    /// later from `notes` would mean re-parsing a string that was already
+    /// compacted for the log, and the durable ledger must not depend on the
+    /// shape of a human-readable line.
+    pub failed: Vec<(String, StrikeReason)>,
     /// `(who, why)` per candidate that did NOT win, in join order —
     /// [`summarize_losses`] folds them into the round's single compact summary
     /// line (R0 addendum #1, built at R1). `who` is the node's host (or
@@ -629,7 +917,7 @@ pub async fn race(
     // A loss carries (the URL to strike, if the NODE is what failed; a note for
     // the round summary). Losing tasks no longer log a line each — the caller
     // prints one coalesced line per round (addendum #1).
-    type Loss = (Option<String>, Option<(String, String)>);
+    type Loss = (Option<(String, StrikeReason)>, Option<(String, String)>);
     let mut tasks: JoinSet<std::result::Result<ProbeOutcome, Loss>> = JoinSet::new();
     let mut entered: HashSet<String> = HashSet::new();
 
@@ -652,11 +940,15 @@ pub async fn race(
                     // before the dial). Which candidates were dialed without
                     // the resolver is how C6 was confirmed in the field, so the
                     // summary keeps the distinction.
+                    let text = e.to_string();
                     let note = (
                         format!("{}[imm]", sanitize_node_text(endpoint_host(&url))),
-                        compact_reason(&e.to_string()),
+                        compact_reason(&text),
                     );
-                    (Some(url), Some(note))
+                    (
+                        Some((url, StrikeReason::classify_probe_failure(&text))),
+                        Some(note),
+                    )
                 })
         });
     }
@@ -702,11 +994,15 @@ pub async fn race(
             probe_endpoint(&url, network_id, probe_timeout)
                 .await
                 .map_err(|e| {
+                    let text = e.to_string();
                     let note = (
                         sanitize_node_text(endpoint_host(&url)),
-                        compact_reason(&e.to_string()),
+                        compact_reason(&text),
                     );
-                    (Some(url), Some(note))
+                    (
+                        Some((url, StrikeReason::classify_probe_failure(&text))),
+                        Some(note),
+                    )
                 })
         });
     }
@@ -941,10 +1237,10 @@ mod tests {
     fn strikes_accumulate_and_demote_within_window() {
         let mut health = EndpointHealth::default();
         let url = "wss://nora.kaspa.stream/borsh";
-        assert!(!health.strike(url, 1_000));
+        assert!(!health.strike(url, 1_000, StrikeReason::Drop));
         assert!(!health.is_demoted(url, 1_000));
         // Second strike inside the window demotes.
-        assert!(health.strike(url, 1_060));
+        assert!(health.strike(url, 1_060, StrikeReason::Drop));
         assert!(health.is_demoted(url, 1_060));
         assert!(health.is_demoted(url, 1_060 + DEMOTION_COOLDOWN_SECS - 1));
         // Cooldown lapses — candidacy restored.
@@ -955,21 +1251,21 @@ mod tests {
     fn same_incident_strikes_dedup() {
         let mut health = EndpointHealth::default();
         let url = "wss://node.example/borsh";
-        assert!(!health.strike(url, 1_000));
+        assert!(!health.strike(url, 1_000, StrikeReason::Drop));
         // A phantom-kill echo 2 s later is the SAME incident — one strike.
-        assert!(!health.strike(url, 1_002));
+        assert!(!health.strike(url, 1_002, StrikeReason::Drop));
         assert!(!health.is_demoted(url, 1_002));
         // A real second flap 60 s later is a new incident — demoted.
-        assert!(health.strike(url, 1_060));
+        assert!(health.strike(url, 1_060, StrikeReason::Drop));
     }
 
     #[test]
     fn stale_strike_restarts_the_count() {
         let mut health = EndpointHealth::default();
         let url = "wss://node.example/borsh";
-        assert!(!health.strike(url, 1_000));
+        assert!(!health.strike(url, 1_000, StrikeReason::Drop));
         // Far outside the window: count restarts at 1, no demotion.
-        assert!(!health.strike(url, 1_000 + STRIKE_WINDOW_SECS + 10));
+        assert!(!health.strike(url, 1_000 + STRIKE_WINDOW_SECS + 10, StrikeReason::Drop));
         assert!(!health.is_demoted(url, 1_000 + STRIKE_WINDOW_SECS + 10));
     }
 
@@ -977,10 +1273,10 @@ mod tests {
     fn clean_run_clears_strikes() {
         let mut health = EndpointHealth::default();
         let url = "wss://node.example/borsh";
-        assert!(!health.strike(url, 1_000));
+        assert!(!health.strike(url, 1_000, StrikeReason::Drop));
         health.clean_run(url);
         // The next strike is a fresh first strike, not the demoting second.
-        assert!(!health.strike(url, 1_010));
+        assert!(!health.strike(url, 1_010, StrikeReason::Drop));
     }
 
     #[test]
@@ -989,9 +1285,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut health = EndpointHealth::default();
-        health.strike("wss://a.example/borsh", 5_000);
-        health.strike("wss://a.example/borsh", 5_100); // demoted
-        health.strike("wss://b.example/borsh", 6_000);
+        health.strike("wss://a.example/borsh", 5_000, StrikeReason::Drop);
+        health.strike("wss://a.example/borsh", 5_100, StrikeReason::Drop); // demoted
+        health.strike("wss://b.example/borsh", 6_000, StrikeReason::Drop);
         health.save(&path);
 
         let loaded = EndpointHealth::load(&path);
@@ -1039,11 +1335,466 @@ mod tests {
         assert!(!loaded.is_demoted("wss://lena.kaspa.stream/kaspa/mainnet/wrpc/borsh", 5_600));
         // Absent (and corrupt) 5th field = never-observed-healthy: nothing
         // qualifies for the pantry.
-        assert!(loaded.race_pantry(None, 6_000, PANTRY_DIALS).is_empty());
+        assert!(loaded
+            .race_pantry(None, 6_000, PANTRY_DIALS, false)
+            .is_empty());
         // And the migrated ledger round-trips in the NEW format.
         loaded.save(&path);
         let reloaded = EndpointHealth::load(&path);
         assert!(reloaded.is_demoted("wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh", 5_600));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// R2 D4's instrumentation: the run length of a drop that convicts NOBODY
+    /// is still recorded durably. D-095 could not re-examine
+    /// [`MIN_STRIKE_RUN_SECS`] because the second incident's run lengths had
+    /// rolled out of the ring; a floor is judged by what it absorbs, so the
+    /// absorbed drops are exactly the ones that must survive a restart.
+    #[test]
+    fn a_churn_noise_run_is_recorded_even_though_it_convicts_nobody() {
+        let path = tmp("health-r2-runs");
+        let url = "wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh";
+        let mut health = EndpointHealth::default();
+
+        // The 14:11 cycle: a 2 s run, acquitted as churn noise.
+        let churn = 2;
+        assert_eq!(judge_run(churn), RunJudgment::ChurnNoise);
+        health.record_run(url, churn);
+        health.save(&path);
+
+        let reloaded = EndpointHealth::load(&path);
+        assert_eq!(
+            reloaded.last_run_secs(url),
+            Some(churn),
+            "the absorbed drop must survive the restart — it is the evidence"
+        );
+        // Acquitted means acquitted: no strike, no demotion.
+        assert!(!reloaded.is_demoted(url, 10_000));
+        assert_eq!(reloaded.last_reason(url), Some((StrikeReason::Unknown, 0)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **R2 D5 — the exhaustion floor, with the WHOLE pantry demoted.**
+    /// D-095 burned six of eleven endpoints in 108 s with 600 s cooldowns, so
+    /// "what happens at 11 of 11?" stopped being hypothetical. Read from the
+    /// code: `race_loop` sets `advisory = empty_rounds >= 2` and then passes
+    /// an EMPTY demoted set, so demoted endpoints re-enter the race — the
+    /// wallet always has something to dial and never waits out a cooldown in
+    /// the dark. INV-6's unilateral exit is present.
+    ///
+    /// This pins both halves of that floor, because only one half existed
+    /// before R2: the demoted SET degraded, but `race_pantry` filtered
+    /// demotions on its own regardless, so the immediate-dial fast path stayed
+    /// empty at exactly the moment every candidate was demoted.
+    #[test]
+    fn the_whole_pantry_demoted_still_leaves_the_wallet_something_to_dial() {
+        let now = 10_000;
+        let mut health = EndpointHealth::default();
+        let urls: Vec<String> = (0..11)
+            .map(|i| format!("wss://n{i}.kaspa.stream/kaspa/mainnet/wrpc/borsh"))
+            .collect();
+        // Every endpoint healthy recently, then every endpoint demoted —
+        // the D-095 end state, taken all the way to 11 of 11.
+        for url in &urls {
+            health.mark_healthy(url, now - 60);
+            health.strike(url, now - 30, StrikeReason::Drop);
+            health.backdate_last_strike(url, STRIKE_DEDUP_SECS + 1);
+            health.strike(url, now - 20, StrikeReason::Drop);
+        }
+        assert_eq!(
+            health.demoted_set(now).len(),
+            urls.len(),
+            "the fixture must actually reach total exhaustion"
+        );
+
+        // Normal hygiene: nothing is offered. This IS the dark-wallet state,
+        // and it is why the advisory degradation has to exist.
+        assert!(
+            health
+                .race_pantry(None, now, PANTRY_DIALS, false)
+                .is_empty(),
+            "under normal hygiene a fully demoted pantry offers nothing"
+        );
+
+        // The floor: hygiene degrades to advisory and the fast path comes
+        // back, still capped at PANTRY_DIALS and still most-recent-first.
+        let floor = health.race_pantry(None, now, PANTRY_DIALS, true);
+        assert_eq!(
+            floor.len(),
+            PANTRY_DIALS,
+            "the advisory pantry must offer candidates when every one is demoted"
+        );
+
+        // And the floor is a degradation, not an amnesty: the ledger still
+        // knows they are demoted, so the moment anything healthier exists the
+        // normal path resumes.
+        for url in &floor {
+            assert!(
+                health.is_demoted(url, now),
+                "the advisory dial must not silently clear the demotion"
+            );
+        }
+    }
+
+    /// **R2 D3 regression bar — the rule must not acquit `ivy`.** D-092
+    /// ruling 6 recorded a real, earned demotion: ivy answered HTTP 500 twice,
+    /// once caught live. An inadmissibility rule that would have spared it is
+    /// a worse defect than the flapping it cures, because it teaches the
+    /// ledger to forgive nodes that genuinely fail. So: even with BOTH excuses
+    /// active and perfectly coincident, an `http-5xx` is still convicted.
+    #[test]
+    fn no_excuse_acquits_a_node_that_answered_with_an_error() {
+        let at = 10_000;
+        assert_eq!(
+            judge_admissibility(StrikeReason::HttpServerError, at, at, at),
+            Admissibility::Convict(StrikeReason::HttpServerError),
+            "ivy's earned strike must survive every excuse the rule can offer"
+        );
+    }
+
+    /// The rule fires only when a signal actually says so. On a healthy link
+    /// (no OS loss ever seen, no doubled connect ever seen) every reason is
+    /// admissible — the window cannot open on its own.
+    #[test]
+    fn a_healthy_link_withholds_nothing() {
+        for reason in [
+            StrikeReason::Drop,
+            StrikeReason::ProbeFailed,
+            StrikeReason::DialTimeout,
+            StrikeReason::BindFailed,
+            StrikeReason::Stall,
+        ] {
+            assert_eq!(
+                judge_admissibility(reason, 10_000, 0, 0),
+                Admissibility::Convict(reason),
+                "{} was withheld with no signal to justify it",
+                reason.as_token()
+            );
+        }
+    }
+
+    /// The R1 sample, replayed: `tess` was struck 86 ms after `network_lost`
+    /// on a scripted Wi-Fi kill. That strike is now withheld — and the
+    /// endpoint keeps its record, because withholding is not erasure.
+    #[test]
+    fn an_os_adjacent_drop_is_withheld_and_still_recorded() {
+        let drop_at = 10_000;
+        assert_eq!(
+            judge_admissibility(StrikeReason::Drop, drop_at, drop_at, 0),
+            Admissibility::Withhold(StrikeReason::OsLostAdjacent)
+        );
+
+        let url = "wss://tess.kaspa.stream/kaspa/mainnet/wrpc/borsh";
+        let mut health = EndpointHealth::default();
+        health.withhold(url, StrikeReason::OsLostAdjacent);
+        // Not convicted...
+        assert!(!health.is_demoted(url, drop_at));
+        // ...but not forgotten either.
+        assert_eq!(
+            health.last_reason(url),
+            Some((StrikeReason::OsLostAdjacent, 1))
+        );
+    }
+
+    /// The OS is routinely SLOWER than the socket to notice a dead link, so
+    /// the window must look FORWARD as well as back. A backward-only window
+    /// would leave the rule looking implemented while convicting the very
+    /// endpoints it exists to protect.
+    #[test]
+    fn the_os_window_catches_a_loss_reported_after_the_drop() {
+        let drop_at = 10_000;
+        // OS notices three seconds LATER — the common real ordering.
+        assert_eq!(
+            judge_admissibility(StrikeReason::Drop, drop_at, drop_at + 3, 0),
+            Admissibility::Withhold(StrikeReason::OsLostAdjacent)
+        );
+        // Outside the window in either direction, the node answers for it.
+        assert_eq!(
+            judge_admissibility(
+                StrikeReason::Drop,
+                drop_at,
+                drop_at + OS_LOST_ADJACENCY_SECS + 1,
+                0
+            ),
+            Admissibility::Convict(StrikeReason::Drop)
+        );
+        assert_eq!(
+            judge_admissibility(
+                StrikeReason::Drop,
+                drop_at,
+                drop_at - OS_LOST_ADJACENCY_SECS - 1,
+                0
+            ),
+            Admissibility::Convict(StrikeReason::Drop)
+        );
+    }
+
+    /// D2's finding, enforced: a drop next to the item-9 tripwire is OURS.
+    /// The pinned client re-dials on its own, so a socket can die that our
+    /// reconnect authority never created — and no node should pay for it.
+    #[test]
+    fn a_drop_next_to_a_doubled_connect_is_ours_not_the_nodes() {
+        let at = 10_000;
+        assert_eq!(
+            judge_admissibility(StrikeReason::Drop, at, 0, at + 1),
+            Admissibility::Withhold(StrikeReason::SelfInflicted)
+        );
+        // An old tripwire is not a standing amnesty.
+        assert_eq!(
+            judge_admissibility(
+                StrikeReason::Drop,
+                at,
+                0,
+                at - SELF_INFLICTED_ADJACENCY_SECS - 1
+            ),
+            Admissibility::Convict(StrikeReason::Drop)
+        );
+    }
+
+    /// Unix 0 means "never observed", and at unix 0 everything is adjacent to
+    /// everything — so the never-observed case must be an explicit check, not
+    /// arithmetic. A phone whose clock reads near the epoch must not have its
+    /// whole pantry acquitted.
+    #[test]
+    fn a_never_observed_signal_is_not_an_amnesty_at_the_epoch() {
+        assert_eq!(
+            judge_admissibility(StrikeReason::Drop, 1, 0, 0),
+            Admissibility::Convict(StrikeReason::Drop)
+        );
+    }
+
+    /// **R2 D2 — the mechanism, reproduced.** D-095 hypothesised that a losing
+    /// race dial landed late on the shared socket. That is structurally
+    /// impossible: [`probe_endpoint`] builds its OWN `KaspaRpcClient`, so a
+    /// loser cannot emit on the shared client's ctl channel. The real
+    /// mechanism is one layer down, and this test provokes it.
+    ///
+    /// `WebSocket::connect` (pin `workflow-websocket 0.18.0
+    /// client/native.rs:161-250`) spawns a DETACHED `'outer` loop. When a
+    /// connection that successfully opened later dies, the loop falls to
+    /// `if !this.reconnect.load() { break 'outer }` and, finding `reconnect`
+    /// still true, **re-dials on its own** — no caller involved, and the
+    /// `Fallback` strategy does not stop it (Fallback only breaks out of the
+    /// two connect-FAILURE arms, never after a successful open).
+    ///
+    /// So the pin holds a reconnect authority of its own. D-081 established
+    /// the app as "the one reconnect authority"; that is true of OUR code and
+    /// not true of the stack as a whole. `reconnect` is cleared only by
+    /// `disconnect()`, and our teardown is a bounded, detached task reacting
+    /// to a ctl event that arrives a channel hop later — so the pin's loop is
+    /// already re-dialing before our disconnect can run.
+    ///
+    /// Consequences that convict healthy nodes (D-095's six):
+    /// - A spurious re-dial that succeeds emits a second `Ctl::Connect` with
+    ///   no intervening `Disconnect` — exactly the item-9 signature captured
+    ///   at 14:11:08.519/.771 in `r2_flap_20260730_135734/ring_raw.txt`.
+    /// - `Ctl::Disconnect` carries no URL, and the monitor attributes it via
+    ///   `client.url()` — the DESCRIPTOR, set by the most recent `connect()`.
+    ///   A stale loop's socket dying is therefore charged to whatever endpoint
+    ///   the race most recently bound. That is a self-inflicted strike against
+    ///   a node that did nothing wrong.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pinned_client_redials_a_dropped_socket_with_no_caller() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dials = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // A server that completes a REAL ws handshake and then drops the
+        // socket. The handshake matters: a refused port takes the pin's
+        // connect-failure arm (which Fallback does break out of), and would
+        // prove nothing. This is the "healthy socket dies" moment.
+        let served = dials.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                served.fetch_add(1, AtomicOrdering::SeqCst);
+                tokio::spawn(async move {
+                    if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                        drop(ws);
+                    }
+                });
+            }
+        });
+
+        let url = format!("ws://{addr}/");
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let client = KaspaRpcClient::new_with_args(
+            WrpcEncoding::Borsh,
+            Some(&url),
+            None,
+            Some(network_id),
+            None,
+        )
+        .unwrap();
+
+        // ONE connect call. Nothing below asks for another.
+        client
+            .connect(Some(ConnectOptions {
+                url: Some(url.clone()),
+                strategy: ConnectStrategy::Fallback,
+                block_async_connect: true,
+                connect_timeout: Some(Duration::from_secs(2)),
+                ..Default::default()
+            }))
+            .await
+            .expect("the loopback ws server must accept the first dial");
+
+        let after_first = dials.load(AtomicOrdering::SeqCst);
+        assert_eq!(after_first, 1, "exactly one dial should follow one connect");
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let total = dials.load(AtomicOrdering::SeqCst);
+        // Recorded, not asserted: the RATE is environment-sensitive, but it is
+        // the number that shows this is a spin, not a single stray retry.
+        // Measured 4 on the R2 dev box — a re-dial roughly every 175 ms, for
+        // as long as `reconnect` stays true.
+        println!("R2 D2: {total} dial(s) reached the server after ONE connect() call");
+
+        // Clean up before asserting, so a failure cannot leave the loop
+        // hammering the loopback server for the rest of the suite.
+        let _ = client.disconnect().await;
+
+        assert!(
+            total > 1,
+            "the pin re-dialed {total} time(s) after ONE connect() call — if this is 1, \
+             the pinned client no longer self-reconnects and R2's D2 finding (and the \
+             self-inflicted-strike reasoning built on it) must be re-derived"
+        );
+    }
+
+    /// R2 D1 acceptance: a strike written under EACH reason is read back after
+    /// the process dies. `load` from a file the running process never touched
+    /// IS the process-kill simulation — the ledger's whole point is that it
+    /// outlives the app (L65: the durable twin reconstructed a session 90
+    /// minutes and one reboot gone).
+    #[test]
+    fn every_strike_reason_survives_a_process_kill() {
+        let path = tmp("health-r2-reasons");
+        let reasons = [
+            StrikeReason::Drop,
+            StrikeReason::ProbeFailed,
+            StrikeReason::DialTimeout,
+            StrikeReason::HttpServerError,
+            StrikeReason::BindFailed,
+            StrikeReason::Stall,
+        ];
+        let url_for = |i: usize| format!("wss://n{i}.kaspa.stream/kaspa/mainnet/wrpc/borsh");
+
+        let mut health = EndpointHealth::default();
+        for (i, reason) in reasons.iter().enumerate() {
+            health.strike(&url_for(i), 10_000, *reason);
+        }
+        health.save(&path);
+
+        // Nothing of the writer survives into the reader — a cold load.
+        let reloaded = EndpointHealth::load(&path);
+        for (i, reason) in reasons.iter().enumerate() {
+            assert_eq!(
+                reloaded.last_reason(&url_for(i)),
+                Some((*reason, 0)),
+                "reason {} did not survive the reload",
+                reason.as_token()
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The schema-forgiveness clause, proven against a PRE-R2 file: five
+    /// fields, no reason, no withheld count. A phone that upgrades mid-
+    /// cooldown must keep its demotions — dropping the row for being short
+    /// would silently acquit every endpoint the ledger had convicted.
+    #[test]
+    fn pre_r2_ledger_loads_with_unknown_reason_and_keeps_its_demotions() {
+        let path = tmp("health-r2-oldfile");
+        std::fs::write(
+            &path,
+            "wss://ivy.kaspa.blue/kaspa/mainnet/wrpc/borsh\t2\t5100\t5700\t5000\n\
+             wss://eva.kaspa.stream/kaspa/mainnet/wrpc/borsh\t1\t6000\t0\t5900\n",
+        )
+        .unwrap();
+        let loaded = EndpointHealth::load(&path);
+
+        // The demotion is intact — the upgrade did not acquit ivy.
+        assert!(loaded.is_demoted("wss://ivy.kaspa.blue/kaspa/mainnet/wrpc/borsh", 5_600));
+        // The 5th field still parses (the C6 forgiveness is not regressed),
+        // and the surviving demotion still does its job: at 5_600 ivy is
+        // sitting out, so the pantry offers eva alone. (Past 5_700 ivy is
+        // legitimately back — the cooldown lapsing is the ledger healing,
+        // not the loader forgetting.)
+        assert_eq!(
+            loaded.race_pantry(None, 5_600, PANTRY_DIALS, false),
+            vec!["wss://eva.kaspa.stream/kaspa/mainnet/wrpc/borsh".to_string()],
+        );
+        // And the new fields default HONESTLY: the record predates the reason
+        // field, so its `why` is Unknown — not a guess, and not a default that
+        // would read as an actual classification.
+        assert_eq!(
+            loaded.last_reason("wss://ivy.kaspa.blue/kaspa/mainnet/wrpc/borsh"),
+            Some((StrikeReason::Unknown, 0))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A node must not be able to classify its OWN failures by choosing a
+    /// hostname. Without the scrub, our wrapper's embedded URL puts the
+    /// node's chosen bytes into the matcher's input.
+    #[test]
+    fn a_node_cannot_buy_leniency_with_its_hostname() {
+        // The exact shape `probe_endpoint` produces, with an adversarial host.
+        let hostile = "probe dial wss://timeout.example/kaspa/mainnet/wrpc/borsh: \
+                       wRPC -> WebSocket -> connection refused";
+        assert_eq!(
+            StrikeReason::classify_probe_failure(hostile),
+            StrikeReason::ProbeFailed,
+            "a hostname containing 'timeout' must not classify as dial-timeout"
+        );
+        // The genuine article still classifies — the scrub narrows the input,
+        // it does not blind the matcher.
+        let real = "probe info wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh: timeout";
+        assert_eq!(
+            StrikeReason::classify_probe_failure(real),
+            StrikeReason::DialTimeout
+        );
+    }
+
+    /// `http-5xx` is the one token D3 must never excuse, so it must not be
+    /// lost to truncation: `sanitize_node_text` caps at 200 chars and a long
+    /// URL is the longest run in the wrapper. Scrub-then-sanitize keeps the
+    /// verdict; sanitize-then-scrub would drop it to `probe-failed`.
+    #[test]
+    fn an_earned_http_5xx_survives_a_very_long_url() {
+        let long_url = format!("wss://ivy.kaspa.blue/{}/wrpc/borsh", "x".repeat(180));
+        let text = format!(
+            "probe dial {long_url}: wRPC -> WebSocket -> WebSocket error: \
+             HTTP error: 500 Internal Server Error"
+        );
+        assert!(text.len() > 200, "fixture must exceed the sanitize cap");
+        assert_eq!(
+            StrikeReason::classify_probe_failure(&text),
+            StrikeReason::HttpServerError,
+            "ivy's earned guilt must survive a long URL"
+        );
+    }
+
+    /// An unrecognised token from a NEWER build degrades to Unknown rather
+    /// than dropping the row — forward compatibility, same forgiveness as an
+    /// absent field.
+    #[test]
+    fn an_unknown_reason_token_degrades_without_losing_the_record() {
+        let path = tmp("health-r2-futuretoken");
+        std::fs::write(
+            &path,
+            "wss://ivy.kaspa.blue/kaspa/mainnet/wrpc/borsh\t2\t5100\t5700\t5000\tquantum-flap\t3\n",
+        )
+        .unwrap();
+        let loaded = EndpointHealth::load(&path);
+        assert!(loaded.is_demoted("wss://ivy.kaspa.blue/kaspa/mainnet/wrpc/borsh", 5_600));
+        assert_eq!(
+            loaded.last_reason("wss://ivy.kaspa.blue/kaspa/mainnet/wrpc/borsh"),
+            Some((StrikeReason::Unknown, 3)),
+            "an unreadable token must not cost us the withheld count beside it"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1061,13 +1812,14 @@ mod tests {
         health.mark_healthy("wss://stale.example/borsh", now - PANTRY_FRESH_SECS - 1);
         // Fresh but demoted — out while the cooldown holds.
         health.mark_healthy("wss://demoted.example/borsh", now - 30);
-        health.strike("wss://demoted.example/borsh", now - 20);
+        health.strike("wss://demoted.example/borsh", now - 20, StrikeReason::Drop);
         health.backdate_last_strike("wss://demoted.example/borsh", STRIKE_DEDUP_SECS + 1);
-        health.strike("wss://demoted.example/borsh", now - 5); // second strike demotes
+        health.strike("wss://demoted.example/borsh", now - 5, StrikeReason::Drop); // second strike demotes
         assert!(health.is_demoted("wss://demoted.example/borsh", now));
 
         // The cached endpoint is deduped out even when it is the freshest.
-        let pantry = health.race_pantry(Some("wss://recent.example/borsh"), now, PANTRY_DIALS);
+        let pantry =
+            health.race_pantry(Some("wss://recent.example/borsh"), now, PANTRY_DIALS, false);
         assert_eq!(
             pantry,
             vec![
@@ -1078,7 +1830,7 @@ mod tests {
         );
 
         // Without the dedup, K caps the list and recency orders it.
-        let pantry = health.race_pantry(None, now, PANTRY_DIALS);
+        let pantry = health.race_pantry(None, now, PANTRY_DIALS, false);
         assert_eq!(
             pantry,
             vec![
@@ -1090,7 +1842,7 @@ mod tests {
 
         // A lapsed demotion cooldown restores pantry candidacy.
         let after_cooldown = now + DEMOTION_COOLDOWN_SECS;
-        let pantry = health.race_pantry(None, after_cooldown, 10);
+        let pantry = health.race_pantry(None, after_cooldown, 10, false);
         assert!(pantry.contains(&"wss://demoted.example/borsh".to_string()));
     }
 
@@ -1163,10 +1915,19 @@ mod tests {
         .await;
 
         assert!(outcome.winner.is_none(), "a closed port cannot win");
-        assert_eq!(
-            outcome.failed,
-            vec![url.clone()],
-            "the node must be strikeable"
+        assert_eq!(outcome.failed.len(), 1, "the node must be strikeable");
+        assert_eq!(outcome.failed[0].0, url, "the strike must name the node");
+        // A closed port refuses fast on most hosts and times out on some
+        // (a filtered port drops the SYN); both are honest "it never
+        // answered" verdicts. What matters for D3 is the one this must NOT
+        // be: `http-5xx` means the node ANSWERED, which a closed port cannot.
+        assert!(
+            matches!(
+                outcome.failed[0].1,
+                StrikeReason::ProbeFailed | StrikeReason::DialTimeout
+            ),
+            "a closed port classified as {:?}",
+            outcome.failed[0].1
         );
         assert_eq!(
             outcome.notes.len(),

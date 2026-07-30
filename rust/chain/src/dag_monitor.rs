@@ -165,6 +165,20 @@ struct Inner {
     /// (ruling 4 keeps `network_lost` passive), it lets the glass name the
     /// cause instead of blaming the nodes.
     os_offline: AtomicBool,
+    /// Unix-seconds of the last `onLost` TRANSITION (0 = never). Separate from
+    /// [`Self::os_offline`] because that flag is cleared by `onAvailable`,
+    /// while admissibility (R2 D3) is judged after the network is back — the
+    /// moment the boolean has already forgotten. Never cleared: an old stamp
+    /// simply falls outside [`link::OS_LOST_ADJACENCY_SECS`].
+    os_lost_at: AtomicU64,
+    /// Unix-seconds the item-9 tripwire last fired (0 = never) — a prior
+    /// listener surviving into a new connect, which proves two `Connected`
+    /// arrived with no `Disconnected` between them. R2 D2 established the
+    /// cause: the pinned ws client re-dials a dropped socket on its own
+    /// (`workflow-websocket` `'outer` loop, `reconnect` still true), so a
+    /// socket can exist that our reconnect authority never created. Drops in
+    /// that neighbourhood are OURS, and R2 D3 refuses to charge them to a node.
+    doubled_connect_at: AtomicU64,
     /// The endpoint whose failure awaits network-alive evidence: committed as
     /// a strike by the NEXT `Connected` event from a DIFFERENT endpoint (the
     /// control-group — the network worked via B while this one stayed dark).
@@ -272,6 +286,8 @@ impl DagMonitor {
                 race_running: AtomicBool::new(false),
                 race_kick: tokio::sync::Notify::new(),
                 os_offline: AtomicBool::new(false),
+                os_lost_at: AtomicU64::new(0),
+                doubled_connect_at: AtomicU64::new(0),
                 pending_strike: Mutex::new(None),
                 hygiene_advisory: AtomicBool::new(false),
                 connected_at: AtomicU64::new(0),
@@ -335,20 +351,62 @@ impl DagMonitor {
     /// network-alive evidence in hand (a race just found another healthy node,
     /// or a fresh node just took an escalation resubmit) — a phone in a tunnel
     /// never demotes an innocent endpoint (D-081 control-group rule).
-    fn commit_strike(&self, url: &str, reason: &str) {
+    fn commit_strike(&self, url: &str, reason: link::StrikeReason, event_at_unix: u64) {
         let now = Self::now_unix();
+        // R2 D3 — admissibility is judged at the ONE choke point every strike
+        // passes, for the same reason the demotion refusal sits at the one
+        // choke point every connection passes: a rule enforced at each call
+        // site is a rule the next call site forgets.
+        //
+        // `event_at_unix` is the moment the EVIDENCE arose, which for a parked
+        // drop is when the socket died — not now. Judging a settled strike by
+        // its settle time would compare the OS window against a clock reading
+        // taken after the network already recovered, and quietly convict the
+        // exact endpoints this rule exists to protect.
+        let verdict = link::judge_admissibility(
+            reason,
+            event_at_unix,
+            self.inner.os_lost_at.load(Ordering::SeqCst),
+            self.inner.doubled_connect_at.load(Ordering::SeqCst),
+        );
+        let reason = match verdict {
+            link::Admissibility::Convict(reason) => reason,
+            link::Admissibility::Withhold(why) => {
+                let withheld = {
+                    let mut health = self
+                        .inner
+                        .health
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    health.withhold(url, why);
+                    self.save_health(&health);
+                    health.last_reason(url).map_or(0, |(_, n)| n)
+                };
+                // Recorded, never erased: the ledger must stay auditable for
+                // wrongful ACQUITTALS too, not only wrongful convictions.
+                log::info!(
+                    "link: strike ({}) on {url} WITHHELD as {} — not the node's fault \
+                     ({withheld} withheld so far)",
+                    reason.as_token(),
+                    why.as_token()
+                );
+                spans::mark_with("endpoint_strike_withheld", url);
+                return;
+            }
+        };
         let demoted = {
             let mut health = self
                 .inner
                 .health
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let demoted = health.strike(url, now);
+            let demoted = health.strike(url, now, reason);
             self.save_health(&health);
             demoted
         };
         log::info!(
-            "link: strike ({reason}) on {url}{}",
+            "link: strike ({}) on {url}{}",
+            reason.as_token(),
             if demoted { " — DEMOTED" } else { "" }
         );
         spans::mark_with(
@@ -401,8 +459,8 @@ impl DagMonitor {
     /// with the tx), never whoever the socket re-raced to since
     /// (consensus-audit finding). Only called after a fresh node answered,
     /// so the evidence rule holds.
-    pub fn strike_endpoint(&self, url: &str, reason: &str) {
-        self.commit_strike(url, reason);
+    pub fn strike_endpoint(&self, url: &str, reason: link::StrikeReason) {
+        self.commit_strike(url, reason, Self::now_unix());
     }
 
     /// The endpoint the shared socket is (or was last) bound to — captured by
@@ -447,7 +505,8 @@ impl DagMonitor {
                     "link: pending strike on {url} refuted by its own reconnect — discarded"
                 );
             } else if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
-                self.commit_strike(&url, "connection lost");
+                // `at` is when the socket DIED, not now — see commit_strike.
+                self.commit_strike(&url, link::StrikeReason::Drop, at);
             } else {
                 log::info!("link: pending strike on {url} expired unproven — discarded");
             }
@@ -845,7 +904,11 @@ impl DagMonitor {
                 // The pantry (C6): recent-healthy nodes dial immediately, in
                 // parallel with the cached endpoint — the common reconnect
                 // does zero HTTP before dialing a node it trusted recently.
-                let pantry = health.race_pantry(cached.as_deref(), now, link::PANTRY_DIALS);
+                // Under the advisory degradation it ignores demotions too
+                // (R2 D5): a floor that leaves the fast path dark is not a
+                // floor, it is a slower way to reach the same dark wallet.
+                let pantry =
+                    health.race_pantry(cached.as_deref(), now, link::PANTRY_DIALS, advisory);
                 (demoted, pantry)
             };
             let outcome = link::race(
@@ -909,8 +972,8 @@ impl DagMonitor {
             // were the NODES' fault: strike them. (The drop that triggered
             // this race is parked as the pending strike and settles at the
             // Connected event — robust to a phantom redial winning first.)
-            for url in &outcome.failed {
-                self.commit_strike(url, "probe failed");
+            for (url, reason) in &outcome.failed {
+                self.commit_strike(url, *reason, now);
             }
 
             // Someone else (a ws-level phantom redial) may have connected
@@ -979,7 +1042,11 @@ impl DagMonitor {
                         winner.url,
                         link::sanitize_node_text(&e.to_string())
                     );
-                    self.commit_strike(&winner.url, "bind failed");
+                    self.commit_strike(
+                        &winner.url,
+                        link::StrikeReason::BindFailed,
+                        Self::now_unix(),
+                    );
                 }
                 Err(_) => {
                     // NO strike: the node just won a probe — this is our own
@@ -1068,6 +1135,13 @@ impl DagMonitor {
         // deliberately take no action.
         self.inner.os_offline.store(!available, Ordering::SeqCst);
         if !available {
+            // R2 D3: the boolean alone cannot judge admissibility — by the
+            // time a parked strike settles, `onAvailable` has usually already
+            // flipped it back to false, erasing the very fact the rule needs.
+            // Stamp the TRANSITION so the window survives the recovery.
+            self.inner
+                .os_lost_at
+                .store(Self::now_unix(), Ordering::SeqCst);
             spans::mark("network_lost");
             log::info!("link: OS network lost — passive (the socket's own death drives recovery)");
             return;
@@ -1243,6 +1317,21 @@ impl DagMonitor {
                                 let run_secs = Self::now_unix().saturating_sub(
                                     self.inner.connected_at.load(Ordering::Relaxed),
                                 );
+                                // R2 D4: record the run length for EVERY
+                                // judgment before deciding what it means —
+                                // the floor can only be re-examined against
+                                // the drops it absorbed, and a ledger that
+                                // stored only convictions would keep proving
+                                // the floor right by construction.
+                                if let Some(url) = dropped.as_deref() {
+                                    let mut health = self
+                                        .inner
+                                        .health
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    health.record_run(url, run_secs);
+                                    self.save_health(&health);
+                                }
                                 match (dropped, link::judge_run(run_secs)) {
                                     (Some(url), link::RunJudgment::CleanRun) => {
                                         self.commit_clean_run(&url);
@@ -1367,8 +1456,17 @@ impl DagMonitor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(id) = prior {
+            // R2 D2/D3: this is no longer only a hygiene warning. It is the
+            // one positive detector we have for "a socket exists that we did
+            // not create" — so stamp it, and let the strike path refuse to
+            // convict a node for anything dying in its neighbourhood.
+            self.inner
+                .doubled_connect_at
+                .store(Self::now_unix(), Ordering::SeqCst);
             log::warn!(
-                "dag-monitor: prior listener survived to a new connect — unregistering (item 9)"
+                "dag-monitor: prior listener survived to a new connect — unregistering (item 9); \
+                 strikes are inadmissible for {}s (R2 D3)",
+                link::SELF_INFLICTED_ADJACENCY_SECS
             );
             let _ = rpc.unregister_listener(id).await;
         }
