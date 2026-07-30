@@ -150,7 +150,8 @@ async fn escalation_task(mut events: broadcast::Receiver<AcceptanceEvent>, monit
                         // re-raced to since is innocent — control-group rule,
                         // consensus-audit finding).
                         match &submit_url {
-                            Some(url) => monitor.strike_endpoint(url, "stalled submit"),
+                            Some(url) => monitor
+                                .strike_endpoint(url, kaspaverse_chain::link::StrikeReason::Stall),
                             None => {
                                 log::info!("escalation: {txid} submit endpoint unknown — no strike")
                             }

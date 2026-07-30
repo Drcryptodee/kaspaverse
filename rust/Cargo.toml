@@ -72,6 +72,16 @@ async-channel = "2"
 # itself uses. Already resolved in the lock as a transitive of the pinned tree
 # (zero new packages); dev-deps never enter the Android build.
 async-trait = "0.1"
+# Test-only (chain dev-deps), R2 D2: a LOCAL ws server that completes a real
+# handshake and then closes — the only way to prove what the pinned ws client
+# does after a socket opens and dies, which is the mechanism behind the D-095
+# cascade. Deliberately the SAME library the pin's own client speaks
+# (`workflow-websocket 0.18` → `tokio-tungstenite 0.23.1`), so the server side
+# of the test cannot disagree with the client under test about the protocol.
+# Already resolved in the lock as a transitive of the pinned tree (zero new
+# packages); dev-deps never enter the Android build. Local-only: INV-8 is
+# untouched — nothing in this test leaves the loopback interface.
+tokio-tungstenite = "0.23.1"
 # Observability: `log::` is the facade our crates emit through. L40 (device,
 # 2026-06-15): no sink was ever installed for it — FRB's default utils did NOT
 # surface our lines in logcat, while the kaspa crates' own `workflow-log` DOES
