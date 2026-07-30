@@ -118,7 +118,27 @@ jobs:
       - name: Run the gate (strict — every check provisioned or red)
         # ANDROID_NDK_HOME is preset on the runner image; the gate uses it for
         # the arm64 cross-compile check.
-        run: GATE_STRICT=1 tools/gate.sh
+        run: |
+          set -o pipefail
+          GATE_STRICT=1 tools/gate.sh 2>&1 | tee /tmp/gate.log
+
+      - name: Name the failing checks in an ANNOTATION
+        if: failure()
+        # Job logs need admin rights on this repo; ANNOTATIONS do not — they
+        # come back from the public check-runs API. A red gate that only
+        # whispers into a log nobody can open costs a session per diagnosis
+        # (2026-07-30: three runs red, cause inferred rather than read). The
+        # gate already prints a per-check verdict — this republishes it where
+        # it can actually be seen.
+        run: |
+          grep -E '^(FAIL|SKIP)' /tmp/gate.log | while IFS= read -r line; do
+            echo "::error title=gate::${line}"
+          done
+          # Workflow-command escaping: % first, then newlines (order matters).
+          tail_msg=$(tail -30 /tmp/gate.log \
+            | sed -e 's/%/%25/g' -e 's/\r//g' \
+            | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/%0A/g')
+          echo "::error title=gate-tail::${tail_msg}"
 
       # Everything below runs on failure too — that is the point.
       - name: Report runner resources
