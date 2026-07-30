@@ -30,6 +30,16 @@ echo "• android device: $(command -v adb >/dev/null && adb devices 2>/dev/null
 # that reaches people who aren't the founder" (tools/release.sh surfaces that subset at
 # build time). Repaying one flips its marker to `[TRIGGER-FIRED]`. Surfaced here because
 # a trigger nobody reads is not a trigger — the register is the docs themselves.
+#
+# KNOWN FALSE POSITIVE, diagnose it in ten seconds before you go hunting: any PROSE that
+# spells the bracketed marker gets counted as one, because grep cannot tell a commitment
+# from a sentence about commitments. It has happened three times in two sessions —
+# D-091's own entry, RELEASE.md's checklist step, NEXT_SESSION's P3 note (D-092 ruling 7)
+# — so if the count is one high, run the grep below and look for a line that TALKS about
+# the marker instead of carrying one. The counter is deliberately left over-counting
+# rather than narrowed to the three owner files (DECISION_LOG / IDEAS_BACKLOG /
+# PERFORMANCE_BUDGET): a noisy count costs a minute, a MISSED armed trigger is a park
+# silently becoming a loss, which is the whole failure this exists to prevent.
 TRIG_LINES="$(grep -rnE '\[TRIGGER(\]|:)' docs/ 2>/dev/null | grep -v 'TRIGGER-FIRED' || true)"
 TRIG_N="$(printf '%s\n' "$TRIG_LINES" | grep -c . || true)"
 TRIG_BY="$(printf '%s\n' "$TRIG_LINES" | grep . | sed -E 's|^docs/(([^/:]*/)*)([^:]*):.*|\3|' \
