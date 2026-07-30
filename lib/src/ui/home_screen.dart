@@ -961,11 +961,20 @@ class _NetworkSheetState extends State<_NetworkSheet> {
 
   /// The transport-scan liveness line: the scan runs on every block, so the
   /// block-age IS its freshness. Honest about "never" before the first block.
-  String get _scanLine {
+  ///
+  /// C7 addendum: *live* is a claim about the LINK, not about the age alone.
+  /// This line rides a 2 s poll while the link notifiers are pushed, so a
+  /// just-dropped socket could otherwise read "live — scanning every block"
+  /// beside a Status row saying *phone offline* — two truths on one surface,
+  /// the exact disagreement C7 exists to forbid. The link decides whether the
+  /// scan may claim liveness; the age only refines the claim.
+  String _scanLine(BeaconState state) {
+    final linkUp = state == BeaconState.connected;
     if (!_haveStatus || _blockAgeSecs == null) {
-      return 'waiting for first block…';
+      return linkUp ? 'waiting for first block…' : 'not scanning — no link';
     }
     final age = _blockAgeSecs!;
+    if (!linkUp) return '$age s since last block';
     if (age <= 5) return 'live — scanning every block';
     return '$age s since last block';
   }
@@ -998,11 +1007,17 @@ class _NetworkSheetState extends State<_NetworkSheet> {
             final age = last == null ? null : now.difference(last);
             final droppedAt = widget.disconnectedAt?.value;
             final busy = widget.reconnecting?.value ?? false;
+            // C7 addendum: the button's busy state rides the HUNT, not the
+            // dispatch. `reconnecting` clears the instant the race is spawned
+            // (tens of ms, by design since R0) — a label that lives less than
+            // a frame is a label nobody reads. `hunting` lasts as long as the
+            // search actually does, and is the same bit the beacon renders.
+            final hunting = busy || (widget.searching?.value ?? false);
             final state = evaluateBeacon(
               connected: widget.connected.value,
               age: age,
               error: widget.error.value,
-              searching: (widget.searching?.value ?? false) || busy,
+              searching: hunting,
               osOffline: widget.osOffline?.value ?? false,
               sinceDrop: droppedAt == null ? null : now.difference(droppedAt),
             );
@@ -1028,7 +1043,7 @@ class _NetworkSheetState extends State<_NetworkSheet> {
                   value: formatScore(widget.virtualDaaScore.value),
                   mono: true,
                 ),
-                _DetailRow(label: 'Transport scan', value: _scanLine),
+                _DetailRow(label: 'Transport scan', value: _scanLine(state)),
                 _DetailRow(
                   label: 'Node',
                   value: widget.endpoint.value ?? '—',
@@ -1039,16 +1054,22 @@ class _NetworkSheetState extends State<_NetworkSheet> {
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.tonalIcon(
-                      onPressed: busy
-                          ? null
-                          : () {
-                              KvHaptic.selection();
-                              widget.onReconnect!();
-                            },
-                      icon: busy
+                      // Never disabled while hunting: a tap mid-search IS C4's
+                      // kick, and greying the button out would delete that
+                      // affordance exactly when the user most wants it. Repeat
+                      // taps are already harmless — ChainService.reconnect()
+                      // returns early while a dispatch is in flight.
+                      onPressed: () {
+                        KvHaptic.selection();
+                        widget.onReconnect!();
+                      },
+                      icon: hunting
                           ? const KvLoader.inline()
                           : const Icon(Icons.refresh, size: 18),
-                      label: Text(busy ? 'Reconnecting…' : 'Reconnect'),
+                      // "Searching…", not "Reconnecting…": the hunt is just as
+                      // often the engine's own (first connect, watchdog) as a
+                      // user's tap, and this label must be true in all three.
+                      label: Text(hunting ? 'Searching…' : 'Reconnect'),
                     ),
                   ),
                 const SizedBox(height: KvSpace.m),
