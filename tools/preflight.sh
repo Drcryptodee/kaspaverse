@@ -25,5 +25,13 @@ echo "• toolchain: rustc=$(rustc --version 2>/dev/null | cut -d' ' -f2 || echo
 # adb lives in the local SDK install (P0.3), not on PATH in fresh shells.
 command -v adb >/dev/null || PATH="$PATH:$HOME/Android/Sdk/platform-tools"
 echo "• android device: $(command -v adb >/dev/null && adb devices 2>/dev/null | sed -n '2p' | awk '{print $1" "$2}' || echo 'adb missing')"
+# Armed repayment triggers (D-091): a parked decision names its firing condition and
+# marks it `[TRIGGER]`; repaying it flips the marker to `[TRIGGER-FIRED]`. Surfaced here
+# because a trigger nobody reads is not a trigger — the register is the docs themselves.
+TRIG_LINES="$(grep -rn '\[TRIGGER\]' docs/ 2>/dev/null | grep -v 'TRIGGER-FIRED' || true)"
+TRIG_N="$(printf '%s\n' "$TRIG_LINES" | grep -c . || true)"
+TRIG_BY="$(printf '%s\n' "$TRIG_LINES" | grep . | sed -E 's|^docs/(([^/:]*/)*)([^:]*):.*|\3|' \
+    | sed 's/\.md$//' | sort | uniq -c | awk '{printf "%s %s · ", $2, $1}' | sed 's/ · $//')"
+echo "• armed triggers: ${TRIG_N}${TRIG_BY:+  ($TRIG_BY)} — grep -rn '\[TRIGGER\]' docs/"
 echo "═══════════════════════════════════════════"
 echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md"
