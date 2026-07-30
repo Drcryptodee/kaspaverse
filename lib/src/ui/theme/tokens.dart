@@ -134,6 +134,13 @@ abstract final class KvFreshness {
   /// ~10 bps a multi-second silence is anomalous, not jitter (tuned for the
   /// on-device kill-the-network observation; DS-1 acceptance).
   static const Duration staleAfter = Duration(seconds: 5);
+
+  /// A link that drops and returns inside this window never flips the glass
+  /// (register item 16's churn ruling, render side — the engine's twin is
+  /// `link::MIN_STRIKE_RUN_SECS`, 10 s): Wi-Fi re-association noise is not
+  /// information, and a beacon that blinks on it teaches distrust. Strictly
+  /// below [staleAfter], so the hold can never present stale data as live.
+  static const Duration linkChurnGrace = Duration(seconds: 2);
 }
 
 /// §4 — Font families (bundled assets, never runtime-fetched — DS-6). The two

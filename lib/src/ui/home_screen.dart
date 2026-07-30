@@ -99,6 +99,9 @@ class ChainScope {
     required this.lastUpdate,
     this.reconnecting,
     this.onReconnect,
+    this.searching,
+    this.osOffline,
+    this.disconnectedAt,
   });
 
   final ValueListenable<bool> connected;
@@ -114,6 +117,15 @@ class ChainScope {
 
   /// Force a fresh connection — the network sheet's Reconnect action (P3).
   final Future<void> Function()? onReconnect;
+
+  /// C7 (D-091): the engine's honest link truths, straight from Rust — a race
+  /// is hunting / the OS says the phone has no network / when the link last
+  /// died (the churn hold's clock). Optional like [reconnecting]: a widget test
+  /// that doesn't exercise the hunt states can omit them, and absent reads as
+  /// "no hunt, not offline, up" — the pre-C7 behaviour.
+  final ValueListenable<bool>? searching;
+  final ValueListenable<bool>? osOffline;
+  final ValueListenable<DateTime?>? disconnectedAt;
 }
 
 /// The wallet-facing wiring [HomeScreen] consumes — same law as [ChainScope].
@@ -186,7 +198,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late final ValueNotifier<DateTime> _now;
 
   late final _Derived<_LinkView> _link;
-  late final _Derived<bool> _stale;
+  late final _Derived<bool> _dimmed;
   late final _Derived<_BalanceView> _balance;
 
   /// Everything the activity feed reads. The feed rebuilds on activity
@@ -205,21 +217,30 @@ class _HomeScreenState extends State<HomeScreen> {
       widget.chain.connected,
       widget.chain.error,
       widget.chain.lastUpdate,
+      if (widget.chain.searching != null) widget.chain.searching!,
+      if (widget.chain.osOffline != null) widget.chain.osOffline!,
+      if (widget.chain.disconnectedAt != null) widget.chain.disconnectedAt!,
+      if (widget.chain.reconnecting != null) widget.chain.reconnecting!,
       _now,
     ], _computeLink);
-    _stale = _Derived([_link], () => _link.value.state == BeaconState.stale);
+    // DS-1 dimming is "not live", not "stale" specifically: since C7 a dark
+    // link can read *finding a node…* or *phone offline* instead of stale, and
+    // last-known data must never sit at full brightness through any of them.
+    _dimmed = _Derived([
+      _link,
+    ], () => _link.value.state != BeaconState.connected);
     _balance = _Derived(
       [
         widget.wallet.mature,
         widget.wallet.pending,
         widget.wallet.syncing,
         widget.wallet.utxoIndexMissing,
-        _stale,
+        _dimmed,
       ],
       () => (
         mature: widget.wallet.mature.value,
         pending: widget.wallet.pending.value,
-        stale: _stale.value,
+        stale: _dimmed.value,
         syncing: widget.wallet.syncing.value,
         utxoIndexMissing: widget.wallet.utxoIndexMissing.value,
       ),
@@ -227,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _feedInputs = Listenable.merge([
       widget.wallet.activity,
       widget.chain.virtualDaaScore,
-      _stale,
+      _dimmed,
       _now,
     ]);
     // Re-evaluate freshness every second so the stale state and "as of N ago"
@@ -246,6 +267,12 @@ class _HomeScreenState extends State<HomeScreen> {
       identical(oldWidget.chain.connected, widget.chain.connected) &&
           identical(oldWidget.chain.error, widget.chain.error) &&
           identical(oldWidget.chain.lastUpdate, widget.chain.lastUpdate) &&
+          identical(oldWidget.chain.searching, widget.chain.searching) &&
+          identical(oldWidget.chain.osOffline, widget.chain.osOffline) &&
+          identical(
+            oldWidget.chain.disconnectedAt,
+            widget.chain.disconnectedAt,
+          ) &&
           identical(oldWidget.wallet.mature, widget.wallet.mature) &&
           identical(oldWidget.wallet.pending, widget.wallet.pending) &&
           identical(oldWidget.wallet.syncing, widget.wallet.syncing) &&
@@ -267,7 +294,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _ticker?.cancel();
     // Chained deriveds unhook in reverse dependency order.
     _balance.dispose();
-    _stale.dispose();
+    _dimmed.dispose();
     _link.dispose();
     _now.dispose();
     super.dispose();
@@ -278,12 +305,26 @@ class _HomeScreenState extends State<HomeScreen> {
     return last == null ? null : _now.value.difference(last);
   }
 
+  /// Time since the link died — the churn hold's clock (null ⇒ up/never up).
+  Duration? _sinceDrop() {
+    final at = widget.chain.disconnectedAt?.value;
+    return at == null ? null : _now.value.difference(at);
+  }
+
   _LinkView _computeLink() {
     final age = _age();
     final state = evaluateBeacon(
       connected: widget.chain.connected.value,
       age: age,
       error: widget.chain.error.value,
+      // A tap counts as searching from the frame it lands (≤200 ms ack, C7):
+      // the Dart flag flips synchronously, so the beacon reads *finding a
+      // node…* before the bridge call has even been dispatched.
+      searching:
+          (widget.chain.searching?.value ?? false) ||
+          (widget.chain.reconnecting?.value ?? false),
+      osOffline: widget.chain.osOffline?.value ?? false,
+      sinceDrop: _sinceDrop(),
     );
     return (
       state: state,
@@ -331,6 +372,9 @@ class _HomeScreenState extends State<HomeScreen> {
         clock: widget.clock,
         reconnecting: widget.chain.reconnecting,
         onReconnect: widget.chain.onReconnect,
+        searching: widget.chain.searching,
+        osOffline: widget.chain.osOffline,
+        disconnectedAt: widget.chain.disconnectedAt,
       ),
     );
   }
@@ -474,7 +518,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   records: widget.wallet.activity.value,
                   now: _now.value,
                   virtualDaaScore: widget.chain.virtualDaaScore.value,
-                  stale: _stale.value,
+                  stale: _dimmed.value,
                   onRefresh: widget.wallet.onRefreshActivity,
                 ),
               ),
@@ -856,6 +900,9 @@ class _NetworkSheet extends StatefulWidget {
     required this.clock,
     this.reconnecting,
     this.onReconnect,
+    this.searching,
+    this.osOffline,
+    this.disconnectedAt,
   });
 
   final ValueListenable<bool> connected;
@@ -866,6 +913,14 @@ class _NetworkSheet extends StatefulWidget {
   final DateTime Function() clock;
   final ValueListenable<bool>? reconnecting;
   final Future<void> Function()? onReconnect;
+
+  /// C7: the same three truths the beacon renders — the sheet is where the
+  /// user goes to understand, so it must never disagree with the chip. ONE
+  /// writer (ChainService) feeds both; the sheet's own poll stays scoped to
+  /// the block-age line it already owned.
+  final ValueListenable<bool>? searching;
+  final ValueListenable<bool>? osOffline;
+  final ValueListenable<DateTime?>? disconnectedAt;
 
   @override
   State<_NetworkSheet> createState() => _NetworkSheetState();
@@ -933,25 +988,34 @@ class _NetworkSheetState extends State<_NetworkSheet> {
             widget.error,
             widget.lastUpdate,
             if (widget.reconnecting != null) widget.reconnecting!,
+            if (widget.searching != null) widget.searching!,
+            if (widget.osOffline != null) widget.osOffline!,
+            if (widget.disconnectedAt != null) widget.disconnectedAt!,
           ]),
           builder: (context, _) {
             final last = widget.lastUpdate.value;
-            final age = last == null ? null : widget.clock().difference(last);
+            final now = widget.clock();
+            final age = last == null ? null : now.difference(last);
+            final droppedAt = widget.disconnectedAt?.value;
+            final busy = widget.reconnecting?.value ?? false;
             final state = evaluateBeacon(
               connected: widget.connected.value,
               age: age,
               error: widget.error.value,
+              searching: (widget.searching?.value ?? false) || busy,
+              osOffline: widget.osOffline?.value ?? false,
+              sinceDrop: droppedAt == null ? null : now.difference(droppedAt),
             );
             final status = switch (state) {
               BeaconState.error => widget.error.value ?? 'connection error',
-              BeaconState.connecting => 'connecting to mainnet…',
+              BeaconState.offline => 'phone offline — no network',
+              BeaconState.connecting => 'finding a node…',
               BeaconState.stale =>
                 age == null
                     ? 'no recent update'
                     : 'as of ${formatAge(age)} ago',
               BeaconState.connected => 'live',
             };
-            final busy = widget.reconnecting?.value ?? false;
             return Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,

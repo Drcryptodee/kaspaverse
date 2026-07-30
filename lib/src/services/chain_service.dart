@@ -79,6 +79,17 @@ class ChainService with WidgetsBindingObserver {
   @visibleForTesting
   static int watchdogStallSecs = 30;
 
+  /// C7 honest-states cadence: while the link is DOWN, pull the engine's
+  /// searching/offline bits this often so the glass animates the hunt instead
+  /// of freezing on a staleness phrase. Deliberately 1 s — half the churn-hold
+  /// window, so the honest state is always known before the hold expires and
+  /// the glass flips. Costs nothing in the steady state: a connected link takes
+  /// the early return below and makes NO bridge call at all (the battery
+  /// posture's "no invisible always-on work" rule), and a backgrounded app
+  /// makes none either.
+  @visibleForTesting
+  static Duration linkPollPeriod = const Duration(seconds: 1);
+
   /// V3 freshness watchdog (register item 10's second heal): when the link is
   /// up but the WALLET lane has applied nothing for this long, the tick pulls
   /// the fold's latest via [onWalletQuiet] — a cheap local re-serve that heals
@@ -111,10 +122,23 @@ class ChainService with WidgetsBindingObserver {
   /// Reconnect button). The honest-liveness indicator — never a silent stall.
   final ValueNotifier<bool> reconnecting = ValueNotifier(false);
 
+  /// C7 (D-091): the engine's own two truths, polled while the link is down.
+  /// [searching] = a connect race is hunting (held across its inter-round
+  /// pauses in Rust, so a 14–28 s weak-link hunt reads as one continuous
+  /// state); [osOffline] = Android's `ConnectivityManager` said the default
+  /// network is gone. Rust owns both — Dart never infers them.
+  final ValueNotifier<bool> searching = ValueNotifier(false);
+  final ValueNotifier<bool> osOffline = ValueNotifier(false);
+
+  /// When the link last went down (null = up, or never up). Feeds the beacon's
+  /// churn hold: a ≤2 s blip must not flip the glass (register item 16).
+  final ValueNotifier<DateTime?> disconnectedAt = ValueNotifier(null);
+
   StreamSubscription<DagSnapshot>? _subscription;
   Timer? _graceTimer;
   bool _droppedByGrace = false;
   Timer? _watchdogTimer;
+  Timer? _linkTimer;
   bool _foreground = true;
 
   /// Idempotent: the first call attaches the app-lifetime subscription and
@@ -142,6 +166,33 @@ class ChainService with WidgetsBindingObserver {
       },
     );
     _watchdogTimer ??= Timer.periodic(watchdogPeriod, (_) => _watchdogTick());
+    _linkTimer ??= Timer.periodic(linkPollPeriod, (_) => _linkTick());
+  }
+
+  /// C7: keep the honest link state current while we are dark. A connected,
+  /// idle link short-circuits with no bridge call — the bits are known from
+  /// the stream (a live socket is neither hunting nor offline). While a
+  /// reconnect is in flight we DO poll even if the last snapshot said
+  /// connected: the socket is being bounced under us.
+  Future<void> _linkTick() async {
+    if (!_foreground || _droppedByGrace) return;
+    if (connected.value && !reconnecting.value) {
+      searching.value = false;
+      osOffline.value = false;
+      return;
+    }
+    final DagStatusDto status;
+    try {
+      status = await statusFn();
+    } catch (_) {
+      return; // a failed pull leaves the last-known state; never invent one
+    }
+    // The link may have come UP while this pull was in flight. A landed
+    // connect is the newer truth, so the older answer must not re-assert a
+    // hunt (or an offline claim) over a live socket.
+    if (connected.value && !reconnecting.value) return;
+    searching.value = status.searching;
+    osOffline.value = status.osOffline;
   }
 
   /// Foreground liveness check (P3/D-068): pull the honest block-age; if the
@@ -206,6 +257,10 @@ class ChainService with WidgetsBindingObserver {
   /// [stalled] = the caller holds failure evidence (watchdog only).
   Future<void> reconnect({bool stalled = false}) async {
     if (reconnecting.value) return;
+    // Set BEFORE the await: the sheet's button and the beacon both read this
+    // synchronously, so the tap is acknowledged on the very next frame
+    // regardless of what the backend is doing (C7's ≤200 ms bar; the engine
+    // side was proven ≤40 ms at R0).
     reconnecting.value = true;
     try {
       await reconnectFn(stalled);
@@ -216,6 +271,10 @@ class ChainService with WidgetsBindingObserver {
       error.value = e.toString();
     } finally {
       reconnecting.value = false;
+      // The tap handed off to a hunt — show that immediately rather than
+      // waiting up to a poll period with the glass reading whatever it read
+      // before.
+      unawaited(_linkTick());
     }
   }
 
@@ -250,10 +309,27 @@ class ChainService with WidgetsBindingObserver {
           }),
         );
       }
+      // C7: a resume re-races, and the returning user is looking at the glass
+      // NOW — pull the honest state immediately instead of leaving up to a
+      // poll period of last-session staleness on screen (this is exactly the
+      // 2026-07-30 observation-A shape: a warm process, a dead socket, and a
+      // beacon still reading "as of N ago").
+      unawaited(_linkTick());
     }
   }
 
   void _apply(DagSnapshot snapshot) {
+    // C7: remember the moment the link died — the beacon's churn hold reads it
+    // (a ≤2 s blip must not flip the glass), and a fresh connect clears both
+    // the timestamp and the hunt bits: a live socket is neither hunting nor
+    // offline, whatever the last poll or a flapping OS callback said.
+    if (connected.value && !snapshot.connected) {
+      disconnectedAt.value = DateTime.now();
+    } else if (snapshot.connected) {
+      disconnectedAt.value = null;
+      searching.value = false;
+      osOffline.value = false;
+    }
     connected.value = snapshot.connected;
     endpoint.value = snapshot.endpoint;
     // Retain last-known scores when a snapshot carries none — a dropped link
@@ -283,6 +359,8 @@ class ChainService with WidgetsBindingObserver {
     _graceTimer = null;
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
+    _linkTimer?.cancel();
+    _linkTimer = null;
     _droppedByGrace = false;
     _foreground = true;
     onWalletQuiet = null;
@@ -294,5 +372,8 @@ class ChainService with WidgetsBindingObserver {
     error.value = null;
     lastUpdate.value = null;
     reconnecting.value = false;
+    searching.value = false;
+    osOffline.value = false;
+    disconnectedAt.value = null;
   }
 }

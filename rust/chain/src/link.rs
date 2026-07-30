@@ -331,6 +331,131 @@ pub fn sanitize_node_text(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).take(200).collect()
 }
 
+/// The host of a `wss://host/path` candidate — the node's identity. The
+/// scheme and the `/kaspa/mainnet/wrpc/borsh` tail are the same on every
+/// candidate, so a round summary that repeats them spends bytes saying
+/// nothing (and bytes are what evict the ring — L65).
+///
+/// A resolver-supplied URL is **node-controlled text**, so every caller that
+/// puts this into the evidence lane wraps it in [`sanitize_node_text`]
+/// (consensus-auditor item 16 — the same rule the error strings already
+/// followed; the host was a new doorway for the same class).
+pub fn endpoint_host(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+}
+
+/// Replace every embedded URL with `…`. The failure CLASS is the reason; the
+/// address is already carried by the note's actor. Without this, three seeder
+/// failures that differ only by seeder URL read as three distinct reasons and
+/// grouping buys nothing (measured on device 2026-07-30). ASCII schemes, so
+/// the byte offsets are always char boundaries.
+fn scrub_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let hit = ["https://", "http://", "wss://", "ws://"]
+            .iter()
+            .filter_map(|p| rest.find(p))
+            .min();
+        match hit {
+            None => {
+                out.push_str(rest);
+                return out;
+            }
+            Some(at) => {
+                out.push_str(&rest[..at]);
+                out.push('…');
+                let tail = &rest[at..];
+                let end = tail
+                    .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | ']' | ','))
+                    .unwrap_or(tail.len());
+                rest = &tail[end..];
+            }
+        }
+    }
+}
+
+/// Strip the layered boilerplate off a candidate's failure text, keeping the
+/// clause that says what actually went wrong. Prefix shapes are verbatim from
+/// the pin as observed on device 2026-07-30 (pinned in the unit test): a DNS
+/// failure arrives as `wRPC -> WebSocket -> WebSocket error: IO error:
+/// <cause>`, a seeder failure as `resolver fetch: Failed to connect:
+/// [Custom("Unable to connect to <url>: <cause>")]`.
+pub fn compact_reason(text: &str) -> String {
+    let mut s = scrub_urls(&sanitize_node_text(text));
+    // Substring, not prefix: the pin nests these mid-string (our own
+    // `probe dial <url>: ` wrapper comes first), which is exactly how the first
+    // on-device measurement still spent 452 chars a round.
+    for (boilerplate, replacement) in [
+        ("wRPC -> WebSocket -> WebSocket error: ", ""),
+        ("wRPC -> WebSocket -> ", ""),
+        ("probe dial …: ", "dial "),
+        ("IO error: ", ""),
+        (
+            "Failed to connect: [Custom(\"Unable to connect to … ",
+            "seeder ",
+        ),
+        ("Reqwest: error sending request for url ", "request failed "),
+        ("failed to lookup address information: ", "DNS: "),
+    ] {
+        while let Some(at) = s.find(boilerplate) {
+            s.replace_range(at..at + boilerplate.len(), replacement);
+        }
+    }
+    s.chars().take(90).collect()
+}
+
+/// Collapse a round's losses into ONE compact line: each distinct reason is
+/// stated once, prefixed by who hit it (`aria,eva,kate×2`). Grouping is the
+/// load-bearing part — the first cut of this coalescing (R0 addendum #1)
+/// traded nine verbose lines for one 1900-character line, which saved no
+/// BYTES at all and so did not buy the retention it existed to buy. Reasons
+/// are still verbatim (compacted, never dropped): they are what convicted
+/// `ivy`'s real HTTP 500 and exonerated four weak-link timeouts.
+pub fn summarize_losses(notes: &[(String, String)]) -> String {
+    let mut order: Vec<&str> = Vec::new();
+    let mut by: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (who, why) in notes {
+        let entry = by.entry(why.as_str()).or_insert_with(|| {
+            order.push(why.as_str());
+            Vec::new()
+        });
+        entry.push(who.as_str());
+    }
+    order
+        .into_iter()
+        .map(|why| {
+            // Collapse repeats of the same actor into `who×N`, first seen first.
+            let whos = &by[why];
+            let mut seen: Vec<(&str, usize)> = Vec::new();
+            for who in whos {
+                match seen.iter_mut().find(|(w, _)| w == who) {
+                    Some((_, n)) => *n += 1,
+                    None => seen.push((who, 1)),
+                }
+            }
+            let actors = seen
+                .iter()
+                .map(|(w, n)| {
+                    if *n == 1 {
+                        w.to_string()
+                    } else {
+                        format!("{w}×{n}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{actors}: {why}")
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// A healthy endpoint found by [`probe_endpoint`].
 #[derive(Debug, Clone)]
 pub struct ProbeOutcome {
@@ -468,6 +593,13 @@ pub async fn probe_endpoint(
 pub struct RaceOutcome {
     pub winner: Option<ProbeOutcome>,
     pub failed: Vec<String>,
+    /// `(who, why)` per candidate that did NOT win, in join order —
+    /// [`summarize_losses`] folds them into the round's single compact summary
+    /// line (R0 addendum #1, built at R1). `who` is the node's host (or
+    /// `resolver`); `why` is its failure text, boilerplate-stripped but never
+    /// dropped: reasons are what convicted `ivy`'s real HTTP 500 and exonerated
+    /// four weak-link timeouts in the 2026-07-30 capture (L65).
+    pub notes: Vec<(String, String)>,
 }
 
 /// Race-to-connect (V3 deliverable 1, pantry since C6/D-089): the cached
@@ -494,7 +626,11 @@ pub async fn race(
     fetches: usize,
     probe_timeout: Duration,
 ) -> RaceOutcome {
-    let mut tasks: JoinSet<std::result::Result<ProbeOutcome, Option<String>>> = JoinSet::new();
+    // A loss carries (the URL to strike, if the NODE is what failed; a note for
+    // the round summary). Losing tasks no longer log a line each — the caller
+    // prints one coalesced line per round (addendum #1).
+    type Loss = (Option<String>, Option<(String, String)>);
+    let mut tasks: JoinSet<std::result::Result<ProbeOutcome, Loss>> = JoinSet::new();
     let mut entered: HashSet<String> = HashSet::new();
 
     // Cached first, then the pantry: identical immediate-dial treatment, and
@@ -512,8 +648,15 @@ pub async fn race(
             probe_endpoint(&url, network_id, probe_timeout)
                 .await
                 .map_err(|e| {
-                    log::info!("link: race probe failed (immediate): {e}");
-                    Some(url)
+                    // `[imm]` = the immediate lane (cached + pantry, zero HTTP
+                    // before the dial). Which candidates were dialed without
+                    // the resolver is how C6 was confirmed in the field, so the
+                    // summary keeps the distinction.
+                    let note = (
+                        format!("{}[imm]", sanitize_node_text(endpoint_host(&url))),
+                        compact_reason(&e.to_string()),
+                    );
+                    (Some(url), Some(note))
                 })
         });
     }
@@ -531,27 +674,39 @@ pub async fn race(
             let node = bounded_get_node(&resolver, network_id, RESOLVER_FETCH_TIMEOUT)
                 .await
                 .map_err(|e| {
-                    log::info!("link: {e}");
-                    None
+                    (
+                        None,
+                        Some(("resolver".to_string(), compact_reason(&e.to_string()))),
+                    )
                 })?;
             let url = node.url;
             if demoted.contains(&url) {
-                log::info!("link: race skipping demoted candidate {url}");
-                return Err(None);
+                return Err((
+                    None,
+                    Some((
+                        sanitize_node_text(endpoint_host(&url)),
+                        "skipped: demoted".to_string(),
+                    )),
+                ));
             }
             {
                 let mut seen = seen
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !seen.insert(url.clone()) {
-                    return Err(None); // duplicate answer — someone's already dialing it
+                    // Duplicate answer — someone's already dialing it. Not a
+                    // loss worth a note: it says nothing about any node.
+                    return Err((None, None));
                 }
             }
             probe_endpoint(&url, network_id, probe_timeout)
                 .await
                 .map_err(|e| {
-                    log::info!("link: race probe failed: {e}");
-                    Some(url)
+                    let note = (
+                        sanitize_node_text(endpoint_host(&url)),
+                        compact_reason(&e.to_string()),
+                    );
+                    (Some(url), Some(note))
                 })
         });
     }
@@ -563,9 +718,19 @@ pub async fn race(
                 outcome.winner = Some(winner);
                 break;
             }
-            Ok(Err(Some(failed_url))) => outcome.failed.push(failed_url),
-            Ok(Err(None)) => {} // resolver miss / demoted / duplicate — not a node failure
-            Err(_) => {}        // panicked probe task — nothing to record
+            Ok(Err((failed_url, note))) => {
+                // A URL means the NODE failed (it gets struck once the network
+                // proves alive); a note without a URL is a resolver miss, a
+                // demoted skip or a fetch timeout — evidence, but not evidence
+                // against a node.
+                if let Some(url) = failed_url {
+                    outcome.failed.push(url);
+                }
+                if let Some(note) = note {
+                    outcome.notes.push(note);
+                }
+            }
+            Err(_) => {} // panicked probe task — nothing to record
         }
     }
     // NEVER abort in-flight losers (consensus-audit finding): a probe aborted
@@ -968,6 +1133,117 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "errored, but not within the configured bound"
+        );
+    }
+
+    /// R0 addendum #1 (built at R1): a lost round reports itself in ONE line,
+    /// and the reasons survive the compression. The failing candidate must
+    /// still land in `failed` (it is struck once the network proves alive —
+    /// D-084) AND contribute a note naming itself, because the reason strings
+    /// are what let a cold `endpoint.health` read be interpreted later (L65).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lost_round_carries_its_reasons_as_notes() {
+        // A closed port: refused immediately, so no timeout to wait out.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = closed.local_addr().unwrap();
+        drop(closed);
+        let url = format!("ws://{addr}/borsh");
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        // fetches = 0: no resolver on the path, so this measures exactly the
+        // immediate-candidate lane.
+        let outcome = race(
+            &Resolver::default(),
+            network_id,
+            Some(url.clone()),
+            Vec::new(),
+            &Default::default(),
+            0,
+            Duration::from_millis(400),
+        )
+        .await;
+
+        assert!(outcome.winner.is_none(), "a closed port cannot win");
+        assert_eq!(
+            outcome.failed,
+            vec![url.clone()],
+            "the node must be strikeable"
+        );
+        assert_eq!(
+            outcome.notes.len(),
+            1,
+            "one note per loss — no more, no less"
+        );
+        let (who, why) = &outcome.notes[0];
+        assert!(
+            who.contains(&addr.to_string()),
+            "a note that cannot be attributed to a candidate is not evidence: {who}"
+        );
+        assert!(
+            who.ends_with("[imm]"),
+            "the immediate lane must stay distinguishable (C6 forensics): {who}"
+        );
+        assert!(!why.is_empty(), "a loss with no reason is not evidence");
+    }
+
+    /// The coalescing has ONE job: fewer BYTES in the ring, not just fewer
+    /// lines (L65 — the ring evicts by size, and the first cut of addendum #1
+    /// spent 1900 characters on a single round, which bought nothing). Pinned
+    /// against the verbatim strings the device produced on 2026-07-30 during
+    /// an 8-round outage.
+    #[test]
+    fn a_round_summary_groups_identical_reasons_and_stays_small() {
+        let dns = "wRPC -> WebSocket -> WebSocket error: IO error: failed to lookup \
+                   address information: No address associated with hostname";
+        let seeder = |host: &str| {
+            format!(
+                "resolver fetch: Failed to connect: [Custom(\"Unable to connect to \
+                 https://{host}/v2/kaspa/mainnet/any/wrpc/borsh: Reqwest: error sending \
+                 request for url (https://{host}/v2/kaspa/mainnet/any/wrpc/borsh)\")]"
+            )
+        };
+        let raw: Vec<(String, String)> = vec![
+            ("tess[imm]", dns.to_string()),
+            ("aria[imm]", dns.to_string()),
+            ("kate[imm]", dns.to_string()),
+            ("eva[imm]", dns.to_string()),
+            ("resolver", seeder("jack.kaspa.blue")),
+            ("resolver", seeder("luke.kaspa.blue")),
+            ("resolver", seeder("ryan.kaspa.blue")),
+        ]
+        .into_iter()
+        .map(|(w, y)| (w.to_string(), compact_reason(&y)))
+        .collect();
+
+        let line = summarize_losses(&raw);
+        // Four identical DNS failures state their reason ONCE.
+        assert_eq!(
+            line.matches("No address associated with hostname").count(),
+            1,
+            "identical reasons must be stated once: {line}"
+        );
+        // Boilerplate the pin nests mid-string must be gone, not just
+        // un-prefixed (the first device measurement spent 452 chars a round
+        // because `strip_prefix` never matched a nested shape).
+        assert!(
+            !line.contains("wRPC -> WebSocket"),
+            "transport boilerplate is not a reason: {line}"
+        );
+        assert!(
+            line.starts_with("tess[imm],aria[imm],kate[imm],eva[imm]: "),
+            "the actors group in first-seen order: {line}"
+        );
+        // Three seeder failures differ only by URL — compaction must make them
+        // one reason, collapsed to `resolver×3`.
+        assert!(
+            line.contains("resolver×3"),
+            "per-seeder URLs must not defeat grouping: {line}"
+        );
+        // The whole point, measured: the device emitted ~1900 chars for this
+        // exact round.
+        assert!(
+            line.len() < 200,
+            "a round summary that big does not buy retention ({} chars): {line}",
+            line.len()
         );
     }
 

@@ -2244,11 +2244,15 @@ impl SseDecode for crate::api::dag::DagStatusDto {
         let mut var_endpoint = <Option<String>>::sse_decode(deserializer);
         let mut var_lastBlockAgeSecs = <Option<u64>>::sse_decode(deserializer);
         let mut var_virtualDaaScore = <Option<u64>>::sse_decode(deserializer);
+        let mut var_searching = <bool>::sse_decode(deserializer);
+        let mut var_osOffline = <bool>::sse_decode(deserializer);
         return crate::api::dag::DagStatusDto {
             connected: var_connected,
             endpoint: var_endpoint,
             last_block_age_secs: var_lastBlockAgeSecs,
             virtual_daa_score: var_virtualDaaScore,
+            searching: var_searching,
+            os_offline: var_osOffline,
         };
     }
 }
@@ -3108,6 +3112,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::dag::DagStatusDto {
             self.endpoint.into_into_dart().into_dart(),
             self.last_block_age_secs.into_into_dart().into_dart(),
             self.virtual_daa_score.into_into_dart().into_dart(),
+            self.searching.into_into_dart().into_dart(),
+            self.os_offline.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3708,6 +3714,8 @@ impl SseEncode for crate::api::dag::DagStatusDto {
         <Option<String>>::sse_encode(self.endpoint, serializer);
         <Option<u64>>::sse_encode(self.last_block_age_secs, serializer);
         <Option<u64>>::sse_encode(self.virtual_daa_score, serializer);
+        <bool>::sse_encode(self.searching, serializer);
+        <bool>::sse_encode(self.os_offline, serializer);
     }
 }
 

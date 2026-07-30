@@ -94,6 +94,9 @@ class KaspaVerseApp extends StatelessWidget {
             lastUpdate: chain.lastUpdate,
             reconnecting: chain.reconnecting,
             onReconnect: chain.reconnect,
+            searching: chain.searching,
+            osOffline: chain.osOffline,
+            disconnectedAt: chain.disconnectedAt,
           ),
           wallet: WalletScope(
             mature: wallet.mature,

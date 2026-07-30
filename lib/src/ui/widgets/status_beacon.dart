@@ -3,25 +3,65 @@ import 'package:flutter/material.dart';
 import '../theme/tokens.dart';
 import 'kv_breath.dart';
 
-/// The four honest states of a chain link (DS-1, design_system §8). Colour is
+/// The honest states of a chain link (DS-1, design_system §8). Colour is
 /// never the only signal — every state pairs a dot colour with a text label
-/// (§11).
-enum BeaconState { connected, connecting, stale, error }
+/// (§11). [offline] is C7's addition (D-089 ruling 6): when the OS says the
+/// phone has no network, the glass names the phone instead of blaming a node.
+enum BeaconState { connected, connecting, stale, error, offline }
 
 /// Pure state derivation — the testable heart of the P0.3 stale-dimming
-/// retrofit. Priority: an error outranks everything; no data yet is
-/// `connecting`; a dropped link OR a silence past [staleAfter] is `stale`
-/// (last-known data must never read at full brightness — DS-1); otherwise
-/// `connected`.
+/// retrofit, widened at C7 (D-091 ruling 1) to the three truths the engine
+/// actually knows.
 ///
-/// [age] is the time since the last *fresh* snapshot (null ⇒ none ever).
+/// Priority, and why:
+/// 1. **Churn hold** — a link that drops with fresh data in hand keeps reading
+///    live for [churnGrace]. Sub-2 s transitions are Wi-Fi re-association
+///    noise, not information (register item 16's ruling on the render side; the
+///    engine's twin is `MIN_STRIKE_RUN_SECS`). It can never hold a stale
+///    reading live, because [churnGrace] < [staleAfter].
+/// 2. **Phone offline** — the OS's own `onLost`, and only while the socket is
+///    also down: a live socket is proof of a network whatever a flapping
+///    callback claims. Ranked above [error] deliberately — with no network,
+///    every downstream error is a *consequence*, and "connection error" would
+///    blame the nodes for the user's Wi-Fi.
+/// 3. **Error** — an explicit failure we were handed.
+/// 4. **Finding a node** — [searching]: a race is hunting. This is the fix for
+///    the 2026-07-30 field observation (a 14–28 s weak-link hunt rendered as
+///    *"as of 20 s ago"*, which reads as *connected, data slightly stale* —
+///    the exact opposite of the truth).
+/// 5. No data ever ([age] null) is also *finding a node* — honest in the
+///    instant between mount and the first race flag.
+/// 6. A dropped link or silence past [staleAfter] is `stale`.
+/// 7. Otherwise `connected`.
+///
+/// **Invariant this ordering buys (C7's acceptance bar):** a staleness phrase
+/// can never render before the first `wss_connected` of a process. Reaching
+/// rule 6 while disconnected requires `age != null`, and only a connected
+/// snapshot bearing real chain data ever sets that clock.
+///
+/// [age] is the time since the last *fresh* snapshot (null ⇒ none ever);
+/// [sinceDrop] the time since the link last went down (null ⇒ up, or never up).
 BeaconState evaluateBeacon({
   required bool connected,
   required Duration? age,
   required String? error,
+  bool searching = false,
+  bool osOffline = false,
+  Duration? sinceDrop,
   Duration staleAfter = KvFreshness.staleAfter,
+  Duration churnGrace = KvFreshness.linkChurnGrace,
 }) {
+  if (error == null &&
+      !connected &&
+      sinceDrop != null &&
+      sinceDrop < churnGrace &&
+      age != null &&
+      age < staleAfter) {
+    return BeaconState.connected;
+  }
+  if (!connected && osOffline) return BeaconState.offline;
   if (error != null) return BeaconState.error;
+  if (!connected && searching) return BeaconState.connecting;
   if (age == null) return BeaconState.connecting;
   if (!connected || age >= staleAfter) return BeaconState.stale;
   return BeaconState.connected;
@@ -68,10 +108,15 @@ class StatusBeacon extends StatelessWidget {
     final theme = Theme.of(context);
     final (Color color, String label) = switch (state) {
       BeaconState.error => (KvColor.error, error ?? 'connection error'),
-      BeaconState.connecting => (
-        KvColor.textTertiary,
-        'connecting to mainnet…',
-      ),
+      // The phone's own network, stated plainly — tertiary, not warning:
+      // warning means exactly "stale link" (§3), and this is not a link fault
+      // at all. Nothing for the user to distrust, something for them to fix.
+      BeaconState.offline => (KvColor.textTertiary, 'phone offline'),
+      // C7 copy (D-089 ruling 6): what the engine is ACTUALLY doing. "finding
+      // a node" is the truth for both the first connect and every later hunt;
+      // "connecting to mainnet" implied a single destination we were already
+      // talking to.
+      BeaconState.connecting => (KvColor.textTertiary, 'finding a node…'),
       // Degraded link = warning (§3: warning means exactly "stale link").
       BeaconState.stale => (
         KvColor.warning,
@@ -84,8 +129,14 @@ class StatusBeacon extends StatelessWidget {
     };
 
     final live = state == BeaconState.connected;
+    // The breath means "something is happening", so a hunt breathes too (C7:
+    // *finding a node…* must read as visible search activity, not as a frozen
+    // label) — reusing the existing component rather than inventing a spinner
+    // for the chip (D-064: no new visual language). The GLOW stays rationed to
+    // live data below, so a hunt never looks like a healthy link.
+    final animate = live || state == BeaconState.connecting;
     final dot = KvBreath(
-      active: live,
+      active: animate,
       child: Container(
         width: KvSpace.s,
         height: KvSpace.s,

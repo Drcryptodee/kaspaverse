@@ -227,12 +227,30 @@ pub async fn dag_resume() -> Result<(), AppError> {
 /// field — a healthy mainnet keeps it near zero (~10 blocks/s); a large value
 /// while foreground means a silently dead socket (the midnight DAA stall), the
 /// watchdog's trigger to [`dag_reconnect`]. `None` before the first connect.
+///
+/// It is ALSO the honest-states lane (C7/D-091): `searching` + `os_offline`
+/// ride here rather than on the event stream because the stream only speaks
+/// when something HAPPENS — and a hunt is precisely a stretch of nothing
+/// happening. A pull is the only lane that can animate it. The call itself
+/// takes no network await (one mutex + atomic loads), so polling it while dark
+/// cannot block the caller — see the pass §5 sweep row.
 #[derive(Clone, Default)]
 pub struct DagStatusDto {
     pub connected: bool,
     pub endpoint: Option<String>,
     pub last_block_age_secs: Option<u64>,
     pub virtual_daa_score: Option<u64>,
+    /// A connect race is hunting right now (C7's second truth) — held for the
+    /// whole multi-round hunt, so the glass can honestly read *finding a
+    /// node…* for the full 14–28 s a weak link takes instead of a staleness
+    /// phrase that reads as "connected, data slightly old".
+    pub searching: bool,
+    /// The OS says the default network is gone (C7's first truth) — the glass
+    /// names the phone, never a node. Plain bools, both of them: this surface
+    /// stays boolean-only, so no secret material can structurally reach it
+    /// (INV-1/3 untouched — no new FFI *function* either, just two more bits
+    /// on the existing pull).
+    pub os_offline: bool,
 }
 
 /// Read the current connection health (see [`DagStatusDto`]). Endpoint + DAA
@@ -245,15 +263,24 @@ pub fn dag_status() -> DagStatusDto {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .unwrap_or_default();
-    let (connected, last_block_age_secs) = match MONITOR.get() {
-        Some(monitor) => (monitor.is_connected(), monitor.last_block_age_secs()),
-        None => (false, None),
+    let (connected, last_block_age_secs, searching, os_offline) = match MONITOR.get() {
+        Some(monitor) => (
+            monitor.is_connected(),
+            monitor.last_block_age_secs(),
+            monitor.is_searching(),
+            monitor.os_offline(),
+        ),
+        // No monitor yet: not connected, and nothing is known — never claim a
+        // hunt or accuse the phone on a guess.
+        None => (false, None, false, false),
     };
     DagStatusDto {
         connected,
         endpoint: latest.endpoint,
         last_block_age_secs,
         virtual_daa_score: latest.virtual_daa_score,
+        searching,
+        os_offline,
     }
 }
 

@@ -2157,13 +2157,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DagStatusDto dco_decode_dag_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return DagStatusDto(
       connected: dco_decode_bool(arr[0]),
       endpoint: dco_decode_opt_String(arr[1]),
       lastBlockAgeSecs: dco_decode_opt_box_autoadd_u_64(arr[2]),
       virtualDaaScore: dco_decode_opt_box_autoadd_u_64(arr[3]),
+      searching: dco_decode_bool(arr[4]),
+      osOffline: dco_decode_bool(arr[5]),
     );
   }
 
@@ -2742,11 +2744,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_endpoint = sse_decode_opt_String(deserializer);
     var var_lastBlockAgeSecs = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_virtualDaaScore = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_searching = sse_decode_bool(deserializer);
+    var var_osOffline = sse_decode_bool(deserializer);
     return DagStatusDto(
       connected: var_connected,
       endpoint: var_endpoint,
       lastBlockAgeSecs: var_lastBlockAgeSecs,
       virtualDaaScore: var_virtualDaaScore,
+      searching: var_searching,
+      osOffline: var_osOffline,
     );
   }
 
@@ -3486,6 +3492,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.endpoint, serializer);
     sse_encode_opt_box_autoadd_u_64(self.lastBlockAgeSecs, serializer);
     sse_encode_opt_box_autoadd_u_64(self.virtualDaaScore, serializer);
+    sse_encode_bool(self.searching, serializer);
+    sse_encode_bool(self.osOffline, serializer);
   }
 
   @protected
