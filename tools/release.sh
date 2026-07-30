@@ -24,6 +24,32 @@ COMMIT="$(git rev-parse --short HEAD)"
 [ -f android/key.properties ] \
   || die "android/key.properties missing — see docs/RELEASE.md (the build would fall back to the unshippable debug key)"
 
+# Published-release trigger gate (D-091, founder-ratified 2026-07-30): some parked
+# work is gated on "the first build that reaches people who aren't the founder".
+# This script cannot judge whether an item was dispositioned, so it SURFACES them
+# at the one moment the decision is actually being made. Not a hard failure — a
+# release blocked by a doc grep would get overridden, and an overridden gate is
+# worse than a visible one. Marker convention + count: tools/preflight.sh.
+# Self-contained token, deliberately: an earlier version required the marker and the
+# words "published-release gate" to co-occur, and grep is line-based — the two sat on
+# different lines of the same entry, so the gate silently matched nothing.
+REL_TRIGGERS="$(grep -rn '\[TRIGGER:PUBLISHED\]' docs/ 2>/dev/null \
+  | grep -v 'TRIGGER-FIRED' || true)"
+if [ -n "$REL_TRIGGERS" ]; then
+  echo
+  echo "╔══ PUBLISHED-RELEASE TRIGGER GATE (D-091) ═══════════════════════════════"
+  echo "║ Parked work whose firing condition is a build that reaches OTHER PEOPLE."
+  echo "║ If this artifact is such a build, each item must be repaid — or knowingly"
+  echo "║ re-deferred with a DECISION_LOG entry. Proof/founder-only builds: ignore."
+  # The label is whatever follows the token ON THE SAME LINE — keep entry labels
+  # on the marker's own line, since grep cannot see a label that wrapped.
+  printf '%s\n' "$REL_TRIGGERS" \
+    | sed -E 's|^docs/||; s/:([0-9]+):.*\[TRIGGER:PUBLISHED\]`?[[:space:]]*/ (L\1)  /' \
+    | cut -c1-140 | sed 's/^/║   • /'
+  echo "╚═════════════════════════════════════════════════════════════════════════"
+  echo
+fi
+
 # apksigner is a java wrapper, and on this machine the JDK lives in $HOME off
 # PATH (no-sudo WSL2 install, environment.local.md) — discover it like gate.sh
 # discovers the NDK.
