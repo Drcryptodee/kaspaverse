@@ -117,17 +117,39 @@ class DagSnapshot {
 /// field — a healthy mainnet keeps it near zero (~10 blocks/s); a large value
 /// while foreground means a silently dead socket (the midnight DAA stall), the
 /// watchdog's trigger to [`dag_reconnect`]. `None` before the first connect.
+///
+/// It is ALSO the honest-states lane (C7/D-091): `searching` + `os_offline`
+/// ride here rather than on the event stream because the stream only speaks
+/// when something HAPPENS — and a hunt is precisely a stretch of nothing
+/// happening. A pull is the only lane that can animate it. The call itself
+/// takes no network await (one mutex + atomic loads), so polling it while dark
+/// cannot block the caller — see the pass §5 sweep row.
 class DagStatusDto {
   final bool connected;
   final String? endpoint;
   final BigInt? lastBlockAgeSecs;
   final BigInt? virtualDaaScore;
 
+  /// A connect race is hunting right now (C7's second truth) — held for the
+  /// whole multi-round hunt, so the glass can honestly read *finding a
+  /// node…* for the full 14–28 s a weak link takes instead of a staleness
+  /// phrase that reads as "connected, data slightly old".
+  final bool searching;
+
+  /// The OS says the default network is gone (C7's first truth) — the glass
+  /// names the phone, never a node. Plain bools, both of them: this surface
+  /// stays boolean-only, so no secret material can structurally reach it
+  /// (INV-1/3 untouched — no new FFI *function* either, just two more bits
+  /// on the existing pull).
+  final bool osOffline;
+
   const DagStatusDto({
     required this.connected,
     this.endpoint,
     this.lastBlockAgeSecs,
     this.virtualDaaScore,
+    required this.searching,
+    required this.osOffline,
   });
 
   static Future<DagStatusDto> default_() =>
@@ -138,7 +160,9 @@ class DagStatusDto {
       connected.hashCode ^
       endpoint.hashCode ^
       lastBlockAgeSecs.hashCode ^
-      virtualDaaScore.hashCode;
+      virtualDaaScore.hashCode ^
+      searching.hashCode ^
+      osOffline.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -148,7 +172,9 @@ class DagStatusDto {
           connected == other.connected &&
           endpoint == other.endpoint &&
           lastBlockAgeSecs == other.lastBlockAgeSecs &&
-          virtualDaaScore == other.virtualDaaScore;
+          virtualDaaScore == other.virtualDaaScore &&
+          searching == other.searching &&
+          osOffline == other.osOffline;
 }
 
 /// One span marker crossing the FFI (V1 observability — findings-register

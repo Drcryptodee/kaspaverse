@@ -156,6 +156,15 @@ struct Inner {
     /// kick lets the next pause skip once — one spurious immediate round,
     /// accepted (register C4 note).
     race_kick: tokio::sync::Notify,
+    /// The OS's last word on the default network (C7/D-089 ruling 4): `true`
+    /// once `onLost` fires, back to `false` on `onAvailable`. Initialised
+    /// `false` = *not known to be offline* — the callback only speaks on
+    /// TRANSITIONS, so a launch with no network may produce no callback at
+    /// all, and a phone must never be accused of being offline without the OS
+    /// actually saying so. Display-only: it changes no dialing decision
+    /// (ruling 4 keeps `network_lost` passive), it lets the glass name the
+    /// cause instead of blaming the nodes.
+    os_offline: AtomicBool,
     /// The endpoint whose failure awaits network-alive evidence: committed as
     /// a strike by the NEXT `Connected` event from a DIFFERENT endpoint (the
     /// control-group — the network worked via B while this one stayed dark).
@@ -262,6 +271,7 @@ impl DagMonitor {
                 health_path: Mutex::new(None),
                 race_running: AtomicBool::new(false),
                 race_kick: tokio::sync::Notify::new(),
+                os_offline: AtomicBool::new(false),
                 pending_strike: Mutex::new(None),
                 hygiene_advisory: AtomicBool::new(false),
                 connected_at: AtomicU64::new(0),
@@ -650,6 +660,30 @@ impl DagMonitor {
         self.inner.is_connected.load(Ordering::SeqCst)
     }
 
+    /// Is a connect race alive right now — i.e. are we *hunting for a node*
+    /// (C7's second truth)? This is the honest search signal and it holds for
+    /// the WHOLE hunt, inter-round pauses included, by construction:
+    /// [`Self::spawn_race`] sets the flag before spawning and the spawned task
+    /// clears it only after `race_loop().await` RETURNS, while every round —
+    /// probe fan-out, the [`link::RACE_RETRY_DELAY`] pause, the next round —
+    /// happens inside that one await. So a 14–28 s weak-link hunt (the
+    /// 2026-07-30 field capture) reads `true` end to end; it can never blink
+    /// off between rounds and let the glass claim connected or offline.
+    pub fn is_searching(&self) -> bool {
+        self.inner.race_running.load(Ordering::SeqCst)
+    }
+
+    /// Has the OS told us the default network is gone (C7's first truth)?
+    /// Only ever `true` because Android's `ConnectivityManager` said `onLost`
+    /// — never inferred from our own failures, so the glass can say *phone
+    /// offline* without ever blaming a node for a dead Wi-Fi link. A launch
+    /// that never sees a callback reads `false` (unknown ≠ offline), and the
+    /// UI additionally requires a dead socket before rendering it: a live
+    /// socket is proof of a network, whatever a flapping callback claims.
+    pub fn os_offline(&self) -> bool {
+        self.inner.os_offline.load(Ordering::SeqCst)
+    }
+
     /// New receiver onto the event fan-out. Subscribers that join late simply
     /// pick up from the next event — scores tick about once per second.
     pub fn subscribe(&self) -> broadcast::Receiver<DagEvent> {
@@ -827,9 +861,21 @@ impl DagMonitor {
 
             let Some(winner) = outcome.winner else {
                 empty_rounds += 1;
+                // ONE line per empty round (R0 addendum #1, built at R1). An
+                // outage used to spend ~9 INFO lines a round (a line per
+                // resolver-fetch failure, a line per probe failure, then the
+                // round line) — and under the weak-link condition the shared
+                // ring retains only ~2 minutes, so the round pressure helped
+                // evict its own head before it could be pulled (L65). Every
+                // reason is still here, verbatim; only the line count shrank.
+                // NOTE the honest bound: coalescing reduces OUR pressure, it
+                // does not fix the class — Android's Wi-Fi subsystem is the
+                // bigger spammer exactly when connectivity fails.
                 log::info!(
-                    "link: race round {empty_rounds} found no healthy endpoint ({} probe failure(s)) — retrying in {:?}",
+                    "link: race round {empty_rounds} found no healthy endpoint ({} probe failure(s), {} other loss(es)) [{}] — retrying in {:?}",
                     outcome.failed.len(),
+                    outcome.notes.len().saturating_sub(outcome.failed.len()),
+                    link::summarize_losses(&outcome.notes),
                     RACE_RETRY_DELAY
                 );
                 // Kickable pause (C4): a Reconnect tap / resume / OS
@@ -845,6 +891,18 @@ impl DagMonitor {
                 }
                 continue;
             };
+            // A winning round's losers get the same one-line treatment — the
+            // strike lines below name the URLs but not WHY, and the why is what
+            // separated `ivy`'s real HTTP 500 from four weak-link timeouts in
+            // the 2026-07-30 capture.
+            if !outcome.notes.is_empty() {
+                log::info!(
+                    "link: race round {} lost {} candidate(s) before the winner [{}]",
+                    empty_rounds + 1,
+                    outcome.notes.len(),
+                    link::summarize_losses(&outcome.notes)
+                );
+            }
             empty_rounds = 0;
 
             // A healthy node answered → the network is alive → probe failures
@@ -1005,6 +1063,10 @@ impl DagMonitor {
     /// the watchdog gap hurts). Paused (backgrounded) → observe, never dial:
     /// the battery posture owns the socket then, and resume() re-races.
     pub fn network_changed(&self, available: bool) {
+        // Record it for the glass (C7) before deciding what to DO about it:
+        // the honest-states surface needs the OS's word even on the paths that
+        // deliberately take no action.
+        self.inner.os_offline.store(!available, Ordering::SeqCst);
         if !available {
             spans::mark("network_lost");
             log::info!("link: OS network lost — passive (the socket's own death drives recovery)");
@@ -1530,6 +1592,38 @@ mod tests {
             .await
             .expect("the stored permit must satisfy the next pause");
         monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// C7 (D-089 ruling 6 / D-091 ruling 1): the two bits the honest-states
+    /// glass reads. `os_offline` must be OS-driven only — false until a real
+    /// `onLost`, cleared by `onAvailable` — and recording it must not disturb
+    /// ruling 4's passivity (a lost signal still dials nothing). `is_searching`
+    /// must track the single-flight race flag, which is what makes a
+    /// multi-round weak-link hunt render as ONE continuous *finding a node…*.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_glass_reads_os_offline_and_searching_honestly() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+
+        // Unknown ≠ offline: a launch that never saw a callback must not
+        // accuse the phone (the callback speaks only on transitions).
+        assert!(!monitor.os_offline(), "never offline before the OS says so");
+        assert!(!monitor.is_searching());
+
+        monitor.network_changed(false);
+        assert!(monitor.os_offline(), "onLost must be visible to the glass");
+        // Ruling 4 holds: lost is passive — nothing was dialed, so the
+        // single-flight race flag is untouched.
+        assert!(!monitor.is_searching(), "network_lost must not dial");
+
+        monitor.network_changed(true);
+        assert!(!monitor.os_offline(), "onAvailable clears the accusation");
+        // available && !connected DOES race (C5) — that flag is now the
+        // searching truth the beacon renders.
+        assert!(monitor.is_searching(), "available while dark starts a hunt");
+
+        // Stand the detached hunt down (offline unit test — it has no node to
+        // find and we never await it).
+        monitor.inner.paused.store(true, Ordering::SeqCst);
     }
 
     #[tokio::test(flavor = "multi_thread")]

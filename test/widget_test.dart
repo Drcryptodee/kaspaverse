@@ -77,7 +77,7 @@ void main() {
     // Connecting: no data yet → balance unknown `—`, connecting beacon, empty
     // activity (never a forever-skeleton).
     expect(find.text('KaspaVerse'), findsOneWidget);
-    expect(find.text('connecting to mainnet…'), findsOneWidget);
+    expect(find.text('finding a node…'), findsOneWidget); // C7 copy
     expect(find.text('—'), findsOneWidget);
     expect(find.text('No recent activity'), findsOneWidget);
 

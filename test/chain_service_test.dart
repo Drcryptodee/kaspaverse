@@ -7,6 +7,20 @@ import 'package:kaspaverse/src/rust/api/dag.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 
+/// The pull DTO, built by field so a new bit (C7 added two) never edits every
+/// call site again.
+DagStatusDto status({
+  bool connected = true,
+  int? blockAgeSecs,
+  bool searching = false,
+  bool osOffline = false,
+}) => DagStatusDto(
+  connected: connected,
+  lastBlockAgeSecs: blockAgeSecs == null ? null : BigInt.from(blockAgeSecs),
+  searching: searching,
+  osOffline: osOffline,
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late StreamController<DagSnapshot> controller;
@@ -25,7 +39,7 @@ void main() {
     ChainService.resumeBridge = () async => resumeCalls++;
     ChainService.graceDuration = const Duration(milliseconds: 20);
     // Watchdog: fast cadence + low stall threshold, healthy by default.
-    statusValue = const DagStatusDto(connected: true, lastBlockAgeSecs: null);
+    statusValue = status();
     ChainService.statusFn = () async => statusValue;
     ChainService.reconnectFn = (stalled) async => reconnectCalls++;
     ChainService.watchdogPeriod = const Duration(milliseconds: 10);
@@ -178,10 +192,7 @@ void main() {
     test('a stalled chain while foreground forces a reconnect', () async {
       ChainService.instance.start();
       // Block-age past the stall threshold: the socket went silently dead.
-      statusValue = DagStatusDto(
-        connected: true,
-        lastBlockAgeSecs: BigInt.from(30),
-      );
+      statusValue = status(blockAgeSecs: 30);
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(
         reconnectCalls,
@@ -193,10 +204,7 @@ void main() {
     test('a live chain never triggers a reconnect', () async {
       ChainService.instance.start();
       // Fresh blocks arriving — nothing to recover.
-      statusValue = DagStatusDto(
-        connected: true,
-        lastBlockAgeSecs: BigInt.from(1),
-      );
+      statusValue = status(blockAgeSecs: 1);
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(reconnectCalls, 0);
     });
@@ -204,10 +212,7 @@ void main() {
     test('the watchdog stays quiet while backgrounded', () async {
       final service = ChainService.instance..start();
       // Stalled, but we're backgrounded — the grace-drop owns the socket.
-      statusValue = DagStatusDto(
-        connected: true,
-        lastBlockAgeSecs: BigInt.from(30),
-      );
+      statusValue = status(blockAgeSecs: 30);
       service.didChangeAppLifecycleState(AppLifecycleState.paused);
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(
@@ -245,10 +250,7 @@ void main() {
         await service.reconnect();
         expect(stalledSeen, [false]);
         // Then a genuine stall: 30 s past threshold while foreground.
-        statusValue = DagStatusDto(
-          connected: true,
-          lastBlockAgeSecs: BigInt.from(30),
-        );
+        statusValue = status(blockAgeSecs: 30);
         await Future<void>.delayed(const Duration(milliseconds: 40));
         expect(stalledSeen, contains(true));
       },
@@ -279,10 +281,7 @@ void main() {
 
     test('a disconnected link never triggers the wallet pull', () async {
       var pulls = 0;
-      statusValue = const DagStatusDto(
-        connected: false,
-        lastBlockAgeSecs: null,
-      );
+      statusValue = status(connected: false);
       final service = ChainService.instance;
       service.walletLastApply = () =>
           DateTime.now().subtract(const Duration(seconds: 60));
@@ -291,5 +290,104 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(pulls, 0, reason: 'quiet-while-down is the LINK\'s problem');
     });
+  });
+
+  // ── C7 (D-091): the honest-states lane ───────────────────────────────────
+  group('honest link states (C7)', () {
+    setUp(() {
+      ChainService.linkPollPeriod = const Duration(milliseconds: 10);
+      // Park the watchdog so its own pulls can't be mistaken for the link
+      // poll's in the call counts below.
+      ChainService.watchdogPeriod = const Duration(seconds: 30);
+    });
+
+    test('while dark, the engine bits reach the notifiers', () async {
+      statusValue = status(connected: false, searching: true);
+      final service = ChainService.instance..start();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(service.searching.value, isTrue);
+      expect(service.osOffline.value, isFalse);
+
+      statusValue = status(connected: false, searching: false, osOffline: true);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(service.osOffline.value, isTrue, reason: 'the OS said onLost');
+      expect(service.searching.value, isFalse);
+    });
+
+    test('a connected link costs NO bridge call (battery posture)', () async {
+      var pulls = 0;
+      ChainService.statusFn = () async {
+        pulls++;
+        return statusValue;
+      };
+      final service = ChainService.instance..start();
+      controller.add(const DagSnapshot(connected: true));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        pulls,
+        0,
+        reason: 'a live socket is neither hunting nor offline — nothing to ask',
+      );
+      expect(service.searching.value, isFalse);
+      expect(service.osOffline.value, isFalse);
+    });
+
+    test('backgrounded, the poll stands down', () async {
+      statusValue = status(connected: false, searching: true);
+      var pulls = 0;
+      ChainService.statusFn = () async {
+        pulls++;
+        return statusValue;
+      };
+      final service = ChainService.instance..start();
+      service.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(pulls, 0, reason: 'the grace-drop owns the socket while dark');
+    });
+
+    test('a connect clears the hunt bits and the drop clock', () async {
+      statusValue = status(connected: false, searching: true, osOffline: true);
+      final service = ChainService.instance..start();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(service.searching.value, isTrue);
+      expect(service.osOffline.value, isTrue);
+
+      controller.add(const DagSnapshot(connected: true));
+      await Future<void>.delayed(Duration.zero);
+      expect(service.searching.value, isFalse);
+      expect(service.osOffline.value, isFalse);
+      expect(service.disconnectedAt.value, isNull);
+    });
+
+    test(
+      'the drop clock starts when the link dies (churn hold input)',
+      () async {
+        final service = ChainService.instance..start();
+        controller.add(const DagSnapshot(connected: true));
+        await Future<void>.delayed(Duration.zero);
+        expect(service.disconnectedAt.value, isNull);
+
+        controller.add(const DagSnapshot(connected: false));
+        await Future<void>.delayed(Duration.zero);
+        expect(service.disconnectedAt.value, isNotNull);
+      },
+    );
+
+    test(
+      'the Reconnect ack is synchronous — no await before it shows',
+      () async {
+        final service = ChainService.instance..start();
+        final inFlight = service.reconnect(); // deliberately not awaited yet
+        expect(
+          service.reconnecting.value,
+          isTrue,
+          reason:
+              'the honest indicator must be set BEFORE the first await — '
+              'that is what makes the tap ack a render, not a round-trip',
+        );
+        await inFlight;
+        expect(service.reconnecting.value, isFalse);
+      },
+    );
   });
 }
