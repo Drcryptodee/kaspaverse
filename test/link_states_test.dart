@@ -175,28 +175,43 @@ void main() {
   });
 
   group('the network sheet acknowledges the tap (C7, ≤200 ms bar)', () {
-    testWidgets('one frame after the flip the sheet is visibly busy', (
-      tester,
-    ) async {
-      // Roomy surface, deliberately: widget tests render in a fallback font
-      // whose glyphs are square em-boxes, so every label measures far wider
-      // than on a device. Real phone geometry is proven on the device, not
-      // here; this window just keeps the sheet's button inside the hit-test
-      // area so the ACK — the thing under test — is what gets measured.
+    // Roomy surface, deliberately: widget tests render in a fallback font
+    // whose glyphs are square em-boxes, so every label measures far wider
+    // than on a device. Real phone geometry is proven on the device, not
+    // here; this window just keeps the sheet's button inside the hit-test
+    // area so the ACK — the thing under test — is what gets measured.
+    void roomySurface(WidgetTester tester) {
       tester.view.physicalSize = const Size(2000, 1400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
+    }
+
+    // Never pumpAndSettle in this group: the freshness ticker and KvBreath are
+    // deliberately never-ending, so "settled" never arrives. Two pumps — the
+    // first starts the route's ticker (elapsed 0), the second carries it past
+    // the 250 ms entrance.
+    Future<void> openSheet(WidgetTester tester, String beaconLabel) async {
+      // The beacon is the only way in — the power-user detail lives behind it
+      // (§12). No new entry point was added for C7 (INV-12).
+      await tester.tap(find.text(beaconLabel));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Network'), findsOneWidget);
+    }
+
+    testWidgets('one frame after the tap the sheet is visibly busy', (
+      tester,
+    ) async {
+      roomySurface(tester);
       final now = DateTime(2026, 7, 30, 0, 53);
       final reconnecting = ValueNotifier<bool>(false);
       final tapped = Completer<void>();
 
       await tester.pumpWidget(
         host(
-          connected: ValueNotifier<bool>(false),
-          lastUpdate: ValueNotifier<DateTime?>(
-            now.subtract(const Duration(seconds: 20)),
-          ),
-          searching: ValueNotifier<bool>(true),
+          connected: ValueNotifier<bool>(true),
+          lastUpdate: ValueNotifier<DateTime?>(now),
+          searching: ValueNotifier<bool>(false),
           reconnecting: reconnecting,
           // ChainService flips `reconnecting` synchronously before its first
           // await (proven in chain_service_test); the fake mirrors that
@@ -209,27 +224,18 @@ void main() {
         ),
       );
 
-      // The beacon is the only way in — the power-user detail lives behind it
-      // (§12). No new entry point was added for C7 (INV-12).
-      await tester.tap(find.text('finding a node…'));
-      // Never pumpAndSettle here: the freshness ticker and KvBreath are
-      // deliberately never-ending, so "settled" never arrives. Two pumps —
-      // the first starts the route's ticker (elapsed 0), the second carries it
-      // past the 250 ms entrance.
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Network'), findsOneWidget);
-      expect(
-        find.text('finding a node…'),
-        findsWidgets,
-        reason: 'the sheet must not disagree with the chip',
-      );
+      await openSheet(tester, 'Mainnet');
       expect(find.text('Reconnect'), findsOneWidget);
+      expect(
+        find.text('waiting for first block…'),
+        findsOneWidget,
+        reason: 'link up, no status yet — the honest pre-first-block line',
+      );
 
       await tester.tap(find.text('Reconnect'));
       await tester.pump(); // exactly ONE frame after the tap
       expect(
-        find.text('Reconnecting…'),
+        find.text('Searching…'),
         findsOneWidget,
         reason: 'the tap is acknowledged in the next frame, backend or not',
       );
@@ -237,6 +243,62 @@ void main() {
 
       tapped.complete();
       await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('mid-hunt the button reads busy AND stays kickable', (
+      tester,
+    ) async {
+      // The R1 sheet drove the busy label off `reconnecting` alone, which
+      // clears the instant the race is spawned — so a real 14–28 s hunt
+      // rendered a button reading "Reconnect", idle-looking, for its whole
+      // duration. The busy state must last as long as the search does; the
+      // button must nonetheless stay tappable, because a tap mid-hunt IS
+      // C4's kick.
+      roomySurface(tester);
+      final now = DateTime(2026, 7, 30, 0, 53);
+      var kicks = 0;
+
+      await tester.pumpWidget(
+        host(
+          connected: ValueNotifier<bool>(false),
+          lastUpdate: ValueNotifier<DateTime?>(
+            now.subtract(const Duration(seconds: 20)),
+          ),
+          searching: ValueNotifier<bool>(true),
+          // Never flips: the engine's own hunt, no tap involved. This is the
+          // state the old label was blind to.
+          reconnecting: ValueNotifier<bool>(false),
+          onReconnect: () async => kicks++,
+          clock: () => now,
+        ),
+      );
+
+      await openSheet(tester, 'finding a node…');
+      expect(
+        find.text('finding a node…'),
+        findsWidgets,
+        reason: 'the sheet must not disagree with the chip',
+      );
+      expect(
+        find.text('Searching…'),
+        findsOneWidget,
+        reason: 'the hunt owns the busy label, not the millisecond dispatch',
+      );
+      expect(find.text('Reconnect'), findsNothing);
+      // The link is down, so the scan line may not claim liveness — its own
+      // 2 s poll would otherwise contradict the Status row beside it.
+      expect(find.text('not scanning — no link'), findsOneWidget);
+      expect(find.text('live — scanning every block'), findsNothing);
+
+      await tester.tap(find.text('Searching…'));
+      await tester.pump();
+      expect(
+        kicks,
+        1,
+        reason: 'a busy-looking button that cannot be tapped deletes C4',
+      );
+
       await tester.pumpWidget(const SizedBox());
     });
   });

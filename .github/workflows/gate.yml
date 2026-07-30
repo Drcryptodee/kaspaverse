@@ -9,9 +9,15 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # Weekly advisory tripwire: cargo-deny pulls a fresh RustSec DB each run,
-    # so a quiet repo still learns about a new CVE within a week (P0.5).
-    - cron: "23 6 * * 1" # Mondays 06:23 UTC — off the top-of-hour load spike
+    # Advisory tripwire: cargo-deny pulls a fresh RustSec DB each run, so a
+    # quiet repo still learns about a new CVE within days (P0.5).
+    #
+    # Twice weekly, not weekly — and the second reason matters as much as the
+    # first. GitHub evicts a cache untouched for 7 days, so a weekly cadence
+    # sat exactly ON the eviction boundary: one late run and the caches were
+    # gone. Mon+Thu keeps every gap ≤4 days, so the cache never expires from
+    # quiet alone (2026-07-30: that boundary is what went red).
+    - cron: "23 6 * * 1,4" # Mon+Thu 06:23 UTC — off the top-of-hour spike
 
 
 permissions:
@@ -31,8 +37,29 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
+      # A cold runner builds the whole pinned rusty-kaspa tree three times
+      # (clippy --all-targets, test, arm64 cross). Debug info is the bulk of
+      # that on disk, and incremental state is dead weight on a machine that
+      # is destroyed after one job. Both off. This changes what the build
+      # WRITES, never what the gate CHECKS (2026-07-30 CI-cold diagnosis).
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Reclaim runner disk
+        # The image ships several toolchains this gate never touches. On a
+        # warm cache their bulk is harmless; on a COLD one the build needs
+        # every gigabyte. Android stays — the arm64 cross-compile needs the
+        # NDK the image provides.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/.ghcup \
+            /opt/ghc /usr/local/share/powershell \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
 
       - name: Install pinned Rust toolchain
         # Mirrors rust/rust-toolchain.toml — the runner ships a newer stable
@@ -43,14 +70,22 @@ jobs:
             --target aarch64-linux-android
           rustup default 1.94.0
 
-      - name: Cache gate tools
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      # Restore and save are SPLIT deliberately. The combined `actions/cache`
+      # only saves in a post-step that GitHub skips when the job fails — so a
+      # red run left the caches empty, the next run started cold, and cold is
+      # what breaks the build: red became self-sustaining (runs 79→81, all on
+      # unchanged dependencies). Saving on `always()` breaks that loop; the
+      # run after a failure is warm and the failure becomes reproducible.
+      - name: Restore gate tools
+        id: tools-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/ci-tools
           key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0
 
-      - name: Cache cargo registry + build artifacts
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      - name: Restore cargo registry + build artifacts
+        id: rust-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry/index
@@ -84,3 +119,34 @@ jobs:
         # ANDROID_NDK_HOME is preset on the runner image; the gate uses it for
         # the arm64 cross-compile check.
         run: GATE_STRICT=1 tools/gate.sh
+
+      # Everything below runs on failure too — that is the point.
+      - name: Report runner resources
+        if: always()
+        # A build that dies mid-compile looks identical to a build that lost a
+        # lint, unless the machine says which. Cheap, and it makes the NEXT red
+        # run legible instead of a guess.
+        run: |
+          echo "── disk"; df -h /
+          echo "── rust/target"; du -sh rust/target 2>/dev/null || true
+          echo "── memory"; free -h
+          echo "── OOM kills (empty = none)"
+          sudo dmesg 2>/dev/null | grep -i -E 'killed process|out of memory' || true
+
+      - name: Save gate tools
+        if: always() && steps.tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/ci-tools
+          key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0
+
+      - name: Save cargo registry + build artifacts
+        if: always() && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: rust-${{ runner.os }}-1.94.0-${{ hashFiles('rust/Cargo.lock') }}
