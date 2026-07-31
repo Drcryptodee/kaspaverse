@@ -51,10 +51,8 @@ public community nodes over a phone radio, and holding that link through weak si
 network changes turned out to be the hard part (see the limitation below). After it: the
 **covenant engine** (Phase 3), then the arcade.
 
-Every subsystem's state and the *why* behind every established choice are kept in the
-project's engineering record — a constitution, a source-of-truth register, a decision
-ledger and a research corpus, maintained alongside this code and provided in full to
-reviewers and auditors (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+The state of every subsystem, and the reasoning behind every established choice, live in
+the project's engineering record — which is private (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Known limitations (honest roadmap)
 
@@ -89,11 +87,9 @@ Full toolchain + the contributor workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Contributing & security
 
-This repo carries the product: the code, the CI, the tooling, and an executable proof gate
-anyone can run. The engineering record behind it — constitution, source-of-truth register,
-decision ledger, research corpus, phase plans and session journal — is maintained
-privately and shared in full with contributors and auditors rather than published
-piecemeal.
+This repo carries the product: the code, the CI, the tooling, and a proof gate anyone can
+run. The engineering record behind it — constitution, decision ledger, research corpus,
+phase plans — is private. Contributors and auditors get it in full.
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — build from a clean clone, the proof gate, and the
   risk-tier auditor ritual.
