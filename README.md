@@ -16,9 +16,10 @@ communications, identity, and games as native L1 primitives. Built in this order
 
 - **A minimal, excellent Kaspa wallet** — Keystore/biometric vault, send/receive at
   10 bps speed, KIP-9-aware fees. **Shipped and device-proven** (status below).
-- **Native transport** (next) — encrypted-payload messaging as a first-class L1
-  primitive: the challenge/handshake rail the games ride on, wire-compatible with the
-  ecosystem's established Kasia payload format.
+- **Native transport** — encrypted-payload messaging as a first-class L1 primitive: the
+  challenge/handshake rail the games ride on, wire-compatible with the ecosystem's
+  established Kasia payload format. **Shipped and interop-proven** against live
+  third-party clients.
 - **The first covenant games on Kaspa L1** — PvP duels with on-chain wager escrow
   enforced by Toccata covenants (KIP-17/20), every move a ~1-second L1 transaction:
   commit-reveal RPS → tic-tac-toe → **Attack & Defend** → ZK battleship (KIP-16,
@@ -41,8 +42,14 @@ step (auditor-verified, not vibed).
 What's done: the custody core, the platform vault, onboarding & backup, wallet sync, and
 **send & receive** (Phase 1.1–1.7) — then **re-proven twice** in 2026-07: a five-pass
 adversarial re-audit of the shipped wallet, and a full docs↔code grounding audit that
-found **zero code defects**. What's next: **native transport** (Phase 2), then the covenant
-engine and the arcade.
+found **zero code defects**. **Native transport shipped 2026-07-08** (Phase 2): encrypted
+payloads on L1, byte-parity proven against the ecosystem's cipher and interop-proven
+against live third-party clients on mainnet.
+
+In flight now: a **connection-reliability pass** — the wallet reaches the network through
+public community nodes over a phone radio, and holding that link through weak signal and
+network changes turned out to be the hard part (see the limitation below). After it: the
+**covenant engine** (Phase 3), then the arcade.
 
 Every subsystem's state and the *why* behind every established choice are kept in the
 project's engineering record — a constitution, a source-of-truth register, a decision
