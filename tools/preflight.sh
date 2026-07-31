@@ -9,7 +9,16 @@ echo "• branch:  $(git branch --show-current 2>/dev/null || echo 'NO GIT')"
 echo "• dirty:   $(git status --porcelain 2>/dev/null | wc -l) uncommitted paths"
 echo "• last 5 commits:"
 git log --oneline -5 2>/dev/null | sed 's/^/    /' || echo "    (none)"
-echo "• active phase: $(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null || echo 'NONE — check PHASE_INDEX')"
+# The engineering record went ops-mirror-only at D-102, so `docs/` is simply ABSENT in a
+# public clone. Guard every docs-dependent line the same way the playbook line below is
+# guarded, rather than printing instructions nobody can follow ("check PHASE_INDEX",
+# "diff against NEXT_SESSION.md") against files that are not there.
+HAVE_DOCS=0; [ -d docs ] && HAVE_DOCS=1
+if [ "$HAVE_DOCS" = 1 ]; then
+  echo "• active phase: $(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null || echo 'NONE — check PHASE_INDEX')"
+else
+  echo "• active phase: (docs/ not present — engineering record is ops-mirror-only, D-102)"
+fi
 # Reasoning playbook (ops-layer; absent in public clones — conditional on purpose).
 [ -f .claude/playbook/INDEX.md ] && echo "• playbook: $(grep -c '^- PB-' .claude/playbook/INDEX.md) reasoning patterns — read .claude/playbook/INDEX.md before building"
 echo "• rust workspace: $([ -f rust/Cargo.toml ] && echo present || echo absent)"
@@ -40,10 +49,16 @@ echo "• android device: $(command -v adb >/dev/null && adb devices 2>/dev/null
 # rather than narrowed to the three owner files (DECISION_LOG / IDEAS_BACKLOG /
 # PERFORMANCE_BUDGET): a noisy count costs a minute, a MISSED armed trigger is a park
 # silently becoming a loss, which is the whole failure this exists to prevent.
-TRIG_LINES="$(grep -rnE '\[TRIGGER(\]|:)' docs/ 2>/dev/null | grep -v 'TRIGGER-FIRED' || true)"
-TRIG_N="$(printf '%s\n' "$TRIG_LINES" | grep -c . || true)"
-TRIG_BY="$(printf '%s\n' "$TRIG_LINES" | grep . | sed -E 's|^docs/(([^/:]*/)*)([^:]*):.*|\3|' \
-    | sed 's/\.md$//' | sort | uniq -c | awk '{printf "%s %s · ", $2, $1}' | sed 's/ · $//')"
-echo "• armed triggers: ${TRIG_N}${TRIG_BY:+  ($TRIG_BY)} — grep -rnE '\[TRIGGER(\]|:)' docs/"
+if [ "$HAVE_DOCS" = 1 ]; then
+  TRIG_LINES="$(grep -rnE '\[TRIGGER(\]|:)' docs/ 2>/dev/null | grep -v 'TRIGGER-FIRED' || true)"
+  TRIG_N="$(printf '%s\n' "$TRIG_LINES" | grep -c . || true)"
+  TRIG_BY="$(printf '%s\n' "$TRIG_LINES" | grep . | sed -E 's|^docs/(([^/:]*/)*)([^:]*):.*|\3|' \
+      | sed 's/\.md$//' | sort | uniq -c | awk '{printf "%s %s · ", $2, $1}' | sed 's/ · $//')"
+  echo "• armed triggers: ${TRIG_N}${TRIG_BY:+  ($TRIG_BY)} — grep -rnE '\[TRIGGER(\]|:)' docs/"
+fi
 echo "═══════════════════════════════════════════"
-echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md"
+if [ "$HAVE_DOCS" = 1 ]; then
+  echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md"
+else
+  echo "Public clone: code, CI and tooling only. Build with tools/gate.sh; see CONTRIBUTING.md."
+fi

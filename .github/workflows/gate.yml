@@ -7,6 +7,14 @@ name: gate
 on:
   push:
     branches: [main]
+  # PRs run the gate too. Without this the checks fired only AFTER merge, while
+  # CONTRIBUTING.md promised "the same checks locally and in CI" and carried a full
+  # Pull requests section — so a dependency-adding PR could land before `cargo deny`
+  # (INV-7's actual enforcement point) had ever seen it. Cost, stated: a PR from a
+  # FORK gets no access to this repo's cache, so those runs are cold against the
+  # 120-minute budget below; same-repo branch PRs hit the cache normally.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # Advisory tripwire: cargo-deny pulls a fresh RustSec DB each run, so a
