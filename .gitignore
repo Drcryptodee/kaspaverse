@@ -31,14 +31,9 @@ docs/environment.local.md
 .packages
 pubspec.lock.bak
 
-# Personal AI-workflow — local only, versioned in the private ops mirror (D-047)
+# Engineering record + AI workflow — local only, versioned in the private ops
+# mirror (D-047, widened to the whole tree by D-102). The public repo carries the
+# product; the record behind it is internal and goes to auditors as a whole.
 CLAUDE.md
 .claude/
-docs/sessions/
-docs/audits/
-docs/proposals/
-docs/phases/
-docs/COMPLETION_HISTORY.md
-docs/REAUDIT_CAMPAIGN_PROMPT.md
-docs/CLAUDE_DESIGN_PROMPT.md
-docs/FINAL_GROUNDING_AUDIT_PROMPT.md
+docs/
