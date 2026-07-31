@@ -33,6 +33,17 @@ COMMIT="$(git rev-parse --short HEAD)"
 # Self-contained token, deliberately: an earlier version required the marker and the
 # words "published-release gate" to co-occur, and grep is line-based — the two sat on
 # different lines of the same entry, so the gate silently matched nothing.
+# The record is ops-mirror-only (D-102), so in a public clone `docs/` is absent and this
+# grep matches nothing — which reads EXACTLY like "no parked work", the fail-open class
+# that L76 is about. The soft-gate reasoning above ("not a hard failure") governs what to
+# do about triggers that are FOUND; being unable to look at all is a different thing, and
+# a release script that cannot verify its own gate must not proceed quietly.
+if [ ! -d docs ]; then
+  echo "ERROR: docs/ is not present, so the published-release trigger gate cannot run."
+  echo "       The engineering record is ops-mirror-only (D-102) — release from a"
+  echo "       working tree where docs/ exists on disk, or the gate is vacuous."
+  exit 1
+fi
 REL_TRIGGERS="$(grep -rn '\[TRIGGER:PUBLISHED\]' docs/ 2>/dev/null \
   | grep -v 'TRIGGER-FIRED' || true)"
 if [ -n "$REL_TRIGGERS" ]; then

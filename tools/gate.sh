@@ -71,7 +71,10 @@ if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
       # BOTH generated trees: the Dart bindings AND the Rust side. gate.sh
       # regenerates before cargo builds, so a stale committed frb_generated.rs
       # is invisible to every earlier check — only this diff can see it (L61).
-      git -C "$ROOT" diff --exit-code --quiet -- lib/src/rust/ rust/bridge/src/frb_generated.rs || {
+      # Pinned like the other git reads: a steered index does not track lib/src/rust/,
+      # so an inherited GIT_DIR would make this diff vacuously clean — a drift check
+      # that passes because it looked in the wrong place (L76).
+      git --git-dir="$ROOT/.git" --work-tree="$ROOT" diff --exit-code --quiet -- lib/src/rust/ rust/bridge/src/frb_generated.rs || {
         echo "   generated bindings differ from the index — after an API change,"
         echo "   stage BOTH generated trees ('git add lib/src/rust/ rust/bridge/src/frb_generated.rs')"
         echo "   before gating (L20/L61)"
@@ -97,18 +100,32 @@ if compgen -G "$ROOT/contracts/*/SPEC.md" >/dev/null 2>&1; then
 fi
 
 # ── Public-repo hygiene (always runs — the repo is public, D-011/D-019) ──
+# Both this and internal_record() decide from `git ls-files` output, and an empty
+# result is ambiguous: it means "nothing tracked" OR "git could not answer" (no repo,
+# git absent, source tarball). Reading the second as a pass is a check that reports
+# GREEN precisely when it did not run — the failure mode GATE_STRICT exists to stop
+# (D-024). Assert the repo first so the emptiness is evidence, not silence.
+require_git_repo() {
+  git --git-dir="$ROOT/.git" --work-tree="$ROOT" rev-parse --git-dir >/dev/null 2>&1
+}
 repo_hygiene() {
   local bad=0
   local tracked
-  tracked="$(git -C "$ROOT" ls-files -- '*.keystore' '*.jks' '*.p12' '*.pem' \
+  require_git_repo || { echo "   not a git repository — hygiene unverifiable, failing closed"; return 1; }
+  # Pinned --git-dir/--work-tree, same reason as internal_record(): the ops mirror shares
+  # this working tree, so an inherited GIT_DIR must not be able to steer this check.
+  tracked="$(git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files -- \
+    '*.keystore' '*.jks' '*.p12' '*.pem' \
     '*key.properties' '.env' '.env.*' 'id_rsa*' 'docs/environment.local.md')"
   if [ -n "$tracked" ]; then
     echo "   secret-shaped files are git-tracked:"; echo "$tracked" | sed 's/^/     /'
     bad=1
   fi
-  if git -C "$ROOT" grep -lI -e "BEGIN .*PRIVATE KEY" -- ':!tools/gate.sh' >/dev/null 2>&1; then
+  # Same pinning as above — `git grep` searches an index, and a steered index is the
+  # wrong index. All three git reads in this file are now unsteerable.
+  if git --git-dir="$ROOT/.git" --work-tree="$ROOT" grep -lI -e "BEGIN .*PRIVATE KEY" -- ':!tools/gate.sh' >/dev/null 2>&1; then
     echo "   a tracked file contains PEM private-key material:"
-    git -C "$ROOT" grep -lI -e "BEGIN .*PRIVATE KEY" -- ':!tools/gate.sh' | sed 's/^/     /'
+    git --git-dir="$ROOT/.git" --work-tree="$ROOT" grep -lI -e "BEGIN .*PRIVATE KEY" -- ':!tools/gate.sh' | sed 's/^/     /'
     bad=1
   fi
   return $bad
@@ -127,7 +144,12 @@ run_check "public-repo hygiene (no tracked secrets)" repo_hygiene
 # fail the gate on any outside contributor's PR.
 internal_record() {
   local tracked
-  tracked="$(git -C "$ROOT" ls-files -- 'docs/' 'CLAUDE.md' '.claude/')"
+  require_git_repo || { echo "   not a git repository — boundary unverifiable, failing closed"; return 1; }
+  # --git-dir/--work-tree pinned, not `-C`: the ops mirror shares this working tree, so
+  # an exported GIT_DIR in the environment would otherwise point this check at the ops
+  # index and list all 400+ record files — a spurious RED, and a spuriously red check is
+  # how a real check earns a `git rm` from the ledger.
+  tracked="$(git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files -- 'docs/' 'CLAUDE.md' '.claude/')"
   [ -z "$tracked" ] && return 0
   echo "   the engineering record is ops-mirror-only (D-102), but these are tracked here:"
   echo "$tracked" | sed 's/^/     /'
