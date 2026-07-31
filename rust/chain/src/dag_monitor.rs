@@ -179,6 +179,13 @@ struct Inner {
     /// socket can exist that our reconnect authority never created. Drops in
     /// that neighbourhood are OURS, and R2 D3 refuses to charge them to a node.
     doubled_connect_at: AtomicU64,
+    /// Unix-seconds of the last race round that PROVED the phone's own
+    /// network broken (correlated DNS or `ENETUNREACH` — R3 D-099); 0 =
+    /// never. A pending drop/stall strike whose socket died at-or-before
+    /// this stamp is withheld as [`link::StrikeReason::LinkBlackout`]: the
+    /// interposed race is the one witness that saw the link at the time of
+    /// death.
+    phone_fault_round_at: AtomicU64,
     /// The endpoint whose failure awaits network-alive evidence: committed as
     /// a strike by the NEXT `Connected` event from a DIFFERENT endpoint (the
     /// control-group — the network worked via B while this one stayed dark).
@@ -189,7 +196,11 @@ struct Inner {
     /// spent minutes offline blames no one). Robust to every event ordering,
     /// including a phantom redial the ws layer can land before our
     /// disconnect() takes effect (its dial cannot be aborted mid-flight).
-    pending_strike: Mutex<Option<(String, u64)>>,
+    /// Carries (url, event-unix, why) — `why` is [`link::StrikeReason::Drop`]
+    /// for a judged socket death, [`link::StrikeReason::Stall`] for a
+    /// watchdog execution, so the ledger records the true proximate cause
+    /// (R3 D1) instead of flattening both to `drop`.
+    pending_strike: Mutex<Option<(String, u64, link::StrikeReason)>>,
     /// True while the live bind KNOWINGLY went to a demoted endpoint (two
     /// whole race rounds found nothing healthy — connectivity over hygiene).
     /// Gates the Connected-time demotion refusal so the advisory bind isn't
@@ -197,7 +208,8 @@ struct Inner {
     hygiene_advisory: AtomicBool,
     /// Unix-seconds of the last `Connected` (0 = never) — a drop after a run
     /// of ≥ [`link::CLEAN_RUN_SECS`] clears the endpoint's strikes instead of
-    /// adding one.
+    /// adding one. Also the stall-verdict baseline floor (R3 D-099): silence
+    /// is measured from `max(last_block_at, connected_at)`.
     connected_at: AtomicU64,
     /// `try_new(url = Some(..))` pins a node explicitly (dev/tests): the race
     /// and demotion machinery stand down and the ws client's own Retry loop
@@ -237,6 +249,21 @@ struct Inner {
 
 /// Owns one wRPC client plus the event task that tracks its connection state
 /// and notification stream, fanning everything out as [`DagEvent`]s.
+/// What a watchdog stall claim amounts to once judged against the monitor's
+/// own clocks (R3 D-099). The claim arrives from Dart with process-lifetime
+/// evidence; only the monitor knows the CURRENT socket's age and silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallVerdict {
+    /// Connected and silent past [`link::WATCHDOG_STALL_SECS`] measured from
+    /// this socket's own baseline — a true zombie; execute it.
+    Execute { silent_secs: u64 },
+    /// Connected but the socket's own silence is inside the threshold — the
+    /// claim was built on silence older than the socket. It keeps its window.
+    Refuse { silent_secs: u64 },
+    /// Not connected: there is no defendant. Kick the hunt (C4) instead.
+    Hunting,
+}
+
 #[derive(Clone)]
 pub struct DagMonitor {
     inner: Arc<Inner>,
@@ -288,6 +315,7 @@ impl DagMonitor {
                 os_offline: AtomicBool::new(false),
                 os_lost_at: AtomicU64::new(0),
                 doubled_connect_at: AtomicU64::new(0),
+                phone_fault_round_at: AtomicU64::new(0),
                 pending_strike: Mutex::new(None),
                 hygiene_advisory: AtomicBool::new(false),
                 connected_at: AtomicU64::new(0),
@@ -356,7 +384,7 @@ impl DagMonitor {
         url: &str,
         reason: link::StrikeReason,
         event_at_unix: u64,
-        dns_correlated: bool,
+        phone_fault_correlated: bool,
     ) {
         let now = Self::now_unix();
         // R2 D3 — admissibility is judged at the ONE choke point every strike
@@ -374,7 +402,8 @@ impl DagMonitor {
             event_at_unix,
             self.inner.os_lost_at.load(Ordering::SeqCst),
             self.inner.doubled_connect_at.load(Ordering::SeqCst),
-            dns_correlated,
+            phone_fault_correlated,
+            self.inner.phone_fault_round_at.load(Ordering::SeqCst),
         );
         let reason = match verdict {
             link::Admissibility::Convict(reason) => reason,
@@ -477,13 +506,16 @@ impl DagMonitor {
     }
 
     /// Park a strike until network-alive evidence arrives (the next
-    /// `Connected` commits it; staleness discards it).
-    fn set_pending_strike(&self, url: String) {
+    /// `Connected` commits it; staleness discards it). `why` names the true
+    /// proximate cause — `Drop` for a judged socket death, `Stall` for a
+    /// watchdog execution (R3 D1).
+    fn set_pending_strike(&self, url: String, why: link::StrikeReason) {
         *self
             .inner
             .pending_strike
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((url, Self::now_unix()));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((url, Self::now_unix(), why));
     }
 
     /// Commit-or-discard the parked strike — called on every `Connected`
@@ -506,14 +538,14 @@ impl DagMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some((url, at)) = taken {
+        if let Some((url, at, why)) = taken {
             if prover_url == Some(url.as_str()) {
                 log::info!(
                     "link: pending strike on {url} refuted by its own reconnect — discarded"
                 );
             } else if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
                 // `at` is when the socket DIED, not now — see commit_strike.
-                self.commit_strike(&url, link::StrikeReason::Drop, at, false);
+                self.commit_strike(&url, why, at, false);
             } else {
                 log::info!("link: pending strike on {url} expired unproven — discarded");
             }
@@ -929,8 +961,26 @@ impl DagMonitor {
             )
             .await;
 
+            // Judge the ROUND before judging its members (R2 field addendum,
+            // widened at R3 D-099): whether a DNS/route failure is the node's
+            // fault or the phone's is not visible in any single failure, only
+            // in how many DISTINCT hosts failed phone-side at the same moment.
+            let phone_fault = link::phone_fault_in_round(&outcome.failed);
             let Some(winner) = outcome.winner else {
                 empty_rounds += 1;
+                // The link-blackout stamp lives in the NO-WINNER arm only
+                // (R3 wallet-security finding): a round that produced a live
+                // prover proved the phone's network works, and stamping it
+                // would let one stray unreachable candidate nullify the very
+                // control-group conviction that round earned.
+                if phone_fault {
+                    self.inner.phone_fault_round_at.store(now, Ordering::SeqCst);
+                    log::info!(
+                        "link: round failed phone-side across {}+ distinct hosts \
+                         (DNS/unreachable) — stamped as link blackout",
+                        link::DNS_CORRELATION_MIN
+                    );
+                }
                 // ONE line per empty round (R0 addendum #1, built at R1). An
                 // outage used to spend ~9 INFO lines a round (a line per
                 // resolver-fetch failure, a line per probe failure, then the
@@ -979,20 +1029,17 @@ impl DagMonitor {
             // were the NODES' fault: strike them. (The drop that triggered
             // this race is parked as the pending strike and settles at the
             // Connected event — robust to a phantom redial winning first.)
-            // Judge the ROUND before judging its members (R2 field addendum):
-            // whether a DNS failure is the node's fault or our resolver's is
-            // not visible in any single failure, only in how many distinct
-            // hosts failed the same way at the same moment.
-            let dns_outage = link::dns_outage_in_round(&outcome.failed);
-            if dns_outage {
+            // The round-correlation verdict still travels with each loss so
+            // correlated DNS/unreachable losses are withheld (D-097 widened).
+            if phone_fault {
                 log::info!(
-                    "link: DNS failed across {}+ distinct endpoints this round — reading it as \
-                     the phone's resolver, not the nodes (strikes withheld)",
+                    "link: DNS/route failure across {}+ distinct endpoints this round — \
+                     reading it as the phone, not the nodes (those strikes withheld)",
                     link::DNS_CORRELATION_MIN
                 );
             }
             for (url, reason) in &outcome.failed {
-                self.commit_strike(url, *reason, now, dns_outage);
+                self.commit_strike(url, *reason, now, phone_fault);
             }
 
             // Someone else (a ws-level phantom redial) may have connected
@@ -1119,8 +1166,44 @@ impl DagMonitor {
     pub async fn reconnect(&self, stalled: bool) -> Result<()> {
         self.inner.paused.store(false, Ordering::SeqCst);
         if stalled {
-            if let Some(url) = self.inner.client.url() {
-                self.set_pending_strike(url);
+            // The watchdog's claim is judged against OUR clocks (R3 D-099).
+            // Its Dart-side block-age is process-lifetime, so after a link
+            // blackout every fresh bind inherits silence older than itself
+            // and used to be executed on the next 10 s tick — runs of ~10 s,
+            // repeatedly, one innocent endpoint demoted per cycle (the
+            // D-095/D-098 cascade signature). A stall claim now only
+            // executes a CONNECTED socket that has ITSELF been silent past
+            // the threshold.
+            match self.stall_verdict() {
+                StallVerdict::Execute { silent_secs } => {
+                    if let Some(url) = self.inner.client.url() {
+                        let run_secs = Self::now_unix()
+                            .saturating_sub(self.inner.connected_at.load(Ordering::Relaxed));
+                        log::info!(
+                            "link: watchdog stall confirmed on {url} \
+                             (socket silent {silent_secs}s) — executing"
+                        );
+                        self.record_socket_run(&url, run_secs, "watchdog-stall");
+                        self.set_pending_strike(url, link::StrikeReason::Stall);
+                    }
+                }
+                StallVerdict::Refuse { silent_secs } => {
+                    // No teardown either: the claim is void, and bouncing a
+                    // young socket every tick IS the cascade.
+                    log::info!(
+                        "link: watchdog stall claim refused — socket silent only \
+                         {silent_secs}s (< {}s)",
+                        link::WATCHDOG_STALL_SECS
+                    );
+                    return Ok(());
+                }
+                StallVerdict::Hunting => {
+                    // There is no defendant, but the claim still means the
+                    // wallet is dark — keep C4's promise and kick the hunt.
+                    log::info!("link: watchdog stall claim while hunting — kicking the race");
+                    self.spawn_or_kick_race("watchdog-kick");
+                    return Ok(());
+                }
             }
         }
         // Mark down BEFORE dropping the socket: the ctl Disconnected can be
@@ -1178,6 +1261,50 @@ impl DagMonitor {
         } else {
             log::info!("link: OS network available while disconnected — racing now");
             self.spawn_or_kick_race("network_available");
+        }
+    }
+
+    /// Durably record that a socket's run ended, however it ended (R3 D1).
+    /// One greppable lifecycle line + the `last_run_secs` ledger write, from
+    /// the SHARED seam both death paths call — the Disconnected arm and the
+    /// watchdog execution. The watchdog path used to bypass the Disconnected
+    /// arm entirely (it pre-clears `is_connected`, so the swap-once guard
+    /// skips the judged branch), which is why D-098 read a column of zeros
+    /// after a watchdog-driven cascade: the writer existed and was never on
+    /// that path.
+    fn record_socket_run(&self, url: &str, run_secs: u64, cause: &str) {
+        {
+            let mut health = self
+                .inner
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            health.record_run(url, run_secs);
+            self.save_health(&health);
+        }
+        log::info!("link: run ended url={url} run={run_secs}s cause={cause}");
+    }
+
+    /// The stall verdict for a watchdog claim (R3 D-099), judged against OUR
+    /// clocks: the Dart watchdog's block-age is process-lifetime, so after a
+    /// link blackout it reads stale silence against a seconds-old socket.
+    /// The evidence baseline is `max(last_block_at, connected_at)` — a socket
+    /// cannot be guilty of silence older than itself.
+    fn stall_verdict(&self) -> StallVerdict {
+        if !self.is_connected() {
+            return StallVerdict::Hunting;
+        }
+        let now = Self::now_unix();
+        let baseline = self
+            .inner
+            .last_block_at
+            .load(Ordering::Relaxed)
+            .max(self.inner.connected_at.load(Ordering::Relaxed));
+        let silent_secs = now.saturating_sub(baseline);
+        if baseline != 0 && silent_secs > link::WATCHDOG_STALL_SECS {
+            StallVerdict::Execute { silent_secs }
+        } else {
+            StallVerdict::Refuse { silent_secs }
         }
     }
 
@@ -1283,8 +1410,14 @@ impl DagMonitor {
                             }
                             match self.handle_connect().await {
                                 Ok(()) => {
-                                    self.inner.is_connected.store(true, Ordering::SeqCst);
+                                    // `connected_at` FIRST, `is_connected` second (R3
+                                    // consensus-audit finding): the SeqCst store
+                                    // publishes the stamp, so a stall claim landing
+                                    // between the two can never judge this fresh
+                                    // socket against the PRIOR socket's baseline —
+                                    // the exact class D-099 exists to kill.
                                     self.inner.connected_at.store(Self::now_unix(), Ordering::Relaxed);
+                                    self.inner.is_connected.store(true, Ordering::SeqCst);
                                     // V1 spans: close the cold-connect leg,
                                     // arm the first-DAA one.
                                     spans::mark("wss_connected");
@@ -1342,22 +1475,20 @@ impl DagMonitor {
                                 // the floor can only be re-examined against
                                 // the drops it absorbed, and a ledger that
                                 // stored only convictions would keep proving
-                                // the floor right by construction.
+                                // the floor right by construction. Through
+                                // the SHARED seam (R3 D1): the watchdog path
+                                // records the same way, so a cascade can no
+                                // longer zero the very column built to
+                                // diagnose it.
                                 if let Some(url) = dropped.as_deref() {
-                                    let mut health = self
-                                        .inner
-                                        .health
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    health.record_run(url, run_secs);
-                                    self.save_health(&health);
+                                    self.record_socket_run(url, run_secs, "ctl-drop");
                                 }
                                 match (dropped, link::judge_run(run_secs)) {
                                     (Some(url), link::RunJudgment::CleanRun) => {
                                         self.commit_clean_run(&url);
                                     }
                                     (Some(url), link::RunJudgment::Strike) => {
-                                        self.set_pending_strike(url)
+                                        self.set_pending_strike(url, link::StrikeReason::Drop)
                                     }
                                     (Some(url), link::RunJudgment::ChurnNoise) => {
                                         // V6 churn-smoothing (item 16): a run
@@ -1599,14 +1730,14 @@ mod tests {
 
         // Self-refute, twice over (would demote at 2 commits): stays clean.
         for _ in 0..2 {
-            monitor.set_pending_strike(URL.to_string());
+            monitor.set_pending_strike(URL.to_string(), link::StrikeReason::Drop);
             monitor.settle_pending_strike(Some(URL));
         }
         assert!(!demoted(&monitor), "own reconnect must refute, not convict");
 
         // Control group intact: a DIFFERENT prover commits; two commits demote.
         for _ in 0..2 {
-            monitor.set_pending_strike(URL.to_string());
+            monitor.set_pending_strike(URL.to_string(), link::StrikeReason::Drop);
             monitor.settle_pending_strike(Some(OTHER));
             // Past the same-incident dedup window the ledger counts each
             // commit separately; simulate by backdating the last strike.
@@ -1618,6 +1749,101 @@ mod tests {
                 .backdate_last_strike(URL, link::STRIKE_DEDUP_SECS + 1);
         }
         assert!(demoted(&monitor), "a different prover still convicts");
+    }
+
+    /// **R3 D-099 — the stall verdict is judged against the SOCKET's own
+    /// clocks.** The D-098 cascade shape: after a link blackout the Dart
+    /// watchdog's process-lifetime block-age reads stale silence against a
+    /// seconds-old socket and used to execute it on the next 10 s tick.
+    /// PB-026: pre-state assertions are bounds, never equalities.
+    #[test]
+    fn stall_verdict_never_convicts_a_socket_younger_than_the_silence() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let now = DagMonitor::now_unix();
+
+        // Not connected: no defendant — the claim becomes a hunt kick.
+        assert_eq!(monitor.stall_verdict(), StallVerdict::Hunting);
+
+        monitor.inner.is_connected.store(true, Ordering::SeqCst);
+
+        // The regression case: blocks last seen 120 s ago (the BLACKOUT'S
+        // silence), socket bound 5 s ago (ivy, 2026-07-31 01:00:18) — the
+        // old rule executed it; the socket must keep its window.
+        monitor
+            .inner
+            .last_block_at
+            .store(now.saturating_sub(120), Ordering::Relaxed);
+        monitor
+            .inner
+            .connected_at
+            .store(now.saturating_sub(5), Ordering::Relaxed);
+        assert!(
+            matches!(monitor.stall_verdict(), StallVerdict::Refuse { silent_secs } if silent_secs <= 10),
+            "a fresh socket must not inherit the blackout's silence"
+        );
+
+        // A true zombie: connected 40+ s and blockless the whole time.
+        monitor
+            .inner
+            .connected_at
+            .store(now.saturating_sub(40), Ordering::Relaxed);
+        monitor
+            .inner
+            .last_block_at
+            .store(now.saturating_sub(40), Ordering::Relaxed);
+        assert!(
+            matches!(monitor.stall_verdict(), StallVerdict::Execute { silent_secs } if silent_secs >= link::WATCHDOG_STALL_SECS),
+            "a socket silent past the threshold on its own clock is executed"
+        );
+
+        // Blocks flowing now: healthy regardless of age.
+        monitor.inner.last_block_at.store(now, Ordering::Relaxed);
+        assert!(matches!(
+            monitor.stall_verdict(),
+            StallVerdict::Refuse { .. }
+        ));
+    }
+
+    /// **R3 D1 — the instrument's call-site seam is itself proven.** D-098's
+    /// `last_run_secs` column read 0 in production with a green unit test,
+    /// because the store was tested and the CALLER was not (the watchdog
+    /// path bypassed the arm that called it). Both death paths now share
+    /// [`DagMonitor::record_socket_run`]; this drives it and asserts the
+    /// LEDGER changed, and proves a stall parking carries its true reason.
+    #[test]
+    fn a_socket_death_lands_in_the_ledger_with_its_true_reason() {
+        const URL: &str = "wss://emma.example/kaspa/mainnet/wrpc/borsh";
+        const PROVER: &str = "wss://lena.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+
+        monitor.record_socket_run(URL, 27, "watchdog-stall");
+        {
+            let health = monitor
+                .inner
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                health.last_run_secs(URL),
+                Some(27),
+                "the run must land in the durable ledger, not only in a log line"
+            );
+        }
+
+        // A stall execution parks Stall, and the settle commits it as such —
+        // the ledger's `why` distinguishes an executed zombie from a drop.
+        monitor.set_pending_strike(URL.to_string(), link::StrikeReason::Stall);
+        monitor.settle_pending_strike(Some(PROVER));
+        let health = monitor
+            .inner
+            .health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            health.last_reason(URL),
+            Some((link::StrikeReason::Stall, 0)),
+            "the committed strike must carry the stall cause, not a flattened drop"
+        );
     }
 
     #[test]
