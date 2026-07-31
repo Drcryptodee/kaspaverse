@@ -78,9 +78,9 @@ Android-first, **arm64-only**, physical device:
 flutter pub get
 tools/preflight.sh                                        # orientation
 flutter build apk --debug --target-platform android-arm64 # then `flutter install`
-tools/gate.sh   # the proof gate, all ten checks: fmt · clippy · tests · cargo-deny ·
+tools/gate.sh   # the proof gate, all eleven checks: fmt · clippy · tests · cargo-deny ·
                 # arm64 cross-compile · dart format · analyze · flutter test ·
-                # codegen-drift · repo hygiene
+                # codegen-drift · repo hygiene · record boundary
 ```
 
 Full toolchain + the contributor workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -55,7 +55,8 @@ flutter_rust_bridge_codegen generate
 
 `cargo fmt` · `cargo clippy -D warnings` · `cargo test` · `cargo deny` (INV-7) · android
 arm64 cross-compile · `dart format` · `flutter analyze` · `flutter test` · codegen-drift
-(generated bindings match the Rust API) · public-repo hygiene (no tracked secrets).
+(generated bindings match the Rust API) · public-repo hygiene (no tracked secrets) ·
+internal-record boundary (the private engineering record can't drift into this repo).
 
 **Never weaken a check to go green.** A failing gate is fixed at the cause; a check is removed
 only via a decision-ledger entry. If your environment can't run a check, say so in the

@@ -115,6 +115,27 @@ repo_hygiene() {
 }
 run_check "public-repo hygiene (no tracked secrets)" repo_hygiene
 
+# ── Internal-record boundary (D-102 — the record is ops-mirror-only) ──
+# `.gitignore` states the rule; this enforces it. A single `git add -f` would
+# otherwise put a doc back in the public tree silently, and the whole reason
+# D-102 replaced D-047's per-file taxonomy is that a boundary nobody checks
+# gets crossed. Directories are checkable — so check them.
+#
+# Deliberately NOT extended to commit authorship: the companion exposure was a
+# personal email on every commit, but a check for it would have to name the
+# address inside this public file, and pinning the author to one identity would
+# fail the gate on any outside contributor's PR.
+internal_record() {
+  local tracked
+  tracked="$(git -C "$ROOT" ls-files -- 'docs/' 'CLAUDE.md' '.claude/')"
+  [ -z "$tracked" ] && return 0
+  echo "   the engineering record is ops-mirror-only (D-102), but these are tracked here:"
+  echo "$tracked" | sed 's/^/     /'
+  echo "   fix: git rm -r --cached <path>   — the files stay on disk; 'git ops' tracks them"
+  return 1
+}
+run_check "internal-record boundary (D-102)" internal_record
+
 # ── Summary ─────────────────────────────────────────────────────
 echo; echo "══════════ GATE SUMMARY ══════════"
 printf '%s\n' "${RESULTS[@]:-"(no checks ran)"}"
