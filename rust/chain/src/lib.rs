@@ -15,6 +15,7 @@ mod error;
 pub mod history_fill;
 mod kvlog;
 pub mod link;
+mod link_rpc;
 mod send;
 pub mod spans;
 mod transport;
