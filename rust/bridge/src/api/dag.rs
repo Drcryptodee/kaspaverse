@@ -142,7 +142,14 @@ async fn escalation_task(mut events: broadcast::Receiver<AcceptanceEvent>, monit
                                 (via.clone(), format!("already known ({detail})"))
                             }
                         };
-                        log::info!("escalation: {txid} via {via} — {note}");
+                        // `via` is a resolver-supplied URL that skipped the
+                        // race's intake guard (this lane dials it directly) —
+                        // sanitize before the log lane (PB-024; R3
+                        // wallet-security delta nit).
+                        log::info!(
+                            "escalation: {txid} via {} — {note}",
+                            kaspaverse_chain::link::sanitize_node_text(&via)
+                        );
                         kaspaverse_chain::spans::mark_with("escalate_ok", &txid);
                         // The fresh node answered → network alive → the
                         // SUBMIT-TIME endpoint earned this strike (it took
