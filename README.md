@@ -7,7 +7,7 @@
 Android-first. Non-custodial. Built on [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa)
 v2.0.1 (the Toccata-hardfork line, pinned by immutable revision) — a Flutter UI over a Rust
 core, with **keys that never leave Rust memory and never cross the language boundary**
-(enforced, not aspirational; see [`docs/CONSTITUTION.md`](docs/CONSTITUTION.md)).
+(enforced by an executable proof gate, not aspirational — see [SECURITY.md](SECURITY.md)).
 
 ## What this becomes
 
@@ -41,13 +41,13 @@ step (auditor-verified, not vibed).
 What's done: the custody core, the platform vault, onboarding & backup, wallet sync, and
 **send & receive** (Phase 1.1–1.7) — then **re-proven twice** in 2026-07: a five-pass
 adversarial re-audit of the shipped wallet, and a full docs↔code grounding audit that
-found **zero code defects**. The evidence trail is public in the decision ledger
-(D-051…D-060). What's next: **native transport** (Phase 2), then the covenant engine and
-the arcade.
+found **zero code defects**. What's next: **native transport** (Phase 2), then the covenant
+engine and the arcade.
 
-The current state of every subsystem — built, in-flight, or planned — lives in
-[`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md); the *why* behind every established
-choice is ledgered in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
+Every subsystem's state and the *why* behind every established choice are kept in the
+project's engineering record — a constitution, a source-of-truth register, a decision
+ledger and a research corpus, maintained alongside this code and provided in full to
+reviewers and auditors (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Known limitations (honest roadmap)
 
@@ -82,18 +82,17 @@ Full toolchain + the contributor workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Contributing & security
 
-Development runs on an internal AI-assisted process; its working journal is not part of
-this repo. What *is* here is the complete product record: the code, the research corpus,
-a constitution, a decision ledger, and an executable proof gate — the same documents human
-contributors and auditors use.
+This repo carries the product: the code, the CI, the tooling, and an executable proof gate
+anyone can run. The engineering record behind it — constitution, source-of-truth register,
+decision ledger, research corpus, phase plans and session journal — is maintained
+privately and shared in full with contributors and auditors rather than published
+piecemeal.
 
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — build from a clean clone, the proof gate, the
-  risk-tier auditor ritual, and the doc "spine".
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — build from a clean clone, the proof gate, and the
+  risk-tier auditor ritual.
 - **[SECURITY.md](SECURITY.md)** — the security model, the threat-model boundary, and how to
   report a vulnerability privately.
 - **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — stag hunt, not prisoner's dilemma.
-- **[docs/CONSTITUTION.md](docs/CONSTITUTION.md)** — the numbered invariants (INV-1…12) every
-  change is checked against.
 
 ## License
 

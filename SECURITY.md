@@ -33,8 +33,9 @@ There is **no bug-bounty program** at this alpha stage; reports are handled on g
 
 ## The security model (what we guarantee, by design)
 
-These are enforced invariants, not aspirations. The full numbered law is
-[`docs/CONSTITUTION.md`](docs/CONSTITUTION.md); the security-critical ones:
+These are enforced invariants, not aspirations. They are numbered clauses of a written
+constitution that is shared in full with contributors and auditors
+([CONTRIBUTING.md](CONTRIBUTING.md)); the security-critical ones:
 
 - **No secret ever crosses the language boundary or lives on the GC heap (INV-1/2/3).**
   Private keys, seeds, mnemonics, and raw signatures are created, used, and destroyed in
@@ -53,7 +54,8 @@ These are enforced invariants, not aspirations. The full numbered law is
   never re-implemented or "remembered" — so we inherit upstream's audited correctness.
 - **Verifiable releases (INV-11).** Every released APK is signed, built from a tagged commit,
   and published with checksums; the build verifies the artifact's *actual* signer against a
-  pinned certificate. See [`docs/RELEASE.md`](docs/RELEASE.md) to verify provenance yourself.
+  pinned certificate. Each release publishes the checksums and the signer fingerprint needed
+  to verify provenance yourself.
 - **Supply-chain custody (INV-7).** Dependencies are pinned; `cargo-deny` (advisories,
   licenses, sources) runs in the gate on every push and weekly; every new dependency is a
   recorded decision.

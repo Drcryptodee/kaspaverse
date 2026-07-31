@@ -5,10 +5,12 @@ bar is unusual: **nothing is "done" until it is proven** (a green gate cited as 
 and a change that touches keys, the language boundary, or on-chain logic gets adversarial
 review before it merges. This guide is how to clear that bar.
 
-Development runs on an internal AI-assisted process; its working journal (session logs,
-phase plans, agent instructions) is deliberately not part of this repo. Everything a
-contributor or auditor needs *is*: the code, the research corpus, a constitution, a
-decision ledger, and an executable proof gate — the same record the maintainer works from.
+Development runs on an internal AI-assisted process. This repo carries the product — the
+code, the CI, the tooling, and an executable proof gate you can run from a clean clone.
+The engineering record behind it (constitution, source-of-truth register, decision ledger,
+research corpus, phase plans, session journal) is kept privately and shared **in full**
+with contributors and auditors on request: it goes out as a whole, to people working on
+the code, rather than published piecemeal. Ask and you'll get it.
 
 ## The one rule
 
@@ -57,7 +59,7 @@ arm64 cross-compile · `dart format` · `flutter analyze` · `flutter test` · c
 (generated bindings match the Rust API) · public-repo hygiene (no tracked secrets).
 
 **Never weaken a check to go green.** A failing gate is fixed at the cause; a check is removed
-only via a `docs/DECISION_LOG.md` entry. If your environment can't run a check, say so in the
+only via a decision-ledger entry. If your environment can't run a check, say so in the
 PR — an honest partial beats a fake pass.
 
 ## Risk tiers + the auditor ritual
@@ -80,8 +82,8 @@ blocks the merge.
 ## How decisions are made (the epistemic order)
 
 When sources conflict, the higher one wins: **working code + gate output → the pinned
-`rusty-kaspa` crate source → `docs/SOURCE_OF_TRUTH.md` → `docs/research/` → a live
-network/web check → training data** (presumed stale — the network has hardforked, so never
+`rusty-kaspa` crate source → the project's source-of-truth register → its research
+corpus → a live network/web check → training data** (presumed stale — the network has hardforked, so never
 the sole basis for protocol logic). In particular, **consensus logic is consumed from the
 pinned crates, never re-implemented from memory** (INV-9). Reality wins: docs converge to the
 build, never the reverse. Found drift? Fix it if it's in scope, else log it — never silently
@@ -89,15 +91,19 @@ ignore it.
 
 ## Read before you build (the spine)
 
-[`docs/INDEX.md`](docs/INDEX.md) is the map. The load-bearing docs:
+The engineering record is a "spine" of load-bearing documents, indexed by a map and shared
+with contributors and auditors (see above). Ask for it before you start — it will save you
+from re-deriving settled ground:
 
-- [`docs/CONSTITUTION.md`](docs/CONSTITUTION.md) — the numbered laws (INV-1…12). Read first.
-- [`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md) — what is true right now: every
-  subsystem's state, built or planned (grep a section, then range-read).
-- [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) — the *why* behind established choices (it
-  may be deliberate before you "fix" it).
-- [`docs/research/`](docs/research/) — the verified research corpus behind every protocol
-  and design claim.
+- **The constitution** — the numbered laws (INV-1…12). Read first.
+- **The source-of-truth register** — what is true right now: every subsystem's state,
+  built or planned.
+- **The decision ledger** — the *why* behind established choices (a thing may be
+  deliberate before you "fix" it).
+- **The research corpus** — the verified research behind every protocol and design claim.
+
+The invariants that bind *your* change are summarised in [SECURITY.md](SECURITY.md), so a
+small PR doesn't have to wait on the full record.
 
 ## Pull requests
 
