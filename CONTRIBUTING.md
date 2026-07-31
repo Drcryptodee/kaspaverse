@@ -6,11 +6,10 @@ and a change that touches keys, the language boundary, or on-chain logic gets ad
 review before it merges. This guide is how to clear that bar.
 
 Development runs on an internal AI-assisted process. This repo carries the product — the
-code, the CI, the tooling, and an executable proof gate you can run from a clean clone.
-The engineering record behind it (constitution, source-of-truth register, decision ledger,
-research corpus, phase plans, session journal) is kept privately and shared **in full**
-with contributors and auditors on request: it goes out as a whole, to people working on
-the code, rather than published piecemeal. Ask and you'll get it.
+code, the CI, the tooling, and a proof gate you can run from a clean clone. The
+engineering record behind it (constitution, decision ledger, research corpus, phase plans,
+session journal) is private. If you're working on the code or auditing it, ask and you'll
+get the whole thing.
 
 ## The one rule
 
@@ -91,9 +90,8 @@ ignore it.
 
 ## Read before you build (the spine)
 
-The engineering record is a "spine" of load-bearing documents, indexed by a map and shared
-with contributors and auditors (see above). Ask for it before you start — it will save you
-from re-deriving settled ground:
+The record is a "spine" of load-bearing documents. Ask for it before you start — it saves
+you re-deriving settled ground:
 
 - **The constitution** — the numbered laws (INV-1…12). Read first.
 - **The source-of-truth register** — what is true right now: every subsystem's state,

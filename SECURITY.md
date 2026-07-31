@@ -34,8 +34,7 @@ There is **no bug-bounty program** at this alpha stage; reports are handled on g
 ## The security model (what we guarantee, by design)
 
 These are enforced invariants, not aspirations. They are numbered clauses of a written
-constitution that is shared in full with contributors and auditors
-([CONTRIBUTING.md](CONTRIBUTING.md)); the security-critical ones:
+constitution, kept private ([CONTRIBUTING.md](CONTRIBUTING.md)); the security-critical ones:
 
 - **No secret ever crosses the language boundary or lives on the GC heap (INV-1/2/3).**
   Private keys, seeds, mnemonics, and raw signatures are created, used, and destroyed in
