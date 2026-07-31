@@ -443,7 +443,8 @@ fn fold(snapshot: &mut DagSnapshot, event: DagEvent) {
 }
 
 /// First call connects to mainnet and spawns the folder task; the monitor's
-/// own event task keeps the connection alive for the life of the process.
+/// race keeps a socket bound for the life of the process (since R4 each socket
+/// is its own bind, with its own task — see `DagMonitor::install_bind`).
 async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError> {
     SNAPSHOTS
         .get_or_try_init(|| async {

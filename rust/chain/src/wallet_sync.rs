@@ -765,9 +765,29 @@ impl WalletEngine {
             }
             // Coinbase stasis is never a user row (events.rs:185).
             Events::Stasis { .. } => {}
-            Events::UtxoProcError { message } | Events::Error { message } => {
+            // The witness for D-101's armed trigger. `UtxoProcError` is the
+            // processor's CONNECT-negotiation failure (pin `processor.rs`
+            // emits it only from `handle_connect`'s error arm and the ctl
+            // task's connect handler) — the one case whose automatic recovery
+            // R4 deliberately did not wire, because the pin's own
+            // force-disconnect is no longer reachable through the link's
+            // stable handle. It must be greppable in OUR lane, naming the
+            // endpoint, or the trigger cannot fire from a capture: the pin's
+            // own error line carries neither endpoint nor bind.
+            Events::UtxoProcError { message } => {
+                log::warn!(
+                    "wallet-sync: processor connect negotiation failed on {} — \
+                     the wallet lane is dark on this socket until it drops or the \
+                     user reconnects (D-101 trigger)",
+                    self.inner
+                        .processor
+                        .try_rpc_ctl()
+                        .and_then(|ctl| ctl.descriptor())
+                        .unwrap_or_else(|| "<no endpoint>".to_string())
+                );
                 self.emit(WalletEvent::Error(message))
             }
+            Events::Error { message } => self.emit(WalletEvent::Error(message)),
             _ => {}
         }
     }

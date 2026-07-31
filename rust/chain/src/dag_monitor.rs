@@ -14,13 +14,14 @@ use std::time::Duration;
 
 use kaspa_addresses::Prefix;
 use kaspa_consensus_core::Hash;
-use kaspa_wallet_core::rpc::Rpc;
+use kaspa_wallet_core::rpc::{Rpc, RpcCtl};
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::acceptance::VccBatch;
 use crate::error::Result;
 use crate::link::{self, EndpointHealth};
+use crate::link_rpc::LinkRpc;
 use crate::spans;
 use crate::transport::{self, TransportEvent};
 
@@ -84,6 +85,26 @@ const CATCHUP_RPC_ATTEMPTS: u32 = 15;
 /// more), short enough that the recovery feels immediate.
 const CATCHUP_RETRY_DELAY: Duration = Duration::from_millis(1000);
 
+/// How long a RETIRED bind's task keeps servicing its own channels before it
+/// exits (R4). Its events are all stale by then — the window exists so the
+/// late teardown event that USED to kill the next socket (D-100: 1–5 ms after
+/// `connected`, 85 times) is seen, counted and logged as discarded instead of
+/// vanishing. Sized above [`link::DISCONNECT_WAIT_TIMEOUT`] so the pin's whole
+/// shutdown handshake lands inside it. Task lifecycle only — it gates no
+/// judgment and no dialing decision.
+const RETIRED_DRAIN: Duration = Duration::from_secs(10);
+
+/// Bound on the best-effort listener unregister at a socket's end (R4).
+///
+/// The call is a courtesy to a node that, on a dropped socket, has already
+/// forgotten us — but it is an RPC round trip, and the C2 sweep bounds it only
+/// at the pin's ~65 s request timeout (CONNECTIVITY_PASS §5, finding (b)). That
+/// was tolerable while it lived solely in the event loop; R4 routes every
+/// teardown through one seam, so the same await now sits on `pause()` — the
+/// app-backgrounding path — and on the race's re-bind. A live socket answers in
+/// milliseconds; anything slower is a socket we are abandoning anyway.
+const LISTENER_UNREGISTER_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// A chain event observed by the [`DagMonitor`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DagEvent {
@@ -111,13 +132,84 @@ fn map_notification(notification: &Notification) -> Option<DagEvent> {
     }
 }
 
-struct Inner {
+/// **One bound socket — the unit of IDENTITY (R4/D-101).**
+///
+/// Before R4 the app owned ONE `KaspaRpcClient` for its whole life and every
+/// socket took turns inside it. `RpcState` carries no identity (pin
+/// `rpc/core/src/api/ctl.rs`: a bare `Connected|Disconnected`), and the pin's
+/// `connect()` tears the previous socket down and restarts the ctl relay
+/// (`client.rs:433` → `disconnect()` → `stop()` → `start()`), so a teardown's
+/// `Disconnected` could be relayed AFTER the next bind's `Connected` and was
+/// charged to it: 85 bind-die cycles in 18 minutes, self-sustaining until the
+/// app was killed (D-100, L71).
+///
+/// Now each bind owns its client, its ctl channel, its notification channel
+/// and its listener, and carries a `gen` stamped at install. Every intake
+/// checks [`DagMonitor::is_current_bind`] first, so an event from a retired
+/// socket can only ever be attributed to — and discarded on behalf of — the
+/// socket that produced it. Mis-attribution is not judged leniently; it is
+/// structurally impossible.
+struct BoundSocket {
+    /// Monotonic identity, allocated at install and never reused.
+    gen: u64,
+    /// The endpoint this socket IS — not a descriptor re-read at event time
+    /// (the old `client.url()` attribution, `link.rs` D2 reproduction test).
+    url: String,
     client: Arc<KaspaRpcClient>,
-    is_connected: AtomicBool,
-    /// Channel handed to the notification subsystem (`ChannelConnection`).
+    /// This socket's own notification channel — handed to its
+    /// `ChannelConnection`, dropped with it. A notification from a dead socket
+    /// cannot arrive on a live one's stream (D4).
     notification_tx: async_channel::Sender<Notification>,
     notification_rx: async_channel::Receiver<Notification>,
     listener_id: Mutex<Option<ListenerId>>,
+    /// Unix-seconds this socket was accepted as connected (0 = never). The
+    /// run-length base and half the stall baseline.
+    connected_at: AtomicU64,
+    /// Unix-seconds of the last block THIS socket delivered. The stall
+    /// verdict's evidence clock (L70: a detector measures its subject against
+    /// the subject's own lifetime); the process-wide twin on [`Inner`] stays
+    /// for the glass's data-age reading.
+    last_block_at: AtomicU64,
+    daa_seen_since_connect: AtomicBool,
+    /// True once this bind's `Connected` was announced to consumers (monitor
+    /// ctl open + [`DagEvent::Connected`]) — so retirement tells them exactly
+    /// once, and a bind that never came up never announces a disconnect.
+    announced: AtomicBool,
+    /// Stale-event evidence, reported when the retired task exits.
+    stale_ctl: AtomicU64,
+    stale_notifications: AtomicU64,
+    /// Fired at retirement: the task moves to its bounded drain phase.
+    retire_tx: Mutex<Option<oneshot::Sender<()>>>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// What a retirement yields the caller: enough to judge the run, never the
+/// socket itself (it is already on its way down).
+struct Retired {
+    /// How long the socket was up, 0 if it never reached an accepted
+    /// `Connected` (in which case nothing was recorded — there is no run).
+    run_secs: u64,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct Inner {
+    /// The app's STABLE rpc handle (R4): consumers bind this once and every
+    /// call lands on whichever socket is current — see [`LinkRpc`] for why the
+    /// handle, not the client, is what must never change (L59).
+    link_rpc: Arc<LinkRpc>,
+    /// The ctl the app's consumers watch. Monitor-owned and driven ONLY by
+    /// events the identity gate accepted, so wallet-core sees a de-aliased
+    /// connect/disconnect stream instead of the raw client's.
+    monitor_ctl: RpcCtl,
+    /// The installed socket, if any. At most one exists at a time —
+    /// [`DagMonitor::install_bind`] retires whatever it finds.
+    bound: Mutex<Option<Arc<BoundSocket>>>,
+    /// The identity that owns the present: `0` = none installed. An event
+    /// whose `gen` differs is from a retired socket and is discarded.
+    current_gen: AtomicU64,
+    /// Allocator for [`BoundSocket::gen`] — monotonic, never reused.
+    next_gen: AtomicU64,
+    is_connected: AtomicBool,
     events: broadcast::Sender<DagEvent>,
     /// Payload-transport fan-out (P2.1): matches from the BlockAdded scan.
     /// Separate from `events` — these are discrete deliveries, not foldable
@@ -127,8 +219,6 @@ struct Inner {
     /// Address prefix for the scan's output-address extraction — derived from
     /// the network this monitor was constructed for.
     address_prefix: Prefix,
-    event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// App-private file remembering the last node that worked (public data,
     /// INV-3; the PNN resolver is already an untrusted accelerator, INV-8 —
     /// remembering its last answer adds no new trust). `None` until the bridge
@@ -206,11 +296,6 @@ struct Inner {
     /// Gates the Connected-time demotion refusal so the advisory bind isn't
     /// bounced by our own enforcement.
     hygiene_advisory: AtomicBool,
-    /// Unix-seconds of the last `Connected` (0 = never) — a drop after a run
-    /// of ≥ [`link::CLEAN_RUN_SECS`] clears the endpoint's strikes instead of
-    /// adding one. Also the stall-verdict baseline floor (R3 D-099): silence
-    /// is measured from `max(last_block_at, connected_at)`.
-    connected_at: AtomicU64,
     /// `try_new(url = Some(..))` pins a node explicitly (dev/tests): the race
     /// and demotion machinery stand down and the ws client's own Retry loop
     /// keeps the pinned URL alive — loyalty is CORRECT for a pinned node.
@@ -229,22 +314,22 @@ struct Inner {
     /// Unix-seconds of the last cursor write — throttles the hot BlockAdded path
     /// to one small write every [`TRANSPORT_CURSOR_MIN_WRITE_SECS`].
     transport_cursor_written: AtomicU64,
-    /// Unix-seconds of the last BlockAdded we scanned (0 = none yet). The
-    /// foreground watchdog's liveness signal (P3/D-068): a healthy mainnet
-    /// delivers ~10 blocks/s, so a large age while the app is foreground means
-    /// the wRPC socket died silently (the "midnight DAA stall") — the UI polls
-    /// [`last_block_age_secs`] and forces a [`reconnect`]. A plain atomic store
-    /// every block (no I/O), unlike the throttled cursor write.
+    /// Unix-seconds of the last BlockAdded we scanned, process-wide (0 = none
+    /// yet). This is the **display** clock: how old the data on the glass is,
+    /// which is a property of the app's session, not of any one socket, and it
+    /// must keep reading across a rebind (C7's no-staleness-before-first-connect
+    /// invariant is built on it). A plain atomic store every block (no I/O),
+    /// unlike the throttled cursor write.
+    ///
+    /// Its **judgment** twin is [`BoundSocket::last_block_at`] (R4): a stall
+    /// verdict is measured against the accused socket's own silence, never the
+    /// process's — that conflation was the D-099/L70 cascade.
     last_block_at: AtomicU64,
     /// V1 acceptance spine: where the event task forwards VirtualChainChanged
     /// batches once the tracker is attached ([`DagMonitor::attach_acceptance`]).
     /// Unattached (or a dead receiver) = batches drop harmlessly — the tracker's
     /// own reconnect catch-up recovers anything missed while detached.
     vcc_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<VccBatch>>>,
-    /// True until the first VirtualDaaScore after a connect — drives the
-    /// `first_daa` span marker (V1 observability; closes the L40-scarred
-    /// time-to-first-DAA baseline row).
-    daa_seen_since_connect: AtomicBool,
 }
 
 /// Owns one wRPC client plus the event task that tracks its connection state
@@ -274,37 +359,19 @@ impl DagMonitor {
     /// via the connect race (D-081); `url = Some` pins that node (dev/tests).
     pub fn try_new(network_id: NetworkId, url: Option<String>) -> Result<Self> {
         let resolver = Resolver::default();
-        let client = Arc::new(KaspaRpcClient::new_with_args(
-            WrpcEncoding::Borsh,
-            url.as_deref(),
-            // The client's internal resolver is a construction requirement for
-            // url-less clients; the race supplies explicit URLs so it never
-            // actually resolves (D-081). LOAD-BEARING for the bounded-await
-            // law (D-089/L64): the ws connect loop's resolver hook runs raw
-            // `get_node` OUTSIDE `connect_timeout` (pin ws native.rs:150-156,
-            // :178 vs :182; client.rs:233-235) — an unbounded HTTP that
-            // cannot fire only because EVERY connect on this client passes
-            // `options.url: Some(..)`. A url-less connect here re-opens the
-            // D-089 wedge (sweep-table tripwire, CONNECTIVITY_PASS §5).
-            url.is_none().then(|| resolver.clone()),
-            Some(network_id),
-            None,
-        )?);
-        let (notification_tx, notification_rx) = async_channel::unbounded();
         let (events, _) = broadcast::channel(256);
         let (transport_events, _) = broadcast::channel(256);
         Ok(Self {
             inner: Arc::new(Inner {
-                client,
+                link_rpc: LinkRpc::new(),
+                monitor_ctl: RpcCtl::new(),
+                bound: Mutex::new(None),
+                current_gen: AtomicU64::new(0),
+                next_gen: AtomicU64::new(0),
                 is_connected: AtomicBool::new(false),
-                notification_tx,
-                notification_rx,
-                listener_id: Mutex::new(None),
                 events,
                 transport_events,
                 address_prefix: Prefix::from(network_id.network_type),
-                event_task: Mutex::new(None),
-                shutdown: Mutex::new(None),
                 endpoint_cache: Mutex::new(None),
                 resolver,
                 network_id,
@@ -318,14 +385,12 @@ impl DagMonitor {
                 phone_fault_round_at: AtomicU64::new(0),
                 pending_strike: Mutex::new(None),
                 hygiene_advisory: AtomicBool::new(false),
-                connected_at: AtomicU64::new(0),
                 direct_url: url,
                 paused: AtomicBool::new(false),
                 transport_cursor: Mutex::new(None),
                 transport_cursor_written: AtomicU64::new(0),
                 last_block_at: AtomicU64::new(0),
                 vcc_tx: Mutex::new(None),
-                daa_seen_since_connect: AtomicBool::new(false),
             }),
         })
     }
@@ -499,10 +564,13 @@ impl DagMonitor {
         self.commit_strike(url, reason, Self::now_unix(), false);
     }
 
-    /// The endpoint the shared socket is (or was last) bound to — captured by
-    /// the send hook at submit time so a later stall strikes the right node.
+    /// The endpoint the installed socket IS bound to — captured by the send
+    /// hook at submit time so a later stall strikes the right node. Since R4
+    /// this is the bind's own identity rather than the client's descriptor,
+    /// so it names the socket that carried the submit, never whichever URL a
+    /// later connect happened to write. `None` between binds.
     pub fn current_url(&self) -> Option<String> {
-        self.inner.client.url()
+        self.current_bind().map(|bind| bind.url.clone())
     }
 
     /// Park a strike until network-alive evidence arrives (the next
@@ -659,7 +727,10 @@ impl DagMonitor {
     /// current sink so the NEXT gap is coverable, and replays nothing — there is
     /// no prior session whose arrivals could have been missed.
     pub async fn catch_up_transport(&self, from: Option<Hash>) -> Result<usize> {
-        let rpc = self.inner.client.rpc_api();
+        // Through the stable handle: the replay commonly starts before the
+        // first bind lands, and it must keep working across any rebind that
+        // happens mid-walk.
+        let rpc = self.inner.link_rpc.clone();
         let Some(mut low) = from else {
             if let Ok(sink) = rpc.get_sink().await {
                 self.write_cursor_now(&sink.sink);
@@ -713,7 +784,9 @@ impl DagMonitor {
     /// `None` after the whole budget = the node is unreachable or the cursor is
     /// pruned.
     async fn catch_up_get_blocks(&self, low: Hash) -> Option<GetBlocksResponse> {
-        let rpc = self.inner.client.rpc_api();
+        // "No bound socket" is just another retryable answer here — the walk
+        // is allowed to start before the race has bound anything.
+        let rpc = self.inner.link_rpc.clone();
         for attempt in 0..CATCHUP_RPC_ATTEMPTS {
             match rpc.get_blocks(Some(low), true, true).await {
                 Ok(resp) => return Some(resp),
@@ -797,55 +870,40 @@ impl DagMonitor {
         self.inner.transport_events.subscribe()
     }
 
-    /// The shared wRPC handle (`rpc_api` + `rpc_ctl`), for binding a wallet-core
-    /// `UtxoProcessor` to this same connection — one client for both DAG status
-    /// and wallet sync (P1 §0.8 / D-005: no DAA divergence, one socket to
-    /// manage). The processor reacts to the client's `RpcState` over the shared
-    /// ctl multiplexer, so it connects and resyncs in lockstep with the monitor.
+    /// The app's wRPC handle (`rpc_api` + `rpc_ctl`), for binding a wallet-core
+    /// `UtxoProcessor` to this same connection — one socket for both DAG status
+    /// and wallet sync (P1 §0.8 / D-005: no DAA divergence, one link to
+    /// manage). The processor reacts to `RpcState` over this ctl, so it
+    /// connects and resyncs in lockstep with the monitor.
+    ///
+    /// Both halves are monitor-owned and STABLE across rebinds (R4): the
+    /// [`LinkRpc`] handle routes each call to whichever socket is current, and
+    /// the ctl is signalled only for events the identity gate accepted. That
+    /// is what lets D-005 stay true while the client underneath rotates — and
+    /// what keeps the L59 funds-visibility lanes off the re-plumb path.
     pub fn rpc(&self) -> Rpc {
-        Rpc::new(
-            self.inner.client.rpc_api(),
-            self.inner.client.rpc_ctl().clone(),
-        )
+        Rpc::new(self.inner.link_rpc.clone(), self.inner.monitor_ctl.clone())
     }
 
-    /// Spawns the event task and initiates the first connect. Resolver mode
-    /// starts the race task (non-blocking, D-081 — the app is the one
-    /// reconnect authority); an explicitly pinned URL keeps the ws client's
-    /// own Retry loop (loyalty is correct for a pinned node).
+    /// Initiates the first connect. Resolver mode starts the race task
+    /// (non-blocking, D-081 — the app is the one reconnect authority); an
+    /// explicitly pinned URL keeps the ws client's own Retry loop (loyalty is
+    /// correct for a pinned node).
     ///
     /// Must be called from within a tokio runtime.
     pub async fn start(&self) -> Result<()> {
-        // Register on the ctl multiplexer *before* connecting so the first
-        // Connected event cannot be missed.
-        let ctl_channel = self.inner.client.rpc_ctl().multiplexer().channel();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        *self
-            .inner
-            .shutdown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shutdown_tx);
-
-        let monitor = self.clone();
-        let task = tokio::spawn(async move {
-            monitor
-                .event_loop(ctl_channel.receiver.clone(), shutdown_rx)
-                .await;
-        });
-        *self
-            .inner
-            .event_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
-
-        if let Some(url) = &self.inner.direct_url {
+        if let Some(url) = self.inner.direct_url.clone() {
+            // Pinned mode installs ONE bind for the process: the pin's Retry
+            // loop redials this same client, so the identity is stable and its
+            // task services every reconnect.
+            let bind = self.install_bind(url.clone()).await?;
             let options = ConnectOptions {
-                url: Some(url.clone()),
+                url: Some(url),
                 block_async_connect: false,
                 strategy: ConnectStrategy::Retry,
                 ..Default::default()
             };
-            self.inner.client.connect(Some(options)).await?;
+            bind.client.connect(Some(options)).await?;
         } else {
             self.spawn_race();
         }
@@ -892,19 +950,248 @@ impl DagMonitor {
         }
     }
 
-    /// Bound the wait on the SHARED client's teardown (C2 fix, the C1 class):
-    /// the pin's `disconnect()` is a dispatcher handshake a blackholed socket
-    /// can starve (`workflow-websocket 0.18.0 client/native.rs:322-334` —
-    /// `ws_sender.send().await` inside a select arm body), and
-    /// `KaspaRpcClient::disconnect` serializes callers on `disconnect_guard`
-    /// (pin `client.rs:476-482`), so ONE hung teardown would wedge every
-    /// later caller — including the event loop, which calls this inline. The
-    /// teardown is detached, never cancelled (the reaper rule), and MAY
-    /// never complete (an error-path dispatcher exit orphans the handshake);
-    /// the wait is bounded, and the guard it can hold is why the winner bind
-    /// carries [`BIND_ENVELOPE_TIMEOUT`].
-    async fn bounded_disconnect(&self) {
-        link::bounded_disconnect((*self.inner.client).clone(), link::DISCONNECT_WAIT_TIMEOUT).await;
+    /// Best-effort listener unregister, bounded ([`LISTENER_UNREGISTER_TIMEOUT`]).
+    /// Never fatal: on a dropped socket the node already forgot us, and a
+    /// socket that will not answer is one we are leaving regardless.
+    async fn unregister_listener_bounded(client: &Arc<KaspaRpcClient>, id: ListenerId) {
+        if tokio::time::timeout(
+            LISTENER_UNREGISTER_TIMEOUT,
+            client.rpc_api().unregister_listener(id),
+        )
+        .await
+        .is_err()
+        {
+            log::info!(
+                "link: listener unregister exceeded {LISTENER_UNREGISTER_TIMEOUT:?} — \
+                 abandoning it with the socket"
+            );
+        }
+    }
+
+    /// The installed socket, if any.
+    fn current_bind(&self) -> Option<Arc<BoundSocket>> {
+        self.inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// **The identity gate (R4/D-101).** Every ctl event and every
+    /// notification asks this BEFORE it is allowed to mean anything. An event
+    /// whose bind is no longer the installed one belongs to a socket that is
+    /// already dead: it is that socket's news, and the socket that replaced it
+    /// answers for nothing it did. This is what makes the D-100 live-lock
+    /// impossible rather than merely unconvictable (L71).
+    fn is_current_bind(&self, gen: u64) -> bool {
+        self.inner.current_gen.load(Ordering::SeqCst) == gen
+    }
+
+    /// A ctl event from a retired socket. Logged in full — ctl events are
+    /// sparse (a handful per socket) and these lines are the direct evidence
+    /// that the aliasing happened and was refused.
+    fn discard_ctl(&self, bind: &BoundSocket, state: RpcState) {
+        bind.stale_ctl.fetch_add(1, Ordering::Relaxed);
+        log::info!(
+            "link: stale ctl {state:?} from retired bind gen={} ({}) — DISCARDED \
+             (current gen={}); the live socket keeps its life",
+            bind.gen,
+            bind.url,
+            self.inner.current_gen.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A notification from a retired socket. Throttled to one line per bind:
+    /// a live mainnet socket carries ~10 blocks/s, so logging each would drown
+    /// the very lane this evidence lives in (L65/L66). The total is reported
+    /// when the retired task exits.
+    fn discard_notification(&self, bind: &BoundSocket) {
+        if bind.stale_notifications.fetch_add(1, Ordering::Relaxed) == 0 {
+            log::info!(
+                "link: notification from retired bind gen={} ({}) — DISCARDED \
+                 (further ones counted, not logged)",
+                bind.gen,
+                bind.url
+            );
+        }
+    }
+
+    /// Create, publish and start servicing a NEW socket identity.
+    ///
+    /// The client is built with an EXPLICIT url and NO internal resolver.
+    /// That keeps the bounded-await law (D-089/L64) true by construction
+    /// rather than by discipline: the ws connect loop's resolver hook runs a
+    /// raw `get_node` OUTSIDE `connect_timeout` (pin ws `native.rs:150-156`,
+    /// `:178` vs `:182`; `client.rs:233-235`), an unbounded HTTP the old
+    /// shared client avoided only because every connect remembered to pass
+    /// `options.url: Some(..)`. A per-bind client has no resolver to call.
+    async fn install_bind(&self, url: String) -> Result<Arc<BoundSocket>> {
+        // At most one identity exists at a time. Anything still installed is
+        // retired (and recorded) before the new one is allocated — so a bind
+        // can never be leaked by a path that forgot to clean up.
+        self.retire_bind("superseded").await;
+
+        let client = Arc::new(KaspaRpcClient::new_with_args(
+            WrpcEncoding::Borsh,
+            Some(url.as_str()),
+            None,
+            Some(self.inner.network_id),
+            None,
+        )?);
+        // Register on THIS client's ctl multiplexer before anyone connects it,
+        // so its own first `Connected` cannot be missed.
+        //
+        // The registration lives as long as the `MultiplexerChannel` VALUE:
+        // its `Drop` unregisters the sender (workflow-core 0.18.0
+        // `channel.rs:316-323`), so keeping only the receiver silently
+        // detaches the socket from its own ctl stream. It is therefore moved
+        // into the bind's task and dropped only when that task exits.
+        let ctl_channel = client.rpc_ctl().multiplexer().channel();
+        let ctl_rx = ctl_channel.receiver.clone();
+        let (notification_tx, notification_rx) = async_channel::unbounded();
+        let (retire_tx, retire_rx) = oneshot::channel();
+        let gen = self.inner.next_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let bind = Arc::new(BoundSocket {
+            gen,
+            url,
+            client,
+            notification_tx,
+            notification_rx,
+            listener_id: Mutex::new(None),
+            connected_at: AtomicU64::new(0),
+            last_block_at: AtomicU64::new(0),
+            daa_seen_since_connect: AtomicBool::new(false),
+            announced: AtomicBool::new(false),
+            stale_ctl: AtomicU64::new(0),
+            stale_notifications: AtomicU64::new(0),
+            retire_tx: Mutex::new(Some(retire_tx)),
+            task: Mutex::new(None),
+        });
+        // Publish the identity BEFORE the task starts and before any connect:
+        // the gate must already read this gen as current when its first event
+        // lands, or the socket would discard its own birth.
+        self.inner.current_gen.store(gen, Ordering::SeqCst);
+        *self
+            .inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bind.clone());
+        let monitor = self.clone();
+        let task_bind = bind.clone();
+        let task = tokio::spawn(async move {
+            // Holding the channel value here is what keeps this socket
+            // registered on its own ctl multiplexer (see above).
+            let _ctl_registration = ctl_channel;
+            monitor.bind_loop(task_bind, ctl_rx, retire_rx).await;
+        });
+        *bind
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+        log::info!("link: bind gen={} armed for {}", bind.gen, bind.url);
+        Ok(bind)
+    }
+
+    /// **The one way a socket leaves (R4 D2).** Takes the installed bind,
+    /// invalidates its identity, records its run whatever killed it, tells
+    /// consumers once, and hands the client to the bounded teardown.
+    ///
+    /// Recording lives HERE rather than at each death site because that is
+    /// what makes it unforgettable: D-098 read a column of zeros after a
+    /// watchdog cascade because the writer existed and the kill path did not
+    /// call it, and the soak then found a second silent path (the pause-path
+    /// teardown left no lifecycle line at all). A path that tears a socket
+    /// down without coming through here no longer exists.
+    ///
+    /// Recording is not judging: a deliberate teardown (pause, stop, manual
+    /// reconnect) writes its lifecycle line and its `last_run_secs` and stops
+    /// there — no strike, and no clean-run credit either. Only the arms that
+    /// have evidence against an endpoint judge, exactly as before.
+    async fn retire_bind(&self, cause: &str) -> Option<Retired> {
+        // The whole state transition happens under the ONE lock a publish also
+        // takes, with no await inside it — so a retirement and an
+        // `on_connected` publish can never interleave and leave the link
+        // reading connected with nothing bound (wallet-security BLOCK, R4).
+        // The ctl close rides along synchronously (`try_signal_close`, pin
+        // `rpc/core/src/api/ctl.rs:83`) so consumers see open/close in exactly
+        // the order the state actually changed.
+        let bind = {
+            let mut bound = self
+                .inner
+                .bound
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let bind = bound.take()?;
+            // From this instant every event still in flight from this socket is
+            // stale — including the teardown event we are about to provoke,
+            // which is the one that used to kill the next bind.
+            self.inner.current_gen.store(0, Ordering::SeqCst);
+            self.inner.is_connected.store(false, Ordering::SeqCst);
+            self.inner.link_rpc.unbind();
+            if bind.announced.swap(false, Ordering::SeqCst) {
+                // Consumers hear about a socket exactly once, and only about
+                // one that actually came up.
+                let _ = self.inner.monitor_ctl.try_signal_close();
+                self.emit(DagEvent::Disconnected);
+            }
+            bind
+        };
+
+        let connected_at = bind.connected_at.load(Ordering::Relaxed);
+        let ever_connected = connected_at != 0;
+        // Measured BEFORE the teardown: the wait for the pin's shutdown
+        // handshake is ours, not part of the socket's life (L70 — never charge
+        // our own timers to the subject).
+        let run_secs = if ever_connected {
+            Self::now_unix().saturating_sub(connected_at)
+        } else {
+            0
+        };
+
+        let listener_id = bind
+            .listener_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(id) = listener_id {
+            // Best-effort, and on ITS OWN client: unregistering through a
+            // shared handle is how a stale teardown could deafen a live socket.
+            Self::unregister_listener_bounded(&bind.client, id).await;
+        }
+        if ever_connected {
+            self.record_socket_run(&bind.url, run_secs, cause);
+        } else {
+            log::info!(
+                "link: bind gen={} ({}) retired before it ever connected (cause={cause}) — \
+                 no run to record",
+                bind.gen,
+                bind.url
+            );
+        }
+        if let Some(tx) = bind
+            .retire_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = tx.send(());
+        }
+        // Bound the wait on the teardown (C2 fix, the C1 class): the pin's
+        // `disconnect()` is a dispatcher handshake a blackholed socket can
+        // starve (`workflow-websocket 0.18.0 client/native.rs:322-334` —
+        // `ws_sender.send().await` inside a select arm body), and
+        // `KaspaRpcClient::disconnect` serializes callers on `disconnect_guard`
+        // (pin `client.rs:476-482`). The teardown is detached, never cancelled
+        // (the reaper rule) and MAY never complete; only our wait is bounded.
+        // Its late `Disconnected` now lands on a retired identity and is
+        // discarded — which is the whole point of R4.
+        link::bounded_disconnect((*bind.client).clone(), link::DISCONNECT_WAIT_TIMEOUT).await;
+        let task = bind
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Some(Retired { run_secs, task })
     }
 
     /// The connect race (V3 deliverable 1): candidates = the cached last-good
@@ -1073,6 +1360,20 @@ impl DagMonitor {
                 Ordering::SeqCst,
             );
 
+            // A NEW identity per bind (R4): its own client, its own ctl and
+            // notification streams, its own generation. The socket this dials
+            // can never be confused with the one it replaces.
+            let bind = match self.install_bind(winner.url.clone()).await {
+                Ok(bind) => bind,
+                Err(e) => {
+                    log::warn!(
+                        "link: could not arm a bind for {}: {}",
+                        winner.url,
+                        link::sanitize_node_text(&e.to_string())
+                    );
+                    continue;
+                }
+            };
             let options = ConnectOptions {
                 url: Some(winner.url.clone()),
                 strategy: ConnectStrategy::Fallback,
@@ -1087,16 +1388,29 @@ impl DagMonitor {
             // Fallback dial failure self-terminates, AlreadyConnected
             // returns before a loop spawns, and a late success is judged
             // at Connected (D-084 machinery — no second authority).
-            match tokio::time::timeout(
-                BIND_ENVELOPE_TIMEOUT,
-                self.inner.client.connect(Some(options)),
-            )
-            .await
+            match tokio::time::timeout(BIND_ENVELOPE_TIMEOUT, bind.client.connect(Some(options)))
+                .await
             {
                 Ok(Ok(_)) => {
                     // A pause that landed mid-bind wins: drop the socket.
                     if self.inner.paused.load(Ordering::SeqCst) {
-                        self.bounded_disconnect().await;
+                        self.retire_bind("pause-lost-bind").await;
+                        return;
+                    }
+                    // Somebody retired this bind while we were dialing it (a
+                    // Reconnect tap, a pull-heal, the demoted-refusal arm).
+                    // Its `Connected` is stale by identity and will be
+                    // discarded, so NOTHING will bring the link up if we return
+                    // here — and every other recovery path short-circuits on
+                    // `is_connected()`. Before R4 the socket's own event still
+                    // healed this; now the hunt has to. Keep hunting.
+                    if !self.is_current_bind(bind.gen) {
+                        log::info!(
+                            "link: the bind to {} was retired while it was dialing — \
+                             keeping the hunt alive",
+                            winner.url
+                        );
+                        continue;
                     }
                     return;
                 }
@@ -1108,12 +1422,24 @@ impl DagMonitor {
                         winner.url,
                         link::sanitize_node_text(&e.to_string())
                     );
-                    self.commit_strike(
-                        &winner.url,
-                        link::StrikeReason::BindFailed,
-                        Self::now_unix(),
-                        false,
-                    );
+                    // ...unless WE broke the dial by retiring the bind under
+                    // it. Convicting a node for our own act is the
+                    // self-inflicted verdict auditor item 18 forbids — the same
+                    // reasoning that already spares the envelope-timeout arm.
+                    if self.is_current_bind(bind.gen) {
+                        self.commit_strike(
+                            &winner.url,
+                            link::StrikeReason::BindFailed,
+                            Self::now_unix(),
+                            false,
+                        );
+                    } else {
+                        log::info!(
+                            "link: bind to {} failed after we retired it — no strike (ours)",
+                            winner.url
+                        );
+                    }
+                    self.retire_bind("bind-failed").await;
                 }
                 Err(_) => {
                     // NO strike: the node just won a probe — this is our own
@@ -1123,6 +1449,7 @@ impl DagMonitor {
                          (teardown guard suspected) — re-racing, no strike",
                         winner.url
                     );
+                    self.retire_bind("bind-timeout").await;
                 }
             }
         }
@@ -1134,7 +1461,10 @@ impl DagMonitor {
     /// resyncs in lockstep on [`Self::resume`] (§0.8 / D-005).
     pub async fn pause(&self) -> Result<()> {
         self.inner.paused.store(true, Ordering::SeqCst);
-        self.bounded_disconnect().await;
+        // R4 D2: a grace-drop is a socket death like any other and now leaves
+        // its lifecycle line. The soak's 13:57 socket vanished without one and
+        // the 14:06 resume raced against a run nobody had measured.
+        self.retire_bind("paused").await;
         Ok(())
     }
 
@@ -1176,14 +1506,15 @@ impl DagMonitor {
             // the threshold.
             match self.stall_verdict() {
                 StallVerdict::Execute { silent_secs } => {
-                    if let Some(url) = self.inner.client.url() {
-                        let run_secs = Self::now_unix()
-                            .saturating_sub(self.inner.connected_at.load(Ordering::Relaxed));
+                    // The defendant is the socket the verdict judged — named
+                    // by its own identity, not by a descriptor re-read now.
+                    if let Some(url) = self.current_bind().map(|bind| bind.url.clone()) {
                         log::info!(
                             "link: watchdog stall confirmed on {url} \
                              (socket silent {silent_secs}s) — executing"
                         );
-                        self.record_socket_run(&url, run_secs, "watchdog-stall");
+                        // Retirement records the run (cause=watchdog-stall).
+                        self.retire_bind("watchdog-stall").await;
                         self.set_pending_strike(url, link::StrikeReason::Stall);
                     }
                 }
@@ -1206,15 +1537,17 @@ impl DagMonitor {
                 }
             }
         }
-        // Mark down BEFORE dropping the socket: the ctl Disconnected can be
-        // processed DURING disconnect().await, and the event arm's swap-once
-        // guard must see "already down" — a deliberate reconnect (pull heal,
-        // manual button) must never park a strike against the healthy
-        // endpoint it is bouncing (caught live at the V3 sitting: a
-        // swipe-to-refresh demoted the innocent incumbent). Also keeps the
-        // race loop we spawn from reading a stale `connected` and exiting.
-        self.inner.is_connected.store(false, Ordering::SeqCst);
-        self.bounded_disconnect().await;
+        // Retire whatever is installed (the stalled arm above already did, so
+        // this is the manual/pull-heal path). A deliberate reconnect must
+        // never park a strike against the healthy endpoint it is bouncing
+        // (caught live at the V3 sitting: a swipe-to-refresh demoted the
+        // innocent incumbent) — retirement records the run and judges nothing.
+        //
+        // Before R4 this arm pre-cleared `is_connected` so the ctl arm's
+        // swap-once guard would skip judging our own teardown. That guard is
+        // now structural: the teardown's `Disconnected` arrives on a retired
+        // identity, and the gate discards it.
+        self.retire_bind("manual-reconnect").await;
         // Spawn-or-kick (C4): the tap always acts. The old path silently
         // no-opped here whenever a wedged race loop still held the
         // single-flight flag — the dead-Reconnect symptom's second half.
@@ -1290,16 +1623,22 @@ impl DagMonitor {
     /// link blackout it reads stale silence against a seconds-old socket.
     /// The evidence baseline is `max(last_block_at, connected_at)` — a socket
     /// cannot be guilty of silence older than itself.
+    /// R4 sharpens it further: both halves of the baseline are now the ACCUSED
+    /// SOCKET's own (`BoundSocket::last_block_at` / `connected_at`), so a
+    /// block delivered by a previous socket can neither excuse nor condemn
+    /// this one.
     fn stall_verdict(&self) -> StallVerdict {
+        let Some(bind) = self.current_bind() else {
+            return StallVerdict::Hunting;
+        };
         if !self.is_connected() {
             return StallVerdict::Hunting;
         }
         let now = Self::now_unix();
-        let baseline = self
-            .inner
+        let baseline = bind
             .last_block_at
             .load(Ordering::Relaxed)
-            .max(self.inner.connected_at.load(Ordering::Relaxed));
+            .max(bind.connected_at.load(Ordering::Relaxed));
         let silent_secs = now.saturating_sub(baseline);
         if baseline != 0 && silent_secs > link::WATCHDOG_STALL_SECS {
             StallVerdict::Execute { silent_secs }
@@ -1308,12 +1647,15 @@ impl DagMonitor {
         }
     }
 
-    /// Record that a block just arrived (the watchdog heartbeat).
-    fn mark_block_seen(&self) {
+    /// Record that a block just arrived (the watchdog heartbeat). Two clocks,
+    /// two purposes (R4): the socket's own is the evidence a stall claim is
+    /// judged against, the process-wide one is how old the glass's data is.
+    fn mark_block_seen(&self, bind: &BoundSocket) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        bind.last_block_at.store(now, Ordering::Relaxed);
         self.inner.last_block_at.store(now, Ordering::Relaxed);
     }
 
@@ -1336,24 +1678,14 @@ impl DagMonitor {
     /// Sets `paused` so a live race loop stands down instead of redialing.
     pub async fn stop(&self) -> Result<()> {
         self.inner.paused.store(true, Ordering::SeqCst);
-        self.bounded_disconnect().await;
-        let shutdown = self
-            .inner
-            .shutdown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(tx) = shutdown {
-            let _ = tx.send(());
-        }
-        let task = self
-            .inner
-            .event_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
-            let _ = task.await;
+        // The retirement records the run and signals the bind's task; at
+        // process stop there is nobody left to read the drain evidence, so the
+        // task is dropped rather than waited out.
+        if let Some(retired) = self.retire_bind("stopped").await {
+            if let Some(task) = retired.task {
+                task.abort();
+                let _ = task.await;
+            }
         }
         Ok(())
     }
@@ -1363,254 +1695,359 @@ impl DagMonitor {
         let _ = self.inner.events.send(event);
     }
 
-    async fn event_loop(
+    /// One socket's whole life, serviced by its own task (R4).
+    ///
+    /// Every event — before or after retirement — passes the identity gate on
+    /// the way in. That is deliberate: retirement and the teardown event it
+    /// provokes race each other by design (the soak measured 1–5 ms), so the
+    /// task can and does see its own death notice while still in its normal
+    /// loop. The gate, not the ordering, is what makes that harmless.
+    ///
+    /// After retirement the task keeps reading for [`RETIRED_DRAIN`] so the
+    /// late teardown — the one that used to be attributed to the next socket
+    /// and kill it — is seen, logged and discarded, then reports what it
+    /// refused and exits.
+    async fn bind_loop(
         self,
+        bind: Arc<BoundSocket>,
         ctl_rx: async_channel::Receiver<RpcState>,
-        mut shutdown_rx: oneshot::Receiver<()>,
+        retire_rx: oneshot::Receiver<()>,
     ) {
-        let notification_rx = self.inner.notification_rx.clone();
+        let mut retire_rx = retire_rx;
+        // `Some(deadline)` once this bind has been retired.
+        let mut exit_at: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 // Poll order matters (biased): drain ctl + notifications
-                // before honoring shutdown, mirroring the upstream example.
+                // before honoring the exit, mirroring the upstream example.
                 biased;
                 msg = ctl_rx.recv() => {
                     match msg {
-                        Ok(RpcState::Connected) => {
-                            // This connect IS the network-alive proof: settle
-                            // the parked strike (commit fresh from a DIFFERENT
-                            // prover; discard stale or self-refuted — D-084).
-                            let prover = self.inner.client.url();
-                            self.settle_pending_strike(prover.as_deref());
-                            // Demotion enforcement at the one choke point
-                            // every connection passes — a demoted endpoint
-                            // that sneaks back in (a ws-level phantom redial,
-                            // a poisoned cache) is refused and re-raced,
-                            // UNLESS the race itself bound it knowingly
-                            // (hygiene advisory: nothing healthier exists).
-                            if self.inner.direct_url.is_none()
-                                && !self.inner.hygiene_advisory.load(Ordering::SeqCst)
-                                && !self.inner.paused.load(Ordering::SeqCst)
-                            {
-                                let demoted_url = self.inner.client.url().filter(|url| {
-                                    self.inner
-                                        .health
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .is_demoted(url, Self::now_unix())
-                                });
-                                if let Some(url) = demoted_url {
-                                    log::warn!(
-                                        "link: demoted endpoint reconnected — refusing {url} and re-racing"
-                                    );
-                                    self.bounded_disconnect().await;
-                                    self.spawn_race();
-                                    continue;
-                                }
-                            }
-                            match self.handle_connect().await {
-                                Ok(()) => {
-                                    // `connected_at` FIRST, `is_connected` second (R3
-                                    // consensus-audit finding): the SeqCst store
-                                    // publishes the stamp, so a stall claim landing
-                                    // between the two can never judge this fresh
-                                    // socket against the PRIOR socket's baseline —
-                                    // the exact class D-099 exists to kill.
-                                    self.inner.connected_at.store(Self::now_unix(), Ordering::Relaxed);
-                                    self.inner.is_connected.store(true, Ordering::SeqCst);
-                                    // V1 spans: close the cold-connect leg,
-                                    // arm the first-DAA one.
-                                    spans::mark("wss_connected");
-                                    self.inner.daa_seen_since_connect.store(false, Ordering::Relaxed);
-                                    log::info!("dag-monitor: connected to {:?}", self.inner.client.url());
-                                    // Remember the node that worked — it is
-                                    // candidate 0 (the fast path) of the next
-                                    // cold start / post-grace race — and stamp
-                                    // it observed-healthy for the pantry (C6).
-                                    if let Some(url) = self.inner.client.url() {
-                                        self.persist_endpoint(&url);
-                                        self.mark_endpoint_healthy(&url);
-                                    }
-                                    self.emit(DagEvent::Connected { url: self.inner.client.url() });
-                                }
-                                // Stay "disconnected"; the race re-heal below
-                                // answers the Disconnected this failure ends in.
-                                // KNOWN GAP (audited 2026-06-12, [→ P1]): if the
-                                // node accepts the socket but rejects a
-                                // subscription, the link idles half-set-up until
-                                // the next natural reconnect.
-                                Err(e) => log::warn!(
-                                    "dag-monitor: subscription setup failed: {}",
-                                    link::sanitize_node_text(&e.to_string())
-                                ),
-                            }
+                        Ok(state) if !self.is_current_bind(bind.gen) => {
+                            self.discard_ctl(&bind, state);
                         }
-                        Ok(RpcState::Disconnected) => {
-                            // Swap-once: only a drop of a connection we KNEW
-                            // was live re-heals (bind failures and our own
-                            // deliberate disconnects also surface here).
-                            let was_connected =
-                                self.inner.is_connected.swap(false, Ordering::SeqCst);
-                            log::info!("dag-monitor: disconnected");
-                            self.handle_disconnect().await;
-                            if was_connected
-                                && !self.inner.paused.load(Ordering::SeqCst)
-                                && self.inner.direct_url.is_none()
-                            {
-                                // The app is the one reconnect authority
-                                // (D-081): kill the ws-level loop still loyal
-                                // to the dropped URL (best-effort — a dial
-                                // already in flight can't be aborted; the
-                                // Connected-time checks above judge whatever
-                                // it lands), judge the run (a clean run
-                                // clears strikes; a short one parks a strike
-                                // for the next connect to settle), re-race.
-                                let dropped = self.inner.client.url();
-                                self.bounded_disconnect().await;
-                                let run_secs = Self::now_unix().saturating_sub(
-                                    self.inner.connected_at.load(Ordering::Relaxed),
-                                );
-                                // R2 D4: record the run length for EVERY
-                                // judgment before deciding what it means —
-                                // the floor can only be re-examined against
-                                // the drops it absorbed, and a ledger that
-                                // stored only convictions would keep proving
-                                // the floor right by construction. Through
-                                // the SHARED seam (R3 D1): the watchdog path
-                                // records the same way, so a cascade can no
-                                // longer zero the very column built to
-                                // diagnose it.
-                                if let Some(url) = dropped.as_deref() {
-                                    self.record_socket_run(url, run_secs, "ctl-drop");
-                                }
-                                match (dropped, link::judge_run(run_secs)) {
-                                    (Some(url), link::RunJudgment::CleanRun) => {
-                                        self.commit_clean_run(&url);
-                                    }
-                                    (Some(url), link::RunJudgment::Strike) => {
-                                        self.set_pending_strike(url, link::StrikeReason::Drop)
-                                    }
-                                    (Some(url), link::RunJudgment::ChurnNoise) => {
-                                        // V6 churn-smoothing (item 16): a run
-                                        // this short never lived — its death
-                                        // says nothing about the endpoint.
-                                        log::info!(
-                                            "link: drop after {run_secs}s run on {url} — churn noise, no strike"
-                                        );
-                                    }
-                                    (None, _) => {}
-                                }
-                                self.spawn_race();
-                            }
-                        }
+                        Ok(RpcState::Connected) => self.on_connected(&bind).await,
+                        Ok(RpcState::Disconnected) => self.on_disconnected(&bind).await,
                         // Ctl channel closed: client is gone, nothing to track.
                         Err(_) => {
-                            log::warn!("dag-monitor: ctl channel closed — event task exiting");
+                            log::warn!(
+                                "dag-monitor: ctl channel closed for bind gen={} — task exiting",
+                                bind.gen
+                            );
                             break;
                         }
                     }
                 }
-                notification = notification_rx.recv() => {
+                notification = bind.notification_rx.recv() => {
                     match notification {
-                        // P2.1 payload scan: BlockAdded is consumed here — the
-                        // ~10 blocks/s stream never leaves this task; only
-                        // `ciph_msg:` matches fan out (sparse by design, §0.3).
-                        // Version-neutral by construction (transport.rs, §0.2).
-                        Ok(Notification::BlockAdded(added)) => {
-                            let matches = transport::scan_block(&added.block, self.inner.address_prefix);
-                            if !matches.is_empty() {
-                                // Three-lights producer log (V3/L55): count +
-                                // receiver count only — payload bodies are
-                                // never logged (§4 plaintext discipline).
-                                // `info`: the liblog lane is Info-max, a
-                                // `debug` light is dark on device (L53).
-                                log::info!(
-                                    "dag-monitor: transport emit matches={} receivers={}",
-                                    matches.len(),
-                                    self.inner.transport_events.receiver_count()
-                                );
-                            }
-                            for event in matches {
-                                // Send fails only with zero subscribers — fine.
-                                let _ = self.inner.transport_events.send(event);
-                            }
-                            // Liveness heartbeat for the watchdog (P3): a block
-                            // arrived, the socket is alive right now.
-                            self.mark_block_seen();
-                            // Advance the catch-up cursor past this scanned block
-                            // (throttled; no-op until transport arms it). P5/D-067.
-                            self.persist_transport_cursor(&added.block.header.hash);
+                        Ok(_) if !self.is_current_bind(bind.gen) => {
+                            self.discard_notification(&bind);
                         }
-                        // V1 acceptance spine: forward the batch to the tracker
-                        // task when one is attached (never processed here — the
-                        // event loop stays non-blocking; blue-score resolution
-                        // and persistence live in the tracker).
-                        Ok(Notification::VirtualChainChanged(vcc)) => {
-                            let sender = self
-                                .inner
-                                .vcc_tx
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .clone();
-                            if let Some(tx) = sender {
-                                let accepted: Vec<(Hash, Vec<Hash>)> = vcc
-                                    .accepted_transaction_ids
-                                    .iter()
-                                    .map(|a| (a.accepting_block_hash, a.accepted_transaction_ids.clone()))
-                                    .collect();
-                                let _ = tx.send(VccBatch {
-                                    removed_chain_block_hashes: vcc.removed_chain_block_hashes.clone(),
-                                    added_chain_block_hashes: vcc.added_chain_block_hashes.clone(),
-                                    accepted: Arc::new(accepted),
-                                });
-                            }
-                        }
-                        Ok(notification) => {
-                            if let Some(event) = map_notification(&notification) {
-                                // V1 span: the first DAA tick after a connect
-                                // closes the time-to-first-DAA row.
-                                if matches!(event, DagEvent::VirtualDaaScore(_))
-                                    && !self.inner.daa_seen_since_connect.swap(true, Ordering::Relaxed)
-                                {
-                                    spans::mark("first_daa");
-                                }
-                                self.emit(event);
-                            }
-                        }
+                        Ok(notification) => self.on_notification(&bind, notification),
                         Err(_) => {
-                            log::warn!("dag-monitor: notification channel closed — event task exiting");
+                            log::warn!(
+                                "dag-monitor: notification channel closed for bind gen={} — task exiting",
+                                bind.gen
+                            );
                             break;
                         }
                     }
                 }
-                _ = &mut shutdown_rx => break,
+                _ = &mut retire_rx, if exit_at.is_none() => {
+                    exit_at = Some(tokio::time::Instant::now() + RETIRED_DRAIN);
+                }
+                _ = async {
+                    match exit_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        // Never fires while this bind is live.
+                        None => std::future::pending::<()>().await,
+                    }
+                } => break,
             }
         }
-        if self.is_connected() {
-            self.handle_disconnect().await;
+        let ctl = bind.stale_ctl.load(Ordering::Relaxed);
+        let notes = bind.stale_notifications.load(Ordering::Relaxed);
+        if ctl > 0 || notes > 0 {
+            log::info!(
+                "link: retired bind gen={} ({}) discarded {ctl} stale ctl event(s) and \
+                 {notes} stale notification(s)",
+                bind.gen,
+                bind.url
+            );
         }
     }
 
-    /// Scopes are per-connection node state — re-register on every connect.
-    async fn handle_connect(&self) -> Result<()> {
-        let rpc = self.inner.client.rpc_api();
+    /// This bind's socket came up — and the gate has already confirmed this
+    /// bind is the installed one, so everything below speaks about IT.
+    async fn on_connected(&self, bind: &Arc<BoundSocket>) {
+        // This connect IS the network-alive proof: settle the parked strike
+        // (commit fresh from a DIFFERENT prover; discard stale or
+        // self-refuted — D-084). The prover is named by identity now, not by
+        // a client descriptor re-read at event time.
+        self.settle_pending_strike(Some(bind.url.as_str()));
+        // Demotion enforcement at the one choke point every connection passes
+        // — a demoted endpoint that sneaks back in (a ws-level phantom redial,
+        // a poisoned cache) is refused and re-raced, UNLESS the race itself
+        // bound it knowingly (hygiene advisory: nothing healthier exists).
+        if self.inner.direct_url.is_none()
+            && !self.inner.hygiene_advisory.load(Ordering::SeqCst)
+            && !self.inner.paused.load(Ordering::SeqCst)
+            && self
+                .inner
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_demoted(&bind.url, Self::now_unix())
+        {
+            log::warn!(
+                "link: demoted endpoint reconnected — refusing {} and re-racing",
+                bind.url
+            );
+            self.retire_bind("demoted-refusal").await;
+            self.spawn_race();
+            return;
+        }
+        match self.handle_connect(bind).await {
+            Ok(()) => {
+                // **Publish atomically against retirement (R4, wallet-security
+                // BLOCK).** The identity gate runs at event INTAKE, but
+                // everything above — the strike settle, the demotion read, four
+                // subscription round-trips — takes real time, and `pause()`,
+                // `reconnect()` and the race's own arms all retire from OTHER
+                // tasks. A retirement that lands inside that window used to
+                // find `bound = Some(..)`, tear the socket down, and then have
+                // this arm set `is_connected = true` behind it: link up, no
+                // bind installed, every recovery path short-circuiting on
+                // `is_connected()` — a dark wallet reading "Connected" that
+                // only an app kill could clear, which is the D-100 outage class
+                // re-entering through the door built to close it.
+                //
+                // So the whole transition happens under the ONE lock
+                // `retire_bind` takes, with no await inside it. The ctl signal
+                // rides along via the pin's SYNCHRONOUS `try_signal_open`
+                // (`rpc/core/src/api/ctl.rs:77`) — its multiplexer channels are
+                // unbounded (workflow-core `channel.rs:203`), so `try_broadcast`
+                // cannot fail for want of capacity — which keeps the consumers'
+                // open/close order identical to the state transitions.
+                {
+                    let bound = self
+                        .inner
+                        .bound
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if bound.as_ref().map(|installed| installed.gen) != Some(bind.gen) {
+                        log::info!(
+                            "link: bind gen={} ({}) was retired while it came up — \
+                             not published; the hunt owns recovery",
+                            bind.gen,
+                            bind.url
+                        );
+                        return;
+                    }
+                    // `connected_at` FIRST, `is_connected` second (R3
+                    // consensus-audit finding): the stamp is published before
+                    // the flag, so a stall claim landing between the two can
+                    // never judge this fresh socket against a stale baseline.
+                    // R4 makes the point moot as well as ordered — the baseline
+                    // lives on the socket itself.
+                    bind.connected_at.store(Self::now_unix(), Ordering::Relaxed);
+                    // The stable handle points at this socket BEFORE anyone is
+                    // told it exists, so a consumer reacting to the ctl open
+                    // finds it (L59: the funds lanes re-arm on connect).
+                    self.inner.link_rpc.bind(bind.client.clone());
+                    self.inner.is_connected.store(true, Ordering::SeqCst);
+                    bind.daa_seen_since_connect.store(false, Ordering::Relaxed);
+                    self.inner
+                        .monitor_ctl
+                        .set_descriptor(Some(bind.url.clone()));
+                    bind.announced.store(true, Ordering::SeqCst);
+                    let _ = self.inner.monitor_ctl.try_signal_open();
+                    self.emit(DagEvent::Connected {
+                        url: Some(bind.url.clone()),
+                    });
+                }
+                // V1 spans: close the cold-connect leg, arm the first-DAA one.
+                spans::mark("wss_connected");
+                // Shape note for the forensic lane: the endpoint is no longer
+                // Debug-printed through an `Option` (it used to read
+                // `connected to Some("wss://…")`), because a bind always knows
+                // its own url. Capture greps that keyed on `Some(` want
+                // `dag-monitor: connected to wss://` now.
+                log::info!(
+                    "dag-monitor: connected to {} (bind gen={})",
+                    bind.url,
+                    bind.gen
+                );
+                // Remember the node that worked — it is candidate 0 (the fast
+                // path) of the next cold start / post-grace race — and stamp it
+                // observed-healthy for the pantry (C6).
+                self.persist_endpoint(&bind.url);
+                self.mark_endpoint_healthy(&bind.url);
+            }
+            // Stay "disconnected"; the race re-heal answers the Disconnected
+            // this failure ends in. KNOWN GAP (audited 2026-06-12, [→ P1]): if
+            // the node accepts the socket but rejects a subscription, the link
+            // idles half-set-up until the next natural reconnect.
+            Err(e) => log::warn!(
+                "dag-monitor: subscription setup failed: {}",
+                link::sanitize_node_text(&e.to_string())
+            ),
+        }
+    }
+
+    /// This bind's socket died — and it is still the installed one, so the
+    /// death is real news rather than a retired socket's echo.
+    async fn on_disconnected(&self, bind: &Arc<BoundSocket>) {
+        let was_connected = self.inner.is_connected.load(Ordering::SeqCst);
+        log::info!("dag-monitor: disconnected (bind gen={})", bind.gen);
+        // Pinned mode (dev/tests): the pin's own Retry loop owns this client
+        // and brings the SAME socket object back up, so the bind is kept and
+        // only the connection state is stood down.
+        if self.inner.direct_url.is_some() {
+            self.inner.is_connected.store(false, Ordering::SeqCst);
+            let listener_id = bind
+                .listener_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(id) = listener_id {
+                Self::unregister_listener_bounded(&bind.client, id).await;
+            }
+            if bind.announced.swap(false, Ordering::SeqCst) {
+                let _ = self.inner.monitor_ctl.try_signal_close();
+                self.emit(DagEvent::Disconnected);
+            }
+            return;
+        }
+        // A socket that never reached an accepted `Connected` belongs to the
+        // race loop that is still dialing it: its bind-failure arm retires it
+        // (and strikes, when the node is at fault). Retiring it from here
+        // would pull the identity out from under an in-flight connect.
+        if !was_connected {
+            return;
+        }
+        let paused = self.inner.paused.load(Ordering::SeqCst);
+        // The app is the one reconnect authority (D-081): retirement kills the
+        // ws-level loop still loyal to the dropped URL (best-effort — a dial
+        // already in flight can't be aborted; whatever it lands on is judged
+        // at its own Connected) and records the run through the single seam.
+        let Some(retired) = self.retire_bind("ctl-drop").await else {
+            return;
+        };
+        if paused {
+            return;
+        }
+        // R2 D4: the run length is recorded for EVERY judgment before deciding
+        // what it means — the floor can only be re-examined against the drops
+        // it absorbed, and a ledger that stored only convictions would keep
+        // proving the floor right by construction.
+        let run_secs = retired.run_secs;
+        match link::judge_run(run_secs) {
+            link::RunJudgment::CleanRun => self.commit_clean_run(&bind.url),
+            link::RunJudgment::Strike => {
+                self.set_pending_strike(bind.url.clone(), link::StrikeReason::Drop)
+            }
+            link::RunJudgment::ChurnNoise => {
+                // V6 churn-smoothing (item 16): a run this short never lived —
+                // its death says nothing about the endpoint.
+                log::info!(
+                    "link: drop after {run_secs}s run on {} — churn noise, no strike",
+                    bind.url
+                );
+            }
+        }
+        self.spawn_race();
+    }
+
+    /// A notification from the installed socket. Everything here folds state
+    /// this bind produced; a retired socket's stream is discarded upstream.
+    fn on_notification(&self, bind: &Arc<BoundSocket>, notification: Notification) {
+        match notification {
+            // P2.1 payload scan: BlockAdded is consumed here — the ~10
+            // blocks/s stream never leaves this task; only `ciph_msg:` matches
+            // fan out (sparse by design, §0.3). Version-neutral by
+            // construction (transport.rs, §0.2).
+            Notification::BlockAdded(added) => {
+                let matches = transport::scan_block(&added.block, self.inner.address_prefix);
+                if !matches.is_empty() {
+                    // Three-lights producer log (V3/L55): count + receiver
+                    // count only — payload bodies are never logged (§4
+                    // plaintext discipline). `info`: the liblog lane is
+                    // Info-max, a `debug` light is dark on device (L53).
+                    log::info!(
+                        "dag-monitor: transport emit matches={} receivers={}",
+                        matches.len(),
+                        self.inner.transport_events.receiver_count()
+                    );
+                }
+                for event in matches {
+                    // Send fails only with zero subscribers — fine.
+                    let _ = self.inner.transport_events.send(event);
+                }
+                // Liveness heartbeat for the watchdog (P3): a block arrived,
+                // THIS socket is alive right now.
+                self.mark_block_seen(bind);
+                // Advance the catch-up cursor past this scanned block
+                // (throttled; no-op until transport arms it). P5/D-067.
+                self.persist_transport_cursor(&added.block.header.hash);
+            }
+            // V1 acceptance spine: forward the batch to the tracker task when
+            // one is attached (never processed here — the event task stays
+            // non-blocking; blue-score resolution and persistence live in the
+            // tracker).
+            Notification::VirtualChainChanged(vcc) => {
+                let sender = self
+                    .inner
+                    .vcc_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(tx) = sender {
+                    let accepted: Vec<(Hash, Vec<Hash>)> = vcc
+                        .accepted_transaction_ids
+                        .iter()
+                        .map(|a| (a.accepting_block_hash, a.accepted_transaction_ids.clone()))
+                        .collect();
+                    let _ = tx.send(VccBatch {
+                        removed_chain_block_hashes: vcc.removed_chain_block_hashes.clone(),
+                        added_chain_block_hashes: vcc.added_chain_block_hashes.clone(),
+                        accepted: Arc::new(accepted),
+                    });
+                }
+            }
+            other => {
+                if let Some(event) = map_notification(&other) {
+                    // V1 span: the first DAA tick after a connect closes the
+                    // time-to-first-DAA row.
+                    if matches!(event, DagEvent::VirtualDaaScore(_))
+                        && !bind.daa_seen_since_connect.swap(true, Ordering::Relaxed)
+                    {
+                        spans::mark("first_daa");
+                    }
+                    self.emit(event);
+                }
+            }
+        }
+    }
+
+    /// Scopes are per-connection node state — re-register on every connect,
+    /// on the bind's OWN client (identity: a scope belongs to one socket).
+    async fn handle_connect(&self, bind: &Arc<BoundSocket>) -> Result<()> {
+        let rpc = bind.client.rpc_api();
         // Item 9 (V2 sitting, doubled Connected): a listener from a prior
         // connect that survived to here would ALSO receive every notification
-        // — same channel, doubled stream bandwidth. The double-connect race
-        // is architecturally gone (one reconnect authority, D-081), but a
-        // leaked listener must still be impossible: unregister before
-        // registering, and say so if one is ever found.
-        let prior = self
-            .inner
+        // — same channel, doubled stream bandwidth. Since R4 each bind starts
+        // with an empty slot, so finding one here means THIS client connected
+        // twice with no disconnect between: the pin's ws layer re-dialing a
+        // dropped socket with no caller (R2 D2, `link.rs` reproduction test).
+        // Stamp it, and let the strike path refuse to convict a node for
+        // anything dying in its neighbourhood.
+        let prior = bind
             .listener_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(id) = prior {
-            // R2 D2/D3: this is no longer only a hygiene warning. It is the
-            // one positive detector we have for "a socket exists that we did
-            // not create" — so stamp it, and let the strike path refuse to
-            // convict a node for anything dying in its neighbourhood.
             self.inner
                 .doubled_connect_at
                 .store(Self::now_unix(), Ordering::SeqCst);
@@ -1619,15 +2056,14 @@ impl DagMonitor {
                  strikes are inadmissible for {}s (R2 D3)",
                 link::SELF_INFLICTED_ADJACENCY_SECS
             );
-            let _ = rpc.unregister_listener(id).await;
+            Self::unregister_listener_bounded(&bind.client, id).await;
         }
         let listener_id = rpc.register_new_listener(ChannelConnection::new(
             "kaspaverse-dag-monitor",
-            self.inner.notification_tx.clone(),
+            bind.notification_tx.clone(),
             ChannelType::Persistent,
         ));
-        *self
-            .inner
+        *bind
             .listener_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener_id);
@@ -1660,21 +2096,6 @@ impl DagMonitor {
         )
         .await?;
         Ok(())
-    }
-
-    async fn handle_disconnect(&self) {
-        let listener_id = self
-            .inner
-            .listener_id
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(id) = listener_id {
-            // Best-effort: on a dropped connection the node already forgot us.
-            let _ = self.inner.client.rpc_api().unregister_listener(id).await;
-        }
-        self.inner.is_connected.store(false, Ordering::SeqCst);
-        self.emit(DagEvent::Disconnected);
     }
 }
 
@@ -1756,26 +2177,31 @@ mod tests {
     /// watchdog's process-lifetime block-age reads stale silence against a
     /// seconds-old socket and used to execute it on the next 10 s tick.
     /// PB-026: pre-state assertions are bounds, never equalities.
-    #[test]
-    fn stall_verdict_never_convicts_a_socket_younger_than_the_silence() {
+    #[tokio::test]
+    async fn stall_verdict_never_convicts_a_socket_younger_than_the_silence() {
+        const URL: &str = "wss://emma.example/kaspa/mainnet/wrpc/borsh";
         let monitor = DagMonitor::mainnet().expect("construct");
         let now = DagMonitor::now_unix();
 
-        // Not connected: no defendant — the claim becomes a hunt kick.
+        // No socket installed: no defendant — the claim becomes a hunt kick.
         assert_eq!(monitor.stall_verdict(), StallVerdict::Hunting);
 
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("a bind arms without dialing");
+        // Installed but not up: still no defendant.
+        assert_eq!(monitor.stall_verdict(), StallVerdict::Hunting);
         monitor.inner.is_connected.store(true, Ordering::SeqCst);
 
         // The regression case: blocks last seen 120 s ago (the BLACKOUT'S
         // silence), socket bound 5 s ago (ivy, 2026-07-31 01:00:18) — the
-        // old rule executed it; the socket must keep its window.
-        monitor
-            .inner
-            .last_block_at
+        // old rule executed it; the socket must keep its window. Since R4
+        // both clocks are the SOCKET'S own, so a previous socket's silence
+        // cannot even be read here.
+        bind.last_block_at
             .store(now.saturating_sub(120), Ordering::Relaxed);
-        monitor
-            .inner
-            .connected_at
+        bind.connected_at
             .store(now.saturating_sub(5), Ordering::Relaxed);
         assert!(
             matches!(monitor.stall_verdict(), StallVerdict::Refuse { silent_secs } if silent_secs <= 10),
@@ -1783,13 +2209,9 @@ mod tests {
         );
 
         // A true zombie: connected 40+ s and blockless the whole time.
-        monitor
-            .inner
-            .connected_at
+        bind.connected_at
             .store(now.saturating_sub(40), Ordering::Relaxed);
-        monitor
-            .inner
-            .last_block_at
+        bind.last_block_at
             .store(now.saturating_sub(40), Ordering::Relaxed);
         assert!(
             matches!(monitor.stall_verdict(), StallVerdict::Execute { silent_secs } if silent_secs >= link::WATCHDOG_STALL_SECS),
@@ -1797,7 +2219,18 @@ mod tests {
         );
 
         // Blocks flowing now: healthy regardless of age.
-        monitor.inner.last_block_at.store(now, Ordering::Relaxed);
+        bind.last_block_at.store(now, Ordering::Relaxed);
+        assert!(matches!(
+            monitor.stall_verdict(),
+            StallVerdict::Refuse { .. }
+        ));
+
+        // The process-wide display clock is NOT the judgment clock: a stale
+        // process reading must never convict a socket that is delivering.
+        monitor
+            .inner
+            .last_block_at
+            .store(now.saturating_sub(600), Ordering::Relaxed);
         assert!(matches!(
             monitor.stall_verdict(),
             StallVerdict::Refuse { .. }
@@ -1985,6 +2418,434 @@ mod tests {
             .resume()
             .await
             .expect("resume initiates non-blocking connect");
+    }
+
+    // ── R4 · per-bind identity (D-101) ────────────────────────────────────
+
+    /// Poll a predicate to a bound. Waiting is unavoidable here — the bind's
+    /// task services its channels on its own — but the WAIT is bounded and
+    /// the assertion is the predicate, never a sleep-and-hope.
+    async fn wait_for(label: &str, mut pred: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !pred() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {label}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Put a bind in the state an ACCEPTED `Connected` leaves it in, without
+    /// going through `on_connected` — so a test can stage the post-window
+    /// state deterministically instead of racing for it (L69/PB-026). Mirrors
+    /// `on_connected`'s Ok arm in order: the socket's own stamp, the stable
+    /// handle, then the published link state.
+    fn mark_accepted(monitor: &DagMonitor, bind: &Arc<BoundSocket>, age_secs: u64) {
+        bind.connected_at.store(
+            DagMonitor::now_unix().saturating_sub(age_secs),
+            Ordering::Relaxed,
+        );
+        monitor.inner.link_rpc.bind(bind.client.clone());
+        monitor.inner.is_connected.store(true, Ordering::SeqCst);
+    }
+
+    fn last_run(monitor: &DagMonitor, url: &str) -> Option<u64> {
+        monitor
+            .inner
+            .health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_run_secs(url)
+    }
+
+    /// **R4 D3 — the live-lock's regression test.**
+    ///
+    /// The D-100 soak signature: a fresh bind reports `run ended run=0s
+    /// cause=ctl-drop` 1–5 ms after `connected`, because the PREVIOUS socket's
+    /// teardown event arrived after the new bind and was attributed to it —
+    /// 85 times in 18 minutes, self-sustaining until the app was killed. R3's
+    /// churn floor made those deaths unconvictable (zero strikes) and the app
+    /// still live-locked: leniency does not fix attribution (L71).
+    ///
+    /// This drives the LOOP, not one event: three generations, each retired
+    /// for real and each followed by its own late teardown event. The property
+    /// under test is that the socket which is alive stays alive and carries no
+    /// death on its record.
+    #[tokio::test]
+    async fn a_retired_sockets_teardown_never_kills_the_bind_that_replaced_it() {
+        const URLS: [&str; 3] = [
+            "wss://vivi.example/kaspa/mainnet/wrpc/borsh",
+            "wss://eva.example/kaspa/mainnet/wrpc/borsh",
+            "wss://isla.example/kaspa/mainnet/wrpc/borsh",
+        ];
+        let monitor = DagMonitor::mainnet().expect("construct");
+
+        let mut retired: Vec<Arc<BoundSocket>> = Vec::new();
+        for (round, url) in URLS.iter().enumerate() {
+            let bind = monitor
+                .install_bind((*url).to_string())
+                .await
+                .expect("arm a bind");
+            mark_accepted(&monitor, &bind, 30);
+
+            // Every previously retired socket now shouts its death — the
+            // aliasing the soak recorded, several times over, arriving while
+            // a healthy socket is bound.
+            for dead in &retired {
+                for _ in 0..2 {
+                    let _ = dead.client.rpc_ctl().signal_close().await;
+                }
+                wait_for("the retired bind to discard its late teardown", || {
+                    dead.stale_ctl.load(Ordering::Relaxed) >= 1
+                })
+                .await;
+
+                // The living socket is untouched: still connected, still the
+                // installed identity, and no race was started on its behalf.
+                assert!(
+                    monitor.is_connected(),
+                    "round {round}: a retired socket's teardown must not take the live link down"
+                );
+                assert_eq!(
+                    monitor.current_bind().map(|b| b.gen),
+                    Some(bind.gen),
+                    "round {round}: the installed identity must not change"
+                );
+                assert!(
+                    !monitor.is_searching(),
+                    "round {round}: a stale event must not start a hunt"
+                );
+                assert_eq!(
+                    last_run(&monitor, url),
+                    None,
+                    "round {round}: the LIVE socket must carry no death on its record — \
+                     this is the `run=0s cause=ctl-drop` the soak saw 85 times"
+                );
+            }
+
+            // Retire it for real, then let the next generation take over.
+            monitor.retire_bind("ctl-drop").await;
+            assert!(
+                last_run(&monitor, url).is_some(),
+                "round {round}: a REAL death is still recorded"
+            );
+            retired.push(bind);
+        }
+
+        // The last generation retired with nothing installed behind it: its
+        // late teardown must be refused just the same, and must not resurrect
+        // a link that is legitimately down.
+        let last = retired.last().expect("three generations ran");
+        let _ = last.client.rpc_ctl().signal_close().await;
+        wait_for("the final retired bind to discard its teardown", || {
+            last.stale_ctl.load(Ordering::Relaxed) >= 1
+        })
+        .await;
+        assert!(!monitor.is_connected(), "nothing is bound; nothing is up");
+        assert!(monitor.current_bind().is_none());
+
+        // Every socket's late teardown was SEEN and refused, not silently
+        // lost (bounds, not equalities — the pin's own timing decides how many
+        // events a dying socket emits; L69/PB-026).
+        for (dead, url) in retired.iter().zip(URLS.iter()) {
+            assert!(
+                dead.stale_ctl.load(Ordering::Relaxed) >= 1,
+                "{url}: its late teardown was seen and refused, not silently lost"
+            );
+        }
+    }
+
+    /// **R4 D4 — a retired socket cannot deafen or excuse the live one.**
+    ///
+    /// The soak convicted two sockets of a 39–40 s stall while race dials to
+    /// the same hosts were succeeding in under a second (vivi 13:32, eva
+    /// 13:32:43). The mechanism the shared client allowed: one process-wide
+    /// `listener_id` and one notification channel, so a retired socket's
+    /// teardown could unregister the LIVE socket's listener and leave it
+    /// connected but deaf — genuinely silent, and convicted by a rule that was
+    /// working correctly on false evidence.
+    ///
+    /// Both halves are now per-bind, and this proves it from the outside:
+    /// the retired socket's stream reaches nothing, and the live socket's
+    /// subscription is untouched by its predecessor's death.
+    #[tokio::test]
+    async fn a_retired_sockets_notifications_reach_nothing_and_its_death_deafens_nobody() {
+        const DEAD: &str = "wss://vivi.example/kaspa/mainnet/wrpc/borsh";
+        const LIVE: &str = "wss://eva.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let mut events = monitor.subscribe();
+
+        let dead = monitor
+            .install_bind(DEAD.to_string())
+            .await
+            .expect("arm the first bind");
+        mark_accepted(&monitor, &dead, 30);
+        monitor.retire_bind("ctl-drop").await;
+
+        let live = monitor
+            .install_bind(LIVE.to_string())
+            .await
+            .expect("arm the second bind");
+        mark_accepted(&monitor, &live, 0);
+        // The live socket's subscription, as `handle_connect` would leave it.
+        *live
+            .listener_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(42);
+        let live_block_clock = live.last_block_at.load(Ordering::Relaxed);
+
+        // The dead socket keeps talking: a late teardown AND a late block.
+        let _ = dead.client.rpc_ctl().signal_close().await;
+        let _ = dead
+            .notification_tx
+            .send(Notification::VirtualDaaScoreChanged(
+                VirtualDaaScoreChangedNotification {
+                    virtual_daa_score: 500_808_467,
+                },
+            ))
+            .await;
+        wait_for("the retired bind to discard its late notification", || {
+            dead.stale_notifications.load(Ordering::Relaxed) >= 1
+        })
+        .await;
+
+        // Nothing of it reached the app.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), events.recv())
+                .await
+                .is_err(),
+            "a retired socket's notification must not surface as a chain event"
+        );
+        // Nothing of it reached the live socket, either.
+        assert_eq!(
+            *live
+                .listener_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(42),
+            "the live socket's subscription must survive its predecessor's death — \
+             the deafness that produced the soak's 39-40 s stall convictions"
+        );
+        assert_eq!(
+            live.last_block_at.load(Ordering::Relaxed),
+            live_block_clock,
+            "a dead socket's block must not refresh the live socket's evidence clock"
+        );
+        assert!(monitor.is_connected(), "the live link is still up");
+    }
+
+    /// **R4 D2 — every teardown path records, and recording is not judging.**
+    ///
+    /// D-098 read a column of zeros because the watchdog kill path never
+    /// called the writer; the D-100 soak then found a second silent path (the
+    /// 13:57 pause-path teardown left no lifecycle line at all, and the 14:06
+    /// resume raced against a run nobody had measured). Retirement is now the
+    /// only exit, so each of these paths writes the run — and a deliberate
+    /// teardown still convicts nobody.
+    #[tokio::test]
+    async fn every_teardown_path_records_its_run() {
+        const RUN: u64 = 42;
+
+        for (case, url) in [
+            ("paused", "wss://a.example/kaspa/mainnet/wrpc/borsh"),
+            ("stopped", "wss://b.example/kaspa/mainnet/wrpc/borsh"),
+            (
+                "manual-reconnect",
+                "wss://c.example/kaspa/mainnet/wrpc/borsh",
+            ),
+            ("superseded", "wss://d.example/kaspa/mainnet/wrpc/borsh"),
+        ] {
+            let monitor = DagMonitor::mainnet().expect("construct");
+            // Hold the single-flight flag so a recovery path kicks instead of
+            // spawning a race that would dial the real network.
+            monitor.inner.race_running.store(true, Ordering::SeqCst);
+            let bind = monitor
+                .install_bind(url.to_string())
+                .await
+                .expect("arm a bind");
+            mark_accepted(&monitor, &bind, RUN);
+
+            match case {
+                "paused" => monitor.pause().await.expect("pause"),
+                "stopped" => monitor.stop().await.expect("stop"),
+                "manual-reconnect" => monitor.reconnect(false).await.expect("reconnect"),
+                // Installing over a live bind must not leak it.
+                _ => {
+                    monitor
+                        .install_bind("wss://next.example/kaspa/mainnet/wrpc/borsh".to_string())
+                        .await
+                        .expect("arm the successor");
+                }
+            }
+
+            let recorded = last_run(&monitor, url)
+                .unwrap_or_else(|| panic!("{case}: the run must reach the durable ledger"));
+            assert!(
+                recorded >= RUN,
+                "{case}: the recorded run ({recorded}s) must cover the socket's life"
+            );
+            // Recording is not judging: a deliberate teardown parks no strike,
+            // commits none, and hands out no clean-run credit either. (The
+            // ledger row exists — `record_run` created it — but it carries no
+            // conviction: `Unknown` is the reason of a row nobody was charged
+            // on.)
+            {
+                let health = monitor
+                    .inner
+                    .health
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert!(
+                    !health.is_demoted(url, DagMonitor::now_unix()),
+                    "{case}: a deliberate teardown must not demote the endpoint"
+                );
+                assert!(
+                    matches!(
+                        health.last_reason(url),
+                        None | Some((link::StrikeReason::Unknown, 0))
+                    ),
+                    "{case}: a deliberate teardown convicts nobody, got {:?}",
+                    health.last_reason(url)
+                );
+            }
+            assert!(
+                monitor
+                    .inner
+                    .pending_strike
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none(),
+                "{case}: a deliberate teardown parks no strike either"
+            );
+            assert!(!monitor.is_connected(), "{case}: the link is down");
+            assert!(
+                monitor.current_bind().is_none() || case == "superseded",
+                "{case}: no bind is left installed"
+            );
+        }
+    }
+
+    /// **R4 — a bind retired while it was coming up must not publish.**
+    ///
+    /// The wallet-security BLOCK: the identity gate runs at event INTAKE, but
+    /// `on_connected` then spends four subscription round-trips before it
+    /// publishes. A `pause()` / `reconnect()` / demoted-refusal landing inside
+    /// that window used to be overwritten by the publish, leaving
+    /// `is_connected = true` with NO bind installed — a state nothing could
+    /// clear, because every recovery path short-circuits on `is_connected()`
+    /// and the socket's own death notice is (correctly) discarded as stale.
+    /// A dark wallet reading "Connected" until the app is killed: the D-100
+    /// outage class walking back in through the door built to close it.
+    #[tokio::test]
+    async fn a_bind_retired_while_coming_up_never_publishes_itself() {
+        const URL: &str = "wss://vivi.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+
+        // The retirement lands while the socket is still coming up — before it
+        // ever published (`announced` is false, so consumers were never told).
+        monitor.retire_bind("paused").await;
+
+        // The publish now runs on a bind nobody is waiting for any more.
+        monitor.on_connected(&bind).await;
+
+        assert!(
+            !monitor.is_connected(),
+            "a retired bind must not raise the link — this is the unrecoverable \
+             connected-with-nothing-bound state"
+        );
+        assert!(
+            monitor.current_bind().is_none(),
+            "and it must not reinstall itself"
+        );
+        assert!(
+            !bind.announced.load(Ordering::SeqCst),
+            "consumers are never told a retired socket came up"
+        );
+        // The link is recoverable: a fresh bind can take over cleanly.
+        let next = monitor
+            .install_bind("wss://eva.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm the successor");
+        assert!(monitor.is_current_bind(next.gen));
+    }
+
+    /// **R4 D1 — the consumers' handle is the thing that does NOT move.**
+    ///
+    /// The client rotates once per reconnect; `WalletEngine`'s `UtxoProcessor`
+    /// consumes its `Rpc` at construction and the acceptance tracker moves one
+    /// into its task, so if THAT changed we would be re-plumbing every
+    /// funds-visibility lane L59 scarred us on. It does not: both halves of
+    /// `rpc()` are monitor-owned and outlive every bind.
+    #[tokio::test]
+    async fn the_handle_consumers_bind_at_construction_outlives_every_socket() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let held = monitor.rpc();
+
+        let bind = monitor
+            .install_bind("wss://a.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        mark_accepted(&monitor, &bind, 5);
+        monitor.retire_bind("ctl-drop").await;
+        let next = monitor
+            .install_bind("wss://b.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm the successor");
+        mark_accepted(&monitor, &next, 0);
+
+        let after = monitor.rpc();
+        assert!(
+            Arc::ptr_eq(held.rpc_api(), after.rpc_api()),
+            "the rpc handle must be the same object across a rebind"
+        );
+        // The ctl a consumer watches is the monitor's own, and it is still the
+        // one being driven — so a processor bound before the first socket
+        // existed still hears every accepted connect.
+        assert!(
+            Arc::ptr_eq(
+                &monitor.rpc().rpc_ctl().multiplexer().channels,
+                &held.rpc_ctl().multiplexer().channels
+            ),
+            "the ctl a consumer watches must be the same object across a rebind"
+        );
+    }
+
+    /// A watchdog execution still records its run and still parks its strike —
+    /// R3's ruling 1 machinery is untouched by R4's re-plumb.
+    #[tokio::test]
+    async fn a_watchdog_execution_still_records_and_parks_its_strike() {
+        const URL: &str = "wss://vivi.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        mark_accepted(&monitor, &bind, 60);
+        // Silent its whole life: a true zombie on its OWN clock.
+        bind.last_block_at.store(0, Ordering::Relaxed);
+
+        monitor.reconnect(true).await.expect("stalled reconnect");
+
+        assert!(
+            last_run(&monitor, URL).is_some_and(|run| run >= 60),
+            "the executed socket's run reaches the ledger (D-098's column of zeros)"
+        );
+        let parked = monitor
+            .inner
+            .pending_strike
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            matches!(parked, Some((ref u, _, link::StrikeReason::Stall)) if u == URL),
+            "the execution parks a Stall against the socket it judged, got {parked:?}"
+        );
     }
 
     /// Live smoke test against mainnet via the PNN resolver — run manually:

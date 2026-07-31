@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# R4 per-bind identity (D-101): the link's stable `Arc<dyn RpcApi>` handle
+# implements the pin's `#[async_trait]` RpcApi, so the attribute macro moves
+# from dev- to normal dependencies. No new package enters the tree — the pin's
+# own kaspa-rpc-core already depends on it, so this ships nothing new; only the
+# manifest line moves (dependency-steward note).
+async-trait.workspace = true
 kaspa-wrpc-client.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-addresses.workspace = true
@@ -34,9 +40,8 @@ serde_json.workspace = true
 kaspa-rpc-core.workspace = true
 
 [dev-dependencies]
-# Reconnect-survival regression harness (V6, guards D-083/L59/PB-022): the
-# test fake implements the pin's #[async_trait] RpcApi. Never ships.
-async-trait.workspace = true
+# (async-trait moved to [dependencies] at R4 — the reconnect-survival fake,
+# which also implements the pin's #[async_trait] RpcApi, inherits it there.)
 # R2 D2 reproduction harness: a loopback ws server for the self-reconnect
 # proof. Never ships (see the workspace note).
 tokio-tungstenite.workspace = true
