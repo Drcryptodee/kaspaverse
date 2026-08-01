@@ -240,10 +240,24 @@ pub enum WitnessChunk {
 }
 
 /// The request half of the OQ-1 split: which key, which sighash mode.
+///
+/// **Sighash law (C1 closure audit · D-115).** The freeze property this seam
+/// promises — nothing rebinds after core signs — holds because the sighash
+/// commits to the whole transaction, and it does that **only under
+/// `SIG_HASH_ALL`**: the pinned hasher zeroes entire commitment fields for
+/// the rest of the type space (`sequences_hash` → `ZERO_HASH` under
+/// `NONE`/`SINGLE`/`ANYONECANPAY`; `outputs_hash` → `ZERO_HASH` under `NONE`;
+/// `previous_outputs_hash` → `ZERO_HASH` under `ANYONECANPAY` —
+/// `consensus/core/src/hashing/sighash.rs` at `cfafeb4c`). Core's slot-fill
+/// therefore REFUSES any slot whose type is not `SIG_HASH_ALL` unless a
+/// `D-` entry names the exception and the narrower commitment it accepts —
+/// an implementation cannot widen what the user's signature stops committing
+/// to by picking a looser mode. A default is not a constraint; this law is.
 #[derive(Clone, Debug)]
 pub struct SignatureSlot {
     pub key: KeyRole,
     /// Pinned sighash type (INV-9 — the pin's own type, not a re-statement).
+    /// Constrained at fill time by the D-115 law above.
     pub sighash: SigHashType,
 }
 
