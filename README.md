@@ -11,21 +11,30 @@ core, with **keys that never leave Rust memory and never cross the language boun
 
 ## What this becomes
 
-The north star: a sovereign **everything-app for the pure-L1 Kaspa ecosystem** — finance,
-communications, identity, and games as native L1 primitives. Built in this order:
+**A minimal, excellent Kaspa wallet that grows one proven surface at a time.** There is no
+destination noun here: the app is what it has proven, and the list below is a sequence, not
+a claim. Two of the six are shipped.
 
-- **A minimal, excellent Kaspa wallet** — Keystore/biometric vault, send/receive at
-  10 bps speed, KIP-9-aware fees. **Shipped and device-proven** (status below).
-- **Native transport** — encrypted-payload messaging as a first-class L1 primitive: the
+- **Money** — Keystore/biometric vault, send/receive at 10 bps speed, fees priced by the
+  pinned consensus crates rather than by us. **Shipped and device-proven** (status below).
+- **Communication** — encrypted-payload messaging as a first-class L1 primitive: the
   challenge/handshake rail the games ride on, wire-compatible with the ecosystem's
   established Kasia payload format. **Shipped and interop-proven** against live
   third-party clients.
-- **The first covenant games on Kaspa L1** — PvP duels with on-chain wager escrow
-  enforced by Toccata covenants (KIP-17/20), every move a ~1-second L1 transaction:
-  commit-reveal RPS → tic-tac-toe → **Attack & Defend** → ZK battleship (KIP-16,
+- **Contracts** — a covenant engine on Toccata (KIP-17/20): state machines whose rules live
+  in the script, with no admin path, no upgrade proxy and no pause guardian unless the
+  author writes one as a transition you can read before you fund it. **In progress.**
+- **Games** — PvP duels with on-chain wager escrow, no house and no server holding funds.
+  The design bar, which no contract ships without meeting: **every state has a timeout exit
+  one player can take alone**, so an opponent who walks away cannot strand your money.
+  Commit-reveal RPS → tic-tac-toe → **Attack & Defend** → ZK battleship (KIP-16,
   settlement-time proving) → tournaments.
-- **The covenant vault** — the same engine turned inward: time-locked recovery and
-  spending limits; the wallet hardening itself.
+- **Finance** — the contract engine turned inward: time-locked recovery, spending limits,
+  dead-man's-switch inheritance. Funds owned by a rule you can read rather than a party you
+  must trust. Market structures that need shared state (order books, AMMs) are **out of
+  scope**, not queued.
+- **Identity** — your keypair already is your identity; there is no login layer to import.
+  Human-readable naming arrives natively or not at all.
 
 Pure L1 — no L2, no house. No servers. No telemetry. Indexers are optional, untrusted
 accelerators, always verifiable against the chain.
@@ -46,22 +55,32 @@ found **zero code defects**. **Native transport shipped 2026-07-08** (Phase 2): 
 payloads on L1, byte-parity proven against the ecosystem's cipher and interop-proven
 against live third-party clients on mainnet.
 
-In flight now: a **connection-reliability pass** — the wallet reaches the network through
-public community nodes over a phone radio, and holding that link through weak signal and
-network changes turned out to be the hard part (see the limitation below). After it: the
-**covenant engine** (Phase 3), then the arcade.
+**Connection reliability closed 2026-07-31.** The wallet reaches the network through public
+community nodes over a phone radio, and holding that link through weak signal and network
+changes turned out to be the hard part — it took five iterations, and the root cause was
+ours, not the nodes'. Verified across two multi-hour soaks of ordinary use on a real device:
+zero healthy nodes wrongly blamed, and reconnects that used to hang now land in seconds
+(residual limitation below).
+
+In flight now: the **covenant engine** (Phase 3) — currently in an architecture pass that
+settles the module boundary, the custody of covenant state, and the contract specs *before*
+any contract is written. Then the arcade.
 
 The state of every subsystem, and the reasoning behind every established choice, live in
 the project's engineering record — which is private (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Known limitations (honest roadmap)
 
-- **Send propagation can be variable.** The wallet currently reaches the network through a
-  single public community-node resolver, so the time from broadcast to first confirmation
-  depends on that node's quality — sometimes slower than mature wallets like Kaspium/Kasware.
-  The transaction mechanics are correct and fully on-chain; the gap is node-infrastructure
-  quality, not cryptography. Node-quality selection, fee-bump/replacement, and Send-Max are a
-  planned dedicated performance pass.
+- **Send propagation can be variable.** The wallet reaches the network through public
+  community nodes, so the time from broadcast to first confirmation depends on the node that
+  accepts it — sometimes slower than mature wallets like Kaspium/Kasware. The transaction
+  mechanics are correct and fully on-chain; the gap is node-infrastructure quality, not
+  cryptography. Node-quality selection, fee-bump/replacement, and Send-Max are a planned
+  dedicated performance pass.
+- **A cold start on a weak, lossy link can take 14–28 seconds** before the first balance
+  appears. This is known, measured, and deliberately not yet fixed: the reliability pass
+  chose to fix *correctness* of the link first, and the remaining cost is latency on bad
+  radio, not lost funds or wrong balances. Warm reconnects are seconds.
 - **Restore scans a fixed 30-address window per chain** in the alpha. A wallet that used
   more than 30 receive addresses elsewhere can show an incomplete balance after restore —
   window growth is a recorded roadmap item. (Wallets created here stay inside the window.)
