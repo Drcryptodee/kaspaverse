@@ -1,0 +1,18 @@
+[package]
+name = "kaspaverse-covenant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The Covenant Engine's boundary crate (COVENANT C1, DP-1 — D-113). Deliberately
+# minimal and deliberately walled:
+#   - NO kaspaverse-core: key material, the vault and the signer are unreachable
+#     from anything compiled against this seam (OQ-1, INV-1/2). Core depends on
+#     this crate for the witness-plan types — never the reverse.
+#   - NO RPC crates: the engine cannot open a socket (INV-8). Chain feeds it
+#     sightings and broadcasts its plans.
+# Both lines below are existing pinned workspace deps — zero new packages
+# (dependency-steward: the D-028 §0.2 containment class).
+[dependencies]
+kaspa-consensus-core.workspace = true
+zeroize.workspace = true
