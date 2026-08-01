@@ -3137,6 +3137,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaspaverse-covenant"
+version = "0.1.0"
+dependencies = [
+ "kaspa-consensus-core",
+ "zeroize",
+]
+
+[[package]]
 name = "kaspaverse_bridge"
 version = "0.1.0"
 dependencies = [
