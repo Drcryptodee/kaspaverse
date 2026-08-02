@@ -120,19 +120,33 @@ pub enum Taker {
     Me,
     /// Requires the counterparty's signature.
     Counterparty,
-    /// Permissionless — anyone may broadcast it (a crank).
+    /// Permissionless — anyone may broadcast it, because the covenant
+    /// determines every output. **Not a synonym for "crank."** A crank is
+    /// this composed with [`EntrypointClass::Crank`] (recovery from a
+    /// stall); the same `Anyone` composed with
+    /// [`EntrypointClass::Cooperative`] is the ordinary, non-stalled
+    /// determined transition — a MUX worker executing an already-declared
+    /// move, or a settlement whose payout the script pins exactly. In the
+    /// reference chess family that case is the *majority*: nine of its
+    /// twelve compiled templates contain no signature check at all
+    /// (`covenant_design_patterns.md §7`, lexicon §3.4). The composition is
+    /// intended; only this comment used to foreclose it (D-117).
     Anyone,
 }
 
 /// The INV-6 classification of an entrypoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntrypointClass {
-    /// An ordinary move inside the game's cooperative path.
+    /// An ordinary move inside the game's cooperative path. Says nothing
+    /// about who may take it: pair with [`Taker`] for that. `Cooperative` +
+    /// [`Taker::Anyone`] is the ordinary determined transition (lexicon
+    /// §3.4) and is a normal, expected combination — D-117.
     Cooperative,
     /// A unilateral exit — takeable alone, without the counterparty
     /// (INV-6; `toccata_protocol.md §15` row L19).
     UnilateralExit,
-    /// A permissionless crank advancing or settling a stalled match.
+    /// A determined transition broadcast to **rescue a stalled match**. The
+    /// recovery subset of [`Taker::Anyone`], not the whole of it.
     Crank,
 }
 
@@ -274,6 +288,19 @@ pub struct InputWitnessTemplate {
 /// it, and the first-party verifier checks the plan actually creates it
 /// (successor validation is the covenant's job on-chain; this is the app's
 /// mirror of the same claim).
+///
+/// **Open: this expectation cannot name the successor's *template*, so it
+/// describes single-template families only (D-117, routed to C3).** To check
+/// the promise, the verifier must re-derive the successor output's script
+/// public key = P2SH(template ‖ state); the only template it can reach is
+/// [`CovenantTransition::template`], which is the template being *spent*. In
+/// a MUX family the successor is a different template by construction —
+/// chess routes `Mux` → `Pawn` → `Mux` across twelve of them
+/// (`covenant_design_patterns.md §7/§10`) — and the MUX is our own stated
+/// core pattern for complex covenants, so this is not a foreign-only
+/// concern. Whether the fix is a `TemplateId` here, a family-scoped
+/// implementation, or a decode-recipe lookup is a design question with a
+/// tier and auditors; it is deliberately **not** patched in passing.
 #[derive(Clone, Debug)]
 pub struct SuccessorExpectation {
     pub covenant_id: Hash,
