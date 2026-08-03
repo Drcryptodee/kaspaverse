@@ -1,0 +1,109 @@
+{
+  "format": "duel-ad-vectors-v1",
+  "source": "rust/covenant/tests/duel_ad_model.rs (DP-9/DP-12; regenerate with KV_REGEN_VECTORS=1)",
+  "note": "each row names the layer that must refuse it; at P4 the parity harness drives the script rows through kaspa-txscript against the compiled template and asserts the named failure",
+  "vectors": [
+    {
+      "name": "premature_claim_sequence_lock",
+      "description": "A commit-timeout claim broadcast before the window: the claim input carries sequence = W, and the state UTXO is younger than W.",
+      "reject_layer": "consensus",
+      "enforcer": "check_sequence_lock rejects until the spent UTXO is `sequence` DAA old (tx_validation_in_utxo_context.rs:136-155 at cfafeb4c)"
+    },
+    {
+      "name": "premature_claim_low_sequence",
+      "description": "A claim built with sequence < W to slip the consensus lock: the script's CSV guard reads W from the template and the input's sequence is below it.",
+      "reject_layer": "script",
+      "enforcer": "OpCheckSequenceVerify fails when stack_sequence > input.sequence (opcodes/mod.rs, UnsatisfiedLockTime)"
+    },
+    {
+      "name": "premature_claim_disabled_bit",
+      "description": "A claim built with sequence = W | SEQUENCE_LOCK_TIME_DISABLED (1<<63): consensus FILTERS disabled-bit inputs out of the sequence lock, so the script's CSV arm is the only wall standing.",
+      "reject_layer": "script",
+      "enforcer": "OpCheckSequenceVerify refuses a spending input whose sequence carries the disabled bit (opcodes/mod.rs:1093-1094 at cfafeb4c) — the one premature shape with a single enforcement layer; the P4 harness must execute it"
+    },
+    {
+      "name": "premature_dead_man",
+      "description": "A dead-man settlement attempted before the 36000-DAA statute.",
+      "reject_layer": "consensus",
+      "enforcer": "same sequence lock, statute-length window"
+    },
+    {
+      "name": "claim_without_standing",
+      "description": "A claim from a state where the claimant's own commit/reveal is absent (nobody acted).",
+      "reject_layer": "script",
+      "enforcer": "the claim branch requires the claimant's slot to be present in state — no such entrypoint exists (STATES.md standing rule)"
+    },
+    {
+      "name": "claim_when_opponent_acted",
+      "description": "A commit-timeout claim while the opponent's commitment is already in state.",
+      "reject_layer": "script",
+      "enforcer": "the claim branch requires the counterparty's slot to be absent"
+    },
+    {
+      "name": "commit_wrong_signer",
+      "description": "B's key signing into A's commitment slot.",
+      "reject_layer": "script",
+      "enforcer": "the commit branch checks the signature against the slot owner's registered session_pk or payout_pk"
+    },
+    {
+      "name": "commit_duplicate_hash",
+      "description": "The second commitment byte-equal to the first (copy attempt).",
+      "reject_layer": "script",
+      "enforcer": "explicit inequality check at the second commit (pvp §4 defense-in-depth)"
+    },
+    {
+      "name": "reveal_wrong_preimage",
+      "description": "A reveal whose (zone, salt) does not hash to the stored commitment under the revealer's identity fields.",
+      "reject_layer": "script",
+      "enforcer": "Blake2b(domain ‖ covenant_id ‖ round ‖ role ‖ session_pk ‖ zone ‖ salt) mismatch"
+    },
+    {
+      "name": "reveal_cross_round_replay",
+      "description": "Replaying round N's preimage in round N+1.",
+      "reject_layer": "script",
+      "enforcer": "the round number is an identity field in the reconstructed hash"
+    },
+    {
+      "name": "reveal_cross_match_replay",
+      "description": "Replaying a preimage from another match.",
+      "reject_layer": "script",
+      "enforcer": "the covenant id is an identity field in the reconstructed hash"
+    },
+    {
+      "name": "commit_in_reveal_phase",
+      "description": "A commit attempted while both commitments are already in state.",
+      "reject_layer": "script",
+      "enforcer": "phase dispatch: the commit branch requires an empty own slot in the committing phase"
+    },
+    {
+      "name": "overdraw_fee",
+      "description": "A transition whose successor value is more than the fee cap below the input value.",
+      "reject_layer": "script",
+      "enforcer": "value floor: next.value >= self.value - FEE_CAP, and never below stakes + bonds"
+    },
+    {
+      "name": "settle_unregistered_payout",
+      "description": "A settlement output paying a script public key that is not the genesis-registered payout of the entitled player.",
+      "reject_layer": "script",
+      "enforcer": "output introspection pins every settlement output to registered payout SPKs (OpTxOutputSpk)"
+    },
+    {
+      "name": "dead_man_wrong_split",
+      "description": "A dead-man settlement paying the pot to the trailing player.",
+      "reject_layer": "script",
+      "enforcer": "the settle branch computes the payout from the state's scores; any other output layout fails introspection"
+    },
+    {
+      "name": "sd_elimination_check",
+      "description": "An elimination settlement attempted during sudden death.",
+      "reject_layer": "script",
+      "enforcer": "the elimination comparison is gated on regulation mode (§7 disabled in SD)"
+    },
+    {
+      "name": "successor_state_tamper",
+      "description": "A transition whose successor output carries a state the transition function did not produce (wrong score after a reveal).",
+      "reject_layer": "script",
+      "enforcer": "successor validation recomputes and pins template ‖ state for the covenant output"
+    }
+  ]
+}
