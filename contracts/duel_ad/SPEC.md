@@ -1,5 +1,20 @@
-# duel_ad — SPEC: Attack & Defend, formally (COVENANT C3, D-120/D-121)
+# duel_ad — SPEC: Attack & Defend, formally (COVENANT C3, D-120/D-121 · amended C6, D-127/D-128/D-129)
 
+> ⚠ **Amended at COVENANT C6, 2026-08-07 — the pass's only machine sitting.**
+> C3 ratified this machine and C4/C5 were forbidden to touch it: every finding
+> that wanted a change became a register row with a named trigger, and all
+> three triggers named C6. They are ruled here, **together**, because all three
+> touched §5's value/output rules and one design serves them:
+> **D-127 (OQ-11)** the value floor reserves `2 · L_FLOOR` (§5.1) — the
+> settlement dust hole is closed, and closed by a *script* rule rather than a
+> genesis sizing rule · **D-128 (OQ-12)** the reveal-claim's slice is credited
+> in state and paid at settlement (§5.3), so every non-terminal row is
+> 1-in-1-out and storage-mass free · **D-129 (OQ-13)** every transition spends
+> its covenant at transaction input 0 (§5.6), which kills double satisfaction
+> for this family by consensus. Model re-proven (**31,098 states, unchanged** —
+> the amendments moved the value rules, not the state space), vectors
+> regenerated per `vectors/README.md`, and `P12` added.
+>
 > **Status:** design law, ratified at C3 (2026-08-03). No `.sil` exists; the
 > compiled template is P4's, the codegen path is C5's (DP-11), and the cost
 > constants are C4's (DP-7). What is fixed here: the state machine, its exit
@@ -48,8 +63,39 @@
    D-117 correction with C2's ratified partition, and converging on chess's
    own signature discipline from the opposite direction.
 
-Machine verdict (DP-12, gate-reproved): **31,098 reachable states · every
-property of §7 held · worst-case sole exit 3 windows + 7 transactions.**
+**The C6 rulings (2026-08-07 — the amendments), stated as one design:**
+
+7. **OQ-11 — the value floor reserves two law-L floors** (§5.1, D-127). The
+   settlement dust hole was an INV-6 defect: a losing payout could fall to
+   zero (`TxOutZero`) or below admissibility, leaving the covenant unable to
+   exit at all. The reserve makes `⌊buffer/2⌋ ≥ L_FLOOR` at **every** terminal
+   regardless of bonds, so the smallest settlement output is structurally
+   non-small. Machine-asserted (`P12`), and the bound is **tight** — deleting
+   the reserve fails the property rather than silently re-opening the hole.
+8. **OQ-12 — the slice is credited in state, not paid at claim time** (§5.3,
+   D-128). Every non-terminal transition becomes 1-in-1-out and storage-mass
+   free. The credit costs **no new state field**: only reveal claims slice and
+   the claimant is always the conceder's counterparty, so p's credit is
+   exactly `(BOND_SLICES − bond(p.other())) · b`.
+9. **OQ-13 — every transition spends its covenant at input 0** (§5.6, D-129).
+   Two duel_ad covenants can never be spent by one transaction, so the
+   double-satisfaction class is closed by consensus for ~4 script bytes, with
+   no storage cost, no locked capital and no forfeiture.
+
+**Why they are one ruling and not three.** D-128 alone would have moved law B's
+storage term from the claim row onto the settlement row (C4's own finding 11);
+D-127's reserve is what absorbs it, so the slice deferral's saving is real
+*because* the reserve exists. And D-127's reserve is what let D-129 be chosen
+on merit rather than on price: the register's remedy (ii) (auth-view-bound
+payouts) would have quadrupled the smallest payout's storage term — landing
+exactly on the floor D-127 had just fixed — while the input-index rule costs
+nothing at all.
+
+Machine verdict (DP-12, gate-reproved, **re-proven at C6**): **31,098
+reachable states · every property of §7 held · worst-case sole exit 3 windows
++ 7 transactions.** The census is unchanged by the amendments, which is the
+expected result and worth stating: §5 is a value/output layer over the state
+machine, and C6 moved that layer without moving the machine underneath it.
 
 ---
 
@@ -140,7 +186,19 @@ genesis.
 terms are bounded, and out-of-range terms are **refused at genesis planning
 and at the first-party confirm** — the same refusal layer that pins payout
 addresses. Binding bounds: **`W_commit, W_reveal ∈ [600, 6000]` DAA** (the
-Blitz floor, `pvp §6`; the Relaxed ceiling, new here). The ceiling is what
+Blitz floor, `pvp §6`; the Relaxed ceiling, new here) and — **added at C6
+(D-128), because a law with no range and no refusal site is not a law
+(consensus-auditor, C6)** — **`5b ∈ [β · stake, α · stake]`, `α ≤ ½`, with `β`
+bounded below by the condition that its own term binds —
+`β · stake / 5 ≥ 10 · FEE_MOVE_CAP`** — ruled `β = 5 %` / `α = ½`. The ceiling
+is C4's item-15 finding (past `½` a player facing connectivity doubt prefers
+pre-emptive resignation). The floor is stated as a *condition* rather than a
+number because the obvious number does not work: `β ≥ φ` reads across units
+(φ is friction against the pot, β against the stake) and, worse, the β term
+only overtakes the fee term at `β ≈ 2.17 φ`, so `β ∈ [φ, 2.17 φ)` would be an
+**inert** range a terms sheet could satisfy while exhibiting the exact defect
+the floor exists to prevent (`covenant_engine_architecture.md §8.6.1`).
+Machine-asserted beside the window bounds. The ceiling is what
 keeps §9's stall-to-the-statute row true for *every* admissible terms sheet:
 a full claims exit (≤ 3 windows = 18,000 DAA at the ceiling) matures inside
 half the 36,000-DAA statute, so a leading staller can never reach
@@ -301,15 +359,102 @@ that dependency for every player and every stranger cranking the statute.
 The script enforces per transition:
 
 - `value_out ≥ value_in − DRAW_CAP(row)` and
-- `value_out ≥ stakes + bond_a + bond_b` (**the value floor** — fees can
-  never eat entitlements; bonds/stakes leave only through §5.3's tables).
+- `value_out ≥ stakes + BOND_CAPITAL + SETTLE_RESERVE` (**the value floor** —
+  fees can never eat entitlements; bonds/stakes leave only through §5.3's
+  tables), where **`BOND_CAPITAL = 2 · BOND_SLICES · b` is a genesis
+  constant**, not a read of the remaining bond fields.
 
-Buffer remaining is *derived* (`value − floor`), never stored. If the buffer
-runs dry, transitions remain takeable with externally-funded fees (the draw
-becomes 0 and a funder's input/change ride along — the script constrains the
-covenant's value flow and payout outputs, not the transaction's other lanes).
-C4 sizes the buffer against §5.5's counts so exhaustion is a
-theoretical tail, not a plan.
+**Both quantities are scoped to this covenant, never to the transaction.**
+`value_in` is the value of the input this transition spends; `value_out` is the
+sum of *this covenant's* outputs — the successor, or §5.3.2's pinned payout set
+— never a transaction-wide total. A transaction-wide reading would make a
+funder's change output count as covenant value on the way in and a foreign
+covenant's outputs count on the way out; either turns the floor into a drain
+vector. Buffer remaining is *derived* (`value − floor`), never stored.
+
+> ⚠ **Why `BOND_CAPITAL` is a constant, and not `bond_a + bond_b`**
+> *(consensus-auditor, C6 — a BLOCK on this section's first draft, fixed before
+> merge).* C3 wrote the floor as `stakes + bond_a + bond_b`, and that was
+> **right while a slice left the covenant as an output**: the remaining bonds
+> fell and the covenant's value fell with them, together. **D-128 breaks that
+> coupling** — a slice now moves from a bond field to a *credit*, both inside
+> the covenant, so the remaining-bond terms fall while the value does not, and
+> the difference becomes drawable fee budget. Meanwhile §5.3 still owes those
+> sompi: `bond(A) + credit(A) + bond(B) + credit(B)` is **invariant at
+> `2 · BOND_SLICES · b`**, however many slices have moved. Left as written, the
+> floor would have under-reserved by up to `2 · BOND_SLICES · b` (1.0 KAS at
+> the ruled terms) and a deeply-drawn buffer would have stranded the pot and
+> both bonds — re-opening the exact INV-6 hole D-127 exists to close, in a new
+> place. Reading a genesis constant is also *simpler*: the floor no longer
+> reads state at all. Machine-asserted — `payouts()` proves the conservation
+> identity and derives the buffer from it, so `P12` fails loudly under the old
+> expression instead of passing vacuously.
+
+### 5.1.1 The settlement reserve — OQ-11 ruled (D-127)
+
+`SETTLE_RESERVE = 2 · L_FLOOR`, where `L_FLOOR` is law L's floor
+(`covenant_engine_architecture.md §8.6`: `C / (10 · fee_mass(settlement))` =
+**23,651,844 sompi ≈ 0.2365 KAS** at R = 1,791, re-executed against the pin's
+own `MassCalculator` at C6). One law-L floor per settlement output.
+
+**P12 derives, it does not assume.** The property computes each terminal's
+obligations, subtracts them from the **value floor** (the worst admissible
+covenant value), and checks what remains — rather than being handed a buffer.
+That is what makes it a proof: handing it `SETTLE_RESERVE` would make the
+property true by construction, and it is exactly how the `BOND_CAPITAL` defect
+above survived this section's first draft. *(Precisely: the load-bearing
+element is the `checked_sub` — it panics when a terminal owes more than the
+floor guarantees. The conservation `assert_eq!` beside it is algebraically an
+identity at today's row set, so it is a **tripwire against future edits** — the
+day a row moves a slice out of the covenant again — rather than a proof in its
+own right. Distinguished here because calling a tautology a proof is how the
+next defect hides.)*
+
+**The defect it closes.** §5.3 pays each player their own bond remainder plus
+half the buffer remainder. At `BondForfeit` the loser's bond remainder is zero
+*by construction*, and — the general condition, which is what this rule is
+written against — at **any** terminal the loser's bond may be exhausted
+through five non-consecutive reveal-claims. If the buffer remainder were also
+small, that output would be sub-dust (`RejectStorageMass`); if zero,
+`TxOutZero` rejects the transaction outright. Either way **the settlement is
+unbroadcastable and the covenant has no exit** — an INV-6 violation, not an
+economics problem.
+
+**Why the reserve had to move into the value floor.** C4's interim posture
+sized the same quantity into law **U** (the genesis buffer). That is a
+*planning* rule: it is satisfied once, at genesis, and then drawn away by
+ordinary transitions like any other buffer sompi. Only the value floor — a
+rule the script enforces on every transition — makes the reserve
+**un-drawable**. This is the operative correction C6 makes to the interim
+posture, and the reason remedy (a) is the ruling rather than a tightening.
+
+**Why not the other two candidates.** Remedy (b) (a reserve inside the bond
+encoding) buys a cheaper constant by making "empty bond" mean *zero
+sliceable* rather than zero sompi — a semantics change to `STATES.md`'s bond
+field, for no gain the value floor does not already give. Remedy (c), the C4
+auditor's *dust-rolls-to-the-winner* (emit the output only if the share clears
+the floor, else add it to the other side), is the most elegant of the three
+and is **refused on the stag-hunt bar** (consensus-auditor item 15): a
+threshold whose crossing pays a player is a threshold that player will pay to
+cross. Burning `2δ` of buffer costs the winner `δ` of their own half and moves
+the loser's share by `δ`; once the loser sits just above the floor, a
+sub-0.001 KAS burn captures up to `L_FLOOR`. Strict dominance must not have a
+cliff in it. *(The variant that burns the dust to fee instead of paying it to
+the winner is incentive-clean — nobody at the table gains — and was weighed;
+it still forfeits a losing player's money for a reason they cannot see, and
+the reserve costs nothing but lockup, so it is not needed.)*
+
+**What it costs.** `0.4730 KAS` per match, locked from genesis and **returned
+at settlement** (it is buffer, split 50/50 like the rest) — lockup, never
+loss. It is exactly law **U**'s existing second term, so the genesis sizing
+does not change; what changes is that the script now holds it.
+
+**When the buffer reaches the reserve**, transitions remain takeable with
+externally-funded fees (the draw becomes 0 and a funder's input/change ride
+along — the script constrains the covenant's value flow and payout outputs,
+not the transaction's other lanes; input 0 stays the covenant's, §5.6).
+Exhaustion costs convenience, never liveness. C4 sizes the buffer against
+§5.5's counts so reaching it is a theoretical tail, not a plan.
 
 ### 5.2 Draw rules per row class
 
@@ -327,15 +472,71 @@ theoretical tail, not a plan.
 
 | Cause | Pot (2 × stake) | Bonds | Buffer remainder |
 |:--|:--|:--|:--|
-| Elimination / Regulation / SdPair | winner | remainders to owners | split 50/50, odd sompi to fee |
-| CounterForfeit / BondForfeit | claimant | remainders to owners | split |
-| Resign | the opponent | remainders to owners | split |
-| DeadMan, leader | leader | remainders to owners | split |
-| DeadMan, tied | stakes refunded each | remainders to owners | split |
+| Elimination / Regulation / SdPair | winner | remainders to owners **+ slices won** | split 50/50, odd sompi to fee |
+| CounterForfeit / BondForfeit | claimant | remainders to owners **+ slices won** | split |
+| Resign | the opponent | remainders to owners **+ slices won** | split |
+| DeadMan, leader | leader | remainders to owners **+ slices won** | split |
+| DeadMan, tied | stakes refunded each | remainders to owners **+ slices won** | split |
 
-Slices moved at claim time (one output per reveal-claim, to the claimant's
-payout SPK) — the model asserts local conservation per edge, which composes
-to global (P7).
+So each player's single settlement output is
+
+```
+  stake_part                     (2·stake to the winner; stake each on a tie; 0 to the loser)
++ bond(p)          · b           own remaining slices
++ (BOND_SLICES − bond(p.other())) · b     slices WON from the opponent
++ ⌊buffer_remainder / 2⌋         (odd sompi to fee — deterministic)
+```
+
+### 5.3.1 Slices are credited in state, not paid at claim time — OQ-12 ruled (D-128)
+
+`claim_reveal_timeout` **emits no slice output.** The slice leaves the
+conceder's bond inside the claim transition exactly as before (P6, P11
+unchanged — the claim still strictly worsens the conceder at the moment it is
+taken); what changes is that the claimant's gain is *recorded* rather than
+*paid*, and lands in their single settlement output.
+
+**The credit needs no new state field.** Only reveal claims slice, and a claim's
+conceder is always the claimant's counterparty — so every slice that left
+player *q*'s bond was won by *p*, and `credit(p) = (BOND_SLICES − bond(q)) · b`
+is a pure function of the bond fields already in state. C4 offered "one more
+state field (or a re-derivation)"; the re-derivation is exact, so the field is
+not built.
+
+**What it buys.** The slice output was the only second output any non-terminal
+row emitted, and therefore the only place a non-terminal transition touched
+storage mass at all. Without it **every non-terminal transition is 1-in-1-out
+and storage-mass free** (re-executed at C6: `calc_storage_mass` returns 0 for
+the claim row's shape, identical to a move). Law **B** loses its two storage
+terms; `claim_reveal_timeout`'s own relay floor falls 429,800 → 419,400 sompi,
+which also demotes it as the worst signed row — `FEE_MOVE_CAP`'s floor is now
+set by `commit_a/b` at 425,800.
+
+**And the honest half.** C4's registered "5.7× less locked bond capital" is
+arithmetically confirmed (`b`'s fee-only floor is 0.0426 KAS ⇒ standing bond
+0.213 KAS) but is **not** the ruling, for two reasons. First, C4's auditor was
+right that law B's storage term *relocates* rather than vanishes — it lands on
+the loser's settlement output — and it is **D-127's reserve, not D-128, that
+absorbs it**. Second, with both storage terms gone, nothing in law B priced
+what the standing bond is actually *for* on the margin: **grief-by-delay**. A
+player already beaten on the scoreboard can stall every reveal, burning up to
+five windows of a counterparty's real-world attention, and the only mechanical
+price they pay is `5b`. Law B therefore gains a two-sided, stake-relative
+bound (`covenant_engine_architecture.md §8.6`), the same shape the C4 auditor's
+item-15 finding gave its ceiling — **ruled `b = 0.10 KAS`, standing bond
+0.5 KAS**, a 2.5× reduction rather than 5.9×, with the difference attributed
+to a security parameter rather than absorbed silently.
+
+### 5.3.2 Output layout, pinned (the introspection contract)
+
+Every payout output is pinned by **index, script public key and amount**: the
+settlement's outputs `0..N` are exactly §5.3's shares, each to its
+genesis-registered payout SPK, each a pure function of state and of this
+covenant input's own value. Outputs beyond index `N` are unconstrained, which
+is what keeps an externally-funded transition's change output legal. The
+amounts being pinned is what makes a merge unable to *take* anything from this
+covenant even where one is possible: our beneficiaries are paid exactly what
+the table owes them, and only a second covenant demanding the *same* outputs
+loses — which §5.6 forecloses.
 
 ### 5.4 Amendments to `pvp §6`/`§8`, enumerated
 
@@ -354,7 +555,8 @@ note points here; the theory doc remains authoritative for the game theory:
    idiom reads the anchor from the UTXO entry itself (§6); a stored copy is
    a redundant second source of truth.
 3. **Slice-to-crank-fee cases deleted** with the mutual rows — every slice
-   now pays the standing claimant.
+   now credits the standing claimant (**paid at settlement since D-128**,
+   §5.3.1; the claim row itself emits no slice output).
 4. **Resign added** (one row): the honest instant quit. Same terminal value
    as decay-forfeit (pot to opponent, bond remainders keep), strictly faster
    for both sides, trivially dominated as an attack (it pays the opponent).
@@ -370,6 +572,82 @@ relative only — no dual-idiom cost row needed (C2 §6's both-idioms pricing
 question does not arise). Bond slice `b` must clear the §10 rule
 (`b ≥ 10× fee`) *and* KIP-9 storage mass as a small standalone output — C4
 prices both, plus `FEE_FIXED`/`FEE_MOVE_CAP`/buffer size at real mass numbers.
+*(Amended by D-128: there is no slice output, so the storage half of `b`'s
+floor is gone and law B is re-derived in `…§8.6`.)*
+
+## §5.6 The covenant is transaction input 0 — OQ-13 ruled (D-129)
+
+**Ruling: every duel_ad transition requires its covenant input to be
+transaction input 0.** `require(this.activeInputIndex == 0)` — one nullary op,
+a literal, an equality, a verify: **~4 script bytes, zero storage mass, zero
+locked capital, no output binding, no forfeiture.**
+
+**The class it closes.** Double satisfaction (the EUTXO literature's named
+vulnerability, C5 `utxo_contract_prior_art.md §3`): one transaction assembled
+by a stranger spends **two** statute-ripe covenants and discharges both with a
+single output set, the second pot flowing to fee — i.e. to the assembling
+miner, who can withhold the transaction and self-mine it. Signed rows are
+immune (a merged transaction changes the sighash, so only the beneficiary
+could sign it — self-harm); non-terminal rows are immune (the successor output
+carries the match's own covenant binding); the exposure is any settling row
+reachable signature-free, above all `dead_man_settle`, whose payouts are plain
+unbound P2PK outputs. **Two duel_ad covenants both demanding input 0 can never
+appear in one transaction** — at most one input has index 0, consensus
+evaluates *every* input's script, so the second fails and the transaction is
+invalid. Total, by consensus, for this family.
+
+**Why not the three registered remedies.**
+
+- **(i) Pin the terminal's full output layout.** Kept anyway as §5.3.2 (it is
+  the payout table's own enforcement), but it does **not** close OQ-13. Its
+  residual — two settlements whose entire demanded output sets coincide — was
+  registered as a corner case, and it is not one: it is **constructible at
+  will.** Two matches between the same pair at identical terms, both abandoned
+  at genesis, demand byte-identical output sets by construction. An attacker
+  who can mine needs no luck at all.
+- **(ii) Carry the auth view into terminals** (covenant-bind the payouts to the
+  settling input). Also total, and it was the register's strongest candidate —
+  but a bound output carries the covenant id in its UTXO entry, which is +34 B
+  and **plurality 2**, so `C·p²/o` quadruples the harmonic storage term on the
+  *smallest* payout: exactly the output D-127 had just fixed. Law L's floor
+  would rise 0.2365 → 0.9461 KAS and the reserve with it. Paying four times the
+  storage term on every settlement to buy what one opcode buys for free is the
+  trade this ruling declines.
+- **(iii) Both** — buys nothing (i) and the index rule do not already give.
+
+**Expressible on the chosen path** (DP-11, Silverscript-direct):
+`this.activeInputIndex` is `NullaryOp::ActiveInputIndex`
+(`silverscript-lang/src/ast/mod.rs:1220,2434` at the pinned rev `d57e5df`),
+lowering to **`OpTxInputIndex` (0xb9)** (`compiler/compile/expression.rs:504`),
+which at the pin pushes the executing input's own index and is *not* gated on
+`covenants_enabled` (`crypto/txscript/src/opcodes/mod.rs:1188-1195` `[pin]`,
+read this sitting). Argent's own generated code uses the sibling discipline —
+its leader entries require covenant-group position 0 (`OpCovInputIdx(cov_id,
+0)`) — which is the same idea one scope narrower; group position is useless to
+a singleton covenant, so the wedge takes the transaction-wide index.
+
+**Honest scope (L79 — constrain, then claim).** The rule makes duel_ad
+un-mergeable *with duel_ad*. It does not, and need not, prevent a merge with a
+**foreign** covenant: because §5.3.2 pins our payouts by index, SPK and amount,
+our beneficiaries receive exactly what the table owes them in any transaction
+our script accepts, so a foreign covenant sharing those outputs loses **its
+own** value to fee, never ours. Our exposure was always and only *another
+covenant demanding the same outputs we do*, and that is what the index rule
+forecloses. **Family law:** every later contract of this family
+(`contracts/duel_rps/`, and any P4+ template) adopts the same rule, or the
+class re-opens between families rather than within one — recorded in the
+contract-package format, not left to memory.
+
+**Applied uniformly, not only to terminals.** Non-terminal rows are already
+merge-immune, so the rule is redundant there — and it is applied anyway,
+because a single structural invariant ("every duel_ad transition spends its
+covenant at input 0") is one line for an auditor to check and forecloses merge
+shapes nobody has thought of yet, while a per-row exception table is a place
+for one to hide. The cost of the redundancy is ~4 script bytes.
+
+**P4 owes two negative vectors**, both committed:
+`merged_settlement_two_covenants` and `covenant_not_at_input_zero`
+(`vectors/negative.json`, script layer).
 
 ## §6 The timeout idiom — OQ-8 ruled at the pin
 
@@ -453,7 +731,18 @@ Properties, all asserted per reachable state
 | P8 | sudden death quotient sound; decisive pair reachable; P1/P4 hold inside | held |
 | P9 | every Anyone row determined (single successor); the reveal's branch is epistemic only | held |
 | P11 | every claim strictly worsens the conceder; every move was `Now`-enabled first | held |
-| — | census: 31,098 reachable states, 432 distinct terminals; all 7 terminal causes reachable | held |
+| **P12** | **(D-127) no terminal emits an unbroadcastable settlement: every payout is > 0 and ≥ law L's floor, evaluated at the *worst* admissible buffer (the un-drawable reserve)** | **held — and the bound is tight: the worst reachable payout is exactly `L_FLOOR`** |
+| — | census: 31,098 reachable states, 432 distinct terminals; all 7 terminal causes reachable | held (**unchanged by the C6 amendments**) |
+
+**P12's honest scope.** The walker is otherwise value-symbolic — which is
+precisely why it could not see OQ-11 at C3 (sompi granularity, `TxOutZero` and
+storage mass are outside a protocol-layer model's universe). C6 gives it the
+*minimum* value dimension its own ruling needs: the terminal payout arithmetic,
+evaluated at the reserve. It proves that no reachable terminal can emit a
+zero-or-sub-floor output; it does **not** prove the compiled script computes
+those amounts correctly. That is the P4 parity harness's job, and the committed
+positive vectors now carry `payout_a_sompi`/`payout_b_sompi` so it has
+something to check against rather than a description.
 
 Honest scope notes: the walker proves the **protocol layer** exhaustively;
 the game layer's termination-with-probability-1 (sudden death's geometric
@@ -500,6 +789,9 @@ reads this table.
 | Vanish while winning | the present player's claimed rounds resolve at *their* optimum: they score their attacks, your lead erodes, forfeit at 3 lands regardless of score | stalling never preserves a lead; forfeit ignores score | P1f (winner = claimant on every abandonment path) |
 | Stall-to-the-statute while leading | a present opponent reaches forfeit in ≤ 3W ≤ 18,000 < 36,000; only a *mutually* absent match reaches the statute | the gambit requires the victim asleep for the whole statute — priced in promise sentence 2, not exploitable against an awake player. **True for every admissible terms sheet because of §3.1's terms-validity law** (the window ceiling) — not only the named controls | P1 bound × the ceiling assertion (`the_terms_validity_law_bounds_every_window`) |
 | Grief the buffer (broadcast max-draw transitions) | signed rows: only you can sign yours; unsigned rows: exact draw, the transaction is unique | nothing variable to outbid with match money | §5.2's rule |
+| **Merge two matches' settlements into one transaction** (double satisfaction — a mining attacker, or anyone paying one) | the second covenant's script fails: both demand transaction input 0 and only one input has it | the merge is not cheaper, it is **invalid** — there is no version of the attack that confirms | §5.6 (D-129) + the two merged-settlement negative vectors |
+| **Drain the buffer to push the opponent's settlement share under a payout floor** | there is no such floor to push them under: the reserve is un-drawable and every payout clears law L by construction | the threshold that would have made this pay was refused for exactly this reason (§5.1.1) | P12's tight bound |
+| **Stall every reveal to burn the opponent's clock** | five windows of delay, priced at `5b` — and the rounds conceded at the claimant's optimum, and the concession counter | law B's new floor makes `5b` a stated fraction of the stake rather than a by-product of fee arithmetic | law B two-sided (`…§8.6`) |
 | Eternal mutual draw (both stall attacks forever in SD) | possible only by *both* players' continuous choice; either exits any time (play → decisive, stop → claimed, resign) | strictly dominated by the statute's tie refund (same outcome, minus fees and an hour) | quotient structure (P8) + analytic note |
 | Resign as an attack | pays the opponent the pot | self-harm is not an attack | payout table |
 | Mempool snooping / miner censorship / weak RNG | unchanged from `pvp §9` rows 8–10 | window floors price censorship; salts are CSPRNG; the coin-flip floor stands | `pvp §9` (protocol-external) |
@@ -537,6 +829,8 @@ degenerate case at P4 — same rows, one round, no SD).
 | Source | Rev | Read for |
 |:--|:--|:--|
 | rusty-kaspa pin `[pin]` | `cfafeb4c` (= v2.0.1), **read directly this sitting** | `check_sequence_lock` (`tx_validation_in_utxo_context.rs:53,136-155`) · CSV semantics + disabled-bit rule (`crypto/txscript/src/opcodes/mod.rs`, `UnsatisfiedLockTime` arms) · `SEQUENCE_LOCK_TIME_MASK`/`DISABLED` (`consensus/core/src/constants.rs:47,52`) · `OpTxInputDaaScore` present (`opcodes/mod.rs:1282`) — noted, unused by the wedge |
+| rusty-kaspa pin `[pin]` — **C6 reads (2026-08-07)** | `cfafeb4c` | `OpTxInputIndex` 0xb9 (`opcodes/mod.rs:1188-1195` — pushes the executing input's index; **not** gated on `covenants_enabled`) · the covenant-partition rules (`crypto/txscript/src/covenants.rs::from_tx` — the auth view carries **continuation** outputs only, i.e. an auth-bound payout must itself carry the covenant id, which is what prices remedy (ii) at plurality 2) · `OpAuthOutputCount/Idx` 0xcb/0xcc · `OpCovInputCount/Idx` 0xd0/0xd1 · `OpOutputAuthorizingInput` 0xd6 · `TxOutZero` (`tx_validation_in_isolation.rs:149-154`) · the whole §8 mass surface **re-executed** (`MassCalculator::calc_non_contextual_masses`, `calc_storage_mass`, `utxo_plurality`) against the amended row shapes |
+| silverscript pin `[research]` | `d57e5df` (argent's rev; C5's DP-11 path) | `this.activeInputIndex` = `NullaryOp::ActiveInputIndex` (`silverscript-lang/src/ast/mod.rs:1220,2434`) lowering to `OpTxInputIndex` (`compiler/compile/expression.rs:504,507`) — D-129 is expressible on the chosen codegen path |
 | carried pin cites | from C1/C2 verified tables | covenant-id derivation (`hashing/covenant_id.rs:16-30`) · v1-necessity (A-4) · v1 txid excludes signature scripts |
 | chess `[chess]` | `115f29a` (D-116/D-117 ratified reads; paths `chess/`-relative) | signature discipline (`Mux.timeout` signed; workers/settle free) · compiled sizes · exclusively-relative timeout shape |
 | shipped `[ship]` | working tree at C3 | `rust/covenant/src/seam.rs` (Unlock/Taker/EntrypointClass/KeyRole/SuccessorExpectation) · `rust/covenant/tests/duel_ad_model.rs` (this spec's arbiter) |

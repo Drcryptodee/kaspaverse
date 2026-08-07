@@ -1,181 +1,254 @@
-# duel_ad — AUDIT (consensus-auditor, COVENANT C3 sitting)
+# duel_ad — AUDIT (consensus-auditor, COVENANT C6 · FINAL sitting)
 
-**Date:** 2026-08-03 · **Auditor:** consensus-auditor (checklist version: C-items
-8–16 + 19/20, skill as of 2026-08-01 D-115 amendment) · **Tier:** T1 sitting
-(design + in-tree model; no `.sil` exists — the compiled-artifact halves of
-items 13/14 re-run at P4 and this audit is void the day a `.sil` lands).
+**Date:** 2026-08-07 · **Auditor:** consensus-auditor (checklist: C-items 8–16 +
+19/20, skill as of the 2026-08-03 L81/D-121 amendment) · **Tier:** T1 sitting
+(design + in-tree model; still no `.sil` — the compiled-artifact halves of items
+13/14 re-run at P4 and this audit is void the day a `.sil` lands).
 
 **AUDIT-SCOPE (restated verbatim):** `uncommitted working tree + index vs HEAD
-(86fa7b4)  ||  ops mirror: uncommitted record vs 4bceb1b`
+(52f35ed)  ||  ops mirror: uncommitted record vs ac7bc95`
 
-**Pinned to (sha256, working tree at C3 — re-pinned after the in-sitting
-remediation below, per this audit's own disposition):**
+The injected diff was **TRUNCATED** (2,937 lines > the 2,000-line cap). Per the
+skill's own instruction this verdict was written after reading the files
+directly: `SPEC.md` §3.1/§5.1/§5.1.1 (whole), `STATES.md` (whole),
+`rust/covenant/tests/duel_ad_model.rs` (constants + const-assertion block,
+`payouts()`, `resolve()`, the vector emitter), both vector files (parsed as JSON
+and arithmetically checked), `DECISION_LOG.md` D-127/D-128/D-129/D-130 + the
+D-129 addendum, `covenant_engine_architecture.md` §8.6/§8.6.1/§8.8,
+`covenant_engine_lexicon.md` §3.4, `docs/phases/P3_covenant_engine_ACTIVE.md`
+§0 + the P4-inheritance block, `docs/sessions/COVENANT_PASS.md` OQ-11/OQ-12,
+`docs/SOURCE_OF_TRUTH.md` §8 header, and `PHASE_3.1_SESSION_PROMPT.md`.
 
-| File | sha256 |
-|:--|:--|
-| `SPEC.md` | `2fd1f10a84df17aad33bceaae21e2640dfa8f1c452f4181a0b78018aa7e2d88a` |
-| `STATES.md` | `4083a075a9cd8bc2f85dd3d92c12cb4e211da313fd3cf54a2a4ecb80e4ef3781` |
-| `vectors/positive.json` | `e8f1ce83f23101b9c0aaeeac58fec9acb546773a4f853590fc8e0221c3c726b1` |
-| `vectors/negative.json` | `f48110372dac54d93d435beef96b8be153138a1901756c3fa8094dbb6894f75a` |
-| `vectors/README.md` | `ff34acde6ce2b056b8b90be211c2b1ddabfcc8c955b4800cef0c62cc97327fe0` |
-| `rust/covenant/tests/duel_ad_model.rs` | `35730cef48e8de1b75d33cded20d44f257de873c044c50a83cbf7834acb5d8fb` |
+**Re-pinned to (sha256, working tree at this sitting):**
 
-Any change to any pinned file voids this audit (the golden test enforces the
-vector half mechanically).
+| File | sha256 | vs the previous pin |
+|:--|:--|:--|
+| `SPEC.md` | `f5be33f18fd74c0b1eb1ebaf54cf3fc3be48dd4a52be3b45e5247746e8aad476` | changed |
+| `STATES.md` | `2d07cd1860eba404e8e2d318dea781e017bb9c057e75e21de5e28df4749d4d7d` | changed — **re-pinned at the wrap after this audit's finding was remediated** (`:100-102` now carries law B's binding-condition floor, not the superseded `β ∈ [φ, α]`); the verdict above is unaffected by that edit, as it anticipated |
+| `vectors/positive.json` | `83ae497e53065874de8ac6c7c9ee2299c5981b4f6d4a76ca3bad65b4b975ff25` | **unchanged** |
+| `vectors/negative.json` | `b257717f430faa997a6b63b2523438543d9b4e4e47d7255ae0f5ea7576ffbb9e` | changed |
+| `vectors/README.md` | `ff34acde6ce2b056b8b90be211c2b1ddabfcc8c955b4800cef0c62cc97327fe0` | **unchanged** |
+| `rust/covenant/tests/duel_ad_model.rs` | `20cd387b623eb9e049cfd66a8b3edb6d0e23bf3fc9e9f4af5ed5bad9f66a5973` | changed |
 
-**REMEDIATION — all three CONCERNS fixed in-sitting (2026-08-03, before the
-wrap commit), each exactly the minimal fix this audit named:**
-
-1. **Terms-validity law stated and asserted** — SPEC §3.1 (bounds
-   `W ∈ [600, 6000]`, refusal at genesis planning + confirm), STATES.md
-   constructor-constants block, stag-hunt row updated to cite its
-   precondition, and the model gained
-   `the_terms_validity_law_bounds_every_window` (bounds at runtime; the
-   3-window-exit ≤ half-statute ratio as a **compile-time const assertion**
-   — the gate's clippy pass upgraded it from a runtime check). 5/5 tests
-   green; the model-file hash above reflects the post-rustfmt final form.
-2. **Per-move sighash named** — SPEC §4.2 + STATES.md authentication
-   preamble: every signed row is `SIG_HASH_ALL` under the D-115 fill-site
-   law; no `D-` exception exists for this contract.
-3. **`premature_claim_disabled_bit` vector added** (script layer,
-   `opcodes/mod.rs:1093-1094`) — regenerated via the README ritual;
-   negative set now 17 rows; golden test green.
-
-Verdict standing: **CONCERNS ×3 → all remediated in-sitting**; merge may
-proceed. The compiled-template halves re-run at P4 as noted.
+Any change to any pinned file voids this audit. `STATES.md`'s hash being
+**unchanged** is itself the evidence for the one open finding below: the law-B
+restatement did not reach it. Applying that one-line fix changes this row, and
+the wrap must re-run `sha256sum` on it — the verdict is unaffected by that edit,
+which is precisely what makes it safe to name here.
 
 ---
 
-## VERDICT: CONCERNS (no BLOCK)
+## VERDICT: CONCERNS ×1 (0 BLOCK · 1 CONCERNS · 0 nits) — merge unblocked
 
-**Independently reproduced by this auditor, not taken from the record:**
-`cargo test -p kaspaverse-covenant --test duel_ad_model` → 4/4 green;
-**31,098 reachable states, 432 distinct terminals, P1 worst sole exit
-3 windows + 7 transitions (bound 4)**; committed vectors byte-equal to the
-model's emission. Every pin cite in SPEC §6/§12 re-read at the cargo checkout
-of `cfafeb4c`: `check_sequence_lock` at
-`tx_validation_in_utxo_context.rs:136-155`, called at `:53` **before** the
-`TxValidationFlags` match (unconditional for Full / SkipScriptChecks /
-SkipMassCheck); `SEQUENCE_LOCK_TIME_MASK`/`DISABLED` at `constants.rs:47,52`;
-CSV at `opcodes/mod.rs:1066` with the input disabled-bit refusal at
-`:1093-1094` and the masked comparison at `:1098`; `OpTxInputDaaScore` at
-`:1282` (present, unused by the wedge). All cites exact. INV-6 holds on the
-model: every reachable state has a bounded sole exit and the statute converges
-by Anyone edges alone (P1/P4, re-proven this sitting). The standing rule is a
-textbook prover ≠ subject guard (item 16): every default witness is chain
-state — the claimant's own act, elapsed input age, the accused's empty slot —
-never a message the defaulter controls. Item 15's table is honest and mostly
-machine-backed. The three findings below are real but each has a minimal,
-in-scope fix; none traps funds at rest.
+**Reproduced by this auditor, not taken from the record:**
 
-### Findings
+- `cargo test --manifest-path rust/Cargo.toml -p kaspaverse-covenant --test
+  duel_ad_model` → **5/5 green**, 1.45 s. Census printed and matching the claim:
+  **31,098 reachable states, 432 distinct terminals, P1 worst sole exit 3 windows
+  + 7 transitions (bound 4)**.
+- `tools/gate.sh` → **GREEN, pass=11 fail=0 skip=0** (run here, not quoted).
+- `vectors/positive.json` re-parsed and re-checked arithmetically: **9 terminal
+  payout rows, every one summing to exactly `2,147,303,688` sompi = `VALUE_FLOOR`
+  (a single distinct value across all nine), minimum payout exactly `23,651,844`
+  = `L_FLOOR`.** Item 9 (value conservation) and D-127's tight bound both hold on
+  the committed fixtures, not merely in the model.
+- `vectors/negative.json`: **19 rows** (17 at C3 + D-129's two).
 
-1. **[CONCERNS] No window-ceiling law — the stall-to-the-statute defense is
-   parameter-conditional and the constraint is unstated** — violates the
-   D-019 stag-hunt bar (checklist item 15; item 12's "stall paths favor the
-   honest party"). SPEC §9's row ("a present opponent reaches forfeit in
-   ≤ 3W ≪ 36,000") and promise-map row 5 ("stalling costs the staller") hold
-   only while `max(W_commit, W_reveal) < W_DEADMAN`, and windows are
-   **per-match free parameters with only a floor** (Blitz 600 —
-   `pvp §6`; SPEC §3.1 lists them as unconstrained terms-sheet material).
-   Failure scenario: a terms sheet with `W_commit ≥ 36,000` (consented, but
-   nothing refuses it) → leader stalls in C_victim; the victim's claim
-   matures at `W ≥` statute while `dead_man_settle` matures at 36,000 **on
-   the same input**; the leader (or anyone) cranks first and takes the pot
-   at score against a fully awake victim — defection pays the full pot. The
-   three named controls all satisfy the constraint (max 6,000, 6× margin),
-   and the model cannot see the pathology (window costs are symbolic counts;
-   clock interleaving is not modelled). **Fix (minimal):** state the
-   terms-validity law in SPEC §3.1 + STATES.md's constructor-constants block
-   (`W_commit, W_reveal ≤ 6,000` — the Relaxed ceiling — or at minimum
-   strictly `< W_DEADMAN`), name its enforcement site (the genesis
-   plan/confirm first-party refusal, the same layer that pins payout
-   addresses; the constants are baked at genesis so refusal-at-plan is the
-   right site), and add one model assertion
-   (`assert!(W_COMMIT.max(W_REVEAL) < W_DEADMAN)`).
+## Disposition — the five findings this sitting was called to re-check
 
-2. **[CONCERNS] Per-move sighash type unnamed** — checklist item 20 / L79 /
-   D-115. SPEC names `SIG_HASH_ALL` only at genesis (§3); §4.2's dual-arm
-   rule and §5.2's "the signature gates abuse" are commitment claims whose
-   truth requires ALL on **every** signed row. Failure scenario under a
-   looser type (e.g. NONE): the signature stops committing to outputs, so a
-   mempool observer rebinds a broadcast commit's successor state —
-   substituting a commitment hash whose preimage the observer knows (the
-   identity fields `domain ‖ covenant_id ‖ round ‖ role ‖ session_pk` are
-   all public state) — and later "reveals" the victim's move at will. The
-   space is **not** unconstrained (this is why no BLOCK): the ratified D-115
-   fill-site law on `SignatureSlot` (`rust/covenant/src/seam.rs:258-270`,
-   refusal implemented at P3.1; no signing code exists yet) is exactly the
-   mandated constraint shape, and only the actor can produce the actor's
-   signature. **Fix (minimal):** one sentence in SPEC §4.2 — *every signed
-   row's signature is `SIG_HASH_ALL` under the D-115 fill-site law; no `D-`
-   exception exists for this contract* — echoed in STATES.md's
-   authentication preamble, so the per-row claims name their type.
+| # | Finding | Owner | Status |
+|:--|:--|:--|:--|
+| A | value-floor fix reached the normative sites but not five secondary ones | consensus | ✅ **CLEARED — all five, verified individually** |
+| B | law B's `β` floor fails on units and leaves an inert sub-range | consensus | ✅ **CLEARED in substance** — the restated law is sound and non-inert. ⚠ **two sites still carry the superseded form** → the one open finding |
+| C | the conservation `assert_eq` is a tautology, SPEC called it a proof | consensus | ✅ **CLEARED** |
+| D1 | the silverscript citation is not rev-scoped | steward | ✅ **CLEARED** |
+| D2 | `§8.8`'s checklist numbering would re-point three live "item 7" cross-refs | steward | ✅ **CLEARED** |
+| D3 | the audit-freshness deferral reason overstates an INV-7 question | steward | ✅ **CLEARED** |
 
-3. **[CONCERNS] The disabled-bit bypass has no negative vector** — checklist
-   item 13 (vectors must cover the dispute/refusal surface) against the
-   D-116 clause-4 posture SPEC §6 itself adopts. At the pin, consensus
-   **filters out** inputs whose sequence carries `SEQUENCE_LOCK_TIME_DISABLED`
-   (`tx_validation_in_utxo_context.rs:138`), so for
-   `sequence = W | (1 << 63)` the script CSV arm
-   (`opcodes/mod.rs:1093-1094`) is the **only** enforcement layer — the one
-   premature shape where defense-in-depth is down to one wall. SPEC §6 names
-   the refusal, but the committed vector set — which SPEC declares to be the
-   pinned P4 executed-rejection obligation — has no row for it, so P4's
-   parity harness could discharge clause 4 without ever executing this
-   shape. **Fix (minimal):** add a `premature_claim_disabled_bit` row
-   (layer: `script`, enforcer: the `:1093` input disabled-bit arm) to
-   `negatives()` in the model and regenerate (`KV_REGEN_VECTORS=1` + diff
-   review per the README ritual).
+### A — CLEARED at all five sites.
 
-### Notes (no action required)
+Each read at its line, not taken from the brief:
 
-- Item 8's ".sil implements each exit" half is **unadjudicable at C3 by
-  design** (no `.sil` exists; SPEC says so in its status line and labels
-  every promise-map row "design → 4" honestly). This audit covers the
-  machine, the model, and the vectors; the compiled-template audit is P4's
-  and re-pins this file.
-- P7 is proven at **slice granularity**; sompi-granular conservation
-  (fees vs the value floor) is the script's §5.1/§5.2 rules with the
-  `overdraw_fee` vector at P4 — honestly labeled in SPEC §7's scope note.
-- `every_transition_is_one_transaction` is a census tripwire (the model
-  cannot express a MUX split); its own comment says so — honest, not
-  overclaimed. The real 1:1 enforcement is A-3's single-template ruling plus
-  P4's compiled-size check.
-- `pvp §6`'s stale absolute-idiom paragraph (`:708-715`) is superseded eight
-  lines below in the same collision block and in the v2.5 header — adequate
-  proximity; no fix demanded.
-- The A-10 race (late move vs standing claim) is correctly ruled
-  both-outcomes-legitimate; the dead-man's exact-draw uniqueness kills the
-  RBF-grief lane (§5.2) — verified reasoning, no gap found.
-- Rulings audited and found sound: A-3 (dissolution is genuine — buffer-fed
-  fees leave the session key propertyless), A-6 (the last revealer's only
-  option is strictly dominated, `pvp §9` row 2), OQ-9 protocol half (the
-  sequential-join refusal correctly prices the contested-singleton window),
-  OQ-10 wedge discharge (single-template makes `SuccessorExpectation`
-  complete — confirmed against `seam.rs:287-309`), OQ-8 idiom ruling
-  (semantic identity argument is correct: every A&D clock is input age; both
-  enforcement halves verified at the pin by this auditor).
-- `docs/environment.local.md` (in scope as untracked): machine-local build
-  notes only; no consensus content.
+| Site | Now reads | ✓ |
+|:--|:--|:--|
+| `covenant_engine_lexicon.md:130` | *"stakes + the **genesis bond capital** + the settlement reserve"*, with the ⚠ C6 amendment note naming `2 · BOND_SLICES · b` a genesis constant and `SETTLE_RESERVE = 2 · L_FLOOR` | ✅ the canonical definition is now the correct one, reserve term included |
+| `P3_covenant_engine_ACTIVE.md:37` | `value_out ≥ stakes + BOND_CAPITAL + SETTLE_RESERVE` with both the genesis-constant clause and the covenant-scope clause | ✅ what P3.1 builds against is correct |
+| `vectors/negative.json:82` (`overdraw_fee`) | the full enforcer string incl. *"BOND_CAPITAL = 2\*BOND_SLICES\*b is a GENESIS CONSTANT, not the remaining bond fields"* and the covenant-scope clause | ✅ and it came through the **model**, regenerated — the golden test is green, so the fixture cannot drift from the emitter |
+| `COVENANT_PASS.md:374` (OQ-11) | `value_out ≥ stakes + BOND_CAPITAL + SETTLE_RESERVE` + the under-reservation reasoning | ✅ |
+| `SOURCE_OF_TRUTH.md:5` | same, with the *"not a read of the remaining bond fields"* clause and the 1.0 KAS exposure named | ✅ the grep target is correct |
 
-### INV citations
+**Swept for residue, not just spot-checked.** `grep -rn "stakes + bonds\|stakes +
+bond_a\|both bond remainders\|bonds + SETTLE_RESERVE"` over `*.md`/`*.rs`/`*.json`
+returns **zero live occurrences** outside this audit file's own history. The three
+remaining `bond remainders` hits (`duel_ad_model.rs:40,1075`, `SPEC.md:330,561`,
+`STATES.md:183`) are §5.3's *payout* language — what the settlement pays out —
+which is correct and must not be changed; they are a different quantity from the
+floor's reserve. `SPEC.md:377` is the ⚠ rationale block quoting C3's superseded
+form on purpose. No site contradicts.
 
-- **INV-6:** HELD on the model (P1/P3/P4 reproduced; worst sole exit
-  3 windows + 7 transitions; the statute is a material-free Anyone exit from
-  every reachable state). Finding 1 does not break INV-6 — funds always
-  exit — it breaks a stag-hunt payoff claim under pathological terms.
-- **INV-9:** HELD — no consensus logic re-implemented; every protocol claim
-  cites the pin and the cites were re-read at `cfafeb4` this sitting; the
-  walker models the contract's own rules, not consensus.
-- **D-019 (stag hunt):** CONCERNS — finding 1 names the payoff gap (full pot
-  to a stalling leader under `W ≥ W_DEADMAN` terms).
-- **D-115 / L79 (constrain, then claim):** CONCERNS — finding 2; the
-  constraint exists and is ratified, the spec's per-row claims must name it.
-- **INV-10:** the model's proof is gate-carried (`cargo test --workspace` in
-  `tools/gate.sh`) and was independently re-run for this verdict.
+### B — the restated law is sound and non-inert. Judged, not accepted.
 
-**Disposition:** merge may proceed once the three CONCERNS fixes land (all
-are doc/vector/one-assert changes inside this sitting's own files — no
-design change required); re-pin the hashes above after the vector
-regeneration.
+Law B now reads (`SPEC.md §3.1`, `§8.6.1`'s blockquote, `duel_ad_model.rs:183-188`):
+
+> `β · stake / 5 ≤ b ≤ α · stake / 5`, `α ≤ ½`, with `β` bounded below by the
+> condition that its own term binds: **`β · stake / 5 ≥ 10 · FEE_MOVE_CAP`**.
+
+**Non-inert — by construction, and that is the whole point.** Under the condition,
+`max(10·FEE_MOVE_CAP, β·stake/5)` **always** selects the `β` term. The inert
+sub-range does not shrink; it ceases to exist. The failure mode the C6 finding
+named (*a terms sheet obeys the law while `b` sits at the fee floor*) is now
+unrepresentable at the refusal site rather than merely unlikely.
+
+**Sound on units — the cross-unit comparison is gone.** The old form compared `β`
+(against the stake) to `φ` (against the pot). The new form compares
+`β·stake/5` to `10·FEE_MOVE_CAP` — **both sompi**, both the same object (`b`).
+There is no unit to get wrong.
+
+**Ranged over the parameter space (item 15 as amended by L81/D-121), by me:**
+substituting law S (`stake ≥ 23·FEE_MOVE_CAP/φ`) gives
+`β ≥ 50·φ/23 ≈ 2.174·φ` — and **`FEE_MOVE_CAP` cancels**, so the condition is
+invariant in `R` *and* invariant across law M's whole admissible cap range
+(`relay_floor … 2×relay_floor`). §8.6.1's "R-invariant" claim is therefore
+stronger than it states, and correct. At `φ`'s ceiling of 2 % the crossover is
+4.35 %; the ruled `β = 5 %` clears by **1.15×** — the document's own number, which
+I recomputed. At the ruled stake the margin is **2.35×** (5 % against 2.13 %),
+likewise reproduced. The dominance claim now holds over the admissible space, not
+at a preset.
+
+**Machine-asserted, and the assertion is the law and not a restatement of the
+preset:** `B_BETA_FLOOR >= 10 * FEE_MOVE_CAP_FLOOR` (`:183-188`) sits beside
+`B_SLICE >= B_BETA_FLOOR` and the α ceiling `5*B_SLICE <= STAKE/2`, all
+compile-time. Using `FEE_MOVE_CAP_FLOOR` rather than a free cap is correct here
+and not a narrowing, because — as computed above — the condition is cap-invariant
+once law S is applied; the runtime refusal over a negotiated sheet is the P3.1
+genesis-planning deliverable, where the actual cap is known.
+
+### C — CLEARED.
+
+`SPEC.md §5.1.1` now reads: *"the load-bearing element is the `checked_sub` — it
+panics when a terminal owes more than the floor guarantees. The conservation
+`assert_eq!` beside it is algebraically an identity at today's row set, so it is a
+**tripwire against future edits** … rather than a proof in its own right.
+Distinguished here because calling a tautology a proof is how the next defect
+hides."* That is the distinction exactly, with the reason for making it. Verified
+against the code: `payouts()` (`:426-434`) asserts conservation, then
+`value.checked_sub(2*STAKE + BOND_CAPITAL)` with a panic message naming the
+terminal — the panic is the proof, the assert is the guard.
+
+### D1/D2/D3 — cross-checked for the steward, all three land.
+
+- **D1.** `DECISION_LOG.md:5664` carries a *D-129 addendum* naming
+  `michaelsutton/silverscript` rev `d57e5df`, branch `argent-sil-integration`,
+  stating that all three coordinates are false on canonical master and that the
+  capability survives the rename. The call-sites agree: `SPEC.md:620` (*"at the
+  pinned rev `d57e5df`"*), `SPEC.md:833`'s pin table row, `COVENANT_PASS.md:101`,
+  and `duel_ad_model.rs:1605` — which carries the rev *inside the emitted vector
+  string*, so the golden test now defends the citation mechanically. Append-only
+  handled correctly (addendum, not an edit).
+- **D2.** `§8.8` is numbered **1–9 sequentially**, item 7 is
+  `used_script_units`, and the merged-settlement item is **9, last**, with the
+  reason stated in place. The three live cross-refs resolve:
+  `covenant_engine_architecture.md:552`, `utxo_contract_prior_art.md:148` and
+  `:282` all point at "§8.8 item 7" and all land on `used_script_units`. ✅
+- **D3.** `P3_covenant_engine_ACTIVE.md:198-212` restates it as scheduling
+  (*"it belongs with the harness that consumes it — and **not** because the hasher
+  is an open INV-7 question"*), names `sha2 0.10.9` as already resolved in
+  `rust/Cargo.lock`, classes it a D-022a admission, and annotates the superseded
+  wording in place. ✅
+
+---
+
+## Finding — the one open item
+
+**[CONCERNS] Law B's superseded `β ∈ [φ, α]` floor survives in two sites, one of
+them a pinned normative contract artifact.** Checklist item 14 (*the spec ↔ script
+gap; drift between prose and rule is the classic covenant audit failure*),
+item 15 as amended by L81/D-121, INV-10.
+
+| Site | Still reads | Why it matters |
+|:--|:--|:--|
+| `contracts/duel_ad/STATES.md:100-101` | *"**Law B's bounds are terms-sheet material too:** `5b ∈ [β·stake, α·stake]`, **`β ∈ [φ, α]`**, `α ≤ ½` — refused out of range at the same site as the windows."* | A **pinned artifact P4 writes the refusal from**, with no supersession marker. Implemented as written, the genesis refusal admits the entire `β ∈ [φ, 2.17φ)` band — verbatim the inert range finding B exists to delete. Its sha256 is unchanged this sitting, which is how I found it |
+| `covenant_engine_architecture.md:715` | the superseded §8.6 law-B row: *"the law is now two-sided … **with `β ∈ [φ, α]`**, `α ≤ ½`"* | Lower severity — the row opens *"⚠ SUPERSEDED at C6 (D-128) → §8.6.1"* and routes readers to the corrected home — but it restates the wrong floor inline, in the table a P4 session reads first |
+
+**Failure scenario (why it is not merely cosmetic).** P3.1's deliverable is the
+genesis-planning refusal beside the window bounds. `STATES.md`'s constructor block
+is where that refusal's constants live and is the artifact the phase packet points
+at. A builder implementing `β ≥ φ` from it accepts a terms sheet at `φ = 1 %`,
+`stake = 10 KAS`, `b = 0.0426 KAS` (standing bond 0.213 KAS = 2.13 % of stake):
+it clears `5b ≥ φ·stake = 0.0979 KAS` comfortably, and law B collapses to its fee
+term — nothing prices grief-by-delay, which is the entire content of D-128's
+ruling. Not a fund-loss (no covenant value is at risk; the machine proof, the
+payout tables and the value floor are untouched), which is why this is CONCERNS
+and not a BLOCK.
+
+**Fix (minimal), two one-line edits:**
+
+1. `STATES.md:100-101` → *"`5b ∈ [β·stake, α·stake]`, `α ≤ ½`, with `β` bounded
+   below by the condition that its own term binds — `β·stake/5 ≥ 10·FEE_MOVE_CAP`
+   (`SPEC.md §3.1`) — refused out of range at the same site as the windows."*
+   Then re-run `sha256sum contracts/duel_ad/STATES.md` and update this audit's
+   pin row.
+2. `covenant_engine_architecture.md:715` → drop `with β ∈ [φ, α]` from the
+   superseded row; leave the pointer to §8.6.1, which states the floor correctly.
+
+---
+
+## Notes (no action required)
+
+- **`D-130`'s body (`DECISION_LOG.md:5637`) still carries the superseded
+  audit-freshness reason** (*"std has no sha256 and adding a hasher is an INV-7
+  decision"*). The ledger is append-only and the correction landed in the P3
+  packet with an explicit *"the earlier wording was …"* annotation, so nothing is
+  wrong — but D-129 got an **addendum** for the same class of correction and
+  D-130 did not. One addendum line would make the ledger self-consistent about
+  its own repair convention. Steward's item, recorded here for the wrap.
+- **Items 8, 10, 11, 12, 16, 19, 20 re-checked and unmoved.** This remediation is
+  documentation plus three const assertions; the census is byte-identical
+  (31,098 / 432 / 3 windows + 7 transitions), no exit changed, no witness surface
+  changed, no sighash claim changed (item 20's D-115 fill-site law stands as
+  ratified), no await introduced. The C6 pin verification of `check_sequence_lock`,
+  `SEQUENCE_LOCK_TIME_MASK/DISABLED`, the CSV arm and `OpTxInputIndex` stands
+  unaltered — **no protocol claim moved**, so INV-9 needs no re-derivation.
+- **The vectors were regenerated, not hand-edited.** `negative.json`'s hash moved
+  and `positive.json`'s did not, which is exactly the expected signature of an
+  enforcer-string change routed through the model: the payout arithmetic was never
+  wrong, only the guarantee's wording. The golden test is the proof, and it is
+  green.
+- **P12's worst case is genuinely worst.** Re-derived here: at `VALUE_FLOOR`,
+  `buffer = SETTLE_RESERVE = 47,303,688`, `half = 23,651,844 = L_FLOOR`, and a
+  loser holding no slices against an opponent holding five receives exactly that.
+  The bound is tight in both directions — deleting the reserve fails the property
+  rather than silently re-opening the hole.
+
+## INV citations
+
+- **INV-6:** **HELD.** Every reachable terminal emits a broadcastable settlement
+  whose smallest output is `≥ L_FLOOR` — proven exhaustively over 432 terminals,
+  tight, and reproduced in the committed fixtures by arithmetic here. Every state
+  retains a unilateral bounded exit (P1/P4 re-run).
+- **INV-9:** **HELD.** No consensus logic re-implemented or remembered; no
+  protocol claim moved in this remediation; the D-129 addendum makes the one
+  non-rusty-kaspa citation rev-scoped.
+- **INV-10:** **HELD** for the value floor — the five-site sweep is complete and
+  I verified each site individually. The single residual INV-10 exposure is the
+  finding above: two documents state a superseded law.
+- **D-019 (stag hunt):** **HELD at the normative sites.** The grief-by-delay price
+  is now a parameter-space property, not a preset property — the binding condition
+  is `R`- and cap-invariant and the ruled `β = 5 %` clears it across law S's whole
+  `φ ∈ [0.5 %, 2 %]` band. The finding above is that one artifact has not yet been
+  told.
+- **INV-5 / mass:** not implicated (no transaction construction in this diff).
+
+**Disposition: merge unblocked.** Two one-line edits should land in the same wrap
+— they are the tail of the very CONCERNS this sitting cleared, and leaving them
+means P3.1 inherits a refusal law that disagrees with the ruling it implements.
+Re-pin `STATES.md`'s row after the edit.
+
+**Proposed checklist addition (destination: `LESSONS.md` → this checklist):**
+*Sweep a corrected law by its **symbol**, not by its section. C6's value-floor
+remediation was swept by grepping `BOND_CAPITAL` and reached all five sites,
+including two nobody had listed. The law-B remediation was swept by section —
+SPEC §3.1, architecture §8.6.1, the model — and missed the two artifacts that
+state the law without living under those headings. A law's statement sites are
+wherever its symbols appear; a section list is the builder's memory of where it
+wrote, which is exactly the thing an audit exists not to trust.*

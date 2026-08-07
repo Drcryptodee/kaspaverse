@@ -77,9 +77,9 @@
     },
     {
       "name": "overdraw_fee",
-      "description": "A transition whose successor value is more than the fee cap below the input value.",
+      "description": "A transition whose successor value is more than the fee cap below the input value, or below the value floor.",
       "reject_layer": "script",
-      "enforcer": "value floor: next.value >= self.value - FEE_CAP, and never below stakes + bonds"
+      "enforcer": "value floor (D-127/D-128): next.value >= self.value - FEE_CAP, and never below stakes + BOND_CAPITAL + SETTLE_RESERVE — where BOND_CAPITAL = 2*BOND_SLICES*b is a GENESIS CONSTANT, not the remaining bond fields (a slice moves inside the covenant since D-128, so a remaining-bonds reading falls while the settlement's obligation does not), and both values are scoped to this covenant, never the transaction"
     },
     {
       "name": "settle_unregistered_payout",
@@ -104,6 +104,18 @@
       "description": "A transition whose successor output carries a state the transition function did not produce (wrong score after a reveal).",
       "reject_layer": "script",
       "enforcer": "successor validation recomputes and pins template ‖ state for the covenant output"
+    },
+    {
+      "name": "merged_settlement_two_covenants",
+      "description": "Double satisfaction (D-129, OQ-13): one stranger-assembled transaction spending TWO statute-ripe duel_ad covenants whose payout demands coincide, discharging both with a single output set — the second pot flowing to fee, i.e. to the assembling miner. Constructible at will: two matches between the same pair at identical terms, both abandoned at genesis, demand byte-identical output sets.",
+      "reject_layer": "script",
+      "enforcer": "every transition requires its covenant at transaction input 0 (OpTxInputIndex, 0xb9); at most one input is index 0 and consensus evaluates every input's script, so the second covenant's script fails — total for this family"
+    },
+    {
+      "name": "covenant_not_at_input_zero",
+      "description": "Any transition whose covenant input sits at a transaction index other than 0 (the shape a merge forces on its second victim).",
+      "reject_layer": "script",
+      "enforcer": "require(this.activeInputIndex == 0) — lowering to OpTxInputIndex (0xb9) at the rusty-kaspa pin cfafeb4c. The Silverscript construct is NullaryOp::ActiveInputIndex at michaelsutton/silverscript rev d57e5df (argent's pin, branch argent-sil-integration); on canonical kaspanet/silverscript master the same type is IntrospectionKind::ActiveInputIndex after the 2026-08-02 renames — the capability survives, only the name moved"
     }
   ]
 }
