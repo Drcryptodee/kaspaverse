@@ -37,8 +37,9 @@
 //!       and at most one counter is nonzero (the mutual rows are deleted).
 //!   P6  bonds stay in [0, BOND_SLICES]; only reveal claims slice; an offense
 //!       against an empty bond forfeits.
-//!   P7  value conservation: every terminal pays pot + bond remainders
-//!       exactly; every slice is paid at claim time from the conceder's bond.
+//!   P7  value conservation: every terminal pays pot + bond remainders +
+//!       credited slices exactly; every slice leaves the conceder's bond at
+//!       claim time and is credited to the claimant (paid at settlement).
 //!   P8  sudden death cannot loop invisibly: every SD pair end is either
 //!       decisive or returns to the pair start (the quotient's single cycle),
 //!       and P1/P4 hold inside it.
@@ -47,6 +48,24 @@
 //!   P11 stalling is strictly dominated mechanically: every claim strictly
 //!       worsens the conceder (counter, bond, or match), and the conceder's
 //!       own move was enabled from the state's birth (Unlock::Now).
+//!   P12 (D-127, OQ-11) no terminal can emit an unbroadcastable settlement:
+//!       every payout output is > 0 and at or above law L's floor, evaluated
+//!       at the WORST admissible buffer — the un-drawable reserve itself.
+//!
+//! C6 amended this machine (the pass's only machine sitting — D-127/128/129).
+//! Three register findings that all touched the value/output rules were ruled
+//! together, because one design serves all three:
+//!   D-127 (OQ-11) the value floor reserves `2 · L_FLOOR`, so the smallest
+//!         settlement output can never fall to zero or below admissibility.
+//!   D-128 (OQ-12) the reveal-claim's slice is credited IN STATE and paid at
+//!         settlement, so every non-terminal row is 1-in-1-out and
+//!         storage-mass free. The credit needs no new field: only reveal
+//!         claims slice and the claimant is always the conceder's
+//!         counterparty, so p's credit is exactly
+//!         `(BOND_SLICES − bond(p.other())) · b`.
+//!   D-129 (OQ-13) every transition spends its covenant at transaction input
+//!         0, so two duel_ad covenants can never be settled by one merged
+//!         transaction (double satisfaction). Emitted into every vector step.
 //!
 //! Vector emission (DP-9): positive vectors are walker-searched paths to every
 //! terminal cause; negative vectors are the refusals the script/consensus must
@@ -78,6 +97,114 @@ const BOND_SLICES: u8 = 5; // standing reveal bond, in slices of `b`
 const ROUNDS: u8 = 10; // regulation length
 /// P1's asserted ceiling: phase completion (≤1 window) + three claim windows.
 const EXIT_WINDOW_BOUND: u32 = 4;
+
+// ---------------------------------------------------------------------------
+// The value dimension (COVENANT C6 — D-127/D-128).
+//
+// The walker was deliberately value-symbolic at C3, and that is exactly why it
+// could not see OQ-11: sompi granularity, `TxOutZero` and storage mass are all
+// outside a protocol-layer model's universe (`covenant_engine_architecture.md
+// §8.7-1`). A ruling the walker cannot check is a document claim, not a proof
+// (INV-10), so C6 gives it the *minimum* value dimension its own rulings need:
+// the terminal payouts, evaluated at the worst admissible buffer.
+//
+// The constants are the recommended terms at R = 1,791 (`…§8.6`), every one
+// re-executed against the pin's own `MassCalculator`/`calc_storage_mass` this
+// sitting. They are per-match terms like the windows above; the properties are
+// bounds, so they hold for any admissible terms sheet.
+// ---------------------------------------------------------------------------
+
+const SOMPI_PER_KAS: u64 = 100_000_000;
+/// Law S at φ = 1 %, R = 1,791 (floor 9.793 KAS → ruled 10).
+const STAKE: u64 = 10 * SOMPI_PER_KAS;
+/// The worst signed row's relay-fee floor at R = 1,791 — `commit_a/b`, which
+/// is the worst signed row *because* D-128 removed the slice output that used
+/// to make `claim_reveal_timeout` heavier (429,800 → 419,400 sompi).
+const FEE_MOVE_CAP_FLOOR: u64 = 425_800;
+/// Law L: `C / (10 · fee_mass(settlement row))`, settlement fee 422,800 sompi
+/// ⇒ 4,228 grams ⇒ 23,651,844 sompi. The smallest settlement output must clear
+/// it or the settlement is admissible-but-unminable (C4 finding 1).
+const L_FLOOR: u64 = 23_651_844;
+/// **D-127.** The reserve the value floor holds back on every non-terminal
+/// row: two law-L floors, one per settlement output. Because the floor is a
+/// *script* rule and not merely a genesis sizing rule, the reserve cannot be
+/// drawn away by transitions — which is precisely what C4's interim posture
+/// (a term inside law U) did not achieve.
+const SETTLE_RESERVE: u64 = 2 * L_FLOOR;
+/// Law B at the amended shapes: `max(10 · FEE_MOVE_CAP, β · stake / 5)` with
+/// β = 5 %. D-128 deletes law B's two storage terms (there is no slice output
+/// left to price), so the fee term alone would put `b` at 0.043 KAS — and
+/// nothing would then price grief-by-delay. β is the founder-owned product
+/// parameter that does (D-128, law B restated two-sided).
+const B_SLICE: u64 = SOMPI_PER_KAS / 10; // 0.10 KAS ⇒ standing bond 0.5 KAS
+/// Law B's deterrence term, `β · stake / 5`, at the ruled β = 5 %.
+const B_BETA_FLOOR: u64 = STAKE / 100;
+
+/// **The bond capital, and why it is a constant.** Since D-128 a slice never
+/// leaves the covenant: it moves from the conceder's bond field to the
+/// claimant's *derived* credit, inside the same state. So across any terminal
+/// `bond(A) + credit(A) + bond(B) + credit(B)` is invariant at
+/// `2 · BOND_SLICES · b` — the settlement owes the same bond sompi no matter
+/// how many slices have moved.
+///
+/// This is load-bearing for the value floor. C3's floor read the **remaining**
+/// bond fields, which was right while a slice left the covenant as an output
+/// (value and floor fell together) and is **wrong** after D-128 (the floor
+/// falls, the value does not, and the credited sompi become drawable fee
+/// budget). Reading state here would under-reserve by up to `2·BOND_SLICES·b`.
+/// *(consensus-auditor, C6 — the BLOCK. Caught before merge, and caught
+/// because `P12` was rewritten to DERIVE the buffer instead of being handed
+/// it: the conservation assertion below is the one that fails under the old
+/// floor.)*
+const BOND_CAPITAL: u64 = 2 * BOND_SLICES as u64 * B_SLICE;
+
+/// The floor the script enforces on every transition (`SPEC.md §5.1`), and the
+/// worst admissible covenant value at any terminal.
+const VALUE_FLOOR: u64 = 2 * STAKE + BOND_CAPITAL + SETTLE_RESERVE;
+
+const _: () = {
+    assert!(
+        B_SLICE >= 10 * FEE_MOVE_CAP_FLOOR,
+        "law B's fee term: a slice must dominate the cost of claiming it"
+    );
+    // Law B's β floor (D-128), corrected at the C6 re-audit. The first draft
+    // justified it as `β ≥ φ` (law S's fee friction) and that was wrong twice:
+    // φ is friction against the POT and β against the STAKE, so `β = φ` buys
+    // half the fee bill rather than covering it; and the β term only overtakes
+    // the fee term at `β ≈ 2.17 φ`, so the whole sub-range `[φ, 2.17φ)` is
+    // INERT — a terms sheet could satisfy the "law" while exhibiting verbatim
+    // the defect it exists to correct. So the law is stated as the condition
+    // itself: **the deterrence term must be the binding one.**
+    assert!(
+        B_SLICE >= B_BETA_FLOOR,
+        "law B's β floor: the standing bond must be β = 5 % of the stake, or \
+         nothing prices grief-by-delay"
+    );
+    assert!(
+        B_BETA_FLOOR >= 10 * FEE_MOVE_CAP_FLOOR,
+        "law B's β must BIND: a β whose term sits below the fee term is inert, \
+         and the entire content of the ruling is that SOMETHING prices \
+         grief-by-delay once D-128 removed the storage terms"
+    );
+    assert!(
+        5 * B_SLICE <= STAKE / 2,
+        "law B's ceiling (α ≤ ½): once the standing bond exceeds half the stake, \
+         pre-emptive resignation dominates playing on"
+    );
+    assert!(
+        SETTLE_RESERVE == 2 * L_FLOOR,
+        "D-127: one law-L floor per settlement output"
+    );
+};
+
+/// **D-129 (OQ-13).** Every duel_ad transition spends its covenant at
+/// transaction input 0. Two covenants of this family therefore can never be
+/// spent by one transaction — at most one input is index 0, and consensus
+/// evaluates every input's script — which kills double satisfaction at the
+/// class OQ-13 names, by consensus, for ~4 script bytes and no storage cost.
+/// Emitted into every vector step, so changing it fails the golden test and
+/// forces the regeneration ritual + an auditor re-read.
+const COVENANT_INPUT_INDEX: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // The covenant state (the model state IS the on-chain state — foldability).
@@ -259,9 +386,58 @@ struct Edge {
     taker_for_a: Taker,
     unlock: Unlock,
     material: Material,
-    /// Slices paid out of a bond to the claimant inside this transition.
-    slice_paid_to: Option<Player>,
+    /// Slices moved out of the conceder's bond and **credited** to the
+    /// claimant inside this transition. Since D-128 the credit is recorded in
+    /// covenant state and paid at settlement — the row emits no slice output,
+    /// so every non-terminal transition is 1-in-1-out and storage-mass free.
+    slice_credited_to: Option<Player>,
     succs: Vec<Succ>,
+}
+
+/// What each player receives at a terminal, in sompi (D-127/D-128), given the
+/// covenant's value at settlement.
+///
+/// The bond term carries D-128's derived credit: a player receives their own
+/// remaining slices plus every slice the opponent lost — and every slice the
+/// opponent lost was won by this player, because only reveal claims slice and
+/// the claimant is always the conceder's counterparty. No stored credit field.
+///
+/// **The buffer is DERIVED, never assumed**: it is whatever the covenant holds
+/// above its stake and bond obligations. That is the whole content of `P12` —
+/// handing the function a buffer would make the property true by construction
+/// and would have hidden the floor defect the C6 audit caught.
+fn payouts(t: &Terminal, value: u64) -> [(Player, u64); 2] {
+    let stake_part = |p: Player| match t.winner {
+        Some(w) if w == p => 2 * STAKE,
+        Some(_) => 0,
+        None => STAKE, // the dead-man tie refunds both stakes
+    };
+    let bond_part = |p: Player| {
+        let (own, opp) = match p {
+            A => (t.bond_a, t.bond_b),
+            B => (t.bond_b, t.bond_a),
+        };
+        own as u64 * B_SLICE + (BOND_SLICES - opp) as u64 * B_SLICE
+    };
+
+    // Conservation: bonds + credits are invariant at the genesis bond capital,
+    // however many slices have moved. This is the identity the value floor
+    // must reserve against, and asserting it here is what makes P12 a proof.
+    assert_eq!(
+        bond_part(A) + bond_part(B),
+        BOND_CAPITAL,
+        "bond capital is not conserved at {t:?} — a slice left the covenant"
+    );
+    let obligations = 2 * STAKE + BOND_CAPITAL;
+    let buffer = value
+        .checked_sub(obligations)
+        .unwrap_or_else(|| panic!("terminal {t:?} owes {obligations} against a value of {value}"));
+
+    let half = buffer / 2; // odd sompi to fee (SPEC §5.3) — deterministic
+    [
+        (A, stake_part(A) + bond_part(A) + half),
+        (B, stake_part(B) + bond_part(B) + half),
+    ]
 }
 
 fn remaining_attacks(p: Player, next_round: u8) -> u8 {
@@ -441,7 +617,7 @@ fn edges(s: &S) -> Vec<Edge> {
                         taker_for_a: taker_for_a(p),
                         unlock: Unlock::Now,
                         material: Material::OwnSig(p),
-                        slice_paid_to: None,
+                        slice_credited_to: None,
                         succs: vec![Succ::Live(S { phase: succ, ..*s })],
                     });
                 }
@@ -456,7 +632,7 @@ fn edges(s: &S) -> Vec<Edge> {
                         taker_for_a: taker_for_a(claimant),
                         unlock: Unlock::AfterInputAge(W_COMMIT),
                         material: Material::OwnSig(claimant),
-                        slice_paid_to: None,
+                        slice_credited_to: None,
                         succs: vec![resolve(s, Some(claimant.other()), None, false)],
                     });
                 }
@@ -488,7 +664,7 @@ fn edges(s: &S) -> Vec<Edge> {
                         taker_for_a: Taker::Anyone, // preimage-gated, sig-free
                         unlock: Unlock::Now,
                         material: Material::Preimage(p),
-                        slice_paid_to: None,
+                        slice_credited_to: None,
                         succs,
                     });
                 }
@@ -501,7 +677,7 @@ fn edges(s: &S) -> Vec<Edge> {
                         taker_for_a: taker_for_a(claimant),
                         unlock: Unlock::AfterInputAge(W_REVEAL),
                         material: Material::OwnSig(claimant),
-                        slice_paid_to: if s.bond(claimant.other()) > 0 {
+                        slice_credited_to: if s.bond(claimant.other()) > 0 {
                             Some(claimant)
                         } else {
                             None // empty bond: the offense forfeits instead
@@ -522,7 +698,7 @@ fn edges(s: &S) -> Vec<Edge> {
             taker_for_a: taker_for_a(p),
             unlock: Unlock::Now,
             material: Material::OwnSig(p),
-            slice_paid_to: None,
+            slice_credited_to: None,
             succs: vec![Succ::Done(Terminal {
                 winner: Some(p.other()),
                 cause: Cause::Resign,
@@ -540,7 +716,7 @@ fn edges(s: &S) -> Vec<Edge> {
         taker_for_a: Taker::Anyone,
         unlock: Unlock::AfterInputAge(W_DEADMAN),
         material: Material::None,
-        slice_paid_to: None,
+        slice_credited_to: None,
         succs: vec![Succ::Done(Terminal {
             winner: s.leader(),
             cause: Cause::DeadMan,
@@ -786,7 +962,8 @@ fn the_duel_state_space_satisfies_the_inv6_properties() {
             }
 
             // P6 — only reveal claims slice, by exactly one, from the
-            // conceder, paid to the claimant (local conservation → P7 global).
+            // conceder, credited to the claimant (D-128: recorded in state,
+            // paid at settlement; local conservation → P7 global).
             match e.kind {
                 Kind::ClaimRevealTimeout(claimant) => {
                     for succ in &e.succs {
@@ -799,14 +976,14 @@ fn the_duel_state_space_satisfies_the_inv6_properties() {
                             // Empty bond: the offense forfeits, no slice.
                             assert_eq!((nb_a, nb_b), (s.bond_a, s.bond_b));
                             assert!(matches!(succ, Succ::Done(t) if t.cause == Cause::BondForfeit));
-                            assert_eq!(e.slice_paid_to, None);
+                            assert_eq!(e.slice_credited_to, None);
                         } else {
                             let expect = match conceder {
                                 A => (s.bond_a - 1, s.bond_b),
                                 B => (s.bond_a, s.bond_b - 1),
                             };
                             assert_eq!((nb_a, nb_b), expect, "slice must come from the conceder");
-                            assert_eq!(e.slice_paid_to, Some(claimant));
+                            assert_eq!(e.slice_credited_to, Some(claimant));
                         }
                     }
                 }
@@ -895,9 +1072,23 @@ fn the_duel_state_space_satisfies_the_inv6_properties() {
         }
     }
 
-    // P7 — terminal payout table: pot + bond remainders, nothing else.
-    // (Slices moved at claim time — asserted per edge above; the buffer's
-    // split is a constant rule, C4 prices it.)
+    // P7 — terminal payout table: pot + bond remainders + credited slices,
+    // nothing else. (Slices leave the conceder's bond at claim time — asserted
+    // per edge above; the buffer's split is a constant rule, C4 prices it.)
+    //
+    // P12 — D-127, OQ-11 closed. The settlement dust hole was a reachable
+    // state in which the losing payout fell to zero (`TxOutZero`) or below
+    // admissibility (`RejectStorageMass`), so the covenant could not exit at
+    // all. It is checked here at the WORST admissible covenant value — the
+    // value floor itself — with the buffer DERIVED from what the terminal
+    // owes, not assumed. That derivation is the property: it asserts bond
+    // capital is conserved (D-128 moves slices inside the covenant, so the
+    // floor must reserve the genesis capital, never the remaining fields) and
+    // it panics if any terminal owes more than the floor guarantees. The bound
+    // is TIGHT: a loser holding no slices against an opponent holding all five
+    // receives exactly `L_FLOOR`, so deleting the reserve fails this property
+    // rather than silently re-opening the hole.
+    let mut min_payout = u64::MAX;
     for t in &space.terminals {
         match t.cause {
             Cause::DeadMan => {} // winner may be None (tie refund)
@@ -907,7 +1098,27 @@ fn the_duel_state_space_satisfies_the_inv6_properties() {
             ),
         }
         assert!(t.bond_a <= BOND_SLICES && t.bond_b <= BOND_SLICES);
+
+        for (p, amount) in payouts(t, VALUE_FLOOR) {
+            assert!(
+                amount > 0,
+                "P12: terminal {t:?} pays {p:?} zero — TxOutZero, the settlement \
+                 cannot be broadcast and the covenant cannot exit (INV-6)"
+            );
+            assert!(
+                amount >= L_FLOOR,
+                "P12: terminal {t:?} pays {p:?} {amount} sompi, below law L's \
+                 floor {L_FLOOR} — admissible at best, unminable in practice"
+            );
+            min_payout = min_payout.min(amount);
+        }
     }
+    assert_eq!(
+        min_payout, L_FLOOR,
+        "P12's bound must stay TIGHT: the worst reachable payout is exactly \
+         the reserve's half. A larger minimum means the reserve is now \
+         over-sized (re-derive law L); a smaller one is impossible here."
+    );
 
     // P8 — the SD quotient: reachable SD states carry deltas only, and both
     // pair outcomes (decisive, continue) are reachable — the loop is real and
@@ -1072,8 +1283,9 @@ mod vectors {
                 _ => "",
             };
             steps.push(format!(
-                "{{\"age_daa\":{},\"entrypoint\":\"{}\"{}}}",
+                "{{\"age_daa\":{},\"cov_input_index\":{},\"entrypoint\":\"{}\"{}}}",
                 age_for(e),
+                COVENANT_INPUT_INDEX,
                 kind_label(e.kind),
                 outcome
             ));
@@ -1088,15 +1300,22 @@ mod vectors {
             Some(p) => format!("\"{}\"", p.name()),
             None => "null".to_string(),
         };
+        // Payouts at the WORST admissible covenant value — the value floor
+        // itself (D-127), from which the buffer is derived. The P4 harness
+        // asserts the compiled template emits exactly these amounts, so the
+        // dust hole is a fixture, not a hope.
+        let [(_, pay_a), (_, pay_b)] = payouts(&t, VALUE_FLOOR);
         format!(
-            "    {{\n      \"name\": \"{}\",\n      \"description\": \"{}\",\n      \"steps\": [{}],\n      \"terminal\": {{\"cause\": \"{:?}\", \"winner\": {}, \"bond_a\": {}, \"bond_b\": {}}}\n    }}",
+            "    {{\n      \"name\": \"{}\",\n      \"description\": \"{}\",\n      \"steps\": [{}],\n      \"terminal\": {{\"cause\": \"{:?}\", \"winner\": {}, \"bond_a\": {}, \"bond_b\": {}, \"payout_a_sompi\": {}, \"payout_b_sompi\": {}}}\n    }}",
             walk.name,
             walk.description,
             steps.join(", "),
             t.cause,
             winner,
             t.bond_a,
-            t.bond_b
+            t.bond_b,
+            pay_a,
+            pay_b
         )
     }
 
@@ -1345,9 +1564,9 @@ mod vectors {
             ),
             (
                 "overdraw_fee",
-                "A transition whose successor value is more than the fee cap below the input value.",
+                "A transition whose successor value is more than the fee cap below the input value, or below the value floor.",
                 "script",
-                "value floor: next.value >= self.value - FEE_CAP, and never below stakes + bonds",
+                "value floor (D-127/D-128): next.value >= self.value - FEE_CAP, and never below stakes + BOND_CAPITAL + SETTLE_RESERVE — where BOND_CAPITAL = 2*BOND_SLICES*b is a GENESIS CONSTANT, not the remaining bond fields (a slice moves inside the covenant since D-128, so a remaining-bonds reading falls while the settlement's obligation does not), and both values are scoped to this covenant, never the transaction",
             ),
             (
                 "settle_unregistered_payout",
@@ -1373,6 +1592,18 @@ mod vectors {
                 "script",
                 "successor validation recomputes and pins template ‖ state for the covenant output",
             ),
+            (
+                "merged_settlement_two_covenants",
+                "Double satisfaction (D-129, OQ-13): one stranger-assembled transaction spending TWO statute-ripe duel_ad covenants whose payout demands coincide, discharging both with a single output set — the second pot flowing to fee, i.e. to the assembling miner. Constructible at will: two matches between the same pair at identical terms, both abandoned at genesis, demand byte-identical output sets.",
+                "script",
+                "every transition requires its covenant at transaction input 0 (OpTxInputIndex, 0xb9); at most one input is index 0 and consensus evaluates every input's script, so the second covenant's script fails — total for this family",
+            ),
+            (
+                "covenant_not_at_input_zero",
+                "Any transition whose covenant input sits at a transaction index other than 0 (the shape a merge forces on its second victim).",
+                "script",
+                "require(this.activeInputIndex == 0) — lowering to OpTxInputIndex (0xb9) at the rusty-kaspa pin cfafeb4c. The Silverscript construct is NullaryOp::ActiveInputIndex at michaelsutton/silverscript rev d57e5df (argent's pin, branch argent-sil-integration); on canonical kaspanet/silverscript master the same type is IntrospectionKind::ActiveInputIndex after the 2026-08-02 renames — the capability survives, only the name moved",
+            ),
         ];
         let mut out = Vec::new();
         for (name, description, layer, enforcer) in rows {
@@ -1391,7 +1622,7 @@ mod vectors {
             .collect::<Vec<_>>()
             .join(",\n");
         format!(
-            "{{\n  \"format\": \"duel-ad-vectors-v1\",\n  \"source\": \"rust/covenant/tests/duel_ad_model.rs (DP-9/DP-12; regenerate with KV_REGEN_VECTORS=1)\",\n  \"windows\": {{\"w_commit\": {W_COMMIT}, \"w_reveal\": {W_REVEAL}, \"w_dead_man\": {W_DEADMAN}, \"note\": \"per-match terms (Standard control shown); ages are the claim input's minimum sequence\"}},\n  \"vectors\": [\n{body}\n  ]\n}}\n"
+            "{{\n  \"format\": \"duel-ad-vectors-v1\",\n  \"source\": \"rust/covenant/tests/duel_ad_model.rs (DP-9/DP-12; regenerate with KV_REGEN_VECTORS=1)\",\n  \"windows\": {{\"w_commit\": {W_COMMIT}, \"w_reveal\": {W_REVEAL}, \"w_dead_man\": {W_DEADMAN}, \"note\": \"per-match terms (Standard control shown); ages are the claim input's minimum sequence\"}},\n  \"terms\": {{\"stake_sompi\": {STAKE}, \"b_slice_sompi\": {B_SLICE}, \"bond_slices\": {BOND_SLICES}, \"settle_reserve_sompi\": {SETTLE_RESERVE}, \"l_floor_sompi\": {L_FLOOR}, \"note\": \"C6 D-127/D-128 at R=1791; payouts below are evaluated at the WORST admissible buffer (the un-drawable reserve), so they are the lower bound the compiled template must clear\"}},\n  \"cov_input_index\": {COVENANT_INPUT_INDEX},\n  \"vectors\": [\n{body}\n  ]\n}}\n"
         )
     }
 
