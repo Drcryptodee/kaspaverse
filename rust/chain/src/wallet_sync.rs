@@ -640,6 +640,18 @@ impl WalletEngine {
         if previous.is_empty() {
             return Err(ChainError::Message("wallet engine not started".into()));
         }
+        // Structurally a WIDENING, not a replacement. The caller derives the new
+        // set from marks that only grow, so `previous ⊆ addresses` holds today —
+        // but "holds today by convention" is exactly what made the original
+        // window bug possible, and the cost of being wrong here is a watched
+        // address dropped from the set the balance reflects. Refuse instead.
+        let proposed: HashSet<&Address> = addresses.iter().collect();
+        if let Some(dropped) = previous.iter().find(|a| !proposed.contains(a)) {
+            return Err(ChainError::Message(format!(
+                "refusing to narrow the watch window: {} would be dropped",
+                dropped.short(8)
+            )));
+        }
         let known: HashSet<&Address> = previous.iter().collect();
         let added: Vec<Address> = addresses
             .iter()

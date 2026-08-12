@@ -67,22 +67,35 @@ pub(crate) fn wallet_window() -> (u32, u32) {
 /// as a bare index, `0` means both "nothing found" and "index 0 is funded", and
 /// a fresh wallet came out one address wider than the gap limit.
 ///
-/// Both branches are capped at [`vault::MAX_SCAN_MARK`]. Saturating arithmetic
-/// alone is not a defence here: it stops the window WRAPPING to something tiny
-/// but happily returns `u32::MAX`, and every consumer scales linearly in this
+/// Both branches are capped at [`MAX_WINDOW`]. Saturating arithmetic alone is
+/// not a defence here: it stops the window WRAPPING to something tiny but
+/// happily returns `u32::MAX`, and every consumer scales linearly in this
 /// number — a window is a derivation count. Wide and narrow are both fatal; the
 /// first version of this function defended one and shipped a passing test that
 /// blessed the other.
 pub(crate) fn window_from(receive_seen: u32, change_seen: u32, change_cursor: u32) -> (u32, u32) {
     let receive = GAP_LIMIT
         .max(receive_seen.saturating_add(GAP_LIMIT))
-        .min(vault::MAX_SCAN_MARK);
+        .min(MAX_WINDOW);
     let change = GAP_LIMIT
         .max(change_seen.saturating_add(GAP_LIMIT))
         .max(change_cursor.saturating_add(1))
-        .min(vault::MAX_SCAN_MARK);
+        .min(MAX_WINDOW);
     (receive, change)
 }
+
+/// The ceiling on a derived window — the mark ceiling plus the gap always kept
+/// past it.
+///
+/// It must sit **above** the index space the marks can name, never on it. A
+/// window is a COUNT: `build_wallet_signer` registers `0..count`, so clamping
+/// the window to `MAX_SCAN_MARK` while [`next_change_index`] can also *equal*
+/// `MAX_SCAN_MARK` hands out a change address one past the last signable index.
+/// The send would succeed, return change to an address neither watched nor
+/// spendable, and the cursor — clamped on read — would return the same dead
+/// index on every send after it. Fixing an abort by opening a fund-loss path at
+/// the same boundary is not a fix; this is the boundary, plus one gap.
+pub(crate) const MAX_WINDOW: u32 = vault::MAX_SCAN_MARK + GAP_LIMIT;
 
 /// The next change index to hand out — the send cursor (D-041), floored at what
 /// discovery found.
@@ -105,14 +118,26 @@ pub(crate) fn next_change_index() -> u32 {
 /// How deep to probe a branch on the next discovery pass: always at least
 /// [`DISCOVERY_DEPTH`], and always [`GAP_LIMIT`] past anything already found, so
 /// a wallet that has grown past the default depth keeps growing instead of
-/// pinning itself at the last scan's edge — under the same
-/// [`vault::MAX_SCAN_MARK`] ceiling, since a probe depth is a derivation count
-/// too.
+/// pinning itself at the last scan's edge — up to [`MAX_DISCOVERY_DEPTH`].
 pub(crate) fn discovery_depth_for(seen: u32) -> u32 {
     DISCOVERY_DEPTH
         .max(seen.saturating_add(GAP_LIMIT))
-        .min(vault::MAX_SCAN_MARK)
+        .min(MAX_DISCOVERY_DEPTH)
 }
+
+/// The deepest a single automatic pass will probe.
+///
+/// A window is derived once and held; a probe depth is **round trips on the
+/// unlock path**, and the two must not share a ceiling. `MAX_SCAN_MARK` as the
+/// cap made the pass `ceil(100_000/128) = 782` sequential chunks — at
+/// `PROBE_TIMEOUT` each, over two hours of a blocked gate, reachable from the
+/// same corrupt bytes the mark clamp exists for. At 512 the pass is at most 4
+/// chunks per branch, and the branches run concurrently.
+///
+/// A wallet genuinely deeper than this stops growing automatically, which is
+/// the already-recorded bound: deeper than one pass reaches is the manual
+/// "scan deeper" control's job (Track 2), not the unlock path's.
+pub(crate) const MAX_DISCOVERY_DEPTH: u32 = 512;
 
 /// A signer registered over the CURRENT window — the one call every send path
 /// uses. Exists so the window reaches the signer as a single fact rather than as
@@ -187,7 +212,14 @@ pub(crate) async fn window_after_discovery() -> (u32, u32) {
 /// must keep its own budget), so it reports through the log, not a return value.
 pub(crate) async fn retry_discovery_if_unproven() {
     let before = {
-        let mut state = DISCOVERY.lock().await;
+        // `try_lock`, not `lock`: a pass already in flight IS the retry. Waiting
+        // would queue one spawn per reconnect, and a link that flaps every
+        // `RACE_RETRY_DELAY` (3 s) against a node slow enough to need retrying
+        // would grow that queue without bound — every entry then running a full
+        // pass against the same sick node.
+        let Ok(mut state) = DISCOVERY.try_lock() else {
+            return;
+        };
         if state.succeeded {
             return;
         }
@@ -217,16 +249,24 @@ pub(crate) async fn retry_discovery_if_unproven() {
     };
     match vault::derive_wallet_addresses(after.0, after.1) {
         Ok((addresses, change_addresses)) => {
-            match engine.extend_watch(addresses, change_addresses).await {
-                Ok(0) => {}
-                Ok(added) => log::info!(
+            match tokio::time::timeout(
+                EXTEND_WATCH_TIMEOUT,
+                engine.extend_watch(addresses, change_addresses),
+            )
+            .await
+            {
+                Ok(Ok(0)) => {}
+                Ok(Ok(added)) => log::info!(
                     "wallet: {added} newly discovered addresses registered with the live engine"
                 ),
                 // Not silent, and not lost: `extend_watch` publishes the wider
                 // set before registering, so the next `UtxoProcStart` or any
                 // pull-to-refresh re-asks the node for it.
-                Err(e) => log::warn!(
+                Ok(Err(e)) => log::warn!(
                     "wallet: widened window not registered ({e}) — a refresh or reconnect re-asks"
+                ),
+                Err(_) => log::warn!(
+                    "wallet: widened window registration timed out — a refresh or reconnect re-asks"
                 ),
             }
         }
@@ -236,6 +276,25 @@ pub(crate) async fn retry_discovery_if_unproven() {
         ),
     }
 }
+
+/// The whole pass's deadline, and therefore the whole gate's: the longest the
+/// sync engine and the messaging hub can be held before they open on the last
+/// known-good window.
+///
+/// Three times the codebase's single-call tier (`SOFT_RESCAN_TIMEOUT`,
+/// `PAGE_TIMEOUT`, `BIND_ENVELOPE_TIMEOUT` are all 10 s), because a pass is a
+/// multi-call operation: at `MAX_DISCOVERY_DEPTH` it is 4 chunks per branch with
+/// the branches concurrent, and a healthy node answers each in well under a
+/// second. Only a sick one gets anywhere near this — and against a sick node the
+/// right answer is to open the wallet and retry, not to keep waiting.
+const DISCOVERY_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The engine's registration budget for a late widening — the
+/// `SOFT_RESCAN_TIMEOUT` pattern, for the same reason: `extend_watch` reaches
+/// `get_utxos_by_addresses`, which is pin-bounded at ≈65 s and nothing of ours.
+/// Detached, so a timeout costs a log line; the next `UtxoProcStart` or pull
+/// re-asks for the set, which `extend_watch` has already published.
+const EXTEND_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Run one pass and record what it means.
 ///
@@ -255,7 +314,25 @@ async fn run_discovery_pass(state: &mut Discovery) {
             return;
         }
     };
-    let outcome = discover_and_persist_window(&monitor.rpc()).await;
+    // One deadline for the WHOLE pass, on top of the per-probe one. Both
+    // consumers block on this gate, so the guarantee that matters to them is
+    // "the wallet opens within N seconds", not "each round trip is bounded":
+    // per-call deadlines alone multiply by the chunk count, which scales with
+    // the persisted mark. Partial findings are lost when it fires (the probes
+    // are dropped) — the retry re-asks, and a window that widens late is now
+    // harmless.
+    let outcome = match tokio::time::timeout(
+        DISCOVERY_PASS_TIMEOUT,
+        discover_and_persist_window(&monitor.rpc()),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => Err(AppError::msg(format!(
+            "discovery pass exceeded its {} s deadline",
+            DISCOVERY_PASS_TIMEOUT.as_secs()
+        ))),
+    };
     match &outcome {
         Ok((receive_seen, change_seen)) => log::info!(
             "wallet: address discovery complete — funded marks receive={receive_seen} change={change_seen}"
@@ -300,10 +377,11 @@ fn record_pass(state: &mut Discovery, outcome: &Result<(u32, u32), AppError>) {
 /// try again*, never *narrow the window*.
 async fn discover_and_persist_window(rpc: &kaspaverse_chain::Rpc) -> Result<(u32, u32), AppError> {
     // Two independent questions about the chain, so they are asked
-    // CONCURRENTLY — `join!`, never `try_join!`: cancelling the other branch
-    // mid-call would abandon a pending wrpc request for the reaper to collect,
-    // and the whole point of this concurrency is to halve what a caller waits
-    // on the gate.
+    // CONCURRENTLY — halving what a caller waits on the gate. `join!`, never
+    // `try_join!`: `try_join!` returns on the first error and DROPS the other
+    // branch, discarding an answer we would have kept — the marks are
+    // monotonic, so a half-answer can only widen, and a widening thrown away is
+    // one we have to pay to probe for again.
     persist_from_probe(|receive, change| async move {
         tokio::join!(
             kaspaverse_chain::discovery::highest_funded_index(rpc, &receive),
@@ -638,12 +716,36 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                         // the last `resume_start`.
                                         kaspaverse_chain::spans::mark("wallet_balance");
                                     }
-                                    if matches!(event, WalletEvent::Connected { .. }) {
+                                    if matches!(
+                                        event,
+                                        WalletEvent::Connected { .. } | WalletEvent::Syncing
+                                    ) {
                                         // The socket the first pass could not
-                                        // reach is up now. Detached: the fold
-                                        // loop owes the glass its next frame,
-                                        // not a network probe. A no-op once a
-                                        // pass has succeeded.
+                                        // reach is usable now. BOTH events,
+                                        // because at the pin they cover
+                                        // different paths: `Connect` is
+                                        // broadcast only from the
+                                        // `RpcState::Connected` arm, and
+                                        // `UtxoProcessor::start()` on an
+                                        // ALREADY-connected client calls
+                                        // `handle_connect()` directly without
+                                        // it (`processor.rs:704-705, 717-723`)
+                                        // — which is the normal path here,
+                                        // since the chain service connects at
+                                        // app start and the engine starts after
+                                        // unlock. `Syncing` is our forward of
+                                        // `UtxoProcStart`, which
+                                        // `handle_connect_impl` fires on both
+                                        // (`processor.rs:541`). Hanging the
+                                        // retry on the one event that does not
+                                        // arrive is how the original defect
+                                        // would have survived its own fix.
+                                        //
+                                        // Detached: the fold loop owes the
+                                        // glass its next frame, not a network
+                                        // probe. A no-op once a pass has
+                                        // succeeded, and a no-op while one is
+                                        // in flight.
                                         tokio::spawn(retry_discovery_if_unproven());
                                     }
                                     let refresh_rows = matches!(event, WalletEvent::Activity(_));
@@ -861,8 +963,11 @@ mod tests {
         // `handle_alloc_error`, SIGABRT, and a wallet that re-reads the same
         // eight bytes and aborts again on every launch.
         let (receive, change) = window_from(u32::MAX, u32::MAX, u32::MAX);
-        assert_eq!(receive, vault::MAX_SCAN_MARK);
-        assert_eq!(change, vault::MAX_SCAN_MARK);
+        assert_eq!(receive, MAX_WINDOW);
+        assert_eq!(change, MAX_WINDOW);
+        // And the ceiling sits ABOVE the index space the clamped marks name,
+        // never on it — see `MAX_WINDOW`.
+        const { assert!(MAX_WINDOW > vault::MAX_SCAN_MARK) };
     }
 
     #[test]
@@ -888,9 +993,12 @@ mod tests {
         // Past the default depth the scan keeps growing rather than pinning
         // itself at the last scan's edge.
         assert_eq!(discovery_depth_for(400), 400 + GAP_LIMIT);
-        // …but a probe depth is a derivation count too, so it stops at the
-        // same ceiling instead of asking the node about 4 billion addresses.
-        assert_eq!(discovery_depth_for(u32::MAX), vault::MAX_SCAN_MARK);
+        // …but a probe depth is round trips on the unlock path, so it stops at
+        // its OWN, much lower ceiling — not the window's. At `MAX_SCAN_MARK`
+        // one pass would be 782 sequential chunks: over two hours of a blocked
+        // gate, from four corrupt bytes.
+        assert_eq!(discovery_depth_for(u32::MAX), MAX_DISCOVERY_DEPTH);
+        const { assert!(MAX_DISCOVERY_DEPTH < vault::MAX_SCAN_MARK) };
     }
 
     #[test]
@@ -1047,7 +1155,26 @@ mod tests {
         // path takes, the signer's window must already reach it, or the fix
         // would create the very "visible but unspendable" state this track
         // exists to kill. Both sides read the same two numbers.
-        for (cursor, change_seen) in [(0u32, 0u32), (0, 78), (120, 78), (78, 120), (5, 3)] {
+        //
+        // The last four pairs are the ones the first version of this test
+        // missed: five hand-picked values, none near the ceiling the clamp had
+        // just introduced. `MAX_SCAN_MARK` is exactly what a CORRUPT
+        // `change.cursor` or `scan.window` reads back as once clamped, and at
+        // that value a window also clamped to `MAX_SCAN_MARK` covers
+        // `0..=MAX_SCAN_MARK-1` — one short of the index it hands out. The send
+        // would have succeeded and returned change to an address that is
+        // neither watched nor signable, on every send thereafter.
+        for (cursor, change_seen) in [
+            (0u32, 0u32),
+            (0, 78),
+            (120, 78),
+            (78, 120),
+            (5, 3),
+            (vault::MAX_SCAN_MARK, 0),
+            (0, vault::MAX_SCAN_MARK),
+            (vault::MAX_SCAN_MARK, vault::MAX_SCAN_MARK),
+            (vault::MAX_SCAN_MARK - 1, vault::MAX_SCAN_MARK),
+        ] {
             let index = cursor.max(change_seen);
             let (_, window) = window_from(0, change_seen, cursor);
             assert!(
