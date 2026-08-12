@@ -3,7 +3,7 @@
 # The uid is resolved live — it changes on any uninstall/reinstall cycle.
 # Usage: ./netstats_snap.sh <label>
 #   appends "label epoch uid rx=<bytes> tx=<bytes>" to build/perf_baseline/netstats_log.txt
-export PATH="$HOME/Android/Sdk/platform-tools:$PATH"
+command -v adb >/dev/null || export PATH="${ANDROID_HOME:-/nonexistent}/platform-tools:$HOME/sdk/android/platform-tools:$HOME/Android/Sdk/platform-tools:$PATH"
 UID_APP=$(adb shell dumpsys package org.kaspaverse.app | grep -m1 userId | grep -oE '[0-9]+' | head -1)
 if [ -z "$UID_APP" ]; then echo "app uid not found"; exit 1; fi
 mkdir -p build/perf_baseline

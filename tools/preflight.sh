@@ -27,12 +27,25 @@ if [ -f rust/Cargo.toml ]; then
 fi
 echo "• flutter app: $([ -f pubspec.yaml ] && echo present || echo absent)"
 echo "• contracts: $(ls -d contracts/*/ 2>/dev/null | wc -l) defined"
-echo "• toolchain: rustc=$(rustc --version 2>/dev/null | cut -d' ' -f2 || echo missing)" \
-     "flutter=$(flutter --version 2>/dev/null | head -1 | cut -d' ' -f2 || echo missing)" \
+# rustc is probed from rust/, NOT the repo root: rust-toolchain.toml governs that
+# subtree only, so a root-level `rustc --version` reports whatever the default stable
+# happens to be and hides a missing pin — this line printed 1.97.1 on a machine whose
+# builds all used 1.94.0 (L84). frb-codegen is listed because the gate silently drops
+# the codegen-drift check without it; the inventory must name every tool the gate needs.
+# Captured into vars first, then defaulted: `cmd | cut ... || echo missing` can never
+# report missing, because the pipeline's exit status is CUT's and cut succeeds on empty
+# input. Same masking bug as piping a build through `tail`.
+RUSTC_V="$( (cd "$ROOT/rust" 2>/dev/null && rustc --version 2>/dev/null) | cut -d' ' -f2)"
+FLUTTER_V="$(flutter --version 2>/dev/null | head -1 | cut -d' ' -f2)"
+echo "• toolchain: rustc=${RUSTC_V:-missing}" \
+     "flutter=${FLUTTER_V:-missing}" \
      "cargo-ndk=$(command -v cargo-ndk >/dev/null && echo yes || echo no)" \
-     "cargo-deny=$(command -v cargo-deny >/dev/null && echo yes || echo no)"
+     "cargo-deny=$(command -v cargo-deny >/dev/null && echo yes || echo no)" \
+     "frb-codegen=$(command -v flutter_rust_bridge_codegen >/dev/null && echo yes || echo no)"
 # adb lives in the local SDK install (P0.3), not on PATH in fresh shells.
-command -v adb >/dev/null || PATH="$PATH:$HOME/Android/Sdk/platform-tools"
+# Env var first, then both SDK roots this project has used — see gate.sh's NDK
+# discovery for why a single hardcoded root is not enough (2026-08-12 migration).
+command -v adb >/dev/null || PATH="$PATH:${ANDROID_HOME:-/nonexistent}/platform-tools:$HOME/sdk/android/platform-tools:$HOME/Android/Sdk/platform-tools"
 echo "• android device: $(command -v adb >/dev/null && adb devices 2>/dev/null | sed -n '2p' | awk '{print $1" "$2}' || echo 'adb missing')"
 # Armed repayment triggers (D-091): a parked decision names its firing condition and
 # marks it `[TRIGGER]`, or `[TRIGGER:PUBLISHED]` when the condition is "the first build

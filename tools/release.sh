@@ -61,12 +61,13 @@ if [ -n "$REL_TRIGGERS" ]; then
   echo
 fi
 
-# apksigner is a java wrapper, and on this machine the JDK lives in $HOME off
-# PATH (no-sudo WSL2 install, environment.local.md) — discover it like gate.sh
-# discovers the NDK.
+# apksigner is a java wrapper, so a JDK must be reachable. Under WSL2 that meant
+# a no-sudo tarball under $HOME; on native Ubuntu the system JDK is on PATH and
+# this whole block is a no-op. Both lanes stay — the discovery is what lets the
+# script survive a machine move (2026-08-12), not the machine survive the script.
 if ! command -v java >/dev/null 2>&1; then
   if [ -z "${JAVA_HOME:-}" ]; then
-    for d in "$HOME"/jdk-*/; do
+    for d in "$HOME"/jdk-*/ /usr/lib/jvm/*/; do
       [ -x "${d}bin/java" ] && JAVA_HOME="${d%/}"
     done
   fi
@@ -74,10 +75,15 @@ if ! command -v java >/dev/null 2>&1; then
 fi
 command -v java >/dev/null 2>&1 || die "java not found (apksigner needs a JDK)"
 
-# apksigner ships with SDK build-tools; discover like gate.sh discovers the NDK.
+# apksigner ships with SDK build-tools, which are never on PATH. Discover like
+# gate.sh discovers the NDK, across every SDK root this project has used: the
+# release path must not die on a layout change the gate already tolerates.
 APKSIGNER="$(command -v apksigner || true)"
 if [ -z "$APKSIGNER" ]; then
-  for d in "$HOME"/Android/Sdk/build-tools/*/; do
+  for d in "${ANDROID_HOME:-/nonexistent}"/build-tools/*/ \
+           "${ANDROID_SDK_ROOT:-/nonexistent}"/build-tools/*/ \
+           "$HOME"/Android/Sdk/build-tools/*/ \
+           "$HOME"/sdk/android/build-tools/*/; do
     [ -x "${d}apksigner" ] && APKSIGNER="${d}apksigner"
   done
 fi
