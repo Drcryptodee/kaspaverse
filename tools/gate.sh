@@ -108,6 +108,70 @@ if compgen -G "$ROOT/contracts/*/SPEC.md" >/dev/null 2>&1; then
   # vectors execute inside `cargo test` (chain crate integration tests)
 fi
 
+# ── Toolchain pins vs the pin files (D-131 / L84) ───────────────
+# `preflight.sh` PRINTS these versions; until 2026-08-12 nothing FAILED on drift,
+# which is how the repo sat on Flutter 3.44.9 against a 3.41.5 pin — and that drift
+# was live, not cosmetic: 3.44.9 reddens `flutter analyze`. D-024 requires local and
+# CI to compile with the same tools, so a mismatch is a defect.
+#
+# Asymmetric on purpose. Under GATE_STRICT=1 (CI) a mismatch is RED, because a runner
+# that provisioned the wrong version is a provisioning bug. Locally it prints a loud
+# block and passes, so an outside contributor's first `gate.sh` is not a red wall for
+# a pin they never agreed to. The local path must stay LOUD, never a quiet warning —
+# a warning nobody reads is the exact L84 sin this check exists to end.
+pins_expected() { # file, sed-expression
+  [ -f "$1" ] && sed -n "$2" "$1" 2>/dev/null | head -1
+}
+toolchain_pins() {
+  local drift=0 want got
+  local TT="$ROOT/rust/rust-toolchain.toml" WF="$ROOT/.github/workflows/gate.yml"
+  _pin_cmp() { # label, want, got
+    # An unreadable pin is reported, never silently treated as agreement.
+    if [ -z "$2" ]; then
+      printf '   %-30s PIN UNREADABLE (skipped)\n' "$1"; return 0
+    fi
+    if [ "$2" != "${3:-}" ]; then
+      printf '   %-30s pinned %-12s installed %s\n' "$1" "$2" "${3:-MISSING}"
+      drift=$((drift+1))
+    fi
+  }
+  want="$(pins_expected "$TT" 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')"
+  got="$( (cd "$ROOT/rust" 2>/dev/null && rustc --version 2>/dev/null) | cut -d' ' -f2)"
+  _pin_cmp "rustc (rust-toolchain.toml)" "$want" "$got"
+
+  want="$(pins_expected "$WF" 's/.*flutter-version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p')"
+  got="$(flutter --version 2>/dev/null | head -1 | cut -d' ' -f2)"
+  _pin_cmp "flutter (gate.yml)" "$want" "$got"
+
+  want="$(pins_expected "$WF" 's/.*cargo install cargo-deny --version \([0-9][0-9.]*\).*/\1/p')"
+  got="$(cargo-deny --version 2>/dev/null | awk '{print $2}')"
+  _pin_cmp "cargo-deny (gate.yml)" "$want" "$got"
+
+  want="$(pins_expected "$WF" 's/.*cargo install cargo-ndk --version \([0-9][0-9.]*\).*/\1/p')"
+  got="$(cargo ndk --version 2>/dev/null | awk '{print $2}')"
+  _pin_cmp "cargo-ndk (gate.yml)" "$want" "$got"
+
+  want="$(pins_expected "$WF" 's/.*cargo install flutter_rust_bridge_codegen --version \([0-9][0-9.]*\).*/\1/p')"
+  got="$(flutter_rust_bridge_codegen --version 2>/dev/null | awk '{print $2}')"
+  _pin_cmp "frb_codegen (gate.yml)" "$want" "$got"
+
+  [ "$drift" -eq 0 ] && return 0
+  if [ "${GATE_STRICT:-0}" = "1" ]; then
+    echo "   $drift toolchain pin(s) drifted — local and CI must match (D-024)"
+    return 1
+  fi
+  echo "   ╔═══════════════════════════════════════════════════════════════════════"
+  echo "   ║ TOOLCHAIN DRIFT — $drift pin(s) above. The gate you just ran is NOT the"
+  echo "   ║ gate CI runs (D-024). Fix before trusting a green, or CI will disagree."
+  echo "   ║ This is RED under GATE_STRICT=1."
+  echo "   ╚═══════════════════════════════════════════════════════════════════════"
+  RESULTS+=("WARN  toolchain pins ($drift drifted — RED under GATE_STRICT=1)")
+  return 0
+}
+if [ -f "$ROOT/rust/rust-toolchain.toml" ] || [ -f "$ROOT/.github/workflows/gate.yml" ]; then
+  run_check "toolchain pins (D-024)" toolchain_pins
+fi
+
 # ── Public-repo hygiene (always runs — the repo is public, D-011/D-019) ──
 # Both this and internal_record() decide from `git ls-files` output, and an empty
 # result is ambiguous: it means "nothing tracked" OR "git could not answer" (no repo,
