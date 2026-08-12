@@ -566,8 +566,23 @@ async fn fill_walks(
     };
     let mut cursors = FillCursors::load(dir);
 
-    // Handshake sweep: the receive branch only — handshakes bond an address
-    // we hand out; the change branch is internal and never receives one.
+    // Handshake sweep: the receive branch only.
+    //
+    // The reason this file used to give — "the change branch is internal and
+    // never receives one" — is FALSE, and this branch is what disproved it: a
+    // sender resolves our return address with `get_utxo_return_address`, which
+    // answers with the address behind input[0] of a transaction we broadcast,
+    // routinely one of our change addresses (see `KeyWindow::handshake_slots`).
+    // The LIVE path handles those; this history sweep does not, so a
+    // change-established conversation is unrecoverable from history. That is
+    // omission, which is D-074's accepted failure mode and stays behind the
+    // honest notice — but it is a real gap, logged to IDEAS_BACKLOG with its
+    // trigger rather than left behind a comment that says it cannot happen.
+    //
+    // The real reason the sweep stays narrow is the one below: each address is a
+    // separate paginated walk against an untrusted indexer, and the change
+    // branch would roughly double a correlatable burst for history we can
+    // usually re-derive from the live lane.
     //
     // Capped at the FUNDED receive prefix, not the whole watch window. Each
     // address here is a separate paginated walk against an untrusted indexer, so

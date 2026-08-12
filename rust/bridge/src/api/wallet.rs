@@ -200,6 +200,12 @@ struct Discovery {
 /// merely read the live window (a send's signer) call [`wallet_window`]
 /// directly: by then the gate is long open, and a send must never block on a
 /// network probe.
+/// Waiting here is bounded by whatever holds the gate: the first pass
+/// (`DISCOVERY_PASS_TIMEOUT`) or a retry, which also holds it across its
+/// re-registration (`EXTEND_WATCH_TIMEOUT`). A retry can only exist once
+/// `snapshots()` has started the engine, so the sync engine's own call is never
+/// the one that waits behind one — only the transport hub's, which is
+/// fire-and-forget.
 pub(crate) async fn window_after_discovery() -> (u32, u32) {
     {
         let mut state = DISCOVERY.lock().await;
@@ -221,23 +227,31 @@ pub(crate) async fn window_after_discovery() -> (u32, u32) {
 ///
 /// Detached by every caller (the fold loop must keep painting, the pull gesture
 /// must keep its own budget), so it reports through the log, not a return value.
+///
+/// The `DISCOVERY` guard is held across the **whole** thing — pass AND
+/// re-registration — not just the pass. Releasing it early left two overlapping
+/// retries free to interleave: the second widens to `W2` and publishes, then the
+/// first publishes the `W1` it read before that, and `extend_watch`'s
+/// refuse-to-narrow guard passes because it too read `previous` early. The
+/// signer survives that (it reads the monotonic marks, never the watch set), so
+/// it is not fund loss — but the engine re-registers from `watch` on every
+/// `UtxoProcStart`, so the lost addresses go deaf to live deposits until
+/// relaunch, and change arriving there is misread as a deposit. Under the guard,
+/// `try_lock` makes the second retry the no-op it was always meant to be.
 pub(crate) async fn retry_discovery_if_unproven() {
-    let before = {
-        // `try_lock`, not `lock`: a pass already in flight IS the retry. Waiting
-        // would queue one spawn per reconnect, and a link that flaps every
-        // `RACE_RETRY_DELAY` (3 s) against a node slow enough to need retrying
-        // would grow that queue without bound — every entry then running a full
-        // pass against the same sick node.
-        let Ok(mut state) = DISCOVERY.try_lock() else {
-            return;
-        };
-        if state.succeeded {
-            return;
-        }
-        let before = wallet_window();
-        run_discovery_pass(&mut state).await;
-        before
+    // `try_lock`, not `lock`: a pass already in flight IS the retry. Waiting
+    // would queue one spawn per reconnect, and a link that flaps every
+    // `RACE_RETRY_DELAY` (3 s) against a node slow enough to need retrying
+    // would grow that queue without bound — every entry then running a full
+    // pass against the same sick node.
+    let Ok(mut state) = DISCOVERY.try_lock() else {
+        return;
     };
+    if state.succeeded {
+        return;
+    }
+    let before = wallet_window();
+    run_discovery_pass(&mut state).await;
     let after = wallet_window();
     if after == before {
         return;

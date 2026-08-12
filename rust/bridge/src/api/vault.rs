@@ -239,10 +239,16 @@ pub(crate) fn transport_decryptor() -> Result<kaspaverse_core::TransportDecrypto
 /// relationship at compile time.)
 pub(crate) const MAX_SCAN_MARK: u32 = 512;
 
-/// The largest change cursor this app will believe. Not a policy limit — the
-/// cursor advances by exactly one per fully-broadcast send (D-041), so reaching
-/// this takes 100 000 sends from this device, and nothing above it is a number
-/// we wrote.
+/// The largest change cursor this app will believe — and therefore the largest
+/// it will ever WRITE. Not a policy limit: the cursor advances by exactly one
+/// per fully-broadcast send (D-041), so reaching it takes 100 000 sends from
+/// this device.
+///
+/// The two must be the same number. A writer that can produce a value its own
+/// reader rejects turns the 100 000th send into a cursor that reads back as
+/// unset — silently dropping to the discovery mark and reusing change indices
+/// the wallet already spent from. [`set_change_cursor`] refuses to pass it
+/// instead, which repeats one index but says so.
 pub(crate) const MAX_CHANGE_CURSOR: u32 = 100_000;
 
 /// Validate a persisted count: **out of range reads as UNSET, never clamped.**
@@ -286,7 +292,20 @@ pub(crate) fn change_cursor() -> u32 {
 
 /// Persist the change cursor atomically — advanced only after a fully-broadcast
 /// send (D-041), so an abandoned/failed send never burns an index.
+///
+/// Refuses to write past [`MAX_CHANGE_CURSOR`], so the file can never hold a
+/// value [`change_cursor`] reads as unset. Reaching that is 100 000 sends from
+/// one device; past it, change addresses repeat from the last index, which is a
+/// linkability regression stated in the log rather than a silent fall back to
+/// indices the wallet's own history already spent from.
 pub(crate) fn set_change_cursor(next: u32) -> Result<(), AppError> {
+    if next > MAX_CHANGE_CURSOR {
+        log::warn!(
+            "vault: change cursor is at its {MAX_CHANGE_CURSOR} ceiling — not advancing; \
+             change addresses repeat from here (D-041 fresh-per-send no longer holds)"
+        );
+        return Ok(());
+    }
     atomic_write(&change_cursor_path()?, &next.to_le_bytes())
         .map_err(|e| AppError::io("write change cursor", e))
 }
@@ -998,6 +1017,23 @@ pub(crate) mod tests {
         assert_eq!(Lockout::from_bytes(&l.to_bytes()), Some(l));
         assert_eq!(Lockout::from_bytes(&[0u8; 11]), None);
         assert_eq!(Lockout::from_bytes(&[]), None);
+    }
+
+    #[test]
+    fn the_cursor_never_writes_a_value_its_own_reader_would_reject() {
+        let (_g, _dir) = enter();
+        // The writer's whole range round-trips.
+        for value in [0u32, 1, 77, MAX_CHANGE_CURSOR - 1, MAX_CHANGE_CURSOR] {
+            set_change_cursor(value).unwrap();
+            assert_eq!(change_cursor(), value);
+        }
+        // And past the ceiling it holds rather than writing something that
+        // reads back as unset — which would drop the next send to the discovery
+        // mark and reuse indices the wallet already spent from.
+        set_change_cursor(MAX_CHANGE_CURSOR + 1).unwrap();
+        assert_eq!(change_cursor(), MAX_CHANGE_CURSOR);
+        set_change_cursor(u32::MAX).unwrap();
+        assert_eq!(change_cursor(), MAX_CHANGE_CURSOR);
     }
 
     #[test]
