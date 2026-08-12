@@ -414,10 +414,19 @@ struct Inner {
     store: Mutex<ActivityStore>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
-    /// The watched address window `start()` was given — kept so
-    /// [`WalletEngine::rescan`] can re-ask the node for the SAME set the
-    /// balance reflects (public strings only, INV-3).
-    watch: Mutex<Vec<Address>>,
+    /// The watched address window — kept so [`WalletEngine::rescan`] can re-ask
+    /// the node for the SAME set the balance reflects, and so a reconnect
+    /// re-registers the CURRENT window rather than the one `start()` happened to
+    /// be given (public strings only, INV-3).
+    ///
+    /// `Arc` because the fold task reads it on every event and
+    /// [`WalletEngine::extend_watch`] replaces it wholesale: readers take a
+    /// cheap snapshot, never a lock held across an await.
+    watch: Mutex<Arc<Vec<Address>>>,
+    /// The change subset of [`Inner::watch`] — a UTXO here is our own returning
+    /// change, never a deposit (D-043). Widens with the watch set, or a change
+    /// address discovered after `start()` would be filed as an incoming deposit.
+    change_set: Mutex<Arc<HashSet<Address>>>,
 }
 
 /// Drives one [`UtxoProcessor`] + [`UtxoContext`] over a shared [`Rpc`], folding
@@ -445,9 +454,30 @@ impl WalletEngine {
                 store: Mutex::new(store),
                 event_task: Mutex::new(None),
                 shutdown: Mutex::new(None),
-                watch: Mutex::new(Vec::new()),
+                watch: Mutex::new(Arc::new(Vec::new())),
+                change_set: Mutex::new(Arc::new(HashSet::new())),
             }),
         })
+    }
+
+    /// A snapshot of the current watched window. Taken by value (an `Arc` bump)
+    /// so no lock is ever held across an await — `clippy::await_holding_lock`.
+    fn watched(&self) -> Arc<Vec<Address>> {
+        self.inner
+            .watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A snapshot of the current change subset. Same discipline as
+    /// [`WalletEngine::watched`].
+    fn change_set(&self) -> Arc<HashSet<Address>> {
+        self.inner
+            .change_set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// A new receiver onto the folded event fan-out.
@@ -504,19 +534,28 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
 
-        let change_set: HashSet<Address> = change_addresses.into_iter().collect();
+        // The window lives in `Inner`, not in this task's captures: discovery
+        // can widen it after start (`extend_watch`), and a fold task holding a
+        // private copy would keep re-registering the narrow set on every
+        // reconnect — the widening would silently undo itself.
         *self
             .inner
             .watch
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = addresses.clone();
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(addresses);
+        *self
+            .inner
+            .change_set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            Arc::new(change_addresses.into_iter().collect());
 
         // Emit the PERSISTED activity once at start (2026-07-09 V1 sitting
         // find): record events are the only other emission trigger, and a
         // boot where every UTXO is settled own-change fires none — the list
         // rendered "No recent activity" while activity.kvlog held the full
         // history. Earlier boots masked this behind instant Discovery events.
-        self.emit_activity(&change_set);
+        self.emit_activity(&self.change_set());
 
         let engine = self.clone();
         let task = tokio::spawn(async move {
@@ -527,7 +566,7 @@ impl WalletEngine {
                     biased;
                     msg = channel.receiver.recv() => {
                         match msg {
-                            Ok(event) => engine.handle_event(*event, &addresses, &change_set).await,
+                            Ok(event) => engine.handle_event(*event).await,
                             Err(_) => break, // multiplexer closed
                         }
                     }
@@ -559,22 +598,77 @@ impl WalletEngine {
     /// processor has no live DAA — callers treat an `Err` as "soft path
     /// unavailable" and escalate to the hard reconnect.
     pub async fn rescan(&self) -> Result<()> {
-        let addresses = self
-            .inner
-            .watch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let addresses = self.watched();
         if addresses.is_empty() {
             return Err(ChainError::Message("wallet engine not started".into()));
         }
         let count = addresses.len();
         self.inner
             .context
-            .scan_and_register_addresses(addresses, None)
+            .scan_and_register_addresses(addresses.as_ref().clone(), None)
             .await?;
         log::info!("wallet-sync: in-place rescan re-asked the node for {count} addresses");
         Ok(())
+    }
+
+    /// Widen the watched window to `addresses` and register the newly-added
+    /// ones. Returns how many addresses were added (0 = the window already
+    /// covered them).
+    ///
+    /// **Why this exists.** Address discovery runs against a socket that may not
+    /// be up yet, so the window `start()` freezes can be the pre-discovery one.
+    /// When a later pass finds funds deeper than that, widening the *derivation*
+    /// alone is a half-fix: the `UtxoContext` only reports UTXOs for addresses
+    /// registered with it, so the coins stay invisible until the next process.
+    /// Watch ⊆ sign still holds — the signer is rebuilt per send from the same
+    /// persisted marks, and those only grow.
+    ///
+    /// Additive at the pin, and safe on overlap either way: the context filters
+    /// out addresses it already holds (`context.rs:704-727`) and
+    /// `extend_from_scan` inserts only vacant UTXO ids (`context.rs:447-480`).
+    ///
+    /// The wider set is published BEFORE the network call, so a registration
+    /// that fails (e.g. the processor has no DAA yet — `MissingDaaScore`) still
+    /// heals: the next `UtxoProcStart` and every `rescan()` re-ask the node for
+    /// whatever `watch` currently holds.
+    pub async fn extend_watch(
+        &self,
+        addresses: Vec<Address>,
+        change_addresses: Vec<Address>,
+    ) -> Result<usize> {
+        let previous = self.watched();
+        if previous.is_empty() {
+            return Err(ChainError::Message("wallet engine not started".into()));
+        }
+        let known: HashSet<&Address> = previous.iter().collect();
+        let added: Vec<Address> = addresses
+            .iter()
+            .filter(|a| !known.contains(*a))
+            .cloned()
+            .collect();
+        if added.is_empty() {
+            return Ok(0);
+        }
+        let (total, count) = (addresses.len(), added.len());
+        *self
+            .inner
+            .watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(addresses);
+        *self
+            .inner
+            .change_set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            Arc::new(change_addresses.into_iter().collect());
+        self.inner
+            .context
+            .scan_and_register_addresses(added, None)
+            .await?;
+        log::info!(
+            "wallet-sync: watch window widened by {count} to {total} addresses (late discovery)"
+        );
+        Ok(count)
     }
 
     /// Stop the processor and drain the fold task (e.g. on vault lock — the
@@ -628,12 +722,15 @@ impl WalletEngine {
         self.emit(WalletEvent::Activity(list));
     }
 
-    async fn handle_event(
-        &self,
-        event: Events,
-        addresses: &[Address],
-        change_set: &HashSet<Address>,
-    ) {
+    /// Fold one wallet-framework event. The watched window and its change
+    /// subset are read from `Inner` per event rather than captured at start:
+    /// discovery may widen them mid-session and every arm below must see the
+    /// current fact, not the one this task was born with.
+    async fn handle_event(&self, event: Events) {
+        let addresses = self.watched();
+        let addresses = addresses.as_slice();
+        let change_set = self.change_set();
+        let change_set = change_set.as_ref();
         match event {
             Events::UtxoProcStart => {
                 self.emit(WalletEvent::Syncing);

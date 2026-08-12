@@ -256,8 +256,76 @@ fn take_intent(nonce: u64) -> Option<TransportIntent> {
 struct TransportHub {
     store: Mutex<TransportStore>,
     decryptor: TransportDecryptor,
-    watched: HashSet<String>,
-    window: Vec<KeySlot>,
+    /// The addresses an inbound envelope must touch to be ours, and the key
+    /// slots we try to open it with. Behind locks — and always widened as a
+    /// PAIR — because address discovery can widen the wallet's window after the
+    /// hub is built: a watched address whose key slot is missing is a message we
+    /// can never decrypt, and a key slot whose address is unwatched is never
+    /// reached at all. See [`widen_key_window`].
+    watched: Mutex<Arc<HashSet<String>>>,
+    window: Mutex<Arc<Vec<KeySlot>>>,
+}
+
+impl TransportHub {
+    /// A snapshot of the watched set (an `Arc` bump — never a lock held across
+    /// an await or a decrypt).
+    fn watched(&self) -> Arc<HashSet<String>> {
+        self.watched
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A snapshot of the key-slot window. Same discipline as
+    /// [`TransportHub::watched`].
+    fn key_window(&self) -> Arc<Vec<KeySlot>> {
+        self.window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Widen the hub's watched set and key window to `(receive, change)` after a
+/// late discovery pass found the wallet reaches deeper than the window this
+/// session started on.
+///
+/// Never narrows: a smaller window than the one already armed is ignored, so a
+/// caller cannot cost us a conversation by passing a stale read. A no-op when
+/// no hub is running or the vault is locked (the next `transport_start()`
+/// derives from the widened marks anyway).
+pub(crate) fn widen_key_window(window: (u32, u32)) {
+    let Some(hub) = HUB.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
+        return;
+    };
+    let (receive, change) = window;
+    let armed = hub.key_window().len();
+    if (receive as usize + change as usize) <= armed {
+        return;
+    }
+    let addresses = match vault::derive_wallet_addresses(receive, change) {
+        Ok((addresses, _)) => addresses,
+        Err(e) => {
+            log::warn!(
+                "transport-hub: key window not widened ({}) — vault locked",
+                e.message
+            );
+            return;
+        }
+    };
+    let watched: HashSet<String> = addresses.iter().map(|a| a.to_string()).collect();
+    let slots: Vec<KeySlot> = (0..receive)
+        .map(|i| (Branch::Receive, i))
+        .chain((0..change).map(|i| (Branch::Change, i)))
+        .collect();
+    // Watched set first: a key slot with no watched address behind it is inert,
+    // whereas the reverse ordering leaves a live address whose envelope has no
+    // key to try. Both are replaced before the next inbound event either way.
+    *hub.watched.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(watched);
+    *hub.window.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(slots);
+    log::info!(
+        "transport-hub: key window widened to receive={receive} change={change} after discovery"
+    );
 }
 
 static HUB: Mutex<Option<Arc<TransportHub>>> = Mutex::new(None);
@@ -466,7 +534,15 @@ async fn fill_walks(
 
     // Handshake sweep: the receive branch only — handshakes bond an address
     // we hand out; the change branch is internal and never receives one.
-    let receive_addresses = match vault::derive_wallet_addresses(wallet::wallet_window().0, 0) {
+    //
+    // Capped at the FUNDED receive prefix, not the whole watch window. Each
+    // address here is a separate paginated walk against an untrusted indexer, so
+    // sweeping the full discovered window would multiply both the run duration
+    // and — worse — the slice of this wallet's address graph handed to one
+    // server in one correlatable burst. The gap addresses past the last funded
+    // one have no history to fill by construction.
+    let sweep_depth = wallet::GAP_LIMIT.max(vault::scan_high_water().0);
+    let receive_addresses = match vault::derive_wallet_addresses(sweep_depth, 0) {
         Ok((receive, _)) => receive,
         Err(e) => {
             report.complete = false;
@@ -668,7 +744,12 @@ pub async fn transport_start() -> Result<(), AppError> {
     // reading it twice would let the two disagree if a discovery pass landed in
     // between, and a key slot without its watched address is a message we can
     // never decrypt.
-    let (window_receive, window_change) = wallet::wallet_window();
+    //
+    // Taken through the SAME discovery gate the wallet's sync engine waits on
+    // (main.dart fires both starts unawaited, and this path reaches the window
+    // after only local store work — it used to win that race and freeze the
+    // pre-discovery window every time).
+    let (window_receive, window_change) = wallet::window_after_discovery().await;
     let (watched_addresses, _) = vault::derive_wallet_addresses(window_receive, window_change)?;
     let watched: HashSet<String> = watched_addresses.iter().map(|a| a.to_string()).collect();
     // Receive slots first — the likelier establishment binding.
@@ -680,8 +761,8 @@ pub async fn transport_start() -> Result<(), AppError> {
     let hub = Arc::new(TransportHub {
         store: Mutex::new(store),
         decryptor,
-        watched,
-        window,
+        watched: Mutex::new(Arc::new(watched)),
+        window: Mutex::new(Arc::new(window)),
     });
     *HUB.lock().unwrap_or_else(PoisonError::into_inner) = Some(hub.clone());
 
@@ -992,7 +1073,8 @@ fn handle_inbound_handshake(
     };
     // Relevance without crypto: a real handshake bonds the recipient, so one
     // of OUR watched addresses must be among the outputs.
-    if !addresses.iter().any(|a| hub.watched.contains(a)) {
+    let watched = hub.watched();
+    if !addresses.iter().any(|a| watched.contains(a)) {
         return false;
     }
     let envelope_bytes = decode_envelope_body(body);
@@ -1006,7 +1088,7 @@ fn handle_inbound_handshake(
     // opens is dropped here — omission is possible, forgery is not (D-074).
     let Ok((slot, plaintext)) = hub
         .decryptor
-        .decrypt_scanning(hub.window.iter().copied(), &envelope)
+        .decrypt_scanning(hub.key_window().iter().copied(), &envelope)
     else {
         return false;
     };
@@ -1201,7 +1283,7 @@ fn handle_inbound_comm(
         Err(CoreError::TransportOpen) => {
             match hub
                 .decryptor
-                .decrypt_scanning(hub.window.iter().copied(), &envelope)
+                .decrypt_scanning(hub.key_window().iter().copied(), &envelope)
             {
                 Ok((slot, _)) => Some((to_key_branch(slot.0), slot.1)),
                 Err(_) => return false, // alias matched but no key opens it — spoofed head
@@ -1295,7 +1377,7 @@ pub async fn transport_prepare_bcast(
 
     // Same two-consumer change seam as the payment path (vault.rs is the
     // single source): fresh change registered + signer over the watched window.
-    let cursor = vault::change_cursor();
+    let cursor = wallet::next_change_index();
     let change = vault::change_address_at(cursor)?;
     let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
@@ -2199,7 +2281,7 @@ fn open_with_fallback(
     match hub.decryptor.decrypt_at(slot, envelope) {
         Err(CoreError::TransportOpen) => hub
             .decryptor
-            .decrypt_scanning(hub.window.iter().copied(), envelope)
+            .decrypt_scanning(hub.key_window().iter().copied(), envelope)
             .map(|(_, plaintext)| plaintext),
         other => other,
     }

@@ -233,7 +233,7 @@ pub fn send_minimum() -> Result<Option<u64>, AppError> {
     let Some(engine) = wallet::engine_handle() else {
         return Ok(None); // engine not up yet — the UI simply shows no hint
     };
-    let change = vault::change_address_at(vault::change_cursor())?;
+    let change = vault::change_address_at(wallet::next_change_index())?;
     engine.minimum_sendable(change).map_err(AppError::chain)
 }
 
@@ -257,7 +257,7 @@ pub async fn send_prepare(
     // The fresh change is change/cursor; the signer registers the SAME watched
     // window (receive + widened change) so it can resolve any selected input and
     // the fresh change (the two-consumer seam — vault.rs is the single source).
-    let cursor = vault::change_cursor();
+    let cursor = wallet::next_change_index();
     let change = vault::change_address_at(cursor)?;
     let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
@@ -297,7 +297,7 @@ pub async fn send_prepare(
             // honestly, WITH the exact way out: the computed minimum for this
             // wallet's coin shape, not a mystery — D-054).
             let hint = engine
-                .minimum_sendable(vault::change_address_at(vault::change_cursor())?)
+                .minimum_sendable(vault::change_address_at(wallet::next_change_index())?)
                 .ok()
                 .flatten()
                 .map(|m| {
@@ -354,9 +354,11 @@ pub(crate) fn take_stashed(
 /// fully-broadcast outcome (D-041) — every committed send returns change to
 /// the same cursor discipline, payload or not.
 pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto {
-    // The change index this send used (cursor is advanced only on full success,
-    // so it still reads as the index we prepared with).
-    let used_cursor = vault::change_cursor();
+    // The change index this send used (neither input moves during a send —
+    // the cursor advances only on full success, and the discovery mark that
+    // floors it only ever grows — so this still reads as the index we prepared
+    // with; a pass landing mid-send could only skip an index, never reuse one).
+    let used_cursor = wallet::next_change_index();
 
     // V1 acceptance spine: resolve the tracker BEFORE committing so every
     // leg is watched the instant its submit is acked — a fast acceptance of

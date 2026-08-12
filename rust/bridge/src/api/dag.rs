@@ -392,6 +392,13 @@ pub async fn dag_resync() -> Result<bool, AppError> {
             return Ok(false);
         };
         LAST_SOFT.store(now, Ordering::Relaxed);
+        // The pull is also the user's manual lever on address discovery. A pass
+        // that has never succeeded normally retries on the next `Connected`, but
+        // a socket that stays up while the probe keeps failing (a node without a
+        // UTXO index, say) would otherwise wait for a process restart — the
+        // recovery gap this whole track exists to close. Detached: the pull
+        // keeps its own budget, and re-asking the node happens either way.
+        tokio::spawn(super::wallet::retry_discovery_if_unproven());
         match tokio::time::timeout(SOFT_RESCAN_TIMEOUT, engine.rescan()).await {
             Ok(Ok(())) => {
                 log::info!("dag: pull soft rescan — node re-asked in place, socket kept");

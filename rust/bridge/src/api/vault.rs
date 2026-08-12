@@ -232,8 +232,27 @@ pub(crate) fn transport_decryptor() -> Result<kaspaverse_core::TransportDecrypto
     Ok(vault.transport_decryptor())
 }
 
+/// The hard ceiling on any persisted index count, applied **on read** so one
+/// clamp covers every consumer.
+///
+/// These files are four or eight unauthenticated bytes on disk, and every
+/// consumer scales linearly in their value: the window feeds
+/// `derive_wallet_addresses(n, n)`, which is `Vec::with_capacity(n)` plus `n`
+/// BIP32 derivations under the `VAULT` mutex. At `u32::MAX` that is a ~137 GB
+/// allocation → `handle_alloc_error` → **SIGABRT**, which is worse than the
+/// caught panic INV-2 forbids: it is self-reinforcing (re-read every launch) and
+/// the only escape — clear app data — destroys `vault.kvsb` and forces a seed
+/// restore. A clamp turns "brick, unrecoverably" into "scan too wide, once".
+///
+/// 100 000 is far above anything reachable honestly (marks grow only by
+/// `GAP_LIMIT` past an index the chain actually showed funded) and far below
+/// anything the process cannot survive.
+pub(crate) const MAX_SCAN_MARK: u32 = 100_000;
+
 /// Read the persisted change cursor (the next-unused change index). A missing or
 /// malformed file reads as 0 — a fresh wallet has used no change addresses.
+/// Clamped to [`MAX_SCAN_MARK`]: this value widens the change window, so a
+/// corrupt four bytes is an allocation, not a number (see the const).
 pub(crate) fn change_cursor() -> u32 {
     change_cursor_path()
         .ok()
@@ -241,6 +260,7 @@ pub(crate) fn change_cursor() -> u32 {
         .filter(|b| b.len() == 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .unwrap_or(0)
+        .min(MAX_SCAN_MARK)
 }
 
 /// Persist the change cursor atomically — advanced only after a fully-broadcast
@@ -270,8 +290,12 @@ pub(crate) fn scan_window_path() -> Result<PathBuf, AppError> {
 /// is precisely what let a restored wallet watch 30 addresses while its funds
 /// sat at change index 77 — a local send-counter was standing in for a fact
 /// about the chain. Two files, two meanings, neither pretending to be the other.
+///
+/// Both marks are clamped to [`MAX_SCAN_MARK`] and OR-ed with what this process
+/// has already learned (see [`set_scan_high_water`]), so the window never
+/// depends on a disk write having succeeded.
 pub(crate) fn scan_high_water() -> (u32, u32) {
-    scan_window_path()
+    let (disk_receive, disk_change) = scan_window_path()
         .ok()
         .and_then(|p| fs::read(p).ok())
         .filter(|b| b.len() == 8)
@@ -281,14 +305,43 @@ pub(crate) fn scan_high_water() -> (u32, u32) {
                 u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
             )
         })
-        .unwrap_or((0, 0))
+        .unwrap_or((0, 0));
+    let (memo_receive, memo_change) = SCAN_MARKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or((0, 0));
+    (
+        disk_receive.max(memo_receive).min(MAX_SCAN_MARK),
+        disk_change.max(memo_change).min(MAX_SCAN_MARK),
+    )
 }
 
-/// Persist the discovery marks atomically. Monotonic by construction at the call
-/// site: a scan that finds nothing must never shrink a window that previously
-/// found something, or a transient RPC failure would strand funds we had already
-/// learned to watch.
+/// What a discovery pass has learned **this process**, whether or not the write
+/// to disk stuck. Held because the failure is otherwise silent and expensive: a
+/// successful probe followed by a failed persist used to leave the caller
+/// re-reading the OLD marks off disk and opening on the narrow window — the
+/// exact stranding this whole mechanism exists to prevent — for a wallet that
+/// had just proved where its funds were. A failed write now costs the NEXT
+/// launch one re-probe and costs this session nothing.
+///
+/// Monotonic and process-lifetime — it survives a vault lock on purpose (see
+/// [`lock_vault`]); only the test harness resets it, because tests fabricate
+/// several fresh vault dirs inside one process.
+static SCAN_MARKS: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
+/// Record the discovery marks — in memory first, then to disk.
+///
+/// Monotonic in both stores: a scan that finds nothing must never shrink a
+/// window that previously found something, or a transient RPC failure would
+/// strand funds we had already learned to watch. The in-memory half takes the
+/// max here so it cannot regress even if a caller passes a smaller value; the
+/// on-disk half is monotonic at the one call site that computes it.
 pub(crate) fn set_scan_high_water(receive_hi: u32, change_hi: u32) -> Result<(), AppError> {
+    {
+        let mut memo = SCAN_MARKS.lock().unwrap_or_else(PoisonError::into_inner);
+        let (prev_receive, prev_change) = memo.unwrap_or((0, 0));
+        *memo = Some((prev_receive.max(receive_hi), prev_change.max(change_hi)));
+    }
     let mut bytes = [0u8; 8];
     bytes[..4].copy_from_slice(&receive_hi.to_le_bytes());
     bytes[4..].copy_from_slice(&change_hi.to_le_bytes());
@@ -311,6 +364,24 @@ pub(crate) fn derive_wallet_addresses(
     receive_count: u32,
     change_count: u32,
 ) -> Result<(Vec<Address>, Vec<Address>), AppError> {
+    let (receive, change) = derive_wallet_branches(receive_count, change_count)?;
+    let all = receive.into_iter().chain(change.iter().cloned()).collect();
+    Ok((all, change))
+}
+
+/// The same single derivation site, returning the branches **separately** as
+/// `(receive, change)`.
+///
+/// Exists because address discovery needs the receive branch on its own, and
+/// taking it as `&all[..receive_count]` made a cross-module layout contract —
+/// "the concatenation is receive-then-change" — load-bearing with nothing but a
+/// comment holding it. Correct today and unable to panic, but if that order ever
+/// flipped, discovery would read change balances as receive indices and the
+/// window would widen on the wrong branch. A tuple cannot be misread.
+pub(crate) fn derive_wallet_branches(
+    receive_count: u32,
+    change_count: u32,
+) -> Result<(Vec<Address>, Vec<Address>), AppError> {
     let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
     let vault = guard
         .as_ref()
@@ -324,8 +395,7 @@ pub(crate) fn derive_wallet_addresses(
     for index in 0..change_count {
         change.push(keychain.change_address(index).map_err(AppError::core)?);
     }
-    let all = receive.into_iter().chain(change.iter().cloned()).collect();
-    Ok((all, change))
+    Ok((receive, change))
 }
 
 /// The change address at `index` (public — derived from the account xpub), for a
@@ -422,6 +492,12 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    // Create the parent on the way in. `scan.window` is the first writer into
+    // `wallet/` on a fresh install, and the failure it used to produce was
+    // silent in the worst possible way: the write errors, the caller reads it as
+    // "discovery failed", and the wallet opens on the 30-wide window — on
+    // exactly the restored wallet the mark exists for.
+    fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
     {
         let mut f = fs::File::create(&tmp)?;
@@ -736,6 +812,14 @@ pub fn lock_vault() {
     {
         log::info!("create ceremony dropped (lifecycle)");
     }
+    // NOTE: `SCAN_MARKS` deliberately survives a lock. It is tempting to clear
+    // it as "vault state", and that would be a real bug: if the persist to disk
+    // had failed, clearing the memo makes the re-unlock read `(0, 0)` and
+    // rebuild the SIGNER on a 30-wide window — while the sync engine, which is
+    // process-lifetime and untouched by a lock, keeps watching the wide one.
+    // Visible and unspendable, which is the exact state this whole mechanism
+    // exists to prevent. The memo only ever grows, and there is one wallet per
+    // install, so keeping it can only widen.
     broadcast_status();
 }
 
@@ -811,7 +895,7 @@ pub(crate) fn reveal_ceremony_words() -> Result<Zeroizing<Vec<u8>>, AppError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -821,7 +905,7 @@ mod tests {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     // Fast, in-bounds KDF so the suite stays quick (mirrors core's TEST_PARAMS).
-    fn cheap_params() -> VaultKdfParams {
+    pub(crate) fn cheap_params() -> VaultKdfParams {
         VaultKdfParams {
             m_cost_kib: 8 * 1024,
             t_cost: 1,
@@ -843,7 +927,7 @@ mod tests {
     /// Enter a clean global-vault world: lock the serializer, point VAULT_DIR
     /// at a fresh temp dir, clear any leftover unlocked vault. Returns the guard
     /// (held for the test's lifetime) and the dir.
-    fn enter() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+    pub(crate) fn enter() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
         let guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let dir = fresh_dir();
         *VAULT_DIR.lock().unwrap_or_else(PoisonError::into_inner) = Some(dir.clone());
@@ -851,6 +935,10 @@ mod tests {
         *CREATE_CEREMONY
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        // The discovery memo outlives a temp dir (it is process state, not
+        // vault state), so a test that widened the window would otherwise hand
+        // the next test a wallet that had already found funds.
+        *SCAN_MARKS.lock().unwrap_or_else(PoisonError::into_inner) = None;
         (guard, dir)
     }
 
@@ -903,7 +991,7 @@ mod tests {
     /// Stand up a sealed + unlocked vault the way the ceremony does, minus the
     /// device-only reveal/verify (begin → seal). The headless stand-in for the
     /// retired `create_vault` (D-038).
-    fn seal_test_vault(passphrase: Vec<u8>, params: VaultKdfParams) {
+    pub(crate) fn seal_test_vault(passphrase: Vec<u8>, params: VaultKdfParams) {
         begin_create().unwrap();
         seal_and_persist(passphrase, Vec::new(), params).unwrap();
     }
