@@ -257,29 +257,61 @@ struct TransportHub {
     store: Mutex<TransportStore>,
     decryptor: TransportDecryptor,
     /// The addresses an inbound envelope must touch to be ours, and the key
-    /// slots we try to open it with. Behind locks — and always widened as a
-    /// PAIR — because address discovery can widen the wallet's window after the
-    /// hub is built: a watched address whose key slot is missing is a message we
-    /// can never decrypt, and a key slot whose address is unwatched is never
-    /// reached at all. See [`widen_key_window`].
-    watched: Mutex<Arc<HashSet<String>>>,
-    window: Mutex<Arc<Vec<KeySlot>>>,
+    /// slots we try to open it with.
+    ///
+    /// ONE lock over BOTH, because address discovery can widen the wallet's
+    /// window after the hub is built and the two must move together: a watched
+    /// address whose key slot is missing is a message we can never decrypt, and
+    /// a key slot whose address is unwatched is never reached at all. Two
+    /// mutexes would let a reader take its two snapshots either side of a
+    /// widening and see exactly that split — nanoseconds wide, and free to
+    /// close. See [`widen_key_window`].
+    keys: Mutex<Arc<KeyWindow>>,
+}
+
+/// The hub's watched set and key slots as one replaceable value.
+struct KeyWindow {
+    watched: HashSet<String>,
+    /// Receive slots first — the likelier establishment binding.
+    slots: Vec<KeySlot>,
+    /// How many of `slots` are receive-branch, so the handshake path can take
+    /// its prefix without re-filtering on every inbound event.
+    receive_slots: usize,
+}
+
+impl KeyWindow {
+    fn build(receive: u32, change: u32, addresses: &[Address]) -> Self {
+        Self {
+            watched: addresses.iter().map(|a| a.to_string()).collect(),
+            slots: (0..receive)
+                .map(|i| (Branch::Receive, i))
+                .chain((0..change).map(|i| (Branch::Change, i)))
+                .collect(),
+            receive_slots: receive as usize,
+        }
+    }
+
+    /// The slots a HANDSHAKE may have been sealed to: the receive branch only.
+    ///
+    /// A handshake bonds an address we hand out, and we only ever hand out
+    /// receive addresses — the same reasoning `fill_walks` already applies to
+    /// its sweep. It matters here because `decrypt_scanning` derives one private
+    /// key per slot, each a full master-seed expansion, and this is the cheapest
+    /// path for a stranger to trigger: one dust output touching any address we
+    /// have ever published, with a fresh txid each time. Halving the scan is
+    /// worth having; more to the point, the change half could never have opened
+    /// it.
+    fn handshake_slots(&self) -> &[KeySlot] {
+        &self.slots[..self.receive_slots]
+    }
 }
 
 impl TransportHub {
-    /// A snapshot of the watched set (an `Arc` bump — never a lock held across
-    /// an await or a decrypt).
-    fn watched(&self) -> Arc<HashSet<String>> {
-        self.watched
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    /// A snapshot of the key-slot window. Same discipline as
-    /// [`TransportHub::watched`].
-    fn key_window(&self) -> Arc<Vec<KeySlot>> {
-        self.window
+    /// A snapshot of the watched set and key slots — one `Arc` bump, so a reader
+    /// can never see the two halves from different windows, and no lock is held
+    /// across a decrypt.
+    fn keys(&self) -> Arc<KeyWindow> {
+        self.keys
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -299,7 +331,7 @@ pub(crate) fn widen_key_window(window: (u32, u32)) {
         return;
     };
     let (receive, change) = window;
-    let armed = hub.key_window().len();
+    let armed = hub.keys().slots.len();
     if (receive as usize + change as usize) <= armed {
         return;
     }
@@ -313,16 +345,9 @@ pub(crate) fn widen_key_window(window: (u32, u32)) {
             return;
         }
     };
-    let watched: HashSet<String> = addresses.iter().map(|a| a.to_string()).collect();
-    let slots: Vec<KeySlot> = (0..receive)
-        .map(|i| (Branch::Receive, i))
-        .chain((0..change).map(|i| (Branch::Change, i)))
-        .collect();
-    // Watched set first: a key slot with no watched address behind it is inert,
-    // whereas the reverse ordering leaves a live address whose envelope has no
-    // key to try. Both are replaced before the next inbound event either way.
-    *hub.watched.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(watched);
-    *hub.window.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(slots);
+    // One publish, so no reader can observe a half-widened hub.
+    *hub.keys.lock().unwrap_or_else(PoisonError::into_inner) =
+        Arc::new(KeyWindow::build(receive, change, &addresses));
     log::info!(
         "transport-hub: key window widened to receive={receive} change={change} after discovery"
     );
@@ -751,18 +776,15 @@ pub async fn transport_start() -> Result<(), AppError> {
     // pre-discovery window every time).
     let (window_receive, window_change) = wallet::window_after_discovery().await;
     let (watched_addresses, _) = vault::derive_wallet_addresses(window_receive, window_change)?;
-    let watched: HashSet<String> = watched_addresses.iter().map(|a| a.to_string()).collect();
-    // Receive slots first — the likelier establishment binding.
-    let window: Vec<KeySlot> = (0..window_receive)
-        .map(|i| (Branch::Receive, i))
-        .chain((0..window_change).map(|i| (Branch::Change, i)))
-        .collect();
 
     let hub = Arc::new(TransportHub {
         store: Mutex::new(store),
         decryptor,
-        watched: Mutex::new(Arc::new(watched)),
-        window: Mutex::new(Arc::new(window)),
+        keys: Mutex::new(Arc::new(KeyWindow::build(
+            window_receive,
+            window_change,
+            &watched_addresses,
+        ))),
     });
     *HUB.lock().unwrap_or_else(PoisonError::into_inner) = Some(hub.clone());
 
@@ -1073,8 +1095,9 @@ fn handle_inbound_handshake(
     };
     // Relevance without crypto: a real handshake bonds the recipient, so one
     // of OUR watched addresses must be among the outputs.
-    let watched = hub.watched();
-    if !addresses.iter().any(|a| watched.contains(a)) {
+    // One snapshot for both halves of the check below — see `TransportHub::keys`.
+    let keys = hub.keys();
+    if !addresses.iter().any(|a| keys.watched.contains(a)) {
         return false;
     }
     let envelope_bytes = decode_envelope_body(body);
@@ -1088,7 +1111,7 @@ fn handle_inbound_handshake(
     // opens is dropped here — omission is possible, forgery is not (D-074).
     let Ok((slot, plaintext)) = hub
         .decryptor
-        .decrypt_scanning(hub.key_window().iter().copied(), &envelope)
+        .decrypt_scanning(keys.handshake_slots().iter().copied(), &envelope)
     else {
         return false;
     };
@@ -1283,7 +1306,7 @@ fn handle_inbound_comm(
         Err(CoreError::TransportOpen) => {
             match hub
                 .decryptor
-                .decrypt_scanning(hub.key_window().iter().copied(), &envelope)
+                .decrypt_scanning(hub.keys().slots.iter().copied(), &envelope)
             {
                 Ok((slot, _)) => Some((to_key_branch(slot.0), slot.1)),
                 Err(_) => return false, // alias matched but no key opens it — spoofed head
@@ -2281,7 +2304,7 @@ fn open_with_fallback(
     match hub.decryptor.decrypt_at(slot, envelope) {
         Err(CoreError::TransportOpen) => hub
             .decryptor
-            .decrypt_scanning(hub.key_window().iter().copied(), envelope)
+            .decrypt_scanning(hub.keys().slots.iter().copied(), envelope)
             .map(|(_, plaintext)| plaintext),
         other => other,
     }

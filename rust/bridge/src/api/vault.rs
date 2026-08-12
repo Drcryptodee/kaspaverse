@@ -232,35 +232,56 @@ pub(crate) fn transport_decryptor() -> Result<kaspaverse_core::TransportDecrypto
     Ok(vault.transport_decryptor())
 }
 
-/// The hard ceiling on any persisted index count, applied **on read** so one
-/// clamp covers every consumer.
-///
-/// These files are four or eight unauthenticated bytes on disk, and every
-/// consumer scales linearly in their value: the window feeds
-/// `derive_wallet_addresses(n, n)`, which is `Vec::with_capacity(n)` plus `n`
-/// BIP32 derivations under the `VAULT` mutex. At `u32::MAX` that is a ~137 GB
-/// allocation → `handle_alloc_error` → **SIGABRT**, which is worse than the
-/// caught panic INV-2 forbids: it is self-reinforcing (re-read every launch) and
-/// the only escape — clear app data — destroys `vault.kvsb` and forces a seed
-/// restore. A clamp turns "brick, unrecoverably" into "scan too wide, once".
-///
-/// 100 000 is far above anything reachable honestly (marks grow only by
-/// `GAP_LIMIT` past an index the chain actually showed funded) and far below
-/// anything the process cannot survive.
-pub(crate) const MAX_SCAN_MARK: u32 = 100_000;
+/// The largest discovery mark this app can ever have written. A mark is
+/// `highest_funded_index + 1`, and one pass probes at most
+/// `wallet::MAX_DISCOVERY_DEPTH` indices, so a larger value on disk is not a
+/// window we produced — it is corruption. (`wallet.rs` asserts that
+/// relationship at compile time.)
+pub(crate) const MAX_SCAN_MARK: u32 = 512;
 
-/// Read the persisted change cursor (the next-unused change index). A missing or
-/// malformed file reads as 0 — a fresh wallet has used no change addresses.
-/// Clamped to [`MAX_SCAN_MARK`]: this value widens the change window, so a
-/// corrupt four bytes is an allocation, not a number (see the const).
+/// The largest change cursor this app will believe. Not a policy limit — the
+/// cursor advances by exactly one per fully-broadcast send (D-041), so reaching
+/// this takes 100 000 sends from this device, and nothing above it is a number
+/// we wrote.
+pub(crate) const MAX_CHANGE_CURSOR: u32 = 100_000;
+
+/// Validate a persisted count: **out of range reads as UNSET, never clamped.**
+///
+/// Both files are a handful of unauthenticated bytes on disk, and every consumer
+/// scales linearly in their value — a window feeds `derive_wallet_addresses(n,
+/// n)`, which is `Vec::with_capacity(n)` plus `n` BIP32 derivations under the
+/// `VAULT` mutex. Unvalidated, `u32::MAX` is a ~137 GB allocation →
+/// `handle_alloc_error` → **SIGABRT**, worse than the caught panic INV-2
+/// forbids and self-reinforcing, since the same bytes are re-read every launch.
+///
+/// Clamping to the ceiling stops the abort and replaces it with something almost
+/// as bad: the widest legal window forever, on every unlock and every send,
+/// never rewritten — the marks only persist when they *change*, so the corrupt
+/// bytes survive, and the only user escape (clear app data) destroys
+/// `vault.kvsb`. Zero is the honest reading of a value this app could not have
+/// written, and it heals: discovery re-probes and writes a sane mark, the next
+/// send writes a sane cursor. Neither loses funds — the window is rebuilt from
+/// the chain, and `wallet::next_change_index` floors the cursor at the
+/// discovered mark, so a cursor read as 0 still lands past the funded history.
+fn persisted_count(raw: u32, ceiling: u32) -> u32 {
+    if raw > ceiling {
+        log::warn!("vault: persisted count {raw} is past its {ceiling} ceiling — reading as unset");
+        return 0;
+    }
+    raw
+}
+
+/// Read the persisted change cursor (the next-unused change index). A missing,
+/// malformed or out-of-range file reads as 0 — a fresh wallet has used no change
+/// addresses, and an impossible one is not evidence (see [`persisted_count`]).
 pub(crate) fn change_cursor() -> u32 {
-    change_cursor_path()
+    let raw = change_cursor_path()
         .ok()
         .and_then(|p| fs::read(p).ok())
         .filter(|b| b.len() == 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .unwrap_or(0)
-        .min(MAX_SCAN_MARK)
+        .unwrap_or(0);
+    persisted_count(raw, MAX_CHANGE_CURSOR)
 }
 
 /// Persist the change cursor atomically — advanced only after a fully-broadcast
@@ -291,9 +312,10 @@ pub(crate) fn scan_window_path() -> Result<PathBuf, AppError> {
 /// sat at change index 77 — a local send-counter was standing in for a fact
 /// about the chain. Two files, two meanings, neither pretending to be the other.
 ///
-/// Both marks are clamped to [`MAX_SCAN_MARK`] and OR-ed with what this process
-/// has already learned (see [`set_scan_high_water`]), so the window never
-/// depends on a disk write having succeeded.
+/// Each mark is validated by [`persisted_count`] against [`MAX_SCAN_MARK`] and
+/// OR-ed with what this process has already learned (see
+/// [`set_scan_high_water`]), so the window never depends on a disk write having
+/// succeeded.
 pub(crate) fn scan_high_water() -> (u32, u32) {
     let (disk_receive, disk_change) = scan_window_path()
         .ok()
@@ -301,8 +323,8 @@ pub(crate) fn scan_high_water() -> (u32, u32) {
         .filter(|b| b.len() == 8)
         .map(|b| {
             (
-                u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+                persisted_count(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), MAX_SCAN_MARK),
+                persisted_count(u32::from_le_bytes([b[4], b[5], b[6], b[7]]), MAX_SCAN_MARK),
             )
         })
         .unwrap_or((0, 0));
@@ -310,10 +332,7 @@ pub(crate) fn scan_high_water() -> (u32, u32) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .unwrap_or((0, 0));
-    (
-        disk_receive.max(memo_receive).min(MAX_SCAN_MARK),
-        disk_change.max(memo_change).min(MAX_SCAN_MARK),
-    )
+    (disk_receive.max(memo_receive), disk_change.max(memo_change))
 }
 
 /// What a discovery pass has learned **this process**, whether or not the write
@@ -331,17 +350,22 @@ static SCAN_MARKS: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 
 /// Record the discovery marks — in memory first, then to disk.
 ///
-/// Monotonic in both stores: a scan that finds nothing must never shrink a
-/// window that previously found something, or a transient RPC failure would
-/// strand funds we had already learned to watch. The in-memory half takes the
-/// max here so it cannot regress even if a caller passes a smaller value; the
-/// on-disk half is monotonic at the one call site that computes it.
+/// Monotonic in BOTH stores, structurally: the max is taken once and the same
+/// values go to memory and to disk. Persisting the caller's raw arguments while
+/// max-ing only the memo would leave on-disk monotonicity resting on the one
+/// call site that happens to compute it correctly — and a future second caller
+/// narrowing the marks means the next launch opens on the narrow window, which
+/// is the original defect. A scan that finds nothing must never shrink a window
+/// that previously found something, or a transient RPC failure would strand
+/// funds we had already learned to watch.
 pub(crate) fn set_scan_high_water(receive_hi: u32, change_hi: u32) -> Result<(), AppError> {
-    {
+    let (receive_hi, change_hi) = {
         let mut memo = SCAN_MARKS.lock().unwrap_or_else(PoisonError::into_inner);
         let (prev_receive, prev_change) = memo.unwrap_or((0, 0));
-        *memo = Some((prev_receive.max(receive_hi), prev_change.max(change_hi)));
-    }
+        let grown = (prev_receive.max(receive_hi), prev_change.max(change_hi));
+        *memo = Some(grown);
+        grown
+    };
     let mut bytes = [0u8; 8];
     bytes[..4].copy_from_slice(&receive_hi.to_le_bytes());
     bytes[4..].copy_from_slice(&change_hi.to_le_bytes());
@@ -966,6 +990,60 @@ pub(crate) mod tests {
         assert_eq!(Lockout::from_bytes(&l.to_bytes()), Some(l));
         assert_eq!(Lockout::from_bytes(&[0u8; 11]), None);
         assert_eq!(Lockout::from_bytes(&[]), None);
+    }
+
+    #[test]
+    fn an_impossible_persisted_count_reads_as_unset_never_as_the_ceiling() {
+        // In range, including the boundary, passes through untouched.
+        assert_eq!(persisted_count(0, MAX_SCAN_MARK), 0);
+        assert_eq!(persisted_count(78, MAX_SCAN_MARK), 78);
+        assert_eq!(persisted_count(MAX_SCAN_MARK, MAX_SCAN_MARK), MAX_SCAN_MARK);
+
+        // Out of range is UNSET, not clamped — the distinction the second
+        // wallet-security audit turned on. Clamping stops the SIGABRT and
+        // replaces it with a permanent brick: the widest legal window on every
+        // unlock and every send, and the bad bytes are never rewritten, because
+        // the marks only persist when they change. Zero re-probes and heals.
+        assert_eq!(persisted_count(MAX_SCAN_MARK + 1, MAX_SCAN_MARK), 0);
+        assert_eq!(persisted_count(u32::MAX, MAX_SCAN_MARK), 0);
+        assert_eq!(persisted_count(u32::MAX, MAX_CHANGE_CURSOR), 0);
+    }
+
+    #[test]
+    fn the_scan_marks_are_monotonic_on_disk_and_not_only_in_memory() {
+        let (_g, _dir) = enter();
+        set_scan_high_water(41, 78).unwrap();
+        assert_eq!(scan_high_water(), (41, 78));
+
+        // A caller passing something smaller must not narrow either store. The
+        // memo would have absorbed it either way; this asserts the FILE did too,
+        // because a next launch reads the file and nothing else.
+        set_scan_high_water(0, 12).unwrap();
+        let bytes = fs::read(scan_window_path().unwrap()).unwrap();
+        assert_eq!(
+            (
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            ),
+            (41, 78),
+            "the persisted marks narrowed — the next launch would open short"
+        );
+        assert_eq!(scan_high_water(), (41, 78));
+    }
+
+    #[test]
+    fn a_corrupt_scan_window_file_reads_as_unset_and_the_next_pass_heals_it() {
+        let (_g, _dir) = enter();
+        let path = scan_window_path().unwrap();
+        atomic_write(&path, &[0xffu8; 8]).unwrap();
+        assert_eq!(
+            scan_high_water(),
+            (0, 0),
+            "an impossible mark is not evidence"
+        );
+        // …and the wallet is not stuck there: a real pass writes over it.
+        set_scan_high_water(3, 78).unwrap();
+        assert_eq!(scan_high_water(), (3, 78));
     }
 
     #[test]

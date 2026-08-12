@@ -87,15 +87,26 @@ pub(crate) fn window_from(receive_seen: u32, change_seen: u32, change_cursor: u3
 /// The ceiling on a derived window — the mark ceiling plus the gap always kept
 /// past it.
 ///
-/// It must sit **above** the index space the marks can name, never on it. A
-/// window is a COUNT: `build_wallet_signer` registers `0..count`, so clamping
-/// the window to `MAX_SCAN_MARK` while [`next_change_index`] can also *equal*
-/// `MAX_SCAN_MARK` hands out a change address one past the last signable index.
-/// The send would succeed, return change to an address neither watched nor
-/// spendable, and the cursor — clamped on read — would return the same dead
-/// index on every send after it. Fixing an abort by opening a fund-loss path at
-/// the same boundary is not a fix; this is the boundary, plus one gap.
-pub(crate) const MAX_WINDOW: u32 = vault::MAX_SCAN_MARK + GAP_LIMIT;
+/// It must sit **above** the index space the persisted counts can name, never
+/// on it. A window is a COUNT: `build_wallet_signer` registers `0..count`, so a
+/// ceiling equal to the highest index [`next_change_index`] can return would
+/// hand out a change address one past the last signable one. The send would
+/// succeed, return change to an address neither watched nor spendable, and the
+/// cursor would keep naming that same dead index on every send after it. Fixing
+/// an abort by opening a fund-loss path at the same boundary is not a fix.
+///
+/// The cursor is the taller of the two inputs (`MAX_CHANGE_CURSOR` 100 000
+/// against `MAX_SCAN_MARK` 512), so this is its ceiling plus one.
+pub(crate) const MAX_WINDOW: u32 = vault::MAX_CHANGE_CURSOR + 1;
+
+/// The two ceilings are one fact in two modules: a mark is
+/// `highest_funded_index + 1` and a pass probes at most [`MAX_DISCOVERY_DEPTH`]
+/// indices, so `vault::MAX_SCAN_MARK` must be exactly what a pass can produce.
+/// Raise the probe depth (Track 2's deeper scan) without raising the mark
+/// ceiling and every discovered mark past it reads back as UNSET — the wallet
+/// would re-probe on every launch and never keep what it found. Checked here so
+/// that is a compile error, not a field report.
+const _: () = assert!(vault::MAX_SCAN_MARK >= MAX_DISCOVERY_DEPTH);
 
 /// The next change index to hand out — the send cursor (D-041), floored at what
 /// discovery found.
@@ -954,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_mark_is_clamped_not_merely_saturated() {
+    fn a_garbage_window_input_is_bounded_not_merely_saturated() {
         // This test used to assert `u32::MAX` in → `u32::MAX` out and call it
         // safe because it does not NARROW the watch set. Both directions are
         // fatal, and this was the one that shipped defended-as-correct: the
@@ -962,24 +973,30 @@ mod tests {
         // of ~137 GB plus that many BIP32 derivations under the VAULT mutex —
         // `handle_alloc_error`, SIGABRT, and a wallet that re-reads the same
         // eight bytes and aborts again on every launch.
+        //
+        // The live defence is at the reader (`vault::persisted_count` reads an
+        // impossible count as UNSET); this is the backstop under it, and it is
+        // the reason the backstop cannot itself be the index ceiling.
         let (receive, change) = window_from(u32::MAX, u32::MAX, u32::MAX);
         assert_eq!(receive, MAX_WINDOW);
         assert_eq!(change, MAX_WINDOW);
-        // And the ceiling sits ABOVE the index space the clamped marks name,
-        // never on it — see `MAX_WINDOW`.
-        const { assert!(MAX_WINDOW > vault::MAX_SCAN_MARK) };
     }
 
     #[test]
-    fn the_clamp_never_bites_a_window_a_real_wallet_can_reach() {
-        // The ceiling must be a corruption backstop, not a policy limit: marks
-        // grow only past an index the chain showed FUNDED, so a wallet is
-        // nowhere near it. Anything that would make this fail is a wallet whose
-        // real window we would be silently truncating.
-        let (receive, change) = window_from(5_000, 5_000, 5_000);
-        assert_eq!(receive, 5_000 + GAP_LIMIT);
-        assert_eq!(change, 5_000 + GAP_LIMIT);
-        const { assert!(vault::MAX_SCAN_MARK > DISCOVERY_DEPTH + GAP_LIMIT) };
+    fn the_ceiling_never_bites_a_window_a_real_wallet_can_reach() {
+        // The bound must be a corruption backstop, not a policy limit. The
+        // reachable space is small and exactly known: a mark is at most what one
+        // pass can produce, and a cursor is one per send.
+        let (receive, change) = window_from(vault::MAX_SCAN_MARK, vault::MAX_SCAN_MARK, 0);
+        assert_eq!(receive, vault::MAX_SCAN_MARK + GAP_LIMIT);
+        assert_eq!(change, vault::MAX_SCAN_MARK + GAP_LIMIT);
+        let (_, change_at_cursor_ceiling) = window_from(0, 0, vault::MAX_CHANGE_CURSOR);
+        assert_eq!(change_at_cursor_ceiling, vault::MAX_CHANGE_CURSOR + 1);
+        // An earlier version of this test asserted headroom at mark 5 000 and
+        // called it "a window a real wallet can reach" — `MAX_DISCOVERY_DEPTH`,
+        // added in the same commit, had already made 5 000 unreachable. A test
+        // that blesses headroom the code no longer has is worse than no test.
+        const { assert!(vault::MAX_SCAN_MARK >= DISCOVERY_DEPTH) };
     }
 
     #[test]
@@ -994,11 +1011,13 @@ mod tests {
         // itself at the last scan's edge.
         assert_eq!(discovery_depth_for(400), 400 + GAP_LIMIT);
         // …but a probe depth is round trips on the unlock path, so it stops at
-        // its OWN, much lower ceiling — not the window's. At `MAX_SCAN_MARK`
-        // one pass would be 782 sequential chunks: over two hours of a blocked
-        // gate, from four corrupt bytes.
+        // its own ceiling rather than the window's. Sharing the window's made
+        // one pass 782 sequential chunks — over two hours of a blocked gate,
+        // from four corrupt bytes.
         assert_eq!(discovery_depth_for(u32::MAX), MAX_DISCOVERY_DEPTH);
-        const { assert!(MAX_DISCOVERY_DEPTH < vault::MAX_SCAN_MARK) };
+        assert!(discovery_depth_for(MAX_DISCOVERY_DEPTH) <= MAX_DISCOVERY_DEPTH);
+        // And a depth is never wider than a window can hold it.
+        const { assert!(MAX_DISCOVERY_DEPTH < MAX_WINDOW) };
     }
 
     #[test]

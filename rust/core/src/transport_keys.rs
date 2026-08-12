@@ -16,8 +16,20 @@
 //!   keys opens it (the counterparty encrypts to whichever of our addresses
 //!   it resolved — return-address resolution on their side may land on any
 //!   watched slot). First success returns the slot; that slot becomes the
-//!   §0.7 binding. ~60 ECDH+AEAD attempts worst case, microseconds each, and
-//!   only ever on scan-matched envelopes (sparse by construction).
+//!   §0.7 binding. Only ever on scan-matched envelopes (sparse by
+//!   construction).
+//!
+//!   **The cost is one full derivation per slot tried, so the caller owns the
+//!   bound.** Each attempt is a master-seed expansion plus a BIP32 path walk
+//!   (`KeyChain::private_key_bytes`), not a cheap ECDH — and at the pin
+//!   `ExtendedPrivateKey` carries no `Drop`, so intermediates are dropped
+//!   un-wiped (pin behaviour; INV-9 says consume it, not fork it). The window
+//!   used to be a fixed 30+30 and this doc said "~60 attempts, microseconds
+//!   each"; since address discovery (2026-08-12) it is the *discovered*
+//!   window, which grows with the wallet. Callers must pass the narrowest set
+//!   that could have opened the envelope — the transport hub scans handshakes
+//!   against the receive branch only, because a handshake bonds an address we
+//!   handed out, and that path is the cheapest one a stranger can trigger.
 //!
 //! Decrypted plaintext leaves as `Zeroizing<Vec<u8>>` and is user content
 //! post-decrypt (INV-1 as amended D-056) — never logged, never persisted
