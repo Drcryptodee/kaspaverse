@@ -26,19 +26,114 @@ use crate::api::error::AppError;
 use crate::api::{dag, vault};
 use crate::frb_generated::StreamSink;
 
-/// BIP44 receive+change scan window, fixed for P1.5 (decision: 30 per chain —
-/// covers the gap-of-20 plus headroom; grow-on-use re-scan deferred). A restore
-/// of a wallet that used >30 receive addresses can miss funds past the window —
-/// a documented limitation, never a silent zero.
+/// The trailing gap kept beyond the highest address known to hold funds — the
+/// BIP44 gap-of-20 plus headroom. No longer the whole story: it is the *minimum*
+/// window and the margin added past a discovery hit, never a ceiling.
 pub(crate) const GAP_LIMIT: u32 = 30;
 
-/// The change-branch window to derive/watch/register: the fixed [`GAP_LIMIT`]
-/// widened to cover every change index used so far (the persisted cursor, D-041).
-/// The SINGLE source for the change window — both the sync engine's initial scan
-/// and a send's signer registration call it, so the watched set and the signer
-/// can never drift (risk #5). Receive stays fixed at `GAP_LIMIT`.
-pub(crate) fn change_window() -> u32 {
-    GAP_LIMIT.max(vault::change_cursor().saturating_add(1))
+/// How deep a discovery pass probes per branch before it needs a reason to go
+/// further. Sized to swallow an ordinary external-wallet history in one pass
+/// (the case that motivated this: a Kaspium-used wallet sitting at change index
+/// 77), while staying two `get_balances_by_addresses` round trips per branch.
+/// Deeper than this is reachable, but only on evidence — see
+/// [`discovery_depth_for`].
+pub(crate) const DISCOVERY_DEPTH: u32 = 256;
+
+/// The watch/sign window as `(receive, change)` — the SINGLE source for both
+/// branches. The sync engine's initial scan, the transport key window and every
+/// send's signer registration call this, so the watched set and the signer can
+/// never drift (risk #5): funds you can see are funds you can spend.
+///
+/// Each branch is `GAP_LIMIT` past its discovered high-water mark, floored at
+/// `GAP_LIMIT`. Change additionally floors at the send cursor (D-041) so a fresh
+/// change address is always signable even before any discovery has run.
+///
+/// Superseded `change_window()`, which was `max(GAP_LIMIT, change_cursor + 1)`.
+/// That looked like a widening rule and was not: `change_cursor` counts *our own*
+/// broadcasts, so a wallet restored from another client read 0 and got a 30-wide
+/// window regardless of how deep its real history went.
+pub(crate) fn wallet_window() -> (u32, u32) {
+    let (receive_hi, change_hi) = vault::scan_high_water();
+    window_from(receive_hi, change_hi, vault::change_cursor())
+}
+
+/// The window arithmetic, split out from its disk reads so it can be tested
+/// directly. This is where the defect lived — the old rule was a formula that
+/// looked like widening and was not — so it is the part that gets asserted.
+///
+/// The persisted marks are **counts, not indices**: `receive_seen` is how many
+/// indices must be covered, i.e. `highest_funded + 1`, and `0` means nothing has
+/// been found. That distinction is load-bearing and was got wrong first time —
+/// as a bare index, `0` means both "nothing found" and "index 0 is funded", and
+/// a fresh wallet came out one address wider than the gap limit.
+pub(crate) fn window_from(receive_seen: u32, change_seen: u32, change_cursor: u32) -> (u32, u32) {
+    let receive = GAP_LIMIT.max(receive_seen.saturating_add(GAP_LIMIT));
+    let change = GAP_LIMIT
+        .max(change_seen.saturating_add(GAP_LIMIT))
+        .max(change_cursor.saturating_add(1));
+    (receive, change)
+}
+
+/// How deep to probe a branch on the next discovery pass: always at least
+/// [`DISCOVERY_DEPTH`], and always [`GAP_LIMIT`] past anything already found, so
+/// a wallet that has grown past the default depth keeps growing instead of
+/// pinning itself at the last scan's edge.
+pub(crate) fn discovery_depth_for(seen: u32) -> u32 {
+    DISCOVERY_DEPTH.max(seen.saturating_add(GAP_LIMIT))
+}
+
+/// A signer registered over the CURRENT window — the one call every send path
+/// uses. Exists so the window reaches the signer as a single fact rather than as
+/// two arguments each caller re-derives: three call sites previously passed
+/// `(GAP_LIMIT, change_window())` by hand, and any one of them drifting from the
+/// watched set would make a visible UTXO unspendable.
+pub(crate) fn wallet_signer() -> Result<kaspaverse_core::VaultSigner, AppError> {
+    let (receive, change) = wallet_window();
+    vault::build_wallet_signer(receive, change)
+}
+
+/// Probe both branches for funded addresses and persist the high-water marks,
+/// widening the window before anything is watched or signed.
+///
+/// Runs on every unlock, not only on restore. A wallet is a shared object: the
+/// founder's own case had Kaspium advancing the change branch between our
+/// sessions, so a once-at-restore scan would go stale the first time the seed
+/// was used elsewhere.
+///
+/// **Monotonic and best-effort.** The marks only ever grow: a probe that finds
+/// nothing — including one that failed because the node was unreachable — must
+/// never shrink a window that previously found funds, or a flaky connection
+/// would strand coins we had already learned to watch. Errors are returned for
+/// logging and the caller proceeds on the last known-good window; a wallet that
+/// refuses to open because discovery failed is worse than one that opens on a
+/// window it already trusted.
+async fn discover_and_persist_window(rpc: &kaspaverse_chain::Rpc) -> Result<(u32, u32), AppError> {
+    let (known_receive, known_change) = vault::scan_high_water();
+    let depth_receive = discovery_depth_for(known_receive);
+    let depth_change = discovery_depth_for(known_change);
+    debug_assert!(depth_receive >= known_receive && depth_change >= known_change);
+
+    // One derivation for both probes; `all` is receive ++ change, so the split
+    // point is exactly `depth_receive` (see `vault::derive_wallet_addresses`).
+    let (all, change) = vault::derive_wallet_addresses(depth_receive, depth_change)?;
+    let receive = &all[..depth_receive as usize];
+
+    let found_receive = kaspaverse_chain::discovery::highest_funded_index(rpc, receive)
+        .await
+        .map_err(AppError::chain)?;
+    let found_change = kaspaverse_chain::discovery::highest_funded_index(rpc, &change)
+        .await
+        .map_err(AppError::chain)?;
+
+    // Index → count (`highest + 1`); `None` stays 0. See `window_from` for why
+    // the persisted form is a count and not an index.
+    let receive_seen = known_receive.max(found_receive.map_or(0, |i| i.saturating_add(1)));
+    let change_seen = known_change.max(found_change.map_or(0, |i| i.saturating_add(1)));
+
+    if (receive_seen, change_seen) != (known_receive, known_change) {
+        vault::set_scan_high_water(receive_seen, change_seen)?;
+    }
+    Ok((receive_seen, change_seen))
 }
 
 /// Direction of an activity row (mapped from the wallet framework's typed
@@ -240,15 +335,33 @@ fn fold(snapshot: &mut WalletSnapshot, event: WalletEvent) {
 async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppError> {
     SNAPSHOTS
         .get_or_try_init(|| async {
-            // Derive the public watch set from the unlocked vault (INV-1: the
-            // seed never leaves vault.rs). Change widens with the cursor (D-041)
-            // so previously-used change addresses are re-watched on restart; the
-            // change subset lets the engine tell our own returning change from a
-            // real deposit.
-            let (addresses, change_addresses) =
-                vault::derive_wallet_addresses(GAP_LIMIT, change_window())?;
             // Bind to the SAME wRPC client the DAG monitor uses (§0.8 / D-005).
             let monitor = dag::shared_monitor().await?;
+
+            // Discovery runs BEFORE the window is fixed, because the window is
+            // what it produces. A wallet restored from another client can hold
+            // funds far past the default gap — the case this exists for had them
+            // at change index 77 against a 30-wide window, invisible AND
+            // unspendable. Failure is non-fatal: we log and continue on the last
+            // known-good window rather than refusing to open the wallet.
+            if let Err(e) = discover_and_persist_window(&monitor.rpc()).await {
+                // `.message` deliberately, not the whole error: AppError's
+                // contract is that the message is secret-free by construction
+                // (api/error.rs), and liblog reaches logcat on every build
+                // flavour (L53/D-076).
+                log::warn!(
+                    "wallet: address discovery failed, using last known window: {}",
+                    e.message
+                );
+            }
+
+            // Derive the public watch set from the unlocked vault (INV-1: the
+            // seed never leaves vault.rs). Both branches widen past whatever
+            // discovery found; the change subset lets the engine tell our own
+            // returning change from a real deposit.
+            let (receive_count, change_count) = wallet_window();
+            let (addresses, change_addresses) =
+                vault::derive_wallet_addresses(receive_count, change_count)?;
             let engine = WalletEngine::new(
                 monitor.rpc(),
                 NetworkId::new(NetworkType::Mainnet),
@@ -440,6 +553,92 @@ pub async fn subscribe_wallet_updates(sink: StreamSink<WalletSnapshot>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the address window (the 2026-08-12 fund-visibility defect) ──────────
+    //
+    // The bug in one line: the change window was `max(GAP_LIMIT, change_cursor + 1)`,
+    // and `change_cursor` counts sends THIS app broadcast. A wallet restored from
+    // another client reads 0 there however deep its real history goes, so the
+    // window stayed 30 while funds sat far past it — invisible, and because the
+    // signer shares this seam, unspendable too.
+
+    #[test]
+    fn a_fresh_wallet_watches_exactly_the_gap_limit() {
+        assert_eq!(window_from(0, 0, 0), (GAP_LIMIT, GAP_LIMIT));
+    }
+
+    #[test]
+    fn a_funded_change_index_past_the_old_window_is_covered() {
+        // The founder's wallet, 2026-08-12: Kaspium had advanced the change
+        // branch to index 77 while our window was 30. This is the regression.
+        // Discovery reports index 77, which persists as a count of 78.
+        let (_, change) = window_from(0, 78, 0);
+        assert!(
+            change > 77,
+            "change window {change} must cover the funded index 77"
+        );
+        assert_eq!(change, 78 + GAP_LIMIT);
+    }
+
+    #[test]
+    fn index_zero_funded_is_distinguishable_from_nothing_found() {
+        // The bug this pair pins: as a bare index, 0 means both "nothing" and
+        // "index 0 has funds". As a count it cannot.
+        assert_eq!(window_from(0, 0, 0).0, GAP_LIMIT, "nothing found");
+        assert_eq!(window_from(1, 0, 0).0, 1 + GAP_LIMIT, "index 0 funded");
+    }
+
+    #[test]
+    fn the_old_rule_is_what_this_replaces() {
+        // Pin the defect so nobody reintroduces it: with a restored wallet the
+        // send-counter is 0, and the superseded formula returned a 30-wide
+        // window that cannot see index 77.
+        let restored_wallet_cursor = 0u32; // never advanced — we broadcast nothing
+        let superseded = GAP_LIMIT.max(restored_wallet_cursor.saturating_add(1));
+        assert_eq!(superseded, GAP_LIMIT);
+        assert!(superseded <= 77, "the old rule could not reach index 77");
+    }
+
+    #[test]
+    fn both_branches_widen_independently() {
+        let (receive, change) = window_from(46, 13, 0);
+        assert_eq!(receive, 46 + GAP_LIMIT);
+        assert_eq!(change, 13 + GAP_LIMIT);
+        // Receive used to be hard-pinned at GAP_LIMIT with no widening path at
+        // all — strictly worse than change. It grows now.
+        assert!(receive > GAP_LIMIT);
+    }
+
+    #[test]
+    fn the_send_cursor_still_floors_the_change_branch() {
+        // D-041 must survive: a fresh change address is signable the moment the
+        // cursor names it, even before any discovery pass has run.
+        let (_, change) = window_from(0, 0, 200);
+        assert_eq!(change, 201);
+    }
+
+    #[test]
+    fn the_window_saturates_instead_of_wrapping() {
+        // A corrupt or hostile persisted mark must not wrap to a tiny window —
+        // that would silently narrow the watch set to nothing.
+        let (receive, change) = window_from(u32::MAX, u32::MAX, u32::MAX);
+        assert_eq!(receive, u32::MAX);
+        assert_eq!(change, u32::MAX);
+    }
+
+    #[test]
+    fn discovery_probes_at_least_the_default_depth_and_always_past_what_it_found() {
+        assert_eq!(discovery_depth_for(0), DISCOVERY_DEPTH);
+        assert_eq!(
+            discovery_depth_for(78),
+            DISCOVERY_DEPTH,
+            "still within default"
+        );
+        // Past the default depth the scan keeps growing rather than pinning
+        // itself at the last scan's edge.
+        assert_eq!(discovery_depth_for(400), 400 + GAP_LIMIT);
+        assert_eq!(discovery_depth_for(u32::MAX), u32::MAX);
+    }
 
     fn row(daa: u64) -> WalletActivityRecord {
         WalletActivityRecord {

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `change_window`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `overlaid`, `snapshots`
+// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `discover_and_persist_window`, `discovery_depth_for`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `overlaid`, `snapshots`, `wallet_signer`, `wallet_window`, `window_from`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The latest folded snapshot as a PULL (V2 sitting: the founder's

@@ -11,6 +11,7 @@
 
 mod acceptance;
 mod dag_monitor;
+pub mod discovery;
 mod error;
 pub mod history_fill;
 mod kvlog;
