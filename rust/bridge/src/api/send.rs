@@ -259,7 +259,7 @@ pub async fn send_prepare(
     // the fresh change (the two-consumer seam — vault.rs is the single source).
     let cursor = vault::change_cursor();
     let change = vault::change_address_at(cursor)?;
-    let signer = vault::build_wallet_signer(wallet::GAP_LIMIT, wallet::change_window())?;
+    let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
 
     let rpc = dag::shared_monitor().await?.rpc();

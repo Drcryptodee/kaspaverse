@@ -250,6 +250,51 @@ pub(crate) fn set_change_cursor(next: u32) -> Result<(), AppError> {
         .map_err(|e| AppError::io("write change cursor", e))
 }
 
+/// App-private path for the discovery high-water marks: the highest FUNDED
+/// receive and change index observed on chain. Public data (two indices), same
+/// `wallet/` subdir, no encryption (INV-3).
+pub(crate) fn scan_window_path() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet").join("scan.window"))
+}
+
+/// Read the persisted `(receive_seen, change_seen)` discovery marks — COUNTS of
+/// indices needing coverage (`highest_funded + 1`), never bare indices, so that 0
+/// means "nothing found" and cannot be confused with "index 0 is funded".
+/// Missing or
+/// malformed reads as `(0, 0)` — nothing discovered yet, so the caller falls
+/// back to the fixed gap limit.
+///
+/// **Deliberately not `change.cursor`.** That file counts change indices *this
+/// app* burned on its own sends (D-041); it is written only after a successful
+/// broadcast and knows nothing about a wallet used elsewhere. Conflating the two
+/// is precisely what let a restored wallet watch 30 addresses while its funds
+/// sat at change index 77 — a local send-counter was standing in for a fact
+/// about the chain. Two files, two meanings, neither pretending to be the other.
+pub(crate) fn scan_high_water() -> (u32, u32) {
+    scan_window_path()
+        .ok()
+        .and_then(|p| fs::read(p).ok())
+        .filter(|b| b.len() == 8)
+        .map(|b| {
+            (
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
+/// Persist the discovery marks atomically. Monotonic by construction at the call
+/// site: a scan that finds nothing must never shrink a window that previously
+/// found something, or a transient RPC failure would strand funds we had already
+/// learned to watch.
+pub(crate) fn set_scan_high_water(receive_hi: u32, change_hi: u32) -> Result<(), AppError> {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&receive_hi.to_le_bytes());
+    bytes[4..].copy_from_slice(&change_hi.to_le_bytes());
+    atomic_write(&scan_window_path()?, &bytes).map_err(|e| AppError::io("write scan window", e))
+}
+
 /// Derive the public receive + change address window from the unlocked vault,
 /// for the wallet-sync engine. INV-1: the seed and the `KeyChain` NEVER leave
 /// this module — the keychain reference is held only under the `VAULT` lock and

@@ -466,7 +466,7 @@ async fn fill_walks(
 
     // Handshake sweep: the receive branch only — handshakes bond an address
     // we hand out; the change branch is internal and never receives one.
-    let receive_addresses = match vault::derive_wallet_addresses(wallet::GAP_LIMIT, 0) {
+    let receive_addresses = match vault::derive_wallet_addresses(wallet::wallet_window().0, 0) {
         Ok((receive, _)) => receive,
         Err(e) => {
             report.complete = false;
@@ -664,13 +664,17 @@ pub async fn transport_start() -> Result<(), AppError> {
     // the anchor for the catch-up replay (P5/D-067). None on first ever run.
     let catch_up_from = kaspaverse_chain::DagMonitor::read_transport_cursor(&cursor_path);
     let decryptor = vault::transport_decryptor()?;
-    let (watched_addresses, _) =
-        vault::derive_wallet_addresses(wallet::GAP_LIMIT, wallet::change_window())?;
+    // One window read, used for BOTH the watched set and the key slots below:
+    // reading it twice would let the two disagree if a discovery pass landed in
+    // between, and a key slot without its watched address is a message we can
+    // never decrypt.
+    let (window_receive, window_change) = wallet::wallet_window();
+    let (watched_addresses, _) = vault::derive_wallet_addresses(window_receive, window_change)?;
     let watched: HashSet<String> = watched_addresses.iter().map(|a| a.to_string()).collect();
     // Receive slots first — the likelier establishment binding.
-    let window: Vec<KeySlot> = (0..wallet::GAP_LIMIT)
+    let window: Vec<KeySlot> = (0..window_receive)
         .map(|i| (Branch::Receive, i))
-        .chain((0..wallet::change_window()).map(|i| (Branch::Change, i)))
+        .chain((0..window_change).map(|i| (Branch::Change, i)))
         .collect();
 
     let hub = Arc::new(TransportHub {
@@ -1293,7 +1297,7 @@ pub async fn transport_prepare_bcast(
     // single source): fresh change registered + signer over the watched window.
     let cursor = vault::change_cursor();
     let change = vault::change_address_at(cursor)?;
-    let signer = vault::build_wallet_signer(wallet::GAP_LIMIT, wallet::change_window())?;
+    let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
 
     let rpc = dag::shared_monitor().await?.rpc();
@@ -1365,7 +1369,7 @@ async fn prepare_transport_send(
             "this conversation's address is waiting on confirming funds — try again in a few seconds",
         ));
     }
-    let signer = vault::build_wallet_signer(wallet::GAP_LIMIT, wallet::change_window())?;
+    let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
     let rpc = dag::shared_monitor().await?.rpc();
 
