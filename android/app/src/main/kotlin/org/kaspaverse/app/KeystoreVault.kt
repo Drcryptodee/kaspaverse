@@ -36,6 +36,17 @@ import javax.crypto.spec.GCMParameterSpec
  * file is the compile-proven mechanism.
  */
 object KeystoreVault {
+    /**
+     * A ceremony that did not complete: a stable [code] Dart maps to copy, and a
+     * [message] that is diagnostic only.
+     *
+     * Two fields rather than one string because the caller has to make a decision
+     * the string cannot support — chiefly "was this a failure at all?". Parsing
+     * `"biometric error 13: ..."` in Dart would put a user-visible branch on an
+     * OEM- and locale-dependent sentence.
+     */
+    data class Failure(val code: String, val message: String)
+
     private const val KEY_ALIAS = "kaspaverse_vault_key"
     private const val BLOB_A_FILE = "vault.keystore.blob"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -45,9 +56,67 @@ object KeystoreVault {
 
     /** A biometric capable of [BiometricManager.Authenticators.BIOMETRIC_STRONG] is enrolled. */
     fun isBiometricAvailable(ctx: Context): Boolean =
-        BiometricManager.from(ctx).canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG
-        ) == BiometricManager.BIOMETRIC_SUCCESS
+        biometricStatus(ctx) == STATUS_READY
+
+    /**
+     * Why Path A is or is not offerable, as a stable string Dart maps to copy.
+     *
+     * [isBiometricAvailable] collapses all of this to `false`, and that collapse
+     * is the defect: `NONE_ENROLLED` — no fingerprint registered in Android
+     * Settings — is by far the most common answer on a fresh phone, it is the
+     * only one the user can *act* on, and it is indistinguishable from "this
+     * hardware cannot" once it becomes a bool. The create flow read that bool,
+     * skipped the enrolment offer in silence, and left the user believing the
+     * feature did not exist.
+     */
+    fun biometricStatus(ctx: Context): String =
+        when (
+            BiometricManager.from(ctx)
+                .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+        ) {
+            BiometricManager.BIOMETRIC_SUCCESS -> STATUS_READY
+            // Hardware is present and capable — the user simply has not set a
+            // fingerprint up yet. Actionable, and the one worth a real prompt.
+            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> "none_enrolled"
+            BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> "no_hardware"
+            // Transient: sensor busy, or disabled by device policy. Retrying is
+            // the right advice, unlike the two above.
+            BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> "unavailable"
+            BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED ->
+                "security_update_required"
+            else -> "unknown"
+        }
+
+    const val STATUS_READY = "ready"
+
+    // Stable error codes for the enroll/unlock ceremonies. Dart renders copy from
+    // these, never from the platform's message — the message is diagnostic text
+    // that varies by OEM and locale, and one of these outcomes is not an error at
+    // all (see [CODE_CANCELLED]).
+    const val CODE_CANCELLED = "cancelled"
+    const val CODE_LOCKOUT = "lockout"
+    const val CODE_NO_ENROLLMENT = "no_enrollment"
+    const val CODE_KEY_INVALIDATED = "key_invalidated"
+    const val CODE_KEYSTORE = "keystore"
+    const val CODE_VAULT = "vault"
+    const val CODE_FAILED = "failed"
+
+    /**
+     * Map a [BiometricPrompt] error code to one of ours.
+     *
+     * The three cancel codes matter most: the user pressing back, the system
+     * cancelling the prompt, and the user tapping "Use passphrase" are all
+     * *choices*, not failures, and a wallet that shows an error banner for them is
+     * lying about what happened.
+     */
+    private fun promptErrorCode(code: Int): String = when (code) {
+        BiometricPrompt.ERROR_USER_CANCELED,
+        BiometricPrompt.ERROR_CANCELED,
+        BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+        -> CODE_CANCELLED
+        BiometricPrompt.ERROR_LOCKOUT, BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> CODE_LOCKOUT
+        else -> CODE_FAILED
+    }
 
     /** A Path-A blob has been enrolled on this device. */
     fun isEnrolled(ctx: Context): Boolean = blobFile(ctx).exists()
@@ -65,23 +134,27 @@ object KeystoreVault {
      * Rust over JNI) under a freshly created Keystore key. The vault must already
      * be unlocked (created via Path B) so the seed export succeeds.
      */
-    fun enroll(activity: FragmentActivity, onResult: (Boolean, String?) -> Unit) {
+    fun enroll(activity: FragmentActivity, onResult: (Boolean, Failure?) -> Unit) {
         val key = try {
             getOrCreateKey()
         } catch (e: Exception) {
-            onResult(false, "keystore key creation failed: ${e.message}")
+            onResult(false, Failure(CODE_KEYSTORE, "keystore key creation failed: ${e.message}"))
             return
         }
         val cipher = Cipher.getInstance(TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, key) }
-        authenticate(activity, cipher, "Set up biometric unlock") { authedCipher, error ->
+        authenticate(activity, cipher, "Set up biometric unlock") { authedCipher, failure ->
             if (authedCipher == null) {
-                onResult(false, error ?: "authentication failed")
+                onResult(false, failure ?: Failure(CODE_FAILED, "authentication failed"))
                 return@authenticate
             }
             val seed = try {
                 VaultBridge.nativeExportSeedForKeystore()
             } catch (e: Throwable) {
-                onResult(false, "seed export failed: ${e.message}")
+                // Overwhelmingly "vault is locked": the §0.11 lifecycle lock fired
+                // while the prompt held the foreground. Its own code, because the
+                // user CAN act on it (unlock and try again) and because a swallowed
+                // one is precisely what made enrolment look like it did nothing.
+                onResult(false, Failure(CODE_VAULT, "seed export failed: ${e.message}"))
                 return@authenticate
             }
             try {
@@ -89,7 +162,7 @@ object KeystoreVault {
                 writeBlob(activity, authedCipher.iv, ciphertext)
                 onResult(true, null)
             } catch (e: Exception) {
-                onResult(false, "seal failed: ${e.message}")
+                onResult(false, Failure(CODE_KEYSTORE, "seal failed: ${e.message}"))
             } finally {
                 seed.fill(0) // L9 — wipe the plaintext seed copy
             }
@@ -101,29 +174,40 @@ object KeystoreVault {
      * seed to Rust over JNI, and wipe it. Returns success once the vault is
      * loaded native-side.
      */
-    fun unlock(activity: FragmentActivity, onResult: (Boolean, String?) -> Unit) {
+    fun unlock(activity: FragmentActivity, onResult: (Boolean, Failure?) -> Unit) {
         val (iv, ciphertext) = try {
             readBlob(activity)
         } catch (e: Exception) {
-            onResult(false, "no enrollment or unreadable blob: ${e.message}")
+            onResult(
+                false,
+                Failure(CODE_NO_ENROLLMENT, "no enrollment or unreadable blob: ${e.message}")
+            )
             return
         }
         val key = try {
             loadKey() ?: run {
-                onResult(false, "keystore key missing (re-enroll required)")
+                onResult(
+                    false,
+                    Failure(CODE_NO_ENROLLMENT, "keystore key missing (re-enroll required)")
+                )
                 return
             }
         } catch (e: Exception) {
             // KeyPermanentlyInvalidatedException lands here: enrollment changed.
-            onResult(false, "keystore key invalidated (use passphrase): ${e.message}")
+            // §0.5 makes that deliberate (a newly enrolled fingerprint must not
+            // inherit the old key), so it is a re-enrol prompt, not a fault.
+            onResult(
+                false,
+                Failure(CODE_KEY_INVALIDATED, "keystore key invalidated: ${e.message}")
+            )
             return
         }
         val cipher = Cipher.getInstance(TRANSFORM).apply {
             init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
         }
-        authenticate(activity, cipher, "Unlock your wallet") { authedCipher, error ->
+        authenticate(activity, cipher, "Unlock your wallet") { authedCipher, failure ->
             if (authedCipher == null) {
-                onResult(false, error ?: "authentication failed")
+                onResult(false, failure ?: Failure(CODE_FAILED, "authentication failed"))
                 return@authenticate
             }
             var plaintext: ByteArray? = null
@@ -132,7 +216,7 @@ object KeystoreVault {
                 VaultBridge.nativeUnlockWithSeed(plaintext)
                 onResult(true, null)
             } catch (e: Throwable) {
-                onResult(false, "unseal/load failed: ${e.message}")
+                onResult(false, Failure(CODE_VAULT, "unseal/load failed: ${e.message}"))
             } finally {
                 plaintext?.fill(0) // L9
             }
@@ -214,7 +298,7 @@ object KeystoreVault {
         activity: FragmentActivity,
         cipher: Cipher,
         title: String,
-        onDone: (Cipher?, String?) -> Unit,
+        onDone: (Cipher?, Failure?) -> Unit,
     ) {
         val executor = androidx.core.content.ContextCompat.getMainExecutor(activity)
         val prompt = BiometricPrompt(
@@ -226,7 +310,7 @@ object KeystoreVault {
                 }
 
                 override fun onAuthenticationError(code: Int, msg: CharSequence) {
-                    onDone(null, "biometric error $code: $msg")
+                    onDone(null, Failure(promptErrorCode(code), "biometric error $code: $msg"))
                 }
 
                 override fun onAuthenticationFailed() {

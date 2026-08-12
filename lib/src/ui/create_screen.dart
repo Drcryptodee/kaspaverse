@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
+import 'biometric_copy.dart';
 import 'secret/masked_dots.dart';
 import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
@@ -31,7 +32,7 @@ class CreateScreen extends StatefulWidget {
     this.reveal,
     this.abandon,
     this.seal,
-    this.biometricAvailable,
+    this.biometricStatus,
     this.enroll,
     this.checkAccessibility,
     this.setSecure,
@@ -49,8 +50,14 @@ class CreateScreen extends StatefulWidget {
   /// Seal the held ceremony under a passphrase (+ optional ASCII extra word).
   final Future<void> Function(Uint8List passphrase, Uint8List extraWord)? seal;
 
-  /// Is a biometric available to enroll (Path-A offer after seal)?
-  final Future<bool> Function()? biometricAvailable;
+  /// Why Path A is or is not offerable after the seal — a REASON, not a bool.
+  ///
+  /// This used to be `Future<bool>`, and that was the defect: `none_enrolled`
+  /// (the phone has a sensor, the user just has not registered a fingerprint
+  /// with Android) collapsed to the same `false` as `no_hardware`, so the offer
+  /// silently vanished and nothing said why. On the most common phone state, the
+  /// feature appeared not to exist.
+  final Future<String> Function()? biometricStatus;
 
   /// Run the biometric enroll ceremony; true once Path A is set up.
   final Future<bool> Function()? enroll;
@@ -74,6 +81,10 @@ class _CreateScreenState extends State<CreateScreen> {
   String? _message;
   bool _sealed = false; // ceremony consumed — don't abandon on dispose
 
+  /// Why Path A is (un)available, resolved once after the seal. Drives whether
+  /// the enrol step offers a button or an explanation.
+  String _biometricStatus = 'unknown';
+
   // ── seams resolved to the real lanes ─────────────────────────────────────
   Future<void> Function() get _beginLane =>
       widget.begin ??
@@ -88,23 +99,16 @@ class _CreateScreenState extends State<CreateScreen> {
       widget.abandon ?? VaultService.instance.abandonCreate;
   Future<void> Function(Uint8List, Uint8List) get _sealLane =>
       widget.seal ?? (p, x) => VaultService.instance.sealAndPersist(p, x);
-  Future<bool> Function() get _biometricLane =>
-      widget.biometricAvailable ?? _probeBiometric;
-  Future<bool> Function() get _enrollLane => widget.enroll ?? _runEnroll;
-
-  static Future<bool> _probeBiometric() async {
-    final ok = await VaultService.ceremony.invokeMethod<bool>(
-      'biometricAvailable',
-    );
-    return ok ?? false;
-  }
-
-  static Future<bool> _runEnroll() async {
-    final ok = await VaultService.ceremony.invokeMethod<bool>(
-      'enrollBiometric',
-    );
-    return ok ?? false;
-  }
+  // Both biometric lanes go through VaultService, never straight to the static
+  // ceremony channel. That routing is the fix for the lifecycle race: the §0.11
+  // auto-lock suppression is an INSTANCE flag on the service, so a caller that
+  // reaches past it cannot be covered by it *by construction* — which is exactly
+  // what this screen used to do, on the one ceremony that runs against an
+  // unlocked vault and therefore needed it most.
+  Future<String> Function() get _biometricLane =>
+      widget.biometricStatus ?? VaultService.instance.biometricStatus;
+  Future<bool> Function() get _enrollLane =>
+      widget.enroll ?? VaultService.instance.enrollBiometric;
 
   @override
   void initState() {
@@ -161,12 +165,20 @@ class _CreateScreenState extends State<CreateScreen> {
     try {
       await _sealLane(_passphrase.snapshot(), _extraWord.snapshot());
       _sealed = true; // ceremony consumed; the vault is now unlocked
+      // Consumed — wipe now, not at dispose. The enrol step holds this screen
+      // for an unbounded time (and, since the honest-degrade fix, keeps holding
+      // it after a FAILED enrolment instead of popping), across a window that
+      // deliberately spans an app-background. Nothing after the seal reads
+      // either buffer (wallet-security-auditor, Track 2).
+      _passphrase.wipe();
+      _extraWord.wipe();
       if (!mounted) return;
-      final canBiometric = await _safeBiometricProbe();
+      final status = await _safeBiometricProbe();
       if (!mounted) return;
-      if (canBiometric) {
+      if (_offersEnrolStep(status)) {
         setState(() {
           _busy = false;
+          _biometricStatus = status;
           _step = _Step.enrolling;
         });
       } else {
@@ -190,13 +202,29 @@ class _CreateScreenState extends State<CreateScreen> {
     }
   }
 
-  Future<bool> _safeBiometricProbe() async {
+  /// Ask the platform why Path A is or is not offerable. A probe that cannot run
+  /// at all is `unknown`, never a confident "no".
+  Future<String> _safeBiometricProbe() async {
     try {
       return await _biometricLane();
     } catch (_) {
-      return false; // enrollment is optional — Path B already works
+      // The old shape returned `false` here and the offer disappeared without a
+      // word. `unknown` is the honest reading of a question we could not ask,
+      // and it routes to the same silent finish — but through a state Settings
+      // can re-ask later, rather than a verdict.
+      return 'unknown';
     }
   }
+
+  /// Does the create flow stop for the enrol step at all?
+  ///
+  /// Only for the two states a user can do something about: `ready` (offer the
+  /// button) and `none_enrolled` (tell them how to get there, then continue).
+  /// A phone with no usable sensor gets no step — an unavoidable dead end
+  /// tacked onto a wallet's first minute is noise, and Settings tells the whole
+  /// truth to anyone who looks.
+  static bool _offersEnrolStep(String status) =>
+      status == biometricReady || status == biometricNoneEnrolled;
 
   Future<void> _enrollNow() async {
     setState(() {
@@ -205,10 +233,25 @@ class _CreateScreenState extends State<CreateScreen> {
     });
     try {
       await _enrollLane();
+      _finish();
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      // Backing out of the system prompt is a CHOICE, not a failure — no
+      // message, just return to the step so "Not now" is still there.
+      setState(() {
+        _busy = false;
+        _message = e.code == 'cancelled' ? null : enrollFailureCopy(e.code);
+      });
     } catch (_) {
-      // Optional — Path B works regardless; just move on to home.
+      // Never swallowed to a silent pop again: that is what made enrolment
+      // present as "I tapped it and nothing happened". The user stays on the
+      // step, is told what happened, and can retry or skip.
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _message = enrollFailureCopy('failed');
+      });
     }
-    _finish();
   }
 
   void _finish() {
@@ -398,60 +441,83 @@ class _CreateScreenState extends State<CreateScreen> {
 
   Widget _enroll() {
     final theme = Theme.of(context);
+    // `none_enrolled` reaches this step deliberately: nothing is broken, the
+    // phone simply has no fingerprint registered yet, and the user can fix that
+    // in a minute. Showing the step with the reason beats vanishing — and it
+    // names Settings, so "Not now" is never a one-way door again.
+    final ready = _biometricStatus == biometricReady;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Almost done'),
         automaticallyImplyLeading: false,
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(KvSpace.gutter),
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const CeremonyMark(Icons.fingerprint),
-                const SizedBox(height: KvSpace.l),
-                Text(
-                  'Unlock with your fingerprint?',
-                  style: theme.textTheme.headlineSmall,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: KvSpace.s),
-                Text(
-                  'Add a fingerprint to unlock quickly next time. Your passphrase '
-                  'still works as a backup.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: KvSpace.xl),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _busy ? null : _enrollNow,
-                    child: Text(
-                      _busy ? 'Setting up…' : 'Enable fingerprint unlock',
+        // Scrollable. At 1.3× on a 360×640 phone this step overflowed by
+        // 206 px with a failure message showing — `enrollFailureCopy` AND
+        // the "Not now" exit laid out entirely off-screen, so tapping
+        // Enable and failing produced no visible change at all. That is
+        // verbatim the defect the honest-degrade fix was written to end
+        // (ux-auditor, Track 2 re-audit).
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.all(KvSpace.gutter),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: constraints.maxHeight - KvSpace.gutter * 2,
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CeremonyMark(Icons.fingerprint),
+                    const SizedBox(height: KvSpace.l),
+                    Text(
+                      ready
+                          ? 'Unlock with your fingerprint?'
+                          : 'Fingerprint unlock, when you want it',
+                      style: theme.textTheme.headlineSmall,
+                      textAlign: TextAlign.center,
                     ),
-                  ),
-                ),
-                const SizedBox(height: KvSpace.s),
-                TextButton(
-                  onPressed: _busy ? null : _finish,
-                  child: const Text('Not now'),
-                ),
-                if (_message != null) ...[
-                  const SizedBox(height: KvSpace.m),
-                  Text(
-                    _message!,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textSecondary,
+                    const SizedBox(height: KvSpace.s),
+                    Text(
+                      ready
+                          ? 'Add a fingerprint to unlock quickly next time. Your '
+                                'passphrase still works as a backup.'
+                          : biometricUnavailableCopy(_biometricStatus),
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: KvColor.textSecondary,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ],
+                    const SizedBox(height: KvSpace.xl),
+                    if (ready)
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: _busy ? null : _enrollNow,
+                          child: Text(
+                            _busy ? 'Setting up…' : 'Enable fingerprint unlock',
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: KvSpace.s),
+                    TextButton(
+                      onPressed: _busy ? null : _finish,
+                      child: Text(ready ? 'Not now' : 'Continue'),
+                    ),
+                    if (_message != null) ...[
+                      const SizedBox(height: KvSpace.m),
+                      Text(
+                        _message!,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: KvColor.textSecondary,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ),
           ),
         ),

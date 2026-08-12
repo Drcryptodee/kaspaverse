@@ -35,6 +35,7 @@ void main() {
     List<ActivityRecord> activity = const [],
     String? error,
   }) => WalletSnapshot(
+    discoveryIncomplete: false,
     connected: connected,
     syncing: syncing,
     utxoIndexMissing: utxoIndexMissing,

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `build_wallet_signer`, `chain_store_dir`, `change_address_at`, `change_cursor_path`, `change_cursor`, `current_status`, `derive_wallet_addresses`, `derive_wallet_branches`, `endpoint_cache_path`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lockout_delay_secs`, `lockout_path`, `now_unix`, `persisted_count`, `read_blob`, `read_lockout`, `reveal_ceremony_words`, `scan_high_water`, `scan_window_path`, `set_change_cursor`, `set_scan_high_water`, `set_vault`, `status_tx`, `to_bytes`, `transport_decryptor`, `transport_store_dir`, `vault_dir`, `wallet_address_at`, `wallet_store_path`, `write_lockout`
+// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `build_wallet_signer`, `chain_store_dir`, `change_address_at`, `change_cursor_path`, `change_cursor`, `current_status`, `derive_wallet_addresses`, `derive_wallet_branches`, `endpoint_cache_path`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lock_grace_path`, `lock_grace_secs`, `lockout_delay_secs`, `lockout_path`, `now_unix`, `persisted_count`, `read_blob`, `read_lockout`, `reveal_ceremony_words`, `scan_high_water`, `scan_window_path`, `set_change_cursor`, `set_lock_grace_secs`, `set_scan_high_water`, `set_vault`, `status_tx`, `to_bytes`, `transport_decryptor`, `transport_store_dir`, `vault_dir`, `wallet_address_at`, `wallet_store_path`, `write_lockout`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Lockout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -112,6 +112,22 @@ Future<void> unlockWithPassphrase({required List<int> passphrase}) => RustLib
 /// a sign is concurrently finishing. Also the Flutter lifecycle hook: Dart calls
 /// this on background/detach.
 Future<void> lockVault() => RustLib.instance.api.crateApiVaultLockVault();
+
+/// The user's auto-lock grace in seconds (D-133). `0` = lock the instant the app
+/// leaves the foreground, which is both the default and the value any unreadable
+/// or impossible file falls back to.
+///
+/// Enforcement lives Dart-side, in the lifecycle observer that already owns the
+/// §0.11 kill switch; this is only where the choice is kept. That split is worth
+/// stating because it bounds the guarantee: a grace period is a promise about
+/// *this* process's own lifecycle handling, never a claim that a killed process
+/// or a debugger honours it.
+Future<int> vaultLockGraceSecs() =>
+    RustLib.instance.api.crateApiVaultVaultLockGraceSecs();
+
+/// Set the auto-lock grace, clamped to [`MAX_LOCK_GRACE_SECS`] (15 minutes).
+Future<void> setVaultLockGraceSecs({required int secs}) =>
+    RustLib.instance.api.crateApiVaultSetVaultLockGraceSecs(secs: secs);
 
 /// Time one Argon2id run at `params` on THIS device (P1.2 §0.3 tuning):
 /// seals a throwaway seed under a dummy passphrase and returns elapsed

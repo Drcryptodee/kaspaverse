@@ -3,24 +3,16 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import '../rust/api/dag.dart';
 import '../rust/api/wallet.dart';
 import 'format.dart';
+import 'network_sheet.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/amount_text.dart';
 import 'widgets/entrance.dart';
 import 'widgets/glass_panel.dart';
-import 'widgets/haptics.dart';
-import 'widgets/kv_loader.dart';
 import 'widgets/status_beacon.dart';
 import 'widgets/tx_status_chip.dart';
-
-/// Group digits in threes for the node-status readout: 458174109 →
-/// "458,174,109". Scores arrive as [BigInt] (L3); formatted only here, at
-/// render. Delegates to the shared [groupThousands].
-String formatScore(BigInt? value) =>
-    value == null ? '—' : groupThousands(value.toString());
 
 /// The wallet home — the glass cockpit (design_system §1). One instrument
 /// panel: the balance with its freshness truth (DS-1), the link state worn as
@@ -45,6 +37,7 @@ class HomeScreen extends StatefulWidget {
     this.receiveRoute,
     this.sendRoute,
     this.messagesRoute,
+    this.settingsRoute,
     this.clock = DateTime.now,
     this.floatingActionButton,
   });
@@ -72,6 +65,12 @@ class HomeScreen extends StatefulWidget {
 
   /// Builds the Messages screen (P2.3 transport UI; `null` ⇒ no entry).
   final WidgetBuilder? messagesRoute;
+
+  /// Builds the Settings screen (Track 2; `null` ⇒ no entry). Home is the ONLY
+  /// door to it — a setting nobody can reach is a setting that does not exist,
+  /// which is precisely how biometric enrolment came to be unreachable after a
+  /// restore.
+  final WidgetBuilder? settingsRoute;
 
   /// Test seam for "now" (default wall-clock).
   final DateTime Function() clock;
@@ -136,6 +135,7 @@ class WalletScope {
     required this.activity,
     required this.syncing,
     required this.utxoIndexMissing,
+    this.discoveryIncomplete,
     this.onRefreshActivity,
   });
 
@@ -144,6 +144,15 @@ class WalletScope {
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
+
+  /// No address-discovery pass has reached a node this session, so the balance
+  /// is computed over the last known-good address window and **may be short**.
+  ///
+  /// Optional like the C7 link truths: absent reads as "proven", the pre-Track-2
+  /// behaviour. Its sibling is [utxoIndexMissing] and it exists for the same
+  /// reason — without it the panel paints a confidently wrong number, which this
+  /// project treats as worse than a visible unknown.
+  final ValueListenable<bool>? discoveryIncomplete;
 
   /// Swipe-to-refresh heal (founder request, V2 sitting): pulls the latest
   /// folded snapshot directly, bypassing the stream. `null` ⇒ no refresh UI.
@@ -164,6 +173,7 @@ typedef _BalanceView = ({
   bool stale,
   bool syncing,
   bool utxoIndexMissing,
+  bool discoveryIncomplete,
 });
 
 /// The V4 scoping primitive: recomputes [_compute] whenever any source
@@ -235,6 +245,8 @@ class _HomeScreenState extends State<HomeScreen> {
         widget.wallet.pending,
         widget.wallet.syncing,
         widget.wallet.utxoIndexMissing,
+        if (widget.wallet.discoveryIncomplete != null)
+          widget.wallet.discoveryIncomplete!,
         _dimmed,
       ],
       () => (
@@ -243,6 +255,7 @@ class _HomeScreenState extends State<HomeScreen> {
         stale: _dimmed.value,
         syncing: widget.wallet.syncing.value,
         utxoIndexMissing: widget.wallet.utxoIndexMissing.value,
+        discoveryIncomplete: widget.wallet.discoveryIncomplete?.value ?? false,
       ),
     );
     _feedInputs = Listenable.merge([
@@ -355,15 +368,22 @@ class _HomeScreenState extends State<HomeScreen> {
     Navigator.of(context).push(KvPageRoute<void>(builder: builder));
   }
 
+  void _openSettings() {
+    final builder = widget.settingsRoute;
+    if (builder == null) return;
+    Navigator.of(context).push(KvPageRoute<void>(builder: builder));
+  }
+
   /// The §12 power-user tap: endpoint, DAA and freshness in plain sight —
   /// the ONE frosted panel this screen ever spends (§8 budget; a sheet
   /// overlays live content, so the blur has something honest to refract).
+  ///
+  /// Settings' Network row shows this same widget rather than a copy of it, so
+  /// the two surfaces can never disagree about the link.
   void _openNetworkSheet() {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      elevation: 0,
-      builder: (_) => _NetworkSheet(
+    NetworkSheet.show(
+      context,
+      NetworkSheet(
         connected: widget.chain.connected,
         endpoint: widget.chain.endpoint,
         virtualDaaScore: widget.chain.virtualDaaScore,
@@ -423,6 +443,27 @@ class _HomeScreenState extends State<HomeScreen> {
                           onTap: _openNetworkSheet,
                         ),
                       ),
+                      // Understated and last: the header's job is the wordmark
+                      // and the link, and a settings door that shouted would
+                      // compete with the balance for the first glance (§1 —
+                      // the cockpit has one instrument). Static; listens to
+                      // nothing.
+                      if (widget.settingsRoute != null) ...[
+                        const SizedBox(width: KvSpace.s),
+                        // `iconSize: 20` keeps it visually quiet; the TAP area
+                        // stays the full 48 dp (§9), which is the same split
+                        // StatusBeacon makes. `visualDensity: compact` was
+                        // shaving it to 40 dp, 4 dp from the beacon's own
+                        // target — on the app's only door to every custody
+                        // control (ux-auditor, Track 2).
+                        IconButton(
+                          onPressed: _openSettings,
+                          iconSize: 20,
+                          color: KvColor.textSecondary,
+                          tooltip: 'Settings',
+                          icon: const Icon(Icons.tune_rounded),
+                        ),
+                      ],
                     ],
                   ),
                   const SizedBox(height: KvSpace.l),
@@ -435,6 +476,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         stale: b.stale,
                         daa: widget.chain.virtualDaaScore,
                         utxoIndexMissing: b.utxoIndexMissing,
+                        discoveryIncomplete: b.discoveryIncomplete,
                         syncing: b.syncing && b.mature == null,
                       ),
                     ),
@@ -540,6 +582,7 @@ class _BalancePanel extends StatelessWidget {
     required this.stale,
     required this.daa,
     required this.utxoIndexMissing,
+    required this.discoveryIncomplete,
     required this.syncing,
   });
 
@@ -552,6 +595,7 @@ class _BalancePanel extends StatelessWidget {
   final ValueListenable<BigInt?> daa;
 
   final bool utxoIndexMissing;
+  final bool discoveryIncomplete;
   final bool syncing;
 
   @override
@@ -573,7 +617,11 @@ class _BalancePanel extends StatelessWidget {
             const SizedBox(height: KvSpace.xs),
             _PendingLine(pending: pending!, stale: stale),
           ],
-          _StatusCaption(utxoIndexMissing: utxoIndexMissing, syncing: syncing),
+          _StatusCaption(
+            utxoIndexMissing: utxoIndexMissing,
+            discoveryIncomplete: discoveryIncomplete,
+            syncing: syncing,
+          ),
           const SizedBox(height: KvSpace.m),
           // The chain clock — quiet proof the cockpit is live, dimmed with
           // the link (DS-1).
@@ -620,12 +668,22 @@ class _PendingLine extends StatelessWidget {
   }
 }
 
-/// Honest sub-line under the balance: an INV-8 degrade warning, a transient
-/// "syncing…" while the first scan runs, or nothing.
+/// Honest sub-line under the balance: an INV-8 degrade warning, the short-window
+/// notice, a transient "syncing…" while the first scan runs, or nothing.
+///
+/// One caption at a time, most-consequential first. Both degrade states are
+/// `KvColor.warning`, never `error` — red is rationed to fund risk and
+/// destruction (§3/§4), and neither of these is either: the funds are exactly
+/// where they were, it is our *view* of them that is admitted to be partial.
 class _StatusCaption extends StatelessWidget {
-  const _StatusCaption({required this.utxoIndexMissing, required this.syncing});
+  const _StatusCaption({
+    required this.utxoIndexMissing,
+    required this.discoveryIncomplete,
+    required this.syncing,
+  });
 
   final bool utxoIndexMissing;
+  final bool discoveryIncomplete;
   final bool syncing;
 
   @override
@@ -636,7 +694,33 @@ class _StatusCaption extends StatelessWidget {
         padding: const EdgeInsets.only(top: KvSpace.s),
         child: Text(
           'node has no UTXO index — retrying another node',
-          style: theme.textTheme.bodySmall?.copyWith(color: KvColor.warning),
+          // Prose is Inter (§4 role map) — bare `bodySmall` is the mono data
+          // face, which these captions are not (ux-auditor, Track 2).
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: KvColor.warning,
+            fontFamily: KvFont.ui,
+          ),
+        ),
+      );
+    }
+    if (discoveryIncomplete) {
+      // Names the CHECK, not the link. The flag means "no pass has read both
+      // branches yet", and a pass can fail in milliseconds against a socket
+      // that is live but still dialling — so the first wording, "haven't
+      // reached a node yet", could sit under a beacon reading *live*: two
+      // truths on one screen, which is the disagreement DS-1 and C7 both
+      // forbid (ux-auditor, Track 2).
+      //
+      // Says what is true and what it means for the number above it — never
+      // "your balance is wrong", which we do not know.
+      return Padding(
+        padding: const EdgeInsets.only(top: KvSpace.s),
+        child: Text(
+          'still checking your addresses — this may not be your whole balance',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: KvColor.warning,
+            fontFamily: KvFont.ui,
+          ),
         ),
       );
     }
@@ -883,252 +967,5 @@ class _ActivityRow extends StatelessWidget {
     final age = now.difference(at);
     if (age.inSeconds < 5) return 'just now';
     return '${formatAge(age)} ago';
-  }
-}
-
-/// The network details sheet — sovereignty made visible: which public node,
-/// how fresh, what the chain clock reads. Frosted (§8: the screen's one blur,
-/// over real content). Values stay live via the same listenables the home
-/// watches.
-class _NetworkSheet extends StatefulWidget {
-  const _NetworkSheet({
-    required this.connected,
-    required this.endpoint,
-    required this.virtualDaaScore,
-    required this.error,
-    required this.lastUpdate,
-    required this.clock,
-    this.reconnecting,
-    this.onReconnect,
-    this.searching,
-    this.osOffline,
-    this.disconnectedAt,
-  });
-
-  final ValueListenable<bool> connected;
-  final ValueListenable<String?> endpoint;
-  final ValueListenable<BigInt?> virtualDaaScore;
-  final ValueListenable<String?> error;
-  final ValueListenable<DateTime?> lastUpdate;
-  final DateTime Function() clock;
-  final ValueListenable<bool>? reconnecting;
-  final Future<void> Function()? onReconnect;
-
-  /// C7: the same three truths the beacon renders — the sheet is where the
-  /// user goes to understand, so it must never disagree with the chip. ONE
-  /// writer (ChainService) feeds both; the sheet's own poll stays scoped to
-  /// the block-age line it already owned.
-  final ValueListenable<bool>? searching;
-  final ValueListenable<bool>? osOffline;
-  final ValueListenable<DateTime?>? disconnectedAt;
-
-  @override
-  State<_NetworkSheet> createState() => _NetworkSheetState();
-}
-
-class _NetworkSheetState extends State<_NetworkSheet> {
-  Timer? _poll;
-  int? _blockAgeSecs;
-  bool _haveStatus = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _refreshStatus();
-    // Poll the honest block-age while the sheet is open (P3): the precise
-    // scan-liveness signal, straight from the monitor's heartbeat.
-    _poll = Timer.periodic(const Duration(seconds: 2), (_) => _refreshStatus());
-  }
-
-  @override
-  void dispose() {
-    _poll?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _refreshStatus() async {
-    try {
-      final status = await dagStatus();
-      if (!mounted) return;
-      setState(() {
-        _blockAgeSecs = status.lastBlockAgeSecs?.toInt();
-        _haveStatus = true;
-      });
-    } catch (_) {
-      // A failed pull just leaves the last-known age; never crash the sheet.
-    }
-  }
-
-  /// The transport-scan liveness line: the scan runs on every block, so the
-  /// block-age IS its freshness. Honest about "never" before the first block.
-  ///
-  /// C7 addendum: *live* is a claim about the LINK, not about the age alone.
-  /// This line rides a 2 s poll while the link notifiers are pushed, so a
-  /// just-dropped socket could otherwise read "live — scanning every block"
-  /// beside a Status row saying *phone offline* — two truths on one surface,
-  /// the exact disagreement C7 exists to forbid. The link decides whether the
-  /// scan may claim liveness; the age only refines the claim.
-  String _scanLine(BeaconState state) {
-    final linkUp = state == BeaconState.connected;
-    if (!_haveStatus || _blockAgeSecs == null) {
-      return linkUp ? 'waiting for first block…' : 'not scanning — no link';
-    }
-    final age = _blockAgeSecs!;
-    if (!linkUp) return '$age s since last block';
-    if (age <= 5) return 'live — scanning every block';
-    return '$age s since last block';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SafeArea(
-      child: GlassPanel(
-        frosted: true,
-        radius: const BorderRadius.vertical(
-          top: Radius.circular(KvRadius.card),
-        ),
-        padding: const EdgeInsets.all(KvSpace.gutter),
-        child: AnimatedBuilder(
-          animation: Listenable.merge([
-            widget.connected,
-            widget.endpoint,
-            widget.virtualDaaScore,
-            widget.error,
-            widget.lastUpdate,
-            if (widget.reconnecting != null) widget.reconnecting!,
-            if (widget.searching != null) widget.searching!,
-            if (widget.osOffline != null) widget.osOffline!,
-            if (widget.disconnectedAt != null) widget.disconnectedAt!,
-          ]),
-          builder: (context, _) {
-            final last = widget.lastUpdate.value;
-            final now = widget.clock();
-            final age = last == null ? null : now.difference(last);
-            final droppedAt = widget.disconnectedAt?.value;
-            final busy = widget.reconnecting?.value ?? false;
-            // C7 addendum: the button's busy state rides the HUNT, not the
-            // dispatch. `reconnecting` clears the instant the race is spawned
-            // (tens of ms, by design since R0) — a label that lives less than
-            // a frame is a label nobody reads. `hunting` lasts as long as the
-            // search actually does, and is the same bit the beacon renders.
-            final hunting = busy || (widget.searching?.value ?? false);
-            final state = evaluateBeacon(
-              connected: widget.connected.value,
-              age: age,
-              error: widget.error.value,
-              searching: hunting,
-              osOffline: widget.osOffline?.value ?? false,
-              sinceDrop: droppedAt == null ? null : now.difference(droppedAt),
-            );
-            final status = switch (state) {
-              BeaconState.error => widget.error.value ?? 'connection error',
-              BeaconState.offline => 'phone offline — no network',
-              BeaconState.connecting => 'finding a node…',
-              BeaconState.stale =>
-                age == null
-                    ? 'no recent update'
-                    : 'as of ${formatAge(age)} ago',
-              BeaconState.connected => 'live',
-            };
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Network', style: theme.textTheme.titleMedium),
-                const SizedBox(height: KvSpace.m),
-                _DetailRow(label: 'Status', value: status),
-                _DetailRow(
-                  label: 'DAA score',
-                  value: formatScore(widget.virtualDaaScore.value),
-                  mono: true,
-                ),
-                _DetailRow(label: 'Transport scan', value: _scanLine(state)),
-                _DetailRow(
-                  label: 'Node',
-                  value: widget.endpoint.value ?? '—',
-                  mono: true,
-                ),
-                const SizedBox(height: KvSpace.m),
-                if (widget.onReconnect != null)
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.tonalIcon(
-                      // Never disabled while hunting: a tap mid-search IS C4's
-                      // kick, and greying the button out would delete that
-                      // affordance exactly when the user most wants it. Repeat
-                      // taps are already harmless — ChainService.reconnect()
-                      // returns early while a dispatch is in flight.
-                      onPressed: () {
-                        KvHaptic.selection();
-                        widget.onReconnect!();
-                      },
-                      icon: hunting
-                          ? const KvLoader.inline()
-                          : const Icon(Icons.refresh, size: 18),
-                      // "Searching…", not "Reconnecting…": the hunt is just as
-                      // often the engine's own (first connect, watchdog) as a
-                      // user's tap, and this label must be true in all three.
-                      label: Text(hunting ? 'Searching…' : 'Reconnect'),
-                    ),
-                  ),
-                const SizedBox(height: KvSpace.m),
-                Text(
-                  'KaspaVerse talks to public Kaspa nodes directly — '
-                  'no middlemen, no trackers.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: KvColor.textTertiary,
-                    fontFamily: KvFont.ui,
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-class _DetailRow extends StatelessWidget {
-  const _DetailRow({
-    required this.label,
-    required this.value,
-    this.mono = false,
-  });
-
-  final String label;
-  final String value;
-  final bool mono;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.xs),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 96,
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textSecondary,
-                fontFamily: KvFont.ui,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: mono
-                  ? theme.textTheme.bodySmall
-                  : theme.textTheme.bodySmall?.copyWith(fontFamily: KvFont.ui),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }

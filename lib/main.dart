@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
+import 'package:kaspaverse/src/rust/api/wallet.dart' show deepScan;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
@@ -14,9 +15,11 @@ import 'package:kaspaverse/src/ui/dev_transport_panel.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
+import 'package:kaspaverse/src/ui/network_sheet.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
+import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
@@ -104,6 +107,7 @@ class KaspaVerseApp extends StatelessWidget {
             activity: wallet.activity,
             syncing: wallet.syncing,
             utxoIndexMissing: wallet.utxoIndexMissing,
+            discoveryIncomplete: wallet.discoveryIncomplete,
             onRefreshActivity: wallet.refreshNow,
           ),
           onReady: () {
@@ -122,6 +126,40 @@ class KaspaVerseApp extends StatelessWidget {
             minimumSendable: wallet.minimumSendable,
           ),
           messagesRoute: (_) => const ContactsScreen(),
+          // Track 2: the app's settings surface, and the only door to biometric
+          // enrolment outside the create flow. Every seam is wired here so the
+          // screen itself imports no service (the V5 scope law).
+          settingsRoute: (_) => SettingsScreen(
+            security: SecurityScope(
+              biometricStatus: VaultService.instance.biometricStatus,
+              pathAEnrolled: VaultService.instance.pathAEnrolled,
+              enroll: VaultService.instance.enrollBiometric,
+              clearEnrollment: VaultService.instance.clearBiometric,
+              lockGraceSecs: VaultService.instance.lockGraceSecs,
+              setLockGraceSecs: VaultService.instance.setLockGraceSecs,
+            ),
+            wallet: WalletSettingsScope(
+              receiveAddress: vaultReceiveAddress,
+              deepScan: deepScan,
+              receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
+            ),
+            about: AboutScope(packageInfo: VaultService.instance.packageInfo),
+            // The SAME sheet the home beacon opens, over the same notifiers —
+            // never a second rendering of one link state (C7).
+            networkSheet: () => NetworkSheet(
+              connected: chain.connected,
+              endpoint: chain.endpoint,
+              virtualDaaScore: chain.virtualDaaScore,
+              error: chain.error,
+              lastUpdate: chain.lastUpdate,
+              clock: DateTime.now,
+              reconnecting: chain.reconnecting,
+              onReconnect: chain.reconnect,
+              searching: chain.searching,
+              osOffline: chain.osOffline,
+              disconnectedAt: chain.disconnectedAt,
+            ),
+          ),
           floatingActionButton: kDebugMode ? const _DevFabs() : null,
         ),
       ),

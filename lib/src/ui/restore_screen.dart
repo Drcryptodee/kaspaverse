@@ -1,17 +1,25 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
+import 'biometric_copy.dart';
 import 'secret/bip39_wordlist.dart';
 import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'theme/tokens.dart';
+import 'widgets/ceremony_mark.dart';
 import 'widgets/haptics.dart';
 import 'widgets/kv_loader.dart';
 
-enum _Step { words, extraWord, preview, passphrase }
+/// The restore ceremony's steps.
+///
+/// `enrolling` is the one that was missing, and its absence was the whole
+/// defect: the create ceremony ended `seal → biometric offer → home`, restore
+/// ended `commit → home`, and Path A had no other door in the entire app. A
+/// restored wallet could therefore never enable fingerprint unlock — a shipped,
+/// device-proven, fully-working native lane that no user could reach.
+enum _Step { words, extraWord, preview, passphrase, enrolling }
 
 /// Restore flow (P1.4 deliverable 2). §0.6/§0.7: FLAG_SECURE + a11y refusal via
 /// [SecretScreenGuard]; seed words are PICKED from the in-app filtered wordlist
@@ -30,6 +38,8 @@ class RestoreScreen extends StatefulWidget {
     this.wordlist,
     this.preview,
     this.commit,
+    this.biometricStatus,
+    this.enroll,
     this.checkAccessibility,
     this.setSecure,
   });
@@ -43,6 +53,14 @@ class RestoreScreen extends StatefulWidget {
     Uint8List pass,
   )?
   commit;
+
+  /// Why Path A is or is not offerable after the commit — a reason, not a bool
+  /// (see `biometric_copy.dart`). Defaults to the lane.
+  final Future<String> Function()? biometricStatus;
+
+  /// Run the enrolment ceremony; throws [PlatformException] with a stable code.
+  final Future<bool> Function()? enroll;
+
   final Future<bool> Function()? checkAccessibility;
   final Future<void> Function({required bool enable})? setSecure;
 
@@ -62,6 +80,9 @@ class _RestoreScreenState extends State<RestoreScreen> {
   bool _busy = false;
   String? _message;
 
+  /// Why Path A is (un)available, resolved once after the commit.
+  String _biometricStatus = 'unknown';
+
   @override
   void initState() {
     super.initState();
@@ -79,6 +100,16 @@ class _RestoreScreenState extends State<RestoreScreen> {
   void dispose() {
     _extra.dispose();
     _passphrase.dispose();
+    // The picked words ARE the phrase. A back-gesture out of the flow left them
+    // resident until the next GC saw fit; `SecretByteBuffer` was wiped here and
+    // this list was not.
+    //
+    // PARTIAL, and said so: `_indices` grows by `add`, so reallocation leaves
+    // earlier backing stores holding prefix copies that `clear()` cannot reach.
+    // Same class as `_assemblePhrase`'s growable buffer. Both are pre-existing
+    // and both need a fixed-length allocation to close properly — backlogged
+    // with a trigger rather than half-done here (ffi-leak-auditor, Track 2).
+    _indices.clear();
     super.dispose();
   }
 
@@ -153,7 +184,32 @@ class _RestoreScreenState extends State<RestoreScreen> {
         _extra.snapshot(),
         _passphrase.snapshot(),
       );
-      if (mounted) Navigator.of(context).pop(); // shell now shows home
+      // Consumed. Wipe BEFORE the enrol step, not at dispose.
+      //
+      // Until this step existed a successful commit popped within milliseconds
+      // and `dispose` did it. The enrol offer holds the screen for an unbounded
+      // time — deliberately spanning an app-background, since the biometric
+      // prompt pauses Flutter — and `_indices` is the complete mnemonic as
+      // BIP39 wordlist indices. Nothing reachable from `_Step.enrolling` reads
+      // any of the three (wallet-security-auditor, Track 2).
+      _extra.wipe();
+      _passphrase.wipe();
+      _indices.clear();
+      if (!mounted) return;
+      // The vault is now sealed and unlocked — the same state the create flow
+      // reaches after its seal, so it gets the same offer. This used to pop
+      // straight home, which is why a restored wallet could never enable Path A.
+      final status = await _safeBiometricProbe();
+      if (!mounted) return;
+      if (_offersEnrolStep(status)) {
+        setState(() {
+          _busy = false;
+          _biometricStatus = status;
+          _step = _Step.enrolling;
+        });
+      } else {
+        _finish();
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -164,8 +220,76 @@ class _RestoreScreenState extends State<RestoreScreen> {
     }
   }
 
+  // ── Path A offer, mirroring create_screen.dart ───────────────────────────
+  // Routed through VaultService, never the static ceremony channel, so the
+  // §0.11 auto-lock suppression actually covers the prompt (the instance-flag
+  // reason spelled out in create_screen).
+
+  Future<String> _safeBiometricProbe() async {
+    try {
+      final probe =
+          widget.biometricStatus ?? VaultService.instance.biometricStatus;
+      return await probe();
+    } catch (_) {
+      return 'unknown'; // a question we could not ask is not a "no"
+    }
+  }
+
+  /// Stop for the enrol step only where the user can act: `ready` (offer it) or
+  /// `none_enrolled` (say how to get there). See `create_screen.dart`.
+  static bool _offersEnrolStep(String status) =>
+      status == biometricReady || status == biometricNoneEnrolled;
+
+  Future<void> _runEnroll() async {
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    try {
+      final enroll = widget.enroll ?? VaultService.instance.enrollBiometric;
+      await enroll();
+      _finish();
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _message = e.code == 'cancelled' ? null : enrollFailureCopy(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _message = enrollFailureCopy('failed');
+      });
+    }
+  }
+
+  /// The wallet exists and is unlocked; popping reveals home beneath.
+  void _finish() {
+    if (mounted) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
+    // OUTSIDE the guard. The enrol step runs after the wallet is committed and
+    // holds no secret, and DS-7's FLAG_SECURE + accessibility-refusal list is
+    // locked at five screens (D-028) — extending it to a sixth would exclude
+    // screen-reader users from a step that has nothing to hide. Its mirror in
+    // `create_screen` is outside too, and the two ceremonies must not disagree
+    // about whether the identical step is a secret screen (ux-auditor).
+    //
+    // The chrome differs for the same reason: this step must not claim the
+    // restore is still under way, and it suppresses the back arrow that one
+    // step earlier meant *abandon the restore*.
+    if (_step == _Step.enrolling) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('Almost done'),
+          automaticallyImplyLeading: false,
+        ),
+        body: SafeArea(child: _enrollStep()),
+      );
+    }
     return SecretScreenGuard(
       title: 'your recovery words',
       setSecure: widget.setSecure,
@@ -190,7 +314,89 @@ class _RestoreScreenState extends State<RestoreScreen> {
         return _previewStep();
       case _Step.passphrase:
         return _passphraseStep();
+      case _Step.enrolling:
+        return _enrollStep();
     }
+  }
+
+  // ── step: the Path-A offer (mirrors create_screen.dart's `_enroll`) ───────
+  Widget _enrollStep() {
+    final theme = Theme.of(context);
+    final ready = _biometricStatus == biometricReady;
+    // Scrollable. At 1.3× on a 360×640 phone this step overflowed by
+    // 206 px with a failure message showing — `enrollFailureCopy` AND
+    // the "Not now" exit laid out entirely off-screen, so tapping
+    // Enable and failing produced no visible change at all. That is
+    // verbatim the defect the honest-degrade fix was written to end
+    // (ux-auditor, Track 2 re-audit).
+    // `Center` inside a `SingleChildScrollView` is a vertical no-op — the scroll
+    // view hands its child unbounded height — so the overflow fix alone would
+    // top-align this step in every case, leaving ~182 dp of dead space below
+    // "Not now" on a 411×731 phone. The min-height constraint restores the
+    // centring while keeping the overflow escape (ux-auditor, Track 2 re-audit).
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        padding: const EdgeInsets.all(KvSpace.gutter),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: constraints.maxHeight - KvSpace.gutter * 2,
+          ),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CeremonyMark(Icons.fingerprint),
+                const SizedBox(height: KvSpace.l),
+                Text(
+                  ready
+                      ? 'Unlock with your fingerprint?'
+                      : 'Fingerprint unlock, when you want it',
+                  style: theme.textTheme.headlineSmall,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: KvSpace.s),
+                Text(
+                  ready
+                      ? 'Add a fingerprint to unlock quickly next time. Your '
+                            'passphrase still works as a backup.'
+                      : biometricUnavailableCopy(_biometricStatus),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: KvColor.textSecondary,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: KvSpace.xl),
+                if (ready)
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: _busy ? null : _runEnroll,
+                      child: Text(
+                        _busy ? 'Setting up…' : 'Enable fingerprint unlock',
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: KvSpace.s),
+                TextButton(
+                  onPressed: _busy ? null : _finish,
+                  child: Text(ready ? 'Not now' : 'Continue'),
+                ),
+                if (_message != null) ...[
+                  const SizedBox(height: KvSpace.m),
+                  Text(
+                    _message!,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: KvColor.textSecondary,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   // ── step: pick words ──────────────────────────────────────────────────────

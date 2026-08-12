@@ -196,6 +196,54 @@ pub(crate) fn change_cursor_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("wallet").join("change.cursor"))
 }
 
+/// App-private path for the auto-lock grace period (D-133): how long the vault
+/// may survive the app going to the background. Public data (a duration in
+/// seconds), same `wallet/` subdir, no encryption (INV-3).
+pub(crate) fn lock_grace_path() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet").join("lock.grace"))
+}
+
+/// The longest auto-lock grace this app will honour, and therefore the longest it
+/// will ever WRITE.
+///
+/// A ceiling is what keeps this a *grace period* rather than an off switch. P1
+/// §0.11 makes backgrounding drop the vault; D-133 softens that to a user-chosen
+/// delay because re-entering a passphrase after every glance at another app is
+/// friction with no custody gain on a phone whose own lock screen is the real
+/// perimeter. "Never" is not on the menu at any layer: not in the picker, and not
+/// in a file an attacker with a debugger could write.
+pub(crate) const MAX_LOCK_GRACE_SECS: u32 = 900;
+
+/// Read the auto-lock grace in seconds. Missing, malformed or out-of-range reads
+/// as **0 — lock immediately**, which is the pre-D-133 behaviour.
+///
+/// The direction of that fallback is the whole point: every other persisted count
+/// in this module falls back to the value that costs the user a re-probe, but
+/// this one falls back to the value that costs an attacker everything. A file
+/// this app could not have written must never be able to BUY unlock time.
+pub(crate) fn lock_grace_secs() -> u32 {
+    let raw = lock_grace_path()
+        .ok()
+        .and_then(|p| fs::read(p).ok())
+        .filter(|b| b.len() == 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .unwrap_or(0);
+    persisted_count(raw, MAX_LOCK_GRACE_SECS)
+}
+
+/// Persist the auto-lock grace, clamped to [`MAX_LOCK_GRACE_SECS`].
+///
+/// Clamped, not refused — unlike [`set_change_cursor`], because the two failures
+/// are opposites. A cursor past its ceiling must not advance (advancing would
+/// reuse a spent index); a grace past its ceiling is a request for *less*
+/// security than the app allows, and the safe answer is to grant the most it
+/// will, not to leave whatever was there before.
+pub(crate) fn set_lock_grace_secs(secs: u32) -> Result<(), AppError> {
+    let secs = secs.min(MAX_LOCK_GRACE_SECS);
+    atomic_write(&lock_grace_path()?, &secs.to_le_bytes())
+        .map_err(|e| AppError::io("write lock grace", e))
+}
+
 /// App-private path remembering the last-good wRPC endpoint (P1.5 re-audit —
 /// the connect fast path). Public data (a wss URL the PNN resolver handed us),
 /// in the same `wallet/` subdir — no encryption (INV-3), no new trust (INV-8:
@@ -233,11 +281,19 @@ pub(crate) fn transport_decryptor() -> Result<kaspaverse_core::TransportDecrypto
 }
 
 /// The largest discovery mark this app can ever have written. A mark is
-/// `highest_funded_index + 1`, and one pass probes at most
-/// `wallet::MAX_DISCOVERY_DEPTH` indices, so a larger value on disk is not a
-/// window we produced — it is corruption. (`wallet.rs` asserts that
-/// relationship at compile time.)
-pub(crate) const MAX_SCAN_MARK: u32 = 512;
+/// `highest_funded_index + 1`, and the deepest pass probes
+/// `wallet::MANUAL_DISCOVERY_DEPTH` indices, so a larger value on disk is not a
+/// window we produced — it is corruption. (`wallet.rs` asserts that relationship
+/// at compile time.)
+///
+/// It tracks the **manual** scan's depth, not the automatic one. This constant
+/// was 512 — equal to the automatic cap — and the manual "scan for more
+/// addresses" control raised the deepest producible mark to 2048. Left at 512, a
+/// manual scan that found funds at change index 1500 would have written mark 1501
+/// and read it back as UNSET on the very next call: the scan reports success, the
+/// marks silently vanish, and the wallet opens on the gap limit. The scan would
+/// have been Track 1's original defect wearing a fresh button.
+pub(crate) const MAX_SCAN_MARK: u32 = 2048;
 
 /// The largest change cursor this app will believe — and therefore the largest
 /// it will ever WRITE. Not a policy limit: the cursor advances by exactly one
@@ -874,6 +930,26 @@ pub fn lock_vault() {
     broadcast_status();
 }
 
+/// The user's auto-lock grace in seconds (D-133). `0` = lock the instant the app
+/// leaves the foreground, which is both the default and the value any unreadable
+/// or impossible file falls back to.
+///
+/// Enforcement lives Dart-side, in the lifecycle observer that already owns the
+/// §0.11 kill switch; this is only where the choice is kept. That split is worth
+/// stating because it bounds the guarantee: a grace period is a promise about
+/// *this* process's own lifecycle handling, never a claim that a killed process
+/// or a debugger honours it.
+pub fn vault_lock_grace_secs() -> u32 {
+    lock_grace_secs()
+}
+
+/// Set the auto-lock grace, clamped to [`MAX_LOCK_GRACE_SECS`] (15 minutes).
+pub fn set_vault_lock_grace_secs(secs: u32) -> Result<(), AppError> {
+    set_lock_grace_secs(secs)?;
+    log::info!("vault: auto-lock grace set to {} s", lock_grace_secs());
+    Ok(())
+}
+
 fn read_blob() -> Result<Vec<u8>, AppError> {
     fs::read(blob_path()?).map_err(|e| AppError::io("read blob", e))
 }
@@ -1037,6 +1113,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_unreadable_lock_grace_buys_an_attacker_nothing() {
+        let (_g, _dir) = enter();
+        // Unset is the strictest setting, not the loosest — a fresh install locks
+        // the instant it leaves the foreground, exactly as it did before D-133.
+        assert_eq!(lock_grace_secs(), 0);
+
+        for value in [0u32, 30, 60, 300, MAX_LOCK_GRACE_SECS] {
+            set_lock_grace_secs(value).unwrap();
+            assert_eq!(lock_grace_secs(), value);
+        }
+
+        // Past the ceiling the WRITER clamps, so the file can never hold a value
+        // the reader would reject.
+        set_lock_grace_secs(u32::MAX).unwrap();
+        assert_eq!(lock_grace_secs(), MAX_LOCK_GRACE_SECS);
+
+        // And a file this app could not have written reads as 0. This is the
+        // direction that matters: every other persisted count in this module
+        // falls back to the value that costs the user a re-probe, but an
+        // out-of-range grace must never be able to BUY unlock time — the failure
+        // mode is someone else holding the phone.
+        atomic_write(&lock_grace_path().unwrap(), &u32::MAX.to_le_bytes()).unwrap();
+        assert_eq!(lock_grace_secs(), 0, "corruption must lock, never linger");
+        // Truncated / absent are the same answer.
+        atomic_write(&lock_grace_path().unwrap(), &[0u8; 2]).unwrap();
+        assert_eq!(lock_grace_secs(), 0);
+    }
+
+    #[test]
     fn an_impossible_persisted_count_reads_as_unset_never_as_the_ceiling() {
         // In range, including the boundary, passes through untouched.
         assert_eq!(persisted_count(0, MAX_SCAN_MARK), 0);
@@ -1051,6 +1156,51 @@ pub(crate) mod tests {
         assert_eq!(persisted_count(MAX_SCAN_MARK + 1, MAX_SCAN_MARK), 0);
         assert_eq!(persisted_count(u32::MAX, MAX_SCAN_MARK), 0);
         assert_eq!(persisted_count(u32::MAX, MAX_CHANGE_CURSOR), 0);
+    }
+
+    #[test]
+    fn a_mark_the_deepest_scan_can_produce_survives_the_write_and_read_back() {
+        // The landmine the manual "scan for more addresses" control walks onto,
+        // and the one thing the compile assert in `wallet.rs` cannot express.
+        //
+        // That assert pins `MAX_SCAN_MARK` to `MANUAL_DISCOVERY_DEPTH`, so the
+        // two constants can never drift. What it cannot check is the CONSEQUENCE
+        // — that a mark a real pass produces makes it through `atomic_write`,
+        // back off disk, and through `persisted_count` still meaning what it
+        // meant. Left at the old 512 ceiling, a manual scan finding funds at
+        // change index 1500 wrote mark 1501 and read it back as 0: the scan
+        // reports success, the marks silently vanish, and the wallet reopens on
+        // a 30-wide window. The user taps "scan deeper", is told it worked, and
+        // the funds stay invisible.
+        let (_g, _dir) = enter();
+        let deepest = MAX_SCAN_MARK; // = highest_funded_index + 1 at full depth
+        set_scan_high_water(deepest, deepest).unwrap();
+        assert_eq!(
+            scan_high_water(),
+            (deepest, deepest),
+            "the deepest producible mark read back as something else — \
+             a scan that reports success and loses what it found"
+        );
+
+        // Straight off disk too, with the process memo taken out of the picture:
+        // `scan_high_water` ORs the two, so a memo that happens to hold the right
+        // value would mask a file that does not — and the next launch reads only
+        // the file.
+        let bytes = fs::read(scan_window_path().unwrap()).unwrap();
+        assert_eq!(
+            (
+                persisted_count(
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                    MAX_SCAN_MARK
+                ),
+                persisted_count(
+                    u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+                    MAX_SCAN_MARK
+                ),
+            ),
+            (deepest, deepest),
+            "the next launch would read these as UNSET and open on the gap limit"
+        );
     }
 
     #[test]

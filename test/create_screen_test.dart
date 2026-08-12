@@ -1,6 +1,5 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/create_screen.dart';
 
@@ -50,7 +49,7 @@ void main() {
         reveal: () async => false, // user backed out of the native reveal
         abandon: () async => abandonCalls++,
         seal: (p, x) async {},
-        biometricAvailable: () async => false,
+        biometricStatus: () async => 'no_hardware',
         enroll: () async => true,
         checkAccessibility: () async => false,
         setSecure: ({required bool enable}) async {},
@@ -79,7 +78,7 @@ void main() {
           sealedPass = Uint8List.fromList(p);
           sealedExtra = Uint8List.fromList(x);
         },
-        biometricAvailable: () async => false,
+        biometricStatus: () async => 'no_hardware',
         enroll: () async => enrollCalls++ == 0,
         checkAccessibility: () async => false,
         setSecure: ({required bool enable}) async {},
@@ -121,7 +120,7 @@ void main() {
           sealedPass = Uint8List.fromList(p);
           sealedExtra = Uint8List.fromList(x);
         },
-        biometricAvailable: () async => true,
+        biometricStatus: () async => 'ready',
         enroll: () async => ++enrollCalls > 0,
         checkAccessibility: () async => false,
         setSecure: ({required bool enable}) async {},
@@ -150,5 +149,95 @@ void main() {
       find.text('open'),
       findsOneWidget,
     ); // popped to home host after enroll
+  });
+
+  // ── Track 2: honest degrade on the enrolment step ───────────────────────
+  //
+  // `_safeBiometricProbe` returned false on ANY exception and `_enrollNow`
+  // swallowed EVERY error before popping, so a user could not tell
+  // "unavailable" from "failed" from "done" — the three outcomes rendered
+  // identically as the screen simply going away.
+
+  Future<void> sealTo(
+    WidgetTester tester, {
+    required Future<String> Function() biometricStatus,
+    Future<bool> Function()? enroll,
+  }) async {
+    await pumpHost(
+      tester,
+      CreateScreen(
+        begin: () async {},
+        reveal: () async => true,
+        abandon: () async {},
+        seal: (p, x) async {},
+        biometricStatus: biometricStatus,
+        enroll: enroll,
+        checkAccessibility: () async => false,
+        setSecure: ({required bool enable}) async {},
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('a')); // passphrase
+    await settle(tester);
+    await tester.tap(find.text('Next'));
+    await settle(tester);
+    await tester.tap(find.text('Skip'));
+    await settle(tester);
+  }
+
+  testWidgets('no fingerprint enrolled on the phone is explained, not skipped', (
+    tester,
+  ) async {
+    await sealTo(tester, biometricStatus: () async => 'none_enrolled');
+    // The commonest state on a fresh phone, and the only one the user can fix.
+    // As a bool it was indistinguishable from "no sensor" and vanished.
+    expect(find.textContaining('Android Settings'), findsOneWidget);
+    expect(find.text('Enable fingerprint unlock'), findsNothing);
+  });
+
+  testWidgets('a probe that cannot run is unknown, never a confident no', (
+    tester,
+  ) async {
+    // The wallet must still be created — enrolment is optional and Path B is
+    // already live — but the verdict is not manufactured from a thrown probe.
+    await sealTo(
+      tester,
+      biometricStatus: () async => throw Exception('no channel'),
+    );
+    expect(find.text('open'), findsOneWidget); // finished → popped to host
+  });
+
+  testWidgets(
+    'a cancelled enrolment leaves the offer standing, with no error',
+    (tester) async {
+      await sealTo(
+        tester,
+        biometricStatus: () async => 'ready',
+        enroll: () async => throw PlatformException(code: 'cancelled'),
+      );
+      await tester.tap(find.text('Enable fingerprint unlock'));
+      await settle(tester);
+      expect(find.textContaining("didn't complete"), findsNothing);
+      expect(find.text('Enable fingerprint unlock'), findsOneWidget);
+      expect(find.text('open'), findsNothing, reason: 'a cancel must not pop');
+    },
+  );
+
+  testWidgets('a failed enrolment names the cause instead of popping', (
+    tester,
+  ) async {
+    await sealTo(
+      tester,
+      biometricStatus: () async => 'ready',
+      enroll: () async => throw PlatformException(code: 'vault'),
+    );
+    await tester.tap(find.text('Enable fingerprint unlock'));
+    await settle(tester);
+    // The suspected lifecycle race, made visible rather than swallowed.
+    expect(
+      find.textContaining('locked while the prompt was open'),
+      findsOneWidget,
+    );
+    expect(find.text('open'), findsNothing);
   });
 }

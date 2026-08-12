@@ -31,10 +31,75 @@ class VaultService with WidgetsBindingObserver {
 
   StreamSubscription<vault_api.VaultStatus>? _subscription;
 
-  /// True while the native reveal Activity owns the foreground (D-039). It pauses
-  /// Flutter on purpose; suppress the §0.11 auto-lock for that window or we would
-  /// drop the very create ceremony being revealed.
-  bool _ceremonyHandoffActive = false;
+  /// How many native ceremony surfaces currently own the foreground (D-039).
+  /// Those surfaces can pause Flutter on purpose; the §0.11 auto-lock is
+  /// suppressed for that window or we would drop the very ceremony being run.
+  ///
+  /// A DEPTH, not a bool. Three prompt-bearing ceremonies route through
+  /// [runCeremony] now — reveal, enrol and the Path-A unlock — and a
+  /// bool would let an inner ceremony's return clear the guard while an outer one
+  /// was still on screen — exposing exactly the window the guard exists to cover.
+  /// Modal UI makes overlap unreachable today; the counter costs one line and
+  /// stops that from being a fact a future entry point has to re-discover.
+  int _ceremonyDepth = 0;
+
+  bool get _ceremonyHandoffActive => _ceremonyDepth > 0;
+
+  /// A lifecycle lock arrived DURING a ceremony handoff and has not been resolved
+  /// yet. Deferred, never discarded — see [runCeremony].
+  bool _lockDeferred = false;
+
+  /// When the app last left the foreground, or null while it is up. The auto-lock
+  /// grace (D-133) is measured from here.
+  DateTime? _pausedAt;
+  Timer? _graceTimer;
+
+  /// When the vault must be locked by, if it is still open. Monotonic: see
+  /// [_scheduleLock] for why only bringing it forward is safe.
+  DateTime? _lockDeadline;
+
+  /// Is the app currently in the foreground, as last reported by the framework?
+  bool _foreground = true;
+
+  /// How long a completed ceremony's proof-of-presence may hold the vault open
+  /// while the app is still backgrounded.
+  ///
+  /// Presence is proof that the user is *there*, not a promise they will come
+  /// back. Without this bound, a ceremony that completed while the app never
+  /// returned to the foreground left the vault open indefinitely — outside
+  /// [maxLockGraceSecs], which is the ceiling that keeps the grace a grace and
+  /// not an off switch. Long enough for a `resumed` to land after a system prompt
+  /// dismisses, short enough that the worst case is measured in seconds. Tests
+  /// shorten it (the `WalletService.reattachDelay` seam).
+  @visibleForTesting
+  static Duration presenceWindow = const Duration(seconds: 10);
+
+  /// Auto-lock grace in seconds, read from Rust at [start] and refreshed by
+  /// [setLockGraceSecs]. `0` — lock immediately — is both the default and the
+  /// value any unreadable setting falls back to.
+  int _lockGraceSecs = 0;
+
+  /// Test seam for "now" (default wall-clock), matching `HomeScreen.clock`.
+  @visibleForTesting
+  DateTime Function() clock = DateTime.now;
+
+  /// Bridge seams, swapped in tests (the `messaging_service` pattern: one static
+  /// per bridge fn, so a widget/unit test never needs the native library).
+  @visibleForTesting
+  static Future<void> Function() lockVaultFn = () async =>
+      vault_api.lockVault();
+  @visibleForTesting
+  static Future<int> Function() readLockGraceFn = vault_api.vaultLockGraceSecs;
+  @visibleForTesting
+  static Future<void> Function(int secs) writeLockGraceFn = (secs) =>
+      vault_api.setVaultLockGraceSecs(secs: secs);
+
+  /// The current auto-lock grace, for the Settings row to render.
+  final ValueNotifier<int> lockGraceSecs = ValueNotifier(0);
+
+  /// The longest grace the app will honour — mirrors `vault::MAX_LOCK_GRACE_SECS`.
+  /// A ceiling is what keeps this a grace period rather than an off switch.
+  static const int maxLockGraceSecs = 900;
 
   /// Idempotent: hands Rust the app-private directory (INV-3 — the sealed
   /// blob's home), attaches the app-lifetime status subscription, and
@@ -59,7 +124,34 @@ class VaultService with WidgetsBindingObserver {
         error.value = e is AppError ? e.message : e.toString();
       },
     );
+    await _loadLockGrace();
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  Future<void> _loadLockGrace() async {
+    try {
+      _lockGraceSecs = (await readLockGraceFn()).clamp(0, maxLockGraceSecs);
+    } catch (_) {
+      // A setting we cannot read is not a reason to weaken the lock — fall back
+      // to the strictest value, exactly as the Rust reader does.
+      _lockGraceSecs = 0;
+    }
+    lockGraceSecs.value = _lockGraceSecs;
+  }
+
+  /// Re-read the persisted grace, the way [start] does. Exists so a test can
+  /// prove the fallback direction of an unreadable setting without standing up
+  /// the whole service.
+  @visibleForTesting
+  Future<void> reloadLockGraceForTest() => _loadLockGrace();
+
+  /// Change the auto-lock grace (D-133). Clamped here as well as Rust-side —
+  /// the ceiling is a custody property and must not depend on one caller.
+  Future<void> setLockGraceSecs(int secs) async {
+    final clamped = secs.clamp(0, maxLockGraceSecs);
+    await writeLockGraceFn(clamped);
+    _lockGraceSecs = clamped;
+    lockGraceSecs.value = clamped;
   }
 
   /// Unlock via passphrase (Path B). Same single-call-site + finally-wipe
@@ -94,14 +186,118 @@ class VaultService with WidgetsBindingObserver {
   /// (INV-1) — only the boolean verdict returns. The native Activity pauses
   /// Flutter, so this suppresses the §0.11 auto-lock for the handoff (the native
   /// surface is the ceremony's guardian meanwhile — it drops on background).
-  Future<bool> revealAndVerify() async {
-    _ceremonyHandoffActive = true;
+  Future<bool> revealAndVerify() => runCeremony(
+    () async => await ceremony.invokeMethod<bool>('revealAndVerify') ?? false,
+  );
+
+  /// Run a native ceremony that may pause Flutter, with the §0.11 auto-lock held
+  /// open across it and **resolved honestly afterwards**.
+  ///
+  /// Every native custody surface must go through here. That is not style: the
+  /// guard is an instance field on this service, so a caller that reaches past it
+  /// to the static [ceremony] channel cannot be covered by it *by construction* —
+  /// which is exactly what enrolment used to do, and why the suppression that
+  /// existed never applied to the one ceremony that most needed it.
+  ///
+  /// **Deferring, not discarding.** [revealAndVerify] could simply suppress,
+  /// because no unlocked vault exists before the seal — there was nothing to
+  /// lose. Enrolment runs against an *unlocked* vault, so a blanket suppression
+  /// would mean: user taps enrol, the prompt appears, the user switches apps, and
+  /// the wallet is still open when they come back. That is a custody downgrade
+  /// wearing a bug fix's clothes.
+  ///
+  /// So a lock that arrives mid-ceremony is held and then settled on evidence:
+  ///
+  /// > **A completed biometric ceremony is itself proof of user presence** — the
+  /// > user just put a finger on the sensor. A cancel, an error or a timeout
+  /// > proves nothing, so the deferred lock is honoured the moment it ends.
+  ///
+  /// In the bad case (the prompt itself stops the activity on some device) that
+  /// degrades to "you are enrolled, now unlock" rather than "nothing happened".
+  ///
+  /// **Presence is bounded.** Proof that the user was there is not a promise
+  /// they will come back, so a completed ceremony that leaves the app still in
+  /// the background arms [_presenceWindow] rather than clearing the lock
+  /// outright. Without that bound the one path through here that skips
+  /// `_armLock` could hold the vault open past [maxLockGraceSecs] — the ceiling
+  /// that is the whole reason the grace is a grace and not an off switch.
+  @visibleForTesting
+  Future<bool> runCeremony(Future<bool> Function() body) async {
+    _ceremonyDepth++;
+    var authenticated = false;
     try {
-      final ok = await ceremony.invokeMethod<bool>('revealAndVerify');
-      return ok ?? false;
+      authenticated = await body();
+      return authenticated;
     } finally {
-      _ceremonyHandoffActive = false;
+      _ceremonyDepth = _ceremonyDepth > 0 ? _ceremonyDepth - 1 : 0;
+      // An outer ceremony is still on screen — it owns the resolution.
+      if (!_ceremonyHandoffActive) {
+        final deferred = _lockDeferred;
+        _lockDeferred = false;
+        if (_foreground) {
+          // The app is in front of the user again, so the pause that triggered
+          // the deferral was the PROMPT'S own window transition, not a
+          // departure — there is nothing to act on, whatever the outcome was.
+          //
+          // Arming here regardless of outcome was a spurious-lock bug: after a
+          // cancel the countdown ran on into the foreground and locked the
+          // wallet mid-use ~a grace later, reachable from the ordinary "tap
+          // Enable fingerprint, change your mind" path.
+          if (deferred || authenticated) _cancelGrace();
+        } else if (deferred) {
+          // Still away. Presence buys a BOUNDED window; anything else honours
+          // the lock the lifecycle asked for.
+          if (authenticated) {
+            _armPresenceWatchdog();
+          } else {
+            _armLock();
+          }
+        }
+      }
     }
+  }
+
+  // ── Path A: the biometric lane (P1.2 native, D-036) ──────────────────────
+  // Routed through the service so [runCeremony] can cover them and so every
+  // caller (create, restore, settings) shares one honest surface. Only booleans
+  // and status strings cross — the seed goes over JNI, never here (INV-1).
+
+  /// Why Path A is or is not offerable right now: `ready`, `none_enrolled`,
+  /// `no_hardware`, `unavailable`, `security_update_required`, `unknown`.
+  ///
+  /// Deliberately not a bool. `none_enrolled` — the user has no fingerprint set
+  /// up in Android Settings — is the common case on a fresh phone and the only
+  /// one they can act on; as a bool it was indistinguishable from "this hardware
+  /// cannot", and the enrolment offer simply vanished without a word.
+  Future<String> biometricStatus() async =>
+      await ceremony.invokeMethod<String>('biometricStatus') ?? 'unknown';
+
+  /// A Path-A blob exists on this device (enrolment has been done).
+  Future<bool> pathAEnrolled() async =>
+      await ceremony.invokeMethod<bool>('pathAEnrolled') ?? false;
+
+  /// Run the enrolment ceremony. Throws [PlatformException] with a stable code
+  /// (`cancelled`, `lockout`, `vault`, `keystore`, `failed`) — never swallowed,
+  /// so the caller can tell a user's own cancel from a real failure.
+  Future<bool> enrollBiometric() => runCeremony(
+    () async => await ceremony.invokeMethod<bool>('enrollBiometric') ?? false,
+  );
+
+  /// Run the Path-A unlock ceremony. Same error contract as [enrollBiometric].
+  Future<bool> unlockBiometric() => runCeremony(
+    () async => await ceremony.invokeMethod<bool>('unlockBiometric') ?? false,
+  );
+
+  /// Forget the Path-A enrolment (Keystore key + blob). Path B remains the
+  /// recovery lane, so this is reversible by re-enrolling — never fund loss.
+  Future<void> clearBiometric() =>
+      ceremony.invokeMethod<void>('clearBiometric');
+
+  /// Public build identity for the About section: `version`, `build`,
+  /// `signature` (SHA-256 of the signing certificate, lowercase hex).
+  Future<Map<String, String>> packageInfo() async {
+    final info = await ceremony.invokeMapMethod<String, String>('packageInfo');
+    return info ?? const {};
   }
 
   /// Seal the held ceremony's seed under [passphrase] (+ optional ASCII
@@ -171,13 +367,127 @@ class VaultService with WidgetsBindingObserver {
   /// the on-device acceptance evidence.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // A native reveal handoff (D-039) pauses Flutter on purpose; the
-    // RevealActivity guards the in-progress ceremony for its own lifetime, so
-    // don't drop it here. No unlocked vault exists pre-seal — nothing else to lock.
-    if (_ceremonyHandoffActive) return;
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
-      unawaited(vault_api.lockVault());
+    if (state == AppLifecycleState.resumed) {
+      _foreground = true;
+      _resumed();
+      return;
     }
+    if (state != AppLifecycleState.paused &&
+        state != AppLifecycleState.detached) {
+      return;
+    }
+    _foreground = false;
+    // Stamped before the ceremony check, so a handoff cannot erase the fact that
+    // the app left — only delay what is done about it.
+    _pausedAt ??= clock();
+    // A native ceremony (D-039 reveal, or a biometric prompt) pauses Flutter on
+    // purpose; the native surface guards the in-progress ceremony for its own
+    // lifetime. Deferred, not dropped — [runCeremony] settles it.
+    if (_ceremonyHandoffActive) {
+      _lockDeferred = true;
+      return;
+    }
+    _armLock();
+  }
+
+  /// Apply the auto-lock policy for an app that has left the foreground.
+  ///
+  /// At the default grace of 0 this is the pre-D-133 behaviour exactly: lock now.
+  ///
+  /// The timer runs for what is LEFT of the grace, measured from when the app
+  /// actually departed — not a fresh full grace from now. Re-arming from now is
+  /// reachable and fails open: `paused` at t0 arms 900 s, Android destroys the
+  /// activity at t0+880, `detached` cancels and re-arms another 900 s, and the
+  /// vault stays open for roughly twice [maxLockGraceSecs] — the ceiling failing
+  /// at exactly the moment it is supposed to hold. (wallet-security-auditor.)
+  void _armLock() => _scheduleLock(
+    (_pausedAt ?? clock()).add(Duration(seconds: _lockGraceSecs)),
+  );
+
+  /// Bound a completed ceremony's proof of presence while the app is still away.
+  ///
+  /// The one path that skips [_armLock] on a deferred lock. If the app comes
+  /// back, [_resumed] cancels this and the user carries on unlocked — which is
+  /// the point of the presence rule. If it never comes back, this locks anyway,
+  /// so presence can buy seconds, never an unbounded open vault.
+  void _armPresenceWatchdog() => _scheduleLock(clock().add(presenceWindow));
+
+  /// Schedule the lock for [deadline], **or sooner**.
+  ///
+  /// One entry point, and it is monotonic: a later call can only bring the lock
+  /// forward, never push it out. That rule is the whole mechanism, because both
+  /// ways of losing it are reachable and both fail open:
+  ///
+  /// - `paused` at t0 arms 900 s; Android destroys the activity at t0+880 and
+  ///   `detached` re-armed a fresh 900 s → ~2× [maxLockGraceSecs].
+  /// - A completed ceremony arms the 10 s presence watchdog; a following
+  ///   `detached` cancelled it and armed the full grace → presence, the TIGHTER
+  ///   bound, erased by the looser one it exists to replace.
+  ///
+  /// Both are the same bug wearing different clothes, so they get one fix
+  /// (wallet-security-auditor, Track 2 re-audit).
+  void _scheduleLock(DateTime deadline) {
+    final existing = _lockDeadline;
+    final effective = existing != null && existing.isBefore(deadline)
+        ? existing
+        : deadline;
+    _lockDeadline = effective;
+    _graceTimer?.cancel();
+    _graceTimer = null;
+    final left = effective.difference(clock());
+    if (left <= Duration.zero) {
+      _lockNow();
+      return;
+    }
+    // A timer armed while backgrounded must not fire against a user who came
+    // back in the meantime — [_resumed] owns that decision, with the wall clock.
+    _graceTimer = Timer(left, () {
+      if (!_foreground) _lockNow();
+    });
+  }
+
+  /// Back in the foreground: either the grace expired while we were away, or it
+  /// did not.
+  ///
+  /// **The wall-clock comparison here is the real enforcement, not the timer.**
+  /// A backgrounded Dart isolate can be frozen or dozed by the OS, so
+  /// [_graceTimer] is best-effort — it locks a still-running process promptly,
+  /// and this catches every case where it never got to fire. Trusting the timer
+  /// alone would mean a phone that slept through the grace came back unlocked.
+  void _resumed() {
+    // A ceremony still owns the foreground, so this resume is part of ITS
+    // window — `runCeremony`'s `finally` settles the lock on evidence. Without
+    // this line, the default grace of 0 makes `elapsed >= 0` unconditionally
+    // true, so a resume delivered before the ceremony's future completes locks
+    // the vault while the prompt is still up: exactly the path the deferral
+    // exists to hold. (wallet-security-auditor — latent, because AndroidX
+    // usually resolves the ceremony first, but that is message ordering, not a
+    // guarantee.)
+    if (_ceremonyHandoffActive) return;
+    final left = _pausedAt;
+    final deadline = _lockDeadline;
+    _cancelGrace();
+    if (left == null && deadline == null) return;
+    // The deadline is authoritative whenever one is set: [_scheduleLock] has
+    // already folded in the grace and any tighter presence bound, and consulting
+    // the raw grace *as well* would re-lock a vault a completed ceremony had
+    // just vouched for (at the default grace of 0, `elapsed >= 0` is always
+    // true). The departure stamp is the fallback for a pause whose timer never
+    // got armed at all.
+    final now = clock();
+    final due = deadline ?? left!.add(Duration(seconds: _lockGraceSecs));
+    if (!now.isBefore(due)) _lockNow();
+  }
+
+  void _cancelGrace() {
+    _pausedAt = null;
+    _lockDeadline = null;
+    _graceTimer?.cancel();
+    _graceTimer = null;
+  }
+
+  void _lockNow() {
+    _cancelGrace();
+    unawaited(lockVaultFn());
   }
 }

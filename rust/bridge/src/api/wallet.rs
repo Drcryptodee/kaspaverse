@@ -14,6 +14,9 @@
 //! data, owned by the chain layer.
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use kaspaverse_chain::{
@@ -96,17 +99,30 @@ pub(crate) fn window_from(receive_seen: u32, change_seen: u32, change_cursor: u3
 /// an abort by opening a fund-loss path at the same boundary is not a fix.
 ///
 /// The cursor is the taller of the two inputs (`MAX_CHANGE_CURSOR` 100 000
-/// against `MAX_SCAN_MARK` 512), so this is its ceiling plus one.
+/// against `MAX_SCAN_MARK` 2048), so this is its ceiling plus one.
 pub(crate) const MAX_WINDOW: u32 = vault::MAX_CHANGE_CURSOR + 1;
 
 /// The two ceilings are one fact in two modules: a mark is
-/// `highest_funded_index + 1` and a pass probes at most [`MAX_DISCOVERY_DEPTH`]
-/// indices, so `vault::MAX_SCAN_MARK` must be exactly what a pass can produce.
-/// Raise the probe depth (Track 2's deeper scan) without raising the mark
-/// ceiling and every discovered mark past it reads back as UNSET — the wallet
-/// would re-probe on every launch and never keep what it found. Checked here so
-/// that is a compile error, not a field report.
-const _: () = assert!(vault::MAX_SCAN_MARK == MAX_DISCOVERY_DEPTH);
+/// `highest_funded_index + 1` and a pass probes at most
+/// [`MANUAL_DISCOVERY_DEPTH`] indices, so `vault::MAX_SCAN_MARK` must be exactly
+/// what the DEEPEST pass can produce. Raise a probe depth without raising the
+/// mark ceiling and every mark past it reads back as UNSET: the scan reports
+/// success, the marks silently vanish, and the next call opens on the gap limit
+/// — Track 1's original defect wearing a fresh button.
+///
+/// Pinned to the MANUAL depth, not the automatic one, because that is now the
+/// deeper of the two. The first version of this assert named
+/// `MAX_DISCOVERY_DEPTH`, and it would have kept passing while a *separate*
+/// manual constant walked straight past it — the obvious shape, and the one the
+/// deliverable's own wording suggested.
+const _: () = assert!(vault::MAX_SCAN_MARK == MANUAL_DISCOVERY_DEPTH);
+const _: () = assert!(MAX_DISCOVERY_DEPTH <= MANUAL_DISCOVERY_DEPTH);
+
+/// A window is `mark + GAP_LIMIT` and [`window_from`] caps it at [`MAX_WINDOW`].
+/// If the deepest producible mark plus the gap could exceed that cap, the cap
+/// would silently narrow a window discovery had just proven — the same class of
+/// bug from the other end.
+const _: () = assert!(MANUAL_DISCOVERY_DEPTH + GAP_LIMIT <= MAX_WINDOW);
 
 /// The next change index to hand out — the send cursor (D-041), floored at what
 /// discovery found.
@@ -126,24 +142,75 @@ pub(crate) fn next_change_index() -> u32 {
     vault::change_cursor().max(vault::scan_high_water().1)
 }
 
-/// How deep to probe a branch on the next discovery pass: always at least
-/// [`DISCOVERY_DEPTH`], and always [`GAP_LIMIT`] past anything already found, so
-/// a wallet that has grown past the default depth keeps growing instead of
-/// pinning itself at the last scan's edge — up to [`MAX_DISCOVERY_DEPTH`].
-pub(crate) fn discovery_depth_for(seen: u32) -> u32 {
-    DISCOVERY_DEPTH
-        .max(seen.saturating_add(GAP_LIMIT))
-        .min(MAX_DISCOVERY_DEPTH)
+/// Who asked for a discovery pass — and therefore how deep it may probe and how
+/// long it may take.
+///
+/// The depth is a PARAMETER of the pass, not a property of the module. It was a
+/// module constant while only the unlock path ever scanned, and that is exactly
+/// why a wallet deeper than one automatic pass had no way to grow: the caller
+/// with a user watching a spinner and the caller holding the unlock path open
+/// have opposite budgets, and one number cannot serve both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanReach {
+    /// The unlock path's own pass. Bounded so the wallet opens promptly.
+    Automatic,
+    /// The user tapped "scan for more addresses" and is watching it run.
+    Manual,
 }
+
+impl ScanReach {
+    /// How deep to probe a branch, given what is already known about it.
+    ///
+    /// Automatic: always at least [`DISCOVERY_DEPTH`], always [`GAP_LIMIT`] past
+    /// anything already found — so a wallet that has grown keeps growing instead
+    /// of pinning itself at the last scan's edge — capped at
+    /// [`MAX_DISCOVERY_DEPTH`].
+    ///
+    /// Manual: flat [`MANUAL_DISCOVERY_DEPTH`]. A user who asks us to look
+    /// harder is not asking for `known + 30`; the whole point of the control is
+    /// to reach past what the automatic rule can justify.
+    pub(crate) fn depth_for(self, seen: u32) -> u32 {
+        match self {
+            ScanReach::Automatic => DISCOVERY_DEPTH
+                .max(seen.saturating_add(GAP_LIMIT))
+                .min(MAX_DISCOVERY_DEPTH),
+            ScanReach::Manual => MANUAL_DISCOVERY_DEPTH,
+        }
+    }
+
+    /// The whole pass's deadline. See [`DISCOVERY_PASS_TIMEOUT`] and
+    /// [`MANUAL_SCAN_TIMEOUT`] for why they are not the same number.
+    fn deadline(self) -> std::time::Duration {
+        match self {
+            ScanReach::Automatic => DISCOVERY_PASS_TIMEOUT,
+            ScanReach::Manual => MANUAL_SCAN_TIMEOUT,
+        }
+    }
+}
+
+/// The deepest a single MANUAL pass will probe — the "scan for more addresses"
+/// control's reach.
+///
+/// 2048 is 16 [`kaspaverse_chain::discovery::PROBE_BATCH`] chunks per branch,
+/// with the branches concurrent, so a healthy node answers the whole thing in
+/// seconds. It is ~26× the deepest real index this project has actually met on
+/// chain (change/78, the founder's own wallet) and 4× what an automatic pass
+/// will reach on its own.
+///
+/// Raising it is a TWO-line change, not one: `vault::MAX_SCAN_MARK` is the
+/// ceiling a mark is validated against, and a mark this pass can produce but the
+/// reader rejects reads back as UNSET. The compile assert above makes that a
+/// build failure rather than a field report.
+pub(crate) const MANUAL_DISCOVERY_DEPTH: u32 = 2048;
 
 /// The deepest a single automatic pass will probe.
 ///
 /// A window is derived once and held; a probe depth is **round trips on the
-/// unlock path**, and the two must not share a ceiling. `MAX_SCAN_MARK` as the
-/// cap made the pass `ceil(100_000/128) = 782` sequential chunks — at
+/// unlock path**, and the two must not share a ceiling. `MAX_WINDOW` as the cap
+/// made the pass `ceil(100_000/128) = 782` sequential chunks — at
 /// `PROBE_TIMEOUT` each, over two hours of a blocked gate, reachable from the
-/// same corrupt bytes the mark clamp exists for. At 512 the pass is at most 4
-/// chunks per branch, and the branches run concurrently.
+/// same corrupt bytes the mark validation exists for. At 512 the pass is at most
+/// 4 chunks per branch, and the branches run concurrently.
 ///
 /// A wallet genuinely deeper than this stops growing automatically, which is
 /// the already-recorded bound: deeper than one pass reaches is the manual
@@ -193,6 +260,27 @@ struct Discovery {
     succeeded: bool,
 }
 
+/// [`Discovery::succeeded`], mirrored where a reader that must not block can see
+/// it.
+///
+/// The fold loop publishes a snapshot on every chain event and owes the glass its
+/// next frame; it cannot take an async mutex that a 30 s network pass may be
+/// holding. One writer ([`record_pass`], already under the guard), many lock-free
+/// readers. `Relaxed` is the right ordering: this bit guards no other memory —
+/// it is the whole payload, and a reader one event late simply paints the notice
+/// for one more frame.
+static DISCOVERY_PROVEN: AtomicBool = AtomicBool::new(false);
+
+/// Has any discovery pass reached the node and read BOTH branches this process?
+///
+/// `false` means the watched window is the last known-good one and may be short —
+/// the wallet is painting a balance it cannot vouch for. That is the state the
+/// `discovery_incomplete` snapshot field exists to make visible, rather than
+/// leaving a *confidently wrong number* on the glass.
+pub(crate) fn discovery_proven() -> bool {
+    DISCOVERY_PROVEN.load(Ordering::Relaxed)
+}
+
 /// The window to derive, watch and register — read only after the first
 /// discovery pass has had its turn.
 ///
@@ -200,17 +288,31 @@ struct Discovery {
 /// merely read the live window (a send's signer) call [`wallet_window`]
 /// directly: by then the gate is long open, and a send must never block on a
 /// network probe.
-/// Waiting here is bounded by whatever holds the gate: the first pass
-/// (`DISCOVERY_PASS_TIMEOUT`) or a retry, which also holds it across its
-/// re-registration (`EXTEND_WATCH_TIMEOUT`). A retry can only exist once
-/// `snapshots()` has started the engine, so the sync engine's own call is never
-/// the one that waits behind one — only the transport hub's, which is
-/// fire-and-forget.
+/// Waiting here is bounded by whatever holds the gate, and there are now THREE
+/// holders:
+///
+/// - the first pass — `DISCOVERY_PASS_TIMEOUT` (30 s);
+/// - a retry, which also holds it across its re-registration — plus
+///   `EXTEND_WATCH_TIMEOUT` (40 s total);
+/// - the user's manual [`deep_scan`], which takes the same guard with `lock()`
+///   and holds it across both halves — `MANUAL_SCAN_TIMEOUT` +
+///   `EXTEND_WATCH_TIMEOUT` (**190 s**).
+///
+/// A retry can only exist once `snapshots()` has started the engine, so the sync
+/// engine's own call is never the one that waits behind one — only the transport
+/// hub's, which is fire-and-forget. The manual scan can only be tapped from a
+/// screen that exists after the engine is up, so the same holds for it. This
+/// enumeration is load-bearing (wallet-security item 13: the written cannot-block
+/// proof has to stay true) and said 40 s while the third holder was 190.
 pub(crate) async fn window_after_discovery() -> (u32, u32) {
     {
         let mut state = DISCOVERY.lock().await;
         if !state.attempted {
-            run_discovery_pass(&mut state).await;
+            // Outcome deliberately dropped: this caller cannot fail the open —
+            // offline, a captive portal and a dead node all have to end in a
+            // usable wallet on the last known-good window. `record_pass` has
+            // already logged it and armed the retry.
+            let _ = run_discovery_pass(&mut state, ScanReach::Automatic).await;
         }
     }
     wallet_window()
@@ -251,14 +353,81 @@ pub(crate) async fn retry_discovery_if_unproven() {
         return;
     }
     let before = wallet_window();
-    run_discovery_pass(&mut state).await;
+    // Outcome deliberately dropped — this is detached fire-and-forget by every
+    // caller, so the log is its only report and a failure just leaves `succeeded`
+    // false for the next `Connected` to retry.
+    let _ = run_discovery_pass(&mut state, ScanReach::Automatic).await;
+    republish_window(before).await;
+}
+
+/// Tell everything that FROZE a window that the window just grew.
+///
+/// The shared half of every pass that can widen — the retry above and the manual
+/// deep scan below. Extracted rather than copied on purpose: a second widening
+/// mechanism is exactly the drift this module already paid for once, and the two
+/// consumers below must never diverge in which of them gets told.
+///
+/// **Must be called with the `DISCOVERY` guard still held.** Releasing it before
+/// this ran left two overlapping passes free to interleave: the second widens to
+/// `W2` and publishes, then the first publishes the `W1` it read before that, and
+/// `extend_watch`'s refuse-to-narrow guard passes because it too read `previous`
+/// early. The signer survives that (it reads the monotonic marks, never the watch
+/// set), so it is not fund loss — but the engine re-registers from `watch` on
+/// every `UtxoProcStart`, so the lost addresses go deaf to live deposits until
+/// relaunch, and change arriving there is misread as a deposit.
+///
+/// Returns whether the window actually grew, which is the only thing a caller
+/// with a user watching can honestly report.
+/// The pass → republish ordering, with the pass injected so a test can drive the
+/// error path and still observe that the widening was published.
+///
+/// Exists because the property that matters — *republish happens even when the
+/// pass fails* — is invisible from `deep_scan`'s return value: the `Err` looks
+/// identical either way, and the damage shows up a session later as a balance
+/// that is quietly short.
+async fn finish_scan(
+    before: (u32, u32),
+    pass: impl std::future::Future<Output = Result<(u32, u32), AppError>>,
+) -> Result<(u32, u32, bool), AppError> {
+    let outcome = pass.await;
+    let widened = republish_window(before).await;
+    let (receive_seen, change_seen) = outcome?;
+    Ok((receive_seen, change_seen, widened))
+}
+
+/// How many times [`republish_window`] has run — the observable the widening
+/// seam otherwise lacks. Both consumers are no-ops in a test process (no engine,
+/// no transport hub), so without this a test asserting on their effects passes
+/// whether or not they were called at all.
+#[cfg(test)]
+static REPUBLISH_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+async fn republish_window(before: (u32, u32)) -> bool {
+    #[cfg(test)]
+    REPUBLISH_CALLS.fetch_add(1, Ordering::Relaxed);
     let after = wallet_window();
-    if after == before {
-        return;
+    let widened = after != before;
+    // Both consumers are told UNCONDITIONALLY, and `widened` is only the report.
+    //
+    // The delta is measured against the caller's `before` — the marks — not
+    // against what the engine actually watches, and those two can disagree: any
+    // path that grows the marks without completing a re-registration (a
+    // `derive_wallet_addresses` that hits the §0.11 lock mid-pass, an
+    // `extend_watch` that times out) leaves a widening the marks already contain.
+    // Gated on the delta, every later pass then reads that leak as `before`, sees
+    // nothing to do, and the engine stays narrow for the life of the process.
+    //
+    // Both calls are idempotent and cheap in the state that matters:
+    // `widen_key_window` early-returns when the slots already cover the window,
+    // and `extend_watch` answers `Ok(0)` when nothing is new. The real cost is
+    // the derivation below, and it is bounded by who reaches here — retries only
+    // run while no pass has succeeded, and the manual scan is a user tap with a
+    // spinner (consensus-auditor, Track 2).
+    if widened {
+        log::info!(
+            "wallet: discovery widened the window from {before:?} to {after:?} — re-registering"
+        );
     }
-    log::info!(
-        "wallet: discovery widened the window from {before:?} to {after:?} — re-registering"
-    );
     // Both consumers that FROZE a window get told, and neither is allowed to
     // skip the other: an early return here once left the messaging hub on the
     // narrow window whenever the sync engine happened not to be up yet.
@@ -270,7 +439,7 @@ pub(crate) async fn retry_discovery_if_unproven() {
     let Some(engine) = engine_handle() else {
         // No engine yet: `snapshots()` has not started one, so it will derive
         // from the widened marks when it does. Nothing to re-register.
-        return;
+        return widened;
     };
     match vault::derive_wallet_addresses(after.0, after.1) {
         Ok((addresses, change_addresses)) => {
@@ -300,6 +469,77 @@ pub(crate) async fn retry_discovery_if_unproven() {
             e.message
         ),
     }
+    widened
+}
+
+/// What a manual scan found — the honest report the Settings control renders.
+///
+/// Marks are COUNTS (`highest_funded_index + 1`), the same form the window
+/// arithmetic and the persisted file use; `0` means nothing funded was found on
+/// that branch, never "index 0 is funded". See [`window_from`] for why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeepScanReport {
+    /// Indices probed per branch.
+    pub depth: u32,
+    pub receive_seen: u32,
+    pub change_seen: u32,
+    /// The watch/sign window actually grew — the wallet now sees more than it did
+    /// before the tap. `false` is the ordinary, *successful* "nothing new out
+    /// there", and the control must say so rather than implying a failure.
+    pub widened: bool,
+}
+
+/// Probe far deeper than an automatic pass will, at the user's explicit request —
+/// the "scan for more addresses" control.
+///
+/// **Why this exists.** An automatic pass is capped at [`MAX_DISCOVERY_DEPTH`] so
+/// the unlock path cannot be held for minutes by a large persisted mark, which
+/// means a wallet whose funded indices run past that — pushed there by another
+/// client while this app was closed — never widens on its own. This is the manual
+/// lever for exactly that case, and it takes its depth as a parameter rather than
+/// inheriting the automatic cap.
+///
+/// **It reuses the one widening seam.** The pass and the re-registration are the
+/// same code the automatic retry runs ([`republish_window`]); a second widening
+/// mechanism is precisely the drift this module has already paid for once.
+///
+/// Requires an unlocked vault (it derives addresses) — Settings is only reachable
+/// unlocked, and a locked vault errors honestly rather than reporting an empty
+/// scan as success.
+///
+/// **Republish before `?`, always.** A failed pass is not an empty one:
+/// `persist_from_probe` keeps whatever came back and persists it even when the
+/// other branch errored, because the marks are monotonic and a discarded widening
+/// is one we have to pay to probe for again. So an `Err` here routinely arrives
+/// with the marks ALREADY grown, and returning early would strand that widening
+/// in the marks with nothing told — signer wide, watch narrow, the exact drift
+/// [`wallet_window`] exists to make impossible. Worse, it is self-confirming: the
+/// next scan reads the grown marks as `before`, sees no delta, and reports
+/// "nothing new found" over funds it has just made invisible for the session.
+///
+/// That ordering lives in [`finish_scan`] rather than inline, because a rule
+/// spelled out only in a comment is a rule with no test (consensus-auditor,
+/// Track 2 — the first fix was correct and its regression guard could not fail).
+pub async fn deep_scan() -> Result<DeepScanReport, AppError> {
+    // `lock`, not `try_lock`. The automatic retry uses `try_lock` because a pass
+    // already in flight IS the retry and queueing them against a sick node grows
+    // without bound. Here a user has tapped a control and is watching it: the
+    // honest behaviour is to wait for the pass in front and then run, never to
+    // return "done" having done nothing.
+    let mut state = DISCOVERY.lock().await;
+    let before = wallet_window();
+    let (receive_seen, change_seen, widened) =
+        finish_scan(before, run_discovery_pass(&mut state, ScanReach::Manual)).await?;
+    log::info!(
+        "wallet: manual deep scan to depth {MANUAL_DISCOVERY_DEPTH} — \
+         marks receive={receive_seen} change={change_seen}, widened={widened}"
+    );
+    Ok(DeepScanReport {
+        depth: MANUAL_DISCOVERY_DEPTH,
+        receive_seen,
+        change_seen,
+        widened,
+    })
 }
 
 /// The whole pass's deadline, and therefore the whole gate's: the longest the
@@ -321,13 +561,29 @@ const DISCOVERY_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// re-asks for the set, which `extend_watch` has already published.
 const EXTEND_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The manual scan's deadline. Deliberately NOT [`DISCOVERY_PASS_TIMEOUT`]: that
+/// number is the longest the UNLOCK PATH may be held, and nothing is held here —
+/// the vault is already open and a user is watching the control run.
+///
+/// [`MANUAL_DISCOVERY_DEPTH`] is 16 chunks per branch, so against a node slow
+/// enough to spend a full `PROBE_TIMEOUT` on each of them the branch alone would
+/// take 160 s. This is that worst case plus headroom; a healthy node finishes in
+/// seconds and never approaches it.
+const MANUAL_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Run one pass and record what it means.
 ///
 /// Never fails upward: discovery failing must not stop the wallet from opening —
 /// offline, a captive portal and a dead node all have to end in a usable wallet
 /// on the last known-good window. It must only leave `succeeded` false so
 /// something tries again.
-async fn run_discovery_pass(state: &mut Discovery) {
+///
+/// Returns the pass outcome so a caller with a user watching can report it. The
+/// automatic callers ignore it — for them the log IS the report.
+async fn run_discovery_pass(
+    state: &mut Discovery,
+    reach: ScanReach,
+) -> Result<(u32, u32), AppError> {
     state.attempted = true;
     let monitor = match dag::shared_monitor().await {
         Ok(monitor) => monitor,
@@ -336,7 +592,7 @@ async fn run_discovery_pass(state: &mut Discovery) {
                 "wallet: address discovery has no client yet ({}) — will retry on connect",
                 e.message
             );
-            return;
+            return Err(e);
         }
     };
     // One deadline for the WHOLE pass, on top of the per-probe one. Both
@@ -347,15 +603,15 @@ async fn run_discovery_pass(state: &mut Discovery) {
     // are dropped) — the retry re-asks, and a window that widens late is now
     // harmless.
     let outcome = match tokio::time::timeout(
-        DISCOVERY_PASS_TIMEOUT,
-        discover_and_persist_window(&monitor.rpc()),
+        reach.deadline(),
+        discover_and_persist_window(&monitor.rpc(), reach),
     )
     .await
     {
         Ok(outcome) => outcome,
         Err(_) => Err(AppError::msg(format!(
             "discovery pass exceeded its {} s deadline",
-            DISCOVERY_PASS_TIMEOUT.as_secs()
+            reach.deadline().as_secs()
         ))),
     };
     match &outcome {
@@ -371,6 +627,7 @@ async fn run_discovery_pass(state: &mut Discovery) {
         ),
     }
     record_pass(state, &outcome);
+    outcome
 }
 
 /// Fold a pass outcome into the gate.
@@ -382,7 +639,18 @@ async fn run_discovery_pass(state: &mut Discovery) {
 /// already proven.
 fn record_pass(state: &mut Discovery, outcome: &Result<(u32, u32), AppError>) {
     state.attempted = true;
+    let was_proven = state.succeeded;
     state.succeeded |= outcome.is_ok();
+    // The lock-free mirror the fold path reads. Written under the guard, like
+    // the field it mirrors, so the two can never disagree.
+    DISCOVERY_PROVEN.store(state.succeeded, Ordering::Relaxed);
+    if state.succeeded && !was_proven {
+        // The honesty notice is keyed on this bit, and a pass that proves the
+        // window without changing it produces no chain event — so without this
+        // the glass would keep warning about a window we have just vouched for
+        // until something unrelated happened to tick.
+        republish_latest();
+    }
 }
 
 /// Probe both branches for funded addresses and record the high-water marks.
@@ -400,14 +668,17 @@ fn record_pass(state: &mut Discovery, outcome: &Result<(u32, u32), AppError>) {
 /// never shrink a window that previously found funds, or a flaky connection
 /// would strand coins we had already learned to watch. `Err` means *incomplete,
 /// try again*, never *narrow the window*.
-async fn discover_and_persist_window(rpc: &kaspaverse_chain::Rpc) -> Result<(u32, u32), AppError> {
+async fn discover_and_persist_window(
+    rpc: &kaspaverse_chain::Rpc,
+    reach: ScanReach,
+) -> Result<(u32, u32), AppError> {
     // Two independent questions about the chain, so they are asked
     // CONCURRENTLY — halving what a caller waits on the gate. `join!`, never
     // `try_join!`: `try_join!` returns on the first error and DROPS the other
     // branch, discarding an answer we would have kept — the marks are
     // monotonic, so a half-answer can only widen, and a widening thrown away is
     // one we have to pay to probe for again.
-    persist_from_probe(|receive, change| async move {
+    persist_from_probe(reach, |receive, change| async move {
         tokio::join!(
             kaspaverse_chain::discovery::highest_funded_index(rpc, &receive),
             kaspaverse_chain::discovery::highest_funded_index(rpc, &change),
@@ -421,7 +692,7 @@ async fn discover_and_persist_window(rpc: &kaspaverse_chain::Rpc) -> Result<(u32
 /// matters here — *a failed pass must leave the window recoverable, and the next
 /// one must widen it* — is precisely what cannot be tested against a real
 /// socket, and shipping it untested is how this defect got here.
-async fn persist_from_probe<P, Fut>(probe: P) -> Result<(u32, u32), AppError>
+async fn persist_from_probe<P, Fut>(reach: ScanReach, probe: P) -> Result<(u32, u32), AppError>
 where
     P: FnOnce(Vec<kaspaverse_chain::Address>, Vec<kaspaverse_chain::Address>) -> Fut,
     Fut: std::future::Future<
@@ -432,9 +703,24 @@ where
     >,
 {
     let (known_receive, known_change) = vault::scan_high_water();
-    let depth_receive = discovery_depth_for(known_receive);
-    let depth_change = discovery_depth_for(known_change);
-    debug_assert!(depth_receive >= known_receive && depth_change >= known_change);
+    let depth_receive = reach.depth_for(known_receive);
+    let depth_change = reach.depth_for(known_change);
+    // A pass may legitimately probe SHALLOWER than what is already known, now
+    // that the two ceilings differ: an automatic pass stops at
+    // `MAX_DISCOVERY_DEPTH` while a manual scan can have pushed a mark all the
+    // way to `MANUAL_DISCOVERY_DEPTH`. That is not a narrowing — `mark` below
+    // takes `known.max(found + 1)` and `set_scan_high_water` maxes again, so a
+    // shallow pass over a deep wallet re-verifies the shallow part and leaves the
+    // deep mark standing.
+    //
+    // The assert that used to sit here read `depth >= known`. It was true only
+    // while `MAX_SCAN_MARK == MAX_DISCOVERY_DEPTH` made it true by construction,
+    // and raising the mark ceiling for the manual scan would have made it fire on
+    // the next automatic pass over exactly the deep wallet the manual scan
+    // exists for — a debug-build panic reachable from a shipped control.
+    debug_assert!(
+        depth_receive <= MANUAL_DISCOVERY_DEPTH && depth_change <= MANUAL_DISCOVERY_DEPTH
+    );
 
     // The branches are named explicitly — no slicing a concatenation on the
     // strength of a comment about its layout.
@@ -536,6 +822,17 @@ pub struct WalletSnapshot {
     pub syncing: bool,
     /// The connected node has no UTXO index (INV-8 honest degrade).
     pub utxo_index_missing: bool,
+    /// No address-discovery pass has reached the node this process, so the
+    /// watched window is the last known-good one and **may be short** — the
+    /// balance below it is computed over fewer addresses than the wallet might
+    /// actually hold.
+    ///
+    /// The sibling of [`Self::utxo_index_missing`], and it exists for the same
+    /// reason: without it the wallet paints a *confidently wrong number*, which
+    /// this project treats as worse than a visible unknown. The retry machinery
+    /// makes the state narrow and transient, but narrow-and-transient is a
+    /// probability argument, not honesty.
+    pub discovery_incomplete: bool,
     pub mature_sompi: Option<u64>,
     pub pending_sompi: Option<u64>,
     pub outgoing_sompi: Option<u64>,
@@ -555,6 +852,35 @@ static SNAPSHOTS: tokio::sync::OnceCell<broadcast::Sender<WalletSnapshot>> =
     tokio::sync::OnceCell::const_new();
 /// Latest folded state, so a fresh subscriber paints immediately.
 static LATEST: Mutex<Option<WalletSnapshot>> = Mutex::new(None);
+
+/// Stamp the process-wide truths no `WalletEvent` carries, record, and fan out.
+///
+/// The one publish point. It exists because the fold loop has two of them (a
+/// chain event and an acceptance event) and `discovery_incomplete` belongs to
+/// neither — it is read from the discovery gate, not folded from a message. Two
+/// hand-written copies of "stamp, store, send" is one place for a future third
+/// publish site to forget a field.
+fn publish(current: &mut WalletSnapshot, fan_out: &broadcast::Sender<WalletSnapshot>) {
+    current.discovery_incomplete = !discovery_proven();
+    *LATEST.lock().unwrap_or_else(PoisonError::into_inner) = Some(current.clone());
+    let _ = fan_out.send(current.clone());
+}
+
+/// Re-serve the last folded snapshot because a process-wide truth changed.
+///
+/// Discovery proving out is not a chain event, so nothing else would push the
+/// cleared notice to the glass; on a wallet whose window did not change, the next
+/// chain event could be minutes away. A no-op before the engine has folded
+/// anything.
+fn republish_latest() {
+    let Some(fan_out) = SNAPSHOTS.get() else {
+        return;
+    };
+    let Some(mut snapshot) = latest_snapshot() else {
+        return;
+    };
+    publish(&mut snapshot, fan_out);
+}
 
 /// The live sync engine handle, for send construction (P1.6 [`crate::api::send`]).
 /// `None` until the home screen has subscribed (the engine starts lazily on the
@@ -796,8 +1122,6 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                         }
                                     }
                                     apply_overrides(&mut current, &overrides);
-                                    *LATEST.lock().unwrap_or_else(PoisonError::into_inner) =
-                                        Some(current.clone());
                                     // Counts only (INV-3). The V2 sitting saw
                                     // live sends recorded by the chain layer
                                     // yet missing on the glass — this line +
@@ -810,7 +1134,7 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                             fan_out.receiver_count()
                                         );
                                     }
-                                    let _ = fan_out.send(current.clone());
+                                    publish(&mut current, &fan_out);
                                 }
                                 // Lagged: values are absolute — skipping ahead is safe.
                                 Err(RecvError::Lagged(_)) => continue,
@@ -841,9 +1165,7 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                         }
                                     }
                                     apply_overrides(&mut current, &overrides);
-                                    *LATEST.lock().unwrap_or_else(PoisonError::into_inner) =
-                                        Some(current.clone());
-                                    let _ = fan_out.send(current.clone());
+                                    publish(&mut current, &fan_out);
                                 }
                                 Err(RecvError::Lagged(_)) => continue,
                                 Err(RecvError::Closed) => {
@@ -864,7 +1186,12 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
 /// row the stream missed convicts the delivery lane, not the fold). `None`
 /// until the engine has folded anything.
 pub fn wallet_snapshot_now() -> Option<WalletSnapshot> {
-    latest_snapshot()
+    latest_snapshot().map(|mut snapshot| {
+        // Re-stamped, not served as recorded: the pull is the glass asking for
+        // the truth NOW, and discovery may have proven out since the last fold.
+        snapshot.discovery_incomplete = !discovery_proven();
+        snapshot
+    })
 }
 
 /// A Dart-side display-state marker routed through the ONE build-flavor-proof
@@ -1015,23 +1342,57 @@ mod tests {
 
     #[test]
     fn discovery_probes_at_least_the_default_depth_and_always_past_what_it_found() {
-        assert_eq!(discovery_depth_for(0), DISCOVERY_DEPTH);
-        assert_eq!(
-            discovery_depth_for(78),
-            DISCOVERY_DEPTH,
-            "still within default"
-        );
+        let auto = ScanReach::Automatic;
+        assert_eq!(auto.depth_for(0), DISCOVERY_DEPTH);
+        assert_eq!(auto.depth_for(78), DISCOVERY_DEPTH, "still within default");
         // Past the default depth the scan keeps growing rather than pinning
         // itself at the last scan's edge.
-        assert_eq!(discovery_depth_for(400), 400 + GAP_LIMIT);
+        assert_eq!(auto.depth_for(400), 400 + GAP_LIMIT);
         // …but a probe depth is round trips on the unlock path, so it stops at
         // its own ceiling rather than the window's. Sharing the window's made
         // one pass 782 sequential chunks — over two hours of a blocked gate,
         // from four corrupt bytes.
-        assert_eq!(discovery_depth_for(u32::MAX), MAX_DISCOVERY_DEPTH);
-        assert!(discovery_depth_for(MAX_DISCOVERY_DEPTH) <= MAX_DISCOVERY_DEPTH);
+        assert_eq!(auto.depth_for(u32::MAX), MAX_DISCOVERY_DEPTH);
+        assert!(auto.depth_for(MAX_DISCOVERY_DEPTH) <= MAX_DISCOVERY_DEPTH);
         // And a depth is never wider than a window can hold it.
         const { assert!(MAX_DISCOVERY_DEPTH < MAX_WINDOW) };
+    }
+
+    #[test]
+    fn the_manual_reach_ignores_the_automatic_cap_and_never_shrinks_with_what_is_known() {
+        let manual = ScanReach::Manual;
+        // Flat, by design: a user who taps "scan for more addresses" is not
+        // asking for `known + GAP`, they are asking us to look past what the
+        // automatic rule can justify. So the answer never depends on `seen` —
+        // including at the extremes, where a `min`/`max` pair written the
+        // ordinary way would quietly reintroduce the automatic ceiling.
+        for seen in [0, 78, MAX_DISCOVERY_DEPTH, MANUAL_DISCOVERY_DEPTH, u32::MAX] {
+            assert_eq!(manual.depth_for(seen), MANUAL_DISCOVERY_DEPTH);
+        }
+        // The manual reach is strictly the deeper of the two — the property the
+        // whole control exists for.
+        assert!(manual.depth_for(0) > ScanReach::Automatic.depth_for(u32::MAX));
+    }
+
+    #[test]
+    fn a_mark_from_the_deepest_manual_scan_is_a_value_the_reader_still_believes() {
+        // THE landmine, asserted at the exact boundary the compile asserts
+        // cannot reach: `persisted_count` reads anything above `MAX_SCAN_MARK`
+        // as UNSET, so a manual scan that finds funds deep writes a mark that
+        // reads back as 0 — the scan reports success, the marks vanish, and the
+        // wallet reopens on the gap limit.
+        //
+        // The const asserts pin the two ceilings to each other. What they cannot
+        // express is the CONSEQUENCE: that a mark this pass can actually produce
+        // still derives a wide window rather than collapsing to `GAP_LIMIT`.
+        let deepest_mark = MANUAL_DISCOVERY_DEPTH; // highest_funded_index + 1
+        let (receive, change) = window_from(deepest_mark, deepest_mark, 0);
+        assert_eq!(receive, deepest_mark + GAP_LIMIT);
+        assert_eq!(change, deepest_mark + GAP_LIMIT);
+        assert_ne!(
+            receive, GAP_LIMIT,
+            "a collapsed window is the defect itself"
+        );
     }
 
     #[test]
@@ -1095,9 +1456,10 @@ mod tests {
             // dies in milliseconds against a socket that is still dialling. The old
             // shape ended here: one `log::warn!`, a resolved OnceCell, and the
             // narrow window for the rest of the process — the original bug, silent.
-            let first =
-                persist_from_probe(|_, _| async { (Err(not_connected()), Err(not_connected())) })
-                    .await;
+            let first = persist_from_probe(ScanReach::Automatic, |_, _| async {
+                (Err(not_connected()), Err(not_connected()))
+            })
+            .await;
             record_pass(&mut gate, &first);
             assert!(first.is_err());
             assert!(
@@ -1116,7 +1478,10 @@ mod tests {
 
             // `WalletEvent::Connected` arrives. Because the pass never succeeded,
             // the retry runs — and this time the node answers: change index 77.
-            let second = persist_from_probe(|_, _| async { (Ok(None), Ok(Some(77))) }).await;
+            let second = persist_from_probe(ScanReach::Automatic, |_, _| async {
+                (Ok(None), Ok(Some(77)))
+            })
+            .await;
             record_pass(&mut gate, &second);
             assert_eq!(second.unwrap(), (0, 78), "marks persist as counts");
             assert!(gate.succeeded, "a complete pass disarms the retry");
@@ -1130,6 +1495,106 @@ mod tests {
     }
 
     #[test]
+    fn an_automatic_pass_over_a_deep_manual_mark_re_verifies_without_narrowing() {
+        with_unlocked_vault(|| async {
+            // The state a manual scan leaves behind: a mark PAST what any
+            // automatic pass will ever probe. The two ceilings used to be equal,
+            // so this state was unreachable and the code silently assumed it
+            // could not happen — `persist_from_probe` asserted `depth >= known`.
+            // Raising `MAX_SCAN_MARK` for the deep scan makes it reachable, and
+            // the very next launch runs an automatic pass over it.
+            let deep = MAX_DISCOVERY_DEPTH + 1;
+            vault::set_scan_high_water(deep, deep).unwrap();
+            let proven = wallet_window();
+            assert_eq!(proven, (deep + GAP_LIMIT, deep + GAP_LIMIT));
+
+            // The automatic pass now probes shallower than the mark — by design,
+            // since its depth is round trips on the unlock path. It sees nothing
+            // out there (the shallow addresses are empty) and must leave the deep
+            // mark completely alone.
+            let shallow = persist_from_probe(ScanReach::Automatic, |receive, change| async move {
+                assert_eq!(receive.len() as u32, MAX_DISCOVERY_DEPTH);
+                assert_eq!(change.len() as u32, MAX_DISCOVERY_DEPTH);
+                (Ok(None), Ok(None))
+            })
+            .await;
+
+            assert_eq!(shallow.unwrap(), (deep, deep), "the deep mark stands");
+            assert_eq!(
+                wallet_window(),
+                proven,
+                "a shallow re-verification narrowed a window a deep scan had proven"
+            );
+        });
+    }
+
+    #[test]
+    fn the_widening_report_is_the_delta_and_never_gates_the_republish() {
+        // `republish_window` returns whether the window grew, but must TELL the
+        // consumers either way. The delta is measured against the caller's marks,
+        // not against what the engine actually watches, and those disagree
+        // whenever a previous republish leaked (a lock mid-derive, a timed-out
+        // `extend_watch`). Gated on the delta, that leak is invisible forever:
+        // every later pass reads it as `before` and does nothing.
+        //
+        // Asserted on the CALL COUNT, not on the return value. Both consumers are
+        // unobservable no-ops in a test process — no engine, no transport hub —
+        // so a test that checked only the `bool` would pass with the early return
+        // put straight back (consensus-auditor, Track 2 re-audit).
+        with_unlocked_vault(|| async {
+            let before = wallet_window();
+            let calls = REPUBLISH_CALLS.load(Ordering::Relaxed);
+            assert!(
+                !republish_window(before).await,
+                "an unchanged window reports false…"
+            );
+            assert_eq!(
+                REPUBLISH_CALLS.load(Ordering::Relaxed),
+                calls + 1,
+                "…and still tells the consumers"
+            );
+            vault::set_scan_high_water(0, 78).unwrap();
+            assert!(republish_window(before).await, "a grown one reports true");
+        });
+    }
+
+    #[test]
+    fn a_manual_scan_that_fails_still_publishes_the_widening_it_persisted() {
+        // The BLOCK, asserted through the seam `deep_scan` actually uses.
+        //
+        // The first attempt at this test drove `persist_from_probe` directly and
+        // proved only the PREMISE — that an `Err` arrives with the marks already
+        // grown. Reverting `deep_scan` to `run_discovery_pass(...).await?` left
+        // it green. A regression guard that cannot fail on its own defect is the
+        // L86 shape: a passing test certifying the wrong end of the axis.
+        with_unlocked_vault(|| async {
+            let before = wallet_window();
+            let calls = REPUBLISH_CALLS.load(Ordering::Relaxed);
+
+            // A pass that widened the receive branch and then failed on change —
+            // the ordinary partial outcome on a flaky link, not a corner case.
+            let outcome = finish_scan(before, async {
+                let out = persist_from_probe(ScanReach::Manual, |_, _| async {
+                    (Ok(Some(900)), Err(not_connected()))
+                })
+                .await;
+                assert!(out.is_err(), "the pass failed…");
+                assert_ne!(wallet_window(), before, "…having already widened");
+                out
+            })
+            .await;
+
+            assert!(outcome.is_err(), "the error still reaches the caller");
+            assert_eq!(
+                REPUBLISH_CALLS.load(Ordering::Relaxed),
+                calls + 1,
+                "the widening was persisted and never published — signer wide, \
+                 watch narrow, and the next scan reports 'nothing new found'"
+            );
+        });
+    }
+
+    #[test]
     fn a_failure_after_a_success_can_never_narrow_the_window() {
         with_unlocked_vault(|| async {
             let mut gate = Discovery {
@@ -1137,7 +1602,10 @@ mod tests {
                 succeeded: false,
             };
 
-            let good = persist_from_probe(|_, _| async { (Ok(Some(12)), Ok(Some(77))) }).await;
+            let good = persist_from_probe(ScanReach::Automatic, |_, _| async {
+                (Ok(Some(12)), Ok(Some(77)))
+            })
+            .await;
             record_pass(&mut gate, &good);
             let proven = wallet_window();
             assert_eq!(proven, (13 + GAP_LIMIT, 78 + GAP_LIMIT));
@@ -1145,7 +1613,10 @@ mod tests {
             // The socket drops. A pass that finds nothing — or cannot ask — must
             // never shrink a window that already found funds, or a flaky connection
             // would strand coins we had learned to watch.
-            let bad = persist_from_probe(|_, _| async { (Err(not_connected()), Ok(None)) }).await;
+            let bad = persist_from_probe(ScanReach::Automatic, |_, _| async {
+                (Err(not_connected()), Ok(None))
+            })
+            .await;
             record_pass(&mut gate, &bad);
             assert!(bad.is_err());
             assert!(gate.succeeded, "the earlier proof stands");
@@ -1164,8 +1635,10 @@ mod tests {
                 succeeded: false,
             };
 
-            let half =
-                persist_from_probe(|_, _| async { (Ok(Some(40)), Err(not_connected())) }).await;
+            let half = persist_from_probe(ScanReach::Automatic, |_, _| async {
+                (Ok(Some(40)), Err(not_connected()))
+            })
+            .await;
             record_pass(&mut gate, &half);
             assert!(
                 half.is_err(),

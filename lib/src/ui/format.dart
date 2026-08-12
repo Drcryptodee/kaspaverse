@@ -3,6 +3,16 @@
 /// boundary (design_system §5). No floating point ever touches money.
 library;
 
+/// Group digits in threes for a node-status readout: 458174109 →
+/// "458,174,109". Scores arrive as [BigInt] (L3); formatted only here, at
+/// render.
+///
+/// Lives here rather than on the home screen because the network sheet renders
+/// the same value and now has its own file — a formatter that two surfaces
+/// share belongs with the other formatters, not inside one of its callers.
+String formatScore(BigInt? value) =>
+    value == null ? '—' : groupThousands(value.toString());
+
 /// Group digits in threes: `"1234567"` → `"1,234,567"`. (Lifted from the shipped
 /// `formatScore` so [AmountText] and the DAA readout share one grouping.)
 String groupThousands(String digits) {

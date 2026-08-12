@@ -2,6 +2,7 @@ package org.kaspaverse.app
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.view.WindowManager
@@ -83,18 +84,54 @@ class MainActivity : FlutterFragmentActivity() {
                     }
 
                     "biometricAvailable" -> result.success(KeystoreVault.isBiometricAvailable(this))
+
+                    // The same question as `biometricAvailable`, but answered with
+                    // the REASON. A bool cannot tell "this phone has no fingerprint
+                    // sensor" from "you never set one up in Android Settings", and
+                    // the second is both the common case and the actionable one —
+                    // answered as `false`, the enrolment offer simply never appears
+                    // and the user is told nothing at all.
+                    "biometricStatus" -> result.success(KeystoreVault.biometricStatus(this))
+
                     "pathAEnrolled" -> result.success(KeystoreVault.isEnrolled(this))
+
+                    // Version, build and the signing-certificate fingerprint — the
+                    // user-side half of RELEASE.md's provenance story, so an install
+                    // can be checked against a published fingerprint on the glass.
+                    // Public metadata only. Read through the channel we already own
+                    // rather than package_info_plus, for the same reason
+                    // `getFilesDir` is here: no new plugin on the custody path.
+                    "packageInfo" -> result.success(packageInfo())
                     "clearBiometric" -> {
                         KeystoreVault.clearEnrollment(this)
                         result.success(null)
                     }
 
-                    // Async (BiometricPrompt callback) — reply once resolved.
-                    "enrollBiometric" -> KeystoreVault.enroll(this) { ok, err ->
-                        if (ok) result.success(true) else result.error("ENROLL", err, null)
+                    // Async (BiometricPrompt callback) — reply once resolved. The
+                    // error CODE crosses as the platform error code, so Dart can
+                    // tell a user's own cancel from a lockout from a locked vault
+                    // without reading the diagnostic message.
+                    "enrollBiometric" -> KeystoreVault.enroll(this) { ok, failure ->
+                        if (ok) {
+                            result.success(true)
+                        } else {
+                            result.error(
+                                failure?.code ?: KeystoreVault.CODE_FAILED,
+                                failure?.message,
+                                null,
+                            )
+                        }
                     }
-                    "unlockBiometric" -> KeystoreVault.unlock(this) { ok, err ->
-                        if (ok) result.success(true) else result.error("UNLOCK", err, null)
+                    "unlockBiometric" -> KeystoreVault.unlock(this) { ok, failure ->
+                        if (ok) {
+                            result.success(true)
+                        } else {
+                            result.error(
+                                failure?.code ?: KeystoreVault.CODE_FAILED,
+                                failure?.message,
+                                null,
+                            )
+                        }
                     }
 
                     else -> result.notImplemented()
@@ -122,6 +159,68 @@ class MainActivity : FlutterFragmentActivity() {
             networkCallback = callback
         }
     }
+
+    /**
+     * Public build identity: version name, build number, and the SHA-256 of the
+     * signing certificate.
+     *
+     * The fingerprint is lowercase hex with no separators — the exact form
+     * `apksigner verify --print-certs` prints, so a user comparing an install
+     * against a published fingerprint is comparing like with like. (`keytool`'s
+     * colon-separated uppercase is the same bytes in a different dress; the UI
+     * chunks for reading and never reformats the value.)
+     *
+     * Every field degrades to "—" rather than throwing: an About row is not worth
+     * a crash, and API 26/27 cannot answer the signing question the modern way.
+     */
+    private fun packageInfo(): Map<String, String> {
+        val version = runCatching {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            val build = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                info.longVersionCode.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toString()
+            }
+            (info.versionName ?: "—") to build
+        }.getOrDefault("—" to "—")
+
+        return mapOf(
+            "version" to version.first,
+            "build" to version.second,
+            "signature" to (signingFingerprint() ?: "—"),
+        )
+    }
+
+    private fun signingFingerprint(): String? = runCatching {
+        val certificate: ByteArray? =
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                val info = packageManager
+                    .getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+                    .signingInfo
+                // A rotated key reports history; a multi-signer APK reports the
+                // set. Either way the FIRST entry is the one that signed this
+                // install, which is what a fingerprint check is asking about.
+                val signers = when {
+                    info == null -> emptyArray()
+                    info.hasMultipleSigners() -> info.apkContentsSigners
+                    else -> info.signingCertificateHistory
+                }
+                signers?.firstOrNull()?.toByteArray()
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager
+                    .getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
+                    .signatures
+                    ?.firstOrNull()
+                    ?.toByteArray()
+            }
+        certificate?.let {
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(it)
+                .joinToString("") { byte -> "%02x".format(byte) }
+        }
+    }.getOrNull()
 
     override fun onDestroy() {
         networkCallback?.let {

@@ -7,9 +7,43 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `discover_and_persist_window`, `discovery_depth_for`, `engine_handle`, `fold`, `latest_snapshot`, `map_activity`, `next_change_index`, `overlaid`, `persist_from_probe`, `record_pass`, `retry_discovery_if_unproven`, `run_discovery_pass`, `snapshots`, `wallet_signer`, `wallet_window`, `window_after_discovery`, `window_from`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Discovery`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `deadline`, `depth_for`, `discover_and_persist_window`, `discovery_proven`, `engine_handle`, `finish_scan`, `fold`, `latest_snapshot`, `map_activity`, `next_change_index`, `overlaid`, `persist_from_probe`, `publish`, `record_pass`, `republish_latest`, `republish_window`, `retry_discovery_if_unproven`, `run_discovery_pass`, `snapshots`, `wallet_signer`, `wallet_window`, `window_after_discovery`, `window_from`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Discovery`, `ScanReach`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// Probe far deeper than an automatic pass will, at the user's explicit request —
+/// the "scan for more addresses" control.
+///
+/// **Why this exists.** An automatic pass is capped at [`MAX_DISCOVERY_DEPTH`] so
+/// the unlock path cannot be held for minutes by a large persisted mark, which
+/// means a wallet whose funded indices run past that — pushed there by another
+/// client while this app was closed — never widens on its own. This is the manual
+/// lever for exactly that case, and it takes its depth as a parameter rather than
+/// inheriting the automatic cap.
+///
+/// **It reuses the one widening seam.** The pass and the re-registration are the
+/// same code the automatic retry runs ([`republish_window`]); a second widening
+/// mechanism is precisely the drift this module has already paid for once.
+///
+/// Requires an unlocked vault (it derives addresses) — Settings is only reachable
+/// unlocked, and a locked vault errors honestly rather than reporting an empty
+/// scan as success.
+///
+/// **Republish before `?`, always.** A failed pass is not an empty one:
+/// `persist_from_probe` keeps whatever came back and persists it even when the
+/// other branch errored, because the marks are monotonic and a discarded widening
+/// is one we have to pay to probe for again. So an `Err` here routinely arrives
+/// with the marks ALREADY grown, and returning early would strand that widening
+/// in the marks with nothing told — signer wide, watch narrow, the exact drift
+/// [`wallet_window`] exists to make impossible. Worse, it is self-confirming: the
+/// next scan reads the grown marks as `before`, sees no delta, and reports
+/// "nothing new found" over funds it has just made invisible for the session.
+///
+/// That ordering lives in [`finish_scan`] rather than inline, because a rule
+/// spelled out only in a comment is a rule with no test (consensus-auditor,
+/// Track 2 — the first fix was correct and its regression guard could not fail).
+Future<DeepScanReport> deepScan() =>
+    RustLib.instance.api.crateApiWalletDeepScan();
 
 /// The latest folded snapshot as a PULL (V2 sitting: the founder's
 /// swipe-to-refresh; also the stream-freeze diagnostic — a pull that shows a
@@ -98,6 +132,47 @@ class ActivityRecord {
           stalled == other.stalled;
 }
 
+/// What a manual scan found — the honest report the Settings control renders.
+///
+/// Marks are COUNTS (`highest_funded_index + 1`), the same form the window
+/// arithmetic and the persisted file use; `0` means nothing funded was found on
+/// that branch, never "index 0 is funded". See [`window_from`] for why.
+class DeepScanReport {
+  /// Indices probed per branch.
+  final int depth;
+  final int receiveSeen;
+  final int changeSeen;
+
+  /// The watch/sign window actually grew — the wallet now sees more than it did
+  /// before the tap. `false` is the ordinary, *successful* "nothing new out
+  /// there", and the control must say so rather than implying a failure.
+  final bool widened;
+
+  const DeepScanReport({
+    required this.depth,
+    required this.receiveSeen,
+    required this.changeSeen,
+    required this.widened,
+  });
+
+  @override
+  int get hashCode =>
+      depth.hashCode ^
+      receiveSeen.hashCode ^
+      changeSeen.hashCode ^
+      widened.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeepScanReport &&
+          runtimeType == other.runtimeType &&
+          depth == other.depth &&
+          receiveSeen == other.receiveSeen &&
+          changeSeen == other.changeSeen &&
+          widened == other.widened;
+}
+
 /// Maturity of an activity row. `Pending`/`Confirmed` come from wallet-core
 /// (`TransactionRecord::maturity()` at the live DAA — never our own
 /// threshold; INV-9). `Accepted` is the V1 acceptance-spine overlay: the
@@ -122,6 +197,18 @@ class WalletSnapshot {
 
   /// The connected node has no UTXO index (INV-8 honest degrade).
   final bool utxoIndexMissing;
+
+  /// No address-discovery pass has reached the node this process, so the
+  /// watched window is the last known-good one and **may be short** — the
+  /// balance below it is computed over fewer addresses than the wallet might
+  /// actually hold.
+  ///
+  /// The sibling of [`Self::utxo_index_missing`], and it exists for the same
+  /// reason: without it the wallet paints a *confidently wrong number*, which
+  /// this project treats as worse than a visible unknown. The retry machinery
+  /// makes the state narrow and transient, but narrow-and-transient is a
+  /// probability argument, not honesty.
+  final bool discoveryIncomplete;
   final BigInt? matureSompi;
   final BigInt? pendingSompi;
   final BigInt? outgoingSompi;
@@ -134,6 +221,7 @@ class WalletSnapshot {
     required this.connected,
     required this.syncing,
     required this.utxoIndexMissing,
+    required this.discoveryIncomplete,
     this.matureSompi,
     this.pendingSompi,
     this.outgoingSompi,
@@ -149,6 +237,7 @@ class WalletSnapshot {
       connected.hashCode ^
       syncing.hashCode ^
       utxoIndexMissing.hashCode ^
+      discoveryIncomplete.hashCode ^
       matureSompi.hashCode ^
       pendingSompi.hashCode ^
       outgoingSompi.hashCode ^
@@ -163,6 +252,7 @@ class WalletSnapshot {
           connected == other.connected &&
           syncing == other.syncing &&
           utxoIndexMissing == other.utxoIndexMissing &&
+          discoveryIncomplete == other.discoveryIncomplete &&
           matureSompi == other.matureSompi &&
           pendingSompi == other.pendingSompi &&
           outgoingSompi == other.outgoingSompi &&

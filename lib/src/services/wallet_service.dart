@@ -34,6 +34,11 @@ class WalletService {
   /// INV-8 honest degrade: the connected node has no UTXO index.
   final ValueNotifier<bool> utxoIndexMissing = ValueNotifier(false);
 
+  /// No address-discovery pass has reached a node this session, so the balance
+  /// below covers the last known-good address window and may be short. The
+  /// sibling of [utxoIndexMissing] — same honest-degrade job, different cause.
+  final ValueNotifier<bool> discoveryIncomplete = ValueNotifier(false);
+
   /// Balances in sompi ([BigInt], L3). `null` until the first sync (DS-1
   /// unknown `—`); then a real value — `BigInt.zero` for an empty wallet is a
   /// live zero, never unknown.
@@ -71,6 +76,10 @@ class WalletService {
   @visibleForTesting
   static Future<void> Function(String marker) uiMarkFn = (marker) =>
       uiMark(marker: marker);
+
+  /// Row count at the last emitted `apply` marker — the transition detector for
+  /// the log lane. `-1` so the very first apply always marks.
+  int _lastMarkedRows = -1;
 
   void _mark(String marker) {
     try {
@@ -204,13 +213,26 @@ class WalletService {
   void _apply(WalletSnapshot snapshot) {
     // The V2 stream-freeze diagnostic: if the bridge logs a fold this line
     // doesn't echo, the Dart delivery lane dropped it (counts only, INV-3).
-    _mark('apply rows=${snapshot.activity.length}');
+    //
+    // Marked on CHANGE, not on every apply. Unconditional, this one line was
+    // measured at 1982 of 3572 logcat lines — 55% of our whole log lane — while
+    // the app sat idle on home, because the freshness watchdog re-serves the
+    // fold on every quiet tick and each re-serve carries the same row count.
+    // The diagnostic value is entirely in the transitions (a count the glass
+    // never showed), and repeating the unchanged number halves the forensic
+    // history any device pull can hold (L65).
+    final rows = snapshot.activity.length;
+    if (rows != _lastMarkedRows) {
+      _lastMarkedRows = rows;
+      _mark('apply rows=$rows');
+    }
     _everApplied = true;
     _reattachAttempts = 0; // a live lane resets the backoff ladder
     lastApply = DateTime.now();
     connected.value = snapshot.connected;
     syncing.value = snapshot.syncing;
     utxoIndexMissing.value = snapshot.utxoIndexMissing;
+    discoveryIncomplete.value = snapshot.discoveryIncomplete;
     // The snapshot is cumulative — the Rust fold retains balances across events,
     // so a value never regresses to null once seen. Assign directly.
     mature.value = snapshot.matureSompi;

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
+import 'biometric_copy.dart';
 import 'passphrase_unlock_screen.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
@@ -31,22 +32,21 @@ class UnlockSurface extends StatefulWidget {
   /// Debug-only escape hatch (the caged DevVaultPanel); null in release.
   final Widget? debugFooter;
 
+  // Through VaultService, never the static ceremony channel. The §0.11 auto-lock
+  // suppression is an INSTANCE guard on the service, so a caller that reaches
+  // past it cannot be covered by it *by construction* — and this lane is the one
+  // where that bites hardest: the prompt takes the foreground, the lifecycle
+  // reports paused, and at the default grace of 0 the lock fires against the
+  // vault the user's finger has just opened. (wallet-security-auditor, Track 2 —
+  // three of the four ceremonies were routed and this one was left behind.)
   static Future<bool> _probeBiometric() async {
-    final enrolled = await VaultService.ceremony.invokeMethod<bool>(
-      'pathAEnrolled',
-    );
-    final available = await VaultService.ceremony.invokeMethod<bool>(
-      'biometricAvailable',
-    );
-    return (enrolled ?? false) && (available ?? false);
+    final enrolled = await VaultService.instance.pathAEnrolled();
+    final status = await VaultService.instance.biometricStatus();
+    return enrolled && status == biometricReady;
   }
 
-  static Future<bool> _runBiometricUnlock() async {
-    final ok = await VaultService.ceremony.invokeMethod<bool>(
-      'unlockBiometric',
-    );
-    return ok ?? false;
-  }
+  static Future<bool> _runBiometricUnlock() =>
+      VaultService.instance.unlockBiometric();
 
   @override
   State<UnlockSurface> createState() => _UnlockSurfaceState();
@@ -68,7 +68,12 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
     try {
       final ready = await probe();
       if (mounted) setState(() => _biometricReady = ready);
-    } on PlatformException {
+    } catch (_) {
+      // `catch (_)`, not `on PlatformException`: a `MissingPluginException` is
+      // not one, and an uncaught throw here leaves `_biometricReady` null — a
+      // permanent spinner on the one screen standing between the user and their
+      // funds, with the "Unlock with passphrase" escape never rendered. INV-6's
+      // liveness shadow (wallet-security-auditor).
       if (mounted) setState(() => _biometricReady = false);
     }
   }
@@ -91,13 +96,18 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
           _message = "Unlock didn't complete. Your funds are safe — try again.";
         });
       }
-    } on PlatformException {
-      if (mounted) {
-        setState(() {
-          _unlocking = false;
-          _message = 'Unlock is unavailable right now. Your funds are safe.';
-        });
-      }
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _unlocking = false;
+        // Tapping "Use passphrase" on the system prompt is a CHOICE, and on this
+        // screen it is the common one — reporting it as "unavailable right now"
+        // told the user something false about their own deliberate action every
+        // single time. Same contract as create/restore/settings.
+        _message = e.code == 'cancelled'
+            ? null
+            : 'Unlock is unavailable right now. Your funds are safe.';
+      });
     }
   }
 

@@ -99,6 +99,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DagStatusDto dco_decode_dag_status_dto(dynamic raw);
 
   @protected
+  DeepScanReport dco_decode_deep_scan_report(dynamic raw);
+
+  @protected
   FeeStrategyKind dco_decode_fee_strategy_kind(dynamic raw);
 
   @protected
@@ -300,6 +303,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DagStatusDto sse_decode_dag_status_dto(SseDeserializer deserializer);
+
+  @protected
+  DeepScanReport sse_decode_deep_scan_report(SseDeserializer deserializer);
 
   @protected
   FeeStrategyKind sse_decode_fee_strategy_kind(SseDeserializer deserializer);
@@ -553,6 +559,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_dag_status_dto(DagStatusDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_deep_scan_report(
+    DeepScanReport self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_fee_strategy_kind(
