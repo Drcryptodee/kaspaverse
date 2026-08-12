@@ -123,6 +123,24 @@ impl KeyChain {
         branch: Branch,
         index: u32,
     ) -> Result<Zeroizing<[u8; 32]>> {
+        let branch_key = self.branch_key(branch)?;
+        Self::child_key_bytes(&branch_key, index)
+    }
+
+    /// The branch-level extended key — the part of a derivation that does NOT
+    /// vary with the index.
+    ///
+    /// Split out so a caller walking many indices of one branch expands the
+    /// master seed and re-walks the path **once** instead of per index. That is
+    /// three times less work, and — the reason it lives in this file rather than
+    /// in the caller — three times fewer un-wiped intermediates: at the pin
+    /// `ExtendedPrivateKey` has no `Drop`/`Zeroize` (`wallet/bip32/src/
+    /// xprivate_key.rs`), so every `master` and every `branch_key` leaves its
+    /// scalar and chain code in freed memory. INV-9 says consume the pin, not
+    /// fork it, so the lever we own is how many of them we create. The window
+    /// this multiplies by is no longer a fixed 30 (address discovery,
+    /// 2026-08-12) and an inbound-envelope scan walks all of it.
+    pub(crate) fn branch_key(&self, branch: Branch) -> Result<ExtendedPrivateKey<SecretKey>> {
         let master = ExtendedPrivateKey::<SecretKey>::new(self.seed.as_bytes())?;
         let path = WalletDerivationManager::build_derivate_path(
             false,
@@ -130,7 +148,16 @@ impl KeyChain {
             None,
             Some(branch.address_type()),
         )?;
-        let branch_key = master.derive_path(&path)?;
+        Ok(master.derive_path(&path)?)
+    }
+
+    /// One index off an already-derived branch key. Mirror of upstream
+    /// `PrivateKeyGenerator` (pin: privkeygen.rs:26-56), which caches the branch
+    /// keys for the same reason.
+    pub(crate) fn child_key_bytes(
+        branch_key: &ExtendedPrivateKey<SecretKey>,
+        index: u32,
+    ) -> Result<Zeroizing<[u8; 32]>> {
         let child = branch_key.derive_child(ChildNumber::new(index, false)?)?;
         Ok(Zeroizing::new(child.private_key().to_bytes()))
     }
@@ -150,6 +177,34 @@ impl fmt::Debug for KeyChain {
 mod tests {
     use super::*;
     use crate::mnemonic::MnemonicCeremony;
+
+    #[test]
+    fn a_hoisted_branch_key_derives_exactly_what_the_whole_walk_does() {
+        // `decrypt_scanning` derives the branch key once and walks only the
+        // child per slot. Same bytes as the full per-index walk, or an inbound
+        // envelope silently stops opening — and the failure would look like
+        // "not for us", which is indistinguishable from the truth.
+        let seed = MnemonicCeremony::generate()
+            .unwrap()
+            .into_seed(b"")
+            .unwrap();
+        let keychain = KeyChain::from_seed(seed, Prefix::Mainnet).unwrap();
+        for branch in [Branch::Receive, Branch::Change] {
+            let branch_key = keychain.branch_key(branch).unwrap();
+            for index in [0u32, 1, 77, 512] {
+                assert_eq!(
+                    KeyChain::child_key_bytes(&branch_key, index)
+                        .unwrap()
+                        .as_slice(),
+                    keychain
+                        .private_key_bytes(branch, index)
+                        .unwrap()
+                        .as_slice(),
+                    "{branch:?}/{index}"
+                );
+            }
+        }
+    }
 
     // Upstream's own end-to-end vectors (pin: gen1/hd.rs:528-545):
     // mnemonic → master kprv → account kpub at m/44'/111111'/0'.

@@ -328,9 +328,17 @@ pub(crate) fn scan_high_water() -> (u32, u32) {
             )
         })
         .unwrap_or((0, 0));
+    // The memo goes through the same validation as the disk half — one
+    // validation point that covers only one of two inputs is not one.
     let (memo_receive, memo_change) = SCAN_MARKS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+        .map(|(r, c)| {
+            (
+                persisted_count(r, MAX_SCAN_MARK),
+                persisted_count(c, MAX_SCAN_MARK),
+            )
+        })
         .unwrap_or((0, 0));
     (disk_receive.max(memo_receive), disk_change.max(memo_change))
 }

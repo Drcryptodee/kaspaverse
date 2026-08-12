@@ -274,9 +274,6 @@ struct KeyWindow {
     watched: HashSet<String>,
     /// Receive slots first — the likelier establishment binding.
     slots: Vec<KeySlot>,
-    /// How many of `slots` are receive-branch, so the handshake path can take
-    /// its prefix without re-filtering on every inbound event.
-    receive_slots: usize,
 }
 
 impl KeyWindow {
@@ -287,22 +284,34 @@ impl KeyWindow {
                 .map(|i| (Branch::Receive, i))
                 .chain((0..change).map(|i| (Branch::Change, i)))
                 .collect(),
-            receive_slots: receive as usize,
         }
     }
 
-    /// The slots a HANDSHAKE may have been sealed to: the receive branch only.
+    /// The slots a HANDSHAKE may have been sealed to: **the whole window**.
     ///
-    /// A handshake bonds an address we hand out, and we only ever hand out
-    /// receive addresses — the same reasoning `fill_walks` already applies to
-    /// its sweep. It matters here because `decrypt_scanning` derives one private
-    /// key per slot, each a full master-seed expansion, and this is the cheapest
-    /// path for a stranger to trigger: one dust output touching any address we
-    /// have ever published, with a fresh txid each time. Halving the scan is
-    /// worth having; more to the point, the change half could never have opened
-    /// it.
+    /// This looked like the obvious place to halve an attacker-triggerable scan
+    /// — a handshake bonds an address we hand out, and we hand out receive
+    /// addresses. `fill_walks` sweeps the receive branch alone for exactly that
+    /// reason. It is wrong here, and the difference is where the counterparty
+    /// gets the address from.
+    ///
+    /// `fill_walks` asks an indexer about addresses WE published. A sender
+    /// resolves our return address from the chain: `get_utxo_return_address`
+    /// answers with the address behind **input[0]** of a transaction we
+    /// broadcast (pin `rpc/core/src/api/rpc.rs:455`; it is the primitive the
+    /// live population uses, Kasia's own service included). Our inputs are
+    /// whatever the Generator selected, and on a wallet that has sent before,
+    /// that is overwhelmingly returning change. So a counterparty can, and
+    /// routinely will, seal a handshake to one of our CHANGE slots.
+    ///
+    /// Scanning the receive prefix only would have dropped those at a bare
+    /// `return false`, with no log line and no way to establish the
+    /// conversation — a silent interop hole against exactly the clients this
+    /// protocol has to talk to. The window is receive-first, so the common case
+    /// still exits early; the cost is paid on the miss, which is the honest
+    /// price of being reachable.
     fn handshake_slots(&self) -> &[KeySlot] {
-        &self.slots[..self.receive_slots]
+        &self.slots
     }
 }
 

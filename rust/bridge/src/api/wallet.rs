@@ -106,7 +106,7 @@ pub(crate) const MAX_WINDOW: u32 = vault::MAX_CHANGE_CURSOR + 1;
 /// ceiling and every discovered mark past it reads back as UNSET — the wallet
 /// would re-probe on every launch and never keep what it found. Checked here so
 /// that is a compile error, not a field report.
-const _: () = assert!(vault::MAX_SCAN_MARK >= MAX_DISCOVERY_DEPTH);
+const _: () = assert!(vault::MAX_SCAN_MARK == MAX_DISCOVERY_DEPTH);
 
 /// The next change index to hand out — the send cursor (D-041), floored at what
 /// discovery found.

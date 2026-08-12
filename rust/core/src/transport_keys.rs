@@ -19,17 +19,23 @@
 //!   §0.7 binding. Only ever on scan-matched envelopes (sparse by
 //!   construction).
 //!
-//!   **The cost is one full derivation per slot tried, so the caller owns the
-//!   bound.** Each attempt is a master-seed expansion plus a BIP32 path walk
-//!   (`KeyChain::private_key_bytes`), not a cheap ECDH — and at the pin
-//!   `ExtendedPrivateKey` carries no `Drop`, so intermediates are dropped
-//!   un-wiped (pin behaviour; INV-9 says consume it, not fork it). The window
-//!   used to be a fixed 30+30 and this doc said "~60 attempts, microseconds
-//!   each"; since address discovery (2026-08-12) it is the *discovered*
-//!   window, which grows with the wallet. Callers must pass the narrowest set
-//!   that could have opened the envelope — the transport hub scans handshakes
-//!   against the receive branch only, because a handshake bonds an address we
-//!   handed out, and that path is the cheapest one a stranger can trigger.
+//!   **An attempt is a key derivation, not a cheap ECDH.** This doc used to
+//!   price the scan at "~60 attempts, microseconds each" off a window that was
+//!   a fixed 30+30; since address discovery (2026-08-12) the window is the
+//!   *discovered* one and grows with the wallet, so the number is the caller's
+//!   and the per-attempt cost is ours. Ours is now one `derive_child` per slot
+//!   plus one master expansion and path walk **per branch** — it used to be all
+//!   three per slot, which matters beyond CPU: at the pin `ExtendedPrivateKey`
+//!   carries no `Drop`, so every intermediate is dropped un-wiped (pin
+//!   behaviour; INV-9 says consume it, not fork it), and the only lever we own
+//!   is how many we create.
+//!
+//!   Narrowing the window is NOT the lever, however tempting. A sender resolves
+//!   our return address with `get_utxo_return_address`, which answers with the
+//!   address behind input[0] of a transaction we broadcast — routinely one of
+//!   our CHANGE addresses. `scanning_finds_the_slot_and_becomes_the_binding`
+//!   below seals to `change/2` for precisely that reason. A receive-only scan
+//!   drops those envelopes silently and the conversation can never open.
 //!
 //! Decrypted plaintext leaves as `Zeroizing<Vec<u8>>` and is user content
 //! post-decrypt (INV-1 as amended D-056) — never logged, never persisted
@@ -39,6 +45,7 @@ use crate::error::{CoreError, Result};
 use crate::keychain::{Branch, KeyChain};
 use crate::signer::UnlockedVault;
 use crate::transport_crypto::{decrypt, Envelope};
+use kaspa_bip32::{ExtendedPrivateKey, SecretKey};
 use std::fmt;
 use std::sync::Weak;
 use zeroize::Zeroizing;
@@ -89,8 +96,22 @@ impl TransportDecryptor {
         envelope: &Envelope,
     ) -> Result<(KeySlot, Zeroizing<Vec<u8>>)> {
         let keychain = self.keychain.upgrade().ok_or(CoreError::VaultLocked)?;
+        // The branch key is derived once per branch, not once per slot: the
+        // master-seed expansion and the path walk do not vary with the index,
+        // and each one the pin builds is an extended private key it drops
+        // un-wiped. A scan over a discovery-sized window used to pay for three
+        // of them per slot tried.
+        let mut branch_keys: Vec<(Branch, ExtendedPrivateKey<SecretKey>)> = Vec::with_capacity(2);
         for slot in window {
-            let key = keychain.private_key_bytes(slot.0, slot.1)?;
+            let branch_key = match branch_keys.iter().find(|(b, _)| *b == slot.0) {
+                Some((_, key)) => key,
+                None => {
+                    let key = keychain.branch_key(slot.0)?;
+                    branch_keys.push((slot.0, key));
+                    &branch_keys[branch_keys.len() - 1].1
+                }
+            };
+            let key = KeyChain::child_key_bytes(branch_key, slot.1)?;
             match decrypt(envelope, &key) {
                 Ok(plaintext) => return Ok((slot, plaintext)),
                 // Wrong key — structurally indistinguishable from tamper;
