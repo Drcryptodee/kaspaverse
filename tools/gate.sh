@@ -27,8 +27,17 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
     skip_check "cargo deny (INV-7)" "cargo-deny not installed — REQUIRED from P0-D4"
   fi
   # cargo-ndk needs an NDK; discover a local install when the env var is unset.
+  # Layout-agnostic on purpose. This list used to name two paths from one machine,
+  # and when the SDK root moved (WSL2 `~/Android/Sdk` → native `~/sdk/android`,
+  # 2026-08-12) the cross-compile check did not go RED — it went SKIP, which reads
+  # as "fine" on a local run. A discovery list that only knows the last machine
+  # converts a real check into silence; prefer the env vars the SDK itself sets.
   if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    for d in "$HOME"/android-ndk-r* "$HOME"/Android/Sdk/ndk/*; do
+    for d in "$HOME"/android-ndk-r* \
+             "${ANDROID_HOME:-/nonexistent}"/ndk/* \
+             "${ANDROID_SDK_ROOT:-/nonexistent}"/ndk/* \
+             "$HOME"/Android/Sdk/ndk/* \
+             "$HOME"/sdk/android/ndk/*; do
       [ -d "$d" ] && export ANDROID_NDK_HOME="$d"
     done
   fi
