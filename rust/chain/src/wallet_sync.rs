@@ -509,6 +509,32 @@ impl WalletEngine {
             .map(|record| record.block_daa_score())
     }
 
+    /// What `txid` actually PAID US, in sompi — `None` unless we hold it as a
+    /// receive.
+    ///
+    /// For an incoming record the pinned crate sets `value` to
+    /// `aggregate_input_value`, the sum of the UTXO amounts credited to our own
+    /// `UtxoContext` (`wallet/core/src/storage/transaction/record.rs:488-518`
+    /// @ `cfafeb4`) — so this is node truth about value received, not a claim
+    /// from a payload. Deliberately `None` for anything [`is_incoming_data`]
+    /// rejects: `value` means something different on a record we originated
+    /// (change, or the aggregate we spent), and reading it as a receive is how
+    /// a self-send would look like someone paying us.
+    ///
+    /// Exists because accepting a handshake SPENDS: it refunds a bond nobody
+    /// had checked was ever received.
+    pub fn activity_value_sompi(&self, txid: &str) -> Option<u64> {
+        let id: TransactionId = txid.parse().ok()?;
+        self.inner
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .records
+            .get(&id)
+            .filter(|record| is_incoming_data(record))
+            .map(|record| record.value())
+    }
+
     /// Start watching `addresses` (the derived receive+change window — public
     /// strings derived by the bridge from the unlocked vault; this layer never
     /// sees a secret). Spawns the fold task and starts the processor; if the
@@ -1068,6 +1094,43 @@ mod tests {
         assert!(
             !all_change_addresses(&[], &change_set),
             "no UTXOs ⇒ not our change"
+        );
+    }
+
+    /// The bond check's load-bearing half: `activity_value_sompi` answers ONLY
+    /// for records wallet-core classifies as a receive.
+    ///
+    /// Accepting a handshake refunds 0.2 KAS to an address resolved from the
+    /// counterparty's own transaction. Nothing verified that transaction ever
+    /// paid us, so a dust transaction carrying a handshake payload earned the
+    /// refund — defection paid (D-019). The guard is only as good as this
+    /// accessor, and the trap is `value`: on a record WE originated it is the
+    /// payment or the aggregate we spent, so reading it as a receive would let
+    /// one of our own sends vouch for a stranger.
+    #[test]
+    fn activity_value_answers_for_receives_and_refuses_for_our_own_sends() {
+        // Exactly the handshake bond, paid to us.
+        let deposit = incoming(0xB0, 20_000_000, 2_000);
+        // A send of OURS whose `value` is large enough to pass a naive check.
+        let ours = outgoing(0xB1, 20_000_000, 2_001);
+
+        let value_of = |r: &TransactionRecord| -> Option<u64> {
+            Some(r).filter(|r| is_incoming_data(r)).map(|r| r.value())
+        };
+
+        assert_eq!(
+            value_of(&deposit),
+            Some(20_000_000),
+            "a receive reports what it paid us"
+        );
+        assert_eq!(
+            value_of(&ours),
+            None,
+            "a record WE originated is not evidence that anyone paid us"
+        );
+        assert!(
+            value_of(&incoming(0xB2, 1_000, 2_002)).unwrap() < 20_000_000,
+            "a dust receive is below the bond — the accept path must refuse it"
         );
     }
 

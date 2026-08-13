@@ -1738,8 +1738,46 @@ pub async fn transport_prepare_accept(
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
     let daa = engine.activity_daa_score(&handshake_txid).ok_or_else(|| {
-        AppError::msg("the handshake bond is still confirming — try again in a few seconds")
+        // NOT "still confirming". This fires both while a real bond confirms AND
+        // permanently for a txid that never paid us at all, and the transient
+        // wording made the permanent case look like a retry (the V5 finding-15
+        // taxonomy sin). Say both halves and let the user tell them apart.
+        AppError::msg(
+            "your node has not seen a payment from this invitation. If it has just \
+             arrived, wait a few seconds; if it never does, the invitation carried \
+             no bond and accepting it would send your own coins for nothing.",
+        )
     })?;
+
+    // The bond must have been RECEIVED before we refund it. Accepting spends
+    // HANDSHAKE_BOND_SOMPI to an address resolved from the counterparty's own
+    // transaction, and nothing checked what that transaction paid us — so a
+    // real dust transaction carrying a handshake payload sealed to our public
+    // receive address earned 0.2 KAS per accept, repeatably, for the cost of
+    // dust plus a fee. **Defection paid**, which is the one thing the design law
+    // forbids (D-019, stag hunt not prisoner's dilemma).
+    //
+    // Kasia does NOT check this — see the note on `HANDSHAKE_BOND_SOMPI`. This
+    // is a deliberate divergence UPWARD, and it is interop-safe: every genuine
+    // Kasia handshake pays exactly 0.2 (`messaging.store.ts:1086` defaults it,
+    // and the only two call sites that override are the response and the
+    // self-stash), and ours pays the same constant.
+    //
+    // Refuse rather than refund-what-arrived: a partial refund still costs us a
+    // network fee per fake invitation, so it converts a profitable grief into a
+    // cheap one instead of ending it.
+    let received = engine
+        .activity_value_sompi(&handshake_txid)
+        .unwrap_or_default();
+    if received < HANDSHAKE_BOND_SOMPI {
+        return Err(AppError::msg(format!(
+            "this invitation did not carry the {} KAS bond — it paid {}. Accepting \
+             would send your own coins to a stranger who paid nothing, so the \
+             wallet refuses. You can still ignore or dismiss the invitation.",
+            format_kas(HANDSHAKE_BOND_SOMPI),
+            format_kas(received),
+        )));
+    }
     let rpc = dag::shared_monitor().await?.rpc();
     let sender = resolve_return_address(&rpc, &handshake_txid, daa)
         .await
@@ -2196,6 +2234,17 @@ fn thread_row(
             })
         }
     }
+}
+
+/// Sompi rendered exactly, to all 8 decimals.
+///
+/// NOT the pinned crate's `sompi_to_kaspa_string`: that one goes through `f64`
+/// (`wallet/core/src/utils.rs:34,44` @ `cfafeb4`), and this project does not put
+/// money through binary floating point — DS-2 wants the exact figure at the
+/// moment of commitment, and a refusal that names an amount is such a moment.
+/// Integer division and remainder are exact for every u64.
+fn format_kas(sompi: u64) -> String {
+    format!("{}.{:08}", sompi / 100_000_000, sompi % 100_000_000)
 }
 
 /// The stable wire label for a stored row's provenance.

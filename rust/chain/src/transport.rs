@@ -144,12 +144,32 @@ fn output_addresses(tx: &RpcTransaction, prefix: Prefix) -> Vec<String> {
 }
 
 /// The handshake bond: 0.2 KAS, the live population's norm — THE one
-/// provenance-cited economics constant (§0.6, ratified D-062). Provenance
-/// (Gate R, ops audit 2026-07-03): enforced in code at Kasia
-/// `messaging.store.ts:1456` (min-check) and refunded at `:1240-1251`
-/// (`customAmount: kaspaToSompi("0.2")` on the acceptance response); observed
-/// on-chain in tx `596eefed…` (20,000,000-sompi bond output). Every OTHER
-/// message value is computed by the D-054 floor machinery
+/// provenance-cited economics constant (§0.6, ratified D-062). Refunded at
+/// Kasia `messaging.store.ts:1240-1251` (`customAmount: kaspaToSompi("0.2")`
+/// on the acceptance response); the initial handshake defaults to the same
+/// 20,000,000 sompi at `:1086`, and the only two call sites that override it
+/// are that response and the 0-value self-stash — so every genuine Kasia
+/// handshake pays exactly this. Observed on-chain in tx `596eefed…`.
+///
+/// **Correction, 2026-08-13.** This doc-comment used to read "enforced in code
+/// at Kasia `messaging.store.ts:1456` (min-check)". That is FALSE, and it was
+/// load-bearing: a `consensus-auditor` run repeated it back as "Kasia enforces
+/// the min-check we omitted", and the founder acted on it. Read at
+/// `K-Kluster/Kasia@staging`, `:1450-1462` is a **sender-side balance
+/// precondition** — *"check if user has sufficient funds (0.2 KAS minimum)"*
+/// before a self-stash — not a check on what an incoming handshake paid.
+/// Kasia validates a received handshake on **alias shape and version only**
+/// (`conversation-manager-service.ts:698-714`); its block processor does
+/// compute `recipientOutputAmount` but never compares it to anything — the
+/// field reaches only a display row (`messaging.store.ts:1429`).
+///
+/// So **Kasia does not verify that the bond arrived, and neither did we.** We
+/// now do, at `transport_prepare_accept`: a deliberate divergence upward, taken
+/// because accepting SPENDS and an unverified refund makes defection pay
+/// (D-019). It is interop-safe precisely because their default is this same
+/// constant.
+///
+/// Every OTHER message value is computed by the D-054 floor machinery
 /// (`WalletEngine::minimum_sendable`) — never hardcoded (SOT §4).
 pub const HANDSHAKE_BOND_SOMPI: u64 = 20_000_000;
 
