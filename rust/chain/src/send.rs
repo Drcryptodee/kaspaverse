@@ -338,7 +338,14 @@ impl WalletEngine {
             1,        // sig_op_count — single-sig (§0.2)
             1,        // minimum_signatures
             payment,
-            None,                // fee_rate — normal priority
+            // fee_rate = None is the RELAY-FEE FLOOR, not a "normal" bucket:
+            // `calc_fee_rate` returns 0 for None (generator.rs:804-805), so the
+            // fee is `calc_minimum_transaction_fee_from_mass(compute_mass)`
+            // (generator.rs:649) — the cheapest a node will relay. NOTE the
+            // basis is COMPUTE mass; storage mass is excluded from the floor
+            // (check_transaction_standard.rs:127-146), so a dust-heavy send
+            // reports a mass far above what it pays for.
+            None,
             Fees::SenderPays(0), // priority fee 0; NOT Fees::None (generator.rs:384)
             payload,             // final-tx payload (P2.1 transport spine)
             None,                // multiplexer
