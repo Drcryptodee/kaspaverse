@@ -241,11 +241,21 @@ impl TransportStore {
     /// Find by a wire alias — matches EITHER side's alias, because inbound
     /// comm heads may carry ours or theirs depending on the sender's
     /// convention (the live app maps both, `aliasToConversation`).
+    /// Ties break by `conversation_id`, NOT by HashMap iteration order.
+    ///
+    /// Aliases are validated for shape only, so a hostile handshake may declare
+    /// one equal to an existing conversation's. `.values().find(..)` then routed
+    /// a genuine contact's messages to whichever record the hash order happened
+    /// to reach first — a different answer per process start, for the same
+    /// stored state (product-audit run 1, F2 adjacent). Deterministic misrouting
+    /// is still misrouting, but it is diagnosable, reproducible, and cannot
+    /// silently change under a rebuild.
     pub fn conversation_by_alias(&self, alias: &str) -> Option<&ConversationRecord> {
         self.conversations
             .records
             .values()
-            .find(|c| c.my_alias == alias || c.their_alias.as_deref() == Some(alias))
+            .filter(|c| c.my_alias == alias || c.their_alias.as_deref() == Some(alias))
+            .min_by(|a, b| a.conversation_id.cmp(&b.conversation_id))
     }
 
     /// Find the PendingOutbound conversation whose `my_alias` an acceptance

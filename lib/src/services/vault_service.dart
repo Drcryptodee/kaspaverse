@@ -272,9 +272,22 @@ class VaultService with WidgetsBindingObserver {
   Future<String> biometricStatus() async =>
       await ceremony.invokeMethod<String>('biometricStatus') ?? 'unknown';
 
-  /// A Path-A blob exists on this device (enrolment has been done).
+  /// Path A is enrolled **and usable right now**.
+  ///
+  /// Not "a blob file exists": a new fingerprint permanently invalidates the
+  /// Keystore key while leaving the blob on disk, and reporting that as enrolled
+  /// is what put a live-looking unlock button over a dead lane (run 1, F4).
   Future<bool> pathAEnrolled() async =>
       await ceremony.invokeMethod<bool>('pathAEnrolled') ?? false;
+
+  /// Path-A enrolment state with its reason: `none`, `ready`, `invalidated`.
+  ///
+  /// `invalidated` is the one that needs saying out loud — the user's fingerprint
+  /// stopped opening the wallet because they changed their fingerprints, which is
+  /// the design working (§0.5), but it looks exactly like a broken wallet unless
+  /// the app says so and offers the re-enrol.
+  Future<String> pathAState() async =>
+      await ceremony.invokeMethod<String>('pathAState') ?? 'none';
 
   /// Run the enrolment ceremony. Throws [PlatformException] with a stable code
   /// (`cancelled`, `lockout`, `vault`, `keystore`, `failed`) — never swallowed,

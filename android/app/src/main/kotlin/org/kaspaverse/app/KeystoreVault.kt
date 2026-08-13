@@ -2,6 +2,7 @@ package org.kaspaverse.app
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import androidx.biometric.BiometricManager
@@ -118,16 +119,73 @@ object KeystoreVault {
         else -> CODE_FAILED
     }
 
-    /** A Path-A blob has been enrolled on this device. */
-    fun isEnrolled(ctx: Context): Boolean = blobFile(ctx).exists()
+    /**
+     * A Path-A blob is enrolled **and the key it is sealed against still works**.
+     *
+     * File existence alone is not enrolment. A fingerprint enrolment change
+     * permanently invalidates the Keystore key (§0.5, deliberately) and leaves
+     * the blob untouched on disk, so the old `blobFile(ctx).exists()` kept
+     * reporting "On" for a lane that could no longer open anything — which is
+     * how Settings came to show a healthy control over a dead path and the
+     * unlock button came to stick on "Unlocking…" (product-audit run 1, F4).
+     */
+    fun isEnrolled(ctx: Context): Boolean = pathAState(ctx) == PATH_A_READY
+
+    // Path-A enrolment states, as a stable string Dart maps to copy. Three, not a
+    // bool, for the same reason [biometricStatus] is three: "never set up" and
+    // "set up, then invalidated by a new fingerprint" need different sentences
+    // and different remedies, and a bool cannot carry either.
+    const val PATH_A_NONE = "none"
+    const val PATH_A_READY = "ready"
+    const val PATH_A_INVALIDATED = "invalidated"
+
+    /**
+     * Whether Path A is usable, absent, or invalidated by an enrolment change.
+     *
+     * The probe is an ENCRYPT-mode `Cipher.init`, because that is where the
+     * platform actually raises [KeyPermanentlyInvalidatedException] —
+     * `KeyStore.getKey` provably cannot, it declares only `KeyStoreException`,
+     * `NoSuchAlgorithmException` and `UnrecoverableKeyException`. The key is
+     * per-use-authenticated with no validity window, so `init` succeeds without
+     * a prompt: this costs a Keystore round-trip and shows the user nothing.
+     */
+    fun pathAState(ctx: Context): String {
+        if (!blobFile(ctx).exists()) return PATH_A_NONE
+        val key = try {
+            loadKey() ?: return PATH_A_NONE
+        } catch (e: Exception) {
+            return PATH_A_NONE
+        }
+        return try {
+            probeCipher.init(Cipher.ENCRYPT_MODE, key)
+            PATH_A_READY
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            PATH_A_INVALIDATED
+        } catch (e: Exception) {
+            // Some other Keystore fault — we cannot claim the lane works.
+            PATH_A_NONE
+        }
+    }
+
+    /**
+     * ONE reusable Cipher for [pathAState]'s probe, never a fresh instance.
+     *
+     * `Cipher.init` on a Keystore key BEGINS a keystore operation, and this probe
+     * has no `doFinal` to end it — a fresh Cipher per call would leave one
+     * dangling per probe, released only by its finalizer. Keystore operation
+     * slots are bounded (few on StrongBox) and the keystore PRUNES when they run
+     * out, with an in-flight `BiometricPrompt.CryptoObject` a prime candidate:
+     * "fingerprint accepted, then the unseal failed" — the dead-lane symptom F4
+     * exists to end, re-created by F4's own fix. Re-initing one instance aborts
+     * its predecessor, so outstanding probe operations stay bounded at one.
+     * (`isEnrolled` delegates here, so this runs on every locked-screen probe and
+     * on every Settings resume.) Main-thread only, like every MethodChannel
+     * handler that reaches it.
+     */
+    private val probeCipher: Cipher by lazy { Cipher.getInstance(TRANSFORM) }
 
     /** Forget the Path-A enrollment (key + blob). Path B remains the recovery. */
-    fun clearEnrollment(ctx: Context) {
-        runCatching {
-            KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(KEY_ALIAS)
-        }
-        blobFile(ctx).delete()
-    }
+    fun clearEnrollment(ctx: Context) = deleteKeyAndBlob(ctx)
 
     /**
      * Enroll Path A: prompt for biometric, then seal the live seed (pulled from
@@ -135,13 +193,17 @@ object KeystoreVault {
      * be unlocked (created via Path B) so the seed export succeeds.
      */
     fun enroll(activity: FragmentActivity, onResult: (Boolean, Failure?) -> Unit) {
-        val key = try {
-            getOrCreateKey()
+        // `Cipher.init` is INSIDE the try. It — not `KeyStore.getKey` — is the
+        // call that raises [KeyPermanentlyInvalidatedException], and sitting
+        // outside every try it threw straight through the MethodChannel handler,
+        // where Flutter's DartMessenger swallows it and simply never replies:
+        // the Dart future hung forever and the button stuck (run 1, F4).
+        val cipher = try {
+            encryptCipher(activity)
         } catch (e: Exception) {
             onResult(false, Failure(CODE_KEYSTORE, "keystore key creation failed: ${e.message}"))
             return
         }
-        val cipher = Cipher.getInstance(TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, key) }
         authenticate(activity, cipher, "Set up biometric unlock") { authedCipher, failure ->
             if (authedCipher == null) {
                 onResult(false, failure ?: Failure(CODE_FAILED, "authentication failed"))
@@ -193,17 +255,33 @@ object KeystoreVault {
                 return
             }
         } catch (e: Exception) {
-            // KeyPermanentlyInvalidatedException lands here: enrollment changed.
-            // §0.5 makes that deliberate (a newly enrolled fingerprint must not
-            // inherit the old key), so it is a re-enrol prompt, not a fault.
+            // NOT the invalidation path — `KeyStore.getKey` cannot raise
+            // KeyPermanentlyInvalidatedException (it declares only
+            // KeyStoreException / NoSuchAlgorithmException /
+            // UnrecoverableKeyException, and the invalidation exception is a
+            // CHECKED InvalidKeyException). The old comment here claimed
+            // otherwise, which is why the real throw site went unguarded for a
+            // whole phase. Invalidation is caught at the `init` below.
+            onResult(false, Failure(CODE_KEYSTORE, "keystore key unreadable: ${e.message}"))
+            return
+        }
+        val cipher = try {
+            Cipher.getInstance(TRANSFORM).apply {
+                init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            // Enrolment changed. §0.5 makes that deliberate (a newly enrolled
+            // fingerprint must not inherit the old key), so it is a re-enrol
+            // prompt, not a fault — and the seed is NOT lost: Path B still holds
+            // the vault, and "Set up again" now rebuilds the key.
             onResult(
                 false,
                 Failure(CODE_KEY_INVALIDATED, "keystore key invalidated: ${e.message}")
             )
             return
-        }
-        val cipher = Cipher.getInstance(TRANSFORM).apply {
-            init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+        } catch (e: Exception) {
+            onResult(false, Failure(CODE_KEYSTORE, "cipher init failed: ${e.message}"))
+            return
         }
         authenticate(activity, cipher, "Unlock your wallet") { authedCipher, failure ->
             if (authedCipher == null) {
@@ -230,9 +308,59 @@ object KeystoreVault {
         return ks.getKey(KEY_ALIAS, null) as? SecretKey
     }
 
-    private fun getOrCreateKey(): SecretKey {
-        loadKey()?.let { return it }
-        return createKey(strongBox = true)
+    /**
+     * An ENCRYPT-mode cipher under a key that is proven live, replacing the key
+     * first if an enrolment change has killed it.
+     *
+     * The old `getOrCreateKey()` returned whatever `loadKey()` found, so an
+     * invalidated key was reused forever: Settings' "Set up again" — the one
+     * remedy the app offers for this exact state — re-entered the same dead
+     * path, and only the destructive "Turn off" could repair it (run 1, F4).
+     * Re-enrolment is precisely the moment a stale key SHOULD be replaced; the
+     * blob it sealed is about to be overwritten anyway, and Path B holds the
+     * vault throughout, so nothing is at risk in the swap.
+     */
+    private fun encryptCipher(ctx: Context): Cipher {
+        val cipher = Cipher.getInstance(TRANSFORM)
+        val existing = try {
+            loadKey()
+        } catch (e: Exception) {
+            null
+        }
+        if (existing != null) {
+            try {
+                cipher.init(Cipher.ENCRYPT_MODE, existing)
+                return cipher // the live-key path: nothing is discarded
+            } catch (e: KeyPermanentlyInvalidatedException) {
+                android.util.Log.i(
+                    "KeystoreVault",
+                    "key invalidated by an enrolment change — recreating"
+                )
+            }
+        }
+        // We are about to mint a key the existing blob was NOT sealed under, so
+        // the pair dies together. Leaving the blob would desync it from the key:
+        // `pathAState` would probe the healthy NEW key, report READY, and offer a
+        // fingerprint button that authenticates fine and then fails the GCM tag —
+        // the exact "healthy control over a dead lane" F4 exists to end, in a
+        // window the pre-fix code did not have (it never deleted a key at all).
+        // Every abort between here and `writeBlob` lands in that window: a
+        // cancelled prompt, the §0.11 lifecycle race, a failed seal.
+        //
+        // Nothing is lost. The blob is provably unopenable the moment its key is
+        // gone, and Path B holds the vault throughout. Reads as "Off" until a
+        // re-enrolment writes a fresh matched pair — a value the code could not
+        // have written coherently must read as absent, never as healthy (L86).
+        deleteKeyAndBlob(ctx)
+        cipher.init(Cipher.ENCRYPT_MODE, createKey(strongBox = true))
+        return cipher
+    }
+
+    private fun deleteKeyAndBlob(ctx: Context) {
+        runCatching {
+            KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(KEY_ALIAS)
+        }
+        blobFile(ctx).delete()
     }
 
     private fun createKey(strongBox: Boolean): SecretKey {

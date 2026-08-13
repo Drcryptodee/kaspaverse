@@ -84,30 +84,51 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
       _unlocking = true;
       _message = null;
     });
+    var succeeded = false;
     try {
       final ok = await unlock();
-      // On success the status stream flips to unlocked and AppShell swaps this
-      // surface for home — so we stay in the "unlocking" state until then and
-      // never flash back to idle (P1.3 watch-out). Only a non-success needs a
-      // local reset.
+      succeeded = ok;
       if (!ok && mounted) {
-        setState(() {
-          _unlocking = false;
-          _message = "Unlock didn't complete. Your funds are safe — try again.";
-        });
+        setState(
+          () => _message =
+              "Unlock didn't complete. Your funds are safe — try again.",
+        );
       }
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() {
-        _unlocking = false;
         // Tapping "Use passphrase" on the system prompt is a CHOICE, and on this
         // screen it is the common one — reporting it as "unavailable right now"
         // told the user something false about their own deliberate action every
         // single time. Same contract as create/restore/settings.
-        _message = e.code == 'cancelled'
-            ? null
-            : 'Unlock is unavailable right now. Your funds are safe.';
+        _message = e.code == 'cancelled' ? null : unlockFailureCopy(e.code);
+        // A key invalidated by a new fingerprint is not a transient failure —
+        // this lane is gone until re-enrolment, so stop offering it and put the
+        // passphrase where the finger already is.
+        if (e.code == biometricKeyInvalidated) _biometricReady = false;
       });
+    } catch (_) {
+      // NOT `on PlatformException` alone. A MissingPluginException is not one,
+      // and neither is a channel reply that never arrives at all — which is
+      // exactly what an unguarded platform throw produced, because Flutter's
+      // DartMessenger swallows it and simply never replies. Uncaught, that left
+      // `_unlocking` true forever: a disabled button reading "Unlocking…" on the
+      // one screen standing between the user and their funds (run 1, F4). Same
+      // reasoning as `_probe()` above — solved one method up, never carried down.
+      if (!mounted) return;
+      setState(
+        () =>
+            _message = 'Unlock is unavailable right now. Your funds are safe.',
+      );
+    } finally {
+      // The ONE place `_unlocking` is released, so no future branch can forget.
+      // On success we deliberately stay busy: the status stream flips and
+      // AppShell swaps this surface for home, and releasing here would flash the
+      // button back to idle first (P1.3 watch-out). Every other path releases —
+      // including the ones that used to throw straight past this method.
+      if (!succeeded && mounted) {
+        setState(() => _unlocking = false);
+      }
     }
   }
 
@@ -118,6 +139,69 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
     Navigator.of(
       context,
     ).push(KvPageRoute<void>(builder: (_) => const PassphraseUnlockScreen()));
+  }
+
+  /// The recovery a user holding their 12 words already has, and which this
+  /// screen used to hide from them.
+  ///
+  /// `restore_and_persist` refuses while a sealed blob exists, and this surface
+  /// offers only "unlock" — so a user who has lost the passphrase but kept the
+  /// words was staring at a screen that implied there was nothing left to do.
+  /// There was: the words are the wallet, the passphrase only seals the copy on
+  /// this phone. The app does not clear its own storage here — a wipe reachable
+  /// from the locked screen is a wipe an attacker holding the phone can reach —
+  /// so this names the Android-side path and the one precondition that matters
+  /// (run 1, F6).
+  void _openLostPassphrase() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        // Scrolls as well as being scroll-controlled — the flag lifts the 9/16
+        // cap, it does not make a fixed Column fit. ~400 characters plus a
+        // button clears 1.3× on a 360×640 viewport by a margin thinner than the
+        // estimate, and this is the app's ONLY lost-passphrase instruction.
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(KvSpace.gutter),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Lost your passphrase?',
+                  style: Theme.of(sheetContext).textTheme.titleMedium,
+                ),
+                const SizedBox(height: KvSpace.s),
+                Text(
+                  'Your 12 recovery words are the wallet. The passphrase only '
+                  'seals the copy stored on this phone, so if you still have the '
+                  'words your funds are reachable.\n\n'
+                  'Remove this phone’s copy in Android Settings → Apps → '
+                  'KaspaVerse → Storage → Clear storage, then open the app and '
+                  'choose “Restore existing wallet”.\n\n'
+                  'Only do this with the words in front of you. Without them, '
+                  'clearing storage removes the wallet for good.',
+                  style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(
+                    color: KvColor.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: KvSpace.l),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(sheetContext).pop(),
+                    child: const Text('Got it'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -165,6 +249,11 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
                     textAlign: TextAlign.center,
                   ),
                 ],
+                const SizedBox(height: KvSpace.s),
+                TextButton(
+                  onPressed: _openLostPassphrase,
+                  child: const Text('Lost your passphrase?'),
+                ),
                 if (widget.debugFooter != null) ...[
                   const SizedBox(height: KvSpace.xl),
                   widget.debugFooter!,

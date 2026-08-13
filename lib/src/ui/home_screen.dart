@@ -606,7 +606,12 @@ class _BalancePanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Total balance',
+            // NOT "Total balance". The figure below is the MATURE balance, and
+            // the pending line sits directly under it — so the label was wrong
+            // by exactly the amount printed beneath it, and disagreed with the
+            // send screen, which calls the identical value "Available"
+            // (product-audit run 1, F9). One value, one name, both surfaces.
+            'Available balance',
             style: theme.textTheme.labelSmall?.copyWith(
               color: KvColor.textSecondary,
             ),

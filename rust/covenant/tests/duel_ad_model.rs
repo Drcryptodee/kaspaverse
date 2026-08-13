@@ -98,6 +98,14 @@ const ROUNDS: u8 = 10; // regulation length
 /// P1's asserted ceiling: phase completion (≤1 window) + three claim windows.
 const EXIT_WINDOW_BOUND: u32 = 4;
 
+// The published census (SPEC.md, STATES.md, AUDIT.md quote these). A figure a
+// document publishes and the gate only PRINTS is a figure that can drift
+// silently — `println!` is not a proof (product-audit run 1, F16).
+const N_REACHABLE: usize = 31_098;
+const N_TERMINALS: usize = 432;
+/// Measured P1 worst case: (windows, transitions). Published as 3 + 7.
+const WORST_SOLE_EXIT: (u32, u32) = (3, 7);
+
 // ---------------------------------------------------------------------------
 // The value dimension (COVENANT C6 — D-127/D-128).
 //
@@ -877,9 +885,14 @@ fn abandonment_terminal(mut s: S, p: Player) -> Terminal {
 fn the_duel_state_space_satisfies_the_inv6_properties() {
     let space = enumerate();
     let n_reach = space.reachable.len();
-    assert!(
-        n_reach > 1_000,
-        "the walk must actually enumerate ({n_reach})"
+    assert_eq!(
+        n_reach, N_REACHABLE,
+        "reachable-state census moved. This number is PUBLISHED (SPEC.md, \
+         STATES.md, AUDIT.md), and until now it was only ever `println!`ed — \
+         nothing compared it, so it could drift silently while the gate stayed \
+         green (product-audit run 1, F16). If the model genuinely changed, \
+         update the constant AND every document that quotes it, in the same \
+         commit."
     );
 
     let mut max_exit: (u32, u32) = (0, 0);
@@ -1150,6 +1163,24 @@ fn the_duel_state_space_satisfies_the_inv6_properties() {
             "terminal cause {cause:?} unreachable"
         );
     }
+
+    assert_eq!(
+        space.terminals.len(),
+        N_TERMINALS,
+        "terminal census moved — same law as the reachable count (F16)"
+    );
+    // The published figure is 3 windows + 7 transitions, in four documents. The
+    // only thing asserted was `cost.0 <= EXIT_WINDOW_BOUND`, and that bound is
+    // 4 — so a real degradation from 3 windows to 4 was GREEN BY CONSTRUCTION,
+    // which is the whole point of a worst-case census (F16). Pin the measured
+    // worst case, and keep the ceiling as the per-state guard it already is.
+    assert_eq!(
+        max_exit, WORST_SOLE_EXIT,
+        "P1 worst sole exit moved. The ceiling ({EXIT_WINDOW_BOUND}) would still \
+         admit this; the published figure would not. A player needing a fourth \
+         window to leave unilaterally is an INV-6 regression, not a rounding \
+         difference — do not relax this without a DECISION_LOG entry."
+    );
 
     println!(
         "duel_ad model: {} reachable states, {} distinct terminals",

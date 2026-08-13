@@ -6,6 +6,7 @@ import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/transport.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
+import 'package:kaspaverse/src/ui/error_text.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
@@ -36,6 +37,7 @@ ThreadMessageDto message(
   bool readable = true,
   FrameDto? frame,
   bool tombstoned = false,
+  String provenance = 'node',
 }) => ThreadMessageDto(
   txid: txid,
   kind: kind,
@@ -45,6 +47,7 @@ ThreadMessageDto message(
   readable: readable,
   frame: frame,
   tombstoned: tombstoned,
+  provenance: provenance,
 );
 
 FrameDto frameDto({
@@ -549,6 +552,73 @@ void main() {
       // An unopenable envelope is shown honestly, never hidden.
       expect(find.text('Unreadable message'), findsOneWidget);
     });
+
+    // F3. The store has recorded provenance since V5, but it never crossed the
+    // FFI — so a row an indexer supplied rendered pixel-identically to one our
+    // own node saw, under a disclosure promising the archive "can never fake a
+    // message". It can: the app hands it the address messages are sealed to.
+    testWidgets('an archive-supplied row says so; a node row stays clean', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('tx1', text: 'from your own node'),
+        message(
+          'tx2',
+          text: 'handed over by an archive',
+          provenance: 'archive',
+        ),
+      ]);
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      expect(find.text('from your own node'), findsOneWidget);
+      expect(find.text('handed over by an archive'), findsOneWidget);
+      expect(
+        find.text('From an archive — not seen by your own node'),
+        findsOneWidget,
+        reason: 'exactly the archive row carries the mark, not both',
+      );
+    });
+
+    // The row class that matters MOST. The fill sweeps handshakes-by-receiver
+    // and folds each hit as a FillSourced row, and a handshake row CREATES a
+    // conversation — so an archive can manufacture a whole fake contact, not
+    // merely append to an existing thread. The first cut of this fix rendered
+    // the badge on comm rows only, which left exactly that unmarked while the
+    // fill disclosure claimed everything archive-supplied was labelled.
+    testWidgets('an archive-supplied HANDSHAKE row is marked too', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([message('tx0', kind: 'handshake', provenance: 'archive')]);
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      expect(find.text('Handshake received'), findsOneWidget);
+      expect(
+        find.text('From an archive — not seen by your own node'),
+        findsOneWidget,
+      );
+    });
+
+    // Pre-V5 rows predate provenance entirely. Marking them "archive" would say
+    // something false about rows that were almost certainly node-scanned.
+    testWidgets(
+      'a pre-provenance row is not accused of being archive-sourced',
+      (tester) async {
+        MessagingService.threadSinceFn = (_, _) async => delta([
+          message('tx1', text: 'written before V5', provenance: 'unknown'),
+        ]);
+        await tester.pumpWidget(screen());
+        await tester.pumpAndSettle();
+
+        expect(find.text('written before V5'), findsOneWidget);
+        expect(
+          find.text('From an archive — not seen by your own node'),
+          findsNothing,
+        );
+      },
+    );
 
     testWidgets('a locked vault shows the locked state, not content', (
       tester,

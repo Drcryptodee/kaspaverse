@@ -3,9 +3,9 @@
 // Receives the timelines that integration_test/perf_baseline_test.dart traced
 // on-device and writes `<key>.timeline.json` + `<key>.timeline_summary.json`
 // under build/perf_baseline/ — the machine-readable artifacts the baseline
-// table in docs/PERFORMANCE_BUDGET.md cites.
+// table in the internal performance budget cites.
 //
-// Run (see docs/PERF_HARNESS_RECIPE.md):
+// Run (the internal perf-harness recipe carries the full walk-through):
 //   flutter drive --profile \
 //     --driver=test_driver/perf_driver.dart \
 //     --target=integration_test/perf_baseline_test.dart \

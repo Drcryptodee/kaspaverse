@@ -117,6 +117,19 @@ pub struct ThreadMessageDto {
     /// displaced and not re-accepted within the observed window — the row is
     /// a ghost (styled affordance lands in V2; the flag is the truth surface).
     pub tombstoned: bool,
+    /// Where this row came from: `node` (our node's own scan — chain truth),
+    /// `archive` (a history-fill row from an indexer, D-074 — an unverifiable
+    /// txid and timestamp), `own` (self-authored at commit), `unknown`
+    /// (written before V5 recorded provenance).
+    ///
+    /// The store has recorded this since V5; it did not cross the bridge, so an
+    /// archive-supplied row rendered byte-identically to node truth and the
+    /// fill's disclosure promised a guarantee the wire cannot make
+    /// (product-audit run 1, F3). A `String` rather than the chain crate's
+    /// `RowSource`, matching [`kind`](Self::kind): the enum is a store-layer
+    /// type with Borsh positional law on it, and widening its blast radius to
+    /// the FFI buys nothing the label does not.
+    pub provenance: String,
 }
 
 /// The five acceptance states a chip can wear (V2). Field-less — FRB 2.12
@@ -1687,6 +1700,28 @@ pub async fn transport_prepare_accept(
             .handshake_txid
             .clone()
             .ok_or_else(|| AppError::msg("handshake transaction unknown"))?;
+        // An invitation our own node has never seen cannot be accepted, because
+        // accepting SPENDS: it returns the 0.2 KAS bond to an address resolved
+        // from the claimed handshake tx. F3's provenance badge does not reach
+        // this decision — a `pending_in` card has `onTap: null`, so the thread
+        // (and the badge) is unreachable until AFTER acceptance, which puts the
+        // honesty marker after the money moves in precisely the case it exists
+        // for: an archive that manufactured a whole contact (consensus-auditor,
+        // run-1 fix wave re-verify).
+        //
+        // A wait, not a dead end (INV-6): the node-override lane flips the row
+        // to `NodeScanned` the moment our own scan reaches that txid, and this
+        // clears itself.
+        if matches!(
+            store.message(&txid).map(|m| m.provenance),
+            Some(RowSource::FillSourced)
+        ) {
+            return Err(AppError::msg(
+                "this invitation came from a history archive and your own node has \
+                 not seen it yet — accepting would return the bond on an unverified \
+                 claim. It will clear once your node catches up.",
+            ));
+        }
         (
             their_alias,
             txid,
@@ -2111,6 +2146,7 @@ fn thread_row(
     tombstoned: bool,
 ) -> Result<ThreadMessageDto, AppError> {
     let outbound = record.direction == MessageDirection::Outbound;
+    let provenance = row_source_label(record.provenance);
     match record.kind {
         StoredKind::Handshake | StoredKind::Legacy => Ok(ThreadMessageDto {
             txid: record.txid,
@@ -2121,6 +2157,7 @@ fn thread_row(
             readable: true,
             frame: None,
             tombstoned,
+            provenance,
         }),
         StoredKind::Comm => {
             let (text, frame, readable) = match Envelope::from_bytes(&record.envelope) {
@@ -2155,9 +2192,24 @@ fn thread_row(
                 readable,
                 frame,
                 tombstoned,
+                provenance,
             })
         }
     }
+}
+
+/// The stable wire label for a stored row's provenance.
+///
+/// One mapping, here, so a store-layer variant rename cannot silently change
+/// what the glass says about where a message came from.
+fn row_source_label(source: RowSource) -> String {
+    match source {
+        RowSource::NodeScanned => "node",
+        RowSource::FillSourced => "archive",
+        RowSource::Own => "own",
+        RowSource::Unknown => "unknown",
+    }
+    .to_string()
 }
 
 /// Mirror the chain crate's `TxStatus` for display (nothing recomputed).
@@ -2604,5 +2656,18 @@ mod tests {
                 "content-adjacent log line: {line}"
             );
         }
+    }
+
+    /// The provenance labels are a STRINGLY-TYPED SEAM: Rust emits them,
+    /// `thread_screen.dart` compares against the literal `'archive'` to draw the
+    /// badge. Nothing else binds the two, so a rename here would delete the
+    /// badge silently and the gate would stay green — the exact failure mode F16
+    /// exists to kill, at the seam F3's fix depends on. Pin all four.
+    #[test]
+    fn row_source_labels_are_the_wire_contract() {
+        assert_eq!(row_source_label(RowSource::NodeScanned), "node");
+        assert_eq!(row_source_label(RowSource::FillSourced), "archive");
+        assert_eq!(row_source_label(RowSource::Own), "own");
+        assert_eq!(row_source_label(RowSource::Unknown), "unknown");
     }
 }

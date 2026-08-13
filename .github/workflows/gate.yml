@@ -56,6 +56,18 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
+      # D-024: local and CI compile with the same tools. The gate gained a
+      # `kotlin compile` lane in the run-1 fix wave, and until now nothing in
+      # this workflow provisioned a JDK at all — CI would have inherited the
+      # runner image's default while the founder's machine runs 21, so the one
+      # toolchain the new lane depends on was the one nobody pinned
+      # (dependency-steward, run-1 fix wave). `jvmTarget = 17` fixes the
+      # bytecode target, not the compiler.
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Reclaim runner disk
         # The image ships several toolchains this gate never touches. On a
         # warm cache their bulk is harmless; on a COLD one the build needs

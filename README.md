@@ -81,9 +81,10 @@ the project's engineering record — which is private (see [CONTRIBUTING.md](CON
   appears. This is known, measured, and deliberately not yet fixed: the reliability pass
   chose to fix *correctness* of the link first, and the remaining cost is latency on bad
   radio, not lost funds or wrong balances. Warm reconnects are seconds.
-- **Restore scans a fixed 30-address window per chain** in the alpha. A wallet that used
-  more than 30 receive addresses elsewhere can show an incomplete balance after restore —
-  window growth is a recorded roadmap item. (Wallets created here stay inside the window.)
+- **Restore discovers the address window from the chain** (balance-driven, 256 automatic /
+  2048 via a manual deep scan). The fixed 30-address window is only the fallback when
+  discovery cannot complete — a restored wallet that used more addresses elsewhere is
+  found, not truncated.
 - **Arm64-only, physical device.** x86_64 Android emulators can't run upstream `kaspa-hashes`
   (no x86_64-android assembly path at the pinned revision) — use a real device.
 - **Receive uses a single static address** for the alpha; next-unused address rotation is
@@ -97,9 +98,10 @@ Android-first, **arm64-only**, physical device:
 flutter pub get
 tools/preflight.sh                                        # orientation
 flutter build apk --debug --target-platform android-arm64 # then `flutter install`
-tools/gate.sh   # the proof gate, all eleven checks: fmt · clippy · tests · cargo-deny ·
+tools/gate.sh   # the proof gate, all fourteen checks: fmt · clippy · tests · cargo-deny ·
                 # arm64 cross-compile · dart format · analyze · flutter test ·
-                # codegen-drift · repo hygiene · record boundary
+                # kotlin compile · codegen-drift · toolchain pins · repo hygiene ·
+                # record boundary · record pointers
 ```
 
 Full toolchain + the contributor workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -22,6 +22,29 @@ const String biometricReady = 'ready';
 /// enrolment offer simply never appeared and nothing explained why.
 const String biometricNoneEnrolled = 'none_enrolled';
 
+/// Path-A enrolment states (`KeystoreVault.pathAState`).
+///
+/// [pathAInvalidated] is the state that has to be said out loud. The user
+/// changed their fingerprints, Android permanently invalidated the key the seed
+/// was sealed against — which is §0.5 working exactly as designed — and from the
+/// glass it is indistinguishable from a broken wallet. Reported as a bare "not
+/// enrolled" it explains nothing; reported as "On" (the pre-fix behaviour) it
+/// put a live-looking button over a lane that could never open again (run 1, F4).
+const String pathANone = 'none';
+const String pathAReady = 'ready';
+const String pathAInvalidated = 'invalidated';
+
+/// What to say when the fingerprint lane has been invalidated by a new
+/// enrolment, on the locked surface and in Settings.
+///
+/// Ends where every custody message must: what is still true about the money.
+/// Nothing is lost — Path B is the vault's real key and was never touched.
+const String biometricInvalidatedCopy =
+    'Your fingerprints changed, so this phone locked the wallet out of the '
+    'fingerprint key — that is the wallet protecting you, not a fault. Unlock '
+    'with your passphrase, then turn fingerprint unlock on again in Settings. '
+    'Your funds are safe.';
+
 /// Why Path A is unavailable, in the user's terms, with the action where there
 /// is one.
 String biometricUnavailableCopy(String status) => switch (status) {
@@ -53,6 +76,10 @@ String biometricUnavailableCopy(String status) => switch (status) {
 String enrollFailureCopy(String code) => switch (code) {
   'lockout' =>
     'Too many attempts. Wait a moment and try again — your funds are safe.',
+  // Should no longer reach here — enrolment now deletes and rebuilds an
+  // invalidated key rather than reusing it — but a code with no consumer is a
+  // silent failure by construction, so it keeps a sentence of its own.
+  biometricKeyInvalidated => biometricInvalidatedCopy,
   // The lifecycle race, said plainly: the vault re-locked while the system
   // prompt held the foreground, so there was no seed to seal. Swallowed, this
   // was the "I tapped it and nothing happened" report.
@@ -67,6 +94,36 @@ String enrollFailureCopy(String code) => switch (code) {
         'on any time in Settings.',
 };
 
+/// The ceremony error code for "a new fingerprint invalidated the key"
+/// (`KeystoreVault.CODE_KEY_INVALIDATED`).
+const String biometricKeyInvalidated = 'key_invalidated';
+
+/// What to say when a Path-A **unlock** did not complete.
+///
+/// Separate from [enrollFailureCopy] because the stakes read differently: the
+/// user is standing in front of a locked wallet, so every arm has to end with
+/// the way in that still works.
+String unlockFailureCopy(String code) => switch (code) {
+  biometricKeyInvalidated => biometricInvalidatedCopy,
+  'lockout' =>
+    'Too many fingerprint attempts. Wait a moment, or unlock with your '
+        'passphrase. Your funds are safe.',
+  'no_enrollment' =>
+    'Fingerprint unlock is not set up on this phone any more. Unlock with your '
+        'passphrase, then turn it on again in Settings.',
+  // `vault` is the code EVERY unseal/JNI failure on this lane carries, and
+  // `keystore` every hardware refusal. Both fell through to the generic arm,
+  // which is checklist 15 applied to one code and not carried across — the
+  // commonest real failure came out as the most content-free sentence.
+  'vault' =>
+    "The wallet couldn't open with your fingerprint. Unlock with your "
+        'passphrase — that always works, and your funds are safe.',
+  'keystore' =>
+    "This phone's secure hardware refused the key. Unlock with your passphrase "
+        'and turn fingerprint unlock on again in Settings.',
+  _ => 'Unlock is unavailable right now. Your funds are safe.',
+};
+
 /// The trailing label for a biometric row: on, off, or the reason it cannot be.
 ///
 /// The unknown arm is an em dash, not "Unavailable". DS-1 gives three honest
@@ -74,8 +131,18 @@ String enrollFailureCopy(String code) => switch (code) {
 /// platform fact the app has just admitted it cannot determine, and would
 /// contradict [biometricUnavailableCopy], which says "the wallet can't tell" for
 /// the same status one tap away (ux-auditor, Track 2).
-String biometricStateLabel(String status, bool enrolled) => switch (status) {
-  biometricReady => enrolled ? 'On' : 'Off',
+String biometricStateLabel(
+  String status,
+  String pathAState,
+) => switch (status) {
+  // "Off" is a choice the user made; "Needs setting up again" is a state the
+  // phone imposed on them. Collapsing the second into the first is what let a
+  // dead fingerprint lane keep reporting itself as a working control (run 1, F4).
+  biometricReady => switch (pathAState) {
+    pathAReady => 'On',
+    pathAInvalidated => 'Needs setting up again',
+    _ => 'Off',
+  },
   biometricNoneEnrolled => 'No fingerprint on this phone',
   'no_hardware' => 'Not supported',
   'unavailable' => 'Unavailable right now',

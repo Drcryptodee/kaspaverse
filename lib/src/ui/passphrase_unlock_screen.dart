@@ -6,6 +6,7 @@ import 'secret/masked_dots.dart';
 import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
+import 'error_text.dart';
 import 'theme/tokens.dart';
 
 /// The §0.6 passphrase unlock screen (P1.4 deliverable 3) — the Path-B lane the
@@ -74,8 +75,11 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
   /// and auth failure plainly; surface those, else a neutral fallback. Never
   /// alarm — the copy reassures, matching the §3 rule that red means fund risk.
   String _calmError(Object e) {
-    final msg = e.toString();
-    if (msg.contains('locked out')) {
+    // Matched on the EXTRACTED message. Against an FRB-decoded AppError,
+    // `e.toString()` is the literal "Instance of 'AppError'", so this branch
+    // never fired and a rate-limited user was told their passphrase was wrong
+    // instead of that they were locked out (run 1, F8).
+    if (isLockedOut(e)) {
       return 'Too many attempts. Wait a moment, then try again — your funds are safe.';
     }
     return 'That passphrase did not unlock the vault. Your funds are safe — try again.';

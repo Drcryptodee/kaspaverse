@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Executed session orientation (governance upgrade U5): the new session RUNS this and
-# diffs the output against the expected-state block in docs/sessions/NEXT_SESSION.md.
+# diffs the output against the expected-state block in the next-session baton.
+# The marked lines below reach into the ops-mirror record on purpose: this script
+# IS the internal session ritual, and every read degrades when the tree is
+# absent. The marker is PER LINE (the gate's filter is line-scoped) — a new line
+# here naming an internal file needs its own. gate-allow:internal-path
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 echo "═════════ PREFLIGHT — kaspa-verse ═════════"
@@ -15,12 +19,12 @@ git log --oneline -5 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 # "diff against NEXT_SESSION.md") against files that are not there.
 HAVE_DOCS=0; [ -d docs ] && HAVE_DOCS=1
 if [ "$HAVE_DOCS" = 1 ]; then
-  echo "• active phase: $(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null || echo 'NONE — check PHASE_INDEX')"
+  echo "• active phase: $(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null || echo 'NONE — check PHASE_INDEX')" # gate-allow:internal-path
 else
   echo "• active phase: (docs/ not present — engineering record is ops-mirror-only, D-102)"
 fi
 # Reasoning playbook (ops-layer; absent in public clones — conditional on purpose).
-[ -f .claude/playbook/INDEX.md ] && echo "• playbook: $(grep -c '^- PB-' .claude/playbook/INDEX.md) reasoning patterns — read .claude/playbook/INDEX.md before building"
+[ -f .claude/playbook/INDEX.md ] && echo "• playbook: $(grep -c '^- PB-' .claude/playbook/INDEX.md) reasoning patterns — read .claude/playbook/INDEX.md before building" # gate-allow:internal-path
 echo "• rust workspace: $([ -f rust/Cargo.toml ] && echo present || echo absent)"
 if [ -f rust/Cargo.toml ]; then
   echo "    rusty-kaspa pin: $(grep -m1 -E 'rusty-kaspa|kaspa-wrpc-client' rust/Cargo.toml rust/*/Cargo.toml 2>/dev/null | head -1 || echo 'not found')"
@@ -71,7 +75,7 @@ if [ "$HAVE_DOCS" = 1 ]; then
 fi
 echo "═══════════════════════════════════════════"
 if [ "$HAVE_DOCS" = 1 ]; then
-  echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md"
+  echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md" # gate-allow:internal-path
 else
   echo "Public clone: code, CI and tooling only. Build with tools/gate.sh; see CONTRIBUTING.md."
 fi

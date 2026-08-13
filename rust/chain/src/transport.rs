@@ -1,7 +1,7 @@
 //! L1 payload transport — the `ciph_msg:` wire scan (receive) and wire
 //! composition (send). P2.1 payload spine, per the ratified P2 §0 (D-062).
 //!
-//! Wire format authority: `docs/research/kasia_messaging.md` §2 (Gate-R-verified
+//! Wire format authority: the Kasia-messaging research record §2 (Gate-R-verified
 //! 2026-07-03 against Kasia @ `acd3cf65`, its indexer @ `fd1ba0c`, and one real
 //! on-chain message). Namespace `ciph_msg:1:` with kinds `handshake` / `comm` /
 //! `payment` / `self_stash` / `bcast`, plus a legacy unversioned form.

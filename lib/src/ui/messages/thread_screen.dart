@@ -4,11 +4,11 @@ import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
 import '../send/confirm_send_flow.dart';
+import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_loader.dart';
 import '../widgets/tx_status_chip.dart';
-import 'contacts_screen.dart' show displayError;
 
 /// One conversation thread (P2.3 plain view + P2.4 `kv:1:` game frames +
 /// V2 incremental pulls, status chips and the reorg ghost).
@@ -485,68 +485,152 @@ class _MessageRow extends StatelessWidget {
 
     if (m.kind == 'handshake') {
       // System row: the establishment/acceptance handshake — no body.
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
-        child: Center(
-          child: Text(
-            m.outbound ? 'Handshake sent' : 'Handshake received',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: KvColor.textTertiary,
+      //
+      // This row gets the badge too, and it is the one that matters MOST: the
+      // fill sweeps `handshakes/by-receiver` per receive address and folds each
+      // result as a FillSourced row, which creates a conversation. So an archive
+      // can manufacture a whole fake CONTACT, not merely append to a thread —
+      // and an unmarked "Handshake received" is how that would look
+      // (consensus-auditor, this wave).
+      return _withProvenance(
+        theme,
+        m,
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
+          child: Center(
+            child: Text(
+              m.outbound ? 'Handshake sent' : 'Handshake received',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: KvColor.textTertiary,
+              ),
             ),
           ),
         ),
+        align: CrossAxisAlignment.center,
       );
     }
 
     final frame = m.frame;
     if (frame != null) {
       if (frame.kind == 'challenge') {
-        return _ChallengeCard(
-          frame: frame,
-          outbound: m.outbound,
-          declined: declined,
-          onAccept: onAccept,
-          onDecline: onDecline,
+        return _withProvenance(
+          theme,
+          m,
+          _ChallengeCard(
+            frame: frame,
+            outbound: m.outbound,
+            declined: declined,
+            onAccept: onAccept,
+            onDecline: onDecline,
+          ),
         );
       }
       // accept / result / taunt — light surfaces (a forged one is inert: no
       // action, display-only, a CLAIM not a settled outcome).
-      return _FrameLightSurface(
-        kind: frame.kind,
-        text: m.text,
-        outbound: m.outbound,
+      return _withProvenance(
+        theme,
+        m,
+        _FrameLightSurface(
+          kind: frame.kind,
+          text: m.text,
+          outbound: m.outbound,
+        ),
       );
     }
 
     final bubbleColor = m.outbound ? KvColor.surfaceAlt : KvColor.surface;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.xs),
-      child: Align(
-        alignment: m.outbound ? Alignment.centerRight : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 300),
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: KvSpace.sm,
-              vertical: KvSpace.s,
-            ),
-            decoration: BoxDecoration(
-              color: bubbleColor,
-              borderRadius: BorderRadius.circular(KvRadius.card),
-              border: m.outbound ? null : Border.all(color: KvColor.border),
-            ),
-            child: m.readable
-                ? Text(m.text, style: theme.textTheme.bodyMedium)
-                : Text(
-                    'Unreadable message',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: KvColor.textTertiary,
-                      fontStyle: FontStyle.italic,
+    return _withProvenance(
+      theme,
+      m,
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: KvSpace.xs),
+        child: Align(
+          alignment: m.outbound ? Alignment.centerRight : Alignment.centerLeft,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 300),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: KvSpace.sm,
+                vertical: KvSpace.s,
+              ),
+              decoration: BoxDecoration(
+                color: bubbleColor,
+                borderRadius: BorderRadius.circular(KvRadius.card),
+                border: m.outbound ? null : Border.all(color: KvColor.border),
+              ),
+              child: m.readable
+                  ? Text(m.text, style: theme.textTheme.bodyMedium)
+                  : Text(
+                      'Unreadable message',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: KvColor.textTertiary,
+                        fontStyle: FontStyle.italic,
+                      ),
                     ),
-                  ),
+            ),
           ),
         ),
       ),
+    );
+  }
+
+  /// Mark a row the app got from a history archive rather than from its own
+  /// node.
+  ///
+  /// The store has always known this ([`RowSource::FillSourced`]); it simply
+  /// never crossed the FFI, so an archive-supplied row was pixel-identical to
+  /// node truth. It should not be: the app hands the archive the very address
+  /// messages are sealed to, so a dishonest operator can compose a row our keys
+  /// open and stamp any txid and time on it. Nothing about that is visible in
+  /// the bytes — only in where the row came from (run 1, F3).
+  ///
+  /// `unknown` (pre-V5 rows) is deliberately NOT marked: those predate
+  /// provenance entirely, so the badge would say "archive" about rows that were
+  /// almost certainly node-scanned. They are claimed by the next node scan.
+  Widget _withProvenance(
+    ThemeData theme,
+    ThreadMessageDto m,
+    Widget child, {
+    CrossAxisAlignment? align,
+  }) {
+    if (m.provenance != 'archive') return child;
+    return Column(
+      crossAxisAlignment:
+          align ??
+          (m.outbound ? CrossAxisAlignment.end : CrossAxisAlignment.start),
+      children: [
+        child,
+        Padding(
+          padding: const EdgeInsets.only(
+            left: KvSpace.xs,
+            right: KvSpace.xs,
+            bottom: KvSpace.xs,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // `warning`, not tertiary chrome: this says our view of the
+              // thread may be wrong, and an authenticity marker must not be
+              // quieter than the content it qualifies (DS-1). Same reasoning
+              // the home cockpit's _StatusCaption already carries.
+              const Icon(
+                Icons.inventory_2_outlined,
+                size: 12,
+                color: KvColor.warning,
+              ),
+              const SizedBox(width: KvSpace.xs),
+              Flexible(
+                child: Text(
+                  'From an archive — not seen by your own node',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: KvColor.warning,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -622,9 +706,16 @@ class _ChallengeCard extends StatelessWidget {
                                   text: staked
                                       ? '${frame.stake} KAS'
                                       : 'Friendly',
+                                  // NOT brand-primary. `frame.stake` is a
+                                  // counterparty-supplied wire string validated
+                                  // only for shape, and the accent is how this
+                                  // app says "our money, our number" — dressing
+                                  // an unbacked claim in it is the styling half
+                                  // of the same defect the disclosure line
+                                  // below fixes (ux-auditor, this wave).
                                   style: TextStyle(
                                     color: staked
-                                        ? KvColor.primary
+                                        ? KvColor.textPrimary
                                         : KvColor.textSecondary,
                                     fontWeight: FontWeight.w600,
                                   ),
@@ -640,6 +731,22 @@ class _ChallengeCard extends StatelessWidget {
                     ),
                   ],
                 ),
+                // The disclosure the RECIPIENT never got. A stake renders in
+                // brand-primary bold with Accept directly beneath it, which
+                // reads as money about to be committed — and on chain it is
+                // not: a frame binds nothing (§0.3, chain-proven by run 1).
+                // The sender's compose sheet said so; the person being asked
+                // to accept was told nothing at all (run 1, F9).
+                if (staked && !outbound) ...[
+                  const SizedBox(height: KvSpace.xs),
+                  Text(
+                    'Accepting binds no money — this is a claim in a message, '
+                    'not an on-chain wager.',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: KvColor.textTertiary,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: KvSpace.m),
                 _actions(context, theme),
               ],

@@ -68,7 +68,7 @@ unrepresentable — the second commit's successor is already `Revealing`.
 | `round` | u16 | 1-based; keeps counting in sudden death |
 | `score_a` / `score_b` | u8 | strikes, per player |
 | `conc_a` / `conc_b` | u8 | consecutive conceded rounds; **3 is never stored** — the third settles inline; at most one is nonzero (model-proved invariant) |
-| `bond_a` / `bond_b` | u64 | remaining standing-bond sompi (5 slices of `b` at genesis). **Dual duty since D-128:** it also *derives* the opponent's credit — every slice that left this field was won by the counterparty, so `credit(p) = (5 − bond(p.other())) · b`. No credit field exists, and none is needed |
+| `bond_a` / `bond_b` | u8 | remaining standing-bond **slices**, 5 at genesis — a COUNT, not sompi. (Was typed `u64 · sompi` here while the model this file names as its arbiter, SPEC.md and the committed vectors all say `u8 · slices`; the formulas below only typecheck as a slice count. An implementer following this table would have sized the field 7 bytes too wide, twice, and scaled the bond by `b` — product-audit run 1, F14.) **Dual duty since D-128:** it also *derives* the opponent's credit — every slice that left this field was won by the counterparty, so `credit(p) = (5 − bond(p.other())) · b`. No credit field exists, and none is needed |
 | `commit_a` / `commit_b` | 32 B | commitment hashes; zeroed = absent |
 | `reveal_first_zone` | u8 | first reveal's zone, parked until resolution (0xFF = absent) |
 | `revealed_a` / `revealed_b` | bool | who has revealed this round |

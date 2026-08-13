@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 
-import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
 import '../format.dart';
 import '../send/confirm_send_flow.dart';
 import '../theme/kv_page_route.dart';
+import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/entrance.dart';
 import '../widgets/haptics.dart';
@@ -123,6 +123,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
     KvHaptic.selection();
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
+      // L87, the instance that outlived the lesson: without this the sheet is
+      // capped at 9/16 of the screen, and at large text scales a confirm sheet
+      // clips the very button it exists to ask for.
+      isScrollControlled: true,
       builder: (_) => _HideSheet(label: contactLabel(conversation)),
     );
     if (confirmed != true) return;
@@ -219,22 +223,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
 String contactLabel(ConversationDto c) => c.contactAddress.isEmpty
     ? 'Unknown sender'
     : truncateAddressPayload(c.contactAddress);
-
-/// AppError-aware message extraction for snackbars.
-String displayError(Object e) {
-  // The generated AppError has no toString override — Dart's default is
-  // "Instance of 'AppError'", which swallows the honest message.
-  if (e is AppError) return e.message;
-  final s = e.toString();
-  // FRB wraps AppError into its exception string; keep the message half.
-  const marker = 'message: ';
-  final at = s.indexOf(marker);
-  if (at >= 0) {
-    final rest = s.substring(at + marker.length);
-    return rest.endsWith(')') ? rest.substring(0, rest.length - 1) : rest;
-  }
-  return s;
-}
 
 class _ConversationCard extends StatelessWidget {
   const _ConversationCard({

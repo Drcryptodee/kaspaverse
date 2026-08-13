@@ -4,7 +4,7 @@
 //! every signature is real, every body that would need behaviour is `todo!()`,
 //! and the gate stays green. P3.1's first commit is this crate growing its
 //! first behaviour — not an argument about where things go. The full boundary
-//! rationale lives in `docs/research/covenant_engine_architecture.md`.
+//! rationale lives in the covenant-engine architecture record (internal).
 //!
 //! Two absences are the architecture:
 //!

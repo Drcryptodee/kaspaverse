@@ -44,7 +44,12 @@ class RevealActivity : Activity() {
     private val cPrimary = Color.parseColor("#49EACB")
     private val cTextPrimary = Color.parseColor("#F0F0F2")
     private val cTextSecondary = Color.parseColor("#8A8A95")
-    private val cError = Color.parseColor("#F87171")
+    // Mirrored from KvColor.warning. tokens.dart reserves error red for fund
+    // risk and destruction ONLY (§13), and none of this screen's three red
+    // moments qualify: "hold to reveal first" is guidance, "not quite" is a
+    // wrong answer, and the bounce notice is a redirection. The native file had
+    // no warning token because it was never mirrored (ux-auditor, this wave).
+    private val cWarning = Color.parseColor("#FBBF24")
 
     private val MATCH = LinearLayout.LayoutParams.MATCH_PARENT
     private val WRAP = LinearLayout.LayoutParams.WRAP_CONTENT
@@ -53,12 +58,25 @@ class RevealActivity : Activity() {
     private var revealed = false
     private var done = false
 
+    /**
+     * Has the user held to reveal since this reveal screen was built? The quiz is
+     * unreachable until they have (F1/D-136) — and a bounced attempt rebuilds the
+     * screen, so EVERY quiz attempt is preceded by the words being on the glass.
+     */
+    private var revealedOnce = false
+
     private val wordViews = arrayOfNulls<TextView>(12)
 
     // Verify quiz: confirm the word at each of N distinct positions, in order.
+    private val QUIZ_POSITIONS = 4
+    private val QUIZ_COLS = 3
+    /** Wrong taps allowed per attempt before we send the user back to the words. */
+    private val QUIZ_MAX_WRONG = 3
+
     private var quizPositions: List<Int> = emptyList()
     private var quizExpected: List<String> = emptyList()
     private var quizProgress = 0
+    private var quizWrong = 0
     private var quizChips: MutableList<Button> = ArrayList()
     private var quizPrompt: TextView? = null
 
@@ -127,6 +145,25 @@ class RevealActivity : Activity() {
         words = null
         quizExpected = emptyList()
         quizPositions = emptyList()
+        // The VIEWS hold word strings too, and since the chip set became all 12
+        // (F1/D-136) that is the whole phrase rather than a third of it. D-039's
+        // disclosed residual says refs are dropped on every exit; clearing only
+        // the arrays would have made that sentence untrue for 12 of 12 words.
+        releaseQuizChips()
+        for (v in wordViews) v?.text = ""
+    }
+
+    /**
+     * Drop the 12 word strings the quiz chips hold, then the chips.
+     *
+     * Called on teardown AND on the retry path — the 3-wrong-taps bounce detaches
+     * a whole chip set, and re-assigning the list without clearing it would leave
+     * 12 Buttons each holding one recovery word alive until GC. Teardown airtight
+     * and retry leaky is the same residual wearing a new route (ffi-leak-auditor).
+     */
+    private fun releaseQuizChips() {
+        for (c in quizChips) c.text = ""
+        quizChips = ArrayList()
     }
 
     private fun finishWith(ok: Boolean) {
@@ -140,7 +177,19 @@ class RevealActivity : Activity() {
 
     // ── reveal screen ─────────────────────────────────────────────────────
 
-    private fun showReveal() {
+    private fun showReveal(notice: String? = null) {
+        revealed = false
+        revealedOnce = false
+        quizPrompt = null
+        releaseQuizChips() // the bounce detaches a live chip set — drop it now
+        // …and the previous grid's TextViews, which hold the SAME String objects
+        // as `words`. Usually they show bullets, but Android splits multi-touch
+        // across sibling children by default, so a hold on one finger plus a tap
+        // on Continue reaches the quiz with real words on the grid. Orphaned
+        // uncleared, they outlive clearSecrets() and make D-039's "refs dropped
+        // on every exit" false again (wallet-security-auditor, re-verify).
+        for (v in wordViews) v?.text = ""
+
         val root = column().apply {
             setBackgroundColor(cAbyss)
             setPadding(dp(24), dp(24), dp(24), dp(24))
@@ -149,20 +198,39 @@ class RevealActivity : Activity() {
         root.addView(
             body(
                 "Write these 12 words on paper, in order, and keep them somewhere " +
-                    "only you can reach. Anyone who has them controls your funds. " +
-                    "They are never shown to the rest of the app, and this screen " +
-                    "blocks screenshots."
+                    "only you can reach. Anyone who has them controls your funds."
             )
         )
+        root.addView(spacer(dp(12)))
+        root.addView(
+            strong(
+                "This is the only time they are ever shown. The app can never show " +
+                    "them to you again — not with your passphrase, not with your " +
+                    "fingerprint. Screenshots are blocked, so paper is your only copy."
+            )
+        )
+        if (notice != null) {
+            root.addView(spacer(dp(12)))
+            root.addView(warning(notice))
+        }
         root.addView(spacer(dp(16)))
         root.addView(buildGrid())
         root.addView(spacer(dp(16)))
+
+        // Muted until the words have actually been on the glass; the tap is never
+        // dead — it says what is missing (L87's class: no silent disabled control).
+        val cont = styledButton("I've written them down", cSurfaceAlt, cTextSecondary, stroke = cBorder)
+        val hint = body("")
 
         val hold = styledButton("Hold to reveal", cSurfaceAlt, cTextPrimary, stroke = cBorder)
         hold.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     revealed = true
+                    if (!revealedOnce) {
+                        revealedOnce = true
+                        armContinue(cont, hint)
+                    }
                     refreshGrid()
                     v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                     hold.text = "Release to hide"
@@ -178,13 +246,34 @@ class RevealActivity : Activity() {
         }
         root.addView(hold)
         root.addView(spacer(dp(12)))
+        root.addView(hint)
+        root.addView(spacer(dp(4)))
 
-        val cont = styledButton("I've written them down", cPrimary, cAbyss)
-        cont.setOnClickListener { showQuiz() }
+        cont.setOnClickListener {
+            if (revealedOnce) {
+                showQuiz()
+            } else {
+                cont.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                hint.text =
+                    "Hold to reveal your words and copy them down first — the next " +
+                    "step asks you to put four of them back in place."
+                hint.setTextColor(cWarning)
+            }
+        }
         root.addView(cont)
 
         setContentView(scroll(root))
         refreshGrid()
+    }
+
+    /** The words have been shown at least once: promote Continue to the real CTA. */
+    private fun armContinue(cont: Button, hint: TextView) {
+        cont.setTextColor(cAbyss)
+        cont.background = GradientDrawable().apply {
+            cornerRadius = dp(12).toFloat()
+            setColor(cPrimary)
+        }
+        hint.text = ""
     }
 
     private fun buildGrid(): View {
@@ -241,12 +330,13 @@ class RevealActivity : Activity() {
         val chosen = ArrayList<Int>()
         for (p in (0 until 12).shuffled()) {
             if (seen.add(w[p])) chosen.add(p)
-            if (chosen.size == 4) break
+            if (chosen.size == QUIZ_POSITIONS) break
         }
         chosen.sort()
         quizPositions = chosen
         quizExpected = chosen.map { w[it] }
         quizProgress = 0
+        quizWrong = 0
 
         val root = column().apply {
             setBackgroundColor(cAbyss)
@@ -255,8 +345,10 @@ class RevealActivity : Activity() {
         root.addView(heading("Confirm your backup"))
         root.addView(
             body(
-                "Tap the matching word for each position, in order. This proves your " +
-                    "backup works — there is no way to skip it."
+                "Tap the matching word for each position, in order. All 12 of your " +
+                    "words are here, in a random order, so only your own copy tells " +
+                    "you which one belongs where. Three wrong taps and you go back " +
+                    "to the words."
             )
         )
         root.addView(spacer(dp(16)))
@@ -267,18 +359,45 @@ class RevealActivity : Activity() {
             setPadding(0, 0, 0, dp(12))
         }
         quizPrompt = prompt
-        root.addView(prompt)
+        root.addView(prompt) // fixed header — never scrolls away from its chips
 
-        quizChips = ArrayList()
-        for (word in quizExpected.shuffled()) {
-            val chip = styledButton(word, cSurfaceAlt, cTextPrimary, stroke = cBorder)
-            (chip.layoutParams as LinearLayout.LayoutParams).topMargin = dp(8)
-            chip.setOnClickListener { onChipTap(chip, word) }
-            quizChips.add(chip)
-            root.addView(chip)
-        }
+        // The chip set is ALL 12 words, not the 4 expected (F1/D-136): the set
+        // leaks no ordering, carries no elimination channel, and requires the
+        // position knowledge the ceremony exists to verify. No decoys, no
+        // wordlist — the words are already in memory.
+        releaseQuizChips()
+        root.addView(
+            scroll(chipGrid(w.toList().shuffled())).apply {
+                layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f)
+            }
+        )
         updateQuizPrompt()
-        setContentView(scroll(root))
+        setContentView(root)
+    }
+
+    /** 12 chips laid out [QUIZ_COLS] to a row so the prompt above stays visible. */
+    private fun chipGrid(labels: List<String>): View {
+        val grid = column()
+        for (rowWords in labels.chunked(QUIZ_COLS)) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) }
+            }
+            rowWords.forEachIndexed { c, word ->
+                val chip = styledButton(word, cSurfaceAlt, cTextPrimary, stroke = cBorder).apply {
+                    textSize = 14f
+                    setPadding(dp(4), dp(12), dp(4), dp(12))
+                    layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
+                        if (c > 0) marginStart = dp(8)
+                    }
+                }
+                chip.setOnClickListener { onChipTap(chip, word) }
+                quizChips.add(chip)
+                row.addView(chip)
+            }
+            grid.addView(row)
+        }
+        return grid
     }
 
     private fun updateQuizPrompt() {
@@ -305,7 +424,21 @@ class RevealActivity : Activity() {
             }
         } else {
             chip.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            // Reset the whole sequence — early/ wrong tap is no penalty (DS-3).
+            quizWrong++
+            if (quizWrong >= QUIZ_MAX_WRONG) {
+                // The cost for guessing, which never punishes a slip: go back to
+                // the words. The next attempt re-draws BOTH the positions and the
+                // chip order, so nothing this attempt eliminated carries forward —
+                // and `revealedOnce` resets, so the words are shown again first.
+                Log.i(TAG, "verify quiz returned to reveal after $quizWrong wrong taps")
+                showReveal(
+                    "That's three wrong taps, so we've brought you back to your " +
+                        "words. Check them against your paper — the next round asks " +
+                        "about different positions."
+                )
+                return
+            }
+            // Reset the sequence; a slip costs only the re-tap (DS-3).
             quizProgress = 0
             for (c in quizChips) {
                 c.isEnabled = true
@@ -316,8 +449,11 @@ class RevealActivity : Activity() {
                     setStroke(dp(1), cBorder)
                 }
             }
-            quizPrompt?.text = "Not quite — check your paper, then start again from the top."
-            quizPrompt?.setTextColor(cError)
+            val left = QUIZ_MAX_WRONG - quizWrong
+            quizPrompt?.text = "Not quite — check your paper, then start again from " +
+                "the top. $left more wrong ${if (left == 1) "tap" else "taps"} and " +
+                "you'll go back to your words."
+            quizPrompt?.setTextColor(cWarning)
         }
     }
 
@@ -377,6 +513,17 @@ class RevealActivity : Activity() {
         setTextColor(cTextSecondary)
         textSize = 14f
         setLineSpacing(dp(4).toFloat(), 1f)
+    }
+
+    /** Body weight, full contrast — for a fact the user must not skim past. */
+    private fun strong(t: String) = body(t).apply {
+        setTextColor(cTextPrimary)
+        typeface = Typeface.DEFAULT_BOLD
+    }
+
+    /** Why you are back on this screen. Not an error — a redirection. */
+    private fun warning(t: String) = body(t).apply {
+        setTextColor(cWarning)
     }
 
     private fun styledButton(text: String, fill: Int, textColor: Int, stroke: Int? = null): Button {

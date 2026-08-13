@@ -1,5 +1,5 @@
 /// KaspaVerse design tokens — the single source for colour, motion, spacing,
-/// radii and the freshness constants. `docs/research/design_system.md` v2
+/// radii and the freshness constants. The design-system record v2 (internal)
 /// (D-027, DS-1…8) is the law; this file is its code form.
 ///
 /// **This is the one file in `lib/` permitted to hold a raw colour hex** (the

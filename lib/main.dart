@@ -132,7 +132,7 @@ class KaspaVerseApp extends StatelessWidget {
           settingsRoute: (_) => SettingsScreen(
             security: SecurityScope(
               biometricStatus: VaultService.instance.biometricStatus,
-              pathAEnrolled: VaultService.instance.pathAEnrolled,
+              pathAState: VaultService.instance.pathAState,
               enroll: VaultService.instance.enrollBiometric,
               clearEnrollment: VaultService.instance.clearBiometric,
               lockGraceSecs: VaultService.instance.lockGraceSecs,

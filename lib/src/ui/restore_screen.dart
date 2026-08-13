@@ -435,20 +435,30 @@ class _RestoreScreenState extends State<RestoreScreen> {
                   ],
                 ),
                 const SizedBox(height: KvSpace.m),
-                Wrap(
-                  spacing: KvSpace.s,
-                  runSpacing: KvSpace.s,
-                  children: [
-                    for (var k = 0; k < _indices.length; k++)
-                      Chip(
-                        label: Text(
-                          '${k + 1}. ${_wordlist!.words[_indices[k]]}',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                      ),
-                  ],
+                // The picked words are the part that GROWS (up to 24 chips, and
+                // more at large text scale), so they take the slack and scroll
+                // inside it. A `Spacer` here made the growth overflow instead:
+                // once chips + the bottom block exceeded the step, the content
+                // that could not be seen was silently clipped — on the surface
+                // where the user is checking a recovery phrase word by word.
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Wrap(
+                      spacing: KvSpace.s,
+                      runSpacing: KvSpace.s,
+                      children: [
+                        for (var k = 0; k < _indices.length; k++)
+                          Chip(
+                            label: Text(
+                              '${k + 1}. ${_wordlist!.words[_indices[k]]}',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-                const Spacer(),
+                const SizedBox(height: KvSpace.m),
                 if (_message != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: KvSpace.s),
@@ -459,15 +469,24 @@ class _RestoreScreenState extends State<RestoreScreen> {
                       ),
                     ),
                   ),
-                if (complete)
+                if (complete) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: KvSpace.s),
+                    child: Text(
+                      'All $_target words are in. Use ⌫ to change the last one.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: KvColor.textSecondary,
+                      ),
+                    ),
+                  ),
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton(
                       onPressed: () => setState(() => _step = _Step.extraWord),
                       child: const Text('Continue'),
                     ),
-                  )
-                else if (_filter.isNotEmpty)
+                  ),
+                ] else if (_filter.isNotEmpty)
                   SizedBox(
                     height: KvSpace.touchTarget,
                     child: ListView(
@@ -495,12 +514,27 @@ class _RestoreScreenState extends State<RestoreScreen> {
             ),
           ),
         ),
-        if (!complete)
-          SecretKeyboard(
-            mode: SecretKeyboardMode.lowercaseLetters,
-            onChar: (c) => setState(() => _filter += c),
-            onBackspace: _wordsBackspace,
-          ),
+        // Rendered while there is anything to UNDO, not only while there is
+        // something left to add. Its ⌫ is the only caller of `_wordsBackspace`,
+        // and unmounting it at exactly `complete` took away the sole way to
+        // un-pick a word — so the preview trap's own remedy button, "Go back and
+        // fix a word", returned the user to a step where no word could be
+        // changed (product-audit run 1, F5).
+        // Always mounted once a word has been picked — its ⌫ is the only
+        // caller of `_wordsBackspace`, so unmounting it at `complete` took away
+        // the sole way to un-pick a word and left the preview trap's own
+        // "Go back and fix a word" remedy pointing at a step that could not fix
+        // one (product-audit run 1, F5).
+        //
+        // Letters are inert once complete: the suggestion strip is not rendered
+        // there, so a keystroke would silently fill `_filter` and then have to
+        // be drained by ⌫ before it reached a word — a stretch where nothing
+        // the user does responds, which is the defect wearing a smaller hat.
+        SecretKeyboard(
+          mode: SecretKeyboardMode.lowercaseLetters,
+          onChar: complete ? (_) {} : (c) => setState(() => _filter += c),
+          onBackspace: _wordsBackspace,
+        ),
       ],
     );
   }

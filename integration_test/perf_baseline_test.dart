@@ -6,7 +6,7 @@
 //
 //   1. startup      — launch → first stable frame (supplementary; the
 //                     authoritative cold-start row is logcat `Displayed`,
-//                     see docs/PERF_HARNESS_RECIPE.md)
+//                     see the internal perf-harness recipe)
 //   2. home_steady  — 10 s dwell on the unlocked home (missed-frame count)
 //   3. send_screen  — push transition + 5 s dwell + pop (NAVIGATION ONLY:
 //                     nothing is typed, prepared, or signed — no money moves)

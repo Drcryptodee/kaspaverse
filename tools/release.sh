@@ -8,7 +8,8 @@
 #
 # Releases are founder-owned: this script produces a release-shaped artifact;
 # publishing it (and pushing the tag) happens from the founder's terminal.
-# Setup (one-time keystore + key.properties): docs/RELEASE.md.
+# Setup, one-time: generate an upload keystore, then copy
+# android/key.properties.template to android/key.properties and fill it in.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -22,7 +23,7 @@ TAG="$(git describe --tags --exact-match HEAD 2>/dev/null)" \
   || die "HEAD is not tagged — tag the release commit first (git tag <tag>)"
 COMMIT="$(git rev-parse --short HEAD)"
 [ -f android/key.properties ] \
-  || die "android/key.properties missing — see docs/RELEASE.md (the build would fall back to the unshippable debug key)"
+  || die "android/key.properties missing — copy android/key.properties.template to it and fill in the keystore path, alias and passwords (without it the build falls back to the unshippable debug key)"
 
 # Published-release trigger gate (D-091, founder-ratified 2026-07-30): some parked
 # work is gated on "the first build that reaches people who aren't the founder".
@@ -105,11 +106,12 @@ APK="build/app/outputs/flutter-apk/app-release.apk"
 CERTS="$("$APKSIGNER" verify --print-certs "$APK")" \
   || die "apksigner rejected the APK (unsigned or invalid signature)"
 echo "$CERTS" | grep -q "CN=Android Debug" \
-  && die "APK is DEBUG-SIGNED — key.properties was not applied; see docs/RELEASE.md"
+  && die "APK is DEBUG-SIGNED — android/key.properties was not applied; check its keystore path and passwords"
 # Pin the KaspaVerse upload cert (P0.5 sweep): any OTHER signer — not just the
 # debug key — fails. The fingerprint is public by nature (it ships inside every
 # APK); rotation = new keystore + this line + a DECISION_LOG entry + a public
-# announcement. Verification runbook: docs/RELEASE.md "Verifying provenance".
+# announcement. Anyone can re-check it with:
+#   apksigner verify --print-certs <apk> | grep SHA-256
 EXPECTED_CERT_SHA256="ef7ac03d67e324f9b08f372fd1b1270ae77518ce31966fdf10fb36d95d94b696"
 echo "$CERTS" | grep -qi "SHA-256 digest: $EXPECTED_CERT_SHA256" \
   || die "signer cert does not match the pinned KaspaVerse upload cert — wrong keystore?"

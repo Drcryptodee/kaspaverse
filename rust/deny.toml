@@ -28,7 +28,7 @@ ignore = []
 
 [licenses]
 # Explicit SPDX allow-list — anything not listed is denied. Derived from the
-# actual tree at the rusty-kaspa v2.0.0 pin (workspace itself is MIT).
+# actual tree at the rusty-kaspa v2.0.1 pin, `cfafeb4c` (workspace itself is MIT).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -57,7 +57,7 @@ confidence-threshold = 0.8
 [[licenses.exceptions]]
 # kaspa-math (consensus difficulty/Uint arithmetic) → malachite bignum, LGPL-3.0.
 # Statically linked, but the app is MIT open-source: the LGPL's modify-and-relink
-# freedom is preserved by the public source itself. Unavoidable at the v2.0.0 pin
+# freedom is preserved by the public source itself. Unavoidable at the v2.0.1 pin
 # (D-024). Revisit at re-pin or before any non-open distribution.
 allow = ["LGPL-3.0-only"]
 name = "malachite-base"

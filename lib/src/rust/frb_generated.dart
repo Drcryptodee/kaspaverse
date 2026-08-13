@@ -2530,8 +2530,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ThreadMessageDto dco_decode_thread_message_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return ThreadMessageDto(
       txid: dco_decode_String(arr[0]),
       kind: dco_decode_String(arr[1]),
@@ -2541,6 +2541,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       readable: dco_decode_bool(arr[5]),
       frame: dco_decode_opt_box_autoadd_frame_dto(arr[6]),
       tombstoned: dco_decode_bool(arr[7]),
+      provenance: dco_decode_String(arr[8]),
     );
   }
 
@@ -3253,6 +3254,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_readable = sse_decode_bool(deserializer);
     var var_frame = sse_decode_opt_box_autoadd_frame_dto(deserializer);
     var var_tombstoned = sse_decode_bool(deserializer);
+    var var_provenance = sse_decode_String(deserializer);
     return ThreadMessageDto(
       txid: var_txid,
       kind: var_kind,
@@ -3262,6 +3264,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       readable: var_readable,
       frame: var_frame,
       tombstoned: var_tombstoned,
+      provenance: var_provenance,
     );
   }
 
@@ -3966,6 +3969,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.readable, serializer);
     sse_encode_opt_box_autoadd_frame_dto(self.frame, serializer);
     sse_encode_bool(self.tombstoned, serializer);
+    sse_encode_String(self.provenance, serializer);
   }
 
   @protected

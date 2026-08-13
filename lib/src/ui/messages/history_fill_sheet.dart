@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
+import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_loader.dart';
 import '../widgets/status_beacon.dart' show formatAge;
-import 'contacts_screen.dart' show displayError;
 
 /// V2b history fill surfaces (D-074): the honest gap notice, and the settings
 /// sheet with the toggle + plain privacy disclosure. Everything here is
@@ -333,10 +333,15 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
               child: Text(
                 'What the archive operator learns: which addresses and '
                 'conversation tags you look up, and when you check.\n\n'
-                'What they can never do: read or fake a message. Everything '
-                'stays encrypted — your wallet checks each one by decrypting '
-                'it locally, so the archive can hide history, never invent '
-                'it.\n\n'
+                'What they can never do: read your messages. Everything stays '
+                'sealed to keys they do not have.\n\n'
+                'What they CAN do: leave history out, and add a message of '
+                'their own. Your receive address is the key messages are '
+                'sealed to, and it is what the wallet hands them to search '
+                'on — so a dishonest archive can write something your wallet '
+                'will open, and stamp any transaction ID and time on it. '
+                'Anything an archive supplies is labelled in the thread until '
+                'your own node has seen it.\n\n'
                 'Off, everything works against your node alone — only '
                 'history past its horizon stays unrecoverable.',
                 style: theme.textTheme.bodySmall?.copyWith(

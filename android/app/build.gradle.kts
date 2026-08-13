@@ -9,7 +9,8 @@ plugins {
 
 // Release signing (P0.5, INV-11): credentials live in android/key.properties —
 // gitignored, never committed (gate hygiene fails on a tracked copy). Template:
-// android/key.properties.template; founder setup: docs/RELEASE.md.
+// android/key.properties.template — copy it to android/key.properties and
+// fill in the keystore path, alias and passwords. Never committed.
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
@@ -71,7 +72,7 @@ android {
             } else {
                 logger.warn(
                     "WARNING: android/key.properties missing — release build will be " +
-                        "DEBUG-SIGNED (dev smoke test only, unshippable). See docs/RELEASE.md."
+                        "DEBUG-SIGNED (dev smoke test only, unshippable) — android/key.properties was not found."
                 )
                 signingConfigs.getByName("debug")
             }

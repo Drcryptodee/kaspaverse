@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../rust/api/send.dart';
 import '../format.dart';
+import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/amount_text.dart';
 import '../widgets/haptics.dart';
@@ -85,7 +86,9 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
       if (outcome.submitted > 0) KvHaptic.moneyMoment();
       if (mounted) setState(() => _outcome = outcome);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      // `e.toString()` on an AppError renders "Instance of 'AppError'" — the
+      // type name, printed into the body of a failed SEND (run 1, F8).
+      if (mounted) setState(() => _error = displayError(e));
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -114,10 +117,16 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
       );
     }
     if (_outcome != null || _error != null) {
-      return _ResultView(
-        outcome: _outcome,
-        error: _error,
-        onDone: () => Navigator.of(context).pop(_outcome),
+      // Scrolls for the same reason the confirm branch does, and more so since
+      // this wave: the result can now carry Rust's reason AND the Dart-caught
+      // one on top of the txid block. Content is never clipped on a signing
+      // surface — the comment below used to be true of only one branch.
+      return SingleChildScrollView(
+        child: _ResultView(
+          outcome: _outcome,
+          error: _error,
+          onDone: () => Navigator.of(context).pop(_outcome),
+        ),
       );
     }
     // Scrolls only when the viewport can't fit the whole ceremony (small
@@ -405,17 +414,23 @@ class _ResultView extends StatelessWidget {
             ),
           ),
         ],
-        if (error != null) ...[
-          const SizedBox(height: KvSpace.m),
-          Text(
-            error!,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: KvColor.error,
-              fontFamily: KvFont.ui,
+        // Rust's own reason, then the Dart-caught one. `SendOutcomeDto.error`
+        // was read as a BOOLEAN and rendered nowhere, so a vault that locked
+        // between prepare and commit and a node that rejected the transaction
+        // both came out as a bare "Send failed" — on the one surface where the
+        // user most needs to know which (run 1, F8).
+        for (final line in [outcome?.error, error])
+          if (line != null && line.isNotEmpty) ...[
+            const SizedBox(height: KvSpace.m),
+            Text(
+              line,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.error,
+                fontFamily: KvFont.ui,
+              ),
             ),
-          ),
-        ],
+          ],
         const SizedBox(height: KvSpace.xl),
         FilledButton(onPressed: onDone, child: const Text('Done')),
       ],

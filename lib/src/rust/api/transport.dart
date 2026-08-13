@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_intent`, `build`, `clamp_display`, `fill_walks`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `now_unix_ms`, `open_with_fallback`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `apply_intent`, `build`, `clamp_display`, `fill_walks`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `now_unix_ms`, `open_with_fallback`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `EventOrigin`, `KeyWindow`, `TransportHub`, `TransportIntent`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -537,6 +537,20 @@ class ThreadMessageDto {
   /// a ghost (styled affordance lands in V2; the flag is the truth surface).
   final bool tombstoned;
 
+  /// Where this row came from: `node` (our node's own scan — chain truth),
+  /// `archive` (a history-fill row from an indexer, D-074 — an unverifiable
+  /// txid and timestamp), `own` (self-authored at commit), `unknown`
+  /// (written before V5 recorded provenance).
+  ///
+  /// The store has recorded this since V5; it did not cross the bridge, so an
+  /// archive-supplied row rendered byte-identically to node truth and the
+  /// fill's disclosure promised a guarantee the wire cannot make
+  /// (product-audit run 1, F3). A `String` rather than the chain crate's
+  /// `RowSource`, matching [`kind`](Self::kind): the enum is a store-layer
+  /// type with Borsh positional law on it, and widening its blast radius to
+  /// the FFI buys nothing the label does not.
+  final String provenance;
+
   const ThreadMessageDto({
     required this.txid,
     required this.kind,
@@ -546,6 +560,7 @@ class ThreadMessageDto {
     required this.readable,
     this.frame,
     required this.tombstoned,
+    required this.provenance,
   });
 
   @override
@@ -557,7 +572,8 @@ class ThreadMessageDto {
       text.hashCode ^
       readable.hashCode ^
       frame.hashCode ^
-      tombstoned.hashCode;
+      tombstoned.hashCode ^
+      provenance.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -571,7 +587,8 @@ class ThreadMessageDto {
           text == other.text &&
           readable == other.readable &&
           frame == other.frame &&
-          tombstoned == other.tombstoned;
+          tombstoned == other.tombstoned &&
+          provenance == other.provenance;
 }
 
 /// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).

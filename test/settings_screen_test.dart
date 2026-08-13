@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
+import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 
@@ -23,7 +24,7 @@ void main() {
 
   SettingsScreen screen({
     Future<String> Function()? biometricStatus,
-    Future<bool> Function()? enrolled,
+    Future<String> Function()? pathAState,
     Future<bool> Function()? enroll,
     Future<void> Function()? clear,
     ValueNotifier<int>? grace,
@@ -34,7 +35,7 @@ void main() {
   }) => SettingsScreen(
     security: SecurityScope(
       biometricStatus: biometricStatus ?? () async => 'ready',
-      pathAEnrolled: enrolled ?? () async => false,
+      pathAState: pathAState ?? () async => pathANone,
       enroll: enroll ?? () async => true,
       clearEnrollment: clear ?? () async {},
       lockGraceSecs: grace ?? ValueNotifier(0),
@@ -174,7 +175,10 @@ void main() {
   testWidgets('an enrolled wallet reads On', (tester) async {
     await pump(
       tester,
-      screen(biometricStatus: () async => 'ready', enrolled: () async => true),
+      screen(
+        biometricStatus: () async => 'ready',
+        pathAState: () async => pathAReady,
+      ),
     );
     expect(find.text('On'), findsOneWidget);
   });
@@ -202,7 +206,10 @@ void main() {
     var enrolls = 0;
     await pump(
       tester,
-      screen(enroll: () async => ++enrolls > 0, enrolled: () async => false),
+      screen(
+        enroll: () async => ++enrolls > 0,
+        pathAState: () async => pathANone,
+      ),
     );
     await tester.tap(find.text('Fingerprint unlock'));
     await tester.pumpAndSettle();
@@ -215,7 +222,7 @@ void main() {
     var cleared = 0;
     await pump(
       tester,
-      screen(enrolled: () async => true, clear: () async => cleared++),
+      screen(pathAState: () async => pathAReady, clear: () async => cleared++),
     );
     await tester.tap(find.text('Fingerprint unlock'));
     await tester.pumpAndSettle();

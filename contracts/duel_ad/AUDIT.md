@@ -5,6 +5,12 @@
 (design + in-tree model; still no `.sil` — the compiled-artifact halves of items
 13/14 re-run at P4 and this audit is void the day a `.sil` lands).
 
+> **⚠ THE PIN TABLE BELOW IS SUPERSEDED.** Two of its rows moved after this
+> sitting. The **live** pin table is the one under
+> [Re-pin sitting — 2026-08-13](#re-pin-sitting--2026-08-13-product-audit-run-1-fix-wave)
+> at the foot of this file; read that one. This table is kept verbatim because it
+> is part of the C6 sitting's own evidence, not because it is current.
+
 **AUDIT-SCOPE (restated verbatim):** `uncommitted working tree + index vs HEAD
 (52f35ed)  ||  ops mirror: uncommitted record vs ac7bc95`
 
@@ -15,9 +21,10 @@ directly: `SPEC.md` §3.1/§5.1/§5.1.1 (whole), `STATES.md` (whole),
 `payouts()`, `resolve()`, the vector emitter), both vector files (parsed as JSON
 and arithmetically checked), `DECISION_LOG.md` D-127/D-128/D-129/D-130 + the
 D-129 addendum, `covenant_engine_architecture.md` §8.6/§8.6.1/§8.8,
-`covenant_engine_lexicon.md` §3.4, `docs/phases/P3_covenant_engine_ACTIVE.md`
-§0 + the P4-inheritance block, `docs/sessions/COVENANT_PASS.md` OQ-11/OQ-12,
-`docs/SOURCE_OF_TRUTH.md` §8 header, and `PHASE_3.1_SESSION_PROMPT.md`.
+`covenant_engine_lexicon.md` §3.4, the P3 covenant-engine phase file
+§0 + the P4-inheritance block, the covenant-pass notes OQ-11/OQ-12,
+SOURCE_OF_TRUTH §8 header, and the P3.1 session prompt.
+(Those four live in the internal engineering record, not in this repo — D-102.)
 
 **Re-pinned to (sha256, working tree at this sitting):**
 
@@ -252,3 +259,132 @@ SPEC §3.1, architecture §8.6.1, the model — and missed the two artifacts tha
 state the law without living under those headings. A law's statement sites are
 wherever its symbols appear; a section list is the builder's memory of where it
 wrote, which is exactly the thing an audit exists not to trust.*
+
+---
+---
+
+# Re-pin sitting — 2026-08-13 (product-audit run 1, fix wave)
+
+**Date:** 2026-08-13 · **Auditor:** consensus-auditor (checklist C-items 8–16 +
+19–23, skill as of the 2026-08-13 L83/L86/F16 amendment) · **Tier:** T3 wave, T1
+for the covenant portion (still no `.sil`; items 13/14's compiled-artifact halves
+remain deferred to P4, and this whole audit is void the day a `.sil` lands).
+
+**AUDIT-SCOPE (restated verbatim):** `uncommitted working tree + index vs HEAD
+(4be92e0)  ||  ops mirror: uncommitted record vs 34144c8`
+
+The injected diff was **TRUNCATED** (2,537 lines > the 2,000-line cap). Per the
+skill's own instruction the covenant portion of this verdict was written after
+reading the files directly: `contracts/duel_ad/STATES.md` (the state-encoding
+table and the surrounding value/terms blocks), `contracts/duel_ad/SPEC.md` (every
+`bond` occurrence, §5.3's payout formulas), both vector files, and
+`rust/covenant/tests/duel_ad_model.rs` (the constant block, the state and
+terminal structs, the census assertions). `cargo test -p kaspaverse-covenant
+--test duel_ad_model -- --nocapture` was re-run here, not quoted.
+
+## Why this sitting exists
+
+Two files pinned by the C6 sitting changed in this working tree — `STATES.md`
+(F14) and `rust/covenant/tests/duel_ad_model.rs` (F16) — while the C6 pin table
+was left untouched. By that table's own law (*"Any change to any pinned file
+voids this audit"*) the C6 verdict was **void on disk**, and the repo was
+carrying a contract audit whose hash table disagreed with the tree. That is
+checklist item 23's failure mode at the audit-record level: a published figure
+that drifts silently while the gate stays green.
+
+## VERDICT: PASS (0 BLOCK · 0 CONCERNS) — the covenant portion; re-pinned
+
+The C6 sitting's single open CONCERNS (law B's superseded `β ∈ [φ, α]` floor in
+`STATES.md:100-101`) is **CLOSED**: the file now reads *"with `β` bounded below by
+the condition that its own term binds — `β·stake/5 ≥ 10·FEE_MOVE_CAP` (SPEC.md
+§3.1; a numeric `β ≥ φ` floor would leave the sub-range `[φ, 2.17φ)` inert …)"*,
+which is the fix that sitting prescribed, verbatim in substance.
+
+**Re-pinned to (sha256, working tree at this sitting) — THIS IS THE LIVE TABLE:**
+
+| File | sha256 | vs the C6 pin |
+|:--|:--|:--|
+| `SPEC.md` | `f5be33f18fd74c0b1eb1ebaf54cf3fc3be48dd4a52be3b45e5247746e8aad476` | **unchanged** |
+| `STATES.md` | `639cac16e27d1375ad8519c63749a4f687bea0fa8445a74d0d48f4522a38d22b` | changed — F14's `bond_a`/`bond_b` retype, plus the C6 law-B remediation |
+| `vectors/positive.json` | `83ae497e53065874de8ac6c7c9ee2299c5981b4f6d4a76ca3bad65b4b975ff25` | **unchanged** |
+| `vectors/negative.json` | `b257717f430faa997a6b63b2523438543d9b4e4e47d7255ae0f5ea7576ffbb9e` | **unchanged** |
+| `vectors/README.md` | `ff34acde6ce2b056b8b90be211c2b1ddabfcc8c955b4800cef0c62cc97327fe0` | **unchanged** |
+| `rust/covenant/tests/duel_ad_model.rs` | `d8bc450275ccb90e3899d3b82f6ee388605cff831d4dfd3cb80fae135fb7b776` | changed — F16's three census assertions |
+
+Any change to any pinned file voids this audit.
+
+## F14 — `bond_a`/`bond_b` retyped `u64 · sompi` → `u8 · slices`. PASS.
+
+Verified against all three arbiters independently, not against the brief:
+
+| Arbiter | Says | Read at |
+|:--|:--|:--|
+| the model (STATES.md's own named arbiter) | `bond_a: u8` / `bond_b: u8` on both the state and terminal structs; `const BOND_SLICES: u8 = 5`; decrement is `n.bond_a -= 1` (a slice, not a sompi amount) | `duel_ad_model.rs:96, 274-275, 349-350, 478-479` |
+| `SPEC.md` §5.3 | `+ bond(p) · b` and `+ (BOND_SLICES − bond(p.other())) · b` — the multiplication by `b` only typechecks if `bond()` is a count | `SPEC.md:485-486, 500` |
+| the committed vectors | `"bond_a": 5` | `vectors/positive.json` (every genesis row) |
+
+STATES.md was the sole outlier and is now consistent. **Checked for collateral
+drift, which is where a retype usually leaves a hole:** STATES.md carries no
+state-encoding byte-budget table, so nothing was sized off the old `u64` width
+and nothing else needs following. The retype is complete at one line, and the
+row now says *count, not sompi* in the text as well as the type column — which is
+checklist item 22's rule (*name what the quantity is a count OF*) applied to a
+field that was carrying two different units in two different documents.
+
+No rule moved: no exit changed, no payout changed, no witness surface changed,
+no bound changed. Items 8/9/10/11/12/15/16 are unmoved by a units correction to
+a table that the executable arbiter always had right.
+
+## F16 — the published census is now asserted, not printed. PASS.
+
+**Re-run here:** `cargo test -p kaspaverse-covenant --test duel_ad_model --
+--nocapture` → **5 passed, 0 failed**, 2.52 s, printing
+`duel_ad model: 31098 reachable states, 432 distinct terminals` and
+`P1 worst sole exit: 3 windows, 7 transitions (bound 4)`.
+
+The three new constants match every document that publishes them — checked at
+each site rather than assumed: `SPEC.md:94, 735`; `STATES.md:10, 13`; this file
+`:48, 208`; `SOURCE_OF_TRUTH.md:337`; `P3_covenant_engine_ACTIVE.md:31`;
+`COVENANT_PASS.md:102, 477, 546`; `COMPLETION_HISTORY.md:2584, 2629, 2819, 2840`.
+
+**Item 23's second half is the part that was easy to miss, and it was not
+missed.** The pre-existing guard was `cost.0 <= EXIT_WINDOW_BOUND` with
+`EXIT_WINDOW_BOUND = 4`, while the *published* worst case is 3 windows — so a
+genuine INV-6 degradation from 3 to 4 windows would have passed **green by
+construction**. The fix pins the measured pair `WORST_SOLE_EXIT = (3, 7)` with
+`assert_eq!` *beneath* the ceiling rather than replacing it, so the per-state
+guard and the census claim are now two separate checks doing two separate jobs.
+That is the correct shape.
+
+Likewise `assert!(n_reach > 1_000)` → `assert_eq!(n_reach, N_REACHABLE)`: the old
+form was a liveness check on the walker, not a census check, and would have
+admitted a model that lost 30,000 states.
+
+**One residual, recorded not blocking — the same drift class, one figure over.**
+The *property count* is published inconsistently and is still unasserted: the
+model's own header enumerates P1, P1f, P2 … P12 (twelve bodies), while
+`COMPLETION_HISTORY.md:2584` and `COVENANT_PASS.md:102, 477` say **"11
+properties"** and `P3_covenant_engine_ACTIVE.md:31` and `COVENANT_PASS.md:580`
+say **"twelve"**. Two documents cannot both be right. F16 killed this failure
+mode for the three numeric census figures; the property count is the fourth
+published figure and it escaped the sweep. Minimal fix: pick the true count, fix
+the two wrong sites, and — since the model has no natural place to assert it —
+say plainly in the header how many properties the test enforces so a reader can
+count them against the list. Not a fund-safety item; a record-integrity one.
+
+## INV citations (this sitting)
+
+- **INV-6:** **HELD**, and now better defended than at C6 — the worst sole exit
+  is pinned at its measured value instead of only under a looser ceiling.
+- **INV-9:** **HELD.** No protocol claim moved. No consensus logic was
+  re-implemented or remembered in either change; F14 is a units correction to
+  prose and F16 adds three assertions over already-computed values.
+- **INV-10:** **HELD**, and this sitting is the reason: three figures that four
+  documents publish were, until this wave, provable only by reading a `println!`.
+- **INV-5 / mass:** not implicated (no transaction construction in this diff).
+- **D-019 (stag hunt):** unmoved — no payoff, bond, window or terms-sheet law
+  changed. F14 corrects how one field's unit is *described*, not what it is.
+
+**Disposition: the covenant portion of this wave is unblocked.** The wave's
+non-covenant findings (F3's provenance surface and the F2 deferral) are reported
+in the session verdict, not here — they touch no contract artifact.

@@ -2778,6 +2778,7 @@ impl SseDecode for crate::api::transport::ThreadMessageDto {
         let mut var_readable = <bool>::sse_decode(deserializer);
         let mut var_frame = <Option<crate::api::transport::FrameDto>>::sse_decode(deserializer);
         let mut var_tombstoned = <bool>::sse_decode(deserializer);
+        let mut var_provenance = <String>::sse_decode(deserializer);
         return crate::api::transport::ThreadMessageDto {
             txid: var_txid,
             kind: var_kind,
@@ -2787,6 +2788,7 @@ impl SseDecode for crate::api::transport::ThreadMessageDto {
             readable: var_readable,
             frame: var_frame,
             tombstoned: var_tombstoned,
+            provenance: var_provenance,
         };
     }
 }
@@ -3571,6 +3573,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::transport::ThreadMessageDto {
             self.readable.into_into_dart().into_dart(),
             self.frame.into_into_dart().into_dart(),
             self.tombstoned.into_into_dart().into_dart(),
+            self.provenance.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4199,6 +4202,7 @@ impl SseEncode for crate::api::transport::ThreadMessageDto {
         <bool>::sse_encode(self.readable, serializer);
         <Option<crate::api::transport::FrameDto>>::sse_encode(self.frame, serializer);
         <bool>::sse_encode(self.tombstoned, serializer);
+        <String>::sse_encode(self.provenance, serializer);
     }
 }
 

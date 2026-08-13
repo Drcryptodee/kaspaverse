@@ -113,7 +113,7 @@ class SettingsSection {
 class SecurityScope {
   const SecurityScope({
     required this.biometricStatus,
-    required this.pathAEnrolled,
+    required this.pathAState,
     required this.enroll,
     required this.clearEnrollment,
     required this.lockGraceSecs,
@@ -124,7 +124,12 @@ class SecurityScope {
   /// `security_update_required` · `unknown`. A reason, never a bool — see
   /// [biometricStateLabel] for why that distinction is the whole point.
   final Future<String> Function() biometricStatus;
-  final Future<bool> Function() pathAEnrolled;
+
+  /// `none` · `ready` · `invalidated`. A state, not a bool, for the same reason
+  /// [biometricStatus] is: "never set up" and "set up, then invalidated by a new
+  /// fingerprint" need different sentences and different remedies. As a bool the
+  /// second one read as "On" over a lane that could no longer open (run 1, F4).
+  final Future<String> Function() pathAState;
 
   /// Throws [PlatformException] with a stable code so a cancel can be told from
   /// a failure.
@@ -204,6 +209,10 @@ class _SettingsScreenState extends State<SettingsScreen>
   /// Raw biometric status, kept so the action sheet can offer the right verbs.
   String _biometricStatus = 'unknown';
 
+  /// Raw Path-A state, for the same reason — `invalidated` needs its own
+  /// explanation and its own verb, not the "Off" branch's.
+  String _pathAState = pathANone;
+
   /// The signing fingerprint as the platform gave it — all 64 hex characters.
   ///
   /// Kept beside the elided row value rather than instead of it. Shortening on
@@ -264,25 +273,32 @@ class _SettingsScreenState extends State<SettingsScreen>
 
   Future<void> _refreshBiometric() async {
     var status = 'unknown';
-    var enrolled = false;
+    var state = pathANone;
     try {
       status = await widget.security.biometricStatus();
-      enrolled = await widget.security.pathAEnrolled();
+      state = await widget.security.pathAState();
     } catch (_) {
       // A platform gap (host tests, a missing channel) is "unknown", which the
       // label renders honestly rather than as a confident "Off".
     }
     if (!mounted) return;
     _biometricStatus = status;
+    _pathAState = state;
+    final enrolled = state == pathAReady;
     _enrolled = enrolled;
     _biometric.value = SettingsStatus(
-      biometricStateLabel(status, enrolled),
+      biometricStateLabel(status, state),
       // "On" is health and wears `success`; "Off" is a quiet, correct state and
       // must not wear the same voice — colour has to distinguish the two states
       // of a custody control or it carries no information at all (§3).
       tone: switch (status) {
         _ when biometricStateIsDegraded(status) => SettingsTone.degraded,
         _ when biometricStateIsUnknown(status) => SettingsTone.neutral,
+        // Enrolled-but-invalidated is a control the user believes is protecting
+        // them and which no longer opens anything. That is degraded, not the
+        // quiet neutral of "Off" — a row cannot wear the calm voice of a
+        // deliberate choice for a state the user did not choose (§3).
+        _ when state == pathAInvalidated => SettingsTone.degraded,
         _ => enrolled ? SettingsTone.active : SettingsTone.neutral,
       },
     );
@@ -525,19 +541,25 @@ class _SettingsScreenState extends State<SettingsScreen>
     await _refreshBiometric();
     if (!mounted) return;
     final ready = _biometricStatus == biometricReady;
+    final invalidated = ready && _pathAState == pathAInvalidated;
     _showSheet(
       title: 'Fingerprint unlock',
       body: ready
-          ? (_enrolled
+          ? (invalidated
+                ? biometricInvalidatedCopy
+                : _enrolled
                 ? 'Fingerprint unlock is on. Your passphrase still works as a '
                       'backup, and always will.'
                 : 'Add your fingerprint to unlock quickly. Your passphrase '
                       'keeps working as a backup.')
           : biometricUnavailableCopy(_biometricStatus),
       actions: [
-        if (ready && !_enrolled)
+        // "Set up again" is the verb for the invalidated state and it now
+        // actually repairs it: enrolment deletes the dead key and builds a new
+        // one, where it used to reuse the dead one and fail the same way (F4).
+        if (ready && !_enrolled && !invalidated)
           _SheetAction('Enable fingerprint unlock', _enrollNow),
-        if (ready && _enrolled) ...[
+        if (ready && (_enrolled || invalidated)) ...[
           _SheetAction('Set up again', _enrollNow),
           // Destructive: it deletes the Keystore key and the sealed blob. Not
           // fund loss — Path B is untouched and re-enrolling restores it — but

@@ -95,6 +95,13 @@ class MainActivity : FlutterFragmentActivity() {
 
                     "pathAEnrolled" -> result.success(KeystoreVault.isEnrolled(this))
 
+                    // The same question answered with the REASON, for the same
+                    // reason `biometricStatus` exists: "never set up" and "set
+                    // up, then invalidated by a new fingerprint" need different
+                    // sentences and different remedies, and the bool above can
+                    // carry neither (run 1, F4).
+                    "pathAState" -> result.success(KeystoreVault.pathAState(this))
+
                     // Version, build and the signing-certificate fingerprint — the
                     // user-side half of RELEASE.md's provenance story, so an install
                     // can be checked against a published fingerprint on the glass.
