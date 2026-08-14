@@ -22,6 +22,14 @@ import io.flutter.plugin.common.MethodChannel
  * status strings cross the MethodChannel.
  */
 class MainActivity : FlutterFragmentActivity() {
+    companion object {
+        // Stable platform error codes for the save lane — the CODE is the
+        // contract Dart branches on, never the message (KeystoreVault's rule).
+        const val CODE_SAVE_CANCELLED = "cancelled"
+        const val CODE_SAVE_BUSY = "busy"
+        const val CODE_SAVE_FAILED = "failed"
+    }
+
     private val channel = "org.kaspaverse.app/ceremony"
 
     // OS default-network signal (C5/D-089, ruling 3: zero new dependencies).
@@ -41,11 +49,94 @@ class MainActivity : FlutterFragmentActivity() {
         reply?.success(res.resultCode == Activity.RESULT_OK)
     }
 
+    // The pending Dart reply and payload for an in-flight file save. The user
+    // picks the destination in the system document picker (SAF), so the bytes
+    // must survive the round trip out to that picker and back.
+    //
+    // SAF, not MediaStore and not a storage permission: `ACTION_CREATE_DOCUMENT`
+    // needs NO permission at any API level, and the user chooses where the file
+    // lands. `WRITE_EXTERNAL_STORAGE` has been inert for a target-29+ app since
+    // scoped storage, so declaring one would be dead weight that widens the
+    // manifest for nothing (P1 §0.5's posture: the smallest platform surface
+    // that does the job, hand-owned, no plugin).
+    private var pendingSave: MethodChannel.Result? = null
+    private var pendingSaveBytes: ByteArray? = null
+    private val saveLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        val reply = pendingSave
+        val bytes = pendingSaveBytes
+        pendingSave = null
+        // Cleared before ANY reply path, so a failed write cannot strand a
+        // payload in the field for the next save to pick up.
+        pendingSaveBytes = null
+        val uri = res.data?.data
+        when {
+            res.resultCode != Activity.RESULT_OK || uri == null ->
+                // The user backing out is not a failure. It carries the same
+                // code the biometric lane uses so Dart's copy layer can stay
+                // silent about it (biometric_copy.dart's rule).
+                reply?.error(CODE_SAVE_CANCELLED, null, null)
+            bytes == null ->
+                reply?.error(CODE_SAVE_FAILED, "nothing to write", null)
+            else -> try {
+                // Mode "wt" TRUNCATES. The default mode leaves whatever the
+                // previous file had past our length, so overwriting a larger
+                // document would produce a file that is our bytes followed by
+                // a stranger's tail — silently, and looking like ours.
+                contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                    ?: throw java.io.IOException("no output stream")
+                reply?.success(true)
+            } catch (e: Exception) {
+                reply?.error(CODE_SAVE_FAILED, e.message, null)
+            }
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    // Save a file the user asked for, through the system
+                    // document picker. The bytes are decrypted message content
+                    // (§0.4) — they are written to a destination the user
+                    // chose and nowhere else, and never logged.
+                    "saveFile" -> {
+                        if (pendingSave != null) {
+                            result.error(CODE_SAVE_BUSY, "a save is already in progress", null)
+                        } else {
+                            val name = call.argument<String>("name") ?: "attachment"
+                            val bytes = call.argument<ByteArray>("bytes")
+                            if (bytes == null) {
+                                result.error(CODE_SAVE_FAILED, "nothing to write", null)
+                            } else {
+                                pendingSave = result
+                                pendingSaveBytes = bytes
+                                // A generic type: the picker must not be told a
+                                // media type the SENDER chose. The name still
+                                // carries the extension for the user to see.
+                                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                                    .addCategory(Intent.CATEGORY_OPENABLE)
+                                    .setType("application/octet-stream")
+                                    .putExtra(Intent.EXTRA_TITLE, name)
+                                try {
+                                    saveLauncher.launch(intent)
+                                } catch (e: Exception) {
+                                    // A device with no document provider throws
+                                    // here. Without this the fields stay set:
+                                    // the reply never fires, every later save
+                                    // is refused BUSY for the process lifetime,
+                                    // and the decrypted bytes sit pinned in an
+                                    // Activity field with nothing to clear them.
+                                    pendingSave = null
+                                    pendingSaveBytes = null
+                                    result.error(CODE_SAVE_FAILED, e.message, null)
+                                }
+                            }
+                        }
+                    }
+
                     // App-private files dir for the Rust vault store (INV-3).
                     // Keeps path_provider (a plugin on the custody path) out.
                     "getFilesDir" -> result.success(filesDir.absolutePath)

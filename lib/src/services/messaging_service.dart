@@ -1,11 +1,11 @@
 import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 
 import '../rust/api/error.dart';
 import '../rust/api/send.dart';
 import '../rust/api/transport.dart';
 import '../rust/api/wallet.dart' show uiMark;
+import 'vault_service.dart';
 
 /// Conversations + threads over the P2.3 bridge surface. PULL-shaped by
 /// design (§0.4 plaintext discipline): the only stream is a content-free
@@ -132,6 +132,17 @@ class MessagingService {
       transportSetContactName(address: address, name: name);
 
   @visibleForTesting
+  static Future<AttachmentBytesDto> Function(String conversationId, String txid)
+  attachmentBytesFn = (conversationId, txid) =>
+      transportAttachmentBytes(conversationId: conversationId, txid: txid);
+
+  /// Platform write seam — swapped in tests, and the ONLY place decrypted
+  /// bytes leave the app. `false` means the user backed out.
+  @visibleForTesting
+  static Future<bool> Function(String name, Uint8List bytes) writeFileFn =
+      VaultService.instance.saveFile;
+
+  @visibleForTesting
   static Future<void> Function(String conversationId) hideFn =
       (conversationId) =>
           transportHideConversation(conversationId: conversationId);
@@ -252,6 +263,17 @@ class MessagingService {
   /// the answer.
   Future<ContactRouteDto?> existingConversation(String address) =>
       existingConversationFn(address);
+
+  /// Fetch a file attachment's bytes and write them where the user chooses.
+  ///
+  /// Returns the file name when written, or null when the user backed out — a
+  /// cancel is a decision, and the caller must stay silent about it. The bytes
+  /// are fetched only here, never with a thread pull.
+  Future<String?> saveAttachment(String conversationId, String txid) async {
+    final file = await attachmentBytesFn(conversationId, txid);
+    final saved = await writeFileFn(file.name, file.bytes);
+    return saved ? file.name : null;
+  }
 
   /// Name (or clear the name of) a contact, then re-pull so every surface
   /// showing that address updates at once.

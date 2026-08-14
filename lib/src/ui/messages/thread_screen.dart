@@ -232,6 +232,33 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// Accept a received challenge — routes through the confirm ceremony and
   /// sends only a social `accept` frame (a self-send fee). NEVER binds a stake
   /// or auto-spends (§0.5 law a); the real wager binds at the P3 covenant.
+  /// Save a file attachment to the device.
+  ///
+  /// The bytes are fetched only now, never with the thread pull: rendering a
+  /// card needs the description, and shipping every attachment's bytes across
+  /// the bridge to draw one would be waste for the common case and unbounded
+  /// for the hostile one.
+  Future<void> _saveAttachment(String txid) async {
+    KvHaptic.selection();
+    try {
+      final saved = await _messaging.saveAttachment(
+        widget.conversationId,
+        txid,
+      );
+      // A cancel returns null and says nothing — backing out of the picker is
+      // a decision, not something to report back at the user.
+      if (!mounted || saved == null) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Saved $saved')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    }
+  }
+
   Future<void> _acceptChallenge(String refId) => _confirmSend(
     prepare: () =>
         _messaging.prepareChallengeAccept(widget.conversationId, refId),
@@ -405,6 +432,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
           ghost: _ghostFor(m),
           declined: m.frame != null && _declined.contains(m.frame!.id),
           onAccept: _acceptChallenge,
+          onSaveFile: _saveAttachment,
           onDecline: _declineChallenge,
         );
         if (!reduced) {
@@ -446,6 +474,7 @@ class _MessageRow extends StatelessWidget {
     this.ghost = false,
     this.onAccept,
     this.onDecline,
+    this.onSaveFile,
   });
 
   final ThreadMessageDto message;
@@ -472,6 +501,9 @@ class _MessageRow extends StatelessWidget {
 
   final void Function(String refId)? onAccept;
   final void Function(String refId)? onDecline;
+
+  /// Save this message's file attachment to the device (by txid).
+  final void Function(String txid)? onSaveFile;
 
   @override
   Widget build(BuildContext context) {
@@ -567,6 +599,19 @@ class _MessageRow extends StatelessWidget {
           kind: frame.kind,
           text: m.text,
           outbound: m.outbound,
+        ),
+      );
+    }
+
+    final attachment = m.attachment;
+    if (attachment != null) {
+      return _withProvenance(
+        theme,
+        m,
+        _AttachmentCard(
+          file: attachment,
+          outbound: m.outbound,
+          onSave: onSaveFile == null ? null : () => onSaveFile!(m.txid),
         ),
       );
     }
@@ -1070,6 +1115,129 @@ class _ArcadeComposeSheetState extends State<_ArcadeComposeSheet> {
             child: Text(challenge ? 'Review challenge' : 'Review taunt'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A file a counterparty sent.
+///
+/// Everything rendered here is OUR decode, never the sender's claim: the name
+/// was scrubbed to a base name in Rust, the size is the bytes we actually
+/// decoded, and the type is our own allowlisted bucket. A file we will not
+/// interpret shows as an inert card — never opened, never executed, never
+/// handed to a renderer that could act on it.
+class _AttachmentCard extends StatelessWidget {
+  const _AttachmentCard({
+    required this.file,
+    required this.outbound,
+    this.onSave,
+  });
+
+  final AttachmentDto file;
+  final bool outbound;
+  final VoidCallback? onSave;
+
+  static String prettySize(BigInt bytes) {
+    final n = bytes.toInt();
+    if (n < 1024) return '$n B';
+    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+    return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  IconData get _icon => switch (file.kind) {
+    'text' => Icons.description_outlined,
+    'image' => Icons.image_outlined,
+    _ => Icons.insert_drive_file_outlined,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final text = file.text;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: KvSpace.xs),
+      child: Align(
+        alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 300),
+          child: Container(
+            padding: const EdgeInsets.all(KvSpace.sm),
+            decoration: BoxDecoration(
+              color: outbound ? KvColor.surfaceAlt : KvColor.surface,
+              borderRadius: BorderRadius.circular(KvRadius.card),
+              border: outbound ? null : Border.all(color: KvColor.border),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      file.broken ? Icons.error_outline : _icon,
+                      size: 20,
+                      color: file.broken
+                          ? KvColor.textTertiary
+                          : KvColor.textSecondary,
+                    ),
+                    const SizedBox(width: KvSpace.s),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            file.broken ? "This file didn't decode" : file.name,
+                            style: theme.textTheme.bodyMedium,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (!file.broken)
+                            Text(
+                              prettySize(file.sizeBytes),
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: KvColor.textTertiary,
+                                fontFamily: KvFont.ui,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (!file.broken && onSave != null)
+                      IconButton(
+                        tooltip: 'Save to device',
+                        icon: const Icon(Icons.download_outlined, size: 20),
+                        onPressed: onSave,
+                      ),
+                  ],
+                ),
+                // Text files show their content inline; anything we will not
+                // interpret stays a card and nothing more.
+                if (text != null && text.isNotEmpty) ...[
+                  const SizedBox(height: KvSpace.s),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(KvSpace.s),
+                    decoration: BoxDecoration(
+                      color: outbound ? KvColor.surface : KvColor.surfaceAlt,
+                      borderRadius: BorderRadius.circular(KvRadius.data),
+                    ),
+                    // Plain text, never markup — the sender chose these bytes,
+                    // so nothing here may be interpreted as formatting.
+                    child: SelectableText(
+                      text,
+                      maxLines: 20,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontFamily: KvFont.mono,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

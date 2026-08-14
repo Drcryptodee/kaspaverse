@@ -35,6 +35,7 @@ use kaspaverse_chain::{
     MessageRecord, PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore,
     WatchSource, HANDSHAKE_BOND_SOMPI, STASH_SCOPE_SAVED_HANDSHAKE,
 };
+use kaspaverse_core::attachment::Attachment;
 use kaspaverse_core::frames::{
     self, build_accept, build_challenge, build_taunt, fresh_challenge_id, GAME_ATTACK_DEFEND,
 };
@@ -97,6 +98,24 @@ pub struct ConversationDto {
     pub contact_name: Option<String>,
 }
 
+/// A file a counterparty sent. Every field here is OURS: the name is scrubbed
+/// to a base name, the size is what we decoded (never what they claimed), and
+/// `kind` is our own classification, never their `mimeType`.
+#[derive(Clone, Debug)]
+pub struct AttachmentDto {
+    pub name: String,
+    pub size_bytes: u64,
+    /// `text` / `image` / `other` — a coarse, allowlisted bucket. Markup types
+    /// deliberately land in `other` and stay opaque.
+    pub kind: String,
+    /// The decoded text, for `text` attachments only. `None` for everything
+    /// else: bytes we will not interpret never cross the bridge as content.
+    pub text: Option<String>,
+    /// True when the body claimed to be a file and could not be decoded — the
+    /// row says so instead of falling back to rendering its raw JSON.
+    pub broken: bool,
+}
+
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
 /// cross this bridge (user content post-decrypt, D-056; ffi-leak pre-cleared
 /// shape). Produced only by [`transport_thread`] (decrypt-on-view, §0.4):
@@ -119,6 +138,9 @@ pub struct ThreadMessageDto {
     /// forward-version tail (which render as an ordinary bubble from `text`,
     /// P5). Display-only: a frame binds no value (§0.3).
     pub frame: Option<FrameDto>,
+    /// A file the counterparty sent, when this message is one. Set instead of
+    /// [`text`](Self::text) — a file body IS the whole plaintext.
+    pub attachment: Option<AttachmentDto>,
     /// V1 reorg honesty: true when this message's accepting block was
     /// displaced and not re-accepted within the observed window — the row is
     /// a ghost (styled affordance lands in V2; the flag is the truth surface).
@@ -3326,6 +3348,61 @@ pub fn transport_existing_conversation(
     }))
 }
 
+/// The raw bytes of a file attachment, for saving it to the device.
+///
+/// Fetched on DEMAND rather than pushed with every thread row: a thread pull
+/// renders dozens of messages, and shipping every attachment's bytes across
+/// the FFI to draw a card would be wasteful for the common case and unbounded
+/// for the bad one. The card is drawn from the description; the bytes cross
+/// only when the user asks to save.
+///
+/// The name returned alongside is OURS — scrubbed to a base name in the
+/// parser, so a caller writing a file cannot be handed `../../something`.
+pub fn transport_attachment_bytes(
+    conversation_id: String,
+    txid: String,
+) -> Result<AttachmentBytesDto, AppError> {
+    let hub = hub()?;
+    let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let record = store
+        .message(&txid)
+        .filter(|m| m.conversation_id == conversation_id)
+        .cloned()
+        .ok_or_else(|| AppError::msg("message not found"))?;
+    let bound = store
+        .conversation(&conversation_id)
+        .map(|c| (to_core_branch(c.bound_branch), c.bound_index))
+        .ok_or_else(|| AppError::msg("conversation not found"))?;
+    drop(store);
+
+    let envelope =
+        Envelope::from_bytes(&record.envelope).map_err(|_| AppError::msg("unreadable message"))?;
+    let slot = record
+        .sealed_to
+        .map(|(b, i)| (to_core_branch(b), i))
+        .unwrap_or(bound);
+    let plaintext = open_with_fallback(&hub, slot, &envelope).map_err(|e| match e {
+        CoreError::VaultLocked => AppError::msg("wallet is locked — unlock to save this file"),
+        _ => AppError::msg("unreadable message"),
+    })?;
+    let body = String::from_utf8_lossy(&plaintext).into_owned();
+    match Attachment::parse(&body) {
+        Some(Ok(file)) => Ok(AttachmentBytesDto {
+            name: file.name,
+            bytes: file.bytes,
+        }),
+        Some(Err(_)) => Err(AppError::msg("this file could not be decoded")),
+        None => Err(AppError::msg("this message is not a file")),
+    }
+}
+
+/// A file's bytes plus the safe base name to write them under.
+#[derive(Clone, Debug)]
+pub struct AttachmentBytesDto {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Name (or rename) a contact. An empty name clears it back to the address.
 ///
 /// Keyed on the ADDRESS, not the conversation: a name belongs to a person, and
@@ -4260,10 +4337,12 @@ fn thread_row(
             text: String::new(),
             readable: true,
             frame: None,
+            attachment: None,
             tombstoned,
             provenance,
         }),
         StoredKind::Comm => {
+            let mut attachment: Option<AttachmentDto> = None;
             let (text, frame, readable) = match Envelope::from_bytes(&record.envelope) {
                 Ok(envelope) => {
                     let slot = record
@@ -4276,8 +4355,35 @@ fn thread_row(
                             // Only the parsed result crosses the bridge; an
                             // unknown/forward tail degrades to its line (P5).
                             let body = String::from_utf8_lossy(&plaintext).into_owned();
-                            let (text, frame) = split_frame(&body);
-                            (text, frame, true)
+                            // A file body is the WHOLE plaintext, so it is
+                            // checked before frame-splitting — otherwise the
+                            // JSON object renders as a wall of text in a chat
+                            // bubble, which is exactly what it used to do.
+                            if let Some(parsed) = Attachment::parse(&body) {
+                                let dto = match parsed {
+                                    Ok(file) => AttachmentDto {
+                                        name: file.name.clone(),
+                                        size_bytes: file.bytes.len() as u64,
+                                        kind: file.kind.as_token().to_string(),
+                                        text: file.as_text(),
+                                        broken: false,
+                                    },
+                                    // Say "this file did not decode" rather
+                                    // than dumping the body that failed.
+                                    Err(_) => AttachmentDto {
+                                        name: "attachment".to_string(),
+                                        size_bytes: 0,
+                                        kind: "other".to_string(),
+                                        text: None,
+                                        broken: true,
+                                    },
+                                };
+                                attachment = Some(dto);
+                                (String::new(), None, true)
+                            } else {
+                                let (text, frame) = split_frame(&body);
+                                (text, frame, true)
+                            }
                         }
                         Err(CoreError::VaultLocked) => {
                             return Err(AppError::msg("wallet is locked — unlock to read messages"))
@@ -4295,6 +4401,7 @@ fn thread_row(
                 text,
                 readable,
                 frame,
+                attachment,
                 tombstoned,
                 provenance,
             })

@@ -79,20 +79,14 @@ String? backupNotice(StashStateDto? state, {required bool archiveEnabled}) {
   // With the archive OFF there is nothing that could ever confirm it, so the
   // line must not nag about a check the user cannot run: it says what is true
   // and what would change it, once.
-  if (!state.confirmedReadable) {
-    return archiveEnabled
-        ? 'Backup sent — not confirmed readable yet. Tap to check.'
-        : 'Backup sent. Turning on history recovery is what lets a restore '
-              'find it.';
-  }
-  if (state.covered >= state.total) return null;
-  // Past the per-backup cap, "tap to fix" would be a lie — tapping spends a fee
-  // to write the same rows and leaves the banner identical. An affordance that
-  // cannot do what it offers is worse than no affordance.
-  final missing = state.total - state.covered;
-  return '$missing of ${state.total} conversations '
-      "${missing == 1 ? "isn't" : "aren't"} backed up — a backup holds your "
-      'most recent ones.';
+  // Everything else is a DETAIL, and details belong in the sheet.
+  //
+  // Founder ruling: the banner speaks only for the state where you lose
+  // everything. Partial coverage, an unconfirmed read-back, an archive that is
+  // switched off — all real, all visible one tap away, none of them worth
+  // interrupting for. A warning you cannot act on becomes wallpaper, and then
+  // the one that matters gets ignored with it.
+  return null;
 }
 
 /// Slim tappable banner above the conversation list — renders only when

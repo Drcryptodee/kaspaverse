@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -40,6 +41,7 @@ ThreadMessageDto message(
   FrameDto? frame,
   bool tombstoned = false,
   String provenance = 'node',
+  AttachmentDto? attachment,
 }) => ThreadMessageDto(
   txid: txid,
   kind: kind,
@@ -50,6 +52,7 @@ ThreadMessageDto message(
   frame: frame,
   tombstoned: tombstoned,
   provenance: provenance,
+  attachment: attachment,
 );
 
 FrameDto frameDto({
@@ -304,7 +307,7 @@ void main() {
       );
     });
 
-    test('backupNotice: silent unless it has something true to say', () {
+    test('backupNotice speaks ONLY when nothing is backed up at all', () {
       StashStateDto state(
         int covered,
         int total, {
@@ -321,35 +324,31 @@ void main() {
       expect(backupNotice(null, archiveEnabled: true), isNull);
       // Nothing to back up.
       expect(backupNotice(state(0, 0, last: 0), archiveEnabled: true), isNull);
-      // Fully covered.
-      expect(backupNotice(state(3, 3), archiveEnabled: true), isNull);
 
-      // Never backed up: name the actual consequence, not the mechanism.
+      // THE one state worth interrupting for: conversations exist and no
+      // backup does. Name the consequence, not the mechanism.
       final never = backupNotice(state(0, 2, last: 0), archiveEnabled: true);
       expect(never, contains('backed up'));
       expect(never, contains('money'));
       expect(never, contains('contacts'));
 
-      // Partial: the count is the missing ones, and it reads as English.
+      // Founder ruling: everything else is a detail and belongs in the sheet.
+      // A warning you cannot act on becomes wallpaper, and takes the one that
+      // matters down with it.
+      expect(backupNotice(state(3, 3), archiveEnabled: true), isNull);
       expect(
         backupNotice(state(1, 3), archiveEnabled: true),
-        startsWith('2 of 3'),
+        isNull,
+        reason: 'partial coverage is a detail, not an interruption',
       );
-      expect(
-        backupNotice(state(1, 3), archiveEnabled: true),
-        contains("aren't backed up"),
-      );
-      expect(
-        backupNotice(state(2, 3), archiveEnabled: true),
-        contains("isn't backed up"),
-      );
-
-      // SENT IS NOT FINDABLE. A backup we broadcast but have never read back
-      // must not be reported as coverage — the archive's attribution can fail
-      // quietly and leave it invisible to the only query that restores it.
       expect(
         backupNotice(state(3, 3, readable: false), archiveEnabled: true),
-        contains('not confirmed readable'),
+        isNull,
+        reason: 'an unconfirmed read-back is visible one tap away',
+      );
+      expect(
+        backupNotice(state(3, 3, readable: false), archiveEnabled: false),
+        isNull,
       );
     });
 
@@ -403,6 +402,139 @@ void main() {
       await service.threadSince('c1', null);
       await service.threadSince('c1', 'tx1');
       expect(deltas, 2, reason: 'threadSince decrypts fresh per call too');
+    });
+  });
+
+  group('file attachments', () {
+    AttachmentDto file({
+      String name = 'Algovelo.md',
+      int size = 6847,
+      String kind = 'text',
+      String? text = '# Notes',
+      bool broken = false,
+    }) => AttachmentDto(
+      name: name,
+      sizeBytes: BigInt.from(size),
+      kind: kind,
+      text: text,
+      broken: broken,
+    );
+
+    testWidgets('a file renders as a card, never as raw JSON', (tester) async {
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([message('tx1', text: '', attachment: file())]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Algovelo.md'), findsOneWidget);
+      expect(find.text('6.7 KB'), findsOneWidget);
+      expect(find.text('# Notes'), findsOneWidget);
+      // The thing this whole lane exists to stop.
+      expect(find.textContaining('"type":"file"'), findsNothing);
+      expect(find.textContaining('base64'), findsNothing);
+    });
+
+    testWidgets('a file we will not interpret stays an inert card', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message(
+          'tx1',
+          text: '',
+          attachment: file(name: 'page.html', kind: 'other', text: null),
+        ),
+      ]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('page.html'), findsOneWidget);
+      // No content is rendered for a type we refuse to interpret.
+      expect(find.byType(SelectableText), findsNothing);
+    });
+
+    testWidgets('a broken file says so instead of dumping its body', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('tx1', text: '', attachment: file(broken: true, text: null)),
+      ]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining("didn't decode"), findsOneWidget);
+      // Nothing to save from a file that did not decode.
+      expect(find.byIcon(Icons.download_outlined), findsNothing);
+    });
+
+    testWidgets('saving fetches the bytes only on demand', (tester) async {
+      var fetches = 0;
+      var wrote = '';
+      MessagingService.attachmentBytesFn = (conversationId, txid) async {
+        fetches++;
+        return AttachmentBytesDto(
+          name: 'Algovelo.md',
+          bytes: Uint8List.fromList([1, 2, 3]),
+        );
+      };
+      MessagingService.writeFileFn = (name, bytes) async {
+        wrote = '$name:${bytes.length}';
+        return true;
+      };
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([message('tx1', text: '', attachment: file())]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Drawing the card must not have pulled any bytes across the bridge.
+      expect(fetches, 0, reason: 'bytes cross only when the user asks');
+
+      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.pumpAndSettle();
+
+      expect(fetches, 1);
+      expect(wrote, 'Algovelo.md:3');
+      expect(find.textContaining('Saved Algovelo.md'), findsOneWidget);
+    });
+
+    testWidgets('backing out of the picker says nothing at all', (
+      tester,
+    ) async {
+      MessagingService.attachmentBytesFn = (_, _) async => AttachmentBytesDto(
+        name: 'Algovelo.md',
+        bytes: Uint8List.fromList([1]),
+      );
+      // false = the user cancelled.
+      MessagingService.writeFileFn = (_, _) async => false;
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([message('tx1', text: '', attachment: file())]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.pumpAndSettle();
+
+      // A cancel is a decision, not an error — no snackbar of any kind.
+      expect(find.byType(SnackBar), findsNothing);
     });
   });
 

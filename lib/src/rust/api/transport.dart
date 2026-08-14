@@ -10,7 +10,7 @@ import 'send.dart';
 
 // These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `PinPolicy`, `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -96,6 +96,24 @@ Future<ContactRouteDto?> transportExistingConversation({
   required String address,
 }) => RustLib.instance.api.crateApiTransportTransportExistingConversation(
   address: address,
+);
+
+/// The raw bytes of a file attachment, for saving it to the device.
+///
+/// Fetched on DEMAND rather than pushed with every thread row: a thread pull
+/// renders dozens of messages, and shipping every attachment's bytes across
+/// the FFI to draw a card would be wasteful for the common case and unbounded
+/// for the bad one. The card is drawn from the description; the bytes cross
+/// only when the user asks to save.
+///
+/// The name returned alongside is OURS — scrubbed to a base name in the
+/// parser, so a caller writing a file cannot be handed `../../something`.
+Future<AttachmentBytesDto> transportAttachmentBytes({
+  required String conversationId,
+  required String txid,
+}) => RustLib.instance.api.crateApiTransportTransportAttachmentBytes(
+  conversationId: conversationId,
+  txid: txid,
 );
 
 /// Name (or rename) a contact. An empty name clears it back to the address.
@@ -303,6 +321,72 @@ Stream<String> subscribeThreadPings() =>
 /// rides the shared socket's `dag_pause()`/`dag_resume()` posture (D-053).
 Stream<TransportEventDto> subscribeTransportEvents() =>
     RustLib.instance.api.crateApiTransportSubscribeTransportEvents();
+
+/// A file's bytes plus the safe base name to write them under.
+class AttachmentBytesDto {
+  final String name;
+  final Uint8List bytes;
+
+  const AttachmentBytesDto({required this.name, required this.bytes});
+
+  @override
+  int get hashCode => name.hashCode ^ bytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentBytesDto &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          bytes == other.bytes;
+}
+
+/// A file a counterparty sent. Every field here is OURS: the name is scrubbed
+/// to a base name, the size is what we decoded (never what they claimed), and
+/// `kind` is our own classification, never their `mimeType`.
+class AttachmentDto {
+  final String name;
+  final BigInt sizeBytes;
+
+  /// `text` / `image` / `other` — a coarse, allowlisted bucket. Markup types
+  /// deliberately land in `other` and stay opaque.
+  final String kind;
+
+  /// The decoded text, for `text` attachments only. `None` for everything
+  /// else: bytes we will not interpret never cross the bridge as content.
+  final String? text;
+
+  /// True when the body claimed to be a file and could not be decoded — the
+  /// row says so instead of falling back to rendering its raw JSON.
+  final bool broken;
+
+  const AttachmentDto({
+    required this.name,
+    required this.sizeBytes,
+    required this.kind,
+    this.text,
+    required this.broken,
+  });
+
+  @override
+  int get hashCode =>
+      name.hashCode ^
+      sizeBytes.hashCode ^
+      kind.hashCode ^
+      text.hashCode ^
+      broken.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentDto &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          sizeBytes == other.sizeBytes &&
+          kind == other.kind &&
+          text == other.text &&
+          broken == other.broken;
+}
 
 /// Where "add this contact" should actually go.
 class ContactRouteDto {
@@ -683,6 +767,10 @@ class ThreadMessageDto {
   /// P5). Display-only: a frame binds no value (§0.3).
   final FrameDto? frame;
 
+  /// A file the counterparty sent, when this message is one. Set instead of
+  /// [`text`](Self::text) — a file body IS the whole plaintext.
+  final AttachmentDto? attachment;
+
   /// V1 reorg honesty: true when this message's accepting block was
   /// displaced and not re-accepted within the observed window — the row is
   /// a ghost (styled affordance lands in V2; the flag is the truth surface).
@@ -710,6 +798,7 @@ class ThreadMessageDto {
     required this.text,
     required this.readable,
     this.frame,
+    this.attachment,
     required this.tombstoned,
     required this.provenance,
   });
@@ -723,6 +812,7 @@ class ThreadMessageDto {
       text.hashCode ^
       readable.hashCode ^
       frame.hashCode ^
+      attachment.hashCode ^
       tombstoned.hashCode ^
       provenance.hashCode;
 
@@ -738,6 +828,7 @@ class ThreadMessageDto {
           text == other.text &&
           readable == other.readable &&
           frame == other.frame &&
+          attachment == other.attachment &&
           tombstoned == other.tombstoned &&
           provenance == other.provenance;
 }

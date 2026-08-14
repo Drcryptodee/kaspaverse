@@ -20,6 +20,7 @@
 // that is a design smell to escalate, not a lint to relax.
 #![forbid(unsafe_code)]
 
+pub mod attachment;
 pub mod error;
 pub mod frames;
 pub mod handshake;

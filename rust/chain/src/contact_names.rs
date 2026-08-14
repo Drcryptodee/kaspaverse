@@ -94,7 +94,7 @@ pub fn sanitize_name(name: &str) -> String {
             }
             continue;
         }
-        if ch.is_control() {
+        if ch.is_control() || is_deceptive_format(ch) {
             continue;
         }
         // Count CHARACTERS, not bytes: truncating a multi-byte character
@@ -106,6 +106,25 @@ pub fn sanitize_name(name: &str) -> String {
         last_was_space = false;
     }
     out.trim_end().to_string()
+}
+
+/// Characters that carry no glyph but change how surrounding text READS —
+/// bidi overrides, zero-width joiners, the BOM.
+///
+/// `char::is_control` is Unicode category Cc only and misses all of them.
+/// Deliberately duplicated from the attachment parser rather than shared: this
+/// crate has no `kaspaverse-core` dependency by design (see the module docs on
+/// `transport_store`), and a six-line table is a smaller price than a crate
+/// edge. If a third copy ever appears, that is the signal to move it.
+fn is_deceptive_format(ch: char) -> bool {
+    matches!(ch,
+        '\u{00AD}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{FEFF}'
+    )
 }
 
 #[cfg(test)]
@@ -153,6 +172,10 @@ mod tests {
         assert_eq!(sanitize_name("  Alice  "), "Alice");
         assert_eq!(sanitize_name("Alice\nBob"), "Alice Bob");
         assert_eq!(sanitize_name("Alice\u{0}\u{1}Bob"), "AliceBob");
+        // Bidi/zero-width characters are invisible but reorder what a row
+        // reads as — a name is a display string, so they go too.
+        assert_eq!(sanitize_name("Ali\u{202E}ce"), "Alice");
+        assert_eq!(sanitize_name("A\u{200B}B\u{FEFF}"), "AB");
         assert_eq!(sanitize_name("A   B"), "A B", "runs collapse");
 
         let long = "x".repeat(MAX_CONTACT_NAME + 50);

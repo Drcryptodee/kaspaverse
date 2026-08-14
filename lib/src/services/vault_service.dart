@@ -190,6 +190,41 @@ class VaultService with WidgetsBindingObserver {
     () async => await ceremony.invokeMethod<bool>('revealAndVerify') ?? false,
   );
 
+  /// Write [bytes] to a destination the user picks in the system document
+  /// picker, offering [name]. `true` when written, `false` when they backed out.
+  ///
+  /// **Deliberately NOT a [runCeremony] handoff, and that is the whole point.**
+  /// The other native surfaces are wrapped because they pause Flutter and must
+  /// come back to an unlocked vault. This one must not be: the bytes are
+  /// already decrypted and handed to Kotlin BEFORE the picker opens, so the
+  /// write cannot land on a locked vault and needs no suspension.
+  ///
+  /// Wrapping it would be actively worse. Every existing ceremony is
+  /// self-terminating — the biometric prompt times out, the reveal drops on
+  /// background — but the document picker is another app the user can sit in,
+  /// or walk away from, indefinitely. Suspending §0.11 across it would hold the
+  /// vault open for an unbounded window, which is exactly the ceiling D-133
+  /// exists to enforce. So the lock arms normally: leave the app in the picker
+  /// long enough and you come back to a locked wallet, with the file saved.
+  ///
+  /// The bytes are decrypted message content (§0.4). They go to the chosen
+  /// destination and nowhere else, and are never logged.
+  ///
+  /// Throws [PlatformException] on a real failure (`failed`, `busy`); a user
+  /// cancel is NOT an error and returns false.
+  Future<bool> saveFile(String name, Uint8List bytes) async {
+    try {
+      return await ceremony.invokeMethod<bool>('saveFile', {
+            'name': name,
+            'bytes': bytes,
+          }) ??
+          false;
+    } on PlatformException catch (e) {
+      if (e.code == 'cancelled') return false;
+      rethrow;
+    }
+  }
+
   /// Run a native ceremony that may pause Flutter, with the §0.11 auto-lock held
   /// open across it and **resolved honestly afterwards**.
   ///

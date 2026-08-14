@@ -106,6 +106,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _backUp() async {
     await _runPrepare(
       _messaging.prepareStash,
+      // A backup is not a message, and the shared ceremony would otherwise
+      // call it one.
+      title: 'Confirm backup',
       contextNote:
           'Parks your conversation list on Kaspa, sealed to your own key, so '
           'your recovery phrase can bring your contacts back too. The amount '
@@ -120,6 +123,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _runPrepare(
     Future<SignableSummaryDto> Function() prepare, {
     required String contextNote,
+    String? title,
   }) async {
     try {
       await runConfirmSend(
@@ -128,6 +132,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
         commit: _messaging.commit,
         abandon: _messaging.abandon,
         contextNote: contextNote,
+        title: title,
       );
     } catch (e) {
       if (!mounted) return;
