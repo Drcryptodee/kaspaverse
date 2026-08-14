@@ -430,14 +430,14 @@ const CONFIG_FILE: &str = "fill.config";
 const CURSORS_FILE: &str = "fill.cursors";
 const STASH_STATE_FILE: &str = "stash.state";
 
-fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)
         .map_err(|e| ChainError::Message(format!("fill state encode failed: {e}")))?;
     std::fs::write(path, bytes)

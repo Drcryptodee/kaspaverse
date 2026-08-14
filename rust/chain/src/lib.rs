@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod acceptance;
+pub mod contact_names;
 mod dag_monitor;
 pub mod discovery;
 mod error;
@@ -26,6 +27,7 @@ mod wallet_sync;
 pub use acceptance::{
     pruning_horizon_ms, AcceptanceEvent, AcceptanceTracker, TxStatus, VccBatch, WatchSource,
 };
+pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, EscalationOutcome, SignedTxRetention};

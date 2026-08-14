@@ -92,6 +92,9 @@ pub struct ConversationDto {
     /// (INV-9); only this bool crosses the FFI. Always `false` for other
     /// statuses.
     pub invite_expired: bool,
+    /// The local name the user gave this address, when they gave one. Device
+    /// only — never on the wire, never in a backup.
+    pub contact_name: Option<String>,
 }
 
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
@@ -3323,6 +3326,33 @@ pub fn transport_existing_conversation(
     }))
 }
 
+/// Name (or rename) a contact. An empty name clears it back to the address.
+///
+/// Keyed on the ADDRESS, not the conversation: a name belongs to a person, and
+/// conversation ids are minted fresh on a re-handshake and can change across a
+/// restore. Returns the stored name, or `None` when cleared.
+///
+/// The text is the user's own, so it is not foreign — but it is cleaned and
+/// bounded at the write (control characters dropped, whitespace collapsed,
+/// length capped) so no list row, header or log line can be forged by a paste.
+/// Never logged: this is user content (§4), so only its presence is reportable.
+pub fn transport_set_contact_name(
+    address: String,
+    name: String,
+) -> Result<Option<String>, AppError> {
+    let dest = validate_mainnet_address(&address)?;
+    let dir = vault::transport_store_dir()?;
+    let mut names = kaspaverse_chain::ContactNames::load(&dir);
+    let stored = names.set(&dest.to_string(), &name);
+    names.save(&dir).map_err(AppError::chain)?;
+    log::info!(
+        "transport: contact name {}",
+        if stored.is_some() { "set" } else { "cleared" }
+    );
+    ping_notice_inputs();
+    Ok(stored)
+}
+
 /// Where "add this contact" should actually go.
 #[derive(Clone, Debug)]
 pub struct ContactRouteDto {
@@ -4117,6 +4147,11 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
     let hub = hub()?;
     let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
     let now = now_unix_ms();
+    // Loaded once per pull, not per row. Names are device-local metadata, so a
+    // missing or unreadable file costs labels and never a conversation.
+    let names = vault::transport_store_dir()
+        .map(|dir| kaspaverse_chain::ContactNames::load(&dir))
+        .unwrap_or_default();
     Ok(store
         .list_conversations()
         .into_iter()
@@ -4125,6 +4160,7 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
         .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
         .map(|c| ConversationDto {
             invite_expired: invite_expired(c.status, c.created_unix_ms, now),
+            contact_name: names.get(&c.contact_address).map(str::to_string),
             conversation_id: c.conversation_id,
             contact_address: c.contact_address,
             my_alias: c.my_alias,

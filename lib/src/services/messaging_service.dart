@@ -127,6 +127,11 @@ class MessagingService {
       transportExistingConversation(address: address);
 
   @visibleForTesting
+  static Future<String?> Function(String address, String name)
+  setContactNameFn = (address, name) =>
+      transportSetContactName(address: address, name: name);
+
+  @visibleForTesting
   static Future<void> Function(String conversationId) hideFn =
       (conversationId) =>
           transportHideConversation(conversationId: conversationId);
@@ -247,6 +252,13 @@ class MessagingService {
   /// the answer.
   Future<ContactRouteDto?> existingConversation(String address) =>
       existingConversationFn(address);
+
+  /// Name (or clear the name of) a contact, then re-pull so every surface
+  /// showing that address updates at once.
+  Future<void> setContactName(String address, String name) async {
+    await setContactNameFn(address, name);
+    await refresh();
+  }
 
   /// Persist the fill posture, then run a fill immediately when enabling
   /// (the founder's test: flip on → history appears without a restart).

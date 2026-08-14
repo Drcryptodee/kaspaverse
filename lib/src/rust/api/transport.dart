@@ -98,6 +98,24 @@ Future<ContactRouteDto?> transportExistingConversation({
   address: address,
 );
 
+/// Name (or rename) a contact. An empty name clears it back to the address.
+///
+/// Keyed on the ADDRESS, not the conversation: a name belongs to a person, and
+/// conversation ids are minted fresh on a re-handshake and can change across a
+/// restore. Returns the stored name, or `None` when cleared.
+///
+/// The text is the user's own, so it is not foreign — but it is cleaned and
+/// bounded at the write (control characters dropped, whitespace collapsed,
+/// length capped) so no list row, header or log line can be forged by a paste.
+/// Never logged: this is user content (§4), so only its presence is reportable.
+Future<String?> transportSetContactName({
+  required String address,
+  required String name,
+}) => RustLib.instance.api.crateApiTransportTransportSetContactName(
+  address: address,
+  name: name,
+);
+
 /// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
 /// own return-address lookup (consensus data, never payload content — §0.3:
 /// this flow commits value), build the acceptance response, refund the 0.2
@@ -338,6 +356,10 @@ class ConversationDto {
   /// statuses.
   final bool inviteExpired;
 
+  /// The local name the user gave this address, when they gave one. Device
+  /// only — never on the wire, never in a backup.
+  final String? contactName;
+
   const ConversationDto({
     required this.conversationId,
     required this.contactAddress,
@@ -348,6 +370,7 @@ class ConversationDto {
     required this.createdUnixMs,
     required this.lastActivityUnixMs,
     required this.inviteExpired,
+    this.contactName,
   });
 
   @override
@@ -360,7 +383,8 @@ class ConversationDto {
       initiatedByMe.hashCode ^
       createdUnixMs.hashCode ^
       lastActivityUnixMs.hashCode ^
-      inviteExpired.hashCode;
+      inviteExpired.hashCode ^
+      contactName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -375,7 +399,8 @@ class ConversationDto {
           initiatedByMe == other.initiatedByMe &&
           createdUnixMs == other.createdUnixMs &&
           lastActivityUnixMs == other.lastActivityUnixMs &&
-          inviteExpired == other.inviteExpired;
+          inviteExpired == other.inviteExpired &&
+          contactName == other.contactName;
 }
 
 /// The user's fill posture, for the settings surface. `default_endpoint`

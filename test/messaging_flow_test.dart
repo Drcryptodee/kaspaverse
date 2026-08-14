@@ -15,6 +15,7 @@ ConversationDto conversation(
   String id, {
   String status = 'active',
   bool inviteExpired = false,
+  String? contactName,
   String address =
       'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf',
 }) => ConversationDto(
@@ -27,6 +28,7 @@ ConversationDto conversation(
   createdUnixMs: BigInt.one,
   lastActivityUnixMs: BigInt.two,
   inviteExpired: inviteExpired,
+  contactName: contactName,
 );
 
 ThreadMessageDto message(
@@ -598,6 +600,65 @@ void main() {
       );
     });
 
+    testWidgets('a named contact shows its name, not its address', (
+      tester,
+    ) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', contactName: 'Alice'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Alice'), findsOneWidget);
+      // The address is replaced in the label, not shown beside it.
+      expect(find.textContaining('kaspa:'), findsNothing);
+    });
+
+    testWidgets('naming a contact writes through Rust and re-pulls', (
+      tester,
+    ) async {
+      var written = '';
+      MessagingService.setContactNameFn = (address, name) async {
+        written = '$address=$name';
+        return name.isEmpty ? null : name;
+      };
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Name this contact'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, 'Alice');
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(written, endsWith('=Alice'));
+      expect(written, startsWith('kaspa:'));
+    });
+
+    testWidgets('an invitation has no address, so it cannot be named yet', (
+      tester,
+    ) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+      await openRequests(tester);
+
+      await tester.longPress(find.text('Wants to connect'));
+      await tester.pumpAndSettle();
+      // Hiding is still offered; naming is not, because a name keys on the
+      // address and this row has none until its sender is recorded.
+      expect(find.text('Hide conversation'), findsOneWidget);
+      expect(find.text('Name this contact'), findsNothing);
+    });
+
     testWidgets('Chats holds conversations; Requests holds what wants a bond', (
       tester,
     ) async {
@@ -761,6 +822,9 @@ void main() {
 
       await tester.longPress(find.text('Active'));
       await tester.pumpAndSettle();
+      // Long-press now offers naming as well as hiding.
+      await tester.tap(find.text('Hide conversation'));
+      await tester.pumpAndSettle();
       // The confirm sheet is honest about being local-only — and, since the
       // row is now tombstoned rather than deleted, honest that hiding does
       // NOT stop the other side writing to you. The copy used to promise that
@@ -790,6 +854,9 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      // Long-press now offers naming as well as hiding.
+      await tester.tap(find.text('Hide conversation'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
       await tester.pumpAndSettle();

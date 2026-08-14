@@ -164,11 +164,48 @@ class _ContactsScreenState extends State<ContactsScreen> {
     ).showSnackBar(const SnackBar(content: Text('Invitation dismissed.')));
   }
 
-  /// The zombie-cleanup affordance (D-068): long-press → confirm → hide. Local
-  /// only; nothing leaves the device. The row is tombstoned, so their next
-  /// message reopens the thread.
-  Future<void> _hide(ConversationDto conversation) async {
+  /// Long-press: name the contact, or hide the conversation.
+  ///
+  /// Hide used to be the whole long-press. Naming belongs on the same gesture —
+  /// both are "this row, not this message" — and putting a second step in front
+  /// of hide is a feature, not a cost: it is the one local action that makes a
+  /// conversation disappear.
+  Future<void> _rowActions(ConversationDto conversation) async {
     KvHaptic.selection();
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _RowActionsSheet(
+        label: contactLabel(conversation),
+        canName: conversation.contactAddress.isNotEmpty,
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'name') {
+      await _nameContact(conversation);
+    } else if (action == 'hide') {
+      await _hide(conversation);
+    }
+  }
+
+  /// Give this address a local name — or clear it back to the address.
+  Future<void> _nameContact(ConversationDto conversation) async {
+    final name = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _NameSheet(
+        address: conversation.contactAddress,
+        current: conversation.contactName ?? '',
+      ),
+    );
+    if (!mounted || name == null) return;
+    await _messaging.setContactName(conversation.contactAddress, name);
+  }
+
+  /// The zombie-cleanup affordance (D-068): confirm → hide. Local only;
+  /// nothing leaves the device. The row is tombstoned, so their next message
+  /// reopens the thread.
+  Future<void> _hide(ConversationDto conversation) async {
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
       // L87, the instance that outlived the lesson: without this the sheet is
@@ -217,7 +254,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
             conversation: conversation,
             onOpen: () => _openThread(conversation),
             onAccept: () => _accept(conversation),
-            onHide: () => _hide(conversation),
+            onHide: () => _rowActions(conversation),
             onDismissExpired: () => _dismissExpired(conversation),
           ),
         );
@@ -295,6 +332,147 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 }
 
+/// Long-press actions for one row. Two choices, named plainly — a menu this
+/// short does not need icons or a title bar competing with them.
+class _RowActionsSheet extends StatelessWidget {
+  const _RowActionsSheet({required this.label, required this.canName});
+
+  final String label;
+
+  /// An invitation carries no address until its sender is recorded, and a
+  /// name is keyed on the address — so there is nothing to name yet.
+  final bool canName;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          KvSpace.m,
+          KvSpace.gutter,
+          KvSpace.l,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(child: Text(label, style: theme.textTheme.titleMedium)),
+            const SizedBox(height: KvSpace.m),
+            if (canName)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.badge_outlined),
+                title: const Text('Name this contact'),
+                subtitle: const Text('Shown only on this device'),
+                onTap: () => Navigator.of(context).pop('name'),
+              ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.visibility_off_outlined),
+              title: const Text('Hide conversation'),
+              subtitle: const Text('Comes back if they write again'),
+              onTap: () => Navigator.of(context).pop('hide'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Name a contact. The address stays visible while typing — the name is a
+/// label over an identity, never a replacement for it.
+class _NameSheet extends StatefulWidget {
+  const _NameSheet({required this.address, required this.current});
+
+  final String address;
+  final String current;
+
+  @override
+  State<_NameSheet> createState() => _NameSheetState();
+}
+
+class _NameSheetState extends State<_NameSheet> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.current,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final inset = MediaQuery.of(context).viewInsets.bottom;
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          KvSpace.m,
+          KvSpace.gutter,
+          KvSpace.l + inset,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Text(
+                'Name this contact',
+                style: theme.textTheme.titleMedium,
+              ),
+            ),
+            const SizedBox(height: KvSpace.m),
+            // The address stays on screen: a name is a label the user chose,
+            // and the identity underneath it is what actually routes.
+            Text(
+              truncateAddressPayload(widget.address),
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+                fontFamily: KvFont.mono,
+              ),
+            ),
+            const SizedBox(height: KvSpace.m),
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              maxLength: 40,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                helperText:
+                    'Stored on this device only — never sent, never '
+                    'in a backup.',
+              ),
+              onSubmitted: (v) => Navigator.of(context).pop(v),
+            ),
+            const SizedBox(height: KvSpace.m),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(_controller.text),
+              child: const Text('Save'),
+            ),
+            if (widget.current.isNotEmpty) ...[
+              const SizedBox(height: KvSpace.s),
+              TextButton(
+                // Clearing sends an empty name, which Rust treats as "remove"
+                // rather than "store a blank".
+                onPressed: () => Navigator.of(context).pop(''),
+                child: const Text('Remove name'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// The Chats / Requests split.
 ///
 /// **Both tabs always render, even at zero.** A tab bar that appears when the
@@ -362,11 +540,17 @@ class _ConversationTabs extends StatelessWidget {
   }
 }
 
-/// Contact display label: the address (truncated payload) — identity stays
-/// pubkeys + aliases (D-049); an inbound-pending row has no address yet.
-String contactLabel(ConversationDto c) => c.contactAddress.isEmpty
-    ? 'Unknown sender'
-    : truncateAddressPayload(c.contactAddress);
+/// Contact display label: the name the user gave this address, else the
+/// address itself (truncated). Identity is still pubkeys + aliases (D-049) —
+/// a name is a local label over the top, never a claim about who someone is,
+/// and never anything the counterparty can set.
+String contactLabel(ConversationDto c) {
+  final name = c.contactName;
+  if (name != null && name.isNotEmpty) return name;
+  return c.contactAddress.isEmpty
+      ? 'Unknown sender'
+      : truncateAddressPayload(c.contactAddress);
+}
 
 class _ConversationCard extends StatelessWidget {
   const _ConversationCard({
