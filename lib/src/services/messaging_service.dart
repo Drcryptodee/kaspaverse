@@ -139,8 +139,13 @@ class MessagingService {
   /// Platform write seam — swapped in tests, and the ONLY place decrypted
   /// bytes leave the app. `false` means the user backed out.
   @visibleForTesting
-  static Future<bool> Function(String name, Uint8List bytes) writeFileFn =
+  static Future<String?> Function(String name, Uint8List bytes) writeFileFn =
       VaultService.instance.saveFile;
+
+  /// Hand an already-saved file to the phone's own apps.
+  @visibleForTesting
+  static Future<bool> Function(String uri, String mime) openFileFn =
+      VaultService.instance.openFile;
 
   @visibleForTesting
   static Future<void> Function(String conversationId) hideFn =
@@ -269,11 +274,18 @@ class MessagingService {
   /// Returns the file name when written, or null when the user backed out — a
   /// cancel is a decision, and the caller must stay silent about it. The bytes
   /// are fetched only here, never with a thread pull.
-  Future<String?> saveAttachment(String conversationId, String txid) async {
+  Future<SavedFile?> saveAttachment(String conversationId, String txid) async {
     final file = await attachmentBytesFn(conversationId, txid);
-    final saved = await writeFileFn(file.name, file.bytes);
-    return saved ? file.name : null;
+    final uri = await writeFileFn(file.name, file.bytes);
+    return uri == null ? null : SavedFile(name: file.name, uri: uri);
   }
+
+  /// Open a file the user already saved, with whatever the phone has.
+  Future<bool> openSavedFile(String uri, String mime) => openFileFn(uri, mime);
+
+  /// The decoded bytes of a file attachment, for rendering it in place.
+  Future<Uint8List> attachmentBytes(String conversationId, String txid) async =>
+      (await attachmentBytesFn(conversationId, txid)).bytes;
 
   /// Name (or clear the name of) a contact, then re-pull so every surface
   /// showing that address updates at once.
@@ -384,4 +396,12 @@ class MessagingService {
     fillConfig.value = null;
     lastFill.value = null;
   }
+}
+
+/// Where a saved attachment landed — the name for the user, the destination so
+/// it can be opened again without copying it anywhere.
+class SavedFile {
+  const SavedFile({required this.name, required this.uri});
+  final String name;
+  final String uri;
 }

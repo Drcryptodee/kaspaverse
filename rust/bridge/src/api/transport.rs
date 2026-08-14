@@ -114,6 +114,10 @@ pub struct AttachmentDto {
     /// True when the body claimed to be a file and could not be decoded — the
     /// row says so instead of falling back to rendering its raw JSON.
     pub broken: bool,
+    /// The media type to hand the SYSTEM when opening this file, derived from
+    /// the extension we scrubbed — never from the sender's `mimeType`. Markup
+    /// types resolve to the neutral type so no browser is ever routed to.
+    pub view_mime: String,
 }
 
 /// One thread row — [`text`](Self::text) is THE first decrypted content to
@@ -4367,6 +4371,7 @@ fn thread_row(
                                         kind: file.kind.as_token().to_string(),
                                         text: file.as_text(),
                                         broken: false,
+                                        view_mime: file.view_mime().to_string(),
                                     },
                                     // Say "this file did not decode" rather
                                     // than dumping the body that failed.
@@ -4376,6 +4381,7 @@ fn thread_row(
                                         kind: "other".to_string(),
                                         text: None,
                                         broken: true,
+                                        view_mime: "application/octet-stream".to_string(),
                                     },
                                 };
                                 attachment = Some(dto);

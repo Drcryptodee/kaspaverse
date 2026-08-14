@@ -412,12 +412,14 @@ void main() {
       String kind = 'text',
       String? text = '# Notes',
       bool broken = false,
+      String viewMime = 'text/markdown',
     }) => AttachmentDto(
       name: name,
       sizeBytes: BigInt.from(size),
       kind: kind,
       text: text,
       broken: broken,
+      viewMime: viewMime,
     );
 
     testWidgets('a file renders as a card, never as raw JSON', (tester) async {
@@ -490,7 +492,7 @@ void main() {
       };
       MessagingService.writeFileFn = (name, bytes) async {
         wrote = '$name:${bytes.length}';
-        return true;
+        return 'content://downloads/1';
       };
       MessagingService.threadSinceFn = (_, _) async =>
           delta([message('tx1', text: '', attachment: file())]);
@@ -512,6 +514,85 @@ void main() {
       expect(find.textContaining('Saved Algovelo.md'), findsOneWidget);
     });
 
+    testWidgets('Open appears only after a save, with OUR media type', (
+      tester,
+    ) async {
+      var opened = '';
+      MessagingService.attachmentBytesFn = (_, _) async => AttachmentBytesDto(
+        name: 'photo.jpg',
+        bytes: Uint8List.fromList([1, 2, 3]),
+      );
+      MessagingService.writeFileFn = (_, _) async => 'content://downloads/9';
+      MessagingService.openFileFn = (uri, mime) async {
+        opened = '$uri|$mime';
+        return true;
+      };
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message(
+          'tx1',
+          text: '',
+          attachment: file(
+            name: 'photo.jpg',
+            kind: 'other',
+            text: null,
+            viewMime: 'image/jpeg',
+          ),
+        ),
+      ]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Nothing to open before it has been saved — opening points at the
+      // user's own file, so there is no copy to point at yet.
+      expect(find.byIcon(Icons.open_in_new), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.open_in_new), findsOneWidget);
+
+      await tester.tap(find.byIcon(Icons.open_in_new));
+      await tester.pumpAndSettle();
+      // The destination the user chose, and the type WE derived.
+      expect(opened, 'content://downloads/9|image/jpeg');
+    });
+
+    testWidgets('a phone with nothing for the type says so plainly', (
+      tester,
+    ) async {
+      MessagingService.attachmentBytesFn = (_, _) async =>
+          AttachmentBytesDto(name: 'x.xyz', bytes: Uint8List.fromList([1]));
+      MessagingService.writeFileFn = (_, _) async => 'content://downloads/9';
+      MessagingService.openFileFn = (_, _) async => false;
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message(
+          'tx1',
+          text: '',
+          attachment: file(kind: 'other', text: null),
+        ),
+      ]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.pumpAndSettle();
+      // Let the "Saved" snackbar expire — only one shows at a time, so the
+      // next would otherwise sit queued behind it.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.open_in_new));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('No app on this phone'), findsOneWidget);
+    });
+
     testWidgets('backing out of the picker says nothing at all', (
       tester,
     ) async {
@@ -519,8 +600,8 @@ void main() {
         name: 'Algovelo.md',
         bytes: Uint8List.fromList([1]),
       );
-      // false = the user cancelled.
-      MessagingService.writeFileFn = (_, _) async => false;
+      // null = the user cancelled.
+      MessagingService.writeFileFn = (_, _) async => null;
       MessagingService.threadSinceFn = (_, _) async =>
           delta([message('tx1', text: '', attachment: file())]);
       await tester.pumpWidget(

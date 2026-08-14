@@ -191,7 +191,9 @@ class VaultService with WidgetsBindingObserver {
   );
 
   /// Write [bytes] to a destination the user picks in the system document
-  /// picker, offering [name]. `true` when written, `false` when they backed out.
+  /// picker, offering [name]. Returns the destination, or null if they backed
+  /// out — the destination is what makes a later "open" possible WITHOUT
+  /// copying decrypted content into app storage to have something to point at.
   ///
   /// **Deliberately NOT a [runCeremony] handoff, and that is the whole point.**
   /// The other native surfaces are wrapped because they pause Flutter and must
@@ -211,19 +213,34 @@ class VaultService with WidgetsBindingObserver {
   /// destination and nowhere else, and are never logged.
   ///
   /// Throws [PlatformException] on a real failure (`failed`, `busy`); a user
-  /// cancel is NOT an error and returns false.
-  Future<bool> saveFile(String name, Uint8List bytes) async {
+  /// cancel is NOT an error and returns null.
+  Future<String?> saveFile(String name, Uint8List bytes) async {
     try {
-      return await ceremony.invokeMethod<bool>('saveFile', {
-            'name': name,
-            'bytes': bytes,
-          }) ??
-          false;
+      return await ceremony.invokeMethod<String>('saveFile', {
+        'name': name,
+        'bytes': bytes,
+      });
     } on PlatformException catch (e) {
-      if (e.code == 'cancelled') return false;
+      if (e.code == 'cancelled') return null;
       rethrow;
     }
   }
+
+  /// Open an already-saved file with whatever the phone has for it.
+  ///
+  /// [uri] is the destination the user themselves chose, so nothing is copied
+  /// anywhere to make this work — no second unencrypted copy of message
+  /// content exists (§0.4). [mime] comes from the extension Rust scrubbed,
+  /// never from the sender's claim.
+  ///
+  /// Returns false when the device has nothing that can open the type — a fact
+  /// about the phone, not a failure, and the caller says so plainly.
+  Future<bool> openFile(String uri, String mime) async =>
+      await ceremony.invokeMethod<bool>('openFile', {
+        'uri': uri,
+        'mime': mime,
+      }) ??
+      false;
 
   /// Run a native ceremony that may pause Flutter, with the §0.11 auto-lock held
   /// open across it and **resolved honestly afterwards**.

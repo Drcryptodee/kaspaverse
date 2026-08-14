@@ -2348,14 +2348,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AttachmentDto dco_decode_attachment_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return AttachmentDto(
       name: dco_decode_String(arr[0]),
       sizeBytes: dco_decode_u_64(arr[1]),
       kind: dco_decode_String(arr[2]),
       text: dco_decode_opt_String(arr[3]),
       broken: dco_decode_bool(arr[4]),
+      viewMime: dco_decode_String(arr[5]),
     );
   }
 
@@ -3014,12 +3015,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_kind = sse_decode_String(deserializer);
     var var_text = sse_decode_opt_String(deserializer);
     var var_broken = sse_decode_bool(deserializer);
+    var var_viewMime = sse_decode_String(deserializer);
     return AttachmentDto(
       name: var_name,
       sizeBytes: var_sizeBytes,
       kind: var_kind,
       text: var_text,
       broken: var_broken,
+      viewMime: var_viewMime,
     );
   }
 
@@ -3886,6 +3889,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.kind, serializer);
     sse_encode_opt_String(self.text, serializer);
     sse_encode_bool(self.broken, serializer);
+    sse_encode_String(self.viewMime, serializer);
   }
 
   @protected

@@ -86,7 +86,10 @@ class MainActivity : FlutterFragmentActivity() {
                 // a stranger's tail — silently, and looking like ours.
                 contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
                     ?: throw java.io.IOException("no output stream")
-                reply?.success(true)
+                // Return WHERE it went, so the app can offer to open it there
+                // rather than making a second copy of decrypted content in
+                // app-private storage just to have something to point at.
+                reply?.success(uri.toString())
             } catch (e: Exception) {
                 reply?.error(CODE_SAVE_FAILED, e.message, null)
             }
@@ -133,6 +136,37 @@ class MainActivity : FlutterFragmentActivity() {
                                     pendingSaveBytes = null
                                     result.error(CODE_SAVE_FAILED, e.message, null)
                                 }
+                            }
+                        }
+                    }
+
+                    // Hand an already-saved file to whatever the phone has.
+                    //
+                    // The URI is the one the user themselves chose in the
+                    // picker — nothing is copied anywhere to make this work,
+                    // so no second unencrypted copy of message content is
+                    // created (§0.4). The media type comes from the extension
+                    // Rust scrubbed, never from the sender's claim.
+                    "openFile" -> {
+                        val uriText = call.argument<String>("uri")
+                        val mime = call.argument<String>("mime")
+                            ?: "application/octet-stream"
+                        if (uriText == null) {
+                            result.error(CODE_SAVE_FAILED, "no file", null)
+                        } else {
+                            try {
+                                val view = Intent(Intent.ACTION_VIEW)
+                                    .setDataAndType(android.net.Uri.parse(uriText), mime)
+                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(view)
+                                result.success(true)
+                            } catch (e: android.content.ActivityNotFoundException) {
+                                // Nothing installed can open this type. Not a
+                                // failure of ours — the caller says so plainly.
+                                result.success(false)
+                            } catch (e: Exception) {
+                                result.error(CODE_SAVE_FAILED, e.message, null)
                             }
                         }
                     }

@@ -129,6 +129,11 @@ impl Attachment {
         Ok(Self { name, bytes, kind })
     }
 
+    /// The media type to hand the system when opening this file.
+    pub fn view_mime(&self) -> &'static str {
+        view_mime(&self.name)
+    }
+
     /// The attachment as text, when that is what it is — lossy, so malformed
     /// bytes become replacement characters rather than an error or a panic.
     pub fn as_text(&self) -> Option<String> {
@@ -194,6 +199,46 @@ pub fn is_deceptive_format(ch: char) -> bool {
         | '\u{2066}'..='\u{2069}'      // bidi isolates
         | '\u{FEFF}'                   // BOM / zero-width no-break space
     )
+}
+
+/// The media type to hand the SYSTEM when opening this file — derived from the
+/// scrubbed EXTENSION, never from the sender's `mimeType`.
+///
+/// The distinction matters even though a wrong type here only means the wrong
+/// app opens the file: `mimeType` is a string the sender chose, and the point
+/// of routing an intent is that the OS acts on it. An extension we scrubbed
+/// ourselves is the only part of the name we trust. Anything unrecognised gets
+/// `application/octet-stream`, which makes the system offer a chooser instead
+/// of silently handing the bytes to something specific.
+pub fn view_mime(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        // webm carries both; audio/ is the safer route for a voice note and
+        // players handle a video container under it.
+        "webm" => "audio/webm",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
+        "wav" => "audio/wav",
+        "amr" => "audio/amr",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        // Deliberately NOT text/html or image/svg+xml: handing markup to the
+        // system means handing it to a browser, which is the one viewer that
+        // executes what it is given.
+        _ => "application/octet-stream",
+    }
 }
 
 /// Classify by OUR allowlist. The sender's media type is a hint we may accept
@@ -385,6 +430,30 @@ mod tests {
 
         let bad_b64 = r#"{"type":"file","name":"x","content":"data:text/plain;base64,!!!!"}"#;
         assert!(Attachment::parse(bad_b64).unwrap().is_err());
+    }
+
+    /// The type handed to the OS comes from the extension WE scrubbed, never
+    /// from the sender's claim — and markup never gets a viewer that executes.
+    #[test]
+    fn the_view_type_comes_from_our_extension_not_their_claim() {
+        assert_eq!(view_mime("photo.jpg"), "image/jpeg");
+        assert_eq!(view_mime("kasia-audio-4F41.webm"), "audio/webm");
+        assert_eq!(view_mime("note.md"), "text/markdown");
+        assert_eq!(view_mime("clip.mp4"), "video/mp4");
+
+        // Unknown, and markup, both fall to the neutral type so the system
+        // offers a chooser instead of routing to a browser.
+        assert_eq!(view_mime("thing.xyz"), "application/octet-stream");
+        assert_eq!(view_mime("noextension"), "application/octet-stream");
+        assert_eq!(view_mime("page.html"), "application/octet-stream");
+        assert_eq!(view_mime("logo.svg"), "application/octet-stream");
+
+        // A file whose sender LIED about the media type still routes by the
+        // scrubbed extension.
+        let lied = Attachment::parse(&body("photo.jpg", "text/html", b"\x89PNG"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(lied.view_mime(), "image/jpeg");
     }
 
     #[test]

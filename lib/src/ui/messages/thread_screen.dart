@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../../rust/api/send.dart';
@@ -76,6 +77,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// frame (no `decline` kind exists, §0.5) — it just retires the card's
   /// actions. View-scoped, like the decrypted rows.
   final Set<String> _declined = {};
+
+  /// Where each saved attachment landed, by txid — the destination the user
+  /// chose, kept so "Open" can point at it without a second copy existing.
+  final Map<String, SavedFile> _saved = {};
+
+  /// One byte-fetch per rendered image, kept so a rebuild does not re-cross
+  /// the bridge. Bounded in practice by what fits in a transaction (~70 KB).
+  final Map<String, Future<Uint8List>> _imageCache = {};
 
   String? _lockedMessage;
   bool _loading = true;
@@ -248,9 +257,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
       // A cancel returns null and says nothing — backing out of the picker is
       // a decision, not something to report back at the user.
       if (!mounted || saved == null) return;
+      // Remember WHERE it went. That is what lets "Open" hand the phone the
+      // user's own file instead of making a second decrypted copy to point at.
+      setState(() => _saved[txid] = saved);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Saved $saved')));
+      ).showSnackBar(SnackBar(content: Text('Saved ${saved.name}')));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -258,6 +270,35 @@ class _ThreadScreenState extends State<ThreadScreen> {
       ).showSnackBar(SnackBar(content: Text(displayError(e))));
     }
   }
+
+  /// Open a saved file with whatever the phone has for it.
+  Future<void> _openSaved(String txid, String mime) async {
+    final saved = _saved[txid];
+    if (saved == null) return;
+    KvHaptic.selection();
+    try {
+      final opened = await _messaging.openSavedFile(saved.uri, mime);
+      if (!mounted || opened) return;
+      // Nothing installed can open this type. That is a fact about the phone,
+      // not a failure of ours, and it is said plainly.
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No app on this phone can open that file type.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    }
+  }
+
+  /// Decoded bytes for images we render in place, one fetch per message.
+  Future<Uint8List> _imageBytes(String txid) => _imageCache.putIfAbsent(
+    txid,
+    () => _messaging.attachmentBytes(widget.conversationId, txid),
+  );
 
   Future<void> _acceptChallenge(String refId) => _confirmSend(
     prepare: () =>
@@ -433,6 +474,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
           declined: m.frame != null && _declined.contains(m.frame!.id),
           onAccept: _acceptChallenge,
           onSaveFile: _saveAttachment,
+          onOpenFile: _openSaved,
+          savedFile: _saved[m.txid] != null,
+          imageBytes: _imageBytes,
           onDecline: _declineChallenge,
         );
         if (!reduced) {
@@ -475,6 +519,9 @@ class _MessageRow extends StatelessWidget {
     this.onAccept,
     this.onDecline,
     this.onSaveFile,
+    this.onOpenFile,
+    this.savedFile = false,
+    this.imageBytes,
   });
 
   final ThreadMessageDto message;
@@ -504,6 +551,16 @@ class _MessageRow extends StatelessWidget {
 
   /// Save this message's file attachment to the device (by txid).
   final void Function(String txid)? onSaveFile;
+
+  /// Open the already-saved file (txid, media type).
+  final void Function(String txid, String mime)? onOpenFile;
+
+  /// True once this attachment has been saved — only then can it be opened,
+  /// because opening points at the user's own file rather than a copy.
+  final bool savedFile;
+
+  /// Decoded bytes for an image we render in place.
+  final Future<Uint8List> Function(String txid)? imageBytes;
 
   @override
   Widget build(BuildContext context) {
@@ -612,6 +669,12 @@ class _MessageRow extends StatelessWidget {
           file: attachment,
           outbound: m.outbound,
           onSave: onSaveFile == null ? null : () => onSaveFile!(m.txid),
+          onOpen: (!savedFile || onOpenFile == null)
+              ? null
+              : () => onOpenFile!(m.txid, attachment.viewMime),
+          imageBytes: attachment.kind == 'image' && imageBytes != null
+              ? imageBytes!(m.txid)
+              : null,
         ),
       );
     }
@@ -1132,11 +1195,21 @@ class _AttachmentCard extends StatelessWidget {
     required this.file,
     required this.outbound,
     this.onSave,
+    this.onOpen,
+    this.imageBytes,
   });
 
   final AttachmentDto file;
   final bool outbound;
   final VoidCallback? onSave;
+
+  /// Set once the file has been saved — opening points at the user's own copy,
+  /// so there is nothing to open before then.
+  final VoidCallback? onOpen;
+
+  /// Bytes for an image we show in place. Null for every other type: bytes we
+  /// will not interpret never reach a decoder.
+  final Future<Uint8List>? imageBytes;
 
   static String prettySize(BigInt bytes) {
     final n = bytes.toInt();
@@ -1204,6 +1277,12 @@ class _AttachmentCard extends StatelessWidget {
                         ],
                       ),
                     ),
+                    if (!file.broken && onOpen != null)
+                      IconButton(
+                        tooltip: 'Open',
+                        icon: const Icon(Icons.open_in_new, size: 20),
+                        onPressed: onOpen,
+                      ),
                     if (!file.broken && onSave != null)
                       IconButton(
                         tooltip: 'Save to device',
@@ -1212,6 +1291,47 @@ class _AttachmentCard extends StatelessWidget {
                       ),
                   ],
                 ),
+                // Images render in place. The bytes are already bounded by what
+                // fits in one transaction (~70 KB), and `cacheWidth` caps what
+                // the platform decoder allocates from a sender's file.
+                if (imageBytes != null) ...[
+                  const SizedBox(height: KvSpace.s),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(KvRadius.data),
+                    child: FutureBuilder<Uint8List>(
+                      future: imageBytes,
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return Text(
+                            "This image didn't decode",
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: KvColor.textTertiary,
+                            ),
+                          );
+                        }
+                        if (!snap.hasData) {
+                          return const SizedBox(
+                            height: 120,
+                            child: Center(child: KvLoader.inline()),
+                          );
+                        }
+                        return Image.memory(
+                          snap.data!,
+                          cacheWidth: 600,
+                          fit: BoxFit.cover,
+                          // A file that claims to be an image and is not must
+                          // fail as a line of text, never as a red error box.
+                          errorBuilder: (_, _, _) => Text(
+                            "This image didn't decode",
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: KvColor.textTertiary,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
                 // Text files show their content inline; anything we will not
                 // interpret stays a card and nothing more.
                 if (text != null && text.isNotEmpty) ...[

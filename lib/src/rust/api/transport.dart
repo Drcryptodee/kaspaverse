@@ -360,12 +360,18 @@ class AttachmentDto {
   /// row says so instead of falling back to rendering its raw JSON.
   final bool broken;
 
+  /// The media type to hand the SYSTEM when opening this file, derived from
+  /// the extension we scrubbed — never from the sender's `mimeType`. Markup
+  /// types resolve to the neutral type so no browser is ever routed to.
+  final String viewMime;
+
   const AttachmentDto({
     required this.name,
     required this.sizeBytes,
     required this.kind,
     this.text,
     required this.broken,
+    required this.viewMime,
   });
 
   @override
@@ -374,7 +380,8 @@ class AttachmentDto {
       sizeBytes.hashCode ^
       kind.hashCode ^
       text.hashCode ^
-      broken.hashCode;
+      broken.hashCode ^
+      viewMime.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -385,7 +392,8 @@ class AttachmentDto {
           sizeBytes == other.sizeBytes &&
           kind == other.kind &&
           text == other.text &&
-          broken == other.broken;
+          broken == other.broken &&
+          viewMime == other.viewMime;
 }
 
 /// Where "add this contact" should actually go.

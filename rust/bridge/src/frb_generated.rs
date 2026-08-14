@@ -2482,12 +2482,14 @@ impl SseDecode for crate::api::transport::AttachmentDto {
         let mut var_kind = <String>::sse_decode(deserializer);
         let mut var_text = <Option<String>>::sse_decode(deserializer);
         let mut var_broken = <bool>::sse_decode(deserializer);
+        let mut var_viewMime = <String>::sse_decode(deserializer);
         return crate::api::transport::AttachmentDto {
             name: var_name,
             size_bytes: var_sizeBytes,
             kind: var_kind,
             text: var_text,
             broken: var_broken,
+            view_mime: var_viewMime,
         };
     }
 }
@@ -3509,6 +3511,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::transport::AttachmentDto {
             self.kind.into_into_dart().into_dart(),
             self.text.into_into_dart().into_dart(),
             self.broken.into_into_dart().into_dart(),
+            self.view_mime.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4230,6 +4233,7 @@ impl SseEncode for crate::api::transport::AttachmentDto {
         <String>::sse_encode(self.kind, serializer);
         <Option<String>>::sse_encode(self.text, serializer);
         <bool>::sse_encode(self.broken, serializer);
+        <String>::sse_encode(self.view_mime, serializer);
     }
 }
 
