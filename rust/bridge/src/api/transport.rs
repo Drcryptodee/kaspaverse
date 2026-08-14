@@ -969,12 +969,24 @@ pub async fn transport_start() -> Result<(), AppError> {
                         Err(RecvError::Lagged(_)) => continue,
                         Err(RecvError::Closed) => break,
                     };
+                    // The alias re-learn lane, handled before the status
+                    // lanes because it is about a message we have NOT stored.
+                    if let AcceptanceEvent::SenderResolvable {
+                        txid,
+                        accepting_daa_score,
+                    } = &event
+                    {
+                        adopt_alias_from_sender(txid, *accepting_daa_score).await;
+                        continue;
+                    }
                     let txid = match &event {
                         AcceptanceEvent::Accepted { txid }
                         | AcceptanceEvent::Confirmed { txid, .. }
                         | AcceptanceEvent::Displaced { txid }
                         | AcceptanceEvent::DisplacedElapsed { txid }
                         | AcceptanceEvent::Stalled { txid, .. } => txid.clone(),
+                        // Handled above.
+                        AcceptanceEvent::SenderResolvable { txid, .. } => txid.clone(),
                     };
                     // `self::` — the enclosing scope's `hub` binding (the
                     // Arc) shadows the accessor fn in this task.
@@ -1382,6 +1394,100 @@ fn decrypt_drop(error: &CoreError) -> DropReason {
         CoreError::VaultLocked => DropReason::VaultLocked,
         _ => DropReason::NoKeyOpensIt,
     }
+}
+
+/// An alias we could not route, parked until the chain names its sender.
+///
+/// Bounded and in-memory, like the tracker's own interest set: these txids
+/// are attacker-mintable, so nothing here may be durable or unbounded.
+/// Losing an entry costs one deferred lookup, never a message — the fill
+/// re-walks the thread from block time zero once the conversation is Active.
+static PENDING_ALIAS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Cap for [`PENDING_ALIAS`] — the same order as the tracker's interest set.
+const PENDING_ALIAS_CAPACITY: usize = 256;
+
+/// Remember `txid -> alias` while we wait to learn who sent it.
+fn park_alias(txid: &str, alias: &str) {
+    let mut parked = PENDING_ALIAS.lock().unwrap_or_else(PoisonError::into_inner);
+    if parked.iter().any(|(t, _)| t == txid) {
+        return;
+    }
+    if parked.len() >= PENDING_ALIAS_CAPACITY {
+        parked.remove(0);
+    }
+    parked.push((txid.to_string(), alias.to_string()));
+}
+
+fn take_parked_alias(txid: &str) -> Option<String> {
+    let mut parked = PENDING_ALIAS.lock().unwrap_or_else(PoisonError::into_inner);
+    let pos = parked.iter().position(|(t, _)| t == txid)?;
+    Some(parked.remove(pos).1)
+}
+
+/// Learn a contact's alias from a message we could not route.
+///
+/// **This is what makes an alias re-learnable, and the class of failure that
+/// destroyed a live conversation survivable.** A counterparty who already
+/// knows us never re-announces themselves, so if we lose their alias — by
+/// hiding the thread, by reinstalling, by never having received their
+/// handshake — every message they send afterwards matches nothing. Their
+/// alias is nevertheless in cleartext on every single comm they send. The
+/// only thing missing was proof that the comm is theirs.
+///
+/// That proof is the sender address, from the node's own return-address
+/// lookup at the accepting block's DAA score (INV-8: our node, our socket, no
+/// indexer). We compare it against the contact address WE chose when we
+/// opened the conversation — so only the real counterparty can bind an alias,
+/// and a stranger sealing a comm to our published key matches nothing.
+///
+/// Node lane only, by construction: the DAA score comes from the VCC stream
+/// our own node emits, never from a fill row.
+async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
+    let Some(alias) = take_parked_alias(txid) else {
+        return;
+    };
+    let Ok(hub) = hub() else { return };
+    let Ok(monitor) = dag::shared_monitor().await else {
+        return;
+    };
+    let sender = match resolve_return_address(&monitor.rpc(), txid, accepting_daa_score).await {
+        Ok(sender) => sender,
+        Err(e) => {
+            log::info!(
+                "transport-intake: sender lookup failed for tx={txid}: {}",
+                kaspaverse_chain::sanitize_node_text(&e.to_string())
+            );
+            return;
+        }
+    };
+
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(existing) = store.conversation_by_contact_address(&sender) else {
+        log::info!("transport-intake: tx={txid} sender matches no conversation");
+        return;
+    };
+    // Never overwrite an alias we already hold: this path exists to fill a
+    // gap, not to let the newest message redefine who a contact is.
+    if existing.their_alias.is_some() {
+        return;
+    }
+    let mut conversation = existing.clone();
+    let conversation_id = conversation.conversation_id.clone();
+    conversation.their_alias = Some(alias);
+    // Their message proves the handshake completed on their side, whatever
+    // our own side was still waiting for.
+    if conversation.status == ConversationStatus::PendingOutbound {
+        conversation.status = ConversationStatus::Active;
+    }
+    unhide_on_inbound(&mut store, &conversation_id);
+    warn_store(store.upsert_conversation(conversation));
+    drop(store);
+    log::info!(
+        "transport-intake: learned a contact's alias from their message (tx={txid}) — \
+         conversation active"
+    );
+    ping(&conversation_id);
 }
 
 /// May inbound traffic reopen this hidden conversation?
@@ -1858,6 +1964,34 @@ fn handle_inbound_comm(
     let (conversation_id, bound) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(conversation) = store.conversation_by_alias(&alias) else {
+            // An alias we do not know — but it may be a contact whose alias we
+            // LOST (hidden thread, reinstall, or a handshake we never saw).
+            // Their alias is right here in cleartext; what is missing is proof
+            // the message is theirs. Park it and ask the chain who sent it.
+            //
+            // Gated on actually missing one, because this decrypt scans the
+            // whole key window and every stranger's comm reaches this line.
+            if origin == EventOrigin::Node && store.has_conversation_awaiting_alias() {
+                drop(store);
+                let envelope_bytes = decode_envelope_body(sealed);
+                if Envelope::from_bytes(&envelope_bytes).is_ok_and(|envelope| {
+                    hub.decryptor
+                        .decrypt_scanning(hub.keys().slots.iter().copied(), &envelope)
+                        .is_ok()
+                }) {
+                    // It opened under one of our keys, so it was sealed to us.
+                    // That is not proof of authorship — the sender check is —
+                    // but it is enough to be worth resolving.
+                    park_alias(txid, &alias);
+                    if let Some(tracker) = dag::tracker_handle() {
+                        tracker.note_sender_interest(txid);
+                    }
+                    log::info!(
+                        "transport-intake: unroutable comm tx={txid} sealed to us — \
+                         awaiting sender to learn the alias"
+                    );
+                }
+            }
             return dropped(COMM, txid, DropReason::NoConversationForAlias, origin);
         };
         // A DISMISSED INVITATION STAYS DISMISSED.

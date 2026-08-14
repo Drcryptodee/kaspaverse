@@ -374,6 +374,21 @@ impl TransportStore {
             })
     }
 
+    /// Whether any conversation knows WHO it is talking to but not what alias
+    /// they write under — the precondition for learning an alias back from an
+    /// inbound message.
+    ///
+    /// It gates a full key-window decrypt attempt on every otherwise-unroutable
+    /// comm, and on a public chain that is every stranger's traffic. So the
+    /// expensive path runs only while we are genuinely missing something, and
+    /// costs nothing once every conversation knows its contact's alias.
+    pub fn has_conversation_awaiting_alias(&self) -> bool {
+        self.conversations
+            .records
+            .values()
+            .any(|c| c.their_alias.is_none() && !c.contact_address.is_empty())
+    }
+
     /// Whether ANY conversation knows its counterparty's address — the free
     /// pre-check that keeps the inbound fold from paying an RPC round trip
     /// when no address could possibly match. Answers without cloning or

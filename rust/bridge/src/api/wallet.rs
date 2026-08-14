@@ -1153,6 +1153,10 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                         | AcceptanceEvent::Displaced { txid }
                                         | AcceptanceEvent::DisplacedElapsed { txid }
                                         | AcceptanceEvent::Stalled { txid, .. } => txid.clone(),
+                                        // A transport-only signal about a tx
+                                        // this lane never watched — it carries
+                                        // no wallet status to re-read.
+                                        AcceptanceEvent::SenderResolvable { .. } => continue,
                                     };
                                     // Re-read the tracker's CURRENT status (the
                                     // event is a change signal, not the state).

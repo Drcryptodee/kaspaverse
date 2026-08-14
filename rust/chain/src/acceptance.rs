@@ -20,7 +20,7 @@
 //! block hashes, timestamps) in an app-private kvlog; every read is
 //! node-only — no indexer anywhere on this path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -196,6 +196,17 @@ pub enum AcceptanceEvent {
     /// Displaced and not re-accepted within [`TOMBSTONE_WINDOW_MS`] —
     /// consumer #2 tombstones now.
     DisplacedElapsed { txid: String },
+    /// A txid registered via [`AcceptanceTracker::note_sender_interest`] has
+    /// been accepted, and its accepting block's DAA score is now known — the
+    /// one input `get_utxo_return_address` needs to name who sent it.
+    ///
+    /// Emitted instead of resolving here because WHO a sender is matters only
+    /// to conversations, and this layer knows nothing about them. Chain facts
+    /// out; policy stays in the bridge.
+    SenderResolvable {
+        txid: String,
+        accepting_daa_score: u64,
+    },
     /// Send-sourced watch with no acceptance for [`STALL_AFTER_MS`] —
     /// consumer #3's signal (V3 acts; V1 exposes).
     Stalled { txid: String, waited_ms: u64 },
@@ -570,7 +581,21 @@ pub struct AcceptanceTracker {
     events: broadcast::Sender<AcceptanceEvent>,
     cursor_path: PathBuf,
     cursor_written: AtomicU64,
+    /// Txids awaiting SENDER resolution — deliberately NOT the watch log.
+    ///
+    /// The watch log is persisted and capacity-shared with real in-flight
+    /// sends; these txids are attacker-mintable (anyone can put a `comm:`
+    /// payload on chain addressed to a published key), so an unbounded or
+    /// durable queue keyed on them is a self-inflicted denial of service.
+    /// This set is in-memory only, FIFO-evicted at
+    /// [`SENDER_INTEREST_CAPACITY`], and forgotten on restart — losing an
+    /// entry costs one deferred lookup, never a message.
+    sender_interest: Mutex<VecDeque<String>>,
 }
+
+/// How many unresolved senders we will carry at once. Sized for a human
+/// conversation rate, not a chain-wide one; the oldest is dropped first.
+pub const SENDER_INTEREST_CAPACITY: usize = 256;
 
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -602,6 +627,7 @@ impl AcceptanceTracker {
             events,
             cursor_path: dir.join("vcc.cursor"),
             cursor_written: AtomicU64::new(0),
+            sender_interest: Mutex::new(VecDeque::new()),
         }))
     }
 
@@ -619,6 +645,56 @@ impl AcceptanceTracker {
         if let Err(e) = state.watch(txid, source, now_unix_ms()) {
             log::warn!("acceptance: watch persist failed: {e}");
         }
+    }
+
+    /// Register a txid whose SENDER we want named once the chain accepts it.
+    ///
+    /// This is the node-only answer to "who sent this message?" for a payload
+    /// that paid us nothing. `get_utxo_return_address` needs the accepting
+    /// block's DAA score, and the VCC stream this tracker already consumes is
+    /// the only place a node volunteers which chain block accepted which
+    /// txids. So the interest is parked here and resolved in
+    /// [`Self::fold_batch`] — never by blocking the intake that noticed it.
+    ///
+    /// Bounded and in-memory by design: see [`Self::sender_interest`].
+    /// Idempotent.
+    pub fn note_sender_interest(&self, txid: &str) {
+        let mut set = self
+            .sender_interest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if set.iter().any(|t| t == txid) {
+            return;
+        }
+        if set.len() >= SENDER_INTEREST_CAPACITY {
+            // Oldest out, and say so — a silent eviction here is a message
+            // whose sender is never named, which reads to a user as a message
+            // that never arrived.
+            if let Some(dropped) = set.pop_front() {
+                log::info!("acceptance: sender-interest full — dropped tx={dropped}");
+            }
+        }
+        set.push_back(txid.to_string());
+    }
+
+    /// Take any interest entries accepted by this batch, with the DAA score
+    /// their resolution needs. Removes what it returns — one shot per txid.
+    fn take_resolvable(&self, txids: &[String], daa_score: u64) -> Vec<AcceptanceEvent> {
+        let mut set = self
+            .sender_interest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out = Vec::new();
+        for txid in txids {
+            if let Some(pos) = set.iter().position(|t| t == txid) {
+                set.remove(pos);
+                out.push(AcceptanceEvent::SenderResolvable {
+                    txid: txid.clone(),
+                    accepting_daa_score: daa_score,
+                });
+            }
+        }
+        out
     }
 
     /// Current status of a watched txid (None = not watched / already
@@ -685,27 +761,46 @@ impl AcceptanceTracker {
             self.broadcast(events);
         }
 
-        // Acceptances: pre-filter to watched txids, then resolve blue scores.
-        let mut matches: Vec<(Hash, Vec<String>)> = Vec::new();
+        // Acceptances: pre-filter to txids we care about, then resolve scores.
+        // Two independent interests share the one `get_block` round trip —
+        // watched txids (status folding) and sender-interest txids (naming
+        // who sent a message that paid us nothing).
+        let mut matches: Vec<(Hash, Vec<String>, Vec<String>)> = Vec::new();
         {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let interest = self
+                .sender_interest
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (accepting_block, txids) in batch.accepted.iter() {
-                let watched: Vec<String> = txids
+                let all: Vec<String> = txids.iter().map(|t| t.to_string()).collect();
+                let watched: Vec<String> = all
                     .iter()
-                    .map(|t| t.to_string())
                     .filter(|t| state.is_watched(t))
+                    .cloned()
                     .collect();
-                if !watched.is_empty() {
-                    matches.push((*accepting_block, watched));
+                let wanted: Vec<String> = all
+                    .iter()
+                    .filter(|t| interest.iter().any(|i| i == *t))
+                    .cloned()
+                    .collect();
+                if !watched.is_empty() || !wanted.is_empty() {
+                    matches.push((*accepting_block, watched, wanted));
                 }
             }
         }
-        for (accepting_block, txids) in matches {
+        for (accepting_block, txids, wanted) in matches {
+            // `daa_score` is the sibling of the blue score we already fetch —
+            // and it is exactly the input `get_utxo_return_address` needs.
+            let mut daa_score: Option<u64> = None;
             let blue_score = match rpc.rpc_api().get_block(accepting_block, false).await {
-                Ok(block) => block.header.blue_score,
+                Ok(block) => {
+                    daa_score = Some(block.header.daa_score);
+                    block.header.blue_score
+                }
                 Err(e) => {
                     // Conservative fallback: the current sink blue score is an
                     // UPPER bound for the accepting blue score, so depth reads
@@ -748,6 +843,21 @@ impl AcceptanceTracker {
                     sink
                 }
             };
+            // Sender resolution rides the same block read. Only when the node
+            // actually answered: the blue-score fallback above is a bound, not
+            // a fact, and a wrong DAA score names the wrong sender.
+            if !wanted.is_empty() {
+                match daa_score {
+                    Some(daa) => self.broadcast(self.take_resolvable(&wanted, daa)),
+                    None => log::info!(
+                        "acceptance: {} sender lookup(s) deferred — no DAA score for {accepting_block}",
+                        wanted.len()
+                    ),
+                }
+            }
+            if txids.is_empty() {
+                continue;
+            }
             let events = {
                 let mut state = self
                     .state
@@ -946,6 +1056,68 @@ mod tests {
 
     fn block(n: u8) -> String {
         format!("{:02x}", n ^ 0xFF).repeat(32)
+    }
+
+    /// The sender-interest set is the one queue in this file keyed on
+    /// ATTACKER-MINTABLE input: anyone can put a `comm:` payload on chain
+    /// addressed to a published key. So it must be bounded, in-memory, and
+    /// must never share capacity with the persisted watch log that real
+    /// in-flight sends depend on.
+    #[test]
+    fn the_sender_interest_set_is_bounded_and_separate_from_the_watch_log() {
+        let dir = test_dir("sender-interest");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+
+        tracker.note_sender_interest(&txid(1));
+        tracker.note_sender_interest(&txid(1)); // idempotent
+        assert_eq!(
+            tracker
+                .sender_interest
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| **t == txid(1))
+                .count(),
+            1,
+            "re-noting the same txid must not grow the set"
+        );
+
+        // It never touches the persisted watch log.
+        assert!(
+            tracker.status(&txid(1)).is_none(),
+            "sender interest must NOT register a watch — that log is capped \
+             and shared with real in-flight sends"
+        );
+
+        // Resolution is one-shot and carries the DAA score the lookup needs.
+        let events = tracker.take_resolvable(&[txid(1)], 4_242);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            AcceptanceEvent::SenderResolvable { txid: t, accepting_daa_score: 4_242 } if *t == txid(1)
+        ));
+        assert!(
+            tracker.take_resolvable(&[txid(1)], 4_242).is_empty(),
+            "a resolved interest is consumed, never re-emitted"
+        );
+
+        // FIFO eviction at the cap — the oldest goes, the newest survives.
+        for n in 0..(SENDER_INTEREST_CAPACITY + 8) {
+            tracker.note_sender_interest(&format!("{n:064x}"));
+        }
+        let set = tracker.sender_interest.lock().unwrap();
+        assert_eq!(set.len(), SENDER_INTEREST_CAPACITY, "bounded");
+        assert!(
+            !set.iter().any(|t| *t == format!("{:064x}", 0)),
+            "oldest evicted"
+        );
+        assert!(
+            set.iter()
+                .any(|t| *t == format!("{:064x}", SENDER_INTEREST_CAPACITY + 7)),
+            "newest kept"
+        );
+        drop(set);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
