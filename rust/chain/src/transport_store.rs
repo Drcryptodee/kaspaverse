@@ -320,10 +320,29 @@ impl TransportStore {
         &self,
         echoed_alias: &str,
     ) -> Option<&ConversationRecord> {
+        // RANKED, not `.find`. This used to take the first match out of a
+        // `HashMap`'s values, whose order is `RandomState` — reseeded every
+        // process start. With two `PendingOutbound` rows sharing `my_alias`,
+        // which conversation a counterparty's acceptance completed was a coin
+        // flip that could land differently on the next app launch, over a bond
+        // already spent. Its siblings above have carried a deterministic
+        // `max_by` since c917dd6; this one was missed.
         self.conversations
             .records
             .values()
-            .find(|c| c.status == ConversationStatus::PendingOutbound && c.my_alias == echoed_alias)
+            .filter(|c| {
+                c.status == ConversationStatus::PendingOutbound && c.my_alias == echoed_alias
+            })
+            .max_by(|a, b| {
+                // A live row beats a hidden one; then the older establishment
+                // (the one that actually sent the handshake being answered);
+                // then the lowest id, purely to break the last tie somewhere
+                // fixed. Same ordering as `conversation_by_alias`.
+                (!self.conversations.is_tombstoned(&a.conversation_id))
+                    .cmp(&!self.conversations.is_tombstoned(&b.conversation_id))
+                    .then(b.created_unix_ms.cmp(&a.created_unix_ms))
+                    .then(b.conversation_id.cmp(&a.conversation_id))
+            })
     }
 
     /// Find a conversation by the counterparty's own address — **the live
@@ -1368,6 +1387,84 @@ mod tests {
             "intact frame survives"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An acceptance must land on the SAME conversation every process start.
+    ///
+    /// This selector used to be a bare `.find` over a `HashMap`'s values, whose
+    /// iteration order is reseeded per process. With two `PendingOutbound` rows
+    /// sharing `my_alias`, the counterparty's acceptance completed whichever row
+    /// the map happened to yield first — a coin flip over a spent 0.2 KAS bond,
+    /// re-tossed on every launch.
+    #[test]
+    fn awaiting_response_picks_the_same_row_every_process_start() {
+        let dir = test_dir("awaiting-determinism");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+
+        let mut older = conversation("aaa", 10);
+        older.status = ConversationStatus::PendingOutbound;
+        older.my_alias = "fa6d1afa79e1".to_string();
+        older.created_unix_ms = 100;
+        let mut newer = conversation("bbb", 20);
+        newer.status = ConversationStatus::PendingOutbound;
+        newer.my_alias = "fa6d1afa79e1".to_string();
+        newer.created_unix_ms = 900;
+
+        // Insert in both orders; the answer must not depend on it.
+        store.upsert_conversation(older.clone()).unwrap();
+        store.upsert_conversation(newer.clone()).unwrap();
+        let first = store
+            .conversation_awaiting_response("fa6d1afa79e1")
+            .unwrap()
+            .conversation_id
+            .clone();
+
+        let dir2 = test_dir("awaiting-determinism-2");
+        let mut store2 = TransportStore::load(dir2.clone()).unwrap();
+        store2.upsert_conversation(newer).unwrap();
+        store2.upsert_conversation(older).unwrap();
+        let second = store2
+            .conversation_awaiting_response("fa6d1afa79e1")
+            .unwrap()
+            .conversation_id
+            .clone();
+
+        assert_eq!(first, second, "insertion order must not decide");
+        assert_eq!(first, "aaa", "the older establishment wins");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// A hidden row must not absorb an acceptance ahead of a live one — the
+    /// same rule `conversation_by_alias` already carries.
+    #[test]
+    fn awaiting_response_prefers_a_live_row_over_a_hidden_one() {
+        let dir = test_dir("awaiting-hidden");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+
+        let mut hidden = conversation("aaa", 10);
+        hidden.status = ConversationStatus::PendingOutbound;
+        hidden.my_alias = "fa6d1afa79e1".to_string();
+        hidden.created_unix_ms = 100; // older, so it would win on age alone
+        let mut live = conversation("bbb", 20);
+        live.status = ConversationStatus::PendingOutbound;
+        live.my_alias = "fa6d1afa79e1".to_string();
+        live.created_unix_ms = 900;
+
+        store.upsert_conversation(hidden).unwrap();
+        store.upsert_conversation(live).unwrap();
+        store.tombstone_conversation("aaa").unwrap();
+
+        assert_eq!(
+            store
+                .conversation_awaiting_response("fa6d1afa79e1")
+                .unwrap()
+                .conversation_id,
+            "bbb",
+            "live beats hidden, even though hidden is older"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

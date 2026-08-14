@@ -29,16 +29,19 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaspaverse_chain::{
-    compose_bcast, compose_comm_wire, compose_handshake_wire, decode_envelope_body, parse_payload,
-    resolve_return_address, split_comm_body, AcceptanceEvent, Address, ChainError,
-    ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord,
-    PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore, WatchSource,
-    HANDSHAKE_BOND_SOMPI,
+    compose_bcast, compose_comm_wire, compose_handshake_wire, compose_self_stash_wire,
+    decode_envelope_body, parse_payload, resolve_return_address, split_comm_body, AcceptanceEvent,
+    Address, ChainError, ConversationRecord, ConversationStatus, KeyBranch, MessageDirection,
+    MessageRecord, PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore,
+    WatchSource, HANDSHAKE_BOND_SOMPI, STASH_SCOPE_SAVED_HANDSHAKE,
 };
 use kaspaverse_core::frames::{
     self, build_accept, build_challenge, build_taunt, fresh_challenge_id, GAME_ATTACK_DEFEND,
 };
-use kaspaverse_core::handshake::{fresh_alias, fresh_conversation_id, HandshakePayload};
+use kaspaverse_core::handshake::{
+    attach_stash_tag, fresh_alias, fresh_conversation_id, split_stash_tag, HandshakePayload,
+    SavedHandshakePayload, SavedHandshakeSnapshot, BOUND_BRANCH_CHANGE, BOUND_BRANCH_RECEIVE,
+};
 use kaspaverse_core::transport_crypto::{encrypt, Envelope};
 use kaspaverse_core::{Branch, CoreError, KeySlot, TransportDecryptor};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -236,6 +239,43 @@ enum TransportIntent {
         sealed_to: (KeyBranch, u32),
         timestamp_ms: u64,
     },
+    /// The D-138 conversation backup. Records what the snapshot covered and
+    /// touches NOTHING else — no conversation, no message row.
+    ///
+    /// That emptiness is the design. Kasia's stash is emitted from inside their
+    /// handshake flow, *after* the handshake is already on the wire, so a stash
+    /// failure throws over a broadcast transaction. Ours is its own user
+    /// action, which makes that class of failure unreachable rather than
+    /// handled.
+    SelfStash {
+        covered: Vec<String>,
+        timestamp_ms: u64,
+    },
+}
+
+/// How input[0] gets chosen inside [`prepare_transport_send`].
+///
+/// **This exists because of how the live indexer attributes ownership**, which
+/// is not what any of our notes assumed. Reading its source
+/// (`idx_block_processor.rs`): the `owner` it files a self-stash under is NOT
+/// input[0]'s address. It is `inputs[0].previous_outpoint`, **required to be at
+/// index 0**, looked up among transactions that were themselves `ciph_msg:`
+/// operations, resolving to THAT transaction's output[0] address. Miss either
+/// condition and the row is parked for later resolution from the node's
+/// return-address RPC — which can quietly never happen during a historical
+/// gap-fill, leaving a stash that exists on chain and is invisible to the only
+/// query that could restore it.
+///
+/// So a backup asks for its funding to be ordered to hit that fast path. It is
+/// a hint, not a guarantee: we take the best input[0] available and the
+/// deferred resolution remains the fallback.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinPolicy {
+    /// Spend the source's UTXOs in whatever order the wallet supplies.
+    Default,
+    /// Order input[0] so the indexer can attribute the row to us, and refuse
+    /// rather than spend beyond the source address.
+    OwnerAttributable,
 }
 
 /// Intent stashed alongside [`PENDING_TRANSPORT`] under the same nonce.
@@ -772,10 +812,399 @@ async fn fill_walks(
         }
     }
 
+    // Backup sweep (D-138): the conversations we parked on chain ourselves.
+    //
+    // ONE address — `receive/0` — for three reasons, in order of weight: it is
+    // the only owner our own writer ever produces; it is the only address a
+    // restore can derive before any store exists; and one query hands the
+    // operator one address instead of a correlatable sweep of the whole
+    // receive prefix for history that, by construction, only we wrote.
+    //
+    // This is the half of restore the handshake sweep structurally cannot do.
+    // `handshakes/by-receiver` finds invitations addressed TO us and can never
+    // find one we SENT, which is exactly why a restore used to come back with
+    // every inbound conversation and not one outbound one.
+    if hub.decryptor.is_live() {
+        match vault::wallet_address_at(Branch::Receive, 0) {
+            Ok(owner_address) => {
+                let owner = owner_address.to_string();
+                let start = cursors.stash.get(&owner).copied().unwrap_or(0);
+                let outcome = walk_pages(
+                    |cursor| {
+                        client.self_stash_by_owner(&owner, STASH_SCOPE_SAVED_HANDSHAKE, cursor)
+                    },
+                    start,
+                    now_unix_ms(),
+                )
+                .await;
+                report.pages += outcome.pages;
+
+                let mut held = HeldFloor::new();
+                // The NEWEST snapshot alone, not a merge across snapshots.
+                //
+                // A snapshot is a complete statement of the conversation list at
+                // the moment it was written, not a delta — so an older one adds
+                // nothing except the rows the user has since HIDDEN. Merging
+                // would resurrect exactly what hiding means, and after a wipe
+                // there is no tombstone left to refuse them: the suppression
+                // record lived on the device being replaced. Keeping only the
+                // newest makes the newest backup a revocation by construction.
+                let mut newest: Option<(u64, String, SavedHandshakeSnapshot)> = None;
+                for row in &outcome.items {
+                    let Some(sealed) =
+                        kaspaverse_chain::history_fill::decode_hex(&row.stashed_data)
+                    else {
+                        continue; // malformed hint row — omitted, never an error
+                    };
+                    let Ok(envelope) = Envelope::from_bytes(&sealed) else {
+                        dropped(
+                            SELF_STASH,
+                            &row.tx_id,
+                            DropReason::MalformedEnvelope,
+                            EventOrigin::Fill,
+                        );
+                        continue;
+                    };
+                    let plaintext = match open_with_fallback(hub, (Branch::Receive, 0), &envelope) {
+                        Ok(plaintext) => plaintext,
+                        Err(error) => {
+                            let reason = decrypt_drop(&error);
+                            if dropped(SELF_STASH, &row.tx_id, reason, EventOrigin::Fill)
+                                == FoldOutcome::Held
+                            {
+                                held.hold(row.block_time);
+                            }
+                            continue;
+                        }
+                    };
+                    // AUTHORSHIP, not merely readability. Opening the envelope
+                    // proves nothing about who wrote it: the seal is to our own
+                    // PUBLIC key, so the archive answering this very query can
+                    // mint a row our key opens. Since a restore CREATES
+                    // conversations, an unauthenticated row would become a live
+                    // thread carrying an attacker's address, and everything the
+                    // user typed into it would be sealed to them. Only a tag
+                    // keyed by the seed passes here.
+                    let authentic = split_stash_tag(&plaintext).is_some_and(|(untagged, tag)| {
+                        hub.decryptor
+                            .stash_tag(&untagged)
+                            .is_ok_and(|ours| ours == tag)
+                    });
+                    if !authentic {
+                        dropped(
+                            SELF_STASH,
+                            &row.tx_id,
+                            DropReason::StashNotOurs,
+                            EventOrigin::Fill,
+                        );
+                        continue;
+                    }
+                    match SavedHandshakeSnapshot::from_plaintext(&plaintext) {
+                        Ok(snapshot) => {
+                            let supersedes = stash_supersedes(
+                                (row.block_time, &row.tx_id),
+                                newest.as_ref().map(|(t, id, _)| (*t, id.as_str())),
+                            );
+                            if supersedes {
+                                newest = Some((row.block_time, row.tx_id.clone(), snapshot));
+                            }
+                        }
+                        Err(_) => {
+                            dropped(
+                                SELF_STASH,
+                                &row.tx_id,
+                                DropReason::UndecodablePayload,
+                                EventOrigin::Fill,
+                            );
+                        }
+                    }
+                }
+
+                // The admissible slot window comes from the wallet's ONE source,
+                // never a formula re-derived here — a narrower one would silently
+                // rebind a conversation to an address the counterparty does not
+                // know us by (D-067).
+                let windows = wallet::wallet_window();
+                let mut created = 0usize;
+                if let Some((_, tx_id, snapshot)) = &newest {
+                    for payload in snapshot.rows() {
+                        match fold_stash_row(hub, tx_id, payload, &mut created, windows) {
+                            FoldOutcome::Recorded => report.new_rows += 1,
+                            FoldOutcome::Settled => {}
+                            FoldOutcome::Held => held.hold(0),
+                        }
+                    }
+                }
+
+                // COVERAGE BECOMES PROVEN, not merely claimed. Until a walk has
+                // actually read our last backup back under our own owner, all
+                // we know is that we broadcast one — and the indexer's
+                // attribution can fail quietly, leaving a transaction that is on
+                // chain, valid, and invisible to the only query that restores
+                // it. Seeing its txid here is the proof.
+                if !outcome.items.is_empty() {
+                    let mut state = kaspaverse_chain::history_fill::StashState::load(dir);
+                    if !state.confirmed_readable
+                        && !state.last_txid.is_empty()
+                        && outcome.items.iter().any(|row| row.tx_id == state.last_txid)
+                    {
+                        state.confirmed_readable = true;
+                        if let Err(e) = state.save(dir) {
+                            log::warn!("self-stash: coverage confirmation not saved: {e}");
+                        } else {
+                            log::info!("self-stash: the last backup reads back — coverage proven");
+                        }
+                    }
+                }
+
+                let resume = held.resume_from(outcome.cursor);
+                if !outcome.items.is_empty() {
+                    log::info!(
+                        "history-fill: backup walk rows={} restored={created} cursor {start}->{resume}{}",
+                        outcome.items.len(),
+                        if held.any() { " (HELD)" } else { "" },
+                    );
+                }
+                if resume > start {
+                    cursors.stash.insert(owner, resume);
+                }
+                if !outcome.complete || held.any() {
+                    report.complete = false;
+                    if report.error.is_none() {
+                        report.error = outcome.error.or_else(|| held.notice());
+                    }
+                }
+            }
+            Err(e) => {
+                report.complete = false;
+                if report.error.is_none() {
+                    report.error = Some(e.message);
+                }
+            }
+        }
+    } else {
+        // The same law the two sweeps above carry, and it was missing here.
+        // A lane that is skipped while the run still reports `complete` is a
+        // silent gap — and this is the one lane that matters on exactly the
+        // path the feature exists for: a fresh restore, where the walk is long
+        // and the vault's idle grace is short.
+        report.complete = false;
+        if report.error.is_none() {
+            report.error =
+                Some("the wallet locked while catching up — unlock and check again".to_string());
+        }
+        log::info!("history-fill: vault locked before the backup walk — nothing restored");
+    }
+
     if let Err(e) = cursors.save(dir) {
         log::warn!("history-fill: cursor save failed: {e}");
     }
     report
+}
+
+/// Order a funding set so input[0] is one the live indexer can attribute back
+/// to us — the D-138 backup's whole read path depends on it.
+///
+/// **The rule this satisfies is not the one anyone assumed.** Both our audit
+/// plan and the first cut of this design said the indexer keys a self-stash's
+/// `owner` on input[0]'s address. It does not. Reading its source
+/// (`idx_block_processor.rs`, 2026-08-14): take `inputs[0].previous_outpoint`,
+/// **require its index to be 0**, look that funding transaction up among
+/// transactions that were themselves `ciph_msg:` operations, and the owner is
+/// THAT transaction's output[0] address. Miss either condition and the row is
+/// parked for deferred resolution from the node's return-address RPC — which
+/// usually succeeds live and can quietly never happen during a historical
+/// gap-fill.
+///
+/// The failure that avoids is silent and total: a backup sitting on chain,
+/// perfectly valid, invisible to the only query that could ever restore it.
+///
+/// So this SORTS and never filters — refusing to spend a badly-shaped coin
+/// would refuse honest backups on a wallet that has only ever received — and
+/// the sort is stable, so the wallet's own ordering survives within a tier.
+///
+/// Generic over the entry type purely so the rule is testable without
+/// constructing consensus UTXOs (which would cost a new dependency for a test).
+fn order_priority_for_owner<T>(
+    entries: Vec<T>,
+    outpoint_of: impl Fn(&T) -> (u32, String),
+    is_own_protocol_tx: impl Fn(&str) -> bool,
+) -> Vec<T> {
+    let mut ordered = entries;
+    ordered.sort_by_key(|entry| {
+        let (index, txid) = outpoint_of(entry);
+        match (index == 0, is_own_protocol_tx(&txid)) {
+            // Index 0 of a transaction the indexer already parsed as a protocol
+            // operation: the fast path, attributed the moment it is accepted.
+            (true, true) => 0u8,
+            // Index 0 of something else: half the condition, and still better
+            // than nothing — the funder may be a protocol tx we never stored.
+            (true, false) => 1,
+            // Anything else can only reach `owner` by deferred resolution.
+            _ => 2,
+        }
+    });
+    ordered
+}
+
+/// Does the candidate backup supersede the one we are holding?
+///
+/// **The newest snapshot alone speaks for the wallet.** A snapshot is a
+/// complete statement of the conversation list at the moment it was written,
+/// not a delta, so an older one can only add rows the user has since HIDDEN —
+/// and after a wipe there is no tombstone left to refuse them, because the
+/// suppression record lived on the device being replaced. Keeping only the
+/// newest makes each backup a revocation of the one before it.
+///
+/// The txid tiebreak is not decoration: two backups can share a block time, and
+/// a restore that depended on page order would rebuild differently on different
+/// devices.
+fn stash_supersedes(candidate: (u64, &str), current: Option<(u64, &str)>) -> bool {
+    match current {
+        None => true,
+        Some((block_time, tx_id)) => {
+            candidate.0 > block_time || (candidate.0 == block_time && candidate.1 < tx_id)
+        }
+    }
+}
+
+/// Turn a decrypted stash row into the conversation it describes, or `None` if
+/// it describes one we could not use.
+///
+/// Pure over its inputs so the rules below are testable without a store.
+fn restored_conversation(
+    payload: &SavedHandshakePayload,
+    receive_window: u32,
+    change_window: u32,
+) -> Option<ConversationRecord> {
+    // The counterparty address decides where every future message is sealed, so
+    // it has to be an address on OUR network — not merely a non-empty string.
+    validate_mainnet_address(&payload.partner_address).ok()?;
+
+    // The bound slot, clamped to the window we actually derive keys for. An
+    // out-of-window index is not a reason to refuse the conversation; it is a
+    // reason to fall back to the identity address and let the counterparty's
+    // own traffic re-teach us the binding.
+    let bound = match payload.bound_slot() {
+        Some((BOUND_BRANCH_RECEIVE, index)) if index < receive_window => {
+            (KeyBranch::Receive, index)
+        }
+        Some((BOUND_BRANCH_CHANGE, index)) if index < change_window => (KeyBranch::Change, index),
+        // No slot at all is the KASIA case, and receive/0 is right for it for a
+        // specific reason rather than as a default: their wallet is
+        // single-address, and that address is BIP44 `m/44'/111111'/0'/0/0` —
+        // our receive/0. A stash from a client that binds elsewhere and says
+        // nothing would land here wrongly, which is why we always write ours.
+        _ => (KeyBranch::Receive, 0),
+    };
+
+    Some(ConversationRecord {
+        conversation_id: payload
+            .conversation_id
+            .clone()
+            .unwrap_or_else(fresh_conversation_id),
+        contact_address: payload.partner_address.clone(),
+        my_alias: payload.alias.clone(),
+        their_alias: payload.their_alias.clone(),
+        // Never `PendingInbound`. That is the ONE status carrying an Accept
+        // affordance, and Accept spends 0.2 KAS to an address resolved from a
+        // handshake transaction. A row reconstructed from an archive must not
+        // be able to put a bond-spending button in front of the user.
+        status: if payload.their_alias.is_some() {
+            ConversationStatus::Active
+        } else {
+            ConversationStatus::PendingOutbound
+        },
+        // Their hydrate hardcodes `initiatedByMe: true` even for a row their own
+        // writer flagged `isResponse` — a free correction, so take it.
+        initiated_by_me: !payload.is_response.unwrap_or(false),
+        bound_branch: bound.0,
+        bound_index: bound.1,
+        created_unix_ms: payload.timestamp,
+        last_activity_unix_ms: payload.timestamp,
+        // The establishing handshake tx is NOT this stash's txid. Leaving it
+        // empty is honest; filling it with the stash would point the accept
+        // flow's sender resolution at a transaction that paid nobody.
+        handshake_txid: None,
+    })
+}
+
+/// May this restored row be created, given what the store already holds?
+///
+/// **CREATE-ONLY IS NOT ENOUGH ON ITS OWN, and that is the whole point of this
+/// function.** A restored row carries the ORIGINAL handshake's timestamp, so it
+/// is older than any live row by construction — and `conversation_by_alias`
+/// breaks ties in favour of the older establishment (deliberately: the squatter
+/// arrives later). A plain create that merely avoided touching existing rows
+/// would therefore silently capture a live conversation's alias, and every
+/// message that contact sent would file into an invisible twin. That is D-141's
+/// symptom arriving through a door we opened ourselves.
+///
+/// So all four: not the same conversation id, not the same counterparty, and
+/// neither alias already spoken for.
+fn stash_row_is_free(store: &TransportStore, record: &ConversationRecord) -> bool {
+    store.conversation(&record.conversation_id).is_none()
+        && store
+            .conversations_for_contact_address(&record.contact_address)
+            .is_empty()
+        && store.conversation_by_alias(&record.my_alias).is_none()
+        && record
+            .their_alias
+            .as_deref()
+            .is_none_or(|alias| store.conversation_by_alias(alias).is_none())
+}
+
+/// Fold one restored stash row into the store. Creates or refuses — never
+/// merges, never mutates.
+fn fold_stash_row(
+    hub: &TransportHub,
+    tx_id: &str,
+    payload: &SavedHandshakePayload,
+    created: &mut usize,
+    windows: (u32, u32),
+) -> FoldOutcome {
+    if *created >= STASH_CREATE_CAP {
+        return dropped(
+            SELF_STASH,
+            tx_id,
+            DropReason::StashRefusedCollision,
+            EventOrigin::Fill,
+        );
+    }
+    let Some(record) = restored_conversation(payload, windows.0, windows.1) else {
+        return dropped(
+            SELF_STASH,
+            tx_id,
+            DropReason::UndecodablePayload,
+            EventOrigin::Fill,
+        );
+    };
+    let conversation_id = record.conversation_id.clone();
+    {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        if !stash_row_is_free(&store, &record) {
+            drop(store);
+            return dropped(
+                SELF_STASH,
+                tx_id,
+                DropReason::StashRefusedCollision,
+                EventOrigin::Fill,
+            );
+        }
+        if store.upsert_conversation(record).is_err() {
+            drop(store);
+            return dropped(
+                SELF_STASH,
+                tx_id,
+                DropReason::StoreFailed,
+                EventOrigin::Fill,
+            );
+        }
+    }
+    *created += 1;
+    log::info!("history-fill: a conversation was restored from a backup");
+    ping(&conversation_id);
+    FoldOutcome::Recorded
 }
 
 fn thread_pings() -> &'static broadcast::Sender<String> {
@@ -1197,6 +1626,19 @@ enum DropReason {
     StoreRace,
     /// The append itself failed.
     StoreFailed,
+    /// A restored self-stash row that would have collided with a conversation
+    /// we already hold — or that came past this run's creation cap.
+    ///
+    /// Settled, not held: re-serving it next run changes nothing, because the
+    /// thing in its way is a live conversation and that is the correct winner.
+    StashRefusedCollision,
+    /// A self-stash row our own key opened but could not AUTHENTICATE.
+    ///
+    /// The seal is to our published key, so opening it proves only that someone
+    /// knew a public address. Without our keyed tag the row is a stranger's
+    /// claim about who our contacts are — and the restore creates conversations
+    /// from these, so the claim would become a live thread.
+    StashNotOurs,
 }
 
 /// What one fold attempt did.
@@ -1300,6 +1742,7 @@ impl HeldFloor {
 /// so a capture line greps straight back to the payload kind.
 const HANDSHAKE: &str = "handshake";
 const COMM: &str = "comm";
+const SELF_STASH: &str = "self_stash";
 
 /// Log one intake drop and classify it — so every rejection in the folds
 /// below reads `return dropped(...)` and none can go silent again.
@@ -1617,6 +2060,22 @@ async fn handle_inbound(
             .await
         }
         "comm" => handle_inbound_comm(hub, &txid, &event.body, event.block_time_ms, origin),
+        // `self_stash` (D-138) is FILL-ONLY, deliberately — this arm is where
+        // it lands and where it must keep landing. Our own backups reach here
+        // the moment our node accepts them (they self-send to a watched
+        // address), and doing nothing is correct:
+        //
+        // - Folding them would run `decrypt_scanning` over the whole key window
+        //   for every stash-shaped transaction any stranger cares to post, at
+        //   the price of dust, on every device.
+        // - It would add an attacker-mintable drop reason to the node lane's
+        //   log — the one diagnostic that found D-139 — and `info!` is the
+        //   device sink's ceiling, so the useful lines would be the ones evicted.
+        // - It would decide identity from a lane with no authorship check at
+        //   all. The restore path proves a stash is ours with a keyed tag
+        //   (`stash_tag`) precisely because sealing does not — the envelope
+        //   goes to our PUBLISHED key, so anyone can make one we can open.
+        //
         // `legacy` (VNone): parse-layer tolerance is fixture-pinned in chain;
         // conversation semantics for the unversioned generation are
         // consciously deferred (the population emits versioned forms since
@@ -2224,6 +2683,7 @@ async fn prepare_transport_send(
     wire: Vec<u8>,
     source: Address,
     intent: TransportIntent,
+    pin: PinPolicy,
 ) -> Result<SignableSummaryDto, AppError> {
     // D-069 structural check: a comm-carried kind IS a self-send — its
     // destination and pinned source are the same bound address (value
@@ -2231,8 +2691,11 @@ async fn prepare_transport_send(
     // kind the DTO carries must never claim self-send over a tx that pays a
     // stranger. Never crosses the bridge (release-stripped).
     debug_assert!(
-        !matches!(intent, TransportIntent::Comm { .. }) || dest == source,
-        "a Comm intent must be a self-send (D-069): dest == source"
+        !matches!(
+            intent,
+            TransportIntent::Comm { .. } | TransportIntent::SelfStash { .. }
+        ) || dest == source,
+        "a Comm or SelfStash intent must be a self-send (D-069): dest == source"
     );
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
@@ -2246,6 +2709,32 @@ async fn prepare_transport_send(
             "this conversation's address is waiting on confirming funds — try again in a few seconds",
         ));
     }
+    let priority_len = priority.len();
+    let priority = match pin {
+        PinPolicy::Default => priority,
+        // Sort input[0] toward what the indexer can attribute (see `PinPolicy`).
+        // The store answers "is this txid one of ours" — a HashMap hit per
+        // UTXO, taken under a guard that is dropped before the next `.await`
+        // (this file's own law: a `std::sync::Mutex` guard never crosses one).
+        PinPolicy::OwnerAttributable => {
+            let hub = hub().ok();
+            let store = hub
+                .as_ref()
+                .map(|h| h.store.lock().unwrap_or_else(PoisonError::into_inner));
+            let ordered = order_priority_for_owner(
+                priority,
+                |entry| {
+                    (
+                        entry.utxo.outpoint.index(),
+                        entry.utxo.outpoint.transaction_id().to_string(),
+                    )
+                },
+                |txid| store.as_ref().is_some_and(|s| s.has_message_txid(txid)),
+            );
+            drop(store);
+            ordered
+        }
+    };
     let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
     let rpc = dag::shared_monitor().await?.rpc();
@@ -2276,6 +2765,25 @@ async fn prepare_transport_send(
             friendly_prepare_error(e, amount_sompi, mature, pending, outgoing)
         })?;
 
+    // SOURCE CONFINEMENT — only for the owner-attributable lane.
+    //
+    // The pinned Generator consumes `priority` first and then falls through to
+    // the general UTXO iterator, while routing ALL change to `source`. For a
+    // comm that is merely a top-up. For a backup it is a slow leak with teeth:
+    // it would migrate a coin out of another conversation's §0.7 bound change
+    // address into this one, and that conversation's next message would then
+    // fail with "waiting on confirming funds" at a perfectly healthy balance —
+    // a D-067 fragmentation caused by a housekeeping transaction.
+    //
+    // Refuse instead, and say why. A backup deferred by a minute costs nothing;
+    // a wedged conversation costs a diagnosis.
+    if pin == PinPolicy::OwnerAttributable && prepared.summary().utxo_count as usize > priority_len
+    {
+        return Err(AppError::msg(
+            "your main address is still settling — try the backup again in a minute",
+        ));
+    }
+
     let built = prepared.final_payload();
     let payload_kind = parse_payload(&built)
         .map(|(kind, _)| kind)
@@ -2300,7 +2808,12 @@ fn kind_of_intent(intent: &TransportIntent) -> SignableKind {
         TransportIntent::Bcast => SignableKind::Bcast,
         TransportIntent::Handshake { .. } => SignableKind::Bond,
         TransportIntent::Accept { .. } => SignableKind::BondRefund,
-        TransportIntent::Comm { .. } => SignableKind::SelfSendFrame,
+        // A backup is a self-send whose value returns as change, so the honest
+        // ceremony is the existing one: the sheet leads with the FEE, never
+        // with a spend. The `contextNote` on the Dart side says what it is.
+        TransportIntent::Comm { .. } | TransportIntent::SelfStash { .. } => {
+            SignableKind::SelfSendFrame
+        }
     }
 }
 
@@ -2485,6 +2998,7 @@ pub async fn transport_prepare_handshake(
             reseal,
             timestamp_ms,
         },
+        PinPolicy::Default,
     )
     .await
 }
@@ -2656,6 +3170,7 @@ pub async fn transport_prepare_accept(
             reseal,
             timestamp_ms,
         },
+        PinPolicy::Default,
     )
     .await
 }
@@ -2803,6 +3318,7 @@ async fn prepare_comm_plaintext(
             sealed_to: (to_key_branch(bound.0), bound.1),
             timestamp_ms,
         },
+        PinPolicy::Default,
     )
     .await
 }
@@ -2843,6 +3359,216 @@ pub async fn transport_prepare_taunt(
 ) -> Result<SignableSummaryDto, AppError> {
     let plaintext = build_taunt(&text).map_err(AppError::core)?;
     prepare_comm_plaintext(conversation_id, plaintext).await
+}
+
+// ── D-138: the conversation backup (`self_stash`) ─────────────────────────
+
+/// How many conversations one backup carries. A bound, not a target: the
+/// payload is masses-and-fees, and a wallet with hundreds of threads should
+/// back up its live ones rather than fail to build a transaction at all.
+const STASH_SNAPSHOT_MAX: usize = 64;
+
+/// How many conversations one fill run may CREATE from restored stash rows.
+///
+/// Set to the snapshot PARSE bound deliberately, so it can never bite inside a
+/// single snapshot. A cap below the snapshot size would refuse the tail of a
+/// perfectly good backup, and a refusal is `Settled` — the cursor would step
+/// past conversations it never restored while reporting a clean walk. The real
+/// bound on how much one indexer response can grow the store is
+/// `MAX_SNAPSHOT_ROWS`, applied at parse; this is the same number so the two
+/// can never drift apart.
+const STASH_CREATE_CAP: usize = kaspaverse_core::handshake::MAX_SNAPSHOT_ROWS;
+
+/// Which conversations belong in a backup, newest-active first.
+///
+/// A row with no counterparty address or no alias of ours is skipped, because
+/// restoring it would produce a conversation that cannot send. In practice that
+/// is exactly the `PendingInbound` rows — invitations we have not accepted —
+/// and they are the one class already recoverable from chain, since their
+/// handshake was addressed TO us and `handshakes/by-receiver` finds it.
+///
+/// Hidden conversations are skipped too. The tombstone IS the user's
+/// suppression record; a backup that carried it would hand it back at the next
+/// restore, which is the opposite of what hiding means.
+fn stashable_rows(store: &TransportStore) -> Vec<ConversationRecord> {
+    let mut rows: Vec<ConversationRecord> = store
+        .list_conversations()
+        .into_iter()
+        .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
+        .filter(|c| !c.contact_address.is_empty() && !c.my_alias.is_empty())
+        .collect();
+    // Newest activity first, so a wallet past the cap keeps the threads it is
+    // actually using. Ties break on id purely so the payload is deterministic.
+    //
+    // **Deliberately NOT truncated here.** The cap belongs to the payload, not
+    // to the count: `transport_stash_state` uses this same helper for its
+    // denominator, and truncating first made the cap invisible — a wallet with
+    // 70 conversations was told "All 64 backed up" while six were in no backup
+    // at all and nothing would ever say so. The truncation happens at the one
+    // place that builds a transaction.
+    rows.sort_by(|a, b| {
+        b.last_activity_unix_ms
+            .cmp(&a.last_activity_unix_ms)
+            .then(a.conversation_id.cmp(&b.conversation_id))
+    });
+    rows
+}
+
+fn branch_token(branch: KeyBranch) -> &'static str {
+    match branch {
+        KeyBranch::Receive => BOUND_BRANCH_RECEIVE,
+        KeyBranch::Change => BOUND_BRANCH_CHANGE,
+    }
+}
+
+/// Phase 1 of the D-138 backup: seal a snapshot of every conversation to our
+/// OWN key and park it on chain, so a restore-from-seed rebuilds contacts and
+/// not just money.
+///
+/// **Why this is a deliberate user action rather than automatic.** Kasia emits
+/// a stash from inside its handshake flow. We cannot: a backup is funded from
+/// `receive/0`, and immediately after a handshake spends that address its
+/// change is unconfirmed, so `mature_utxos_at` finds nothing. Nor can several
+/// backups be emitted back to back, for the same reason — and there is exactly
+/// one `PENDING_TRANSPORT` slot, so preparing one while a confirm sheet is open
+/// would destroy the plan the user is looking at. One explicit action, one
+/// transaction, everything in it.
+///
+/// The value is a self-send that returns as change (D-069), so the honest cost
+/// is the network fee.
+pub async fn transport_prepare_stash() -> Result<SignableSummaryDto, AppError> {
+    let hub = hub()?;
+    let timestamp_ms = now_unix_ms();
+
+    let mut rows = {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        stashable_rows(&store)
+    };
+    if rows.is_empty() {
+        return Err(AppError::msg(
+            "there are no conversations to back up yet — start one first",
+        ));
+    }
+    // The payload cap applies HERE and only here — see `stashable_rows`.
+    if rows.len() > STASH_SNAPSHOT_MAX {
+        log::info!(
+            "self-stash: {} conversations, backing up the {STASH_SNAPSHOT_MAX} most recent",
+            rows.len()
+        );
+        rows.truncate(STASH_SNAPSHOT_MAX);
+    }
+
+    // `covered` is built from the payloads that ACTUALLY went in, not from the
+    // rows we set out to carry. Claiming coverage for a conversation the
+    // snapshot skipped would make the backup notice go quiet about the one
+    // thread that is still unprotected — a lie by omission in the exact place
+    // the user is trusting the count.
+    let mut covered = Vec::with_capacity(rows.len());
+    let mut payloads = Vec::with_capacity(rows.len());
+    let mut skipped = 0usize;
+    for row in &rows {
+        match SavedHandshakePayload::new(
+            &row.my_alias,
+            row.their_alias.as_deref(),
+            &row.contact_address,
+            &row.conversation_id,
+            branch_token(row.bound_branch),
+            row.bound_index,
+            !row.initiated_by_me,
+            row.created_unix_ms,
+        ) {
+            Ok(payload) => {
+                covered.push(row.conversation_id.clone());
+                payloads.push(payload);
+            }
+            // Shape only, never a value: a malformed row is a bug in OUR store,
+            // and the diagnosis needs the count, not the contents (§4).
+            Err(_) => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        log::warn!("self-stash: {skipped} conversation(s) failed validation and were left out");
+    }
+    let snapshot = SavedHandshakeSnapshot::new(payloads).map_err(|_| {
+        AppError::msg(
+            "none of your conversations could be backed up — this is a bug, please report it",
+        )
+    })?;
+    // AUTHORSHIP TAG — the restore refuses anything it cannot prove we wrote.
+    // Sealing does not prove it: the envelope goes to our own PUBLIC key, so
+    // any party that knows our receive address — including whichever archive we
+    // ask — can produce one our key opens. See `attach_stash_tag`.
+    let untagged = snapshot.to_plaintext().map_err(AppError::core)?;
+    let tag = hub.decryptor.stash_tag(&untagged).map_err(AppError::core)?;
+    let plaintext = attach_stash_tag(&untagged, &tag).map_err(AppError::core)?;
+
+    // receive/0: the one address a restore can derive from the seed alone,
+    // before any store exists. It is also our canonical transport identity
+    // (D2/P4) and — because a single-address Kasia derives the same address
+    // from the same mnemonic — the one that keeps this artifact readable by
+    // their client too.
+    let own_address = vault::wallet_address_at(Branch::Receive, 0)?;
+    let envelope = encrypt(&x_only_of(&own_address)?, &plaintext).map_err(AppError::core)?;
+    let wire = compose_self_stash_wire(&envelope.to_bytes()).map_err(AppError::chain)?;
+
+    let engine = wallet::engine_handle()
+        .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    let floor = engine
+        .minimum_sendable(own_address.clone())
+        .map_err(AppError::chain)?
+        .ok_or_else(|| {
+            AppError::msg("your balance can't cover a backup right now (anti-dust floor)")
+        })?;
+
+    prepare_transport_send(
+        own_address.clone(), // self-send (D-069): the value comes straight back
+        floor,
+        wire,
+        own_address,
+        TransportIntent::SelfStash {
+            covered,
+            timestamp_ms,
+        },
+        PinPolicy::OwnerAttributable,
+    )
+    .await
+}
+
+/// What the last backup covered, for the honest notice.
+#[derive(Clone, Debug)]
+pub struct StashStateDto {
+    /// When the last backup was committed (unix ms), `0` if never.
+    pub last_unix_ms: u64,
+    /// Whether a history walk has actually read that backup back. Until it
+    /// has, the wallet says "sent" rather than "backed up" — the indexer's
+    /// attribution can fail quietly and leave it unfindable.
+    pub confirmed_readable: bool,
+    /// How many of today's conversations that backup still covers.
+    pub covered: u32,
+    /// How many conversations could be backed up right now.
+    pub total: u32,
+}
+
+/// Backup coverage. `covered` counts only conversations that are BOTH in the
+/// last snapshot AND still present — so deleting a thread cannot make the
+/// wallet claim coverage it does not have, and starting one immediately shows
+/// as uncovered.
+pub fn transport_stash_state() -> Result<StashStateDto, AppError> {
+    let hub = hub()?;
+    let dir = vault::transport_store_dir()?;
+    let state = kaspaverse_chain::history_fill::StashState::load(&dir);
+    let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let rows = stashable_rows(&store);
+    let covered = rows
+        .iter()
+        .filter(|r| state.covered.contains(&r.conversation_id))
+        .count();
+    Ok(StashStateDto {
+        last_unix_ms: state.last_unix_ms,
+        confirmed_readable: state.confirmed_readable,
+        covered: covered as u32,
+        total: rows.len() as u32,
+    })
 }
 
 /// Phase 2: sign + broadcast the stashed transport plan identified by `nonce`.
@@ -2995,6 +3721,36 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
             }
             drop(store);
             ping(&conversation_id);
+        }
+        TransportIntent::SelfStash {
+            covered,
+            timestamp_ms,
+        } => {
+            // Deliberately touches NEITHER store. A backup records what it
+            // covered and nothing else — it is not a message, it does not
+            // belong to a conversation, and writing a row for it would put our
+            // own metadata JSON into a thread as a chat bubble (the stash is
+            // sealed to us, so `transport_thread` would happily decrypt and
+            // render it).
+            drop(store);
+            if let Ok(dir) = vault::transport_store_dir() {
+                let state = kaspaverse_chain::history_fill::StashState {
+                    last_unix_ms: timestamp_ms,
+                    last_txid: txid.to_string(),
+                    covered,
+                    // A fresh backup is unproven until a walk reads it back —
+                    // broadcasting is not the same as being findable.
+                    confirmed_readable: false,
+                };
+                if let Err(e) = state.save(&dir) {
+                    // A lost coverage record costs one redundant backup — a
+                    // fee — and never costs history. Warn, never fail: the
+                    // transaction is already on the wire.
+                    log::warn!("self-stash: coverage record not saved: {e}");
+                }
+            }
+            log::info!("self-stash: backup committed");
+            ping_notice_inputs();
         }
     }
 }
@@ -3901,5 +4657,447 @@ mod tests {
         assert_eq!(row_source_label(RowSource::FillSourced), "archive");
         assert_eq!(row_source_label(RowSource::Own), "own");
         assert_eq!(row_source_label(RowSource::Unknown), "unknown");
+    }
+
+    // ── D-138: the conversation backup ────────────────────────────────────
+
+    /// Real mainnet addresses — `restored_conversation` validates the prefix,
+    /// so a placeholder would pass the test for the wrong reason.
+    const PARTNER_A: &str = "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf";
+    const PARTNER_B: &str = "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692";
+
+    fn stash_payload(alias: &str, partner: &str, id: &str) -> SavedHandshakePayload {
+        SavedHandshakePayload::new(
+            alias,
+            None,
+            partner,
+            id,
+            BOUND_BRANCH_RECEIVE,
+            0,
+            false,
+            1_000,
+        )
+        .unwrap()
+    }
+
+    fn stash_store(tag: &str) -> (TransportStore, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kv-stash-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (TransportStore::load(dir.clone()).unwrap(), dir)
+    }
+
+    /// CORRECTION 6 TO THE LIVE POPULATION, and the rule that replaced it.
+    ///
+    /// Their loader `break`s after the first stash it decrypts — across ALL
+    /// recipients — then advances its cursor past the rest, which its own
+    /// ascending pagination never re-serves. Ours reads every row of the
+    /// snapshot it chooses; what it does NOT do is merge across snapshots.
+    ///
+    /// A snapshot is a complete statement, not a delta, so an older one can only
+    /// contribute rows the user has since HIDDEN — and after a wipe there is no
+    /// tombstone left to refuse them, because the suppression record lived on
+    /// the device being replaced. The newest backup revokes the one before it.
+    #[test]
+    fn only_the_newest_backup_speaks_and_an_older_one_cannot_resurrect() {
+        // Later block time wins.
+        assert!(stash_supersedes((20, "tx2"), Some((10, "tx1"))));
+        assert!(!stash_supersedes((10, "tx1"), Some((20, "tx2"))));
+        // Nothing held yet.
+        assert!(stash_supersedes((1, "tx"), None));
+        // Same block time: the lowest txid, so two devices agree.
+        assert!(stash_supersedes((99, "0000"), Some((99, "ffff"))));
+        assert!(!stash_supersedes((99, "ffff"), Some((99, "0000"))));
+        // …and the answer cannot depend on which order the pages arrived in.
+        let mut current: Option<(u64, &str)> = None;
+        for candidate in [(10u64, "tx1"), (99, "ffff"), (99, "0000"), (5, "tx0")] {
+            if stash_supersedes(candidate, current) {
+                current = Some(candidate);
+            }
+        }
+        let mut reversed: Option<(u64, &str)> = None;
+        for candidate in [(5u64, "tx0"), (99, "0000"), (99, "ffff"), (10, "tx1")] {
+            if stash_supersedes(candidate, reversed) {
+                reversed = Some(candidate);
+            }
+        }
+        assert_eq!(current, reversed);
+        assert_eq!(current, Some((99, "0000")));
+    }
+
+    /// The restore creates conversations, so a row it cannot prove we wrote
+    /// must never become one. Sealing does not prove it — the envelope goes to
+    /// our own PUBLIC key, so the archive answering the query can mint one our
+    /// key opens. Only the keyed tag separates ours from a stranger's.
+    #[test]
+    fn a_backup_we_cannot_prove_we_wrote_is_refused() {
+        let snapshot =
+            SavedHandshakeSnapshot::new(vec![stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1")])
+                .unwrap();
+        let untagged = snapshot.to_plaintext().unwrap();
+
+        // A forged row: perfectly well-formed, sealed to a key it knows, no tag.
+        assert!(
+            split_stash_tag(&untagged).is_none(),
+            "an untagged payload must never look authenticated"
+        );
+
+        // A tag from the wrong seed is present but does not verify — the fold
+        // compares against OUR recomputation, so a mismatch is a refusal.
+        let ours = [1u8; 32];
+        let theirs = [2u8; 32];
+        let forged = attach_stash_tag(&untagged, &theirs).unwrap();
+        let (recovered, tag) = split_stash_tag(&forged).unwrap();
+        assert_eq!(recovered, untagged, "the tag covers the whole payload");
+        assert_ne!(tag, ours, "a stranger's tag is not ours");
+
+        // And the refusal settles rather than wedging the walk: the row will
+        // never authenticate, so re-serving it forever would be a self-inflicted
+        // denial of service on our own history.
+        assert_eq!(DropReason::StashNotOurs.outcome(), FoldOutcome::Settled);
+    }
+
+    /// A restored row must never mint the ONE status that carries a
+    /// bond-spending Accept button. An archive can manufacture a whole
+    /// conversation; it must never manufacture a reason to spend 0.2 KAS.
+    #[test]
+    fn a_restored_backup_never_creates_a_pending_inbound_row() {
+        let pending = stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1");
+        let restored = restored_conversation(&pending, 30, 30).unwrap();
+        assert_eq!(restored.status, ConversationStatus::PendingOutbound);
+
+        let active = SavedHandshakePayload::new(
+            "aaaaaaaaaaaa",
+            Some("bbbbbbbbbbbb"),
+            PARTNER_A,
+            "id2",
+            BOUND_BRANCH_CHANGE,
+            3,
+            true,
+            1_000,
+        )
+        .unwrap();
+        let restored = restored_conversation(&active, 30, 30).unwrap();
+        assert_eq!(restored.status, ConversationStatus::Active);
+        assert_eq!(restored.bound_branch, KeyBranch::Change);
+        assert_eq!(restored.bound_index, 3);
+        // Their hydrate hardcodes initiatedByMe = true even on a response leg.
+        assert!(
+            !restored.initiated_by_me,
+            "a response leg was theirs to open"
+        );
+        assert!(
+            restored.handshake_txid.is_none(),
+            "the stash txid paid nobody — never offer it to the refund path"
+        );
+    }
+
+    /// An out-of-window slot falls back rather than panicking or binding to a
+    /// key we never derive. A stash with no slot at all is the KASIA case.
+    #[test]
+    fn an_unusable_bound_slot_falls_back_to_the_identity_address() {
+        let mut far = stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1");
+        far.bound_branch = Some(BOUND_BRANCH_CHANGE.to_string());
+        far.bound_index = Some(u32::MAX);
+        let restored = restored_conversation(&far, 30, 30).unwrap();
+        assert_eq!(restored.bound_branch, KeyBranch::Receive);
+        assert_eq!(restored.bound_index, 0);
+
+        let mut theirs = stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1");
+        theirs.bound_branch = None;
+        theirs.bound_index = None;
+        let restored = restored_conversation(&theirs, 30, 30).unwrap();
+        assert_eq!(restored.bound_branch, KeyBranch::Receive);
+        assert_eq!(restored.bound_index, 0);
+    }
+
+    #[test]
+    fn a_backup_naming_an_address_off_our_network_is_refused() {
+        let mut wrong = stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1");
+        wrong.partner_address = "kaspatest:qq1234".to_string();
+        assert!(restored_conversation(&wrong, 30, 30).is_none());
+        wrong.partner_address = "not an address".to_string();
+        assert!(restored_conversation(&wrong, 30, 30).is_none());
+    }
+
+    /// THE DEFECT THAT MAKES "CREATE-ONLY" INSUFFICIENT.
+    ///
+    /// A restored row carries the ORIGINAL handshake's timestamp, so it is
+    /// older than any live row by construction — and `conversation_by_alias`
+    /// deliberately ranks the older establishment first, because the squatter
+    /// is the one who arrives later. A create that merely avoided touching
+    /// existing rows would therefore capture a live conversation's alias, and
+    /// every message that contact sent would file into an invisible twin.
+    #[test]
+    fn a_backup_row_never_captures_a_live_conversations_alias() {
+        let (mut store, dir) = stash_store("alias-capture");
+        let live = ConversationRecord {
+            conversation_id: "live".into(),
+            contact_address: PARTNER_B.into(),
+            my_alias: "aaaaaaaaaaaa".into(),
+            their_alias: Some("eeeeeeeeeeee".into()),
+            status: ConversationStatus::Active,
+            initiated_by_me: true,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 900_000,
+            last_activity_unix_ms: 900_000,
+            handshake_txid: None,
+        };
+        store.upsert_conversation(live).unwrap();
+
+        // A DIFFERENT counterparty, but claiming an alias the live row holds.
+        let colliding = restored_conversation(
+            &stash_payload("aaaaaaaaaaaa", PARTNER_A, "restored"),
+            30,
+            30,
+        )
+        .unwrap();
+        assert!(
+            colliding.created_unix_ms < 900_000,
+            "the restored row IS older — that is what makes this dangerous"
+        );
+        assert!(!stash_row_is_free(&store, &colliding), "my_alias collision");
+
+        // …and the same through THEIR alias.
+        let mut via_theirs =
+            restored_conversation(&stash_payload("ffffffffffff", PARTNER_A, "r2"), 30, 30).unwrap();
+        via_theirs.their_alias = Some("eeeeeeeeeeee".into());
+        assert!(
+            !stash_row_is_free(&store, &via_theirs),
+            "their_alias collision"
+        );
+
+        // A genuinely fresh conversation is still free to land.
+        let fresh =
+            restored_conversation(&stash_payload("cccccccccccc", PARTNER_A, "r3"), 30, 30).unwrap();
+        assert!(stash_row_is_free(&store, &fresh));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other two clauses: an id we already hold, and a counterparty we
+    /// already talk to. Either would let an archive re-serve a stale identity
+    /// over a live one — reverting `their_alias` to `None` and killing every
+    /// inbound message with `NoConversationForAlias`.
+    #[test]
+    fn a_backup_row_never_displaces_a_conversation_we_already_have() {
+        let (mut store, dir) = stash_store("displace");
+        let live = ConversationRecord {
+            conversation_id: "id1".into(),
+            contact_address: PARTNER_A.into(),
+            my_alias: "9999aaaa9999".into(),
+            their_alias: Some("8888bbbb8888".into()),
+            status: ConversationStatus::Active,
+            initiated_by_me: true,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 900_000,
+            last_activity_unix_ms: 900_000,
+            handshake_txid: None,
+        };
+        store.upsert_conversation(live).unwrap();
+
+        // Same conversation id.
+        let same_id =
+            restored_conversation(&stash_payload("cccccccccccc", PARTNER_B, "id1"), 30, 30)
+                .unwrap();
+        assert!(!stash_row_is_free(&store, &same_id));
+
+        // Same counterparty, different id.
+        let same_partner =
+            restored_conversation(&stash_payload("dddddddddddd", PARTNER_A, "other"), 30, 30)
+                .unwrap();
+        assert!(!stash_row_is_free(&store, &same_partner));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hiding is the user's suppression record. A backup that carried it — or a
+    /// restore that ignored it — would hand back everything they deliberately
+    /// put away. The tombstone keeps the row, so the id clause already refuses
+    /// the rehydrate; the write side must not stash it in the first place.
+    #[test]
+    fn a_hidden_conversation_is_neither_backed_up_nor_restored_over() {
+        let (mut store, dir) = stash_store("tombstone");
+        let hidden = ConversationRecord {
+            conversation_id: "hidden".into(),
+            contact_address: PARTNER_A.into(),
+            my_alias: "aaaaaaaaaaaa".into(),
+            their_alias: Some("bbbbbbbbbbbb".into()),
+            status: ConversationStatus::Active,
+            initiated_by_me: true,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 5,
+            last_activity_unix_ms: 5,
+            handshake_txid: None,
+        };
+        store.upsert_conversation(hidden).unwrap();
+        store.tombstone_conversation("hidden").unwrap();
+
+        assert!(stashable_rows(&store).is_empty(), "never backed up");
+
+        let rehydrate =
+            restored_conversation(&stash_payload("cccccccccccc", PARTNER_A, "hidden"), 30, 30)
+                .unwrap();
+        assert!(
+            !stash_row_is_free(&store, &rehydrate),
+            "never restored over"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backup must carry only conversations that could actually send after a
+    /// restore. `PendingInbound` rows carry no counterparty address until they
+    /// are accepted — and they are the one class already recoverable from
+    /// chain, since their handshake was addressed to us.
+    #[test]
+    fn a_backup_skips_rows_that_could_not_send_after_a_restore() {
+        let (mut store, dir) = stash_store("stashable");
+        let usable = ConversationRecord {
+            conversation_id: "ok".into(),
+            contact_address: PARTNER_A.into(),
+            my_alias: "aaaaaaaaaaaa".into(),
+            their_alias: Some("bbbbbbbbbbbb".into()),
+            status: ConversationStatus::Active,
+            initiated_by_me: true,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 5,
+            last_activity_unix_ms: 50,
+            handshake_txid: None,
+        };
+        let invitation = ConversationRecord {
+            conversation_id: "invite".into(),
+            contact_address: String::new(),
+            my_alias: String::new(),
+            their_alias: Some("cccccccccccc".into()),
+            status: ConversationStatus::PendingInbound,
+            initiated_by_me: false,
+            ..usable.clone()
+        };
+        store.upsert_conversation(usable).unwrap();
+        store.upsert_conversation(invitation).unwrap();
+
+        let rows = stashable_rows(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].conversation_id, "ok");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE COUNT IS NOT THE PAYLOAD, and conflating them told the user a lie.
+    ///
+    /// `stashable_rows` feeds both the backup and the coverage notice. When it
+    /// truncated, a wallet with 80 conversations backed up 64 and then reported
+    /// "All 64 conversations backed up" — the other sixteen were in no backup,
+    /// were never counted, and nothing in the app would ever have said so. The
+    /// founder would learn it on the day the device was gone.
+    ///
+    /// So the list is complete and ordered here; the cap belongs to the one
+    /// place that builds a transaction.
+    #[test]
+    fn the_backup_count_is_never_truncated_by_the_payload_cap() {
+        let (mut store, dir) = stash_store("cap");
+        for i in 0..(STASH_SNAPSHOT_MAX + 16) {
+            store
+                .upsert_conversation(ConversationRecord {
+                    conversation_id: format!("c{i:03}"),
+                    contact_address: PARTNER_A.into(),
+                    my_alias: format!("{i:012}"),
+                    their_alias: None,
+                    status: ConversationStatus::PendingOutbound,
+                    initiated_by_me: true,
+                    bound_branch: KeyBranch::Receive,
+                    bound_index: 0,
+                    created_unix_ms: 1,
+                    last_activity_unix_ms: i as u64,
+                    handshake_txid: None,
+                })
+                .unwrap();
+        }
+        let rows = stashable_rows(&store);
+        assert_eq!(
+            rows.len(),
+            STASH_SNAPSHOT_MAX + 16,
+            "the DENOMINATOR counts every conversation, so the cap stays visible"
+        );
+        assert_eq!(
+            rows[0].last_activity_unix_ms,
+            (STASH_SNAPSHOT_MAX + 15) as u64,
+            "newest first — a wallet past the cap keeps the threads it uses"
+        );
+        // …and the payload path is the one that cuts, which is what makes the
+        // notice able to say "64 of 80" instead of "all 64".
+        let mut payload_rows = rows.clone();
+        payload_rows.truncate(STASH_SNAPSHOT_MAX);
+        assert!(payload_rows.len() < rows.len(), "covered < total, honestly");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused backup row must SETTLE, never HOLD.
+    ///
+    /// The cursor-hold rule keys on who can cause a drop. A collision is caused
+    /// by a live conversation of our own standing in the way — and that live
+    /// row is the correct winner, so re-serving the same stash next run would
+    /// refuse it identically, forever, and the walk would never pass it. That
+    /// is a self-inflicted denial of service on our own history, the same class
+    /// the `HeldFloor` rules were written to avoid.
+    #[test]
+    fn a_refused_backup_row_settles_rather_than_wedging_the_walk() {
+        assert_eq!(
+            DropReason::StashRefusedCollision.outcome(),
+            FoldOutcome::Settled
+        );
+        // …while the genuinely transient ones still hold the cursor.
+        assert_eq!(DropReason::VaultLocked.outcome(), FoldOutcome::Held);
+        assert_eq!(DropReason::StoreFailed.outcome(), FoldOutcome::Held);
+    }
+
+    /// THE D-138 OWNER-ATTRIBUTION ORDERING.
+    ///
+    /// The indexer files a self-stash under an owner derived from input[0]'s
+    /// previous outpoint — requiring **index 0**, and requiring that funding
+    /// transaction to itself have been a `ciph_msg:` operation. Miss both and
+    /// the row is only attributable by a deferred lookup that may never run
+    /// during a historical gap-fill, which loses the backup silently and
+    /// completely. So the best-shaped coin must lead.
+    #[test]
+    fn owner_attribution_puts_the_best_shaped_coin_at_input_zero() {
+        // (index, funding txid) — the only two facts the rule reads.
+        let coins = vec![
+            (3u32, "unknown-a".to_string()), // wrong index      → last tier
+            (0, "unknown-b".to_string()),    // right index only → middle tier
+            (0, "ours".to_string()),         // both             → first
+            (7, "unknown-c".to_string()),    // wrong index      → last tier
+        ];
+        let ordered =
+            order_priority_for_owner(coins, |c| (c.0, c.1.clone()), |txid| txid == "ours");
+
+        assert_eq!(ordered[0].1, "ours", "index 0 of one of our own txs leads");
+        assert_eq!(ordered[1].0, 0, "then any index 0");
+        // Stable inside the last tier: index 3 was supplied before index 7.
+        assert_eq!(ordered[2].0, 3);
+        assert_eq!(ordered[3].0, 7);
+    }
+
+    /// Never a filter. A wallet that has only ever RECEIVED holds no coin at
+    /// index 0 of a protocol transaction, and it must still be able to back up.
+    #[test]
+    fn owner_attribution_reorders_but_never_discards() {
+        let coins = vec![(5u32, "a".to_string()), (9, "b".to_string())];
+        let ordered = order_priority_for_owner(coins, |c| (c.0, c.1.clone()), |_| false);
+        assert_eq!(ordered.len(), 2, "every coin still spendable");
+    }
+
+    /// The scope is a WIRE CONSTANT shared with the live population and with
+    /// the indexer's partition key. A rename here silently returns zero rows
+    /// forever — the fill would report a clean, complete, empty walk.
+    #[test]
+    fn the_backup_scope_is_the_wire_contract() {
+        assert_eq!(SELF_STASH, "self_stash");
+        assert_eq!(STASH_SCOPE_SAVED_HANDSHAKE, "saved_handshake");
     }
 }

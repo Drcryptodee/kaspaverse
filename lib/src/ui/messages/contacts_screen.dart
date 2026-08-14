@@ -68,6 +68,19 @@ class _ContactsScreenState extends State<ContactsScreen> {
     );
   }
 
+  /// The D-138 backup (`self_stash`): park every conversation on chain, sealed
+  /// to our own key, so a restore-from-seed finds contacts and not just money.
+  Future<void> _backUp() async {
+    await _runPrepare(
+      _messaging.prepareStash,
+      contextNote:
+          'Parks your conversation list on Kaspa, sealed to your own key, so '
+          'your recovery phrase can bring your contacts back too. The amount '
+          'returns to you — only the network fee is spent.',
+    );
+    await _messaging.refreshFillState();
+  }
+
   /// The shared ceremony over [runConfirmSend] (V5): the summary — mode,
   /// title, payload facts included — is Rust's decode (B7); this surface
   /// keeps only its own error style (snackbar) and list refresh.
@@ -152,11 +165,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
           // The V2b visible toggle's home (D-074): reachable ALWAYS, not
           // only when the gap banner shows.
           IconButton(
-            tooltip: 'Message history',
+            tooltip: 'History & backup',
             icon: const Icon(Icons.history),
             onPressed: () {
               KvHaptic.selection();
-              showHistoryFillSheet(context, _messaging);
+              showHistoryFillSheet(context, _messaging, onBackUp: _backUp);
             },
           ),
         ],
@@ -174,7 +187,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           children: [
             // The honest gap notice (D-074: never silence) — renders only
             // when history may be incomplete; tap opens the fill sheet.
-            HistoryNoticeBanner(messaging: _messaging),
+            HistoryNoticeBanner(messaging: _messaging, onBackUp: _backUp),
             Expanded(
               child: ValueListenableBuilder<List<ConversationDto>>(
                 valueListenable: _messaging.conversations,

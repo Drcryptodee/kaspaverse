@@ -75,6 +75,25 @@ pub struct IndexerComm {
     pub message_payload: String,
 }
 
+/// One row of `GET /self-stash/by-owner` — our OWN conversation metadata,
+/// sealed to our own key and parked on chain so a restore-from-seed rebuilds
+/// contacts and not just money (D-138).
+///
+/// `stashed_data` is hex of the RAW sealed envelope (the bytes after
+/// `self_stash:<scope>:`) — verified against a real Kasia stash transaction on
+/// 2026-08-14, same raw convention as a handshake.
+///
+/// `owner` is the indexer's CLAIM about whose stash this is, and we never lean
+/// on it (INV-8) — nor on the envelope opening, which proves only that someone
+/// knew our published address. What makes a row ours is the keyed authorship
+/// tag inside the plaintext (`kaspaverse-core::handshake::attach_stash_tag`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct IndexerSelfStash {
+    pub tx_id: String,
+    pub block_time: u64,
+    pub stashed_data: String,
+}
+
 // ── The client (thin: URL build + fetch + parse; no policy) ────────────────
 
 pub struct IndexerClient {
@@ -123,6 +142,32 @@ impl IndexerClient {
         );
         fetch_json(&url).await
     }
+
+    /// Self-stash rows owned by `owner_address` under `scope`, ascending from
+    /// `since_block_time` (inclusive).
+    ///
+    /// **`scope` goes on the wire HEX-ENCODED**, and that is not a guess: the
+    /// indexer partitions self-stash rows in the same column it uses for comm
+    /// aliases, so a plain `saved_handshake` is answered
+    /// `{"error":"Invalid alias hex: Invalid input length 14"}`. Measured
+    /// against the live endpoint 2026-08-14; the live population encodes it the
+    /// same way (`historical-syncer.ts`, "encode alias as hex string").
+    pub async fn self_stash_by_owner(
+        &self,
+        owner_address: &str,
+        scope: &str,
+        since_block_time: u64,
+    ) -> Result<Vec<IndexerSelfStash>> {
+        let url = format!(
+            "{}/self-stash/by-owner?owner={}&scope={}&block_time={}&limit={}",
+            self.base,
+            owner_address,
+            encode_hex(scope.as_bytes()),
+            since_block_time,
+            PAGE_LIMIT
+        );
+        fetch_json(&url).await
+    }
 }
 
 /// One GET with the fill's deadline; errors carry network/HTTP text only
@@ -156,6 +201,15 @@ impl FillItem for IndexerHandshake {
 }
 
 impl FillItem for IndexerComm {
+    fn tx_id(&self) -> &str {
+        &self.tx_id
+    }
+    fn block_time(&self) -> u64 {
+        self.block_time
+    }
+}
+
+impl FillItem for IndexerSelfStash {
     fn tx_id(&self) -> &str {
         &self.tx_id
     }
@@ -313,10 +367,68 @@ pub struct FillCursors {
     pub handshakes: HashMap<String, u64>,
     #[serde(default)]
     pub comms: HashMap<String, u64>,
+    /// Per owning address, for the D-138 self-stash sweep. **This is where a
+    /// new fill lane's state belongs** — `#[serde(default)]` over JSON means an
+    /// older file loads fine and a newer one degrades gracefully, whereas the
+    /// borsh conversation log would have `replay()` STOP at the first frame
+    /// carrying a field an older build cannot decode (`kvlog.rs`).
+    #[serde(default)]
+    pub stash: HashMap<String, u64>,
+}
+
+/// What the last committed self-stash snapshot covered (D-138).
+///
+/// **Coverage bookkeeping, never an obligation.** Losing this file costs one
+/// redundant snapshot — a network fee — and never costs history. That is
+/// precisely why the non-atomic `write_json` below is the right primitive here
+/// and would be the wrong one for anything that gates a spend.
+///
+/// It lives in its OWN file rather than beside [`FillCursors`] because the two
+/// have different writers: the fill lane rewrites cursors on every run while
+/// the commit lane rewrites this on every backup. One load-modify-save JSON
+/// file with two independent writers is a clobber waiting to happen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashState {
+    /// When the covering snapshot was built (local clock, ms).
+    #[serde(default)]
+    pub last_unix_ms: u64,
+    #[serde(default)]
+    pub last_txid: String,
+    /// The conversation ids that snapshot carried.
+    #[serde(default)]
+    pub covered: Vec<String>,
+    /// Set once a fill walk has actually READ [`Self::last_txid`] back under
+    /// our own owner.
+    ///
+    /// Broadcasting a backup is not the same as being able to find it again.
+    /// The indexer attributes a stash by input\[0\]'s funder, and that
+    /// attribution can fail quietly — leaving a transaction that is on chain,
+    /// valid, and permanently invisible to the only query that could restore
+    /// it. Until this flag is set the wallet says "sent, not yet confirmed
+    /// readable", which is the true state and the one that prompts a retry.
+    #[serde(default)]
+    pub confirmed_readable: bool,
+}
+
+impl StashState {
+    /// Infallible: an absent or corrupt file reads as "nothing is backed up",
+    /// which is the honest answer and the safe one.
+    pub fn load(dir: &Path) -> Self {
+        read_json(&dir.join(STASH_STATE_FILE))
+    }
+
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        write_json(&dir.join(STASH_STATE_FILE), self)
+    }
+
+    pub fn path(dir: &Path) -> PathBuf {
+        dir.join(STASH_STATE_FILE)
+    }
 }
 
 const CONFIG_FILE: &str = "fill.config";
 const CURSORS_FILE: &str = "fill.cursors";
+const STASH_STATE_FILE: &str = "stash.state";
 
 fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::read(path)
@@ -439,6 +551,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cm[0].alias, "613162326333");
+
+        // Self-stash rows: the shape MEASURED against the live endpoint
+        // 2026-08-14, including the nullable `owner`/`accepting_*` fields we
+        // deliberately do not bind (INV-8: the indexer's claim about whose row
+        // this is never decides anything — our own key opening it does).
+        let ss: Vec<IndexerSelfStash> = serde_json::from_str(
+            r#"[{"tx_id":"ef","owner":"kaspa:o","scope":"73617665645f68616e647368616b65",
+                 "block_time":789,"accepting_block":"aa","accepting_daa_score":7,
+                 "stashed_data":"d00d"}]"#,
+        )
+        .unwrap();
+        assert_eq!(ss[0].block_time, 789);
+        assert_eq!(decode_hex(&ss[0].stashed_data).unwrap(), vec![0xd0, 0x0d]);
+    }
+
+    /// Coverage state must degrade to "nothing is backed up" rather than to an
+    /// error — an unreadable file is not a reason to refuse a backup, it is a
+    /// reason to take one.
+    #[test]
+    fn stash_state_survives_a_missing_or_corrupt_file() {
+        let dir = std::env::temp_dir().join(format!("kv-stash-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(StashState::load(&dir), StashState::default(), "absent");
+
+        std::fs::write(StashState::path(&dir), b"{ not json").unwrap();
+        assert_eq!(StashState::load(&dir), StashState::default(), "corrupt");
+
+        // A record written before the readability flag existed loads as
+        // UNCONFIRMED — the safe reading, and the one that prompts a check.
+        std::fs::write(
+            StashState::path(&dir),
+            br#"{"last_unix_ms":9,"last_txid":"cd","covered":["c1"]}"#,
+        )
+        .unwrap();
+        let older = StashState::load(&dir);
+        assert_eq!(older.last_txid, "cd");
+        assert!(!older.confirmed_readable, "unproven until a walk reads it");
+
+        let state = StashState {
+            last_unix_ms: 42,
+            last_txid: "ab".into(),
+            covered: vec!["c1".into(), "c2".into()],
+            confirmed_readable: true,
+        };
+        state.save(&dir).unwrap();
+        assert_eq!(StashState::load(&dir), state);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cursor file written before the stash lane existed must still load —
+    /// the `#[serde(default)]` law that keeps new fill state OFF the borsh
+    /// conversation log, where a new field would truncate every replay.
+    #[test]
+    fn a_cursor_file_written_before_the_stash_field_still_loads() {
+        let dir = std::env::temp_dir().join(format!("kv-old-cursors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            FillCursors::path(&dir),
+            br#"{"handshakes":{"kaspa:a":7},"comms":{"c1":9}}"#,
+        )
+        .unwrap();
+
+        let cursors = FillCursors::load(&dir);
+        assert_eq!(cursors.handshakes.get("kaspa:a"), Some(&7));
+        assert_eq!(cursors.comms.get("c1"), Some(&9));
+        assert!(cursors.stash.is_empty(), "new field defaults, never errors");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The self-stash scope travels HEX-ENCODED. The live endpoint answers a
+    /// plain scope with `Invalid alias hex` — it partitions stash rows in the
+    /// same column it uses for comm aliases. Pinned so nobody "simplifies" the
+    /// encode away and silently gets an empty restore.
+    #[test]
+    fn the_stash_scope_is_hex_on_the_wire() {
+        assert_eq!(
+            encode_hex(crate::transport::STASH_SCOPE_SAVED_HANDSHAKE.as_bytes()),
+            "73617665645f68616e647368616b65"
+        );
     }
 
     /// Wall-clock anchor for tests — far past every fixture block_time.

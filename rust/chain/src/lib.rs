@@ -34,9 +34,10 @@ pub use link::{sanitize_node_text, EscalationOutcome, SignedTxRetention};
 pub use kaspa_wrpc_client::prelude::RpcTransaction;
 pub use send::{PreparedSend, SendOutcome, SendSummary};
 pub use transport::{
-    compose_bcast, compose_comm_wire, compose_handshake_wire, decode_envelope_body, parse_payload,
-    resolve_return_address, split_comm_body, TransportEvent, HANDSHAKE_BOND_SOMPI, KIND_LEGACY,
-    KIND_UNKNOWN,
+    compose_bcast, compose_comm_wire, compose_handshake_wire, compose_self_stash_wire,
+    decode_envelope_body, parse_payload, resolve_return_address, split_comm_body,
+    strip_stash_scope, TransportEvent, HANDSHAKE_BOND_SOMPI, KIND_LEGACY, KIND_UNKNOWN,
+    STASH_SCOPE_SAVED_HANDSHAKE,
 };
 pub use transport_store::{
     ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord, RowSource,

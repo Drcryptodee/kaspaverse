@@ -208,6 +208,60 @@ pub fn compose_handshake_wire(sealed_envelope: &[u8]) -> Result<Vec<u8>> {
     Ok(wire)
 }
 
+/// The one self-stash scope we write and read: the live population's
+/// `saved_handshake` (Kasia `messaging.store.ts` `createSelfStash` —
+/// `toHex("saved_handshake:")`). The scope rides on the wire between the kind
+/// token and the envelope, and the indexer partitions on it.
+pub const STASH_SCOPE_SAVED_HANDSHAKE: &str = "saved_handshake";
+
+/// Compose `ciph_msg:1:self_stash:saved_handshake:<raw envelope bytes>` — our
+/// own conversation metadata, sealed to our own key, so a restore-from-seed
+/// rebuilds contacts and not just money (D-138).
+///
+/// **Byte shape read off chain, not inferred** (2026-08-14): a real Kasia
+/// stash transaction carries exactly this ASCII prefix followed by the RAW
+/// sealed envelope (SEC1 tag `0x02` at envelope byte 12) — the same raw-body
+/// convention as `handshake`, NOT the base64 one `comm` uses. It also carries
+/// a single NON-ZERO self-send output, despite their `customAmount: 0n`. The
+/// witness txid lives in the internal record (D-102), not here — it is the
+/// founder's own wallet.
+///
+/// Takes no scope token by design (§4 type separation, same law as
+/// [`compose_handshake_wire`]): no compose path anywhere in this module lets a
+/// caller choose what goes between the delimiters. Refuses non-sealed bodies.
+pub fn compose_self_stash_wire(sealed_envelope: &[u8]) -> Result<Vec<u8>> {
+    if !is_sealed_envelope(sealed_envelope) {
+        return Err(ChainError::Message(
+            "self-stash body must be a sealed envelope".into(),
+        ));
+    }
+    let scope = STASH_SCOPE_SAVED_HANDSHAKE;
+    let mut wire = Vec::with_capacity(
+        CIPH_MSG_PREFIX.len() + WIRE_V1.len() + 11 + scope.len() + 1 + sealed_envelope.len(),
+    );
+    wire.extend_from_slice(CIPH_MSG_PREFIX);
+    wire.extend_from_slice(WIRE_V1);
+    wire.extend_from_slice(b"self_stash:");
+    wire.extend_from_slice(scope.as_bytes());
+    wire.push(b':');
+    wire.extend_from_slice(sealed_envelope);
+    Ok(wire)
+}
+
+/// Strip the `saved_handshake:` scope head off a `self_stash` kind body,
+/// yielding the raw envelope. `None` for any other scope — we read exactly the
+/// one we write.
+///
+/// Deliberately NOT a general `split_on_first_colon`: a sealed envelope is
+/// binary and its first byte can legitimately BE `0x3a`, so a generic splitter
+/// would silently mint a garbage scope out of ciphertext. Matching the exact
+/// known head cannot misparse.
+pub fn strip_stash_scope(body: &[u8]) -> Option<&[u8]> {
+    let mut head = STASH_SCOPE_SAVED_HANDSHAKE.as_bytes().to_vec();
+    head.push(b':');
+    body.strip_prefix(head.as_slice())
+}
+
 /// Compose `ciph_msg:1:comm:<alias>:<base64 envelope text>`. We emit the
 /// envelope as **base64 text — the live emitter's shape** (`btoa` at Kasia
 /// `account-service.ts:801-804`; Gate K row K2, D-068 amending D-066: emit
@@ -586,6 +640,52 @@ mod tests {
         let (kind, body) = parse_payload(&wire).unwrap();
         assert_eq!(kind, "handshake");
         assert_eq!(body, envelope.as_slice(), "raw envelope bytes, untouched");
+    }
+
+    /// THE D-138 EMISSION LAW: a self-stash leaves here byte-identical to the
+    /// live population's shape — the literal head below was read off a REAL
+    /// Kasia stash transaction on 2026-08-14, not inferred from their source
+    /// (their source hex-encodes the whole payload, which hides the on-wire
+    /// bytes). If this test fails, our restore artifact stopped being one a
+    /// Kasia client could read.
+    #[test]
+    fn self_stash_wire_emits_the_on_chain_head_and_round_trips() {
+        let envelope = sealed_shape(318); // the real one's length
+        let wire = compose_self_stash_wire(&envelope).unwrap();
+        assert!(wire.starts_with(b"ciph_msg:1:self_stash:saved_handshake:"));
+
+        let (kind, body) = parse_payload(&wire).unwrap();
+        assert_eq!(kind, "self_stash");
+        // The body is the scope head plus the RAW envelope — raw like a
+        // handshake, never base64 like a comm.
+        let raw = strip_stash_scope(body).unwrap();
+        assert_eq!(raw, envelope.as_slice());
+        assert_eq!(decode_envelope_body(raw), envelope, "raw, not base64");
+    }
+
+    /// The scope head is matched EXACTLY, never split on the first colon: a
+    /// sealed envelope is binary and may legitimately begin with `0x3a`, which
+    /// a generic splitter would turn into a garbage scope.
+    #[test]
+    fn stash_scope_matching_cannot_misparse_a_binary_envelope() {
+        assert_eq!(strip_stash_scope(b"other_scope:body"), None);
+        assert_eq!(strip_stash_scope(b"saved_handshake"), None); // no delimiter
+        assert_eq!(strip_stash_scope(b"saved_handshake:"), Some(&b""[..]));
+
+        // An envelope whose first byte IS ':' survives intact.
+        let mut envelope = sealed_shape(70);
+        envelope[0] = b':';
+        let wire = compose_self_stash_wire(&envelope).unwrap();
+        let (_, body) = parse_payload(&wire).unwrap();
+        assert_eq!(strip_stash_scope(body).unwrap(), envelope.as_slice());
+    }
+
+    #[test]
+    fn self_stash_composer_refuses_plaintext_shaped_bodies() {
+        assert!(compose_self_stash_wire(b"not sealed").is_err());
+        let mut wrong_tag = sealed_shape(70);
+        wrong_tag[12] = b'x';
+        assert!(compose_self_stash_wire(&wrong_tag).is_err());
     }
 
     /// THE K2 EMISSION LAW (D-068 amending D-066): comm bodies leave here as

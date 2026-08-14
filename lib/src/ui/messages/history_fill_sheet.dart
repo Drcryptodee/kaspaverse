@@ -56,12 +56,49 @@ String? historyNotice({
       'be missing.';
 }
 
+/// The D-138 backup notice: what a restore-from-seed would NOT bring back.
+///
+/// Pure, and deliberately silent in three cases: before Rust has answered
+/// (`null` state — never claim a zero we have not measured), with nothing to
+/// back up, and when the last backup still covers everything.
+///
+/// It speaks up unasked, which almost nothing in this app does. It earns that
+/// because the thing it is warning about is invisible until the moment it
+/// cannot be fixed: the user finds out their contacts were never backed up on
+/// the day they no longer have the device.
+String? backupNotice(StashStateDto? state) {
+  if (state == null || state.total == 0) return null;
+  if (state.lastUnixMs == BigInt.zero) {
+    return "Your conversations aren't backed up — a restore would bring back "
+        'your money, but not your contacts. Tap to fix.';
+  }
+  // Sent is not the same as findable. A backup is parked on chain by us but
+  // located again through an archive, and that lookup can fail quietly — so
+  // until a history check has actually read it back, the honest word is "sent".
+  if (!state.confirmedReadable) {
+    return 'Backup sent — not confirmed readable yet. Tap to check.';
+  }
+  if (state.covered >= state.total) return null;
+  final missing = state.total - state.covered;
+  return '$missing of ${state.total} conversations '
+      "${missing == 1 ? "isn't" : "aren't"} backed up yet. Tap to fix.";
+}
+
 /// Slim tappable banner above the conversation list — renders only when
-/// [historyNotice] has something honest to say; tapping opens the sheet.
+/// [historyNotice] or [backupNotice] has something honest to say; tapping
+/// opens the sheet.
 class HistoryNoticeBanner extends StatelessWidget {
-  const HistoryNoticeBanner({super.key, required this.messaging});
+  const HistoryNoticeBanner({
+    super.key,
+    required this.messaging,
+    this.onBackUp,
+  });
 
   final MessagingService messaging;
+
+  /// Runs the backup confirm ceremony. Owned by the caller because the sheet
+  /// pops before the confirm sheet opens.
+  final VoidCallback? onBackUp;
 
   @override
   Widget build(BuildContext context) {
@@ -72,13 +109,19 @@ class HistoryNoticeBanner extends StatelessWidget {
         messaging.gapAge,
         messaging.fillConfig,
         messaging.lastFill,
+        messaging.stashState,
       ]),
       builder: (context, _) {
-        final text = historyNotice(
-          gap: messaging.gapAge.value,
-          config: messaging.fillConfig.value,
-          report: messaging.lastFill.value,
-        );
+        // ONE banner, never two stacked. A history gap is the more urgent of
+        // the pair — it is about messages already missing rather than a risk —
+        // so it wins, and the backup line surfaces once history is whole.
+        final text =
+            historyNotice(
+              gap: messaging.gapAge.value,
+              config: messaging.fillConfig.value,
+              report: messaging.lastFill.value,
+            ) ??
+            backupNotice(messaging.stashState.value);
         // AnimatedSwitcher so the notice resolves (fill completes → banner
         // dissolves) instead of popping; opacity-only under reduced motion
         // (§6 — the TxStatusChip contract, exactly).
@@ -112,7 +155,11 @@ class HistoryNoticeBanner extends StatelessWidget {
                       borderRadius: BorderRadius.circular(KvRadius.card),
                       onTap: () {
                         KvHaptic.selection();
-                        showHistoryFillSheet(context, messaging);
+                        showHistoryFillSheet(
+                          context,
+                          messaging,
+                          onBackUp: onBackUp,
+                        );
                       },
                       child: Container(
                         constraints: const BoxConstraints(
@@ -153,15 +200,99 @@ class HistoryNoticeBanner extends StatelessWidget {
   }
 }
 
+/// The D-138 backup block: what a restore would and would not bring back, the
+/// coverage line, and the one button that fixes it.
+///
+/// **Deliberately not behind the archive toggle.** Writing a backup is an
+/// ordinary transaction through our own node and tells no third party anything
+/// at the time it happens; only READING one back rides the archive opt-in. Two
+/// different privacy questions, so two different consents.
+class _BackupBlock extends StatelessWidget {
+  const _BackupBlock({required this.messaging, required this.onBackUp});
+
+  final MessagingService messaging;
+  final VoidCallback? onBackUp;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AnimatedBuilder(
+      animation: messaging.stashState,
+      builder: (context, _) {
+        final state = messaging.stashState.value;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Back up your conversations',
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: KvSpace.s),
+            Text(
+              'Your recovery phrase rebuilds your money on any device. It does '
+              'not rebuild your contacts — those live only here. Backing up '
+              'parks them on Kaspa, sealed to your own key, so a restore finds '
+              'them too. It costs a network fee; the amount comes straight '
+              'back to you.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+                fontFamily: KvFont.ui,
+              ),
+            ),
+            const SizedBox(height: KvSpace.s),
+            Text(
+              _coverageLine(state),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+                fontFamily: KvFont.ui,
+              ),
+            ),
+            const SizedBox(height: KvSpace.m),
+            FilledButton.tonalIcon(
+              // Nothing to back up is a disabled button with an honest line
+              // above it, never a button that spends a fee on an empty payload.
+              onPressed: (state == null || state.total == 0) ? null : onBackUp,
+              icon: const Icon(Icons.backup_outlined, size: 18),
+              label: const Text('Back up now'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Counts only — never a contact, never an address.
+  static String _coverageLine(StashStateDto? state) {
+    if (state == null) return 'Checking what is backed up…';
+    if (state.total == 0) return 'No conversations to back up yet.';
+    if (state.lastUnixMs == BigInt.zero) {
+      return 'Nothing backed up yet (${state.total} '
+          'conversation${state.total == 1 ? '' : 's'} here).';
+    }
+    if (!state.confirmedReadable) {
+      return 'Backup sent — waiting to confirm it can be read back.';
+    }
+    if (state.covered >= state.total) {
+      return 'All ${state.total} conversation${state.total == 1 ? '' : 's'} '
+          'backed up.';
+    }
+    // Naming the reason matters: the count is capped per backup, so the gap is
+    // a fact about the mechanism, not something the user did wrong.
+    return '${state.covered} of ${state.total} conversations backed up — '
+        'the rest do not fit in one backup.';
+  }
+}
+
 /// Open the history-fill settings sheet.
 Future<void> showHistoryFillSheet(
   BuildContext context,
-  MessagingService messaging,
-) {
+  MessagingService messaging, {
+  VoidCallback? onBackUp,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    builder: (_) => HistoryFillSheet(messaging: messaging),
+    builder: (_) => HistoryFillSheet(messaging: messaging, onBackUp: onBackUp),
   );
 }
 
@@ -170,9 +301,13 @@ Future<void> showHistoryFillSheet(
 /// timing; content stays sealed (verify-by-decrypt). Node-only remains fully
 /// functional with the toggle off (INV-8 as amended D-070).
 class HistoryFillSheet extends StatefulWidget {
-  const HistoryFillSheet({super.key, required this.messaging});
+  const HistoryFillSheet({super.key, required this.messaging, this.onBackUp});
 
   final MessagingService messaging;
+
+  /// Runs the D-138 backup confirm ceremony. The sheet pops first, so the
+  /// caller's context (not this one) owns the confirm.
+  final VoidCallback? onBackUp;
 
   @override
   State<HistoryFillSheet> createState() => _HistoryFillSheetState();
@@ -296,11 +431,21 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
           children: [
             Center(
               child: Text(
-                'Message history',
+                'History & backup',
                 style: theme.textTheme.titleMedium,
               ),
             ),
             const SizedBox(height: KvSpace.m),
+            _BackupBlock(
+              messaging: widget.messaging,
+              onBackUp: widget.onBackUp == null
+                  ? null
+                  : () {
+                      Navigator.of(context).pop();
+                      widget.onBackUp!();
+                    },
+            ),
+            const Divider(height: KvSpace.xl),
             Text(
               'Your Kaspa node only keeps recent history (about 30 hours). '
               'Messages sent while the app is closed longer than that — or '
@@ -335,6 +480,10 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
                 'conversation tags you look up, and when you check.\n\n'
                 'What they can never do: read your messages. Everything stays '
                 'sealed to keys they do not have.\n\n'
+                'What they also learn when you back up conversations: that '
+                'your main address parked a backup, and roughly how many '
+                'contacts it holds (from its size). Not who they are — that '
+                'stays sealed to your own key.\n\n'
                 'What they CAN do: leave history out, and add a message of '
                 'their own. Your receive address is the key messages are '
                 'sealed to, and it is what the wallet hands them to search '

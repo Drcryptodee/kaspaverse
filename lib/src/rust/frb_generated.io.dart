@@ -184,6 +184,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SpanMarkerDto dco_decode_span_marker_dto(dynamic raw);
 
   @protected
+  StashStateDto dco_decode_stash_state_dto(dynamic raw);
+
+  @protected
   ThreadDeltaDto dco_decode_thread_delta_dto(dynamic raw);
 
   @protected
@@ -408,6 +411,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SpanMarkerDto sse_decode_span_marker_dto(SseDeserializer deserializer);
+
+  @protected
+  StashStateDto sse_decode_stash_state_dto(SseDeserializer deserializer);
 
   @protected
   ThreadDeltaDto sse_decode_thread_delta_dto(SseDeserializer deserializer);
@@ -692,6 +698,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_span_marker_dto(SpanMarkerDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_stash_state_dto(StashStateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_thread_delta_dto(

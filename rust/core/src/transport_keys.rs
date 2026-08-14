@@ -123,6 +123,48 @@ impl TransportDecryptor {
         Err(CoreError::TransportOpen)
     }
 
+    /// The authorship tag over a self-stash plaintext (D-138).
+    ///
+    /// **What this exists to prove.** A stash is sealed to our own x-only
+    /// PUBLIC key, so anyone who knows our receive address can produce one our
+    /// key opens — decryptability is confidentiality, never authorship. Since a
+    /// restore CREATES conversations from stash rows, an unauthenticated row
+    /// from a hostile archive would become a live conversation carrying the
+    /// attacker's address, and every message the user sent in it would be
+    /// sealed to them. This tag is keyed by material only the seed holder can
+    /// derive, so no archive can mint one.
+    ///
+    /// Two-step, and the first step is not decoration: the raw derived scalar is
+    /// never used directly as a MAC key over attacker-influenced bytes. A fixed
+    /// domain label expands it into a purpose-bound key first, so this tag can
+    /// never be confused with — or used to attack — any other use of that key.
+    ///
+    /// INV-1 posture is [`Self::decrypt_at`]'s exactly: the scalar exists only
+    /// inside this call, in a `Zeroizing` buffer, and only 32 bytes of MAC
+    /// output leave.
+    pub fn stash_tag(&self, plaintext: &[u8]) -> Result<[u8; 32]> {
+        use hmac::{Mac, SimpleHmac};
+        use sha2::Sha256;
+        type Hmac256 = SimpleHmac<Sha256>;
+
+        const DOMAIN: &[u8] = b"kaspaverse/self_stash/v1";
+
+        let keychain = self.keychain.upgrade().ok_or(CoreError::VaultLocked)?;
+        // receive/0: the address a restore can derive before anything else
+        // exists, and the one the stash is funded from and sealed to.
+        let scalar = keychain.private_key_bytes(Branch::Receive, 0)?;
+
+        let mut expand =
+            Hmac256::new_from_slice(scalar.as_slice()).map_err(|_| CoreError::TransportSeal)?;
+        expand.update(DOMAIN);
+        let mac_key = Zeroizing::new(expand.finalize().into_bytes());
+
+        let mut mac =
+            Hmac256::new_from_slice(mac_key.as_slice()).map_err(|_| CoreError::TransportSeal)?;
+        mac.update(plaintext);
+        Ok(mac.finalize().into_bytes().into())
+    }
+
     /// Whether the vault behind this decryptor is still unlocked.
     pub fn is_live(&self) -> bool {
         self.keychain.strong_count() > 0
@@ -212,6 +254,53 @@ mod tests {
         ));
         assert!(matches!(
             decryptor.decrypt_scanning([slot], &envelope),
+            Err(CoreError::VaultLocked)
+        ));
+    }
+
+    /// THE D-138 AUTHORSHIP PROPERTY, stated as a test.
+    ///
+    /// A stranger who knows our receive address can seal a stash our key opens
+    /// — that is what public-key encryption means, and it is why the first cut
+    /// of this lane was wrong to treat a successful decrypt as proof we wrote
+    /// the row. The tag is what a stranger cannot produce.
+    #[test]
+    fn a_stranger_cannot_forge_our_stash_tag() {
+        let ours = unlocked_vault();
+        let stranger = unlocked_vault();
+        let payload = br#"{"alias":"fa6d1afa79e1","partnerAddress":"kaspa:attacker"}"#;
+
+        let our_tag = ours.transport_decryptor().stash_tag(payload).unwrap();
+        let their_tag = stranger.transport_decryptor().stash_tag(payload).unwrap();
+        assert_ne!(
+            our_tag, their_tag,
+            "a different seed must never produce our tag"
+        );
+
+        // Deterministic for us — a restore of the same seed re-derives it.
+        assert_eq!(
+            ours.transport_decryptor().stash_tag(payload).unwrap(),
+            our_tag
+        );
+
+        // One flipped byte invalidates it.
+        let tampered = br#"{"alias":"fa6d1afa79e1","partnerAddress":"kaspa:attackeR"}"#;
+        assert_ne!(
+            ours.transport_decryptor().stash_tag(tampered).unwrap(),
+            our_tag
+        );
+    }
+
+    /// The tag is a vault operation, so a locked vault must refuse it rather
+    /// than return anything — the same kill-switch contract as decrypt.
+    #[test]
+    fn the_stash_tag_dies_with_the_vault() {
+        let vault = unlocked_vault();
+        let decryptor = vault.transport_decryptor();
+        assert!(decryptor.stash_tag(b"x").is_ok());
+        vault.lock();
+        assert!(matches!(
+            decryptor.stash_tag(b"x"),
             Err(CoreError::VaultLocked)
         ));
     }

@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `PinPolicy`, `TransportHub`, `TransportIntent`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -136,6 +136,31 @@ Future<SignableSummaryDto> transportPrepareTaunt({
   conversationId: conversationId,
   text: text,
 );
+
+/// Phase 1 of the D-138 backup: seal a snapshot of every conversation to our
+/// OWN key and park it on chain, so a restore-from-seed rebuilds contacts and
+/// not just money.
+///
+/// **Why this is a deliberate user action rather than automatic.** Kasia emits
+/// a stash from inside its handshake flow. We cannot: a backup is funded from
+/// `receive/0`, and immediately after a handshake spends that address its
+/// change is unconfirmed, so `mature_utxos_at` finds nothing. Nor can several
+/// backups be emitted back to back, for the same reason — and there is exactly
+/// one `PENDING_TRANSPORT` slot, so preparing one while a confirm sheet is open
+/// would destroy the plan the user is looking at. One explicit action, one
+/// transaction, everything in it.
+///
+/// The value is a self-send that returns as change (D-069), so the honest cost
+/// is the network fee.
+Future<SignableSummaryDto> transportPrepareStash() =>
+    RustLib.instance.api.crateApiTransportTransportPrepareStash();
+
+/// Backup coverage. `covered` counts only conversations that are BOTH in the
+/// last snapshot AND still present — so deleting a thread cannot make the
+/// wallet claim coverage it does not have, and starting one immediately shows
+/// as uncovered.
+Future<StashStateDto> transportStashState() =>
+    RustLib.instance.api.crateApiTransportTransportStashState();
 
 /// Phase 2: sign + broadcast the stashed transport plan identified by `nonce`.
 /// Same stale-nonce refusal, partial-honesty (B6) and change-cursor discipline
@@ -488,6 +513,47 @@ class MessageStatusDto {
           txid == other.txid &&
           tombstoned == other.tombstoned &&
           acceptance == other.acceptance;
+}
+
+/// What the last backup covered, for the honest notice.
+class StashStateDto {
+  /// When the last backup was committed (unix ms), `0` if never.
+  final BigInt lastUnixMs;
+
+  /// Whether a history walk has actually read that backup back. Until it
+  /// has, the wallet says "sent" rather than "backed up" — the indexer's
+  /// attribution can fail quietly and leave it unfindable.
+  final bool confirmedReadable;
+
+  /// How many of today's conversations that backup still covers.
+  final int covered;
+
+  /// How many conversations could be backed up right now.
+  final int total;
+
+  const StashStateDto({
+    required this.lastUnixMs,
+    required this.confirmedReadable,
+    required this.covered,
+    required this.total,
+  });
+
+  @override
+  int get hashCode =>
+      lastUnixMs.hashCode ^
+      confirmedReadable.hashCode ^
+      covered.hashCode ^
+      total.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StashStateDto &&
+          runtimeType == other.runtimeType &&
+          lastUnixMs == other.lastUnixMs &&
+          confirmedReadable == other.confirmedReadable &&
+          covered == other.covered &&
+          total == other.total;
 }
 
 /// One incremental thread pull: the decrypted NEW tail plus the status of

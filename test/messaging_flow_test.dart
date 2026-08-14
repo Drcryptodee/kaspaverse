@@ -138,6 +138,14 @@ void main() {
       atUnixMs: BigInt.zero,
     );
     MessagingService.fillStatusFn = () async => null;
+    // D-138 backup seam: nothing to back up on a fresh install, so the notice
+    // is silent by default — individual tests override.
+    MessagingService.stashStateFn = () async => StashStateDto(
+      lastUnixMs: BigInt.zero,
+      confirmedReadable: false,
+      covered: 0,
+      total: 0,
+    );
     await MessagingService.instance.reset();
   });
 
@@ -287,6 +295,71 @@ void main() {
       );
     });
 
+    test('backupNotice: silent unless it has something true to say', () {
+      StashStateDto state(
+        int covered,
+        int total, {
+        int last = 1,
+        bool readable = true,
+      }) => StashStateDto(
+        lastUnixMs: BigInt.from(last),
+        confirmedReadable: readable,
+        covered: covered,
+        total: total,
+      );
+
+      // Never measured yet — say nothing rather than claim a zero.
+      expect(backupNotice(null), isNull);
+      // Nothing to back up.
+      expect(backupNotice(state(0, 0, last: 0)), isNull);
+      // Fully covered.
+      expect(backupNotice(state(3, 3)), isNull);
+
+      // Never backed up: name the actual consequence, not the mechanism.
+      final never = backupNotice(state(0, 2, last: 0));
+      expect(never, contains('backed up'));
+      expect(never, contains('money'));
+      expect(never, contains('contacts'));
+
+      // Partial: the count is the missing ones, and it reads as English.
+      expect(backupNotice(state(1, 3)), startsWith('2 of 3'));
+      expect(backupNotice(state(1, 3)), contains("aren't backed up"));
+      expect(backupNotice(state(2, 3)), contains("isn't backed up"));
+
+      // SENT IS NOT FINDABLE. A backup we broadcast but have never read back
+      // must not be reported as coverage — the archive's attribution can fail
+      // quietly and leave it invisible to the only query that restores it.
+      expect(
+        backupNotice(state(3, 3, readable: false)),
+        contains('not confirmed readable'),
+      );
+    });
+
+    test('a history gap outranks the backup line — never two banners', () {
+      // Both have something to say; the banner shows the gap, because messages
+      // already missing beat messages that might be lost later.
+      final gapText = historyNotice(
+        gap: GapAgeDto(gapMinutes: BigInt.from(235), beyondHorizon: false),
+        config: const FillConfigDto(
+          enabled: false,
+          endpoint: 'e',
+          defaultEndpoint: 'e',
+        ),
+        report: null,
+      );
+      final backup = backupNotice(
+        StashStateDto(
+          lastUnixMs: BigInt.zero,
+          confirmedReadable: false,
+          covered: 0,
+          total: 2,
+        ),
+      );
+      expect(gapText, isNotNull);
+      expect(backup, isNotNull);
+      expect(gapText ?? backup, gapText, reason: 'the gap wins the one slot');
+    });
+
     test('threads are pulled per call, never cached (§0.4)', () async {
       var pulls = 0;
       MessagingService.threadFn = (_) async {
@@ -339,7 +412,7 @@ void main() {
       await tester.pumpAndSettle();
       // The sheet: title, toggle, and the disclosure's two load-bearing
       // claims — what the operator LEARNS and what they can NEVER do.
-      expect(find.text('Message history'), findsOneWidget);
+      expect(find.text('History & backup'), findsOneWidget);
       expect(find.byType(SwitchListTile), findsOneWidget);
       expect(find.textContaining('operator learns'), findsOneWidget);
       expect(find.textContaining('never'), findsWidgets);
@@ -378,7 +451,7 @@ void main() {
       expect(find.textContaining('may be missing'), findsNothing);
       await tester.tap(find.byIcon(Icons.history));
       await tester.pumpAndSettle();
-      expect(find.text('Message history'), findsOneWidget);
+      expect(find.text('History & backup'), findsOneWidget);
     });
 
     testWidgets('an inbound-pending row is an accept card, not a thread', (

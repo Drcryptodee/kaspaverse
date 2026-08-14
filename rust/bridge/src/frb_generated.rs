@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1849135680;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 976797605;
 
 // Section: executor
 
@@ -1579,6 +1579,41 @@ fn wire__crate__api__transport__transport_prepare_handshake_impl(
         },
     )
 }
+fn wire__crate__api__transport__transport_prepare_stash_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_prepare_stash",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::error::AppError>(
+                    (move || async move {
+                        let output_ok = crate::api::transport::transport_prepare_stash().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__transport__transport_prepare_taunt_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1688,6 +1723,38 @@ fn wire__crate__api__transport__transport_start_impl(
                     })()
                     .await,
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__transport__transport_stash_state_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_stash_state",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::AppError>((move || {
+                    let output_ok = crate::api::transport::transport_stash_state()?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -2753,6 +2820,22 @@ impl SseDecode for crate::api::dag::SpanMarkerDto {
     }
 }
 
+impl SseDecode for crate::api::transport::StashStateDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_lastUnixMs = <u64>::sse_decode(deserializer);
+        let mut var_confirmedReadable = <bool>::sse_decode(deserializer);
+        let mut var_covered = <u32>::sse_decode(deserializer);
+        let mut var_total = <u32>::sse_decode(deserializer);
+        return crate::api::transport::StashStateDto {
+            last_unix_ms: var_lastUnixMs,
+            confirmed_readable: var_confirmedReadable,
+            covered: var_covered,
+            total: var_total,
+        };
+    }
+}
+
 impl SseDecode for crate::api::transport::ThreadDeltaDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3050,61 +3133,73 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__api__transport__transport_prepare_taunt_impl(
+        44 => wire__crate__api__transport__transport_prepare_stash_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__api__transport__transport_set_fill_config_impl(
+        45 => wire__crate__api__transport__transport_prepare_taunt_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__api__transport__transport_start_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__transport__transport_thread_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__transport__transport_thread_since_impl(
+        46 => wire__crate__api__transport__transport_set_fill_config_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__api__transport__tx_acceptance_status_impl(
+        47 => wire__crate__api__transport__transport_start_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__transport__transport_stash_state_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__wallet__ui_mark_impl(port, ptr, rust_vec_len, data_len),
-        51 => {
+        49 => wire__crate__api__transport__transport_thread_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__transport__transport_thread_since_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        51 => wire__crate__api__transport__tx_acceptance_status_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        52 => wire__crate__api__wallet__ui_mark_impl(port, ptr, rust_vec_len, data_len),
+        53 => {
             wire__crate__api__vault__unlock_with_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
-        52 => wire__crate__api__vault__vault_exists_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__vault__vault_kdf_params_starting_grid_impl(
+        54 => wire__crate__api__vault__vault_exists_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__vault__vault_kdf_params_starting_grid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => {
+        56 => {
             wire__crate__api__vault__vault_kdf_params_tuned_impl(port, ptr, rust_vec_len, data_len)
         }
-        55 => {
+        57 => {
             wire__crate__api__vault__vault_lock_grace_secs_impl(port, ptr, rust_vec_len, data_len)
         }
-        56 => {
+        58 => {
             wire__crate__api__vault__vault_receive_address_impl(port, ptr, rust_vec_len, data_len)
         }
-        57 => wire__crate__api__vault__vault_status_default_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__vault__vault_status_stream_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__wallet__wallet_snapshot_default_impl(
+        59 => wire__crate__api__vault__vault_status_default_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__vault__vault_status_stream_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__wallet__wallet_snapshot_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => wire__crate__api__wallet__wallet_snapshot_now_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__wallet__wallet_snapshot_now_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3537,6 +3632,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::dag::SpanMarkerDto>
     for crate::api::dag::SpanMarkerDto
 {
     fn into_into_dart(self) -> crate::api::dag::SpanMarkerDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::transport::StashStateDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.last_unix_ms.into_into_dart().into_dart(),
+            self.confirmed_readable.into_into_dart().into_dart(),
+            self.covered.into_into_dart().into_dart(),
+            self.total.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::transport::StashStateDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::transport::StashStateDto>
+    for crate::api::transport::StashStateDto
+{
+    fn into_into_dart(self) -> crate::api::transport::StashStateDto {
         self
     }
 }
@@ -4180,6 +4298,16 @@ impl SseEncode for crate::api::dag::SpanMarkerDto {
         <String>::sse_encode(self.marker, serializer);
         <Option<String>>::sse_encode(self.detail, serializer);
         <u64>::sse_encode(self.unix_ms, serializer);
+    }
+}
+
+impl SseEncode for crate::api::transport::StashStateDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.last_unix_ms, serializer);
+        <bool>::sse_encode(self.confirmed_readable, serializer);
+        <u32>::sse_encode(self.covered, serializer);
+        <u32>::sse_encode(self.total, serializer);
     }
 }
 

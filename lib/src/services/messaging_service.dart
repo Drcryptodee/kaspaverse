@@ -113,6 +113,14 @@ class MessagingService {
   @visibleForTesting
   static Future<FillReportDto?> Function() fillStatusFn = transportFillStatus;
 
+  // D-138 conversation-backup seams (`self_stash`).
+  @visibleForTesting
+  static Future<SignableSummaryDto> Function() prepareStashFn =
+      transportPrepareStash;
+
+  @visibleForTesting
+  static Future<StashStateDto> Function() stashStateFn = transportStashState;
+
   @visibleForTesting
   static Future<void> Function(String conversationId) hideFn =
       (conversationId) =>
@@ -136,6 +144,10 @@ class MessagingService {
   final ValueNotifier<GapAgeDto?> gapAge = ValueNotifier(null);
   final ValueNotifier<FillConfigDto?> fillConfig = ValueNotifier(null);
   final ValueNotifier<FillReportDto?> lastFill = ValueNotifier(null);
+
+  /// Backup coverage (D-138). `null` until Rust has answered once — the notice
+  /// stays silent rather than claiming a zero it has not measured.
+  final ValueNotifier<StashStateDto?> stashState = ValueNotifier(null);
 
   StreamSubscription<String>? _subscription;
 
@@ -214,10 +226,15 @@ class MessagingService {
       gapAge.value = await gapAgeFn();
       fillConfig.value = await fillConfigFn();
       lastFill.value = await fillStatusFn();
+      stashState.value = await stashStateFn();
     } on AppError {
       // Locked vault / hub restarting — keep prior values; never a crash lane.
     }
   }
+
+  /// Build the D-138 conversation backup (one self-stash carrying every
+  /// conversation). The caller drives the ordinary confirm ceremony from here.
+  Future<SignableSummaryDto> prepareStash() => prepareStashFn();
 
   /// Persist the fill posture, then run a fill immediately when enabling
   /// (the founder's test: flip on → history appears without a restart).
