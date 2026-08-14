@@ -619,200 +619,19 @@ async fn fill_walks(
     };
     let mut cursors = FillCursors::load(dir);
 
-    // Handshake sweep: the receive branch only.
-    //
-    // The reason this file used to give — "the change branch is internal and
-    // never receives one" — is FALSE, and this branch is what disproved it: a
-    // sender resolves our return address with `get_utxo_return_address`, which
-    // answers with the address behind input[0] of a transaction we broadcast,
-    // routinely one of our change addresses (see `KeyWindow::handshake_slots`).
-    // The LIVE path handles those; this history sweep does not, so a
-    // change-established conversation is unrecoverable from history. That is
-    // omission, which is D-074's accepted failure mode and stays behind the
-    // honest notice — but it is a real gap, logged to IDEAS_BACKLOG with its
-    // trigger rather than left behind a comment that says it cannot happen.
-    //
-    // The real reason the sweep stays narrow is the one below: each address is a
-    // separate paginated walk against an untrusted indexer, and the change
-    // branch would roughly double a correlatable burst for history we can
-    // usually re-derive from the live lane.
-    //
-    // Capped at the FUNDED receive prefix, not the whole watch window. Each
-    // address here is a separate paginated walk against an untrusted indexer, so
-    // sweeping the full discovered window would multiply both the run duration
-    // and — worse — the slice of this wallet's address graph handed to one
-    // server in one correlatable burst. The gap addresses past the last funded
-    // one have no history to fill by construction.
-    let sweep_depth = wallet::GAP_LIMIT.max(vault::scan_high_water().0);
-    let receive_addresses = match vault::derive_wallet_addresses(sweep_depth, 0) {
-        Ok((receive, _)) => receive,
-        Err(e) => {
-            report.complete = false;
-            report.error = Some(e.message);
-            return report;
-        }
-    };
-    for address in &receive_addresses {
-        // Liveness is re-checked per address, not once per run.
-        //
-        // `run_fill` gates the whole walk on one `is_live()` at the top, and
-        // that gate is only true at the instant it is read: this sweep is one
-        // paginated HTTP walk PER ADDRESS, so a full run outlives the vault's
-        // 30-second idle grace easily. A vault that locks mid-walk used to
-        // turn every remaining row into a silent `decrypt_scanning` failure
-        // while the cursor advanced over all of them — history destroyed by a
-        // guard that had already passed. Stop honestly instead; the held
-        // cursors mean the next run resumes exactly here.
-        if !hub.decryptor.is_live() {
-            report.complete = false;
-            if report.error.is_none() {
-                report.error = Some(
-                    "the wallet locked while catching up — unlock and check again".to_string(),
-                );
-            }
-            log::info!("history-fill: vault locked mid-walk — stopping with cursors held");
-            break;
-        }
-        let address = address.to_string();
-        let start = cursors.handshakes.get(&address).copied().unwrap_or(0);
-        let outcome = walk_pages(
-            |cursor| client.handshakes_by_receiver(&address, cursor),
-            start,
-            now_unix_ms(),
-        )
-        .await;
-        report.pages += outcome.pages;
-        let mut held = HeldFloor::new();
-        for row in &outcome.items {
-            let Some(body) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
-            else {
-                continue; // malformed hint row — omitted data, never an error
-            };
-            let event = TransportEvent {
-                txid: Some(row.tx_id.clone()),
-                kind: "handshake".to_string(),
-                body,
-                // The address WE swept, not the indexer's `receiver` claim.
-                // The relevance gate exists to prove a row is ours; feeding
-                // it a value the untrusted server chose lets that server
-                // decide the answer — and with the cursor now holding on a
-                // relevance miss, a forged `receiver` would pin this walk
-                // forever. We asked by-receiver for this address, so this
-                // address is the only honest relevance input.
-                addresses: vec![address.clone()],
-                block_time_ms: Some(row.block_time),
-            };
-            match handle_inbound(hub, event, EventOrigin::Fill).await {
-                FoldOutcome::Recorded => report.new_rows += 1,
-                FoldOutcome::Settled => {}
-                FoldOutcome::Held => held.hold(row.block_time),
-            }
-        }
-        let resume = held.resume_from(outcome.cursor);
-        // Public routing data only (our own address, row counts, block times):
-        // enough to tell "the indexer served nothing" apart from "it served a
-        // row and the fold refused it" — the two the 2026-08-13 sitting could
-        // not distinguish.
-        if !outcome.items.is_empty() {
-            log::info!(
-                "history-fill: handshake walk rows={} cursor {start}->{resume}{}",
-                outcome.items.len(),
-                if held.any() { " (HELD)" } else { "" },
-            );
-        }
-        if resume > start {
-            cursors.handshakes.insert(address, resume);
-        }
-        if !outcome.complete || held.any() {
-            report.complete = false;
-            if report.error.is_none() {
-                report.error = outcome.error.or_else(|| held.notice());
-            }
-        }
-    }
-
-    // Comm sweep: per ACTIVE conversation, by (contact address, THEIR alias)
-    // ── see the handshake sweep above for the cursor-hold law.
-    // — the sender tags comms with their own alias (§K7 partition key).
-    let conversations: Vec<(String, String, String)> = {
-        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        store
-            .list_conversations()
-            .into_iter()
-            .filter(|c| c.status == ConversationStatus::Active)
-            // Don't spend indexer round trips refilling a thread the user hid.
-            .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
-            .filter_map(|c| {
-                let their_alias = c.their_alias.clone()?;
-                if c.contact_address.is_empty() || their_alias.is_empty() {
-                    return None;
-                }
-                Some((
-                    c.conversation_id.clone(),
-                    c.contact_address.clone(),
-                    their_alias,
-                ))
-            })
-            .collect()
-    };
-    for (conversation_id, contact_address, their_alias) in conversations {
-        // Same law as the handshake sweep above — see the note there.
-        if !hub.decryptor.is_live() {
-            report.complete = false;
-            if report.error.is_none() {
-                report.error = Some(
-                    "the wallet locked while catching up — unlock and check again".to_string(),
-                );
-            }
-            log::info!("history-fill: vault locked mid-walk — stopping with cursors held");
-            break;
-        }
-        let alias_hex = encode_hex(their_alias.as_bytes());
-        let start = cursors.comms.get(&conversation_id).copied().unwrap_or(0);
-        let outcome = walk_pages(
-            |cursor| client.comms_by_sender(&contact_address, &alias_hex, cursor),
-            start,
-            now_unix_ms(),
-        )
-        .await;
-        report.pages += outcome.pages;
-        let mut held = HeldFloor::new();
-        for row in &outcome.items {
-            let Some(sealed) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
-            else {
-                continue;
-            };
-            // Reassemble the wire body the live scan would have seen:
-            // `<alias>:<sealed>` — the alias head sits OUTSIDE the envelope.
-            let mut body = their_alias.clone().into_bytes();
-            body.push(b':');
-            body.extend_from_slice(&sealed);
-            let event = TransportEvent {
-                txid: Some(row.tx_id.clone()),
-                kind: "comm".to_string(),
-                body,
-                addresses: Vec::new(),
-                block_time_ms: Some(row.block_time),
-            };
-            match handle_inbound(hub, event, EventOrigin::Fill).await {
-                FoldOutcome::Recorded => report.new_rows += 1,
-                FoldOutcome::Settled => {}
-                FoldOutcome::Held => held.hold(row.block_time),
-            }
-        }
-        let resume = held.resume_from(outcome.cursor);
-        if resume > start {
-            cursors.comms.insert(conversation_id, resume);
-        }
-        if !outcome.complete || held.any() {
-            report.complete = false;
-            if report.error.is_none() {
-                report.error = outcome.error.or_else(|| held.notice());
-            }
-        }
-    }
-
     // Backup sweep (D-138): the conversations we parked on chain ourselves.
+    //
+    // **FIRST, and that ordering is load-bearing — proven on the device.**
+    // When this ran last, a restore rebuilt one conversation out of three: the
+    // handshake sweep went first, replayed eight old handshakes into fresh
+    // INVITATIONS (no alias of ours, a bond needed to accept), and the backup's
+    // proper rows — carrying both aliases and the bound slot — were then refused
+    // as colliding with them. The weaker recovery path beat the authenticated
+    // one by fourteen seconds.
+    //
+    // A backup is the only source that knows OUR alias for a conversation; the
+    // handshake sweep can only ever produce a half-conversation. So the
+    // authenticated record lands first and the weaker lane yields to it.
     //
     // ONE address — `receive/0` — for three reasons, in order of weight: it is
     // the only owner our own writer ever produces; it is the only address a
@@ -1042,6 +861,199 @@ async fn fill_walks(
         log::info!("history-fill: vault locked before the backup walk — nothing restored");
     }
 
+    // Handshake sweep: the receive branch only.
+    //
+    // The reason this file used to give — "the change branch is internal and
+    // never receives one" — is FALSE, and this branch is what disproved it: a
+    // sender resolves our return address with `get_utxo_return_address`, which
+    // answers with the address behind input[0] of a transaction we broadcast,
+    // routinely one of our change addresses (see `KeyWindow::handshake_slots`).
+    // The LIVE path handles those; this history sweep does not, so a
+    // change-established conversation is unrecoverable from history. That is
+    // omission, which is D-074's accepted failure mode and stays behind the
+    // honest notice — but it is a real gap, logged to IDEAS_BACKLOG with its
+    // trigger rather than left behind a comment that says it cannot happen.
+    //
+    // The real reason the sweep stays narrow is the one below: each address is a
+    // separate paginated walk against an untrusted indexer, and the change
+    // branch would roughly double a correlatable burst for history we can
+    // usually re-derive from the live lane.
+    //
+    // Capped at the FUNDED receive prefix, not the whole watch window. Each
+    // address here is a separate paginated walk against an untrusted indexer, so
+    // sweeping the full discovered window would multiply both the run duration
+    // and — worse — the slice of this wallet's address graph handed to one
+    // server in one correlatable burst. The gap addresses past the last funded
+    // one have no history to fill by construction.
+    let sweep_depth = wallet::GAP_LIMIT.max(vault::scan_high_water().0);
+    let receive_addresses = match vault::derive_wallet_addresses(sweep_depth, 0) {
+        Ok((receive, _)) => receive,
+        Err(e) => {
+            report.complete = false;
+            report.error = Some(e.message);
+            return report;
+        }
+    };
+    for address in &receive_addresses {
+        // Liveness is re-checked per address, not once per run.
+        //
+        // `run_fill` gates the whole walk on one `is_live()` at the top, and
+        // that gate is only true at the instant it is read: this sweep is one
+        // paginated HTTP walk PER ADDRESS, so a full run outlives the vault's
+        // 30-second idle grace easily. A vault that locks mid-walk used to
+        // turn every remaining row into a silent `decrypt_scanning` failure
+        // while the cursor advanced over all of them — history destroyed by a
+        // guard that had already passed. Stop honestly instead; the held
+        // cursors mean the next run resumes exactly here.
+        if !hub.decryptor.is_live() {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = Some(
+                    "the wallet locked while catching up — unlock and check again".to_string(),
+                );
+            }
+            log::info!("history-fill: vault locked mid-walk — stopping with cursors held");
+            break;
+        }
+        let address = address.to_string();
+        let start = cursors.handshakes.get(&address).copied().unwrap_or(0);
+        let outcome = walk_pages(
+            |cursor| client.handshakes_by_receiver(&address, cursor),
+            start,
+            now_unix_ms(),
+        )
+        .await;
+        report.pages += outcome.pages;
+        let mut held = HeldFloor::new();
+        for row in &outcome.items {
+            let Some(body) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
+            else {
+                continue; // malformed hint row — omitted data, never an error
+            };
+            let event = TransportEvent {
+                txid: Some(row.tx_id.clone()),
+                kind: "handshake".to_string(),
+                body,
+                // The address WE swept, not the indexer's `receiver` claim.
+                // The relevance gate exists to prove a row is ours; feeding
+                // it a value the untrusted server chose lets that server
+                // decide the answer — and with the cursor now holding on a
+                // relevance miss, a forged `receiver` would pin this walk
+                // forever. We asked by-receiver for this address, so this
+                // address is the only honest relevance input.
+                addresses: vec![address.clone()],
+                block_time_ms: Some(row.block_time),
+            };
+            match handle_inbound(hub, event, EventOrigin::Fill).await {
+                FoldOutcome::Recorded => report.new_rows += 1,
+                FoldOutcome::Settled => {}
+                FoldOutcome::Held => held.hold(row.block_time),
+            }
+        }
+        let resume = held.resume_from(outcome.cursor);
+        // Public routing data only (our own address, row counts, block times):
+        // enough to tell "the indexer served nothing" apart from "it served a
+        // row and the fold refused it" — the two the 2026-08-13 sitting could
+        // not distinguish.
+        if !outcome.items.is_empty() {
+            log::info!(
+                "history-fill: handshake walk rows={} cursor {start}->{resume}{}",
+                outcome.items.len(),
+                if held.any() { " (HELD)" } else { "" },
+            );
+        }
+        if resume > start {
+            cursors.handshakes.insert(address, resume);
+        }
+        if !outcome.complete || held.any() {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = outcome.error.or_else(|| held.notice());
+            }
+        }
+    }
+
+    // Comm sweep: per ACTIVE conversation, by (contact address, THEIR alias)
+    // ── see the handshake sweep above for the cursor-hold law.
+    // — the sender tags comms with their own alias (§K7 partition key).
+    let conversations: Vec<(String, String, String)> = {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store
+            .list_conversations()
+            .into_iter()
+            .filter(|c| c.status == ConversationStatus::Active)
+            // Don't spend indexer round trips refilling a thread the user hid.
+            .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
+            .filter_map(|c| {
+                let their_alias = c.their_alias.clone()?;
+                if c.contact_address.is_empty() || their_alias.is_empty() {
+                    return None;
+                }
+                Some((
+                    c.conversation_id.clone(),
+                    c.contact_address.clone(),
+                    their_alias,
+                ))
+            })
+            .collect()
+    };
+    for (conversation_id, contact_address, their_alias) in conversations {
+        // Same law as the handshake sweep above — see the note there.
+        if !hub.decryptor.is_live() {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = Some(
+                    "the wallet locked while catching up — unlock and check again".to_string(),
+                );
+            }
+            log::info!("history-fill: vault locked mid-walk — stopping with cursors held");
+            break;
+        }
+        let alias_hex = encode_hex(their_alias.as_bytes());
+        let start = cursors.comms.get(&conversation_id).copied().unwrap_or(0);
+        let outcome = walk_pages(
+            |cursor| client.comms_by_sender(&contact_address, &alias_hex, cursor),
+            start,
+            now_unix_ms(),
+        )
+        .await;
+        report.pages += outcome.pages;
+        let mut held = HeldFloor::new();
+        for row in &outcome.items {
+            let Some(sealed) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
+            else {
+                continue;
+            };
+            // Reassemble the wire body the live scan would have seen:
+            // `<alias>:<sealed>` — the alias head sits OUTSIDE the envelope.
+            let mut body = their_alias.clone().into_bytes();
+            body.push(b':');
+            body.extend_from_slice(&sealed);
+            let event = TransportEvent {
+                txid: Some(row.tx_id.clone()),
+                kind: "comm".to_string(),
+                body,
+                addresses: Vec::new(),
+                block_time_ms: Some(row.block_time),
+            };
+            match handle_inbound(hub, event, EventOrigin::Fill).await {
+                FoldOutcome::Recorded => report.new_rows += 1,
+                FoldOutcome::Settled => {}
+                FoldOutcome::Held => held.hold(row.block_time),
+            }
+        }
+        let resume = held.resume_from(outcome.cursor);
+        if resume > start {
+            cursors.comms.insert(conversation_id, resume);
+        }
+        if !outcome.complete || held.any() {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = outcome.error.or_else(|| held.notice());
+            }
+        }
+    }
+
     if let Err(e) = cursors.save(dir) {
         log::warn!("history-fill: cursor save failed: {e}");
     }
@@ -1201,16 +1213,36 @@ fn restored_conversation(
 ///
 /// So all four: not the same conversation id, not the same counterparty, and
 /// neither alias already spoken for.
+/// **A hidden row blocks its OWN conversation and nothing else.** The two rules
+/// pull in opposite directions and the device showed why the distinction
+/// matters:
+///
+/// - Clause 1 counts tombstoned rows *deliberately*. Hiding a conversation is
+///   the user's suppression record, so a backup must not hand that exact
+///   conversation back.
+/// - Clauses 2–4 must IGNORE them. On the restore sitting, the handshake sweep
+///   minted junk invitations, the founder dismissed them — which tombstones but
+///   KEEPS the row — and those dead rows then held the aliases and addresses of
+///   two real conversations, refusing their authenticated backups **forever**.
+///   Dismissing spam permanently destroyed the recovery of unrelated threads.
+///
+/// The principle: the alias clauses defend a LIVE conversation from having its
+/// routing captured. A tombstoned row routes nothing, so it has nothing to
+/// defend and no standing to refuse.
 fn stash_row_is_free(store: &TransportStore, record: &ConversationRecord) -> bool {
+    let live = |id: &str| !store.is_conversation_tombstoned(id);
+    let alias_is_free = |alias: &str| {
+        store
+            .conversation_by_alias(alias)
+            .is_none_or(|c| !live(&c.conversation_id))
+    };
     store.conversation(&record.conversation_id).is_none()
         && store
             .conversations_for_contact_address(&record.contact_address)
-            .is_empty()
-        && store.conversation_by_alias(&record.my_alias).is_none()
-        && record
-            .their_alias
-            .as_deref()
-            .is_none_or(|alias| store.conversation_by_alias(alias).is_none())
+            .iter()
+            .all(|c| !live(&c.conversation_id))
+        && alias_is_free(&record.my_alias)
+        && record.their_alias.as_deref().is_none_or(alias_is_free)
 }
 
 /// Fold one restored stash row into the store. Creates or refuses — never
@@ -1691,6 +1723,9 @@ enum DropReason {
     /// Settled, not held: re-serving it next run changes nothing, because the
     /// thing in its way is a live conversation and that is the correct winner.
     StashRefusedCollision,
+    /// A handshake for a conversation we already hold — its alias is one we
+    /// already answer to. Not a new request, so not an invitation.
+    ConversationAlreadyKnown,
     /// A self-stash row our own key opened but could not AUTHENTICATE.
     ///
     /// The seal is to our published key, so opening it proves only that someone
@@ -2428,6 +2463,32 @@ async fn handle_inbound_handshake(
     // A new inbound handshake: pending until the user accepts (the accept
     // card resolves the sender + sends the §0.6 refund).
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+
+    // …unless we already hold the conversation this handshake belongs to.
+    //
+    // Measured on the device: a restore replayed eight archived handshakes and
+    // minted eight invitations, several of them for conversations the backup
+    // had just rebuilt in full. The user sees strangers asking to connect who
+    // are in fact contacts they already have, and dismissing one tombstones a
+    // row that then blocks the real conversation.
+    //
+    // An alias is 48 bits of the counterparty's own choosing and they mint a
+    // fresh one per conversation, so a handshake carrying an alias we already
+    // hold IS that conversation — not a new request. Refusing costs nothing and
+    // fails closed: no bond is ever spent by NOT showing an invitation.
+    if store
+        .conversation_by_alias(&payload.alias)
+        .is_some_and(|c| c.their_alias.as_deref() == Some(payload.alias.as_str()))
+    {
+        drop(store);
+        return dropped(
+            HANDSHAKE,
+            txid,
+            DropReason::ConversationAlreadyKnown,
+            origin,
+        );
+    }
+
     let conversation_id = fresh_conversation_id();
     let conversation = ConversationRecord {
         conversation_id: conversation_id.clone(),
@@ -5011,6 +5072,101 @@ mod tests {
             restored_conversation(&stash_payload("dddddddddddd", PARTNER_A, "other"), 30, 30)
                 .unwrap();
         assert!(!stash_row_is_free(&store, &same_partner));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE RESTORE SITTING, 2026-08-14, pinned as a test.
+    ///
+    /// A restore rebuilt ONE conversation out of three. The handshake sweep ran
+    /// first, replayed archived handshakes into invitations, and the founder
+    /// dismissed the ones he did not recognise — which tombstones the row but
+    /// KEEPS it. Those dead rows then held the aliases of two real
+    /// conversations and refused their authenticated backups permanently.
+    ///
+    /// Dismissing spam must never destroy the recovery of an unrelated thread.
+    #[test]
+    fn a_dismissed_invitation_cannot_block_a_real_backup() {
+        let (mut store, dir) = stash_store("dismissed-blocks");
+        // The junk invitation the handshake sweep minted: no address, no alias
+        // of ours, holding the contact's alias.
+        let invitation = ConversationRecord {
+            conversation_id: "junk".into(),
+            contact_address: String::new(),
+            my_alias: String::new(),
+            their_alias: Some("90b4a1b640eb".into()),
+            status: ConversationStatus::PendingInbound,
+            initiated_by_me: false,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 1,
+            last_activity_unix_ms: 1,
+            handshake_txid: Some("hs".into()),
+        };
+        store.upsert_conversation(invitation).unwrap();
+
+        // The real conversation, from an authenticated backup, sharing that
+        // contact's alias — because it IS that contact.
+        let restored = restored_conversation(
+            &SavedHandshakePayload::new(
+                "8caa5e3c79ff",
+                Some("90b4a1b640eb"),
+                PARTNER_A,
+                "real",
+                BOUND_BRANCH_RECEIVE,
+                0,
+                false,
+                1_000,
+            )
+            .unwrap(),
+            30,
+            30,
+        )
+        .unwrap();
+
+        // While the invitation is LIVE it legitimately holds that alias.
+        assert!(!stash_row_is_free(&store, &restored));
+
+        // Dismissed, it holds nothing — it routes no traffic, so it has no
+        // standing to refuse the real conversation.
+        store.tombstone_conversation("junk").unwrap();
+        assert!(
+            stash_row_is_free(&store, &restored),
+            "a dismissed invitation must not veto an authenticated backup"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hiding a conversation still suppresses THAT conversation — the clause
+    /// that counts tombstoned rows is the id one, and it must keep counting
+    /// them or hiding stops meaning anything across a restore.
+    #[test]
+    fn hiding_a_conversation_still_survives_a_restore() {
+        let (mut store, dir) = stash_store("hide-survives");
+        let hidden = ConversationRecord {
+            conversation_id: "same-id".into(),
+            contact_address: PARTNER_B.into(),
+            my_alias: "aaaaaaaaaaaa".into(),
+            their_alias: Some("bbbbbbbbbbbb".into()),
+            status: ConversationStatus::Active,
+            initiated_by_me: true,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 5,
+            last_activity_unix_ms: 5,
+            handshake_txid: None,
+        };
+        store.upsert_conversation(hidden).unwrap();
+        store.tombstone_conversation("same-id").unwrap();
+
+        let same =
+            restored_conversation(&stash_payload("cccccccccccc", PARTNER_A, "same-id"), 30, 30)
+                .unwrap();
+        assert!(
+            !stash_row_is_free(&store, &same),
+            "the id clause counts tombstones — that is how hiding survives"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
