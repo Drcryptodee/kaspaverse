@@ -139,13 +139,46 @@ impl TransportDecryptor {
     /// domain label expands it into a purpose-bound key first, so this tag can
     /// never be confused with — or used to attack — any other use of that key.
     ///
-    /// INV-1 posture is [`Self::decrypt_at`]'s exactly: the scalar exists only
-    /// inside this call, in a `Zeroizing` buffer, and only 32 bytes of MAC
-    /// output leave.
+    /// **`Hmac`, never `SimpleHmac`, and the difference is a key-retention bug.**
+    /// At the pin, `SimpleHmac::new_from_slice` stores `opad_key = key ^ 0x5c`
+    /// in the struct, and `hmac` 0.12.1 gives it neither `Drop` nor `Zeroize` —
+    /// so keying it with the receive/0 scalar would leave that scalar,
+    /// trivially recoverable, in freed memory after every backup, **outliving
+    /// `lock()`** and defeating the kill switch that
+    /// `lock_is_a_kill_switch_for_outstanding_decryptors` exists to prove. The
+    /// eager `Hmac` retains only a SHA-256 midstate, which is one-way. This is
+    /// the same choice `transport_crypto::hkdf_sha256_32` already makes; it was
+    /// caught here by a re-audit of this very function, whose first version had
+    /// the wrong one AND a doc comment claiming otherwise.
+    ///
+    /// INV-1 posture is [`Self::decrypt_at`]'s: the scalar exists only inside
+    /// this call, in a `Zeroizing` buffer, and only 32 bytes of MAC output
+    /// leave.
     pub fn stash_tag(&self, plaintext: &[u8]) -> Result<[u8; 32]> {
-        use hmac::{Mac, SimpleHmac};
+        use hmac::Mac;
+        let mut mac = self.stash_mac()?;
+        mac.update(plaintext);
+        Ok(mac.finalize().into_bytes().into())
+    }
+
+    /// Verify a tag in constant time.
+    ///
+    /// Separate from [`Self::stash_tag`] so the comparison rides `hmac`'s own
+    /// `verify_slice` rather than a `[u8; 32]` `==`, which short-circuits on the
+    /// first differing byte. No attacker has a usable timing oracle on this
+    /// path — each probe costs an on-chain transaction — but a MAC comparison in
+    /// a wallet is not the place to rely on that argument.
+    pub fn verify_stash_tag(&self, plaintext: &[u8], tag: &[u8; 32]) -> Result<bool> {
+        use hmac::Mac;
+        let mut mac = self.stash_mac()?;
+        mac.update(plaintext);
+        Ok(mac.verify_slice(tag).is_ok())
+    }
+
+    /// The keyed MAC state both halves share (see [`Self::stash_tag`]).
+    fn stash_mac(&self) -> Result<hmac::Hmac<sha2::Sha256>> {
+        use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        type Hmac256 = SimpleHmac<Sha256>;
 
         const DOMAIN: &[u8] = b"kaspaverse/self_stash/v1";
 
@@ -154,15 +187,13 @@ impl TransportDecryptor {
         // exists, and the one the stash is funded from and sealed to.
         let scalar = keychain.private_key_bytes(Branch::Receive, 0)?;
 
-        let mut expand =
-            Hmac256::new_from_slice(scalar.as_slice()).map_err(|_| CoreError::TransportSeal)?;
+        let mut expand = <Hmac<Sha256> as Mac>::new_from_slice(scalar.as_slice())
+            .map_err(|_| CoreError::TransportSeal)?;
         expand.update(DOMAIN);
         let mac_key = Zeroizing::new(expand.finalize().into_bytes());
 
-        let mut mac =
-            Hmac256::new_from_slice(mac_key.as_slice()).map_err(|_| CoreError::TransportSeal)?;
-        mac.update(plaintext);
-        Ok(mac.finalize().into_bytes().into())
+        <Hmac<Sha256> as Mac>::new_from_slice(mac_key.as_slice())
+            .map_err(|_| CoreError::TransportSeal)
     }
 
     /// Whether the vault behind this decryptor is still unlocked.
@@ -289,6 +320,33 @@ mod tests {
             ours.transport_decryptor().stash_tag(tampered).unwrap(),
             our_tag
         );
+
+        // And the constant-time verifier agrees with the computed tag both ways.
+        let decryptor = ours.transport_decryptor();
+        assert!(decryptor.verify_stash_tag(payload, &our_tag).unwrap());
+        assert!(!decryptor.verify_stash_tag(tampered, &our_tag).unwrap());
+        assert!(!decryptor.verify_stash_tag(payload, &their_tag).unwrap());
+    }
+
+    /// The MAC must NOT retain the receive/0 scalar in recoverable form.
+    ///
+    /// `hmac`'s `SimpleHmac` stores `key ^ 0x5c` with no `Drop` and no
+    /// `Zeroize`, so keying it with the wallet's identity scalar would leave
+    /// that scalar in freed memory after every backup — surviving `lock()` and
+    /// defeating the kill switch the test above proves. The eager `Hmac`
+    /// retains only a one-way SHA-256 midstate. This pins the choice, because
+    /// the two types are one identifier apart and swap silently.
+    #[test]
+    fn the_stash_mac_keeps_no_recoverable_copy_of_the_key() {
+        let vault = unlocked_vault();
+        // A TYPE PIN, and it is load-bearing. `hmac`'s `SimpleHmac` retains
+        // `key ^ 0x5c` with neither `Drop` nor `Zeroize`, so keying it with the
+        // receive/0 scalar would leave that scalar recoverable in freed memory
+        // after every backup — surviving `lock()` and defeating the kill switch
+        // the test above proves. The eager `Hmac` keeps only a one-way SHA-256
+        // midstate. The two are one identifier apart and swap silently, so the
+        // choice is asserted by the compiler rather than by a comment.
+        let _pinned: hmac::Hmac<sha2::Sha256> = vault.transport_decryptor().stash_mac().unwrap();
     }
 
     /// The tag is a vault operation, so a locked vault must refuse it rather

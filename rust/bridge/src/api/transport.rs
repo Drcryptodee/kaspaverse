@@ -885,11 +885,35 @@ async fn fill_walks(
                     // thread carrying an attacker's address, and everything the
                     // user typed into it would be sealed to them. Only a tag
                     // keyed by the seed passes here.
-                    let authentic = split_stash_tag(&plaintext).is_some_and(|(untagged, tag)| {
-                        hub.decryptor
-                            .stash_tag(&untagged)
-                            .is_ok_and(|ours| ours == tag)
-                    });
+                    //
+                    // A vault lock landing here is NOT a forgery, and the two
+                    // must not collapse into one answer. `stash_tag` is a vault
+                    // operation, so an idle-lock between the decrypt above and
+                    // this line returns `VaultLocked` — our own transient
+                    // condition, which has to HOLD the cursor. Reporting it as
+                    // "not ours" would settle the row, let the cursor step past
+                    // our newest backup, and print a security-shaped line about
+                    // a transaction we wrote ourselves.
+                    let authentic = match split_stash_tag(&plaintext) {
+                        Some((untagged, tag)) => {
+                            match hub.decryptor.verify_stash_tag(&untagged, &tag) {
+                                Ok(verified) => verified,
+                                Err(error) => {
+                                    let reason = decrypt_drop(&error);
+                                    if dropped(SELF_STASH, &row.tx_id, reason, EventOrigin::Fill)
+                                        == FoldOutcome::Held
+                                    {
+                                        held.hold(row.block_time);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        // No tag at all: a stash from a client that does not
+                        // write one. Settled — it will never authenticate, so
+                        // holding for it would wedge the walk forever.
+                        None => false,
+                    };
                     if !authentic {
                         dropped(
                             SELF_STASH,
@@ -902,8 +926,10 @@ async fn fill_walks(
                     match SavedHandshakeSnapshot::from_plaintext(&plaintext) {
                         Ok(snapshot) => {
                             let supersedes = stash_supersedes(
-                                (row.block_time, &row.tx_id),
-                                newest.as_ref().map(|(t, id, _)| (*t, id.as_str())),
+                                (snapshot.stashed_at, row.block_time, &row.tx_id),
+                                newest
+                                    .as_ref()
+                                    .map(|(t, id, s)| (s.stashed_at, *t, id.as_str())),
                             );
                             if supersedes {
                                 newest = Some((row.block_time, row.tx_id.clone(), snapshot));
@@ -926,7 +952,21 @@ async fn fill_walks(
                 // know us by (D-067).
                 let windows = wallet::wallet_window();
                 let mut created = 0usize;
-                if let Some((_, tx_id, snapshot)) = &newest {
+                // ONLY fold a walk that actually drained.
+                //
+                // The newest-snapshot rule is only sound over the whole set. A
+                // walk cut short by the page budget or a network error may have
+                // seen nothing but an OLD backup — and folding that one creates
+                // conversations which `stash_row_is_free` then refuses the
+                // correct snapshot against, forever. A restore is not urgent;
+                // being right is. The cursor holds and the next run sees more.
+                if !outcome.complete && newest.is_some() {
+                    held.hold(start);
+                    log::info!(
+                        "history-fill: backup walk incomplete — not restoring from a partial view"
+                    );
+                }
+                if let (true, Some((_, tx_id, snapshot))) = (outcome.complete, &newest) {
                     for payload in snapshot.rows() {
                         match fold_stash_row(hub, tx_id, payload, &mut created, windows) {
                             FoldOutcome::Recorded => report.new_rows += 1,
@@ -937,16 +977,22 @@ async fn fill_walks(
                 }
 
                 // COVERAGE BECOMES PROVEN, not merely claimed. Until a walk has
-                // actually read our last backup back under our own owner, all
-                // we know is that we broadcast one — and the indexer's
-                // attribution can fail quietly, leaving a transaction that is on
-                // chain, valid, and invisible to the only query that restores
-                // it. Seeing its txid here is the proof.
-                if !outcome.items.is_empty() {
+                // actually read our last backup back, all we know is that we
+                // broadcast one — and the indexer's attribution can fail
+                // quietly, leaving a transaction that is on chain, valid, and
+                // invisible to the only query that restores it.
+                //
+                // The proof is a row that DECRYPTED AND AUTHENTICATED, never a
+                // txid match. Our txid is public chain data, so an archive
+                // could echo it back over junk and flip the wallet from an
+                // honest "not confirmed readable" to "all backed up" — taking
+                // the one assurance the user acts on from an untrusted claim,
+                // which is the shape INV-8 exists to refuse.
+                if let Some((_, proven_txid, _)) = &newest {
                     let mut state = kaspaverse_chain::history_fill::StashState::load(dir);
                     if !state.confirmed_readable
                         && !state.last_txid.is_empty()
-                        && outcome.items.iter().any(|row| row.tx_id == state.last_txid)
+                        && *proven_txid == state.last_txid
                     {
                         state.confirmed_readable = true;
                         if let Err(e) = state.save(dir) {
@@ -1059,12 +1105,25 @@ fn order_priority_for_owner<T>(
 /// The txid tiebreak is not decoration: two backups can share a block time, and
 /// a restore that depended on page order would rebuild differently on different
 /// devices.
-fn stash_supersedes(candidate: (u64, &str), current: Option<(u64, &str)>) -> bool {
-    match current {
-        None => true,
-        Some((block_time, tx_id)) => {
-            candidate.0 > block_time || (candidate.0 == block_time && candidate.1 < tx_id)
-        }
+/// `stashed_at` is the snapshot's OWN build time, which rides inside the
+/// authenticated body; `block_time`/`tx_id` are the archive's metadata and only
+/// break ties. Ordering primarily on the signed field is what stops an archive
+/// replaying a stale-but-genuine backup of ours under a fresh block time and
+/// resurrecting conversations the user hid — with the untrusted field alone,
+/// "the newest backup revokes the older one" was a claim about what the archive
+/// chose to show us, not a property (INV-8).
+fn stash_supersedes(
+    candidate: (Option<u64>, u64, &str),
+    current: Option<(Option<u64>, u64, &str)>,
+) -> bool {
+    let Some(current) = current else { return true };
+    match (candidate.0, current.0) {
+        (Some(a), Some(b)) if a != b => a > b,
+        // A snapshot that states its build time outranks one that does not —
+        // ours always states it, so an older foreign row cannot displace us.
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => candidate.1 > current.1 || (candidate.1 == current.1 && candidate.2 < current.2),
     }
 }
 
@@ -3489,7 +3548,7 @@ pub async fn transport_prepare_stash() -> Result<SignableSummaryDto, AppError> {
     if skipped > 0 {
         log::warn!("self-stash: {skipped} conversation(s) failed validation and were left out");
     }
-    let snapshot = SavedHandshakeSnapshot::new(payloads).map_err(|_| {
+    let snapshot = SavedHandshakeSnapshot::new(payloads, timestamp_ms).map_err(|_| {
         AppError::msg(
             "none of your conversations could be backed up — this is a bug, please report it",
         )
@@ -4697,31 +4756,73 @@ mod tests {
     /// contribute rows the user has since HIDDEN — and after a wipe there is no
     /// tombstone left to refuse them, because the suppression record lived on
     /// the device being replaced. The newest backup revokes the one before it.
+    /// ONLY THE NEWEST BACKUP SPEAKS, and "newest" must be a fact we can
+    /// verify rather than one the archive chooses.
+    ///
+    /// A snapshot is a complete statement, not a delta, so an older one can only
+    /// contribute rows the user has since HIDDEN — and after a wipe there is no
+    /// tombstone left to refuse them. Ordering therefore has to be trustworthy:
+    /// on the archive's `block_time` alone, a hostile server could replay a
+    /// stale-but-genuine backup of ours under a fresh timestamp and resurrect
+    /// exactly what hiding buried. `stashedAt` rides inside the MAC'd body, so
+    /// an archive can omit a backup but never reorder two.
     #[test]
-    fn only_the_newest_backup_speaks_and_an_older_one_cannot_resurrect() {
-        // Later block time wins.
-        assert!(stash_supersedes((20, "tx2"), Some((10, "tx1"))));
-        assert!(!stash_supersedes((10, "tx1"), Some((20, "tx2"))));
+    fn only_the_newest_backup_speaks_and_the_order_is_not_the_archives_to_choose() {
+        // The authenticated field decides, even when block_time disagrees.
+        assert!(stash_supersedes(
+            (Some(200), 1, "tx-late"),
+            Some((Some(100), 9_999_999, "tx-early"))
+        ));
+        assert!(!stash_supersedes(
+            (Some(100), 9_999_999, "tx-early"),
+            Some((Some(200), 1, "tx-late"))
+        ));
+
         // Nothing held yet.
-        assert!(stash_supersedes((1, "tx"), None));
-        // Same block time: the lowest txid, so two devices agree.
-        assert!(stash_supersedes((99, "0000"), Some((99, "ffff"))));
-        assert!(!stash_supersedes((99, "ffff"), Some((99, "0000"))));
-        // …and the answer cannot depend on which order the pages arrived in.
-        let mut current: Option<(u64, &str)> = None;
-        for candidate in [(10u64, "tx1"), (99, "ffff"), (99, "0000"), (5, "tx0")] {
-            if stash_supersedes(candidate, current) {
-                current = Some(candidate);
+        assert!(stash_supersedes((Some(1), 1, "tx"), None));
+
+        // One of ours (stated build time) outranks a foreign row that has none.
+        assert!(stash_supersedes(
+            (Some(1), 1, "ours"),
+            Some((None, 500, "theirs"))
+        ));
+        assert!(!stash_supersedes(
+            (None, 500, "theirs"),
+            Some((Some(1), 1, "ours"))
+        ));
+
+        // With neither stating one, fall back to block_time then lowest txid —
+        // so two devices restoring the same history still agree.
+        assert!(stash_supersedes((None, 20, "b"), Some((None, 10, "a"))));
+        assert!(stash_supersedes(
+            (None, 99, "0000"),
+            Some((None, 99, "ffff"))
+        ));
+        assert!(!stash_supersedes(
+            (None, 99, "ffff"),
+            Some((None, 99, "0000"))
+        ));
+
+        // And the answer cannot depend on the order pages arrived in.
+        let pick = |order: [(Option<u64>, u64, &'static str); 4]| {
+            let mut current: Option<(Option<u64>, u64, &str)> = None;
+            for candidate in order {
+                if stash_supersedes(candidate, current) {
+                    current = Some(candidate);
+                }
             }
-        }
-        let mut reversed: Option<(u64, &str)> = None;
-        for candidate in [(5u64, "tx0"), (99, "0000"), (99, "ffff"), (10, "tx1")] {
-            if stash_supersedes(candidate, reversed) {
-                reversed = Some(candidate);
-            }
-        }
-        assert_eq!(current, reversed);
-        assert_eq!(current, Some((99, "0000")));
+            current.unwrap().2
+        };
+        let rows = [
+            (Some(10u64), 10u64, "tx1"),
+            (Some(99), 5, "ffff"),
+            (Some(99), 5, "0000"),
+            (Some(5), 50, "tx0"),
+        ];
+        let mut reversed = rows;
+        reversed.reverse();
+        assert_eq!(pick(rows), pick(reversed));
+        assert_eq!(pick(rows), "0000");
     }
 
     /// The restore creates conversations, so a row it cannot prove we wrote
@@ -4730,9 +4831,11 @@ mod tests {
     /// key opens. Only the keyed tag separates ours from a stranger's.
     #[test]
     fn a_backup_we_cannot_prove_we_wrote_is_refused() {
-        let snapshot =
-            SavedHandshakeSnapshot::new(vec![stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1")])
-                .unwrap();
+        let snapshot = SavedHandshakeSnapshot::new(
+            vec![stash_payload("aaaaaaaaaaaa", PARTNER_A, "id1")],
+            5_000,
+        )
+        .unwrap();
         let untagged = snapshot.to_plaintext().unwrap();
 
         // A forged row: perfectly well-formed, sealed to a key it knows, no tag.

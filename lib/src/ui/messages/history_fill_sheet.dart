@@ -66,7 +66,7 @@ String? historyNotice({
 /// because the thing it is warning about is invisible until the moment it
 /// cannot be fixed: the user finds out their contacts were never backed up on
 /// the day they no longer have the device.
-String? backupNotice(StashStateDto? state) {
+String? backupNotice(StashStateDto? state, {required bool archiveEnabled}) {
   if (state == null || state.total == 0) return null;
   if (state.lastUnixMs == BigInt.zero) {
     return "Your conversations aren't backed up — a restore would bring back "
@@ -75,13 +75,24 @@ String? backupNotice(StashStateDto? state) {
   // Sent is not the same as findable. A backup is parked on chain by us but
   // located again through an archive, and that lookup can fail quietly — so
   // until a history check has actually read it back, the honest word is "sent".
+  //
+  // With the archive OFF there is nothing that could ever confirm it, so the
+  // line must not nag about a check the user cannot run: it says what is true
+  // and what would change it, once.
   if (!state.confirmedReadable) {
-    return 'Backup sent — not confirmed readable yet. Tap to check.';
+    return archiveEnabled
+        ? 'Backup sent — not confirmed readable yet. Tap to check.'
+        : 'Backup sent. Turning on history recovery is what lets a restore '
+              'find it.';
   }
   if (state.covered >= state.total) return null;
+  // Past the per-backup cap, "tap to fix" would be a lie — tapping spends a fee
+  // to write the same rows and leaves the banner identical. An affordance that
+  // cannot do what it offers is worse than no affordance.
   final missing = state.total - state.covered;
   return '$missing of ${state.total} conversations '
-      "${missing == 1 ? "isn't" : "aren't"} backed up yet. Tap to fix.";
+      "${missing == 1 ? "isn't" : "aren't"} backed up — a backup holds your "
+      'most recent ones.';
 }
 
 /// Slim tappable banner above the conversation list — renders only when
@@ -121,7 +132,10 @@ class HistoryNoticeBanner extends StatelessWidget {
               config: messaging.fillConfig.value,
               report: messaging.lastFill.value,
             ) ??
-            backupNotice(messaging.stashState.value);
+            backupNotice(
+              messaging.stashState.value,
+              archiveEnabled: messaging.fillConfig.value?.enabled ?? false,
+            );
         // AnimatedSwitcher so the notice resolves (fill completes → banner
         // dissolves) instead of popping; opacity-only under reduced motion
         // (§6 — the TxStatusChip contract, exactly).
@@ -272,14 +286,15 @@ class _BackupBlock extends StatelessWidget {
     if (!state.confirmedReadable) {
       return 'Backup sent — waiting to confirm it can be read back.';
     }
+    if (state.covered < state.total) {
+      return '${state.covered} of ${state.total} conversations backed up — '
+          'one backup holds your most recent ones.';
+    }
     if (state.covered >= state.total) {
       return 'All ${state.total} conversation${state.total == 1 ? '' : 's'} '
           'backed up.';
     }
-    // Naming the reason matters: the count is capped per backup, so the gap is
-    // a fact about the mechanism, not something the user did wrong.
-    return '${state.covered} of ${state.total} conversations backed up — '
-        'the rest do not fit in one backup.';
+    return 'All ${state.total} conversations backed up.';
   }
 }
 

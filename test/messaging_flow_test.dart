@@ -309,28 +309,37 @@ void main() {
       );
 
       // Never measured yet — say nothing rather than claim a zero.
-      expect(backupNotice(null), isNull);
+      expect(backupNotice(null, archiveEnabled: true), isNull);
       // Nothing to back up.
-      expect(backupNotice(state(0, 0, last: 0)), isNull);
+      expect(backupNotice(state(0, 0, last: 0), archiveEnabled: true), isNull);
       // Fully covered.
-      expect(backupNotice(state(3, 3)), isNull);
+      expect(backupNotice(state(3, 3), archiveEnabled: true), isNull);
 
       // Never backed up: name the actual consequence, not the mechanism.
-      final never = backupNotice(state(0, 2, last: 0));
+      final never = backupNotice(state(0, 2, last: 0), archiveEnabled: true);
       expect(never, contains('backed up'));
       expect(never, contains('money'));
       expect(never, contains('contacts'));
 
       // Partial: the count is the missing ones, and it reads as English.
-      expect(backupNotice(state(1, 3)), startsWith('2 of 3'));
-      expect(backupNotice(state(1, 3)), contains("aren't backed up"));
-      expect(backupNotice(state(2, 3)), contains("isn't backed up"));
+      expect(
+        backupNotice(state(1, 3), archiveEnabled: true),
+        startsWith('2 of 3'),
+      );
+      expect(
+        backupNotice(state(1, 3), archiveEnabled: true),
+        contains("aren't backed up"),
+      );
+      expect(
+        backupNotice(state(2, 3), archiveEnabled: true),
+        contains("isn't backed up"),
+      );
 
       // SENT IS NOT FINDABLE. A backup we broadcast but have never read back
       // must not be reported as coverage — the archive's attribution can fail
       // quietly and leave it invisible to the only query that restores it.
       expect(
-        backupNotice(state(3, 3, readable: false)),
+        backupNotice(state(3, 3, readable: false), archiveEnabled: true),
         contains('not confirmed readable'),
       );
     });
@@ -354,6 +363,7 @@ void main() {
           covered: 0,
           total: 2,
         ),
+        archiveEnabled: true,
       );
       expect(gapText, isNotNull);
       expect(backup, isNotNull);

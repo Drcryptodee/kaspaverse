@@ -498,12 +498,24 @@ pub struct SavedHandshakeSnapshot {
     pub head: SavedHandshakePayload,
     /// Every conversation, head included.
     pub conversations: Vec<SavedHandshakePayload>,
+    /// When this snapshot was BUILT (unix ms) — inside the authenticated body,
+    /// deliberately.
+    ///
+    /// A restore keeps only the newest snapshot, so "which is newest" is a
+    /// correctness decision, and until this field existed it was answered with
+    /// the indexer's `block_time` — an unauthenticated claim. An archive holding
+    /// our old ciphertexts could therefore replay a stale-but-genuine snapshot
+    /// under a fresh block time and win, resurrecting conversations the user had
+    /// hidden. Ordering on a field the MAC covers means an archive can omit a
+    /// backup but never reorder two (INV-8: omission is possible, forgery is
+    /// not). `None` on a stash written before this field, or by another client.
+    pub stashed_at: Option<u64>,
 }
 
 impl SavedHandshakeSnapshot {
     /// `rows[0]` becomes the head. Refuses an empty set — a stash that names no
     /// conversation is a fee spent on nothing.
-    pub fn new(rows: Vec<SavedHandshakePayload>) -> Result<Self> {
+    pub fn new(rows: Vec<SavedHandshakePayload>, stashed_at_ms: u64) -> Result<Self> {
         let head = rows
             .first()
             .cloned()
@@ -511,6 +523,7 @@ impl SavedHandshakeSnapshot {
         Ok(Self {
             head,
             conversations: rows,
+            stashed_at: Some(stashed_at_ms),
         })
     }
 
@@ -532,8 +545,11 @@ impl SavedHandshakeSnapshot {
         }
         let rows = serde_json::to_vec(&self.conversations)
             .map_err(|_| CoreError::HandshakeShape("serialize"))?;
-        let mut out = Vec::with_capacity(head.len() + rows.len() + 18);
+        let mut out = Vec::with_capacity(head.len() + rows.len() + 48);
         out.extend_from_slice(&head[..head.len() - 1]);
+        if let Some(stashed_at) = self.stashed_at {
+            out.extend_from_slice(format!(r#","stashedAt":{stashed_at}"#).as_bytes());
+        }
         out.extend_from_slice(br#","conversations":"#);
         out.extend_from_slice(&rows);
         out.push(b'}');
@@ -568,6 +584,7 @@ impl SavedHandshakeSnapshot {
         Ok(Self {
             head,
             conversations,
+            stashed_at: value.get("stashedAt").and_then(serde_json::Value::as_u64),
         })
     }
 
@@ -1155,7 +1172,7 @@ mod tests {
             row("aaaaaaaaaaaa", "kaspa:one", "id1"),
             row("bbbbbbbbbbbb", "kaspa:two", "id2"),
         ];
-        let snapshot = SavedHandshakeSnapshot::new(rows.clone()).unwrap();
+        let snapshot = SavedHandshakeSnapshot::new(rows.clone(), 5_000).unwrap();
         let bytes = snapshot.to_plaintext().unwrap();
         let json = String::from_utf8(bytes.clone()).unwrap();
 
@@ -1195,7 +1212,7 @@ mod tests {
             row("bbbbbbbbbbbb", "kaspa:two", "id2"),
             row("dddddddddddd", "kaspa:three", "id3"),
         ];
-        let snapshot = SavedHandshakeSnapshot::new(rows.clone()).unwrap();
+        let snapshot = SavedHandshakeSnapshot::new(rows.clone(), 5_000).unwrap();
         let parsed =
             SavedHandshakeSnapshot::from_plaintext(&snapshot.to_plaintext().unwrap()).unwrap();
         assert_eq!(parsed.rows().len(), 3);
@@ -1223,10 +1240,13 @@ mod tests {
     /// of a snapshot is that it is the user's only copy.
     #[test]
     fn a_corrupt_row_inside_a_snapshot_never_costs_the_others() {
-        let mut snapshot = SavedHandshakeSnapshot::new(vec![
-            row("aaaaaaaaaaaa", "kaspa:one", "id1"),
-            row("bbbbbbbbbbbb", "kaspa:two", "id2"),
-        ])
+        let mut snapshot = SavedHandshakeSnapshot::new(
+            vec![
+                row("aaaaaaaaaaaa", "kaspa:one", "id1"),
+                row("bbbbbbbbbbbb", "kaspa:two", "id2"),
+            ],
+            5_000,
+        )
         .unwrap();
         // Corrupt the second row's alias after construction (the wire can carry
         // anything; only our constructor validates).
@@ -1243,15 +1263,60 @@ mod tests {
         let rows: Vec<_> = (0..300)
             .map(|i| row("aaaaaaaaaaaa", &format!("kaspa:{i}"), &format!("id{i}")))
             .collect();
-        let snapshot = SavedHandshakeSnapshot::new(rows).unwrap();
+        let snapshot = SavedHandshakeSnapshot::new(rows, 5_000).unwrap();
         let parsed =
             SavedHandshakeSnapshot::from_plaintext(&snapshot.to_plaintext().unwrap()).unwrap();
         assert_eq!(parsed.rows().len(), MAX_SNAPSHOT_ROWS);
     }
 
+    /// The snapshot's own build time rides INSIDE the authenticated body.
+    ///
+    /// The restore keeps only the newest snapshot, so "which is newest" is a
+    /// correctness decision — and answering it with the indexer's `block_time`
+    /// would let an archive replay a stale-but-genuine backup of ours under a
+    /// fresh block time and resurrect conversations the user had hidden.
+    /// Ordering on a MAC-covered field means an archive can omit a backup but
+    /// never reorder two.
+    #[test]
+    fn the_snapshot_carries_its_own_build_time_inside_the_tagged_bytes() {
+        let snapshot = SavedHandshakeSnapshot::new(
+            vec![row("aaaaaaaaaaaa", "kaspa:one", "id1")],
+            1_751_600_000_123,
+        )
+        .unwrap();
+        let bytes = snapshot.to_plaintext().unwrap();
+        assert!(String::from_utf8(bytes.clone())
+            .unwrap()
+            .contains(r#""stashedAt":1751600000123"#));
+
+        let parsed = SavedHandshakeSnapshot::from_plaintext(&bytes).unwrap();
+        assert_eq!(parsed.stashed_at, Some(1_751_600_000_123));
+
+        // Changing it changes the bytes the tag covers, so it cannot be
+        // rewritten by whoever serves the row.
+        let later = SavedHandshakeSnapshot::new(
+            vec![row("aaaaaaaaaaaa", "kaspa:one", "id1")],
+            1_751_600_000_124,
+        )
+        .unwrap()
+        .to_plaintext()
+        .unwrap();
+        assert_ne!(bytes, later);
+
+        // A stash from a client with no such field reads as absent, and the
+        // caller falls back rather than guessing.
+        let theirs = br#"{"alias":"fa6d1afa79e1","timestamp":1,"partnerAddress":"kaspa:p"}"#;
+        assert_eq!(
+            SavedHandshakeSnapshot::from_plaintext(theirs)
+                .unwrap()
+                .stashed_at,
+            None
+        );
+    }
+
     #[test]
     fn an_empty_snapshot_is_refused_rather_than_spent_on() {
-        assert!(SavedHandshakeSnapshot::new(vec![]).is_err());
+        assert!(SavedHandshakeSnapshot::new(vec![], 5_000).is_err());
     }
 
     /// THE AUTHORSHIP TAG. A stash is sealed to our own PUBLIC key, so anyone
@@ -1261,7 +1326,8 @@ mod tests {
     #[test]
     fn the_tag_rides_last_and_leaves_the_untagged_bytes_a_literal_prefix() {
         let snapshot =
-            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:one", "id1")]).unwrap();
+            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:one", "id1")], 5_000)
+                .unwrap();
         let untagged = snapshot.to_plaintext().unwrap();
         let tag = [0xABu8; 32];
         let tagged = attach_stash_tag(&untagged, &tag).unwrap();
@@ -1311,7 +1377,8 @@ mod tests {
         // Truncating the tag by one character must not shift the split into a
         // silent success on the wrong bytes.
         let snapshot =
-            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:one", "id1")]).unwrap();
+            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:one", "id1")], 5_000)
+                .unwrap();
         let tagged = attach_stash_tag(&snapshot.to_plaintext().unwrap(), &[7u8; 32]).unwrap();
         let mut clipped = tagged.clone();
         clipped.remove(clipped.len() - 3);
@@ -1331,7 +1398,8 @@ mod tests {
     #[test]
     fn the_tag_covers_every_byte_an_attacker_would_want_to_change() {
         let snapshot =
-            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:victim", "id1")]).unwrap();
+            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:victim", "id1")], 5_000)
+                .unwrap();
         let untagged = snapshot.to_plaintext().unwrap();
         assert!(
             String::from_utf8(untagged.clone())
@@ -1341,7 +1409,7 @@ mod tests {
         );
 
         let swapped =
-            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:attacker", "id1")])
+            SavedHandshakeSnapshot::new(vec![row("aaaaaaaaaaaa", "kaspa:attacker", "id1")], 5_000)
                 .unwrap()
                 .to_plaintext()
                 .unwrap();
