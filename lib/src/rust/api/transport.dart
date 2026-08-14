@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `PinPolicy`, `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -92,10 +92,11 @@ Future<SignableSummaryDto> transportPrepareHandshake({
 /// `PendingInbound` row is never un-hidden or returned here: that is a
 /// dismissed invitation, its Accept button spends a bond, and a stranger must
 /// not be able to re-arm it.
-Future<String?> transportExistingConversation({required String address}) =>
-    RustLib.instance.api.crateApiTransportTransportExistingConversation(
-      address: address,
-    );
+Future<ContactRouteDto?> transportExistingConversation({
+  required String address,
+}) => RustLib.instance.api.crateApiTransportTransportExistingConversation(
+  address: address,
+);
 
 /// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
 /// own return-address lookup (consensus data, never payload content — §0.3:
@@ -284,6 +285,32 @@ Stream<String> subscribeThreadPings() =>
 /// rides the shared socket's `dag_pause()`/`dag_resume()` posture (D-053).
 Stream<TransportEventDto> subscribeTransportEvents() =>
     RustLib.instance.api.crateApiTransportSubscribeTransportEvents();
+
+/// Where "add this contact" should actually go.
+class ContactRouteDto {
+  final String conversationId;
+
+  /// `true` when this address has already invited US: accepting refunds
+  /// the bond they paid and completes the conversation, where sending our
+  /// own invitation would spend a second one and strand theirs.
+  final bool acceptFirst;
+
+  const ContactRouteDto({
+    required this.conversationId,
+    required this.acceptFirst,
+  });
+
+  @override
+  int get hashCode => conversationId.hashCode ^ acceptFirst.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ContactRouteDto &&
+          runtimeType == other.runtimeType &&
+          conversationId == other.conversationId &&
+          acceptFirst == other.acceptFirst;
+}
 
 /// A conversation row for the contacts surface. Every field is public-wire-
 /// class data (addresses/txids on-chain, aliases on-wire, local ids/status).

@@ -60,15 +60,22 @@ class _ContactsScreenState extends State<ContactsScreen> {
     // Rust owns the rule (its prepare path still refuses, so a race cannot
     // mint a duplicate); this only asks the question early enough to be useful.
     try {
-      final existing = await _messaging.existingConversation(address);
-      if (existing != null) {
+      final route = await _messaging.existingConversation(address);
+      if (route != null) {
         await _messaging.refresh();
         if (!mounted) return;
         final conversation = _messaging.conversations.value
-            .where((c) => c.conversationId == existing)
+            .where((c) => c.conversationId == route.conversationId)
             .firstOrNull;
         if (conversation != null) {
-          _openThread(conversation);
+          // They already invited US. Accepting refunds the bond they paid and
+          // opens the conversation; sending our own would spend a second one
+          // and leave theirs stranded.
+          if (route.acceptFirst) {
+            await _accept(conversation);
+          } else {
+            _openThread(conversation);
+          }
           return;
         }
       }

@@ -1497,6 +1497,7 @@ pub async fn transport_start() -> Result<(), AppError> {
                     } = &event
                     {
                         adopt_alias_from_sender(txid, *accepting_daa_score).await;
+                        backfill_invitation_sender(txid, *accepting_daa_score).await;
                         continue;
                     }
                     let txid = match &event {
@@ -2047,6 +2048,69 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
 /// turned down: never. That card spends the bond refund, so a stranger must
 /// not be able to re-arm it by writing again (INV-6: no exit that the
 /// counterparty can revoke).
+/// Fill in the sender of an invitation whose bond has now been accepted.
+///
+/// **This is the primary path, not a fallback.** `resolve_handshake_sender`
+/// needs the bond's own activity record, which does not exist yet when the
+/// handshake is first folded — so the live lane almost always resolves nothing,
+/// and without this an invitation would keep saying "Unknown sender" until the
+/// user paid to accept it. The acceptance event fires precisely when the
+/// missing record lands.
+///
+/// Node truth throughout: the address comes from our own node's return-address
+/// lookup, never from payload content or an indexer (INV-8).
+async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
+    let Ok(hub) = hub() else { return };
+    // Cheap first: is there even an address-less invitation for this txid?
+    let needs_backfill = {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.list_conversations().into_iter().any(|c| {
+            c.status == ConversationStatus::PendingInbound
+                && c.contact_address.is_empty()
+                && c.handshake_txid.as_deref() == Some(txid)
+        })
+    };
+    if !needs_backfill {
+        return;
+    }
+    let Ok(monitor) = dag::shared_monitor().await else {
+        return;
+    };
+    let sender = match resolve_return_address(&monitor.rpc(), txid, accepting_daa_score).await {
+        Ok(sender) => sender,
+        Err(e) => {
+            log::info!(
+                "transport-intake: invitation sender lookup failed for tx={txid}: {}",
+                kaspaverse_chain::sanitize_node_text(&e.to_string())
+            );
+            return;
+        }
+    };
+    // An address we cannot seal to is worse than none: it would make the row
+    // answer address lookups while still being unable to hold a conversation.
+    if validate_mainnet_address(&sender).is_err() {
+        return;
+    }
+
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(existing) = store.list_conversations().into_iter().find(|c| {
+        c.status == ConversationStatus::PendingInbound
+            && c.contact_address.is_empty()
+            && c.handshake_txid.as_deref() == Some(txid)
+    }) else {
+        return; // accepted or changed while we were on the network
+    };
+    let conversation_id = existing.conversation_id.clone();
+    let conversation = ConversationRecord {
+        contact_address: sender,
+        ..existing
+    };
+    warn_store(store.upsert_conversation(conversation));
+    drop(store);
+    log::info!("transport-intake: recorded the sender of an invitation (tx={txid})");
+    ping(&conversation_id);
+}
+
 fn may_unhide(status: ConversationStatus, tombstoned: bool) -> bool {
     tombstoned && status != ConversationStatus::PendingInbound
 }
@@ -2407,15 +2471,29 @@ async fn handle_inbound_handshake(
     // invitation, and the node-override lane upgrades it if our own scan ever
     // reaches that txid.
     //
-    // The second condition is a free pre-check: with no conversation holding a
-    // counterparty address there is nothing to match, and the fold loop should
-    // not pay a round trip to learn that.
-    let can_match_by_address = origin == EventOrigin::Node && {
+    // **Resolve on the node lane whether or not a MATCH is possible**, and the
+    // split matters. The pre-check below asks whether any conversation holds a
+    // counterparty address; on the very first invitation a wallet ever receives
+    // that is false — so gating the RESOLVE on it meant the sender was never
+    // looked up in exactly the case where recording it matters most, and the
+    // row was stored as "Unknown sender" forever.
+    //
+    // The cheap pre-check still guards the MATCH, which is all it was ever
+    // reasoning about.
+    let resolved_sender = if origin == EventOrigin::Node {
+        resolve_handshake_sender(txid).await
+    } else {
+        // A fill row's sender is an indexer claim; identity never comes from
+        // one (D-139/D-074). Such a row stays address-less until our own node
+        // reaches its txid.
+        None
+    };
+    let can_match_by_address = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         store.conversations_have_any_contact_address()
     };
     if can_match_by_address {
-        if let Some(sender) = resolve_handshake_sender(txid).await {
+        if let Some(sender) = resolved_sender.clone() {
             let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(existing) = store.conversation_by_contact_address(&sender) {
                 let mut conversation = existing.clone();
@@ -2492,7 +2570,15 @@ async fn handle_inbound_handshake(
     let conversation_id = fresh_conversation_id();
     let conversation = ConversationRecord {
         conversation_id: conversation_id.clone(),
-        contact_address: String::new(),
+        // The sender, when our own node could tell us — not an empty string.
+        //
+        // An invitation with no address is a card asking the user to spend
+        // 0.2 KAS on "Unknown sender", and it is invisible to every lookup, so
+        // typing that same address later mints a SECOND bond beside theirs
+        // instead of completing the one they already paid for. The accept flow
+        // still resolves the refund destination itself at spend time — this is
+        // for recognition, never for where money goes.
+        contact_address: resolved_sender.unwrap_or_default(),
         my_alias: String::new(),
         their_alias: Some(payload.alias.clone()),
         status: ConversationStatus::PendingInbound,
@@ -3047,14 +3133,41 @@ pub async fn transport_prepare_handshake(
                 "you already have a conversation with this address. Open it from your messages instead of sending another invitation.",
             ));
         }
+        // THEY invited US, and it is still acceptable — accepting refunds the
+        // bond they already paid and completes the conversation, where a
+        // handshake of ours spends a second one and strands theirs.
+        //
+        // This became reachable only once an invitation recorded its sender; it
+        // was a stated gap for as long as the row carried no address to match.
+        // An expired, dismissed or archive-sourced invitation deliberately does
+        // NOT match: the accept path refuses those permanently, so refusing here
+        // too would make that address unreachable forever (INV-6).
+        if rows.iter().any(|r| {
+            r.status == ConversationStatus::PendingInbound
+                && r.their_alias.is_some()
+                && r.handshake_txid.is_some()
+                && !store.is_conversation_tombstoned(&r.conversation_id)
+                && !invite_expired(r.status, r.created_unix_ms, now_unix_ms())
+        }) {
+            return Err(AppError::msg(
+                "this address already invited you — accept their invitation instead. \
+                 That returns the bond they paid and opens the conversation; sending \
+                 your own would spend a second one.",
+            ));
+        }
         reuse
     };
-    // A gap, stated rather than implied: we cannot refuse a duplicate when
-    // THEY invited US first. A `PendingInbound` row carries no contact address
-    // until its accept resolves the sender, so it is invisible to an address
-    // lookup — handshaking someone whose invitation is already in your list
-    // still spends a second bond beside theirs. Closing it needs the sender
-    // recorded at fold time, which is the same work as F2.
+    // That gap is now CLOSED. It stood open for as long as a `PendingInbound`
+    // row carried no contact address: invisible to an address lookup, so
+    // handshaking someone whose invitation was already in the list spent a
+    // second bond beside theirs. The node lane now records the sender when it
+    // folds the handshake, and the acceptance event backfills it when the bond
+    // is accepted — which is the usual path, because the activity record the
+    // resolver needs does not exist yet at fold time.
+    //
+    // Residual, stated: an invitation recovered only from the history archive
+    // still carries no address (identity never comes from an indexer, D-139),
+    // so that one case can still mint a second bond.
 
     let my_alias = match &existing {
         Some(row) => row.my_alias.clone(),
@@ -3142,18 +3255,56 @@ pub async fn transport_prepare_handshake(
 /// `PendingInbound` row is never un-hidden or returned here: that is a
 /// dismissed invitation, its Accept button spends a bond, and a stranger must
 /// not be able to re-arm it.
-pub fn transport_existing_conversation(address: String) -> Result<Option<String>, AppError> {
+pub fn transport_existing_conversation(
+    address: String,
+) -> Result<Option<ContactRouteDto>, AppError> {
     let dest = validate_mainnet_address(&address)?;
     let hub = hub()?;
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-
-    // Most-established first, and only rows the user could actually TALK in —
-    // decided by the same predicate the send path uses, not a second copy of
-    // the rule. Opening a thread you cannot speak in would answer "you already
-    // have this contact" with a dead end.
-    let found = store
+    let rows: Vec<ConversationRecord> = store
         .conversations_for_contact_address(&dest.to_string())
         .into_iter()
+        .cloned()
+        .collect();
+
+    // THEIR invitation outranks sending one of our own.
+    //
+    // If this address already invited us, the cheapest and only sensible move
+    // is to ACCEPT — that refunds the bond they already paid and opens the
+    // conversation at once. Sending our own handshake instead spends a second
+    // 0.2 KAS and leaves theirs stranded, which is what happened for as long as
+    // an invitation carried no sender address to match on.
+    //
+    // Only when the accept path would actually succeed. Expired, dismissed or
+    // archive-sourced invitations are refused there, and routing the user into
+    // a dead end would leave them unable to reach that address at all (INV-6).
+    let acceptable = rows.iter().find(|c| {
+        c.status == ConversationStatus::PendingInbound
+            && c.their_alias.is_some()
+            && c.handshake_txid.is_some()
+            && !store.is_conversation_tombstoned(&c.conversation_id)
+            && !invite_expired(c.status, c.created_unix_ms, now_unix_ms())
+            && !matches!(
+                c.handshake_txid
+                    .as_deref()
+                    .and_then(|t| store.message(t))
+                    .map(|m| m.provenance),
+                Some(RowSource::FillSourced)
+            )
+    });
+    if let Some(invitation) = acceptable {
+        return Ok(Some(ContactRouteDto {
+            conversation_id: invitation.conversation_id.clone(),
+            accept_first: true,
+        }));
+    }
+
+    // Otherwise: a conversation the user could actually TALK in — decided by
+    // the same predicate the send path uses, not a second copy of the rule.
+    // Opening a thread you cannot speak in would answer "you already have this
+    // contact" with a dead end.
+    let found = rows
+        .iter()
         .find(|c| comm_sendable(c.status, c.initiated_by_me, &c.contact_address, &c.my_alias))
         .map(|c| (c.conversation_id.clone(), c.status));
 
@@ -3166,7 +3317,20 @@ pub fn transport_existing_conversation(address: String) -> Result<Option<String>
     }
     drop(store);
     ping(&conversation_id);
-    Ok(Some(conversation_id))
+    Ok(Some(ContactRouteDto {
+        conversation_id,
+        accept_first: false,
+    }))
+}
+
+/// Where "add this contact" should actually go.
+#[derive(Clone, Debug)]
+pub struct ContactRouteDto {
+    pub conversation_id: String,
+    /// `true` when this address has already invited US: accepting refunds
+    /// the bond they paid and completes the conversation, where sending our
+    /// own invitation would spend a second one and strand theirs.
+    pub accept_first: bool,
 }
 
 /// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
@@ -5395,6 +5559,50 @@ mod tests {
         let coins = vec![(5u32, "a".to_string()), (9, "b".to_string())];
         let ordered = order_priority_for_owner(coins, |c| (c.0, c.1.clone()), |_| false);
         assert_eq!(ordered.len(), 2, "every coin still spendable");
+    }
+
+    /// AN INVITATION WITH NO SENDER IS INVISIBLE, and that invisibility cost a
+    /// second bond every time.
+    ///
+    /// A `PendingInbound` row used to store `contact_address: ""` even when the
+    /// node had just told us who sent it, because the resolve was gated on a
+    /// pre-check that is false on the very first invitation a wallet receives.
+    /// The row then matched no address lookup, so typing that same address
+    /// minted OUR handshake beside theirs: two bonds paid, theirs stranded.
+    #[test]
+    fn an_invitation_that_knows_its_sender_can_be_matched_by_address() {
+        let (mut store, dir) = stash_store("invitation-sender");
+        let invitation = ConversationRecord {
+            conversation_id: "invite".into(),
+            contact_address: PARTNER_A.into(), // recorded, not empty
+            my_alias: String::new(),
+            their_alias: Some("bbbbbbbbbbbb".into()),
+            status: ConversationStatus::PendingInbound,
+            initiated_by_me: false,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 1,
+            last_activity_unix_ms: 1,
+            handshake_txid: Some("hs".into()),
+        };
+        store.upsert_conversation(invitation).unwrap();
+
+        // The lookup that decides whether adding this contact spends a bond
+        // can now see it at all — that is the whole fix.
+        let rows = store.conversations_for_contact_address(PARTNER_A);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, ConversationStatus::PendingInbound);
+
+        // And it is still NOT something to open and talk in — accepting is
+        // what completes it, so the openable rule must keep refusing it.
+        assert!(!comm_sendable(
+            rows[0].status,
+            rows[0].initiated_by_me,
+            &rows[0].contact_address,
+            &rows[0].my_alias
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Adding a contact you already have should OPEN the thread, and the rule

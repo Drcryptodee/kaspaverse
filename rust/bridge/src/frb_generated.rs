@@ -2397,6 +2397,18 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for crate::api::transport::ContactRouteDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_conversationId = <String>::sse_decode(deserializer);
+        let mut var_acceptFirst = <bool>::sse_decode(deserializer);
+        return crate::api::transport::ContactRouteDto {
+            conversation_id: var_conversationId,
+            accept_first: var_acceptFirst,
+        };
+    }
+}
+
 impl SseDecode for crate::api::transport::ConversationDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2683,6 +2695,19 @@ impl SseDecode for Option<String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::transport::ContactRouteDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::transport::ContactRouteDto>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -3319,6 +3344,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::error::AppError>
     for crate::api::error::AppError
 {
     fn into_into_dart(self) -> crate::api::error::AppError {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::transport::ContactRouteDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.conversation_id.into_into_dart().into_dart(),
+            self.accept_first.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::transport::ContactRouteDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::transport::ContactRouteDto>
+    for crate::api::transport::ContactRouteDto
+{
+    fn into_into_dart(self) -> crate::api::transport::ContactRouteDto {
         self
     }
 }
@@ -3996,6 +4042,14 @@ impl SseEncode for bool {
     }
 }
 
+impl SseEncode for crate::api::transport::ContactRouteDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.conversation_id, serializer);
+        <bool>::sse_encode(self.accept_first, serializer);
+    }
+}
+
 impl SseEncode for crate::api::transport::ConversationDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -4208,6 +4262,16 @@ impl SseEncode for Option<String> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::transport::ContactRouteDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::transport::ContactRouteDto>::sse_encode(value, serializer);
         }
     }
 }

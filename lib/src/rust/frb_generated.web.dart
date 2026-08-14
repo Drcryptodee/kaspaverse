@@ -66,6 +66,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  ContactRouteDto dco_decode_box_autoadd_contact_route_dto(dynamic raw);
+
+  @protected
   FillReportDto dco_decode_box_autoadd_fill_report_dto(dynamic raw);
 
   @protected
@@ -88,6 +91,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WalletSnapshot dco_decode_box_autoadd_wallet_snapshot(dynamic raw);
+
+  @protected
+  ContactRouteDto dco_decode_contact_route_dto(dynamic raw);
 
   @protected
   ConversationDto dco_decode_conversation_dto(dynamic raw);
@@ -151,6 +157,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  ContactRouteDto? dco_decode_opt_box_autoadd_contact_route_dto(dynamic raw);
 
   @protected
   FillReportDto? dco_decode_opt_box_autoadd_fill_report_dto(dynamic raw);
@@ -267,6 +276,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  ContactRouteDto sse_decode_box_autoadd_contact_route_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FillReportDto sse_decode_box_autoadd_fill_report_dto(
     SseDeserializer deserializer,
   );
@@ -297,6 +311,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WalletSnapshot sse_decode_box_autoadd_wallet_snapshot(
     SseDeserializer deserializer,
   );
+
+  @protected
+  ContactRouteDto sse_decode_contact_route_dto(SseDeserializer deserializer);
 
   @protected
   ConversationDto sse_decode_conversation_dto(SseDeserializer deserializer);
@@ -370,6 +387,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  ContactRouteDto? sse_decode_opt_box_autoadd_contact_route_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   FillReportDto? sse_decode_opt_box_autoadd_fill_report_dto(
@@ -513,6 +535,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_contact_route_dto(
+    ContactRouteDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_fill_report_dto(
     FillReportDto self,
     SseSerializer serializer,
@@ -551,6 +579,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_wallet_snapshot(
     WalletSnapshot self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_contact_route_dto(
+    ContactRouteDto self,
     SseSerializer serializer,
   );
 
@@ -646,6 +680,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_contact_route_dto(
+    ContactRouteDto? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_fill_report_dto(

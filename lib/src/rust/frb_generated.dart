@@ -164,7 +164,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<List<ConversationDto>> crateApiTransportTransportConversations();
 
-  Future<String?> crateApiTransportTransportExistingConversation({
+  Future<ContactRouteDto?> crateApiTransportTransportExistingConversation({
     required String address,
   });
 
@@ -1221,7 +1221,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "transport_conversations", argNames: []);
 
   @override
-  Future<String?> crateApiTransportTransportExistingConversation({
+  Future<ContactRouteDto?> crateApiTransportTransportExistingConversation({
     required String address,
   }) {
     return handler.executeNormal(
@@ -1237,7 +1237,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_String,
+          decodeSuccessData: sse_decode_opt_box_autoadd_contact_route_dto,
           decodeErrorData: sse_decode_app_error,
         ),
         constMeta: kCrateApiTransportTransportExistingConversationConstMeta,
@@ -2259,6 +2259,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ContactRouteDto dco_decode_box_autoadd_contact_route_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_contact_route_dto(raw);
+  }
+
+  @protected
   FillReportDto dco_decode_box_autoadd_fill_report_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_fill_report_dto(raw);
@@ -2304,6 +2310,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WalletSnapshot dco_decode_box_autoadd_wallet_snapshot(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_wallet_snapshot(raw);
+  }
+
+  @protected
+  ContactRouteDto dco_decode_contact_route_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return ContactRouteDto(
+      conversationId: dco_decode_String(arr[0]),
+      acceptFirst: dco_decode_bool(arr[1]),
+    );
   }
 
   @protected
@@ -2508,6 +2526,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  ContactRouteDto? dco_decode_opt_box_autoadd_contact_route_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_contact_route_dto(raw);
   }
 
   @protected
@@ -2858,6 +2882,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ContactRouteDto sse_decode_box_autoadd_contact_route_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_contact_route_dto(deserializer));
+  }
+
+  @protected
   FillReportDto sse_decode_box_autoadd_fill_report_dto(
     SseDeserializer deserializer,
   ) {
@@ -2911,6 +2943,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_wallet_snapshot(deserializer));
+  }
+
+  @protected
+  ContactRouteDto sse_decode_contact_route_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_conversationId = sse_decode_String(deserializer);
+    var var_acceptFirst = sse_decode_bool(deserializer);
+    return ContactRouteDto(
+      conversationId: var_conversationId,
+      acceptFirst: var_acceptFirst,
+    );
   }
 
   @protected
@@ -3182,6 +3225,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  ContactRouteDto? sse_decode_opt_box_autoadd_contact_route_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_contact_route_dto(deserializer));
     } else {
       return null;
     }
@@ -3644,6 +3700,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_contact_route_dto(
+    ContactRouteDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_contact_route_dto(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_fill_report_dto(
     FillReportDto self,
     SseSerializer serializer,
@@ -3707,6 +3772,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_wallet_snapshot(self, serializer);
+  }
+
+  @protected
+  void sse_encode_contact_route_dto(
+    ContactRouteDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.conversationId, serializer);
+    sse_encode_bool(self.acceptFirst, serializer);
   }
 
   @protected
@@ -3930,6 +4005,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_contact_route_dto(
+    ContactRouteDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_contact_route_dto(self, serializer);
     }
   }
 

@@ -474,7 +474,7 @@ void main() {
       var asked = '';
       MessagingService.existingConversationFn = (address) async {
         asked = address;
-        return 'c1';
+        return const ContactRouteDto(conversationId: 'c1', acceptFirst: false);
       };
       MessagingService.prepareHandshakeFn = (_) async {
         handshakes++;
@@ -500,6 +500,42 @@ void main() {
       );
       // The thread opened instead of a snackbar telling the user to find it.
       expect(find.byType(ThreadScreen), findsOneWidget);
+    });
+
+    testWidgets('adding someone who already invited YOU accepts theirs', (
+      tester,
+    ) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      var handshakes = 0;
+      var accepts = 0;
+      MessagingService.existingConversationFn = (_) async =>
+          const ContactRouteDto(conversationId: 'c1', acceptFirst: true);
+      MessagingService.prepareHandshakeFn = (_) async {
+        handshakes++;
+        return summary();
+      };
+      MessagingService.prepareAcceptFn = (_) async {
+        accepts++;
+        return summary();
+      };
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, addr);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.pumpAndSettle();
+
+      expect(accepts, 1, reason: 'their bond is refunded, not a second spent');
+      expect(handshakes, 0, reason: 'never a second invitation beside theirs');
+      expect(find.text('Confirm accept'), findsOneWidget);
     });
 
     testWidgets('adding a NEW contact still runs the invitation ceremony', (
