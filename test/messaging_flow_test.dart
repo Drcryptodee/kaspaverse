@@ -102,6 +102,12 @@ SignableSummaryDto summary({
   priorityFeeSompi: BigInt.zero,
 );
 
+/// Invitations live in the Requests tab now — go there before looking for one.
+Future<void> openRequests(WidgetTester tester) async {
+  await tester.tap(find.text('Requests'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late StreamController<String> pings;
@@ -592,6 +598,47 @@ void main() {
       );
     });
 
+    testWidgets('Chats holds conversations; Requests holds what wants a bond', (
+      tester,
+    ) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('c1'),
+        conversation('c2', status: 'pending_in'),
+        conversation('c3', status: 'pending_out'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      // Chats: the two you can open. No Accept button — a card that spends
+      // 0.2 KAS must never sit between two of your conversations.
+      expect(find.text('Accept'), findsNothing);
+      expect(find.text('Wants to connect'), findsNothing);
+      // The count is on the tab, so an invitation is visible without
+      // letting a stranger push your real threads down the screen.
+      expect(find.text('1'), findsOneWidget);
+
+      await openRequests(tester);
+      expect(find.text('Accept'), findsOneWidget);
+      expect(find.text('Wants to connect'), findsOneWidget);
+    });
+
+    testWidgets('both tabs render at zero, each saying its own thing', (
+      tester,
+    ) async {
+      MessagingService.conversationsFn = () async => const [];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('No conversations yet'), findsOneWidget);
+      // No count badge when nobody is waiting.
+      expect(find.text('0'), findsNothing);
+
+      await openRequests(tester);
+      expect(find.textContaining('No one is waiting on you'), findsOneWidget);
+    });
+
     testWidgets('an inbound-pending row is an accept card, not a thread', (
       tester,
     ) async {
@@ -601,6 +648,7 @@ void main() {
       await MessagingService.instance.refresh();
       await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
       await tester.pumpAndSettle();
+      await openRequests(tester);
 
       expect(find.text('Wants to connect'), findsOneWidget);
       expect(find.text('Accept'), findsOneWidget);
@@ -622,6 +670,7 @@ void main() {
         await MessagingService.instance.refresh();
         await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
         await tester.pumpAndSettle();
+        await openRequests(tester);
 
         expect(find.text('Invitation expired'), findsOneWidget);
         expect(
@@ -653,6 +702,7 @@ void main() {
       await MessagingService.instance.refresh();
       await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
       await tester.pumpAndSettle();
+      await openRequests(tester);
 
       expect(find.text('Accept'), findsOneWidget);
       expect(find.text('Wants to connect'), findsOneWidget);
@@ -674,6 +724,7 @@ void main() {
       await MessagingService.instance.refresh();
       await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
       await tester.pumpAndSettle();
+      await openRequests(tester);
 
       await tester.tap(find.text('Accept'));
       await tester.pumpAndSettle();

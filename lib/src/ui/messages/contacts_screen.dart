@@ -188,9 +188,45 @@ class _ContactsScreenState extends State<ContactsScreen> {
     ).showSnackBar(const SnackBar(content: Text('Conversation hidden.')));
   }
 
+  /// One tab's list, or its own empty state — the copy differs because the
+  /// two emptinesses mean different things.
+  Widget _list(List<ConversationDto> rows, String emptyCopy) {
+    if (rows.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(KvSpace.xl),
+          child: Text(
+            emptyCopy,
+            textAlign: TextAlign.center,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: KvColor.textSecondary),
+          ),
+        ),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.all(KvSpace.gutter),
+      itemCount: rows.length,
+      separatorBuilder: (_, _) => const SizedBox(height: KvSpace.sm),
+      itemBuilder: (context, index) {
+        final conversation = rows[index];
+        return Entrance(
+          index: index,
+          child: _ConversationCard(
+            conversation: conversation,
+            onOpen: () => _openThread(conversation),
+            onAccept: () => _accept(conversation),
+            onHide: () => _hide(conversation),
+            onDismissExpired: () => _dismissExpired(conversation),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text('Messages'),
@@ -225,45 +261,102 @@ class _ContactsScreenState extends State<ContactsScreen> {
               child: ValueListenableBuilder<List<ConversationDto>>(
                 valueListenable: _messaging.conversations,
                 builder: (context, conversations, _) {
-                  if (conversations.isEmpty) {
-                    return Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(KvSpace.xl),
-                        child: Text(
-                          'No conversations yet.\nAdd a contact by address — '
-                          'the handshake rides the Kaspa L1 itself.',
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: KvColor.textSecondary,
-                          ),
-                        ),
-                      ),
-                    );
-                  }
-                  return ListView.separated(
-                    padding: const EdgeInsets.all(KvSpace.gutter),
-                    itemCount: conversations.length,
-                    separatorBuilder: (_, _) =>
-                        const SizedBox(height: KvSpace.sm),
-                    itemBuilder: (context, index) {
-                      final conversation = conversations[index];
-                      return Entrance(
-                        index: index,
-                        child: _ConversationCard(
-                          conversation: conversation,
-                          onOpen: () => _openThread(conversation),
-                          onAccept: () => _accept(conversation),
-                          onHide: () => _hide(conversation),
-                          onDismissExpired: () => _dismissExpired(conversation),
-                        ),
-                      );
-                    },
+                  // Chats are the conversations you can actually open; every
+                  // invitation waiting on YOU lives in Requests. Keeping them
+                  // in one list meant a bond-spending Accept card sat between
+                  // two threads, and a stranger could push your real
+                  // conversations down the screen by inviting you.
+                  final chats = conversations
+                      .where((c) => c.status != 'pending_in')
+                      .toList();
+                  final requests = conversations
+                      .where((c) => c.status == 'pending_in')
+                      .toList();
+                  return _ConversationTabs(
+                    chats: _list(
+                      chats,
+                      'No conversations yet.\nAdd a contact by address — '
+                      'the handshake rides the Kaspa L1 itself.',
+                    ),
+                    requests: _list(
+                      requests,
+                      'No one is waiting on you.\nInvitations from people you '
+                      "haven't met appear here.",
+                    ),
+                    requestCount: requests.length,
                   );
                 },
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// The Chats / Requests split.
+///
+/// **Both tabs always render, even at zero.** A tab bar that appears when the
+/// first invitation lands would move the list out from under a finger already
+/// travelling toward it, and the count is the honest signal anyway: a Requests
+/// tab reading nothing says "nobody is waiting on you", which is information.
+class _ConversationTabs extends StatelessWidget {
+  const _ConversationTabs({
+    required this.chats,
+    required this.requests,
+    required this.requestCount,
+  });
+
+  final Widget chats;
+  final Widget requests;
+  final int requestCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          TabBar(
+            labelStyle: theme.textTheme.labelLarge,
+            tabs: [
+              const Tab(text: 'Chats'),
+              Tab(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Requests'),
+                    if (requestCount > 0) ...[
+                      const SizedBox(width: KvSpace.xs),
+                      // A count, never a red dot: the number is the useful
+                      // part, and each one of these asks the user to spend.
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: KvSpace.xs,
+                          vertical: 1,
+                        ),
+                        decoration: BoxDecoration(
+                          color: KvColor.info.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(KvRadius.data),
+                        ),
+                        child: Text(
+                          '$requestCount',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: KvColor.info,
+                            fontFamily: KvFont.ui,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+          Expanded(child: TabBarView(children: [chats, requests])),
+        ],
       ),
     );
   }
