@@ -270,6 +270,44 @@ impl TransportStore {
             .find(|c| c.status == ConversationStatus::PendingOutbound && c.my_alias == echoed_alias)
     }
 
+    /// Find a conversation by the counterparty's own address — **the live
+    /// population's conversation key** (D-139).
+    ///
+    /// Kasia looks a handshake up "strictly by sender address only"
+    /// (`conversation-manager-service.ts:181-183` @ `acd3cf65`): the address
+    /// is the identity, and the alias is refreshable metadata hanging off it.
+    /// Our model keyed on the alias alone, which is why a counterparty who
+    /// already knew us could never complete a conversation — they answer an
+    /// existing contact idempotently and emit no response, so the alias we
+    /// were waiting on never arrived.
+    ///
+    /// Empty addresses never match: a `PendingInbound` row carries none until
+    /// its accept resolves the sender, and matching those together would fuse
+    /// every unaccepted invitation into one conversation. Ties break by
+    /// `conversation_id` for the same determinism reason as
+    /// [`Self::conversation_by_alias`].
+    pub fn conversation_by_contact_address(&self, address: &str) -> Option<&ConversationRecord> {
+        if address.is_empty() {
+            return None;
+        }
+        self.conversations
+            .records
+            .values()
+            .filter(|c| c.contact_address == address)
+            .min_by(|a, b| a.conversation_id.cmp(&b.conversation_id))
+    }
+
+    /// Whether ANY conversation knows its counterparty's address — the free
+    /// pre-check that keeps the inbound fold from paying an RPC round trip
+    /// when no address could possibly match. Answers without cloning or
+    /// sorting the record set, which [`Self::list_conversations`] does.
+    pub fn conversations_have_any_contact_address(&self) -> bool {
+        self.conversations
+            .records
+            .values()
+            .any(|c| !c.contact_address.is_empty())
+    }
+
     /// Whether a handshake tx has already been folded into a conversation
     /// (inbound dedup — the DAG can deliver the same handshake repeatedly).
     pub fn has_handshake_txid(&self, txid: &str) -> bool {
@@ -421,6 +459,74 @@ impl std::fmt::Debug for TransportStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The address lookup decides which conversation an inbound handshake
+    /// rewrites, so its edges are money- and identity-relevant, not
+    /// bookkeeping. (wallet-security + consensus auditors, 2026-08-14.)
+    #[test]
+    fn the_address_lookup_never_fuses_unaccepted_invitations() {
+        let dir = test_dir("addr-lookup");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+
+        // Two PendingInbound invitations, neither accepted yet, so neither
+        // knows its counterparty address. Matching them on "" would fuse every
+        // pending invitation in the wallet into one conversation.
+        for id in ["inbound-a", "inbound-b"] {
+            let mut c = conversation(id, 10);
+            c.contact_address = String::new();
+            c.status = ConversationStatus::PendingInbound;
+            c.initiated_by_me = false;
+            store.upsert_conversation(c).unwrap();
+        }
+        assert!(
+            store.conversation_by_contact_address("").is_none(),
+            "an empty address must never match"
+        );
+        assert!(
+            !store.conversations_have_any_contact_address(),
+            "no address is known yet, so the fold must skip the RPC entirely"
+        );
+
+        // A known contact matches, and only itself.
+        let known = "kaspa:qr0277xfclmv23fy7fxjp8dmnavac722cwaf8aja8p9762l5hg0ejkpgqujy6";
+        let mut c = conversation("outbound-1", 20);
+        c.contact_address = known.to_string();
+        c.status = ConversationStatus::PendingOutbound;
+        store.upsert_conversation(c).unwrap();
+        assert!(store.conversations_have_any_contact_address());
+        assert_eq!(
+            store
+                .conversation_by_contact_address(known)
+                .map(|c| c.conversation_id.as_str()),
+            Some("outbound-1")
+        );
+        assert!(
+            store
+                .conversation_by_contact_address("kaspa:qzsomeoneelse")
+                .is_none(),
+            "a stranger's address matches nothing"
+        );
+
+        // Two rows sharing one address resolve DETERMINISTICALLY — the same
+        // answer every process start, so a misroute is reproducible rather
+        // than a per-boot coin flip.
+        let mut second = conversation("outbound-0", 30);
+        second.contact_address = known.to_string();
+        store.upsert_conversation(second).unwrap();
+        let first = store
+            .conversation_by_contact_address(known)
+            .map(|c| c.conversation_id.clone());
+        for _ in 0..8 {
+            assert_eq!(
+                store
+                    .conversation_by_contact_address(known)
+                    .map(|c| c.conversation_id.clone()),
+                first,
+                "the tie-break must not vary with hash iteration order"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn test_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kv-tstore-{tag}-{}", std::process::id()));

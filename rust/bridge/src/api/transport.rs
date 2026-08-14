@@ -613,6 +613,26 @@ async fn fill_walks(
         }
     };
     for address in &receive_addresses {
+        // Liveness is re-checked per address, not once per run.
+        //
+        // `run_fill` gates the whole walk on one `is_live()` at the top, and
+        // that gate is only true at the instant it is read: this sweep is one
+        // paginated HTTP walk PER ADDRESS, so a full run outlives the vault's
+        // 30-second idle grace easily. A vault that locks mid-walk used to
+        // turn every remaining row into a silent `decrypt_scanning` failure
+        // while the cursor advanced over all of them — history destroyed by a
+        // guard that had already passed. Stop honestly instead; the held
+        // cursors mean the next run resumes exactly here.
+        if !hub.decryptor.is_live() {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = Some(
+                    "the wallet locked while catching up — unlock and check again".to_string(),
+                );
+            }
+            log::info!("history-fill: vault locked mid-walk — stopping with cursors held");
+            break;
+        }
         let address = address.to_string();
         let start = cursors.handshakes.get(&address).copied().unwrap_or(0);
         let outcome = walk_pages(
@@ -622,6 +642,7 @@ async fn fill_walks(
         )
         .await;
         report.pages += outcome.pages;
+        let mut held = HeldFloor::new();
         for row in &outcome.items {
             let Some(body) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
             else {
@@ -631,25 +652,47 @@ async fn fill_walks(
                 txid: Some(row.tx_id.clone()),
                 kind: "handshake".to_string(),
                 body,
-                addresses: vec![row.receiver.clone()],
+                // The address WE swept, not the indexer's `receiver` claim.
+                // The relevance gate exists to prove a row is ours; feeding
+                // it a value the untrusted server chose lets that server
+                // decide the answer — and with the cursor now holding on a
+                // relevance miss, a forged `receiver` would pin this walk
+                // forever. We asked by-receiver for this address, so this
+                // address is the only honest relevance input.
+                addresses: vec![address.clone()],
                 block_time_ms: Some(row.block_time),
             };
-            if handle_inbound(hub, event, EventOrigin::Fill) {
-                report.new_rows += 1;
+            match handle_inbound(hub, event, EventOrigin::Fill).await {
+                FoldOutcome::Recorded => report.new_rows += 1,
+                FoldOutcome::Settled => {}
+                FoldOutcome::Held => held.hold(row.block_time),
             }
         }
-        if outcome.cursor > start {
-            cursors.handshakes.insert(address, outcome.cursor);
+        let resume = held.resume_from(outcome.cursor);
+        // Public routing data only (our own address, row counts, block times):
+        // enough to tell "the indexer served nothing" apart from "it served a
+        // row and the fold refused it" — the two the 2026-08-13 sitting could
+        // not distinguish.
+        if !outcome.items.is_empty() {
+            log::info!(
+                "history-fill: handshake walk rows={} cursor {start}->{resume}{}",
+                outcome.items.len(),
+                if held.any() { " (HELD)" } else { "" },
+            );
         }
-        if !outcome.complete {
+        if resume > start {
+            cursors.handshakes.insert(address, resume);
+        }
+        if !outcome.complete || held.any() {
             report.complete = false;
             if report.error.is_none() {
-                report.error = outcome.error;
+                report.error = outcome.error.or_else(|| held.notice());
             }
         }
     }
 
     // Comm sweep: per ACTIVE conversation, by (contact address, THEIR alias)
+    // ── see the handshake sweep above for the cursor-hold law.
     // — the sender tags comms with their own alias (§K7 partition key).
     let conversations: Vec<(String, String, String)> = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -671,6 +714,17 @@ async fn fill_walks(
             .collect()
     };
     for (conversation_id, contact_address, their_alias) in conversations {
+        // Same law as the handshake sweep above — see the note there.
+        if !hub.decryptor.is_live() {
+            report.complete = false;
+            if report.error.is_none() {
+                report.error = Some(
+                    "the wallet locked while catching up — unlock and check again".to_string(),
+                );
+            }
+            log::info!("history-fill: vault locked mid-walk — stopping with cursors held");
+            break;
+        }
         let alias_hex = encode_hex(their_alias.as_bytes());
         let start = cursors.comms.get(&conversation_id).copied().unwrap_or(0);
         let outcome = walk_pages(
@@ -680,6 +734,7 @@ async fn fill_walks(
         )
         .await;
         report.pages += outcome.pages;
+        let mut held = HeldFloor::new();
         for row in &outcome.items {
             let Some(sealed) = kaspaverse_chain::history_fill::decode_hex(&row.message_payload)
             else {
@@ -697,17 +752,20 @@ async fn fill_walks(
                 addresses: Vec::new(),
                 block_time_ms: Some(row.block_time),
             };
-            if handle_inbound(hub, event, EventOrigin::Fill) {
-                report.new_rows += 1;
+            match handle_inbound(hub, event, EventOrigin::Fill).await {
+                FoldOutcome::Recorded => report.new_rows += 1,
+                FoldOutcome::Settled => {}
+                FoldOutcome::Held => held.hold(row.block_time),
             }
         }
-        if outcome.cursor > start {
-            cursors.comms.insert(conversation_id, outcome.cursor);
+        let resume = held.resume_from(outcome.cursor);
+        if resume > start {
+            cursors.comms.insert(conversation_id, resume);
         }
-        if !outcome.complete {
+        if !outcome.complete || held.any() {
             report.complete = false;
             if report.error.is_none() {
-                report.error = outcome.error;
+                report.error = outcome.error.or_else(|| held.notice());
             }
         }
     }
@@ -834,12 +892,17 @@ pub async fn transport_start() -> Result<(), AppError> {
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    handle_inbound(&fold_hub, event, EventOrigin::Node);
+                    handle_inbound(&fold_hub, event, EventOrigin::Node).await;
                 }
-                // Sparse stream — lag is exotic; missed live events are the
-                // live-only law's accepted cost (D-049), not silent data loss:
-                // the store holds only what the wire delivered.
-                Err(RecvError::Lagged(_)) => continue,
+                // Missed live events are the live-only law's accepted cost
+                // (D-049) — but in a change whose whole theme is that no
+                // rejection may be silent, this was the last silent one. The
+                // fold now awaits I/O, so lag is no longer exotic: say how
+                // many were lost rather than discarding them mutely.
+                Err(RecvError::Lagged(n)) => {
+                    log::info!("transport-intake: fold lagged — {n} live event(s) dropped");
+                    continue;
+                }
                 Err(RecvError::Closed) => break,
             }
         }
@@ -1070,24 +1133,273 @@ impl EventOrigin {
     }
 }
 
+/// Why an inbound event never became a stored row.
+///
+/// Every early return in the two intake folds names one of these. The reason
+/// this type exists at all: the most consequential gate in the pipeline — "no
+/// key opened this envelope" — used to be a bare `return false` with no log
+/// line, and that silence cost a real diagnosis. A genuine handshake
+/// acceptance was dropped on the founder's device on 2026-08-13 and the
+/// capture could not say WHICH gate fired, because the gate produced nothing
+/// (sitting §5). A pipeline whose rejections are invisible cannot be debugged
+/// from the field, only guessed at.
+///
+/// Content-free by construction (§4): each label is a fixed string, and the
+/// only values that ride alongside are the txid — public chain data — and
+/// byte counts. No alias, no envelope bytes, never a decrypted value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropReason {
+    /// Neither the node's verbose data nor the pinned recompute produced an id.
+    NoTxid,
+    /// Already stored: DAG re-delivery, our own outbound echoing back, or a
+    /// fill row the live scan already caught.
+    AlreadyStored,
+    /// No output paid an address we watch — not ours.
+    NotAddressedToUs,
+    /// A `comm` whose `<alias>:` head is missing or not UTF-8.
+    MalformedCommHead,
+    /// The envelope failed structural parse (length/tag).
+    MalformedEnvelope,
+    /// **The vault was locked when this arrived.** Distinguishing this from
+    /// `NoKeyOpensIt` is the whole point of the enum: one means "we were shut
+    /// when the postman called", the other means "not addressed to us".
+    VaultLocked,
+    /// Structurally sound, but no key in the window opened it.
+    NoKeyOpensIt,
+    /// Opened, but the plaintext was not a handshake payload we can decode.
+    UndecodablePayload,
+    /// A `comm` tagged with an alias none of our conversations answers to.
+    ///
+    /// This is the visible end of the D-139 cascade: a conversation stuck at
+    /// `PendingOutbound` has `their_alias = None`, so every message the
+    /// counterparty sends lands here and dies. Loud on purpose — it is the
+    /// symptom a user reports as "my messages never arrive".
+    NoConversationForAlias,
+    /// A racing writer settled the row first (override mode).
+    StoreRace,
+    /// The append itself failed.
+    StoreFailed,
+}
+
+/// What one fold attempt did.
+///
+/// The fill needs more than a bool. A row it could not fold must HOLD its
+/// cursor; a row that was merely already stored must not. Conflating the two
+/// either loses history forever or wedges the walk permanently — and the
+/// first of those is exactly what happened on 2026-08-13.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FoldOutcome {
+    /// A new row was recorded.
+    Recorded,
+    /// Nothing to do and nothing lost: already stored, structurally junk, or
+    /// verifiably not ours. A cursor may pass it.
+    Settled,
+    /// We could not fold a row that may well be ours. A cursor must not
+    /// advance past it.
+    Held,
+}
+
+impl DropReason {
+    /// Whether a fill cursor may advance past a row that dropped for this
+    /// reason.
+    ///
+    /// The discriminator is **who can cause it**. A locked vault, a failed
+    /// append, or our own watched window disagreeing with an address we
+    /// swept are OUR transient conditions: the row is probably ours and will
+    /// fold on a later run, so the cursor holds and the row is re-served (the
+    /// indexer's range start is inclusive).
+    ///
+    /// Everything else is settled or **attacker-mintable**, and that is the
+    /// load-bearing half. A cursor that holds on attacker-mintable input is a
+    /// denial of service on our own history: one unopenable envelope sent to
+    /// a published receive address would pin the walk at that block time
+    /// forever, and every later message would stop arriving. So a row no key
+    /// opens is passed over, loudly logged, and left to the node lane — the
+    /// decrypt IS the verification step, and a row that fails it is not ours
+    /// by the only test we trust (D-074: omission is possible, forgery is not).
+    fn outcome(self) -> FoldOutcome {
+        match self {
+            DropReason::VaultLocked
+            | DropReason::StoreRace
+            | DropReason::StoreFailed
+            | DropReason::NotAddressedToUs => FoldOutcome::Held,
+            _ => FoldOutcome::Settled,
+        }
+    }
+}
+
+/// The lowest block time in a walk whose row we could not fold.
+///
+/// A fill cursor is a promise: *everything at or below this block time is
+/// dealt with.* The walker's own cursor is only "the highest block time I
+/// fetched", and persisting that made the promise false — on 2026-08-13 a
+/// genuine handshake acceptance was fetched, dropped by the fold, and stepped
+/// over by the cursor. The wallet then held a conversation waiting forever on
+/// a response that was, by then, unreachable.
+///
+/// Holding at the lowest unfolded row re-serves that row and everything after
+/// it on the next run (the indexer's range start is inclusive), so a
+/// transient failure costs a little re-work instead of the message.
+/// NOT `#[derive(Default)]`: FRB's whole-crate scan exports a derived
+/// `Default` impl as a bridge function, which put this purely internal cursor
+/// helper on the FFI surface (caught by the gate's codegen-drift check). A
+/// private constructor keeps it ignored, like `KeyWindow` and `TransportHub`.
+struct HeldFloor(Option<u64>);
+
+impl HeldFloor {
+    const fn new() -> Self {
+        Self(None)
+    }
+
+    fn hold(&mut self, block_time: u64) {
+        self.0 = Some(self.0.map_or(block_time, |f| f.min(block_time)));
+    }
+
+    fn any(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The resume point: never past the lowest held row.
+    fn resume_from(&self, walk_cursor: u64) -> u64 {
+        match self.0 {
+            Some(floor) => walk_cursor.min(floor),
+            None => walk_cursor,
+        }
+    }
+
+    /// Why the walk is reported incomplete — the honest notice stays up
+    /// rather than a silent "drained" (D-074).
+    fn notice(&self) -> Option<String> {
+        self.0.map(|_| {
+            "some history could not be folded this run and will be retried \
+             (the cursor is held, not advanced)"
+                .to_string()
+        })
+    }
+}
+
+/// Wire-kind labels for the drop log — the same tokens that ride the wire,
+/// so a capture line greps straight back to the payload kind.
+const HANDSHAKE: &str = "handshake";
+const COMM: &str = "comm";
+
+/// Log one intake drop and classify it — so every rejection in the folds
+/// below reads `return dropped(...)` and none can go silent again.
+fn dropped(kind: &str, txid: &str, reason: DropReason, origin: EventOrigin) -> FoldOutcome {
+    // Two reasons are the ordinary outcome for most chain traffic on the NODE
+    // lane and pure noise in a device capture. On the FILL lane, "not
+    // addressed to us" is never routine: the indexer was asked by-receiver
+    // for an address we swept ourselves, so a miss means our own watched
+    // window disagrees with our own sweep.
+    // `NoConversationForAlias` is the same class on the NODE lane: every comm
+    // any stranger sends on a public chain reaches this scan and matches
+    // nothing. Measured 2026-08-14 — a third party's comm tripped it three
+    // times in one minute, which would drown a capture. On the FILL lane it
+    // stays loud: there a comm was fetched FOR one of our own conversations
+    // and still did not match, which is an anomaly worth a line.
+    let routine = matches!(reason, DropReason::AlreadyStored)
+        || (origin == EventOrigin::Node
+            && matches!(
+                reason,
+                DropReason::NotAddressedToUs | DropReason::NoConversationForAlias
+            ));
+    if routine {
+        log::debug!("transport-intake: skipped {kind} tx={txid} reason={reason:?}");
+    } else {
+        // `info` is the device sink's max level — a `debug!` here is
+        // invisible on the phone, which is how the one drop log that did
+        // exist came to prove nothing.
+        log::info!("transport-intake: dropped {kind} tx={txid} reason={reason:?} via={origin:?}");
+    }
+    reason.outcome()
+}
+
+/// Resolve who sent a handshake, via the node's own return-address lookup
+/// (INV-8: same untrusted node, same socket, no indexer).
+///
+/// `None` when the bond has not reached our activity record yet — the live
+/// scan routinely sees a handshake before its accepting block exists. The
+/// caller then falls back to the alias-only path, so a slow resolution costs
+/// a duplicate conversation at worst, never a lost message.
+/// **Bounded**, because the NODE lane awaits this inline in the fold loop that
+/// drains the BlockAdded broadcast. An unbounded RPC here would let one slow
+/// node stall that loop, and a stalled consumer is a LAGGED channel — which on
+/// this stream means live messages are dropped outright. The lookup is a
+/// best-effort enrichment; the fold below works without it, so it must never
+/// be able to cost more than it can give.
+const SENDER_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn resolve_handshake_sender(txid: &str) -> Option<String> {
+    let engine = wallet::engine_handle()?;
+    // The bond's own activity record — absent until the tx is accepted, which
+    // is the common case on the live lane. Checked FIRST because it is free
+    // and skips the RPC entirely.
+    let daa = engine.activity_daa_score(txid)?;
+    let rpc = dag::shared_monitor().await.ok()?.rpc();
+    match tokio::time::timeout(
+        SENDER_LOOKUP_TIMEOUT,
+        resolve_return_address(&rpc, txid, daa),
+    )
+    .await
+    {
+        Ok(Ok(address)) => Some(address),
+        Ok(Err(e)) => {
+            // Node-controlled text: every other sink in `chain` sanitizes it,
+            // and this diff hardened the shape line against the same class.
+            log::info!(
+                "transport-intake: sender lookup failed for tx={txid}: {}",
+                kaspaverse_chain::sanitize_node_text(&e.to_string())
+            );
+            None
+        }
+        Err(_) => {
+            log::info!("transport-intake: sender lookup timed out for tx={txid}");
+            None
+        }
+    }
+}
+
+/// Map a decrypt failure onto the reason it happened. `VaultLocked` is a
+/// genuinely different event from "not for us" and the two must never again
+/// be collapsed into one silent `return false`.
+fn decrypt_drop(error: &CoreError) -> DropReason {
+    match error {
+        CoreError::VaultLocked => DropReason::VaultLocked,
+        _ => DropReason::NoKeyOpensIt,
+    }
+}
+
 /// One scan match → store/conversation fold. Content never reaches a log
 /// line from here (§4: message plaintext is treated like key material for
-/// logging; even sealed bodies are logged as shapes only). Returns whether a
-/// NEW row was recorded — the live scan ignores it; the V2b fill counts it
-/// (its report is row-counts, never content).
-fn handle_inbound(hub: &TransportHub, event: TransportEvent, origin: EventOrigin) -> bool {
+/// logging; even sealed bodies are logged as shapes only). Returns what the
+/// fold did — the live scan ignores it; the V2b fill counts `Recorded` rows
+/// and holds its cursor on `Held` ones (its report is row-counts, never
+/// content).
+async fn handle_inbound(
+    hub: &TransportHub,
+    event: TransportEvent,
+    origin: EventOrigin,
+) -> FoldOutcome {
     // The store law keys on txid (D-065); an id-less event (exotic — both the
     // node's verbose data AND the pinned recompute failed) cannot be stored.
-    let Some(txid) = event.txid else { return false };
+    let Some(txid) = event.txid else {
+        // A fixed token, never `event.kind`: the kind is `from_utf8_lossy`
+        // over arbitrary wire bytes, i.e. a stranger's choice of characters
+        // going straight into a log line.
+        return dropped("?", "?", DropReason::NoTxid, origin);
+    };
     match event.kind.as_str() {
-        "handshake" => handle_inbound_handshake(
-            hub,
-            &txid,
-            &event.body,
-            &event.addresses,
-            event.block_time_ms,
-            origin,
-        ),
+        "handshake" => {
+            handle_inbound_handshake(
+                hub,
+                &txid,
+                &event.body,
+                &event.addresses,
+                event.block_time_ms,
+                origin,
+            )
+            .await
+        }
         "comm" => handle_inbound_comm(hub, &txid, &event.body, event.block_time_ms, origin),
         // `legacy` (VNone): parse-layer tolerance is fixture-pinned in chain;
         // conversation semantics for the unversioned generation are
@@ -1095,18 +1407,18 @@ fn handle_inbound(hub: &TransportHub, event: TransportEvent, origin: EventOrigin
         // 2025). `payment` memos: deferred (not a P2.3 deliverable). `bcast`:
         // plaintext dev/broadcast lane, rendered by the dev panel. Unknown
         // kinds: forward-compat opaque (§0.5) — visible on the dev wire view.
-        _ => false,
+        _ => FoldOutcome::Settled,
     }
 }
 
-fn handle_inbound_handshake(
+async fn handle_inbound_handshake(
     hub: &TransportHub,
     txid: &str,
     body: &[u8],
     addresses: &[String],
     block_time_ms: Option<u64>,
     origin: EventOrigin,
-) -> bool {
+) -> FoldOutcome {
     // Dedup BEFORE any crypto: DAG re-delivery, our own outbound handshakes
     // echoing back through the scan (stored at commit — Own/Outbound rows
     // keep the cheap pre-crypto skip), and fill rows the live scan already
@@ -1123,7 +1435,7 @@ fn handle_inbound_handshake(
                         && matches!(m.provenance, RowSource::FillSourced | RowSource::Unknown)
                 });
             if !overridable {
-                return false;
+                return dropped(HANDSHAKE, txid, DropReason::AlreadyStored, origin);
             }
             store.message(txid).cloned()
         } else {
@@ -1135,122 +1447,251 @@ fn handle_inbound_handshake(
     // One snapshot for both halves of the check below — see `TransportHub::keys`.
     let keys = hub.keys();
     if !addresses.iter().any(|a| keys.watched.contains(a)) {
-        return false;
+        return dropped(HANDSHAKE, txid, DropReason::NotAddressedToUs, origin);
     }
     let envelope_bytes = decode_envelope_body(body);
     let Ok(envelope) = Envelope::from_bytes(&envelope_bytes) else {
-        return false;
+        return dropped(HANDSHAKE, txid, DropReason::MalformedEnvelope, origin);
     };
     // Establishment scan: whichever watched key opens it becomes the §0.7
     // binding. Not ours / vault locked ⇒ skip (live-only law: an envelope
     // seen while locked is missed, same as one seen while offline). This
     // decrypt is ALSO the fill's verify step: an indexer row no watched key
     // opens is dropped here — omission is possible, forgery is not (D-074).
-    let Ok((slot, plaintext)) = hub
+    let (slot, plaintext) = match hub
         .decryptor
         .decrypt_scanning(keys.handshake_slots().iter().copied(), &envelope)
-    else {
-        return false;
+    {
+        Ok(opened) => opened,
+        // THE gate the 2026-08-13 sitting could not see through. A locked
+        // vault and an envelope addressed to someone else are completely
+        // different events and are now reported as such.
+        Err(e) => return dropped(HANDSHAKE, txid, decrypt_drop(&e), origin),
     };
-    let Ok(payload) = HandshakePayload::from_plaintext(&plaintext) else {
-        log::debug!("transport-hub: undecodable handshake payload skipped");
-        return false;
+    let payload = match HandshakePayload::from_plaintext(&plaintext) {
+        Ok(payload) => payload,
+        Err(e) => {
+            // The envelope AEAD-authenticated, so these bytes are genuinely
+            // ours and genuinely the counterparty's — a rejection here is an
+            // INTEROP defect in our parser, not a hostile input. Say which of
+            // the four checks refused it, and how long the decoded value was
+            // (a shape, never its content — §4).
+            log::info!(
+                "transport-intake: handshake payload rejected by our parser: {e} (len={})",
+                plaintext.len()
+            );
+            // SHAPE, not content — field names and JSON types only. This is
+            // how an interop divergence gets named instead of guessed at.
+            log::info!(
+                "transport-intake: rejected handshake shape: {}",
+                kaspaverse_core::handshake::describe_shape(&plaintext)
+            );
+            return dropped(HANDSHAKE, txid, DropReason::UndecodablePayload, origin);
+        }
     };
     drop(plaintext); // Zeroizing — wiped here; the store keeps ciphertext only
 
     // Conversation clocks ride the block time when the source knows it (the
     // fill; the scans since V2b) so filled history lands in true order.
     let now = block_time_ms.unwrap_or_else(now_unix_ms);
-    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
 
-    // OVERRIDE mode (V5, finding 14): node truth replaces the stored claim's
-    // row in place — never a second conversation. The owning conversation is
-    // refreshed only while it is still PendingInbound (node block time
-    // hardens the expiry discriminator; the alias is the node-decrypted
-    // truth); an Active conversation is NEVER touched — the user already
-    // accepted, and regressing status or rebinding is worse than the
-    // documented open-thread residual.
-    if let Some(old) = override_row {
-        let record = MessageRecord {
-            txid: txid.to_string(),
-            conversation_id: old.conversation_id.clone(),
-            direction: MessageDirection::Inbound,
-            kind: StoredKind::Handshake,
-            envelope: envelope_bytes,
-            unix_ms: payload.timestamp,
-            alias_on_wire: None,
-            sealed_to: None,
-            provenance: RowSource::NodeScanned,
-        };
-        match store.override_message(record) {
-            Ok(Some(_)) => {}
-            Ok(None) => return false, // a racing writer settled it first
-            Err(e) => {
-                log::warn!("transport-hub: store append failed: {e}");
-                return false;
-            }
-        }
-        if let Some(existing) = store.conversation(&old.conversation_id) {
-            if existing.status == ConversationStatus::PendingInbound {
-                let mut conversation = existing.clone();
-                conversation.created_unix_ms = now;
-                conversation.their_alias = Some(payload.alias.clone());
-                // Rebind to the slot that opened the NODE envelope (same as
-                // the fresh-inbound fold): a mislabeled fill could have bound
-                // a different slot, and a later accept would pin input[0] to
-                // an address the counterpart doesn't know (the D-067
-                // identity-fragmentation class). Safe while PendingInbound —
-                // nothing was accepted against the stale binding.
-                conversation.bound_branch = to_key_branch(slot.0);
-                conversation.bound_index = slot.1;
-                warn_store(store.upsert_conversation(conversation));
-            }
-        }
-        drop(store);
-        watch_acceptance(txid, block_time_ms);
-        ping(&old.conversation_id);
-        return true;
-    }
+    // Both branches below run under the store lock, and the address-keyed
+    // step after them AWAITS — so the guard lives in a block that ends before
+    // it, never across it.
+    {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
 
-    // An acceptance response completes a conversation we initiated: their
-    // fresh alias arrives in `alias`, OUR alias echoes back in `their_alias`.
-    if payload.is_acceptance() {
-        let echoed = payload.their_alias.as_deref().unwrap_or_default();
-        if let Some(existing) = store.conversation_awaiting_response(echoed) {
-            let mut conversation = existing.clone();
-            conversation.their_alias = Some(payload.alias.clone());
-            conversation.status = ConversationStatus::Active;
-            // REBIND to the slot that actually opened it — this is the key
-            // the counterparty resolved for us and will keep sealing to.
-            conversation.bound_branch = to_key_branch(slot.0);
-            conversation.bound_index = slot.1;
-            // Never regress the activity clock: a FILLED old acceptance must
-            // not re-sort the conversation above newer traffic.
-            conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
-            let conversation_id = conversation.conversation_id.clone();
-            warn_store(store.upsert_conversation(conversation));
-            warn_store(store.record_message(MessageRecord {
+        // OVERRIDE mode (V5, finding 14): node truth replaces the stored claim's
+        // row in place — never a second conversation. The owning conversation is
+        // refreshed only while it is still PendingInbound (node block time
+        // hardens the expiry discriminator; the alias is the node-decrypted
+        // truth); an Active conversation is NEVER touched — the user already
+        // accepted, and regressing status or rebinding is worse than the
+        // documented open-thread residual.
+        if let Some(old) = override_row {
+            let record = MessageRecord {
                 txid: txid.to_string(),
-                conversation_id: conversation_id.clone(),
+                conversation_id: old.conversation_id.clone(),
                 direction: MessageDirection::Inbound,
                 kind: StoredKind::Handshake,
                 envelope: envelope_bytes,
                 unix_ms: payload.timestamp,
                 alias_on_wire: None,
                 sealed_to: None,
-                provenance: origin.row_source(),
-            }));
+                provenance: RowSource::NodeScanned,
+            };
+            match store.override_message(record) {
+                Ok(Some(_)) => {}
+                Ok(None) => return dropped(HANDSHAKE, txid, DropReason::StoreRace, origin),
+                Err(e) => {
+                    log::warn!("transport-hub: store append failed: {e}");
+                    return dropped(HANDSHAKE, txid, DropReason::StoreFailed, origin);
+                }
+            }
+            if let Some(existing) = store.conversation(&old.conversation_id) {
+                if existing.status == ConversationStatus::PendingInbound {
+                    let mut conversation = existing.clone();
+                    conversation.created_unix_ms = now;
+                    conversation.their_alias = Some(payload.alias.clone());
+                    // Rebind to the slot that opened the NODE envelope (same as
+                    // the fresh-inbound fold): a mislabeled fill could have bound
+                    // a different slot, and a later accept would pin input[0] to
+                    // an address the counterpart doesn't know (the D-067
+                    // identity-fragmentation class). Safe while PendingInbound —
+                    // nothing was accepted against the stale binding.
+                    conversation.bound_branch = to_key_branch(slot.0);
+                    conversation.bound_index = slot.1;
+                    warn_store(store.upsert_conversation(conversation));
+                }
+            }
             drop(store);
             watch_acceptance(txid, block_time_ms);
-            ping(&conversation_id);
-            return true;
+            ping(&old.conversation_id);
+            return FoldOutcome::Recorded;
         }
-        // An acceptance we have no pending side for — fall through and treat
-        // it as a fresh inbound handshake (the live app does the same).
+
+        // An acceptance response completes a conversation we initiated: their
+        // fresh alias arrives in `alias`, OUR alias echoes back in `their_alias`.
+        if payload.is_acceptance() {
+            let echoed = payload.their_alias.as_deref().unwrap_or_default();
+            if let Some(existing) = store.conversation_awaiting_response(echoed) {
+                let mut conversation = existing.clone();
+                conversation.their_alias = Some(payload.alias.clone());
+                conversation.status = ConversationStatus::Active;
+                // REBIND to the slot that actually opened it — this is the key
+                // the counterparty resolved for us and will keep sealing to.
+                conversation.bound_branch = to_key_branch(slot.0);
+                conversation.bound_index = slot.1;
+                // Never regress the activity clock: a FILLED old acceptance must
+                // not re-sort the conversation above newer traffic.
+                conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
+                let conversation_id = conversation.conversation_id.clone();
+                warn_store(store.upsert_conversation(conversation));
+                warn_store(store.record_message(MessageRecord {
+                    txid: txid.to_string(),
+                    conversation_id: conversation_id.clone(),
+                    direction: MessageDirection::Inbound,
+                    kind: StoredKind::Handshake,
+                    envelope: envelope_bytes,
+                    unix_ms: payload.timestamp,
+                    alias_on_wire: None,
+                    sealed_to: None,
+                    provenance: origin.row_source(),
+                }));
+                drop(store);
+                watch_acceptance(txid, block_time_ms);
+                ping(&conversation_id);
+                return FoldOutcome::Recorded;
+            }
+            // An acceptance we have no pending side for — fall through and treat
+            // it as a fresh inbound handshake (the live app does the same).
+        }
+    }
+
+    // ── D-139: the counterparty's ADDRESS is the conversation key ──────────
+    //
+    // The live population looks a handshake up "strictly by sender address
+    // only" and treats a repeat from a known contact as idempotent: it
+    // refreshes their alias, activates a conversation it had initiated, and
+    // **emits no response** (`conversation-manager-service.ts:181-213` @
+    // `acd3cf65`). Ours waited for an acceptance that, against such a
+    // counterparty, is never sent — so the conversation hung at
+    // `PendingOutbound` with `their_alias = None`, and because inbound comms
+    // are matched by alias, every message they sent afterwards was dropped
+    // too. Both directions dead from one missing field. Measured on the
+    // founder's device 2026-08-14 and proven on chain: he handshaked an
+    // address that had handshaked him five weeks earlier, and that address
+    // has no reply on chain at all, because their client correctly sent none.
+    //
+    // So we match their semantics. The sender comes from the node's own
+    // return-address lookup — consensus data, never payload content (§0.3) —
+    // and it is available here precisely because a handshake PAYS us the
+    // bond, which is what puts it in the P1.5 activity record.
+    //
+    // **No response is emitted and no accept card is armed**, which is also
+    // what keeps the bond arithmetic honest: a re-handshake carries a fresh
+    // 0.2 KAS, and creating a second invitation here would let the user spend
+    // a second refund on a conversation that is already paid for.
+    // **NODE TRUTH ONLY** (consensus-auditor BLOCK, 2026-08-14).
+    //
+    // This branch rewrites an EXISTING conversation's identity — their alias
+    // and the key slot we seal to. It may therefore only run on evidence the
+    // node itself produced.
+    //
+    // On the fill lane the txid is an indexer CLAIM, and the decrypt proves
+    // only that the PAYLOAD opens for us — nothing binds that payload to that
+    // txid. A hostile endpoint could serve one row pairing an attacker-authored
+    // handshake envelope (anyone may seal one to a published receive address —
+    // that is the protocol) with the txid of a real payment we received from a
+    // contact. The sender would then resolve to that contact's address, and we
+    // would rebind their conversation to the attacker's alias and slot: their
+    // genuine messages would stop matching, and the attacker's would arrive
+    // inside a thread the user trusts. There is no way to bind an
+    // indexer-supplied payload to an indexer-supplied txid without our own node
+    // seeing the transaction, so the rule is simply that identity comes from
+    // the node (D-074: omission is acceptable, forgery is not — the same reason
+    // `transport_prepare_accept` refuses a `FillSourced` invitation).
+    //
+    // Cost, stated plainly: a handshake recoverable only from the archive can
+    // no longer complete a conversation by address. It still folds as an
+    // invitation, and the node-override lane upgrades it if our own scan ever
+    // reaches that txid.
+    //
+    // The second condition is a free pre-check: with no conversation holding a
+    // counterparty address there is nothing to match, and the fold loop should
+    // not pay a round trip to learn that.
+    let can_match_by_address = origin == EventOrigin::Node && {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.conversations_have_any_contact_address()
+    };
+    if can_match_by_address {
+        if let Some(sender) = resolve_handshake_sender(txid).await {
+            let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(existing) = store.conversation_by_contact_address(&sender) {
+                let mut conversation = existing.clone();
+                let conversation_id = conversation.conversation_id.clone();
+                let was = conversation.status;
+                conversation.their_alias = Some(payload.alias.clone());
+                // Their handshake is the authority on which of our keys they seal
+                // to — the same rebinding the acceptance leg does, and what keeps
+                // our input[0] on the address they know us by (D2).
+                conversation.bound_branch = to_key_branch(slot.0);
+                conversation.bound_index = slot.1;
+                // Only a conversation WE initiated may auto-activate. One they
+                // initiated still needs our accept — that is where the bond is
+                // refunded, and skipping it would take their money silently.
+                if conversation.initiated_by_me && conversation.status != ConversationStatus::Active
+                {
+                    conversation.status = ConversationStatus::Active;
+                }
+                conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
+                warn_store(store.upsert_conversation(conversation));
+                warn_store(store.record_message(MessageRecord {
+                    txid: txid.to_string(),
+                    conversation_id: conversation_id.clone(),
+                    direction: MessageDirection::Inbound,
+                    kind: StoredKind::Handshake,
+                    envelope: envelope_bytes,
+                    unix_ms: payload.timestamp,
+                    alias_on_wire: None,
+                    sealed_to: None,
+                    provenance: origin.row_source(),
+                }));
+                drop(store);
+                log::info!(
+                    "transport-intake: handshake matched an existing contact by address \
+                 (status {was:?} -> active check) — no response emitted, per D-139"
+                );
+                watch_acceptance(txid, block_time_ms);
+                ping(&conversation_id);
+                return FoldOutcome::Recorded;
+            }
+        }
     }
 
     // A new inbound handshake: pending until the user accepts (the accept
     // card resolves the sender + sends the §0.6 refund).
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
     let conversation_id = fresh_conversation_id();
     let conversation = ConversationRecord {
         conversation_id: conversation_id.clone(),
@@ -1280,7 +1721,7 @@ fn handle_inbound_handshake(
     drop(store);
     watch_acceptance(txid, block_time_ms);
     ping(&conversation_id);
-    true
+    FoldOutcome::Recorded
 }
 
 fn handle_inbound_comm(
@@ -1289,7 +1730,7 @@ fn handle_inbound_comm(
     body: &[u8],
     block_time_ms: Option<u64>,
     origin: EventOrigin,
-) -> bool {
+) -> FoldOutcome {
     // DAG re-delivery / our own sent row echoing back: pre-crypto skip —
     // except a NODE event over a stored indexer claim (`FillSourced`) or
     // pre-V5 row (`Unknown`), which proceeds in OVERRIDE mode (V5,
@@ -1302,7 +1743,7 @@ fn handle_inbound_comm(
                     && row.direction == MessageDirection::Inbound
                     && matches!(row.provenance, RowSource::FillSourced | RowSource::Unknown);
                 if !overridable {
-                    return false;
+                    return dropped(COMM, txid, DropReason::AlreadyStored, origin);
                 }
                 Some(row.clone())
             }
@@ -1312,14 +1753,14 @@ fn handle_inbound_comm(
     // The alias head sits OUTSIDE the envelope — split BEFORE any envelope
     // parse (P2.2 handover law).
     let Some((alias, sealed)) = split_comm_body(body) else {
-        return false;
+        return dropped(COMM, txid, DropReason::MalformedCommHead, origin);
     };
     // Relevance without crypto: the alias must belong to one of our
     // conversations (either side's — senders tag with their own).
     let (conversation_id, bound) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(conversation) = store.conversation_by_alias(&alias) else {
-            return false;
+            return dropped(COMM, txid, DropReason::NoConversationForAlias, origin);
         };
         (
             conversation.conversation_id.clone(),
@@ -1331,7 +1772,7 @@ fn handle_inbound_comm(
     };
     let envelope_bytes = decode_envelope_body(sealed);
     let Ok(envelope) = Envelope::from_bytes(&envelope_bytes) else {
-        return false;
+        return dropped(COMM, txid, DropReason::MalformedEnvelope, origin);
     };
     // Validation decrypt: bound slot first (§0.7 fast path), then the window
     // (robustness against a counterparty that re-resolved our address). The
@@ -1346,10 +1787,12 @@ fn handle_inbound_comm(
                 .decrypt_scanning(hub.keys().slots.iter().copied(), &envelope)
             {
                 Ok((slot, _)) => Some((to_key_branch(slot.0), slot.1)),
-                Err(_) => return false, // alias matched but no key opens it — spoofed head
+                // Alias matched but no key opens it — a spoofed head, or the
+                // vault shut mid-stream. Two very different events; say which.
+                Err(e) => return dropped(COMM, txid, decrypt_drop(&e), origin),
             }
         }
-        Err(_) => return false, // vault locked mid-stream — live-only law
+        Err(e) => return dropped(COMM, txid, decrypt_drop(&e), origin),
     };
 
     // Row clock = block time when the source knows it (fill + scans since
@@ -1374,10 +1817,10 @@ fn handle_inbound_comm(
     if let Some(old) = override_row {
         match store.override_message(record) {
             Ok(Some(_)) => {}
-            Ok(None) => return false, // a racing writer settled it first
+            Ok(None) => return dropped(COMM, txid, DropReason::StoreRace, origin),
             Err(e) => {
                 log::warn!("transport-hub: store append failed: {e}");
-                return false;
+                return dropped(COMM, txid, DropReason::StoreFailed, origin);
             }
         }
         if let Some(existing) = store.conversation(&conversation_id) {
@@ -1391,12 +1834,13 @@ fn handle_inbound_comm(
         if old.conversation_id != conversation_id {
             ping(&old.conversation_id);
         }
-        return true;
+        return FoldOutcome::Recorded;
     }
 
     let recorded = store.record_message(record);
     if let Err(e) = &recorded {
         log::warn!("transport-hub: store append failed: {e}");
+        return dropped(COMM, txid, DropReason::StoreFailed, origin);
     }
     if let Ok(true) = recorded {
         if let Some(existing) = store.conversation(&conversation_id) {
@@ -1409,9 +1853,10 @@ fn handle_inbound_comm(
         drop(store);
         watch_acceptance(txid, block_time_ms);
         ping(&conversation_id);
-        return true;
+        return FoldOutcome::Recorded;
     }
-    false
+    // `Ok(false)` — the store's own txid dedup settled it.
+    dropped(COMM, txid, DropReason::AlreadyStored, origin)
 }
 
 /// Phase 1 (dev/broadcast lane): compose `ciph_msg:1:bcast:<channel>:<text>`,
@@ -2705,6 +3150,88 @@ mod tests {
                 "content-adjacent log line: {line}"
             );
         }
+    }
+
+    /// A fill cursor must never step over a row the fold could not take.
+    /// This is the 2026-08-13 loss in miniature: rows at 10 and 30 fold, the
+    /// row at 20 is held, and the walk's own cursor says 30. Persisting 30
+    /// would make the row at 20 unreachable forever, because the only query
+    /// the indexer offers starts at a block time.
+    #[test]
+    fn held_rows_pin_the_resume_point_below_them() {
+        let mut held = HeldFloor::new();
+        assert_eq!(held.resume_from(30), 30, "nothing held ⇒ the walk's cursor");
+        assert!(!held.any());
+
+        held.hold(20);
+        held.hold(25);
+        assert_eq!(held.resume_from(30), 20, "the LOWEST held row wins");
+        assert!(held.any());
+        assert!(held.notice().is_some(), "an incomplete walk stays honest");
+
+        // A hold above the walk cursor can never push the cursor forward.
+        let mut ahead = HeldFloor::new();
+        ahead.hold(99);
+        assert_eq!(ahead.resume_from(30), 30);
+    }
+
+    /// THE DENIAL-OF-SERVICE LAW behind [`DropReason::outcome`]. A cursor that
+    /// holds on attacker-mintable input is a weapon: anyone can seal an
+    /// envelope to a published receive address that no key of ours opens, and
+    /// if that pinned the walk, one dust transaction would stop our history
+    /// fill permanently. Only OUR OWN transient conditions may hold it.
+    #[test]
+    fn only_our_own_transient_failures_hold_the_cursor() {
+        // Attacker-mintable — must never pin the walk.
+        for reason in [
+            DropReason::NoKeyOpensIt,
+            DropReason::MalformedEnvelope,
+            DropReason::UndecodablePayload,
+            DropReason::MalformedCommHead,
+            DropReason::NoConversationForAlias,
+            DropReason::AlreadyStored,
+            DropReason::NoTxid,
+        ] {
+            assert_eq!(
+                reason.outcome(),
+                FoldOutcome::Settled,
+                "{reason:?} is attacker-mintable or settled — it must not hold the cursor"
+            );
+        }
+        // Ours, and transient — the row is probably real, so hold and retry.
+        for reason in [
+            DropReason::VaultLocked,
+            DropReason::StoreRace,
+            DropReason::StoreFailed,
+            DropReason::NotAddressedToUs,
+        ] {
+            assert_eq!(
+                reason.outcome(),
+                FoldOutcome::Held,
+                "{reason:?} is our own transient condition — the row must be retried"
+            );
+        }
+    }
+
+    /// THE INDEXER MAY NOT DECIDE WHO YOU ARE TALKING TO.
+    ///
+    /// The address-keyed branch rewrites an existing conversation's alias and
+    /// key slot. On the fill lane the txid is an indexer claim, and the
+    /// decrypt proves only that the payload opens for us — nothing binds
+    /// payload to txid. A hostile endpoint pairing an attacker's envelope with
+    /// the txid of a real payment from a contact would otherwise rebind that
+    /// contact's thread to the attacker. (consensus-auditor BLOCK, 2026-08-14.)
+    #[test]
+    fn only_the_node_lane_may_rebind_a_conversation_by_address() {
+        // The gate is `origin == EventOrigin::Node`; pin the discriminator so
+        // a later edit cannot widen it back to both lanes unnoticed.
+        assert_eq!(EventOrigin::Node.row_source(), RowSource::NodeScanned);
+        assert_eq!(EventOrigin::Fill.row_source(), RowSource::FillSourced);
+        assert_ne!(
+            EventOrigin::Node,
+            EventOrigin::Fill,
+            "the two lanes must stay distinguishable — the identity rule keys on it"
+        );
     }
 
     /// The provenance labels are a STRINGLY-TYPED SEAM: Rust emits them,

@@ -140,9 +140,82 @@ impl HandshakePayload {
     /// Parse decrypted plaintext into a handshake, enforcing the live
     /// receiver's law: `alias` = 12 hex chars, `version` ≤ 1 when present.
     /// Tolerant everywhere else (kind-level generations, §0.7).
+    ///
+    /// ## Why this reads fields by hand instead of deriving `Deserialize`
+    ///
+    /// Measured on the founder's device, 2026-08-14. A third-generation
+    /// client emits **both spellings of the same field in one object**:
+    /// `conversationId` *and* `conversation_id`, `recipientAddress` *and*
+    /// `recipient_address`, `sendToRecipient` *and* `send_to_recipient`. The
+    /// derived path declared those as one field via `rename` + `alias`, so
+    /// serde saw the field twice and failed the WHOLE payload as a duplicate.
+    ///
+    /// The result was the worst class of bug this lane can have: a genuine
+    /// handshake — AEAD-authenticated, bond paid on chain, sealed to our own
+    /// key — silently refused, while the tolerance shim that caused it had
+    /// been added precisely so that no generation would be over-fit.
+    ///
+    /// So: read each field, prefer the camelCase spelling the live app emits,
+    /// fall back to snake_case, ignore anything unknown, and never let the
+    /// presence of an extra field reject a payload. A parser on this lane is
+    /// the last thing that should be strict — the envelope already proved the
+    /// sender holds the key.
     pub fn from_plaintext(plaintext: &[u8]) -> Result<Self> {
-        let payload: Self =
+        let value: serde_json::Value =
             serde_json::from_slice(plaintext).map_err(|_| CoreError::HandshakeShape("json"))?;
+        let map = value
+            .as_object()
+            .ok_or(CoreError::HandshakeShape("not an object"))?;
+
+        /// Prefer the camelCase spelling; accept snake_case; ignore a
+        /// duplicate rather than failing on it.
+        fn pick<'a>(
+            map: &'a serde_json::Map<String, serde_json::Value>,
+            camel: &str,
+            snake: &str,
+        ) -> Option<&'a serde_json::Value> {
+            map.get(camel).or_else(|| map.get(snake))
+        }
+        let text = |v: Option<&serde_json::Value>| {
+            v.and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string)
+        };
+
+        let alias = text(map.get("alias")).ok_or(CoreError::HandshakeShape("alias missing"))?;
+        // Milliseconds. Accept a numeric string too: it costs three lines and
+        // this whole entry exists because we were not tolerant enough.
+        let timestamp = map
+            .get("timestamp")
+            .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
+            .ok_or(CoreError::HandshakeShape("timestamp"))?;
+
+        let payload = Self {
+            kind: text(map.get("type")),
+            alias,
+            their_alias: text(pick(map, "theirAlias", "their_alias")),
+            timestamp,
+            // Present-but-unreadable must FAIL, never read as absent.
+            // `as_u64()` alone returns `None` for `"2"`, `2.0` and `-1`, which
+            // would skip the `> PROTOCOL_VERSION` check entirely and accept a
+            // payload the derived parser refused — failing open on the one
+            // field that exists to refuse things. `try_from`, never `as`, for
+            // the same reason: a lossy cast turns 4294967296 into 0.
+            // Tolerance is for SPELLING, not for the receiver law.
+            version: match map.get("version") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or(CoreError::HandshakeShape("version"))?,
+                ),
+            },
+            recipient_address: text(pick(map, "recipientAddress", "recipient_address")),
+            send_to_recipient: pick(map, "sendToRecipient", "send_to_recipient")
+                .and_then(serde_json::Value::as_bool),
+            is_response: pick(map, "isResponse", "is_response")
+                .and_then(serde_json::Value::as_bool),
+        };
+
         validate_alias(&payload.alias)?;
         if let Some(their_alias) = &payload.their_alias {
             validate_alias(their_alias)?;
@@ -159,6 +232,73 @@ impl HandshakePayload {
     /// aliases present + the response flag — the live app's "active" rule).
     pub fn is_acceptance(&self) -> bool {
         self.is_response == Some(true) && self.their_alias.is_some()
+    }
+}
+
+/// Describe the SHAPE of a plaintext [`HandshakePayload::from_plaintext`]
+/// refused: the field names present and the JSON type of each — **never a
+/// value**.
+///
+/// Why this exists. A rejection here is always an interop divergence, because
+/// the envelope AEAD-authenticated before we ever got here: the bytes are
+/// genuinely from a counterparty who holds the conversation. When our parser
+/// refuses one, the only thing that closes the gap is knowing which field
+/// list the other client actually emits — and a field list is protocol
+/// schema, the same class as the `ciph_msg:1:<kind>:` token that already
+/// rides the wire in clear. Values stay unrendered (§4).
+/// Every receive address we publish is an open inbox: anyone can seal an
+/// envelope one of our keys opens, and making this parser fail is as easy as
+/// omitting `timestamp`. So the field names reaching a log line are
+/// **stranger-chosen bytes**, and rendering them verbatim would let a stranger
+/// forge lines — with newlines — inside the very diagnostic record this
+/// function exists to be. Names are therefore emitted only when they look like
+/// identifiers, and the whole description is bounded.
+const MAX_SHAPE_FIELDS: usize = 24;
+const MAX_NAME_LEN: usize = 32;
+
+pub fn describe_shape(plaintext: &[u8]) -> String {
+    match serde_json::from_slice::<serde_json::Value>(plaintext) {
+        Ok(serde_json::Value::Object(map)) => {
+            let total = map.len();
+            let mut parts: Vec<String> = map
+                .iter()
+                .take(MAX_SHAPE_FIELDS)
+                .map(|(name, value)| format!("{}:{}", safe_name(name), json_type_name(value)))
+                .collect();
+            if total > MAX_SHAPE_FIELDS {
+                parts.push(format!("…+{} more", total - MAX_SHAPE_FIELDS));
+            }
+            parts.join(",")
+        }
+        Ok(other) => format!("not-an-object({})", json_type_name(&other)),
+        Err(_) => "not-json".to_string(),
+    }
+}
+
+/// A field name, but only if it looks like one: ASCII alphanumerics and
+/// underscores, bounded length. Anything else becomes a fixed placeholder, so
+/// no caller-chosen byte — control character, newline, or script — is ever
+/// rendered.
+fn safe_name(name: &str) -> String {
+    if !name.is_empty()
+        && name.len() <= MAX_NAME_LEN
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        name.to_string()
+    } else {
+        format!("<unprintable:{}>", name.len().min(999))
+    }
+}
+
+/// The NAME of a JSON value's type — never the value itself.
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -196,6 +336,110 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE 2026-08-14 INTEROP REGRESSION, pinned.
+    ///
+    /// A third-generation client on mainnet emits BOTH spellings of three
+    /// fields in one object. The field list below is the one measured on the
+    /// founder's device from a real, bond-paying handshake
+    /// (`31dcf952d78ede0f…`) that our parser refused as a serde duplicate
+    /// field — values here are synthetic; only the SHAPE is evidence.
+    ///
+    /// If this test ever fails, a payload a counterparty genuinely sent is
+    /// being dropped again, and the conversation it belongs to will hang at
+    /// "awaiting their accept" forever with no log line to explain it.
+    #[test]
+    fn dual_spelled_fields_parse_instead_of_failing_as_duplicates() {
+        let wire = br#"{"alias":"5431d40d179c","conversationId":"c1","conversation_id":"c1",
+            "recipientAddress":"kaspa:qz5","recipient_address":"kaspa:qz5",
+            "sendToRecipient":true,"send_to_recipient":true,
+            "timestamp":1786659235086,"type":"handshake","version":1}"#;
+        let parsed = HandshakePayload::from_plaintext(wire).expect("dual spellings must parse");
+        assert_eq!(parsed.alias, "5431d40d179c");
+        assert_eq!(parsed.timestamp, 1_786_659_235_086);
+        assert_eq!(parsed.send_to_recipient, Some(true));
+        assert_eq!(parsed.recipient_address.as_deref(), Some("kaspa:qz5"));
+        // No `isResponse` on this generation — it is NOT an acceptance by the
+        // alias-echo rule, which is why address-keyed matching (D-139) is
+        // what actually completes the conversation.
+        assert!(!parsed.is_acceptance());
+    }
+
+    /// Tolerance must not become laxity: the receiver's law still holds.
+    #[test]
+    fn tolerant_parsing_still_enforces_the_receiver_law() {
+        // A snake_case-only generation still parses (nothing over-fit).
+        let snake = br#"{"alias":"5431d40d179c","timestamp":1,"their_alias":"fa6d1afa79e1","is_response":true}"#;
+        let parsed = HandshakePayload::from_plaintext(snake).unwrap();
+        assert!(
+            parsed.is_acceptance(),
+            "snake_case response still activates"
+        );
+
+        // Unknown fields are ignored, never fatal (§0.5 forward-compat).
+        let future = br#"{"alias":"5431d40d179c","timestamp":1,"somethingNew":{"a":[1,2]}}"#;
+        assert!(HandshakePayload::from_plaintext(future).is_ok());
+
+        // A numeric-string timestamp is accepted.
+        let stringy = br#"{"alias":"5431d40d179c","timestamp":"1786659235086"}"#;
+        assert_eq!(
+            HandshakePayload::from_plaintext(stringy).unwrap().timestamp,
+            1_786_659_235_086
+        );
+
+        // But a bad alias, a missing timestamp and a future version all fail.
+        assert!(HandshakePayload::from_plaintext(br#"{"alias":"nothex","timestamp":1}"#).is_err());
+        assert!(HandshakePayload::from_plaintext(br#"{"alias":"5431d40d179c"}"#).is_err());
+        assert!(HandshakePayload::from_plaintext(
+            br#"{"alias":"5431d40d179c","timestamp":1,"version":2}"#
+        )
+        .is_err());
+        assert!(HandshakePayload::from_plaintext(b"[1,2,3]").is_err());
+    }
+
+    /// A published receive address is an open inbox, so the field names that
+    /// reach a log line are a STRANGER'S bytes. If they were rendered raw, a
+    /// stranger could forge lines — newlines and all — inside the diagnostic
+    /// record the wallet's own forensics depend on. (ffi-leak-auditor,
+    /// 2026-08-14.)
+    #[test]
+    fn a_stranger_cannot_write_arbitrary_lines_into_our_log() {
+        let hostile = "{\"al\\nias\":1,\"ok_name\":2,\"\":3}";
+        let shape = describe_shape(hostile.as_bytes());
+        assert!(!shape.contains('\n'), "no newline may survive: {shape}");
+        assert!(
+            shape.contains("ok_name:number"),
+            "honest names still render"
+        );
+        assert!(
+            shape.contains("<unprintable:"),
+            "hostile names are replaced"
+        );
+
+        // Length and count are both bounded.
+        let long = format!(r#"{{"{}":1}}"#, "a".repeat(500));
+        assert!(describe_shape(long.as_bytes()).contains("<unprintable:500>"));
+        let many: String = (0..80).map(|i| format!("\"f{i}\":1,")).collect();
+        let wide = describe_shape(format!("{{{}\"last\":1}}", many).as_bytes());
+        assert!(wide.contains("more"), "field count is capped: {wide}");
+        assert!(wide.len() < 800, "output stays bounded: {}", wide.len());
+
+        // Non-objects and non-JSON stay fixed tokens.
+        assert_eq!(describe_shape(b"[1,2]"), "not-an-object(array)");
+        assert_eq!(describe_shape(b"not json at all"), "not-json");
+    }
+
+    /// Tolerance is for SPELLING, not for the receiver law: a lossy `as u32`
+    /// truncated `version: 4294967296` to `0` and accepted it, where the
+    /// derived parser had refused outright. (ffi-leak-auditor, 2026-08-14.)
+    #[test]
+    fn an_out_of_range_version_cannot_truncate_into_a_legal_one() {
+        let wire = br#"{"alias":"5431d40d179c","timestamp":1,"version":4294967296}"#;
+        assert!(
+            HandshakePayload::from_plaintext(wire).is_err(),
+            "a version above u32 must be refused, not wrapped to 0"
+        );
+    }
 
     /// Byte-pins our emission to the live app's `JSON.stringify` output for
     /// both legs (field order = the object-literal order at

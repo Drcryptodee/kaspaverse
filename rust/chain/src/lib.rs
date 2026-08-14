@@ -28,7 +28,7 @@ pub use acceptance::{
 };
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
-pub use link::{EscalationOutcome, SignedTxRetention};
+pub use link::{sanitize_node_text, EscalationOutcome, SignedTxRetention};
 // The signed-tx DTO the retention/escalation path carries (a broadcast public
 // tx — no key material). Named here so the bridge never imports rpc-core.
 pub use kaspa_wrpc_client::prelude::RpcTransaction;
