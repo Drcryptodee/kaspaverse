@@ -1407,6 +1407,20 @@ static PENDING_ALIAS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// Cap for [`PENDING_ALIAS`] — the same order as the tracker's interest set.
 const PENDING_ALIAS_CAPACITY: usize = 256;
 
+/// Whether this txid is already awaiting resolution.
+///
+/// Checked BEFORE the decrypt, not after: the DAG delivers one transaction in
+/// several blocks, and on the founder's device a single message hit this path
+/// twelve times — twelve full key-window scans, and twelve identical log
+/// lines, for one message.
+fn alias_already_parked(txid: &str) -> bool {
+    PENDING_ALIAS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|(t, _)| t == txid)
+}
+
 /// Remember `txid -> alias` while we wait to learn who sent it.
 fn park_alias(txid: &str, alias: &str) {
     let mut parked = PENDING_ALIAS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1971,7 +1985,10 @@ fn handle_inbound_comm(
             //
             // Gated on actually missing one, because this decrypt scans the
             // whole key window and every stranger's comm reaches this line.
-            if origin == EventOrigin::Node && store.has_conversation_awaiting_alias() {
+            if origin == EventOrigin::Node
+                && !alias_already_parked(txid)
+                && store.has_conversation_awaiting_alias()
+            {
                 drop(store);
                 let envelope_bytes = decode_envelope_body(sealed);
                 if Envelope::from_bytes(&envelope_bytes).is_ok_and(|envelope| {
