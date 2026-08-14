@@ -499,9 +499,18 @@ void main() {
 
       await tester.longPress(find.text('Active'));
       await tester.pumpAndSettle();
-      // The confirm sheet is honest about being local-only.
+      // The confirm sheet is honest about being local-only — and, since the
+      // row is now tombstoned rather than deleted, honest that hiding does
+      // NOT stop the other side writing to you. The copy used to promise that
+      // a new request would start a fresh conversation, which is impossible
+      // against a counterparty whose client answers a known contact
+      // idempotently and sends nothing.
       expect(find.text('Hide conversation'), findsOneWidget);
-      expect(find.textContaining('your device only'), findsOneWidget);
+      expect(find.textContaining('from your device'), findsOneWidget);
+      expect(
+        find.textContaining('they can still write to you'),
+        findsOneWidget,
+      );
 
       await tester.tap(find.widgetWithText(FilledButton, 'Hide'));
       await tester.pumpAndSettle();

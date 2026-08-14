@@ -105,9 +105,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   /// The expired-invitation exit (V5, finding 15 — INV-6 instinct: every
   /// state has a unilateral out). One tap, founder-ruled: the card's copy
-  /// already explains, so no second confirm. Same reversible tombstone lane
-  /// as hide — dismissal loses nothing (the bond is pruned; a fresh
-  /// handshake re-creates a row).
+  /// already explains, so no second confirm. Same reversible hide lane
+  /// as hide — the row is tombstoned, not deleted, so the counterparty's
+  /// alias survives and a later message still finds its home.
   Future<void> _dismissExpired(ConversationDto conversation) async {
     KvHaptic.selection();
     await _messaging.hide(conversation.conversationId);
@@ -118,7 +118,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   /// The zombie-cleanup affordance (D-068): long-press → confirm → hide. Local
-  /// only; nothing leaves the device and a fresh handshake re-creates the row.
+  /// only; nothing leaves the device. The row is tombstoned, so their next
+  /// message reopens the thread.
   Future<void> _hide(ConversationDto conversation) async {
     KvHaptic.selection();
     final confirmed = await showModalBottomSheet<bool>(
@@ -127,7 +128,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
       // capped at 9/16 of the screen, and at large text scales a confirm sheet
       // clips the very button it exists to ask for.
       isScrollControlled: true,
-      builder: (_) => _HideSheet(label: contactLabel(conversation)),
+      builder: (_) => _HideSheet(
+        label: contactLabel(conversation),
+        isInvitation: conversation.status == 'pending_in',
+      ),
     );
     if (confirmed != true) return;
     await _messaging.hide(conversation.conversationId);
@@ -354,9 +358,16 @@ class _ConversationCard extends StatelessWidget {
 /// this is local only — it removes nothing from the chain and tells the
 /// counterpart nothing.
 class _HideSheet extends StatelessWidget {
-  const _HideSheet({required this.label});
+  const _HideSheet({required this.label, this.isInvitation = false});
 
   final String label;
+
+  /// Hiding means two different things, and the sheet must not promise the
+  /// wrong one. On a conversation you already have it is a mute — they can
+  /// still write and the thread comes back. On an invitation you never took
+  /// up it is a block: their messages are refused from then on, because that
+  /// card spends a bond and a stranger must not be able to re-arm it.
+  final bool isInvitation;
 
   @override
   Widget build(BuildContext context) {
@@ -389,9 +400,15 @@ class _HideSheet extends StatelessWidget {
             ),
             const SizedBox(height: KvSpace.sm),
             Text(
-              'Removes this thread from your device only. Nothing is deleted '
-              "on-chain and the other side isn't notified — a new request "
-              'from them starts a fresh conversation.',
+              isInvitation
+                  ? 'Turns down this invitation and clears it from your '
+                        "device. Nothing is deleted on-chain and they aren't "
+                        "notified, but you won't hear from them again unless "
+                        'they send a new request.'
+                  : 'Clears the messages from your device and hides the '
+                        "thread. Nothing is deleted on-chain and they aren't "
+                        'notified, so they can still write to you — a new '
+                        'message brings the thread back.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: KvColor.textSecondary,
               ),

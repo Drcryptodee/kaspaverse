@@ -298,7 +298,8 @@ class MessagingService {
   Future<void> abandon() => abandonFn();
 
   /// Hide (tombstone) a conversation locally — the zombie-cleanup affordance
-  /// (D-068). Removes nothing on-chain; a fresh handshake re-creates the row.
+  /// (D-068). Removes nothing on-chain. The row is TOMBSTONED, not deleted:
+  /// the contact's alias survives, and their next message reopens the thread.
   /// Re-pulls the list so the row drops immediately.
   Future<void> hide(String conversationId) async {
     try {

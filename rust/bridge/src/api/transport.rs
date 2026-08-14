@@ -700,6 +700,8 @@ async fn fill_walks(
             .list_conversations()
             .into_iter()
             .filter(|c| c.status == ConversationStatus::Active)
+            // Don't spend indexer round trips refilling a thread the user hid.
+            .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
             .filter_map(|c| {
                 let their_alias = c.their_alias.clone()?;
                 if c.contact_address.is_empty() || their_alias.is_empty() {
@@ -1168,6 +1170,10 @@ enum DropReason {
     NoKeyOpensIt,
     /// Opened, but the plaintext was not a handshake payload we can decode.
     UndecodablePayload,
+    /// Traffic for an invitation the user dismissed. Correct and expected —
+    /// NOT the D-139 symptom, and it must not pollute the one diagnostic that
+    /// found D-139.
+    DismissedInvitation,
     /// A `comm` tagged with an alias none of our conversations answers to.
     ///
     /// This is the visible end of the D-139 cascade: a conversation stuck at
@@ -1310,7 +1316,8 @@ fn dropped(kind: &str, txid: &str, reason: DropReason, origin: EventOrigin) -> F
                     | DropReason::NoConversationForAlias
                     | DropReason::MalformedCommHead
                     | DropReason::MalformedEnvelope
-            ));
+            ))
+        || reason == DropReason::DismissedInvitation;
     if routine {
         log::debug!("transport-intake: skipped {kind} tx={txid} reason={reason:?}");
     } else {
@@ -1374,6 +1381,87 @@ fn decrypt_drop(error: &CoreError) -> DropReason {
     match error {
         CoreError::VaultLocked => DropReason::VaultLocked,
         _ => DropReason::NoKeyOpensIt,
+    }
+}
+
+/// May inbound traffic reopen this hidden conversation?
+///
+/// A conversation you already have: yes — hide is a mute. An invitation you
+/// turned down: never. That card spends the bond refund, so a stranger must
+/// not be able to re-arm it by writing again (INV-6: no exit that the
+/// counterparty can revoke).
+fn may_unhide(status: ConversationStatus, tombstoned: bool) -> bool {
+    tombstoned && status != ConversationStatus::PendingInbound
+}
+
+/// Is this inbound comm addressed to an invitation the user dismissed?
+///
+/// Checked at BOTH the alias resolution and again after the decrypt re-takes
+/// the store lock: the decrypt runs unlocked, and `transport_hide_conversation`
+/// runs concurrently on an FRB worker, so a dismissal can land in between.
+fn comm_is_dismissed(status: ConversationStatus, tombstoned: bool) -> bool {
+    tombstoned && status == ConversationStatus::PendingInbound
+}
+
+/// Bring a hidden conversation back the moment its counterparty writes.
+///
+/// Without this, hiding is not a mute but a **silent sink**: the row still
+/// matches by alias, so their messages are stored and `last_activity` is
+/// bumped, but the list filters the row out forever and no affordance exists
+/// to restore it. That is strictly worse than the hard delete it replaced —
+/// a state with no unilateral exit (INV-6) — and it would make the hide
+/// sheet's promise that they can still write to you a lie, because the
+/// writing would arrive somewhere no user can look.
+///
+/// Un-hiding needs inbound traffic on a row that is already a **contact**.
+///
+/// "Traffic", not "the contact": a comm proves only that the envelope opened
+/// under one of our keys, and both our receive addresses and our alias are
+/// public, so any wire observer can mint one. Hiding a CONTACT is therefore
+/// revocable by a stranger for the price of a dust transaction. That is an
+/// accepted residual — no money rides on a contact row — and it closes when
+/// comms carry sender authentication (backlog #5). It is exactly why the
+/// invitation case is NOT treated the same way.
+///
+/// A dismissed `PendingInbound` invitation is never resurrected: the guard at
+/// the top of this function refuses it under the write lock,
+/// `handle_inbound_comm` drops its traffic outright, and
+/// `conversation_by_contact_address` cannot reach one at all because an
+/// invitation carries no contact address until its accept.
+///
+/// So `hide` has an honest two-sided meaning: on a conversation you already
+/// have, it is "mute until they write"; on an invitation you never took up,
+/// it is "no".
+///
+/// (Do NOT re-derive that guarantee from status filtering in
+/// `conversation_by_alias` — status there RANKS, it does not filter. An
+/// earlier version of this comment claimed the filter as its safety argument
+/// and was falsified by the same change set that removed it.)
+fn unhide_on_inbound(store: &mut TransportStore, conversation_id: &str) {
+    // Re-check status HERE, under the write lock, not only at the earlier
+    // alias-resolution guard: the decrypt between them runs with the lock
+    // released, and `transport_hide_conversation` runs concurrently on an FRB
+    // worker. A dismissal landing inside that window must still win, or the
+    // user's exit from a money-spending invitation is revocable by whoever
+    // they dismissed — for the cost of streaming dust comms to widen the race.
+    let tombstoned = store.is_conversation_tombstoned(conversation_id);
+    let Some(status) = store.conversation(conversation_id).map(|c| c.status) else {
+        return;
+    };
+    if !may_unhide(status, tombstoned) {
+        return;
+    }
+    {
+        match store.untombstone_conversation(conversation_id) {
+            // "someone wrote", not "the contact wrote": a comm proves only
+            // that the envelope opened under one of our keys, never who sent
+            // it. Sender authentication is still owed (backlog #5).
+            Ok(true) => {
+                log::info!("transport-intake: hidden conversation reopened by inbound traffic")
+            }
+            Ok(false) => {}
+            Err(e) => log::warn!("transport-hub: unhide failed: {e}"),
+        }
     }
 }
 
@@ -1574,6 +1662,7 @@ async fn handle_inbound_handshake(
                 // not re-sort the conversation above newer traffic.
                 conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
                 let conversation_id = conversation.conversation_id.clone();
+                unhide_on_inbound(&mut store, &conversation_id);
                 warn_store(store.upsert_conversation(conversation));
                 warn_store(store.record_message(MessageRecord {
                     txid: txid.to_string(),
@@ -1658,6 +1747,7 @@ async fn handle_inbound_handshake(
             if let Some(existing) = store.conversation_by_contact_address(&sender) {
                 let mut conversation = existing.clone();
                 let conversation_id = conversation.conversation_id.clone();
+                unhide_on_inbound(&mut store, &conversation_id);
                 let was = conversation.status;
                 conversation.their_alias = Some(payload.alias.clone());
                 // Their handshake is the authority on which of our keys they seal
@@ -1770,6 +1860,32 @@ fn handle_inbound_comm(
         let Some(conversation) = store.conversation_by_alias(&alias) else {
             return dropped(COMM, txid, DropReason::NoConversationForAlias, origin);
         };
+        // A DISMISSED INVITATION STAYS DISMISSED.
+        //
+        // This drop stops THIS row being re-armed. It is not what stops a
+        // stranger costing the user money — they can always mint a NEW
+        // invitation with a fresh dust handshake. The money is held by
+        // `transport_prepare_accept`'s bond check, which refuses to refund a
+        // bond that never arrived.
+        //
+        // Hiding a row that never became a contact is a local **block**, not
+        // a mute. A `PendingInbound` row IS the accept affordance, and
+        // accepting spends the §0.6 bond refund — so if a stranger could
+        // re-arm it merely by writing again, the user's only exit from an
+        // unwanted, money-spending invitation would be revocable by the very
+        // party they dismissed (INV-6: no state whose exit needs the
+        // counterparty's cooperation).
+        //
+        // This is refused HERE rather than inside `unhide_on_inbound`
+        // deliberately: stopping only the un-hide would still record their
+        // messages into a row no user can ever open — the silent sink that
+        // the un-hide exists to prevent. Dropping is the honest answer.
+        if comm_is_dismissed(
+            conversation.status,
+            store.is_conversation_tombstoned(&conversation.conversation_id),
+        ) {
+            return dropped(COMM, txid, DropReason::DismissedInvitation, origin);
+        }
         (
             conversation.conversation_id.clone(),
             (
@@ -1807,6 +1923,19 @@ fn handle_inbound_comm(
     // V2b): filled history sorts into its true position, not "now".
     let now = block_time_ms.unwrap_or_else(now_unix_ms);
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    // Re-check under the RE-TAKEN lock. The decrypt above ran unlocked, and
+    // `transport_hide_conversation` runs concurrently on an FRB worker — so a
+    // dismissal can land between the alias-resolution guard and here. Without
+    // this, the message would be recorded into a row no user can ever open,
+    // which is the silent sink that guard exists to prevent.
+    if comm_is_dismissed(
+        store
+            .conversation(&conversation_id)
+            .map_or(ConversationStatus::Active, |c| c.status),
+        store.is_conversation_tombstoned(&conversation_id),
+    ) {
+        return dropped(COMM, txid, DropReason::DismissedInvitation, origin);
+    }
     let record = MessageRecord {
         txid: txid.to_string(),
         conversation_id: conversation_id.clone(),
@@ -1834,6 +1963,7 @@ fn handle_inbound_comm(
         if let Some(existing) = store.conversation(&conversation_id) {
             let mut conversation = existing.clone();
             conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
+            unhide_on_inbound(&mut store, &conversation_id);
             warn_store(store.upsert_conversation(conversation));
         }
         drop(store);
@@ -1856,6 +1986,7 @@ fn handle_inbound_comm(
             // Max, never assignment: an old filled row must not re-sort the
             // conversation list above genuinely newer traffic.
             conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
+            unhide_on_inbound(&mut store, &conversation_id);
             warn_store(store.upsert_conversation(conversation));
         }
         drop(store);
@@ -2131,6 +2262,16 @@ pub async fn transport_prepare_accept(
         if conversation.status != ConversationStatus::PendingInbound {
             return Err(AppError::msg("this conversation isn't awaiting an accept"));
         }
+        // The invariant lives at the SPEND, not in the render path. A
+        // dismissed invitation is unreachable today only because the list
+        // filters it out and Dart is the sole caller — so any future surface
+        // handing back a conversation_id (deep link, notification, restore)
+        // would spend 0.2 KAS on a card the user explicitly dismissed.
+        if store.is_conversation_tombstoned(&conversation_id) {
+            return Err(AppError::msg(
+                "you dismissed this invitation — accepting it would return a bond you chose not to take up",
+            ));
+        }
         // Terminal-vs-transient taxonomy (V5, finding 15): past the pruning
         // horizon the bond can never resolve — the honest refusal is
         // permanent, never "try again in a few seconds". Defense in depth
@@ -2296,6 +2437,47 @@ pub async fn transport_prepare_comm(
     prepare_comm_plaintext(conversation_id, text).await
 }
 
+/// May we send a comm in this conversation?
+///
+/// **We used to require `Active`, and that was stricter than the protocol.**
+/// Sending needs exactly two things: OUR alias (it rides the wire head) and
+/// THEIR address (the envelope is sealed to it). A conversation we initiated
+/// has both the moment the handshake is broadcast — the counterparty's alias
+/// is needed to *read* what they send, never to write to them.
+///
+/// The cost of the old rule was total. Against a counterparty who already
+/// knows us, the live population answers a repeat handshake idempotently and
+/// **emits no response** (`conversation-manager-service.ts:181-213`), so
+/// `PendingOutbound` is a state our conversation can never leave. Meanwhile
+/// their side is already active and monitoring our alias. We were refusing to
+/// speak into a channel that was open the whole time — measured on the
+/// founder's device, where a thread that had worked since July went silent in
+/// both directions.
+///
+/// A whitelist, never `!= something`: a status added later is refused by
+/// default rather than silently becoming sendable.
+///
+/// The two emptiness guards are load-bearing, not decoration. A
+/// `PendingInbound` row carries `contact_address: ""` and `my_alias: ""` until
+/// its accept resolves them, so without these a restored or legacy row could
+/// put an empty alias head on mainnet.
+fn comm_sendable(
+    status: ConversationStatus,
+    initiated_by_me: bool,
+    contact_address: &str,
+    my_alias: &str,
+) -> bool {
+    let state_allows = match status {
+        ConversationStatus::Active => true,
+        // Ours to speak in: we opened it and we hold both halves.
+        ConversationStatus::PendingOutbound => initiated_by_me,
+        // Theirs to answer: accepting is where their bond is refunded, and
+        // skipping it would take their money silently.
+        ConversationStatus::PendingInbound => false,
+    };
+    state_allows && !contact_address.is_empty() && !my_alias.is_empty()
+}
+
 /// The shared self-send comm PREPARE (D-069). Seal `text` to the contact,
 /// self-send the computed floor to our OWN bound address (input[0] + change =
 /// that address, D2/D-068), and stash the built-but-unsigned plan. Every
@@ -2313,10 +2495,18 @@ async fn prepare_comm_plaintext(
         let conversation = store
             .conversation(&conversation_id)
             .ok_or_else(|| AppError::msg("conversation not found"))?;
-        if conversation.status != ConversationStatus::Active {
-            return Err(AppError::msg(
-                "this conversation isn't active yet — the handshake must complete first",
-            ));
+        if !comm_sendable(
+            conversation.status,
+            conversation.initiated_by_me,
+            &conversation.contact_address,
+            &conversation.my_alias,
+        ) {
+            return Err(AppError::msg(match conversation.status {
+                ConversationStatus::PendingInbound => {
+                    "accept this invitation first — that is where their bond is refunded"
+                }
+                _ => "this conversation isn't ready to send yet",
+            }));
         }
         (
             conversation.contact_address.clone(),
@@ -2553,6 +2743,9 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
     Ok(store
         .list_conversations()
         .into_iter()
+        // Hidden rows are matchable but not shown — that asymmetry IS the fix
+        // (see `transport_hide_conversation`).
+        .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
         .map(|c| ConversationDto {
             invite_expired: invite_expired(c.status, c.created_unix_ms, now),
             conversation_id: c.conversation_id,
@@ -2571,20 +2764,26 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
         .collect())
 }
 
-/// Hide a conversation — tombstone the row (and its messages replay-drop with
-/// it via the store's own remove path). The P2.3b cleanup affordance for zombie
-/// pending rows (D-068): the KaChat-era pending contacts and the counterpart's
-/// own stranger-conversation the sitting surfaced. Local-only bookkeeping — it
-/// removes nothing on-chain and signals nothing to the counterpart; a future
-/// handshake from the same address simply re-creates a fresh row. Idempotent:
-/// hiding an unknown id is a no-op success.
+/// Hide a conversation — forget its CONTENT, keep its IDENTITY.
+///
+/// This used to hard-delete the conversation row, and that was the defect
+/// behind the worst interop failure this project has had. The row is the only
+/// place the counterparty's alias lives, and their alias is the only thing
+/// that routes their messages to us. Deleting it did not stop them writing —
+/// it made every message they sent afterwards undeliverable, permanently,
+/// because a client that already knows us never re-announces itself.
+///
+/// So: the messages are still purged — hide must forget what was said, and
+/// the sheet copy promises exactly that — but the conversation row is
+/// tombstoned rather than removed. It stops appearing in the list and stops
+/// being swept for history, while remaining matchable by alias and by address
+/// so an acceptance or a later message can still find its home.
+///
+/// Idempotent: hiding an unknown id is a no-op success.
 pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppError> {
     let hub = hub()?;
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-    // Cascade: REMOVE the conversation's messages first so no orphaned
-    // sealed rows linger, then the conversation row itself. (A hard remove —
-    // deliberately not the V1 reversible reorg tombstone: hide is a local
-    // purge the user asked for, not a chain observation.)
+    // Content goes. Identity stays.
     let txids: Vec<String> = store
         .messages_for(&conversation_id)
         .into_iter()
@@ -2594,10 +2793,11 @@ pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppErr
         warn_store(store.remove_message(&txid));
     }
     store
-        .remove_conversation(&conversation_id)
+        .tombstone_conversation(&conversation_id)
         .map_err(AppError::chain)?;
     drop(store);
-    // Nudge any open list to re-pull (the thread, if open, will 404 and pop).
+    // Nudge any open list to re-pull. The thread does NOT 404 — the row
+    // survives by design; it simply stops being listed.
     ping(&conversation_id);
     Ok(())
 }
@@ -3218,6 +3418,90 @@ mod tests {
                 FoldOutcome::Held,
                 "{reason:?} is our own transient condition — the row must be retried"
             );
+        }
+    }
+
+    /// THE SEND GATE, which four independent audit lanes found separately.
+    ///
+    /// Requiring `Active` was stricter than the protocol: sending needs our
+    /// alias and their address, both of which a conversation we initiated
+    /// already has. Against a counterparty who answers a repeat handshake
+    /// idempotently — emitting nothing — `PendingOutbound` is a state we can
+    /// never leave, so the old rule silenced a thread whose far side was open
+    /// the whole time.
+    #[test]
+    fn we_may_speak_in_a_conversation_we_opened() {
+        use ConversationStatus::{Active, PendingInbound, PendingOutbound};
+        let addr = "kaspa:qqwsnxvu";
+        let mine = "8caa5e3c79ff";
+
+        // The case that was broken on the founder's device.
+        assert!(comm_sendable(PendingOutbound, true, addr, mine));
+        assert!(comm_sendable(Active, true, addr, mine));
+        assert!(comm_sendable(Active, false, addr, mine));
+
+        // Theirs to answer: accepting is where their bond is refunded, and
+        // skipping it would take their money silently.
+        assert!(!comm_sendable(PendingInbound, false, addr, mine));
+        assert!(!comm_sendable(PendingInbound, true, addr, mine));
+
+        // A pending-outbound row we did NOT initiate is not ours to speak in.
+        assert!(!comm_sendable(PendingOutbound, false, addr, mine));
+
+        // The emptiness guards are load-bearing, not decoration: an unaccepted
+        // row carries neither field, and an empty alias head would go on
+        // mainnet.
+        assert!(!comm_sendable(Active, true, "", mine), "no contact address");
+        assert!(
+            !comm_sendable(Active, true, addr, ""),
+            "no alias of our own"
+        );
+        assert!(!comm_sendable(PendingOutbound, true, "", ""));
+    }
+
+    /// HIDE MEANS TWO DIFFERENT THINGS, and getting them the wrong way round
+    /// is a money bug in one direction and a silent sink in the other.
+    ///
+    /// On a conversation you already have, hide is a MUTE: their next message
+    /// brings it back. On an invitation you turned down it is a BLOCK: that
+    /// card spends the bond refund, so a stranger must never be able to
+    /// re-arm it by writing again — an exit the counterparty can revoke is no
+    /// exit at all (INV-6).
+    ///
+    /// These are pure predicates precisely so they can be pinned here. The
+    /// guard they replaced was inspected-correct and still wrong: it straddled
+    /// a lock release, and the next person to move a call site would have
+    /// regressed it in silence.
+    #[test]
+    fn a_dismissed_invitation_stays_dismissed_but_a_muted_contact_returns() {
+        use ConversationStatus::{Active, PendingInbound, PendingOutbound};
+
+        // A hidden CONTACT reopens on inbound traffic.
+        assert!(may_unhide(Active, true));
+        assert!(may_unhide(PendingOutbound, true));
+        // A dismissed INVITATION never does.
+        assert!(!may_unhide(PendingInbound, true));
+        // Nothing to reopen when the row was never hidden.
+        assert!(!may_unhide(Active, false));
+        assert!(!may_unhide(PendingInbound, false));
+
+        // The mirror predicate: only a hidden invitation's traffic is refused.
+        assert!(comm_is_dismissed(PendingInbound, true));
+        assert!(!comm_is_dismissed(PendingInbound, false), "live invitation");
+        assert!(
+            !comm_is_dismissed(Active, true),
+            "a muted contact still folds"
+        );
+        assert!(!comm_is_dismissed(PendingOutbound, true));
+
+        // The two must never both fire, in any state.
+        for status in [Active, PendingOutbound, PendingInbound] {
+            for tombstoned in [true, false] {
+                assert!(
+                    !(may_unhide(status, tombstoned) && comm_is_dismissed(status, tombstoned)),
+                    "reopen and refuse must be mutually exclusive: {status:?}/{tombstoned}"
+                );
+            }
         }
     }
 

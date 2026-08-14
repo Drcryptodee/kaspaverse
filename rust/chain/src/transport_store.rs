@@ -240,22 +240,78 @@ impl TransportStore {
 
     /// Find by a wire alias — matches EITHER side's alias, because inbound
     /// comm heads may carry ours or theirs depending on the sender's
-    /// convention (the live app maps both, `aliasToConversation`).
-    /// Ties break by `conversation_id`, NOT by HashMap iteration order.
+    /// convention.
     ///
-    /// Aliases are validated for shape only, so a hostile handshake may declare
-    /// one equal to an existing conversation's. `.values().find(..)` then routed
-    /// a genuine contact's messages to whichever record the hash order happened
-    /// to reach first — a different answer per process start, for the same
-    /// stored state (product-audit run 1, F2 adjacent). Deterministic misrouting
-    /// is still misrouting, but it is diagnosable, reproducible, and cannot
-    /// silently change under a rebuild.
+    /// **Status RANKS the candidates; it does not filter them.** That
+    /// distinction is the whole design.
+    ///
+    /// An alias is public wire data and ours are validated for shape only, so
+    /// a stranger may declare one equal to a live thread's. The old
+    /// `min(conversation_id)` tie-break made that **grindable**: our ids are
+    /// random hex, and while every attempt must pay an output to a watched
+    /// address, the bond *amount* is only checked at accept — so invitations
+    /// can be minted at the dust floor until one lands with a lower id, after
+    /// which the real contact's messages file themselves into an invisible
+    /// pending row. Ranking by status defeats that outright: an unaccepted
+    /// invitation can never outrank a live conversation, whatever its id.
+    ///
+    /// **Filtering by status would have been a different bug.** The live
+    /// population's own send gate is `active || (pending && initiatedByMe)`,
+    /// the same rule we grant ourselves, so a counterparty legitimately sends
+    /// comms BEFORE we accept. Our `PendingInbound` row already knows their
+    /// alias, and excluding it would drop that traffic on the node lane —
+    /// recoverable only through an untrusted indexer, if at all. We would be
+    /// claiming a right we refuse from the other side.
+    ///
+    /// Ordering, most significant first. `created_unix_ms` sits ABOVE
+    /// `last_activity` deliberately: establishment order is not
+    /// attacker-editable, whereas an attacker bumps `last_activity` simply by
+    /// sending, which would otherwise let them climb the ranking with the very
+    /// traffic being judged.
+    ///
+    /// The prior docstring cited Kasia's `aliasToConversation` (which maps
+    /// both sides) as licence for a GATE. That was the wrong citation — their
+    /// gate is `getMonitoredConversations`, `theirAlias` only.
+    ///
+    /// Hidden (tombstoned) rows still match, deliberately — see
+    /// [`Self::tombstone_conversation`].
     pub fn conversation_by_alias(&self, alias: &str) -> Option<&ConversationRecord> {
+        /// Higher wins. A conversation we can actually talk in outranks one
+        /// still awaiting our accept.
+        fn rank(c: &ConversationRecord) -> u8 {
+            match c.status {
+                ConversationStatus::Active => 2,
+                ConversationStatus::PendingOutbound if c.initiated_by_me => 1,
+                _ => 0,
+            }
+        }
         self.conversations
             .records
             .values()
             .filter(|c| c.my_alias == alias || c.their_alias.as_deref() == Some(alias))
-            .min_by(|a, b| a.conversation_id.cmp(&b.conversation_id))
+            .max_by(|a, b| {
+                rank(a)
+                    .cmp(&rank(b))
+                    // WITHIN a rank, a live row beats a hidden one — so a
+                    // dismissed invitation cannot shadow a live invitation
+                    // that shares its alias and get that stranger's genuine
+                    // pre-accept traffic dropped as "dismissed".
+                    //
+                    // This sits BELOW rank on purpose. Demoting hidden rows
+                    // outright would let a squatter's pending row capture a
+                    // hidden ACTIVE thread's alias, and the un-hide would then
+                    // never fire — breaking the promise that a contact can
+                    // still reach you.
+                    .then(
+                        (!self.conversations.is_tombstoned(&a.conversation_id))
+                            .cmp(&!self.conversations.is_tombstoned(&b.conversation_id)),
+                    )
+                    // Older establishment wins: the squatter arrived later.
+                    .then(b.created_unix_ms.cmp(&a.created_unix_ms))
+                    .then(a.last_activity_unix_ms.cmp(&b.last_activity_unix_ms))
+                    // Reversed, so `max_by` lands on the lowest id.
+                    .then(b.conversation_id.cmp(&a.conversation_id))
+            })
     }
 
     /// Find the PendingOutbound conversation whose `my_alias` an acceptance
@@ -351,6 +407,15 @@ impl TransportStore {
     }
 
     /// Remove a conversation row (tombstone frame).
+    /// **Destroys the conversation row, including the counterparty's alias.**
+    ///
+    /// Do not reach for this as a "cleanup". Hiding uses
+    /// [`Self::tombstone_conversation`]; this primitive exists only for a true
+    /// purge, and it has no caller today. The alias it deletes is the single
+    /// field nothing else on the device can re-derive — a client that already
+    /// knows us never re-announces itself — and destroying it silently
+    /// unroutes every message that contact sends afterwards. That is not
+    /// hypothetical: it cost a live thread in July 2026 (D-141).
     pub fn remove_conversation(&mut self, conversation_id: &str) -> Result<()> {
         self.conversations.remove(conversation_id)
     }
@@ -462,6 +527,39 @@ impl TransportStore {
     pub fn is_message_tombstoned(&self, txid: &str) -> bool {
         self.messages.is_tombstoned(txid)
     }
+
+    /// Hide a conversation REVERSIBLY.
+    ///
+    /// Hiding used to call [`Self::remove_conversation`], and that hard delete
+    /// destroyed the only copy of the counterparty's alias on the device —
+    /// the one field that can never be re-derived from anything we keep. It
+    /// cost a real user a working thread: he hid a conversation in July, and
+    /// when the same contact kept messaging him, every message was dropped
+    /// because the alias that routed them had been deleted. The counterparty
+    /// never re-declares it in a handshake, because their client answers a
+    /// contact it already knows idempotently.
+    ///
+    /// The reversible primitive was already here, wired only to the messages
+    /// log for reorg ghosts. D-068 ratified hide as a "local tombstone" and
+    /// the UI called it reversible; only the code disagreed.
+    ///
+    /// **Tombstoned rows must keep matching** in [`Self::conversation_by_alias`],
+    /// [`Self::conversation_by_contact_address`] and
+    /// [`Self::conversation_awaiting_response`] — that is the whole point.
+    /// Only the user-facing list and the fill sweep filter them.
+    pub fn tombstone_conversation(&mut self, conversation_id: &str) -> Result<bool> {
+        self.conversations.tombstone(conversation_id)
+    }
+
+    /// Bring a hidden conversation back — the counterparty wrote again.
+    pub fn untombstone_conversation(&mut self, conversation_id: &str) -> Result<bool> {
+        self.conversations.untombstone(conversation_id)
+    }
+
+    /// Whether a conversation is currently hidden.
+    pub fn is_conversation_tombstoned(&self, conversation_id: &str) -> bool {
+        self.conversations.is_tombstoned(conversation_id)
+    }
 }
 
 impl std::fmt::Debug for TransportStore {
@@ -480,6 +578,150 @@ impl std::fmt::Debug for TransportStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HIDING MUST NOT DESTROY IDENTITY.
+    ///
+    /// The July regression in miniature: a user hides a conversation, the
+    /// counterparty keeps writing, and every message must still find its home.
+    /// Content goes; the alias binding stays.
+    #[test]
+    fn a_hidden_conversation_still_routes_its_counterpartys_messages() {
+        let dir = test_dir("hide-keeps-identity");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let mut c = conversation("hidden-one", 10);
+        c.their_alias = Some("90b4a1b640eb".to_string());
+        c.status = ConversationStatus::Active;
+        store.upsert_conversation(c).unwrap();
+
+        assert!(store.tombstone_conversation("hidden-one").unwrap());
+        assert!(store.is_conversation_tombstoned("hidden-one"));
+
+        // Still matchable — this is the entire point of the change.
+        assert_eq!(
+            store
+                .conversation_by_alias("90b4a1b640eb")
+                .map(|c| c.conversation_id.as_str()),
+            Some("hidden-one"),
+            "a hidden conversation must still route its contact's messages"
+        );
+        assert!(
+            store.conversation("hidden-one").is_some(),
+            "the row survives"
+        );
+
+        // And it survives a reload — a tombstone is a frame, not memory.
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(reloaded.is_conversation_tombstoned("hidden-one"));
+        assert!(reloaded.conversation_by_alias("90b4a1b640eb").is_some());
+
+        // Reversible: the counterparty wrote again.
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        assert!(store.untombstone_conversation("hidden-one").unwrap());
+        assert!(!store.is_conversation_tombstoned("hidden-one"));
+
+        // THE OTHER END OF THE AXIS, and it is the one with money on it.
+        // A DISMISSED INVITATION must stay dismissed: a `PendingInbound` row
+        // is the accept affordance, and accepting spends the bond refund, so
+        // a stranger must never be able to re-arm it by writing again. The
+        // store still MATCHES the row by alias (that is what the intake needs
+        // in order to recognise and drop it); the refusal lives in
+        // `handle_inbound_comm`, which is why this asserts the two facts that
+        // guard combines: still matchable, still tombstoned.
+        let mut invite = conversation("dismissed-invite", 10);
+        invite.their_alias = Some("beefbeef0001".to_string());
+        invite.status = ConversationStatus::PendingInbound;
+        invite.initiated_by_me = false;
+        invite.contact_address = String::new();
+        store.upsert_conversation(invite).unwrap();
+        assert!(store.tombstone_conversation("dismissed-invite").unwrap());
+
+        let matched = store.conversation_by_alias("beefbeef0001").unwrap();
+        assert_eq!(matched.conversation_id, "dismissed-invite");
+        assert_eq!(matched.status, ConversationStatus::PendingInbound);
+        assert!(
+            store.is_conversation_tombstoned("dismissed-invite"),
+            "the intake must be able to SEE that this row was dismissed"
+        );
+        // And it is unreachable by address, so no handshake path can revive it.
+        assert!(
+            store.conversation_by_contact_address("").is_none(),
+            "an invitation carries no contact address until its accept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An alias is public wire data, and a handshake costs nothing until it is
+    /// accepted — so an attacker could mint cheap invitations declaring a
+    /// victim thread's alias until one landed with a lower random id, and the
+    /// old `min(conversation_id)` tie-break would hand them the thread.
+    #[test]
+    fn a_ground_alias_collision_cannot_steal_a_live_thread() {
+        let dir = test_dir("alias-grind");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+
+        // The real thread. Its id deliberately sorts LAST.
+        let mut real = conversation("zzz-real", 500);
+        real.their_alias = Some("90b4a1b640eb".to_string());
+        real.status = ConversationStatus::Active;
+        store.upsert_conversation(real).unwrap();
+
+        // The attacker's unaccepted invitation, id ground to sort FIRST and
+        // `last_activity` bumped by the very traffic being judged.
+        let mut squat = conversation("aaa-squatter", 900);
+        squat.their_alias = Some("90b4a1b640eb".to_string());
+        squat.status = ConversationStatus::PendingInbound;
+        squat.initiated_by_me = false;
+        store.upsert_conversation(squat).unwrap();
+
+        assert_eq!(
+            store
+                .conversation_by_alias("90b4a1b640eb")
+                .map(|c| c.conversation_id.as_str()),
+            Some("zzz-real"),
+            "an unaccepted invitation must never capture a live thread's alias"
+        );
+
+        // …but a pending invitation is still REACHABLE on its OWN alias.
+        // Status ranks, it does not filter: the live population sends before
+        // we accept (their gate is `active || (pending && initiatedByMe)`),
+        // so dropping pre-accept traffic would claim a right we refuse from
+        // their side.
+        let mut invitation = conversation("pending-invite", 20);
+        invitation.their_alias = Some("d0d0cafe9999".to_string());
+        invitation.status = ConversationStatus::PendingInbound;
+        invitation.initiated_by_me = false;
+        invitation.contact_address = String::new();
+        store.upsert_conversation(invitation).unwrap();
+        assert_eq!(
+            store
+                .conversation_by_alias("d0d0cafe9999")
+                .map(|c| c.conversation_id.as_str()),
+            Some("pending-invite"),
+            "a pending invitation must still receive its own alias's traffic"
+        );
+
+        // Two EQUALLY eligible Active rows: the older establishment wins,
+        // because an attacker can bump `last_activity` at will but cannot
+        // rewrite when a conversation was created.
+        let mut newer = conversation("aaa-newer", 9_999);
+        newer.their_alias = Some("cafebabe1234".to_string());
+        newer.status = ConversationStatus::Active;
+        newer.created_unix_ms = 900;
+        store.upsert_conversation(newer).unwrap();
+        let mut older = conversation("zzz-older", 5);
+        older.their_alias = Some("cafebabe1234".to_string());
+        older.status = ConversationStatus::Active;
+        older.created_unix_ms = 100;
+        store.upsert_conversation(older).unwrap();
+        assert_eq!(
+            store
+                .conversation_by_alias("cafebabe1234")
+                .map(|c| c.conversation_id.as_str()),
+            Some("zzz-older"),
+            "establishment order decides between two live rows, not activity"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The address lookup decides which conversation an inbound handshake
     /// rewrites, so its edges are money- and identity-relevant, not

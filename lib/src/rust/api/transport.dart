@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `any`, `apply_intent`, `build`, `clamp_display`, `decrypt_drop`, `dropped`, `fill_walks`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `outcome`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `any`, `apply_intent`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `outcome`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `tail_start`, `take_intent`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `TransportHub`, `TransportIntent`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -152,13 +152,22 @@ Future<void> transportAbandon() =>
 Future<List<ConversationDto>> transportConversations() =>
     RustLib.instance.api.crateApiTransportTransportConversations();
 
-/// Hide a conversation — tombstone the row (and its messages replay-drop with
-/// it via the store's own remove path). The P2.3b cleanup affordance for zombie
-/// pending rows (D-068): the KaChat-era pending contacts and the counterpart's
-/// own stranger-conversation the sitting surfaced. Local-only bookkeeping — it
-/// removes nothing on-chain and signals nothing to the counterpart; a future
-/// handshake from the same address simply re-creates a fresh row. Idempotent:
-/// hiding an unknown id is a no-op success.
+/// Hide a conversation — forget its CONTENT, keep its IDENTITY.
+///
+/// This used to hard-delete the conversation row, and that was the defect
+/// behind the worst interop failure this project has had. The row is the only
+/// place the counterparty's alias lives, and their alias is the only thing
+/// that routes their messages to us. Deleting it did not stop them writing —
+/// it made every message they sent afterwards undeliverable, permanently,
+/// because a client that already knows us never re-announces itself.
+///
+/// So: the messages are still purged — hide must forget what was said, and
+/// the sheet copy promises exactly that — but the conversation row is
+/// tombstoned rather than removed. It stops appearing in the list and stops
+/// being swept for history, while remaining matchable by alias and by address
+/// so an acceptance or a later message can still find its home.
+///
+/// Idempotent: hiding an unknown id is a no-op success.
 Future<void> transportHideConversation({required String conversationId}) =>
     RustLib.instance.api.crateApiTransportTransportHideConversation(
       conversationId: conversationId,
