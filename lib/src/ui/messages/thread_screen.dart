@@ -372,6 +372,23 @@ class _ThreadScreenState extends State<ThreadScreen> {
       initialItemCount: _messages.length,
       itemBuilder: (context, index, animation) {
         final m = _messages[index];
+        // The archive marker is a BOUNDARY, not a per-message tag. It fires on
+        // the last archive-sourced row of a run — i.e. exactly where our own
+        // node's view of the thread begins — so a restored history carries one
+        // honest line instead of one per bubble.
+        final next = index + 1 < _messages.length ? _messages[index + 1] : null;
+        final archiveBoundary =
+            m.provenance == 'archive' &&
+            (next == null || next.provenance != 'archive');
+        // Is EVERYTHING above this line restored? The fill runs at every open
+        // and lands rows in block-time order, so archive rows interleave with
+        // our own sent messages and node-scanned ones. A mid-thread run must
+        // not claim the user's own messages were restored.
+        final allAboveRestored =
+            archiveBoundary &&
+            !_messages
+                .take(index)
+                .any((older) => older.provenance != 'archive');
         // The DS entrance for inserted rows: a fixed 24dp rise + fade
         // (§6 — never row-height-relative, so a tall challenge card rises
         // exactly as far as a one-liner), decelerate-only; reduced motion
@@ -382,6 +399,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
         Widget row = _MessageRow(
           key: ValueKey(m.txid),
           message: m,
+          archiveBoundary: archiveBoundary,
+          allAboveRestored: allAboveRestored,
           chip: _chipFor(m),
           ghost: _ghostFor(m),
           declined: m.frame != null && _declined.contains(m.frame!.id),
@@ -421,6 +440,8 @@ class _MessageRow extends StatelessWidget {
     super.key,
     required this.message,
     required this.declined,
+    this.archiveBoundary = false,
+    this.allAboveRestored = false,
     this.chip = TxChipState.none,
     this.ghost = false,
     this.onAccept,
@@ -429,6 +450,17 @@ class _MessageRow extends StatelessWidget {
 
   final ThreadMessageDto message;
   final bool declined;
+
+  /// True on the LAST archive-sourced row of a run — the point where our own
+  /// node's view of the thread takes over. See the builder in [_ThreadScreen].
+  final bool archiveBoundary;
+
+  /// True when every row above the boundary is archive-sourced — the only
+  /// case where "everything above" is a true statement. The fill runs at
+  /// every open and lands rows in block-time order, so archive rows
+  /// interleave with the user's own sent messages; a mid-thread run must not
+  /// claim those were restored.
+  final bool allAboveRestored;
 
   /// V2 status chip for outbound rows ([TxChipState.none] renders nothing).
   final TxChipState chip;
@@ -486,7 +518,8 @@ class _MessageRow extends StatelessWidget {
     if (m.kind == 'handshake') {
       // System row: the establishment/acceptance handshake — no body.
       //
-      // This row gets the badge too, and it is the one that matters MOST: the
+      // This row can end an archive run and carry the boundary. It is
+      // also the class that matters MOST: the
       // fill sweeps `handshakes/by-receiver` per receive address and folds each
       // result as a FillSourced row, which creates a conversation. So an archive
       // can manufacture a whole fake CONTACT, not merely append to a thread —
@@ -593,40 +626,43 @@ class _MessageRow extends StatelessWidget {
     Widget child, {
     CrossAxisAlignment? align,
   }) {
-    if (m.provenance != 'archive') return child;
+    if (!archiveBoundary) return child;
     return Column(
-      crossAxisAlignment:
-          align ??
-          (m.outbound ? CrossAxisAlignment.end : CrossAxisAlignment.start),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         child,
         Padding(
-          padding: const EdgeInsets.only(
-            left: KvSpace.xs,
-            right: KvSpace.xs,
-            bottom: KvSpace.xs,
-          ),
+          padding: const EdgeInsets.symmetric(vertical: KvSpace.m),
           child: Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
-              // `warning`, not tertiary chrome: this says our view of the
-              // thread may be wrong, and an authenticity marker must not be
-              // quieter than the content it qualifies (DS-1). Same reasoning
-              // the home cockpit's _StatusCaption already carries.
-              const Icon(
-                Icons.inventory_2_outlined,
-                size: 12,
-                color: KvColor.warning,
-              ),
-              const SizedBox(width: KvSpace.xs),
-              Flexible(
-                child: Text(
-                  'From an archive — not seen by your own node',
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: KvColor.warning,
-                  ),
+              const Expanded(child: Divider(color: KvColor.warning, height: 1)),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // `warning`, not tertiary chrome: this says our view of
+                    // the thread above the line may be wrong, and an
+                    // authenticity marker must not be quieter than the content
+                    // it qualifies (DS-1).
+                    const Icon(
+                      Icons.inventory_2_outlined,
+                      size: 12,
+                      color: KvColor.warning,
+                    ),
+                    const SizedBox(width: KvSpace.xs),
+                    Text(
+                      allAboveRestored
+                          ? 'Everything above was restored from an archive'
+                          : 'Some messages above were restored from an archive',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: KvColor.warning,
+                      ),
+                    ),
+                  ],
                 ),
               ),
+              const Expanded(child: Divider(color: KvColor.warning, height: 1)),
             ],
           ),
         ),

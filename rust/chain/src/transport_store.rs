@@ -374,6 +374,34 @@ impl TransportStore {
             })
     }
 
+    /// Every conversation we hold with this counterparty, most-established
+    /// first (`Active`, then by creation order).
+    ///
+    /// Distinct from [`Self::conversation_by_contact_address`] on purpose:
+    /// that one ranks a completable `PendingOutbound` ABOVE an `Active` row,
+    /// because an inbound handshake is looking for the row it can complete.
+    /// A caller deciding whether to START a conversation needs the opposite
+    /// bias, and reusing the wrong selector would offer to re-handshake a
+    /// contact you are already talking to.
+    pub fn conversations_for_contact_address(&self, address: &str) -> Vec<&ConversationRecord> {
+        if address.is_empty() {
+            return Vec::new();
+        }
+        let mut rows: Vec<&ConversationRecord> = self
+            .conversations
+            .records
+            .values()
+            .filter(|c| c.contact_address == address)
+            .collect();
+        rows.sort_by(|a, b| {
+            (b.status == ConversationStatus::Active)
+                .cmp(&(a.status == ConversationStatus::Active))
+                .then(a.created_unix_ms.cmp(&b.created_unix_ms))
+                .then(a.conversation_id.cmp(&b.conversation_id))
+        });
+        rows
+    }
+
     /// Whether any conversation knows WHO it is talking to but not what alias
     /// they write under — the precondition for learning an alias back from an
     /// inbound message.
@@ -734,6 +762,54 @@ mod tests {
                 .map(|c| c.conversation_id.as_str()),
             Some("zzz-older"),
             "establishment order decides between two live rows, not activity"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ONE CONVERSATION PER CONTACT. Starting a conversation must find the
+    /// row that already exists, and it needs the OPPOSITE ranking bias from
+    /// the inbound fold — which deliberately prefers the row it can complete.
+    #[test]
+    fn starting_a_conversation_finds_the_one_that_already_exists() {
+        let dir = test_dir("per-contact");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let addr = "kaspa:qqwsnxvukqew5hx5r7y5dr938hnw7hmgs7ca87zlvwlrps6rxdy2ja3xknpvj";
+
+        assert!(
+            store.conversations_for_contact_address(addr).is_empty(),
+            "a stranger has no rows"
+        );
+        assert!(
+            store.conversations_for_contact_address("").is_empty(),
+            "an empty address must never match unaccepted invitations"
+        );
+
+        let mut pending = conversation("zzz-pending", 50);
+        pending.contact_address = addr.to_string();
+        pending.status = ConversationStatus::PendingOutbound;
+        pending.created_unix_ms = 50;
+        store.upsert_conversation(pending).unwrap();
+
+        let mut live = conversation("aaa-live", 10);
+        live.contact_address = addr.to_string();
+        live.status = ConversationStatus::Active;
+        live.created_unix_ms = 900;
+        store.upsert_conversation(live).unwrap();
+
+        let rows = store.conversations_for_contact_address(addr);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].conversation_id, "aaa-live",
+            "an Active conversation leads — you are already talking to them, \
+             so a new invitation is refused rather than reusing a stale row"
+        );
+        // …and the inbound fold's selector still biases the other way, toward
+        // the row an arriving handshake can actually complete.
+        assert_eq!(
+            store
+                .conversation_by_contact_address(addr)
+                .map(|c| c.conversation_id.as_str()),
+            Some("zzz-pending"),
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

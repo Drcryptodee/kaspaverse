@@ -54,8 +54,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
     await _runPrepare(
       () => _messaging.prepareHandshake(address),
       contextNote:
-          'Carries a 0.2 KAS bond — the network norm; it comes back to you '
-          'when they accept.',
+          'Carries a 0.2 KAS bond — the network norm. It comes back when they '
+          'accept; if they already have you as a contact their app completes '
+          'the chat silently and the bond is not returned.',
     );
   }
 

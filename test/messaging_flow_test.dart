@@ -582,10 +582,68 @@ void main() {
 
       expect(find.text('from your own node'), findsOneWidget);
       expect(find.text('handed over by an archive'), findsOneWidget);
+      // The mark is a BOUNDARY, not a per-row tag: one line where our own
+      // node's view takes over, however many restored rows sit above it. A
+      // restored thread used to stamp every single bubble.
+      //
+      // "Some", not "everything": a node-scanned row sits ABOVE this archive
+      // row, and the marker must not claim that one was restored too.
       expect(
-        find.text('From an archive — not seen by your own node'),
+        find.text('Some messages above were restored from an archive'),
         findsOneWidget,
-        reason: 'exactly the archive row carries the mark, not both',
+        reason: 'the boundary is marked once, never per row',
+      );
+    });
+
+    /// The founder's complaint, pinned: a restored thread stamped every
+    /// bubble. Many archive rows must produce exactly ONE marker, sitting at
+    /// the last of them — the point where the node's own view begins.
+    testWidgets('a restored history is marked once, not once per message', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('a1', text: 'old one', provenance: 'archive'),
+        message('a2', text: 'old two', provenance: 'archive'),
+        message('a3', text: 'old three', provenance: 'archive'),
+        message('n1', text: 'seen by our node'),
+      ]);
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      expect(find.text('old one'), findsOneWidget);
+      expect(find.text('seen by our node'), findsOneWidget);
+      expect(
+        find.text('Everything above was restored from an archive'),
+        findsOneWidget,
+        reason: 'three restored rows, one boundary — not three badges',
+      );
+    });
+
+    /// The fill runs at every open and lands rows in BLOCK-TIME order, so
+    /// archive rows interleave with the user's own sent messages. A mid-thread
+    /// run must not claim those were restored — the marker has to say "some",
+    /// not "everything".
+    testWidgets('a mid-thread restored run does not claim your own messages', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('a1', text: 'restored one', provenance: 'archive'),
+        message('o1', text: 'mine', outbound: true, provenance: 'own'),
+        message('a2', text: 'restored two', provenance: 'archive'),
+        message('n1', text: 'from our node'),
+      ]);
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Everything above was restored from an archive'),
+        findsOneWidget,
+        reason: 'the LEADING run may say everything above',
+      );
+      expect(
+        find.text('Some messages above were restored from an archive'),
+        findsOneWidget,
+        reason: 'the run above our own message may not',
       );
     });
 
@@ -605,7 +663,7 @@ void main() {
 
       expect(find.text('Handshake received'), findsOneWidget);
       expect(
-        find.text('From an archive — not seen by your own node'),
+        find.text('Everything above was restored from an archive'),
         findsOneWidget,
       );
     });

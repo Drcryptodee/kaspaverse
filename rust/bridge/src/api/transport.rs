@@ -2345,9 +2345,88 @@ pub async fn transport_prepare_handshake(
 ) -> Result<SignableSummaryDto, AppError> {
     let dest = validate_mainnet_address(&destination)?;
     let recipient_x_only = x_only_of(&dest)?;
-    hub()?; // the store must be live before we can promise persistence
+    let hub = hub()?; // the store must be live before we can promise persistence
 
-    let my_alias = fresh_alias();
+    // ONE CONVERSATION PER CONTACT — the live population's model, and the
+    // repair for how this wallet ended up holding two rows for one person.
+    //
+    // Minting blind put a fresh `PendingOutbound` row beside a conversation
+    // the user already had: a second identity for the same contact, with a
+    // second alias and no knowledge of theirs. Their client then answered the
+    // repeat handshake idempotently and sent nothing, so the new row could
+    // never complete while the old one held the alias.
+    //
+    // Reuse keeps the conversation id, OUR alias and the bound slot verbatim:
+    // re-deriving the slot is the D-067 identity-fragmentation class, and
+    // keeping the alias is what lets an acceptance to EITHER handshake land on
+    // the one row (`conversation_awaiting_response` matches the echoed alias).
+    //
+    // Reuse does NOT avoid the second 0.2 KAS — only the refusals do — and
+    // against a counterparty who already knows us that bond is never refunded,
+    // because their client sends no response (D-139). Sending a message is
+    // usually the cheaper repair: it costs a fee only.
+    //
+    // Adding a contact is also an explicit UN-HIDE. The user typed this
+    // address; reusing or refusing a row they can no longer see would spend a
+    // bond into an invisible conversation and leave the address permanently
+    // unreachable, since nothing in the UI can un-hide one (INV-6). A
+    // dismissed invitation can never reach here — those rows carry no contact
+    // address — so this cannot resurrect one.
+    let existing = {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        let rows: Vec<ConversationRecord> = store
+            .conversations_for_contact_address(&dest.to_string())
+            .into_iter()
+            .cloned()
+            .collect();
+        // FIRST match, not last: the vector is most-established first, and the
+        // row we pick decides which alias goes back on the wire.
+        let reuse = rows
+            .iter()
+            .find(|r| r.status == ConversationStatus::PendingOutbound && r.initiated_by_me)
+            .cloned();
+        // Un-hide ONLY the row this call actually acts on. Restoring every
+        // hidden row for the address would hand back the broken duplicate the
+        // user hid — the very state this change exists to converge away from.
+        // INV-6 needs the row we reuse or refuse toward to be reachable, and
+        // nothing more.
+        let acted_on = rows
+            .iter()
+            .find(|r| r.status == ConversationStatus::Active)
+            .or(reuse.as_ref());
+        if let Some(row) = acted_on {
+            // Through `may_unhide`, like every other un-hide site. It is a
+            // no-op today — a `PendingInbound` row carries no contact address,
+            // so it cannot appear in this vector at all — but recording the
+            // sender at fold time (the F2 follow-up this file already names)
+            // is exactly what would put one here and silently re-arm a refund
+            // the user declined.
+            if may_unhide(
+                row.status,
+                store.is_conversation_tombstoned(&row.conversation_id),
+            ) {
+                warn_store(store.untombstone_conversation(&row.conversation_id));
+                log::info!("transport-send: re-adding a hidden contact — conversation restored");
+            }
+        }
+        if rows.iter().any(|r| r.status == ConversationStatus::Active) {
+            return Err(AppError::msg(
+                "you already have a conversation with this address. Open it from your messages instead of sending another invitation.",
+            ));
+        }
+        reuse
+    };
+    // A gap, stated rather than implied: we cannot refuse a duplicate when
+    // THEY invited US first. A `PendingInbound` row carries no contact address
+    // until its accept resolves the sender, so it is invisible to an address
+    // lookup — handshaking someone whose invitation is already in your list
+    // still spends a second bond beside theirs. Closing it needs the sender
+    // recorded at fold time, which is the same work as F2.
+
+    let my_alias = match &existing {
+        Some(row) => row.my_alias.clone(),
+        None => fresh_alias(),
+    };
     let timestamp_ms = now_unix_ms();
     let payload = HandshakePayload::initial(&my_alias, timestamp_ms)
         .map_err(AppError::core)?
@@ -2363,24 +2442,37 @@ pub async fn transport_prepare_handshake(
     // pins the handshake's input[0] to it and returns change to it, so the
     // address Kasia resolves for us == the address we seal with == receive/0,
     // and it self-funds for every later message in the conversation.
-    let bound: KeySlot = (Branch::Receive, 0);
+    // Reuse binds to the slot the conversation ALREADY has — re-deriving it
+    // would repoint our input[0] at an address the counterpart does not know
+    // us by (D-067).
+    let bound: KeySlot = match &existing {
+        Some(row) => (to_core_branch(row.bound_branch), row.bound_index),
+        None => (Branch::Receive, 0),
+    };
     let own_address = vault::wallet_address_at(bound.0, bound.1)?;
     let reseal = encrypt(&x_only_of(&own_address)?, &payload)
         .map_err(AppError::core)?
         .to_bytes();
 
-    let conversation = ConversationRecord {
-        conversation_id: fresh_conversation_id(),
-        contact_address: dest.to_string(),
-        my_alias,
-        their_alias: None,
-        status: ConversationStatus::PendingOutbound,
-        initiated_by_me: true,
-        bound_branch: to_key_branch(bound.0),
-        bound_index: bound.1,
-        created_unix_ms: timestamp_ms,
-        last_activity_unix_ms: timestamp_ms,
-        handshake_txid: None, // set at commit from the broadcast txid
+    let conversation = match existing {
+        // A retry on the row we already have: same id, same alias, same slot.
+        Some(row) => ConversationRecord {
+            last_activity_unix_ms: timestamp_ms,
+            ..row
+        },
+        None => ConversationRecord {
+            conversation_id: fresh_conversation_id(),
+            contact_address: dest.to_string(),
+            my_alias,
+            their_alias: None,
+            status: ConversationStatus::PendingOutbound,
+            initiated_by_me: true,
+            bound_branch: to_key_branch(bound.0),
+            bound_index: bound.1,
+            created_unix_ms: timestamp_ms,
+            last_activity_unix_ms: timestamp_ms,
+            handshake_txid: None, // set at commit from the broadcast txid
+        },
     };
 
     prepare_transport_send(
@@ -2772,6 +2864,43 @@ pub async fn transport_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
 /// Fold a committed send into the transport store. Failures here are store
 /// I/O, not send failures — the tx is already broadcast; the wire re-delivers
 /// what a torn store misses (inbound), and the user re-sees honest state.
+/// Fold a prepare-time conversation snapshot onto whatever the store learned
+/// while we were signing.
+///
+/// A handshake commit lands minutes after its prepare — a whole confirm-and-
+/// sign ceremony — and on a retry to a contact we already have, the row can
+/// change underneath us in exactly the ways that matter: their acceptance
+/// arrives, or an inbound message teaches us their alias. Blind-upserting the
+/// snapshot would undo precisely the repairs that make a stuck conversation
+/// work again, and the wallet would fall silent with nothing in the log.
+///
+/// So the live row wins on everything it can have learned, and the snapshot
+/// only supplies what it alone knows (the broadcast txid, already set).
+fn merge_handshake_commit(
+    snapshot: ConversationRecord,
+    live: &ConversationRecord,
+) -> ConversationRecord {
+    ConversationRecord {
+        // Fill in, never clobber: an alias that arrived mid-ceremony is the
+        // whole point.
+        their_alias: live.their_alias.clone().or(snapshot.their_alias),
+        // Both inbound legs rebind the slot to the key the counterparty
+        // actually sealed to; writing the stale one back would repoint our
+        // input[0] at an address they do not know us by (D-067).
+        bound_branch: live.bound_branch,
+        bound_index: live.bound_index,
+        status: match live.status {
+            // Anything past pending-outbound was learned while we signed.
+            ConversationStatus::PendingOutbound => snapshot.status,
+            other => other,
+        },
+        last_activity_unix_ms: live
+            .last_activity_unix_ms
+            .max(snapshot.last_activity_unix_ms),
+        ..snapshot
+    }
+}
+
 fn apply_intent(intent: TransportIntent, txid: &str) {
     let Ok(hub) = hub() else { return };
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2784,6 +2913,17 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
         } => {
             conversation.handshake_txid = Some(txid.to_string());
             let conversation_id = conversation.conversation_id.clone();
+            // MERGE, never overwrite. `conversation` is the snapshot taken at
+            // PREPARE, and on a retry to a contact we already have, a whole
+            // signing ceremony can pass in between — long enough for their
+            // acceptance to land, or for the alias re-learn to activate the
+            // row. Blind-upserting the snapshot would undo exactly the fix
+            // that unbroke this conversation, and the wallet would go quiet
+            // again with nothing in the log to say why.
+            let conversation = match store.conversation(&conversation_id) {
+                Some(live) => merge_handshake_commit(conversation, live),
+                None => conversation,
+            };
             let sealed_to = Some((conversation.bound_branch, conversation.bound_index));
             warn_store(store.upsert_conversation(conversation));
             warn_store(store.record_message(MessageRecord {
@@ -3608,6 +3748,79 @@ mod tests {
             "no alias of our own"
         );
         assert!(!comm_sendable(PendingOutbound, true, "", ""));
+    }
+
+    /// A HANDSHAKE COMMIT MUST NOT UNDO WHAT ARRIVED WHILE IT WAS SIGNING.
+    ///
+    /// The snapshot is taken at prepare; the commit lands a whole confirm-and-
+    /// sign ceremony later. On a retry to a contact we already have, that
+    /// window is long enough for their acceptance to arrive or for an inbound
+    /// message to teach us their alias — the exact repairs that unbreak a
+    /// stuck conversation. Writing the snapshot back would silently undo them.
+    #[test]
+    fn a_commit_keeps_what_the_store_learned_while_we_were_signing() {
+        fn row(id: &str) -> ConversationRecord {
+            ConversationRecord {
+                conversation_id: id.to_string(),
+                contact_address: "kaspa:qqwsnxvu".to_string(),
+                my_alias: "8caa5e3c79ff".to_string(),
+                their_alias: None,
+                status: ConversationStatus::PendingOutbound,
+                initiated_by_me: true,
+                bound_branch: KeyBranch::Receive,
+                bound_index: 0,
+                created_unix_ms: 10,
+                last_activity_unix_ms: 10,
+                handshake_txid: None,
+            }
+        }
+
+        // Their alias landed mid-ceremony, the fold rebound the slot to the
+        // key they actually seal to, and the row went Active.
+        let snapshot = ConversationRecord {
+            handshake_txid: Some("newtx".into()),
+            last_activity_unix_ms: 99,
+            ..row("c1")
+        };
+        let live = ConversationRecord {
+            their_alias: Some("90b4a1b640eb".into()),
+            status: ConversationStatus::Active,
+            bound_branch: KeyBranch::Change,
+            bound_index: 7,
+            last_activity_unix_ms: 500,
+            ..row("c1")
+        };
+        let merged = merge_handshake_commit(snapshot, &live);
+        assert_eq!(merged.their_alias.as_deref(), Some("90b4a1b640eb"));
+        assert_eq!(
+            merged.status,
+            ConversationStatus::Active,
+            "live status wins"
+        );
+        assert_eq!(
+            merged.bound_branch,
+            KeyBranch::Change,
+            "live slot wins (D-067)"
+        );
+        assert_eq!(merged.bound_index, 7);
+        assert_eq!(merged.last_activity_unix_ms, 500, "clocks never regress");
+        assert_eq!(
+            merged.handshake_txid.as_deref(),
+            Some("newtx"),
+            "the broadcast txid is the one thing only the snapshot knows"
+        );
+
+        // Nothing learned: the snapshot stands unchanged.
+        let quiet = merge_handshake_commit(
+            ConversationRecord {
+                handshake_txid: Some("newtx".into()),
+                ..row("c1")
+            },
+            &row("c1"),
+        );
+        assert!(quiet.their_alias.is_none());
+        assert_eq!(quiet.status, ConversationStatus::PendingOutbound);
+        assert_eq!(quiet.bound_index, 0);
     }
 
     /// HIDE MEANS TWO DIFFERENT THINGS, and getting them the wrong way round
