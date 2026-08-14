@@ -140,6 +140,7 @@ void main() {
     MessagingService.fillStatusFn = () async => null;
     // D-138 backup seam: nothing to back up on a fresh install, so the notice
     // is silent by default — individual tests override.
+    MessagingService.existingConversationFn = (_) async => null;
     MessagingService.stashStateFn = () async => StashStateDto(
       lastUnixMs: BigInt.zero,
       confirmedReadable: false,
@@ -462,6 +463,97 @@ void main() {
       await tester.tap(find.byIcon(Icons.history));
       await tester.pumpAndSettle();
       expect(find.text('History & backup'), findsOneWidget);
+    });
+
+    testWidgets('adding a contact you already have OPENS the thread', (
+      tester,
+    ) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      var handshakes = 0;
+      var asked = '';
+      MessagingService.existingConversationFn = (address) async {
+        asked = address;
+        return 'c1';
+      };
+      MessagingService.prepareHandshakeFn = (_) async {
+        handshakes++;
+        return summary();
+      };
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, addr);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.pumpAndSettle();
+
+      expect(asked, addr, reason: 'Rust is asked before a bond is quoted');
+      expect(
+        handshakes,
+        0,
+        reason: 'an existing contact must never mint a second invitation',
+      );
+      // The thread opened instead of a snackbar telling the user to find it.
+      expect(find.byType(ThreadScreen), findsOneWidget);
+    });
+
+    testWidgets('adding a NEW contact still runs the invitation ceremony', (
+      tester,
+    ) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      var handshakes = 0;
+      MessagingService.existingConversationFn = (_) async => null;
+      MessagingService.prepareHandshakeFn = (_) async {
+        handshakes++;
+        return summary();
+      };
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, addr);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.pumpAndSettle();
+
+      expect(handshakes, 1);
+      expect(find.byType(ThreadScreen), findsNothing);
+    });
+
+    testWidgets('a failed lookup never blocks adding a contact', (
+      tester,
+    ) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      var handshakes = 0;
+      MessagingService.existingConversationFn = (_) async =>
+          throw const AppError(message: 'hub restarting');
+      MessagingService.prepareHandshakeFn = (_) async {
+        handshakes++;
+        return summary();
+      };
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, addr);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.pumpAndSettle();
+
+      expect(
+        handshakes,
+        1,
+        reason: 'the convenience lookup is a hint; Rust holds the real guard',
+      );
     });
 
     testWidgets('an inbound-pending row is an accept card, not a thread', (

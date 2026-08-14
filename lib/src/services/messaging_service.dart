@@ -122,6 +122,10 @@ class MessagingService {
   static Future<StashStateDto> Function() stashStateFn = transportStashState;
 
   @visibleForTesting
+  static Future<String?> Function(String address) existingConversationFn =
+      (address) => transportExistingConversation(address: address);
+
+  @visibleForTesting
   static Future<void> Function(String conversationId) hideFn =
       (conversationId) =>
           transportHideConversation(conversationId: conversationId);
@@ -235,6 +239,12 @@ class MessagingService {
   /// Build the D-138 conversation backup (one self-stash carrying every
   /// conversation). The caller drives the ordinary confirm ceremony from here.
   Future<SignableSummaryDto> prepareStash() => prepareStashFn();
+
+  /// The conversation id already held for [address], or null if adding this
+  /// contact means sending an invitation. Rust owns the rule; this is the
+  /// question, not a second copy of the answer.
+  Future<String?> existingConversation(String address) =>
+      existingConversationFn(address);
 
   /// Persist the fill posture, then run a fill immediately when enabling
   /// (the founder's test: flip on → history appears without a restart).

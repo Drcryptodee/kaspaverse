@@ -3123,6 +3123,52 @@ pub async fn transport_prepare_handshake(
     .await
 }
 
+/// Is there already a conversation with this address that the user can just
+/// OPEN? Returns its id, or `None` if adding this contact means a handshake.
+///
+/// **A distinguishable answer, deliberately — not a parsed error string.** The
+/// same question is settled authoritatively inside `transport_prepare_handshake`,
+/// which refuses rather than spending a second bond, but a refusal reaches the UI
+/// as prose. Asking here lets the surface do the useful thing (open the thread)
+/// instead of telling the user to go and find it, and it asks BEFORE a confirm
+/// sheet quotes a bond the user does not need to pay.
+///
+/// This is a hint, not the guard: the prepare path keeps its own refusal, so a
+/// race between this call and the ceremony still cannot mint a duplicate.
+///
+/// **Adding a contact is an explicit un-hide** (INV-6, the same rule the
+/// handshake path applies). If the row is hidden, typing that address is the
+/// user asking for it back — nothing else in the UI can restore one. A
+/// `PendingInbound` row is never un-hidden or returned here: that is a
+/// dismissed invitation, its Accept button spends a bond, and a stranger must
+/// not be able to re-arm it.
+pub fn transport_existing_conversation(address: String) -> Result<Option<String>, AppError> {
+    let dest = validate_mainnet_address(&address)?;
+    let hub = hub()?;
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+
+    // Most-established first, and only rows the user could actually TALK in —
+    // decided by the same predicate the send path uses, not a second copy of
+    // the rule. Opening a thread you cannot speak in would answer "you already
+    // have this contact" with a dead end.
+    let found = store
+        .conversations_for_contact_address(&dest.to_string())
+        .into_iter()
+        .find(|c| comm_sendable(c.status, c.initiated_by_me, &c.contact_address, &c.my_alias))
+        .map(|c| (c.conversation_id.clone(), c.status));
+
+    let Some((conversation_id, status)) = found else {
+        return Ok(None);
+    };
+    if may_unhide(status, store.is_conversation_tombstoned(&conversation_id)) {
+        warn_store(store.untombstone_conversation(&conversation_id));
+        log::info!("transport: re-adding a hidden contact — conversation restored");
+    }
+    drop(store);
+    ping(&conversation_id);
+    Ok(Some(conversation_id))
+}
+
 /// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
 /// own return-address lookup (consensus data, never payload content — §0.3:
 /// this flow commits value), build the acceptance response, refund the 0.2
@@ -5349,6 +5395,32 @@ mod tests {
         let coins = vec![(5u32, "a".to_string()), (9, "b".to_string())];
         let ordered = order_priority_for_owner(coins, |c| (c.0, c.1.clone()), |_| false);
         assert_eq!(ordered.len(), 2, "every coin still spendable");
+    }
+
+    /// Adding a contact you already have should OPEN the thread, and the rule
+    /// for "already have" is the send predicate — not a second copy of it.
+    ///
+    /// The pairing matters: a `PendingInbound` row must never answer this
+    /// question. It is an invitation whose only affordance spends a bond, so
+    /// routing "add contact" into it would put a payment button where the user
+    /// asked for a chat — and if it had been dismissed, let a stranger re-arm it.
+    #[test]
+    fn the_openable_rule_is_the_send_rule() {
+        use ConversationStatus::{Active, PendingInbound, PendingOutbound};
+        const ADDR: &str = PARTNER_A;
+        const ALIAS: &str = "aaaaaaaaaaaa";
+
+        // Openable: a live conversation, or one we opened and can speak in.
+        assert!(comm_sendable(Active, true, ADDR, ALIAS));
+        assert!(comm_sendable(Active, false, ADDR, ALIAS));
+        assert!(comm_sendable(PendingOutbound, true, ADDR, ALIAS));
+
+        // Not openable: their invitation, in either direction.
+        assert!(!comm_sendable(PendingInbound, false, ADDR, ALIAS));
+        assert!(!comm_sendable(PendingInbound, true, ADDR, ALIAS));
+        // Nor a row missing the halves a conversation needs to exist.
+        assert!(!comm_sendable(Active, true, "", ALIAS));
+        assert!(!comm_sendable(Active, true, ADDR, ""));
     }
 
     /// The scope is a WIRE CONSTANT shared with the live population and with

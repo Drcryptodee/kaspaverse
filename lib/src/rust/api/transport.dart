@@ -73,6 +73,30 @@ Future<SignableSummaryDto> transportPrepareHandshake({
   destination: destination,
 );
 
+/// Is there already a conversation with this address that the user can just
+/// OPEN? Returns its id, or `None` if adding this contact means a handshake.
+///
+/// **A distinguishable answer, deliberately — not a parsed error string.** The
+/// same question is settled authoritatively inside `transport_prepare_handshake`,
+/// which refuses rather than spending a second bond, but a refusal reaches the UI
+/// as prose. Asking here lets the surface do the useful thing (open the thread)
+/// instead of telling the user to go and find it, and it asks BEFORE a confirm
+/// sheet quotes a bond the user does not need to pay.
+///
+/// This is a hint, not the guard: the prepare path keeps its own refusal, so a
+/// race between this call and the ceremony still cannot mint a duplicate.
+///
+/// **Adding a contact is an explicit un-hide** (INV-6, the same rule the
+/// handshake path applies). If the row is hidden, typing that address is the
+/// user asking for it back — nothing else in the UI can restore one. A
+/// `PendingInbound` row is never un-hidden or returned here: that is a
+/// dismissed invitation, its Accept button spends a bond, and a stranger must
+/// not be able to re-arm it.
+Future<String?> transportExistingConversation({required String address}) =>
+    RustLib.instance.api.crateApiTransportTransportExistingConversation(
+      address: address,
+    );
+
 /// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
 /// own return-address lookup (consensus data, never payload content — §0.3:
 /// this flow commits value), build the acceptance response, refund the 0.2

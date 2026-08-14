@@ -51,6 +51,32 @@ class _ContactsScreenState extends State<ContactsScreen> {
       builder: (_) => const _AddContactSheet(),
     );
     if (address == null || address.isEmpty) return;
+
+    // Already a contact? Open the thread instead of quoting a bond.
+    //
+    // This used to refuse with a snackbar telling the user to go and find the
+    // conversation themselves — the app knowing the answer and making them do
+    // the work, after a confirm sheet had already offered to spend 0.2 KAS.
+    // Rust owns the rule (its prepare path still refuses, so a race cannot
+    // mint a duplicate); this only asks the question early enough to be useful.
+    try {
+      final existing = await _messaging.existingConversation(address);
+      if (existing != null) {
+        await _messaging.refresh();
+        if (!mounted) return;
+        final conversation = _messaging.conversations.value
+            .where((c) => c.conversationId == existing)
+            .firstOrNull;
+        if (conversation != null) {
+          _openThread(conversation);
+          return;
+        }
+      }
+    } catch (_) {
+      // A failed lookup must never block adding a contact — fall through to
+      // the invitation, where Rust's own refusal is the real guard.
+    }
+
     await _runPrepare(
       () => _messaging.prepareHandshake(address),
       contextNote:
