@@ -1297,11 +1297,19 @@ fn dropped(kind: &str, txid: &str, reason: DropReason, origin: EventOrigin) -> F
     // times in one minute, which would drown a capture. On the FILL lane it
     // stays loud: there a comm was fetched FOR one of our own conversations
     // and still did not match, which is an anomaly worth a line.
+    // `MalformedCommHead` joins them: it fires BEFORE the alias gate, so on
+    // the node lane any stranger can raise an `info` line on every device on
+    // the network for the price of one dust transaction carrying
+    // `ciph_msg:1:comm:` with no `<alias>:` head — evicting the very forensic
+    // record this change exists to create.
     let routine = matches!(reason, DropReason::AlreadyStored)
         || (origin == EventOrigin::Node
             && matches!(
                 reason,
-                DropReason::NotAddressedToUs | DropReason::NoConversationForAlias
+                DropReason::NotAddressedToUs
+                    | DropReason::NoConversationForAlias
+                    | DropReason::MalformedCommHead
+                    | DropReason::MalformedEnvelope
             ));
     if routine {
         log::debug!("transport-intake: skipped {kind} tx={txid} reason={reason:?}");

@@ -283,9 +283,20 @@ impl TransportStore {
     ///
     /// Empty addresses never match: a `PendingInbound` row carries none until
     /// its accept resolves the sender, and matching those together would fuse
-    /// every unaccepted invitation into one conversation. Ties break by
-    /// `conversation_id` for the same determinism reason as
-    /// [`Self::conversation_by_alias`].
+    /// every unaccepted invitation into one conversation.
+    ///
+    /// **Several rows can share one address**, and this picks between them on
+    /// PURPOSE rather than on a lexical accident. A user whose handshake hangs
+    /// re-sends it; both attempts land as `PendingOutbound` to the same
+    /// contact, each having spent a bond. Breaking that tie by
+    /// `min(conversation_id)` — random hex — meant a coin flip: draw the wrong
+    /// row and the other stays stuck forever with its 0.2 KAS gone, which is
+    /// the exact symptom D-141 exists to end.
+    ///
+    /// So: prefer the row an inbound handshake can actually COMPLETE (one we
+    /// initiated and are still waiting on), then the most recently active, and
+    /// only then `conversation_id` so the answer stays identical across
+    /// process starts — a misroute must be reproducible, never per-boot.
     pub fn conversation_by_contact_address(&self, address: &str) -> Option<&ConversationRecord> {
         if address.is_empty() {
             return None;
@@ -294,7 +305,17 @@ impl TransportStore {
             .records
             .values()
             .filter(|c| c.contact_address == address)
-            .min_by(|a, b| a.conversation_id.cmp(&b.conversation_id))
+            .max_by(|a, b| {
+                let completable = |c: &ConversationRecord| {
+                    c.initiated_by_me && c.status == ConversationStatus::PendingOutbound
+                };
+                completable(a)
+                    .cmp(&completable(b))
+                    .then(a.last_activity_unix_ms.cmp(&b.last_activity_unix_ms))
+                    // Reversed, so the deterministic fallback stays "lowest id"
+                    // under `max_by` (which also takes the LAST maximum).
+                    .then(b.conversation_id.cmp(&a.conversation_id))
+            })
     }
 
     /// Whether ANY conversation knows its counterparty's address — the free
@@ -507,12 +528,23 @@ mod tests {
             "a stranger's address matches nothing"
         );
 
-        // Two rows sharing one address resolve DETERMINISTICALLY — the same
-        // answer every process start, so a misroute is reproducible rather
-        // than a per-boot coin flip.
-        let mut second = conversation("outbound-0", 30);
-        second.contact_address = known.to_string();
-        store.upsert_conversation(second).unwrap();
+        // Two rows sharing one address: the one an inbound handshake can
+        // actually COMPLETE wins, even though it is older and its id sorts
+        // later. A user whose handshake hangs re-sends it — picking the wrong
+        // row strands a spent bond forever.
+        let mut active_already = conversation("aaa-active", 99);
+        active_already.contact_address = known.to_string();
+        active_already.status = ConversationStatus::Active;
+        store.upsert_conversation(active_already).unwrap();
+        assert_eq!(
+            store
+                .conversation_by_contact_address(known)
+                .map(|c| c.conversation_id.as_str()),
+            Some("outbound-1"),
+            "the completable PendingOutbound row wins over a newer Active one"
+        );
+
+        // And the answer never varies with hash iteration order.
         let first = store
             .conversation_by_contact_address(known)
             .map(|c| c.conversation_id.clone());
@@ -525,6 +557,23 @@ mod tests {
                 "the tie-break must not vary with hash iteration order"
             );
         }
+
+        // With no completable row, the most recently active wins.
+        let mut only_active = conversation("zzz-newer", 500);
+        only_active.contact_address = "kaspa:qzother".to_string();
+        only_active.status = ConversationStatus::Active;
+        store.upsert_conversation(only_active).unwrap();
+        let mut older = conversation("aaa-older", 100);
+        older.contact_address = "kaspa:qzother".to_string();
+        older.status = ConversationStatus::Active;
+        store.upsert_conversation(older).unwrap();
+        assert_eq!(
+            store
+                .conversation_by_contact_address("kaspa:qzother")
+                .map(|c| c.conversation_id.as_str()),
+            Some("zzz-newer"),
+            "without a completable row, most-recent activity decides"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
