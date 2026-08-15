@@ -16,7 +16,33 @@ const Duration _showProgressAfter = Duration(milliseconds: 250);
 /// `await_spendable_at`, which every transport caller runs once — but the
 /// sentence is hedged because a slow link can also get here, and the wallet
 /// should not assert what it has not checked.
-const Duration _explainAfter = Duration(milliseconds: 1200);
+///
+/// **Measured against the path D-150 made the common one** (device sitting,
+/// 2026-08-15). This timer starts when the CARD is pushed, not when the prepare
+/// starts, so the reason lands at `_showProgressAfter + _explainAfter` of
+/// prepare. At the old 1200 ms that was 1450 ms — and a healthy maturity wait
+/// measured **1203 ms** on glass, putting the whole prepare at roughly 1500 ms.
+/// The reason therefore fired ~50 ms before the sheet replaced the card: it
+/// reproduced, one level down, exactly the flash-and-vanish that
+/// [_showProgressAfter] exists to prevent, and the founder saw only bare
+/// spinners across a ten-send sitting. Sized above the measured normal so it
+/// speaks only when the prepare is genuinely dragging.
+///
+/// **This moves the window, it does not close it.** A prepare that resolves
+/// between roughly `_showProgressAfter + _explainAfter` and ~200 ms past it
+/// still shows a half-faded line and tears it down; the tuning takes the
+/// typical case out of that window rather than removing it. Closing it properly
+/// means the card explaining when Rust TELLS it a maturity wait is running
+/// instead of when a clock guesses — a bridge change, logged in IDEAS_BACKLOG.
+///
+/// The falsifier, if this is ever re-tuned: a wait that resolves normally must
+/// NOT reach this beat — compare against `_showProgressAfter + _explainAfter`,
+/// which is where the line actually lands, not against this constant alone.
+/// **Only half of that sum is instrumented today**: `transport-send: waited …
+/// ms` bounds the wait, nothing bounds the build that follows it, so the
+/// ~1500 ms figure above is one measured wait plus an estimate. Instrumenting
+/// the build leg is in IDEAS_BACKLOG; do that before trusting a re-tune.
+const Duration _explainAfter = Duration(milliseconds: 2000);
 
 /// How long before the card stops saying "a few seconds" and says it will end
 /// by itself. Past this the first line has become false, and the barrier the
@@ -45,6 +71,12 @@ Future<SendOutcomeDto?> runConfirmSend(
   required Future<void> Function() abandon,
   String? title,
   String? contextNote,
+  // REQUIRED, with no default on purpose. Every default that could be written
+  // here is documented two doc-comments down as never correct on any shipped
+  // path — this card precedes a message, a contact request, an acceptance or a
+  // backup, never a plain payment — and a default that is always wrong is a
+  // wrong-copy trap for whoever adds the next caller.
+  required String preparingObject,
 }) async {
   final pending = prepare();
   // Race the prepare against the delay so a fast one costs nothing extra.
@@ -65,7 +97,9 @@ Future<SendOutcomeDto?> runConfirmSend(
   timer.cancel();
 
   VoidCallback? dismissProgress;
-  if (slow && context.mounted) dismissProgress = _showPreparing(context);
+  if (slow && context.mounted) {
+    dismissProgress = _showPreparing(context, preparingObject);
+  }
 
   final SignableSummaryDto summary;
   try {
@@ -128,13 +162,14 @@ Future<SendOutcomeDto?> runConfirmSend(
 /// a flag and call `transport_abandon()` when the prepare resolved — and that
 /// call is NOT nonce-guarded, so cancelling one send could clear a LATER send's
 /// valid stashed plan. That trades an inconvenience for a correctness defect.
-VoidCallback _showPreparing(BuildContext context) {
+VoidCallback _showPreparing(BuildContext context, String object) {
   final navigator = Navigator.of(context, rootNavigator: true);
   final route = DialogRoute<void>(
     context: context,
     barrierDismissible: false,
     barrierColor: KvColor.abyss.withValues(alpha: 0.72),
-    builder: (_) => const PopScope(canPop: false, child: _PreparingCard()),
+    builder: (_) =>
+        PopScope(canPop: false, child: _PreparingCard(object: object)),
   );
   navigator.push(route);
   return () {
@@ -151,7 +186,14 @@ VoidCallback _showPreparing(BuildContext context) {
 /// text styles now come from the theme ramp for the same reason: a raw
 /// `fontSize` is not a step in the type scale.
 class _PreparingCard extends StatefulWidget {
-  const _PreparingCard();
+  const _PreparingCard({required this.object});
+
+  /// What is being prepared, as the user would name it. Caller-supplied for
+  /// the same reason [runConfirmSend]'s `title` is: this card never precedes a
+  /// plain payment — `send_screen` builds the sheet directly behind its own
+  /// `_building` state — so a hardcoded "transaction" would disagree with the
+  /// "Confirm message" / "Confirm backup" sheet two beats later.
+  final String object;
 
   @override
   State<_PreparingCard> createState() => _PreparingCardState();
@@ -185,25 +227,42 @@ class _PreparingCardState extends State<_PreparingCard> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    final reason = Padding(
-      padding: const EdgeInsets.only(top: KvSpace.s),
-      child: Text(
-        // Says only what is KNOWN. The earlier line named the cause — "waiting
-        // for your last transaction to settle" — which this surface never
-        // checked and which is simply false on a first backup or a first
-        // handshake, where nothing has been sent yet.
-        //
-        // The late line is the §12 half: on a barrier with no exit, the one
-        // thing the user needs and cannot infer is that it ENDS. That much is
-        // provable here — the Rust wait is deadline-bounded and a prepare error
-        // propagates to the caller's own surface — where naming the cause still
-        // is not, so it stays unnamed (L92).
-        _reassure
-            ? 'Still working. This stops on its own either way.'
-            : 'This can take a few seconds.',
-        textAlign: TextAlign.center,
-        style: theme.textTheme.bodyMedium?.copyWith(
-          color: KvColor.textSecondary,
+    // A live region: this text enters the tree only when the beat fires, on a
+    // barrier with no exit, so without an announcement a screen-reader user
+    // hears "loading… Preparing your transaction" and then silence through
+    // both escalations — the same defect as a beat that never lands, one sense
+    // over.
+    final reason = Semantics(
+      liveRegion: true,
+      child: Padding(
+        padding: const EdgeInsets.only(top: KvSpace.s),
+        child: Text(
+          // Says only what is KNOWN. The earlier line named the cause — "waiting
+          // for your last transaction to settle" — which this surface never
+          // checked and which is simply false on a first backup or a first
+          // handshake, where nothing has been sent yet.
+          //
+          // The late line is the §12 half: on a barrier with no exit, the one
+          // thing the user needs and cannot infer is that it ENDS. That much is
+          // provable here — the Rust wait is deadline-bounded and a prepare error
+          // propagates to the caller's own surface — where naming the cause still
+          // is not, so it stays unnamed (L92).
+          // §12: the funds-safe fact is stated because it is provably true —
+          // nothing is signed or broadcast until a completed hold inside
+          // `ConfirmSendSheet`, which this card is still in front of. Scoped to
+          // "this" on purpose: "nothing has been sent" would be false to a user
+          // whose PREVIOUS send is the very thing being waited on. And the
+          // second clause says "the wait", never "it": with a transaction
+          // named one clause earlier, "it stops on its own" reads as the send
+          // aborting itself — the opposite of the reassurance intended.
+          _reassure
+              ? "Still working. This hasn't been sent yet, and the wait ends "
+                    'on its own either way.'
+              : 'This can take a few seconds.',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: KvColor.textSecondary,
+          ),
         ),
       ),
     );
@@ -223,7 +282,14 @@ class _PreparingCardState extends State<_PreparingCard> {
             children: [
               const KvLoader(),
               const SizedBox(height: KvSpace.m),
-              Text('Preparing', style: theme.textTheme.titleMedium),
+              // Names its object (§12) — this line is now the ENTIRE copy for
+              // the whole typical wait, since the reason beat deliberately no
+              // longer fires there. Matches `create_screen.dart`'s
+              // "Preparing your recovery words…".
+              Text(
+                'Preparing your ${widget.object}',
+                style: theme.textTheme.titleMedium,
+              ),
               // Held back rather than shown at once: naming a delay before
               // there is one invents a problem the user did not have. Under
               // reduced motion it simply appears (§6).

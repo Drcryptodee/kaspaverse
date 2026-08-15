@@ -233,6 +233,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
         commit: _messaging.commit,
         abandon: _messaging.abandon,
         title: title,
+        // Every send this funnel makes lands in the thread as a message —
+        // the comm frame, the challenge, the taunt and the accept alike.
+        preparingObject: 'message',
       );
       await _pull();
       return outcome != null && outcome.submitted > 0;

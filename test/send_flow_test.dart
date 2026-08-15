@@ -8,6 +8,7 @@ import 'package:kaspaverse/src/ui/send/confirm_send_flow.dart';
 import 'package:kaspaverse/src/ui/send/confirm_send_sheet.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/amount_text.dart';
 
 const _addr =
@@ -335,6 +336,7 @@ void main() {
         prepare: () => prepared.future,
         commit: (_) async => _ok(),
         abandon: () async => abandoned++,
+        preparingObject: 'message',
       );
       await tester.pumpWidget(const SizedBox()); // the surface unmounts
       prepared.complete(_summary());
@@ -349,6 +351,7 @@ void main() {
       // an outright refusal, and an unresponsive screen would be a worse bug
       // than the one it fixed. The card is held back a moment first, because
       // one that flashes and vanishes on a fast prepare reads as a glitch.
+      final semantics = tester.ensureSemantics();
       final prepared = Completer<SignableSummaryDto>();
       late BuildContext ctx;
       await tester.pumpWidget(
@@ -366,17 +369,74 @@ void main() {
         prepare: () => prepared.future,
         commit: (_) async => _ok(),
         abandon: () async {},
+        preparingObject: 'message',
       );
 
       await tester.pump(const Duration(milliseconds: 100));
-      expect(find.text('Preparing'), findsNothing, reason: 'no flash');
+      expect(
+        find.text('Preparing your message'),
+        findsNothing,
+        reason: 'no flash',
+      );
 
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('Preparing'), findsOneWidget);
+      expect(find.text('Preparing your message'), findsOneWidget);
       // The reason is named only once the wait is long enough to need one.
       expect(find.textContaining('still'), findsNothing);
-      await tester.pump(const Duration(milliseconds: 1300));
+
+      // A HEALTHY maturity wait must not reach the reason beat. Measured on
+      // the device 2026-08-15: `transport-send: waited 1203 ms`, whole prepare
+      // ~1500 ms. The old threshold fired at 1450 ms of prepare, so the line
+      // flashed for a few dozen milliseconds and then the sheet replaced it —
+      // the same flash-and-vanish the card's own delay exists to prevent, and
+      // on glass it read as a bare spinner every time. This is the assertion
+      // that pins the beat to something a real prepare can be measured
+      // against; the timer firing at all was never the thing in doubt.
+      await tester.pump(const Duration(milliseconds: 1200)); // 1600ms total
+      expect(
+        find.text('This can take a few seconds.'),
+        findsNothing,
+        reason: 'a normal-length wait finishes without ever explaining itself',
+      );
+
+      // BOTH edges pinned, deliberately. The card is built by the t=400 pump,
+      // so the beat fires at `400 + _explainAfter`: the t=2350 negative puts
+      // the floor at 1951 and the t=2400 positive puts the ceiling at 2000, so
+      // the constant is bracketed to [1951, 2000] and cannot drift either way.
+      //
+      // A single low guard would only have ruled out the exact old number: a
+      // re-tune to 1300 fires the reason at ~1550 ms of prepare — dead on the
+      // measured normal, the defect fully reproduced — and a one-sided test
+      // would have stayed green through it.
+      await tester.pump(const Duration(milliseconds: 750)); // 2350ms total
+      expect(
+        find.text('This can take a few seconds.'),
+        findsNothing,
+        reason: 'still silent just below the beat — pins the LOW edge',
+      );
+
+      await tester.pump(const Duration(milliseconds: 50)); // 2400ms total
       expect(find.text('This can take a few seconds.'), findsOneWidget);
+
+      // The announcement is a beat too, and the only one a refactor could
+      // silently drop — moving the `Semantics` above the `AnimatedOpacity`
+      // would keep every timing assertion above green while a screen-reader
+      // user behind a no-exit barrier hears nothing (§11).
+      //
+      // Asserted only AFTER the fade completes, and that is a fact about the
+      // surface, not a test convenience: `AnimatedOpacity` excludes its
+      // subtree from the semantics tree while opacity is 0, so the region does
+      // not exist to announce until the fade lands. Asserting on the frame the
+      // timer fires reads the ancestor node and fails.
+      await tester.pump(KvMotion.fast);
+      expect(
+        tester
+            .getSemantics(find.text('This can take a few seconds.'))
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+        reason: 'the reason announces itself when it finally arrives',
+      );
 
       // Past the point where "a few seconds" has become false, the card says
       // the one thing a barrier with no exit cannot let the user infer: that it
@@ -384,7 +444,10 @@ void main() {
       // know which branch Rust took (L92).
       await tester.pump(const Duration(seconds: 7));
       expect(
-        find.text('Still working. This stops on its own either way.'),
+        find.text(
+          "Still working. This hasn't been sent yet, and the wait ends on its "
+          'own either way.',
+        ),
         findsOneWidget,
       );
       expect(find.text('This can take a few seconds.'), findsNothing);
@@ -392,13 +455,18 @@ void main() {
 
       prepared.complete(_summary());
       await tester.pumpAndSettle();
-      expect(find.text('Preparing'), findsNothing, reason: 'the card is gone');
+      expect(
+        find.text('Preparing your message'),
+        findsNothing,
+        reason: 'the card is gone',
+      );
       expect(find.byType(ConfirmSendSheet), findsOneWidget);
 
       // Close the sheet so the ceremony's own future resolves.
       await tester.tapAt(const Offset(10, 10));
       await tester.pumpAndSettle();
       await pending;
+      semantics.dispose();
     });
 
     testWidgets('a prepare landing before the card builds still dismisses it', (
@@ -429,11 +497,16 @@ void main() {
             Future.delayed(const Duration(milliseconds: 270), _summary),
         commit: (_) async => _ok(),
         abandon: () async {},
+        preparingObject: 'message',
       );
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pumpAndSettle();
 
-      expect(find.text('Preparing'), findsNothing, reason: 'no orphaned card');
+      expect(
+        find.text('Preparing your message'),
+        findsNothing,
+        reason: 'no orphaned card',
+      );
       expect(find.byType(ConfirmSendSheet), findsOneWidget);
 
       await tester.tapAt(const Offset(10, 10));
@@ -464,14 +537,15 @@ void main() {
         prepare: () => prepared.future,
         commit: (_) async => _ok(),
         abandon: () async {},
+        preparingObject: 'message',
       );
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Preparing'), findsOneWidget);
+      expect(find.text('Preparing your message'), findsOneWidget);
 
       final style = tester
           .widget<RichText>(
             find.descendant(
-              of: find.text('Preparing'),
+              of: find.text('Preparing your message'),
               matching: find.byType(RichText),
             ),
           )
@@ -504,9 +578,10 @@ void main() {
         prepare: () async => _summary(),
         commit: (_) async => _ok(),
         abandon: () async {},
+        preparingObject: 'message',
       );
       await tester.pumpAndSettle();
-      expect(find.text('Preparing'), findsNothing);
+      expect(find.text('Preparing your message'), findsNothing);
       expect(find.byType(ConfirmSendSheet), findsOneWidget);
 
       await tester.tapAt(const Offset(10, 10));

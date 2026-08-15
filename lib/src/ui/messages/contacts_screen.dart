@@ -86,6 +86,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
     await _runPrepare(
       () => _messaging.prepareHandshake(address),
+      // The SENDER's word for this, not the receiver's: the button behind
+      // this beat says "Review request" and the sheet after it says "Confirm
+      // contact request". "Invitation" is what the other side's app calls it
+      // once it arrives — using it here makes three consecutive beats name
+      // the same thing three ways.
+      preparingObject: 'contact request',
       contextNote:
           'Carries a 0.2 KAS bond — the network norm. It comes back when they '
           'accept; if they already have you as a contact their app completes '
@@ -96,6 +102,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _accept(ConversationDto conversation) async {
     await _runPrepare(
       () => _messaging.prepareAccept(conversation.conversationId),
+      // "acceptance", not "reply": this send refunds the bond and opens the
+      // conversation — it is not a message. Reads as one chain into the
+      // sheet's own "Confirm accept" ("your accept" is ungrammatical).
+      preparingObject: 'acceptance',
       contextNote:
           'Returns the 0.2 KAS bond to the sender and opens the conversation.',
     );
@@ -107,8 +117,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
     await _runPrepare(
       _messaging.prepareStash,
       // A backup is not a message, and the shared ceremony would otherwise
-      // call it one.
+      // call it one — on the confirm sheet AND on the card before it.
       title: 'Confirm backup',
+      preparingObject: 'backup',
       contextNote:
           'Parks your conversation list on Kaspa, sealed to your own key, so '
           'your recovery phrase can bring your contacts back too. The amount '
@@ -123,6 +134,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _runPrepare(
     Future<SignableSummaryDto> Function() prepare, {
     required String contextNote,
+    required String preparingObject,
     String? title,
   }) async {
     try {
@@ -133,6 +145,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
         abandon: _messaging.abandon,
         contextNote: contextNote,
         title: title,
+        preparingObject: preparingObject,
       );
     } catch (e) {
       if (!mounted) return;
