@@ -104,7 +104,24 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _messaging.lastPing.removeListener(_onPing);
     _compose.dispose();
     _scroll.dispose();
-    // The decrypted rows die with this state object (§0.4 — view-scoped).
+    // The decrypted rows die with this state object (§0.4 — view-scoped) — and
+    // so must the decoded IMAGES. Flutter's imageCache is global and keyed on
+    // the provider, so a rendered attachment would otherwise outlive the thread
+    // that decrypted it, holding message content in memory for a screen the
+    // user has closed. Both keys go: the card decodes through `ResizeImage`,
+    // the viewer through the bare `MemoryImage`.
+    for (final pending in _imageCache.values) {
+      pending
+          .then((bytes) {
+            final raw = MemoryImage(bytes);
+            PaintingBinding.instance.imageCache.evict(raw);
+            PaintingBinding.instance.imageCache.evict(
+              ResizeImage(raw, width: _thumbnailWidth),
+            );
+          })
+          .catchError((_) {});
+    }
+    _imageCache.clear();
     _messages.clear();
     super.dispose();
   }
@@ -445,6 +462,25 @@ class _ThreadScreenState extends State<ThreadScreen> {
         // node's view of the thread begins — so a restored history carries one
         // honest line instead of one per bubble.
         final next = index + 1 < _messages.length ? _messages[index + 1] : null;
+        final prev = index > 0 ? _messages[index - 1] : null;
+        // Grouping: a message CLOSES a run when the next one comes from the
+        // other side, lands on another day, or arrives more than a few minutes
+        // later. Only the closing message carries a time and the bubble tail —
+        // stamping every line makes a fast exchange unreadable, and a run of
+        // tails turns a conversation into a column of arrows.
+        final closesRun =
+            next == null ||
+            next.outbound != m.outbound ||
+            !_sameDay(next.unixMs, m.unixMs) ||
+            _gap(m.unixMs, next.unixMs) > _runGap;
+        // Continues the run above ⇒ tighter spacing, so a burst reads as one
+        // utterance rather than three unrelated ones.
+        final continues =
+            prev != null &&
+            prev.outbound == m.outbound &&
+            _sameDay(prev.unixMs, m.unixMs) &&
+            _gap(prev.unixMs, m.unixMs) <= _runGap;
+        final showDay = prev == null || !_sameDay(prev.unixMs, m.unixMs);
         final archiveBoundary =
             m.provenance == 'archive' &&
             (next == null || next.provenance != 'archive');
@@ -467,6 +503,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
         Widget row = _MessageRow(
           key: ValueKey(m.txid),
           message: m,
+          showTime: closesRun,
+          tail: closesRun,
+          continuesRun: continues,
           archiveBoundary: archiveBoundary,
           allAboveRestored: allAboveRestored,
           chip: _chipFor(m),
@@ -479,6 +518,18 @@ class _ThreadScreenState extends State<ThreadScreen> {
           imageBytes: _imageBytes,
           onDecline: _declineChallenge,
         );
+        // The day separator belongs to the item, not between items: an
+        // AnimatedList indexes its own children, so a separator inserted as a
+        // sibling would desynchronise every insert animation from its row.
+        if (showDay) {
+          row = Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _DaySeparator(unixMs: m.unixMs),
+              row,
+            ],
+          );
+        }
         if (!reduced) {
           row = AnimatedBuilder(
             animation: curved,
@@ -497,6 +548,133 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
 /// Human title (emoji + name) for a game slug — the card's identity, mapped
 /// from the same slug the Rust line-generator uses (`core::frames::game_label`).
+/// How far apart two messages from the same side may be and still read as one
+/// utterance. Beyond it the run breaks, the later message gets its own time,
+/// and the bubble above closes with a tail.
+const Duration _runGap = Duration(minutes: 5);
+
+/// The card thumbnail's decode width. Named because `dispose` must evict the
+/// exact `ResizeImage` key the decode created — a literal in two places is a
+/// leak the day one of them changes.
+const int _thumbnailWidth = 600;
+
+DateTime _at(BigInt unixMs) =>
+    DateTime.fromMillisecondsSinceEpoch(unixMs.toInt());
+
+bool _sameDay(BigInt a, BigInt b) {
+  final x = _at(a);
+  final y = _at(b);
+  return x.year == y.year && x.month == y.month && x.day == y.day;
+}
+
+/// Absolute gap — message times come from the chain (or, for an archive row,
+/// from an indexer that can stamp anything, D-074), so they are not guaranteed
+/// monotonic and a negative difference must not silently read as "adjacent".
+Duration _gap(BigInt a, BigInt b) => _at(a).difference(_at(b)).abs();
+
+/// The clock face for one message. Uses the platform's own formatter so a
+/// phone set to 12-hour time gets 12-hour time — the wallet does not get to
+/// pick the user's clock.
+String _clock(BuildContext context, BigInt unixMs) =>
+    MaterialLocalizations.of(context).formatTimeOfDay(
+      TimeOfDay.fromDateTime(_at(unixMs)),
+      alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+    );
+
+/// The line between one day's messages and the next.
+///
+/// "Today"/"Yesterday" for the two days a reader holds in their head, then the
+/// §5 UI date form (`June 30, 2026`) — never the ISO form, which §5 reserves
+/// for technical surfaces.
+class _DaySeparator extends StatelessWidget {
+  const _DaySeparator({required this.unixMs});
+
+  final BigInt unixMs;
+
+  static const _months = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+
+  String _label() {
+    final at = _at(unixMs);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final that = DateTime(at.year, at.month, at.day);
+    final days = today.difference(that).inDays;
+    if (days == 0) return 'Today';
+    if (days == 1) return 'Yesterday';
+    return '${_months[at.month - 1]} ${at.day}, ${at.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: KvSpace.m, bottom: KvSpace.sm),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.sm,
+            vertical: KvSpace.xs,
+          ),
+          decoration: BoxDecoration(
+            color: KvColor.surfaceAlt,
+            borderRadius: BorderRadius.circular(KvRadius.data),
+          ),
+          child: Text(
+            _label(),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: KvColor.textTertiary,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The one decoration a message bubble wears, so the text bubble and the
+/// attachment card can never drift apart.
+///
+/// Direction is carried THREE ways — side, hue, and the tail corner — because
+/// any one of them alone fails somewhere: alignment collapses on a narrow
+/// screen, hue is invisible to a colour-blind reader, and the tail only
+/// appears on the last bubble of a run.
+BoxDecoration _bubbleDecoration({required bool outbound, required bool tail}) =>
+    BoxDecoration(
+      color: outbound ? KvColor.messageMine : KvColor.messageTheirs,
+      borderRadius: _bubbleRadius(outbound: outbound, tail: tail),
+      border: Border.all(
+        color: outbound ? KvColor.messageMineEdge : KvColor.messageTheirsEdge,
+      ),
+    );
+
+/// The bubble's corner set. Every corner takes the card radius except the one
+/// nearest the speaker on the run's LAST bubble, which tightens to the data
+/// radius — the tail. Direction is then legible without relying on alignment
+/// alone, and a run of messages reads as one block with one tail.
+BorderRadius _bubbleRadius({required bool outbound, required bool tail}) {
+  const big = Radius.circular(KvRadius.card);
+  const small = Radius.circular(KvRadius.data);
+  return BorderRadius.only(
+    topLeft: big,
+    topRight: big,
+    bottomLeft: tail && !outbound ? small : big,
+    bottomRight: tail && outbound ? small : big,
+  );
+}
+
 /// Native card identity (Material icon + name) for a game slug. Rendered with a
 /// tinted `Icon`, not an emoji (design_system §13 — emoji personality rides the
 /// Kasia-facing wire line only, generated in `core::frames`). An unknown slug
@@ -512,6 +690,9 @@ class _MessageRow extends StatelessWidget {
     super.key,
     required this.message,
     required this.declined,
+    this.showTime = false,
+    this.tail = true,
+    this.continuesRun = false,
     this.archiveBoundary = false,
     this.allAboveRestored = false,
     this.chip = TxChipState.none,
@@ -526,6 +707,16 @@ class _MessageRow extends StatelessWidget {
 
   final ThreadMessageDto message;
   final bool declined;
+
+  /// This message closes a run, so it carries the clock time. Suppressed on
+  /// system rows, which are not something anyone said.
+  final bool showTime;
+
+  /// This message closes a run, so its bubble gets the tail corner.
+  final bool tail;
+
+  /// This message continues the run above ⇒ tighter spacing.
+  final bool continuesRun;
 
   /// True on the LAST archive-sourced row of a run — the point where our own
   /// node's view of the thread takes over. See the builder in [_ThreadScreen].
@@ -574,27 +765,53 @@ class _MessageRow extends StatelessWidget {
       curve: KvMotion.out,
       child: body,
     );
-    if (!ghost && chip == TxChipState.none) return ghosted;
-
-    final annotation = ghost
-        ? Text(
-            'Displaced by the network',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: KvColor.textTertiary,
-            ),
-          )
-        : TxStatusChip(state: chip);
+    // ONE meta line under the bubble, never two stacked ones: the clock, the
+    // reorg notice and the status chip all answer "what happened to this
+    // message" and belong on the same row.
+    //
+    // A time is not shown on a system row — a handshake is not something
+    // anyone said — and never on an unreadable one, where we hold a txid and
+    // no message.
+    final withTime = showTime && m.kind != 'handshake';
+    final meta = <Widget>[
+      if (withTime)
+        Text(
+          _clock(context, m.unixMs),
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: KvColor.textTertiary,
+            fontFamily: KvFont.mono,
+          ),
+        ),
+      if (ghost)
+        Text(
+          'Displaced by the network',
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: KvColor.textTertiary,
+          ),
+        )
+      else if (chip != TxChipState.none)
+        TxStatusChip(state: chip),
+    ];
+    if (meta.isEmpty) return ghosted;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ghosted,
         Padding(
-          padding: const EdgeInsets.only(bottom: KvSpace.xs),
+          padding: const EdgeInsets.only(top: KvSpace.xs, bottom: KvSpace.xs),
           child: Align(
             alignment: m.outbound
                 ? Alignment.centerRight
                 : Alignment.centerLeft,
-            child: annotation,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final (i, w) in meta.indexed) ...[
+                  if (i > 0) const SizedBox(width: KvSpace.s),
+                  w,
+                ],
+              ],
+            ),
           ),
         ),
       ],
@@ -669,6 +886,7 @@ class _MessageRow extends StatelessWidget {
           file: attachment,
           outbound: m.outbound,
           heroTag: m.txid,
+          tail: tail,
           onSave: onSaveFile == null ? null : () => onSaveFile!(m.txid),
           onOpen: (!savedFile || onOpenFile == null)
               ? null
@@ -680,28 +898,40 @@ class _MessageRow extends StatelessWidget {
       );
     }
 
-    final bubbleColor = m.outbound ? KvColor.surfaceAlt : KvColor.surface;
     return _withProvenance(
       theme,
       m,
       Padding(
-        padding: const EdgeInsets.symmetric(vertical: KvSpace.xs),
+        // A run reads as one utterance: tight above when it continues the run,
+        // a normal breath when it starts one.
+        padding: EdgeInsets.only(
+          top: continuesRun ? 1 : KvSpace.xs,
+          bottom: KvSpace.xs,
+        ),
         child: Align(
           alignment: m.outbound ? Alignment.centerRight : Alignment.centerLeft,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 300),
+            // A share of the screen, not 300 fixed dp: the old constant
+            // cramped a small phone and stranded a wide one. ~78% leaves the
+            // opposite margin visible, which is what makes a thread read as a
+            // conversation rather than a document.
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+            ),
             child: Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: KvSpace.sm,
-                vertical: KvSpace.s,
+                vertical: KvSpace.sm,
               ),
-              decoration: BoxDecoration(
-                color: bubbleColor,
-                borderRadius: BorderRadius.circular(KvRadius.card),
-                border: m.outbound ? null : Border.all(color: KvColor.border),
-              ),
+              decoration: _bubbleDecoration(outbound: m.outbound, tail: tail),
               child: m.readable
-                  ? Text(m.text, style: theme.textTheme.bodyMedium)
+                  ? Text(
+                      m.text,
+                      // Leading, not size: §4 owns the ramp, but a paragraph
+                      // inside a bubble needs more air between lines than a
+                      // label in a row does.
+                      style: theme.textTheme.bodyMedium?.copyWith(height: 1.35),
+                    )
                   : Text(
                       'Unreadable message',
                       style: theme.textTheme.bodySmall?.copyWith(
@@ -808,7 +1038,9 @@ class _ChallengeCard extends StatelessWidget {
       child: Align(
         alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 300),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+          ),
           child: Container(
             padding: const EdgeInsets.all(KvSpace.m),
             decoration: BoxDecoration(
@@ -1196,6 +1428,7 @@ class _AttachmentCard extends StatelessWidget {
     required this.file,
     required this.outbound,
     required this.heroTag,
+    required this.tail,
     this.onSave,
     this.onOpen,
     this.imageBytes,
@@ -1207,6 +1440,9 @@ class _AttachmentCard extends StatelessWidget {
   /// The message txid — unique per attachment, so it can carry the thumbnail
   /// into the full-screen viewer without two images ever sharing a tag.
   final String heroTag;
+
+  /// Closes a run ⇒ the bubble takes the tail corner, same as a text bubble.
+  final bool tail;
 
   final VoidCallback? onSave;
 
@@ -1243,11 +1479,7 @@ class _AttachmentCard extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 300),
           child: Container(
             padding: const EdgeInsets.all(KvSpace.sm),
-            decoration: BoxDecoration(
-              color: outbound ? KvColor.surfaceAlt : KvColor.surface,
-              borderRadius: BorderRadius.circular(KvRadius.card),
-              border: outbound ? null : Border.all(color: KvColor.border),
-            ),
+            decoration: _bubbleDecoration(outbound: outbound, tail: tail),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -1337,7 +1569,7 @@ class _AttachmentCard extends StatelessWidget {
                             tag: heroTag,
                             child: Image.memory(
                               snap.data!,
-                              cacheWidth: 600,
+                              cacheWidth: _thumbnailWidth,
                               fit: BoxFit.cover,
                               // A file that claims to be an image and is not
                               // must fail as a line of text, never as a red
@@ -1363,7 +1595,7 @@ class _AttachmentCard extends StatelessWidget {
                     width: double.infinity,
                     padding: const EdgeInsets.all(KvSpace.s),
                     decoration: BoxDecoration(
-                      color: outbound ? KvColor.surface : KvColor.surfaceAlt,
+                      color: KvColor.messageInset,
                       borderRadius: BorderRadius.circular(KvRadius.data),
                     ),
                     // Plain text, never markup — the sender chose these bytes,
@@ -1449,6 +1681,15 @@ class _ImageViewer extends StatelessWidget {
                 maxScale: 6,
                 child: Image.memory(
                   bytes,
+                  // Capped like the card's thumbnail, just larger: these are
+                  // sender-chosen bytes, and `maxScale: 6` does not need a
+                  // full-resolution decode to look right. Twice the screen's
+                  // physical width is past what the panel can resolve.
+                  cacheWidth:
+                      (MediaQuery.sizeOf(context).width *
+                              MediaQuery.devicePixelRatioOf(context) *
+                              2)
+                          .round(),
                   fit: BoxFit.contain,
                   errorBuilder: (_, _, _) => Text(
                     "This image didn't decode",

@@ -59,6 +59,36 @@ abstract final class KvColor {
   // GlassPanel fill (§8) — 3% white over a σ16 backdrop blur; the frost, not a
   // surface. Solid fallback is [surfaceAlt] (same layout, lesser shimmer).
   static const Color glassFill = Color(0x08FFFFFF);
+
+  // ── Message bubbles (added 2026-08-15; the bible has no chat section) ──────
+  //
+  // A thread has to answer "who said this" before it is read, and the old
+  // bubbles answered it only by which side of the screen they sat on: both
+  // were near-black greys separated by a hairline. These give the two voices
+  // different LIGHTNESS and different HUE, which is the only lever §3 leaves —
+  // elevation on dark is a lighter surface plus a hairline border, never a
+  // glow and never a shadow ("glow ≠ elevation"), and a gradient behind a wall
+  // of text would fail the Rams filter.
+  //
+  // Mine is the Kaspa teal folded into the surface at ~16%, not the neon
+  // itself: `primary` is the CTA voice and a column of it would shout over
+  // every button on the screen. What survives is the lineage — your own words
+  // carry the brand's hue, theirs stay neutral — at a strength that a long
+  // thread can hold.
+  static const Color messageMine = Color(
+    0xFF223B3A,
+  ); // primary @16% on surfaceAlt
+  static const Color messageMineEdge = Color(
+    0xFF2B625A,
+  ); // primary @22% on the fill
+  static const Color messageTheirs = surfaceAlt;
+  static const Color messageTheirsEdge = border;
+
+  /// Sunken panel INSIDE a bubble (a text attachment's body). Depth reads as
+  /// darker-than-its-container, so this is the one place a bubble goes down
+  /// rather than up — and it is the same on both sides, because the panel is
+  /// the file's content, not the speaker's voice.
+  static const Color messageInset = abyss;
 }
 
 /// §9 — Spacing. 4 dp base grid; the only permitted steps. Screen gutter 24 dp.

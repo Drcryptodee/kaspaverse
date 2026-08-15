@@ -42,11 +42,12 @@ ThreadMessageDto message(
   bool tombstoned = false,
   String provenance = 'node',
   AttachmentDto? attachment,
+  BigInt? unixMs,
 }) => ThreadMessageDto(
   txid: txid,
   kind: kind,
   outbound: outbound,
-  unixMs: BigInt.one,
+  unixMs: unixMs ?? BigInt.one,
   text: text,
   readable: readable,
   frame: frame,
@@ -1084,6 +1085,54 @@ void main() {
         contactLabel: 'kaspa:qz7u…j43pf',
       ),
     );
+
+    /// A thread with no dates and no clock is a wall of text you cannot place
+    /// in time — `unixMs` rode the DTO all along and the screen threw it away.
+    testWidgets('days are separated and a run carries ONE time', (
+      tester,
+    ) async {
+      final now = DateTime.now();
+      BigInt at(DateTime t) => BigInt.from(t.millisecondsSinceEpoch);
+      // Three inbound messages inside a minute (one run), then a reply, then a
+      // message from the day before — which must open its own day.
+      final today = DateTime(now.year, now.month, now.day, 10);
+      final yesterday = today.subtract(const Duration(days: 1));
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('tx0', text: 'day before', unixMs: at(yesterday)),
+        message('tx1', text: 'one', unixMs: at(today)),
+        message(
+          'tx2',
+          text: 'two',
+          unixMs: at(today.add(const Duration(seconds: 30))),
+        ),
+        message(
+          'tx3',
+          text: 'three',
+          unixMs: at(today.add(const Duration(minutes: 1))),
+        ),
+        message(
+          'tx4',
+          outbound: true,
+          text: 'reply',
+          unixMs: at(today.add(const Duration(minutes: 2))),
+        ),
+      ]);
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      expect(find.text('Yesterday'), findsOneWidget);
+      expect(find.text('Today'), findsOneWidget);
+
+      // The inbound run closes at 'three', so exactly one clock face for it —
+      // plus one for the reply, which is its own run. Four messages today, two
+      // times: stamping every line makes a fast exchange unreadable.
+      final clock = RegExp(r'^\d{1,2}:\d{2}(\s?[AaPp][Mm])?$');
+      final times = tester
+          .widgetList<Text>(find.byType(Text))
+          .where((t) => t.data != null && clock.hasMatch(t.data!))
+          .length;
+      expect(times, 3, reason: 'one per run: yesterday, the trio, the reply');
+    });
 
     testWidgets('renders decrypted rows and system handshake rows', (
       tester,

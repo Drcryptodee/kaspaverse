@@ -170,10 +170,17 @@ class MainActivity : FlutterFragmentActivity() {
                                 startActivity(chooser)
                                 result.success(true)
                             } catch (e: android.content.ActivityNotFoundException) {
-                                // A belt only, now that the chooser is what
-                                // gets started: the chooser always resolves, so
-                                // "nothing can open this" is a sentence Android
-                                // says inside it rather than an error we see.
+                                // Effectively dead now that the CHOOSER is what
+                                // gets started — it always resolves, so
+                                // "nothing can open this" became a sentence
+                                // Android says inside it. Kept as a belt rather
+                                // than deleted with its Dart branch, because
+                                // pre-resolving instead (`queryIntentActivities`)
+                                // would lie on Android 11+: package-visibility
+                                // rules hide handlers we have not declared in
+                                // `<queries>`, so an empty result would report
+                                // "nothing can open this" about a phone that
+                                // opens it fine.
                                 result.success(false)
                             } catch (e: Exception) {
                                 result.error(CODE_SAVE_FAILED, e.message, null)
