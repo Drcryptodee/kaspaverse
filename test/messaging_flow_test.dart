@@ -1,6 +1,6 @@
-import 'dart:typed_data';
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
@@ -1132,6 +1132,49 @@ void main() {
           .where((t) => t.data != null && clock.hasMatch(t.data!))
           .length;
       expect(times, 3, reason: 'one per run: yesterday, the trio, the reply');
+    });
+
+    /// §0.4 is the plaintext DISCIPLINE — ciphertext at rest, decrypt-on-view,
+    /// nothing decrypted in a state manager. It binds the app, not the user:
+    /// saving an attachment already writes decrypted bytes to storage, and
+    /// FLAG_SECURE is deliberately off here because message content is user
+    /// conversation, not seed material. DS-7's clipboard ban is seed-only.
+    testWidgets('long-press copies a readable message, and only that', (
+      tester,
+    ) async {
+      final copied = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied.add((call.arguments as Map)['text'] as String);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      MessagingService.threadSinceFn = (_, _) async => delta([
+        message('tx1', text: 'copy me'),
+        message('tx2', readable: false, text: ''),
+      ]);
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('copy me'));
+      await tester.pumpAndSettle();
+      expect(copied, ['copy me']);
+
+      // An unreadable row is a txid and no words — there is nothing to put on
+      // the clipboard, so the gesture must not fire.
+      await tester.longPress(find.text('Unreadable message'));
+      await tester.pumpAndSettle();
+      expect(copied, ['copy me'], reason: 'nothing to copy, nothing copied');
     });
 
     testWidgets('renders decrypted rows and system handshake rows', (

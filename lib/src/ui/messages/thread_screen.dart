@@ -1,5 +1,5 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
@@ -644,6 +644,30 @@ class _DaySeparator extends StatelessWidget {
   }
 }
 
+/// Long-press a message to copy it.
+///
+/// **Why this is allowed, next to code this strict about plaintext.** §0.4 is
+/// the plaintext DISCIPLINE — ciphertext at rest, decrypt-on-view, nothing
+/// decrypted held in a state manager — and it governs how long the APP keeps
+/// your words, not what you may do with them. The user's half was settled
+/// twice already, both times the same way: saving an attachment writes
+/// decrypted bytes to storage, and FLAG_SECURE is deliberately NOT applied to
+/// threads because "message content is user conversation, NOT seed material —
+/// screenshots stay the user's choice". A screenshot leaks strictly more than
+/// a clipboard entry.
+///
+/// The clipboard law that DOES bind is DS-7, and it forbids exactly one thing:
+/// seed material to the clipboard. Untouched — this copies a message, and only
+/// a readable one, because an unreadable row is a txid and no words.
+Future<void> _copyMessage(BuildContext context, String text) async {
+  KvHaptic.selection();
+  await Clipboard.setData(ClipboardData(text: text));
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Message copied'), duration: KvMotion.slow),
+  );
+}
+
 /// The one decoration a message bubble wears, so the text bubble and the
 /// attachment card can never drift apart.
 ///
@@ -918,27 +942,35 @@ class _MessageRow extends StatelessWidget {
             constraints: BoxConstraints(
               maxWidth: MediaQuery.sizeOf(context).width * 0.78,
             ),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: KvSpace.sm,
-                vertical: KvSpace.sm,
-              ),
-              decoration: _bubbleDecoration(outbound: m.outbound, tail: tail),
-              child: m.readable
-                  ? Text(
-                      m.text,
-                      // Leading, not size: §4 owns the ramp, but a paragraph
-                      // inside a bubble needs more air between lines than a
-                      // label in a row does.
-                      style: theme.textTheme.bodyMedium?.copyWith(height: 1.35),
-                    )
-                  : Text(
-                      'Unreadable message',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: KvColor.textTertiary,
-                        fontStyle: FontStyle.italic,
+            child: GestureDetector(
+              // Offered only where there are words to copy.
+              onLongPress: m.readable && m.text.isNotEmpty
+                  ? () => _copyMessage(context, m.text)
+                  : null,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: KvSpace.sm,
+                  vertical: KvSpace.sm,
+                ),
+                decoration: _bubbleDecoration(outbound: m.outbound, tail: tail),
+                child: m.readable
+                    ? Text(
+                        m.text,
+                        // Leading, not size: §4 owns the ramp, but a paragraph
+                        // inside a bubble needs more air between lines than a
+                        // label in a row does.
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          height: 1.35,
+                        ),
+                      )
+                    : Text(
+                        'Unreadable message',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: KvColor.textTertiary,
+                          fontStyle: FontStyle.italic,
+                        ),
                       ),
-                    ),
+              ),
             ),
           ),
         ),
@@ -1673,9 +1705,6 @@ class _ImageViewer extends StatelessWidget {
           Center(
             child: Hero(
               tag: heroTag,
-              // No `cacheWidth` here: the card caps its thumbnail decode, but
-              // this is the surface where the user asked to see detail, and
-              // the bytes are already bounded by what fits in one transaction.
               child: InteractiveViewer(
                 minScale: 1,
                 maxScale: 6,
