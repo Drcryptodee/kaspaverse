@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaspaverse_chain::{Address, ChainError, PreparedSend, SendOutcome, SendSummary, SignerT};
-use kaspaverse_core::Prefix;
+use kaspaverse_core::{Branch, Prefix};
 
 use crate::api::error::AppError;
 use crate::api::{dag, vault, wallet};
@@ -225,16 +225,43 @@ fn kas_display(sompi: u64) -> String {
     }
 }
 
+/// WHERE A PAYMENT'S CHANGE GOES — `receive/0`, the same address everything
+/// else in this wallet already is.
+///
+/// **The one-way valve this closes.** `receive/0` is three things at once: the
+/// only address the wallet ever hands out (`vault_receive_address` derives
+/// exactly this and never rotates), the §0.7 binding of every conversation, and
+/// therefore the address every transport send must pin `input[0]` to (D2/L47,
+/// D-067). Money arrives there. Sending change to a fresh `change/N` meant the
+/// FIRST outgoing payment swept those coins away and put them somewhere the
+/// messages lane may not spend from — so a wallet with a healthy balance had an
+/// identity address holding zero UTXOs, and every message, handshake and backup
+/// refused. Nothing ever refilled it, because nothing ever routed anything back.
+/// Found on the founder's own device 2026-08-15: 14.19 KAS in the wallet,
+/// 0 UTXOs at `receive/0`, one payment earlier.
+///
+/// **What it costs.** Change consolidates at one known address instead of a
+/// fresh one. That buys less than it looks like it did: this wallet's receive
+/// address never rotates and is published to every counterpart it messages, and
+/// a payment's `input[0]` already links its change to it on chain. The lane
+/// staying alive is worth more than hygiene that an observer defeats for free.
+/// Reverting is this one function.
+pub(crate) fn payment_change_address() -> Result<Address, AppError> {
+    vault::wallet_address_at(Branch::Receive, 0)
+}
+
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
 /// floor for the live UTXO shape, computed by probing the pinned Generator —
 /// D-054), or `None` when the wallet cannot send at all / isn't ready. Public
-/// data only; signerless; no cursor movement (peeks the current change address).
+/// data only; signerless; probes with the address the send will really use, so
+/// the advertised floor is the floor of the transaction that gets built.
 pub fn send_minimum() -> Result<Option<u64>, AppError> {
     let Some(engine) = wallet::engine_handle() else {
         return Ok(None); // engine not up yet — the UI simply shows no hint
     };
-    let change = vault::change_address_at(wallet::next_change_index())?;
-    engine.minimum_sendable(change).map_err(AppError::chain)
+    engine
+        .minimum_sendable(payment_change_address()?)
+        .map_err(AppError::chain)
 }
 
 /// Phase 1: validate, build the tx chain over the live UTXO context, and stash
@@ -254,11 +281,12 @@ pub async fn send_prepare(
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
-    // The fresh change is change/cursor; the signer registers the SAME watched
-    // window (receive + widened change) so it can resolve any selected input and
-    // the fresh change (the two-consumer seam — vault.rs is the single source).
-    let cursor = wallet::next_change_index();
-    let change = vault::change_address_at(cursor)?;
+    // Change returns to `receive/0` — see `payment_change_address` for why. The
+    // signer registers the whole watched window (receive + widened change)
+    // anyway, so it still resolves inputs sitting at the change addresses
+    // earlier builds created (the two-consumer seam — vault.rs is the single
+    // source), and coins already parked there stay spendable.
+    let change = payment_change_address()?;
     let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
 
@@ -351,8 +379,20 @@ pub(crate) fn take_stashed(
 }
 
 /// Sign + broadcast a taken plan, advancing the change cursor only on a
-/// fully-broadcast outcome (D-041) — every committed send returns change to
-/// the same cursor discipline, payload or not.
+/// fully-broadcast outcome (D-041).
+///
+/// **The cursor is now vestigial and deliberately left alone.** Since
+/// `payment_change_address` routes every send's change back to `receive/0`,
+/// nothing consumes a `change/N` address — and this advance was already
+/// meaningless for transport sends, which have always returned change to
+/// `receive/0`. `wallet_window` floors the change window at `cursor + 1`, so
+/// each such send widens the derived-and-registered window by one for nothing:
+/// measured on the founder's device 2026-08-15, cursor **108** against a
+/// handful of change addresses that ever held a coin. That is waste, not a
+/// fault — it grows no faster than it did before and risks no funds — so it is
+/// logged as follow-up rather than fixed inside a bug fix it does not belong
+/// to (INV-12). Retiring it means retiring `set_change_cursor` and the
+/// window floor together, under their own auditor pass.
 pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto {
     // The change index this send used (neither input moves during a send —
     // the cursor advances only on full success, and the discovery mark that

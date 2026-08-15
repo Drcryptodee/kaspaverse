@@ -668,6 +668,7 @@ class _MessageRow extends StatelessWidget {
         _AttachmentCard(
           file: attachment,
           outbound: m.outbound,
+          heroTag: m.txid,
           onSave: onSaveFile == null ? null : () => onSaveFile!(m.txid),
           onOpen: (!savedFile || onOpenFile == null)
               ? null
@@ -1194,6 +1195,7 @@ class _AttachmentCard extends StatelessWidget {
   const _AttachmentCard({
     required this.file,
     required this.outbound,
+    required this.heroTag,
     this.onSave,
     this.onOpen,
     this.imageBytes,
@@ -1201,6 +1203,11 @@ class _AttachmentCard extends StatelessWidget {
 
   final AttachmentDto file;
   final bool outbound;
+
+  /// The message txid — unique per attachment, so it can carry the thumbnail
+  /// into the full-screen viewer without two images ever sharing a tag.
+  final String heroTag;
+
   final VoidCallback? onSave;
 
   /// Set once the file has been saved — opening points at the user's own copy,
@@ -1315,16 +1322,32 @@ class _AttachmentCard extends StatelessWidget {
                             child: Center(child: KvLoader.inline()),
                           );
                         }
-                        return Image.memory(
-                          snap.data!,
-                          cacheWidth: 600,
-                          fit: BoxFit.cover,
-                          // A file that claims to be an image and is not must
-                          // fail as a line of text, never as a red error box.
-                          errorBuilder: (_, _, _) => Text(
-                            "This image didn't decode",
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: KvColor.textTertiary,
+                        // Tap to fill the screen. A thumbnail cropped to a
+                        // card is not a way to LOOK at a photo, and sending
+                        // the user out to another app to see one they were
+                        // already shown is a worse answer than showing it.
+                        return GestureDetector(
+                          onTap: () => _openImageViewer(
+                            context,
+                            bytes: snap.data!,
+                            name: file.name,
+                            heroTag: heroTag,
+                          ),
+                          child: Hero(
+                            tag: heroTag,
+                            child: Image.memory(
+                              snap.data!,
+                              cacheWidth: 600,
+                              fit: BoxFit.cover,
+                              // A file that claims to be an image and is not
+                              // must fail as a line of text, never as a red
+                              // error box.
+                              errorBuilder: (_, _, _) => Text(
+                                "This image didn't decode",
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: KvColor.textTertiary,
+                                ),
+                              ),
                             ),
                           ),
                         );
@@ -1358,6 +1381,118 @@ class _AttachmentCard extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Full-screen look at an image already shown in the thread.
+///
+/// Pushed over the thread rather than handed to another app: the bytes are
+/// decrypted message content, and the whole point of the attachment lane is
+/// that nothing leaves the app unless the user themselves saves it (§0.4).
+/// Opaque `false` keeps the thread underneath, so the Hero has somewhere to
+/// fly back to.
+void _openImageViewer(
+  BuildContext context, {
+  required Uint8List bytes,
+  required String name,
+  required String heroTag,
+}) {
+  Navigator.of(context).push(
+    PageRouteBuilder<void>(
+      opaque: false,
+      barrierColor: KvColor.abyss,
+      barrierDismissible: true,
+      transitionDuration: KvMotion.fast,
+      reverseTransitionDuration: KvMotion.fast,
+      pageBuilder: (_, _, _) =>
+          _ImageViewer(bytes: bytes, name: name, heroTag: heroTag),
+    ),
+  );
+}
+
+class _ImageViewer extends StatelessWidget {
+  const _ImageViewer({
+    required this.bytes,
+    required this.name,
+    required this.heroTag,
+  });
+
+  final Uint8List bytes;
+  final String name;
+  final String heroTag;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          // Tapping anywhere off the image closes it — the gesture people
+          // already expect from every photo viewer they have used.
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).maybePop(),
+              behavior: HitTestBehavior.opaque,
+            ),
+          ),
+          Center(
+            child: Hero(
+              tag: heroTag,
+              // No `cacheWidth` here: the card caps its thumbnail decode, but
+              // this is the surface where the user asked to see detail, and
+              // the bytes are already bounded by what fits in one transaction.
+              child: InteractiveViewer(
+                minScale: 1,
+                maxScale: 6,
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, _, _) => Text(
+                    "This image didn't decode",
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: KvColor.textTertiary,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: KvSpace.s,
+                  vertical: KvSpace.xs,
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      tooltip: 'Close',
+                      icon: const Icon(Icons.close, color: KvColor.textPrimary),
+                      onPressed: () => Navigator.of(context).maybePop(),
+                    ),
+                    Expanded(
+                      child: Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: KvColor.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

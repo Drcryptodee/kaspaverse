@@ -1134,6 +1134,13 @@ fn order_priority_for_owner<T>(
     ordered
 }
 
+/// How long to wait for our own change to become spendable before giving up,
+/// and how often to look. The maturity window is ~10 s (100 DAA at 10 bps);
+/// the budget is deliberately looser than that, because DAA does not advance
+/// on a metronome and the change has to be ACCEPTED before its clock starts.
+const MATURITY_WAIT: std::time::Duration = std::time::Duration::from_secs(24);
+const MATURITY_POLL: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Does the candidate backup supersede the one we are holding?
 ///
 /// **The newest snapshot alone speaks for the wallet.** A snapshot is a
@@ -2864,10 +2871,10 @@ pub async fn transport_prepare_bcast(
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
-    // Same two-consumer change seam as the payment path (vault.rs is the
-    // single source): fresh change registered + signer over the watched window.
-    let cursor = wallet::next_change_index();
-    let change = vault::change_address_at(cursor)?;
+    // Same change rule as the payment path: back to `receive/0`, so a public
+    // broadcast cannot sweep the identity address and silently kill every
+    // conversation (see `send::payment_change_address`).
+    let change = crate::api::send::payment_change_address()?;
     let signer = wallet::wallet_signer()?;
     let signer: Arc<dyn SignerT> = Arc::new(signer);
 
@@ -2935,14 +2942,61 @@ async fn prepare_transport_send(
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
-    let priority = engine
+    // WAIT FOR OUR OWN CHANGE — do not refuse over it.
+    //
+    // Source-address discipline pins input[0] to `source` and routes change
+    // back to it, so every send in the messages lane is serialized behind the
+    // previous one's change becoming spendable. The pinned wallet holds a user
+    // transaction immature for `user_transaction_maturity_period_daa = 100`
+    // (`wallet/core/src/utxo/settings.rs:49` @ `cfafeb4`) — about ten seconds
+    // at mainnet's ten blocks per second. Refusing during that window told the
+    // user their funds were the problem when the wallet was only waiting on
+    // itself, and it fired on a backup, a handshake and a message alike.
+    //
+    // Only wait when something IS settling. A bound address that has simply
+    // never been funded is a different answer and deserves a different
+    // sentence — waiting twenty seconds to say "no coins" helps nobody.
+    let mut priority = engine
         .mature_utxos_at(&source)
         .await
         .map_err(AppError::chain)?;
     if priority.is_empty() {
-        return Err(AppError::msg(
-            "this conversation's address is waiting on confirming funds — try again in a few seconds",
-        ));
+        if !wallet::latest_snapshot()
+            .is_some_and(|s| s.pending_sompi.unwrap_or(0) > 0 || s.outgoing_sompi.unwrap_or(0) > 0)
+        {
+            return Err(AppError::msg(
+                // NOT "this conversation's address": this path also serves the
+                // backup and an outbound handshake, neither of which is a
+                // conversation the user is looking at. The sentence has to be
+                // true for every caller and name the way out — the address is
+                // the one the wallet already shows on Receive, so "your wallet
+                // address" is a thing the user can act on.
+                "your wallet address has no spendable coins yet — receive some KAS to it first",
+            ));
+        }
+        let started = std::time::Instant::now();
+        let deadline = started + MATURITY_WAIT;
+        while priority.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(MATURITY_POLL).await;
+            priority = engine
+                .mature_utxos_at(&source)
+                .await
+                .map_err(AppError::chain)?;
+        }
+        // Say how long it actually took, every time. The fix's only other
+        // evidence is an error the user DOESN'T see, and an absence proves
+        // nothing about a window this short (INV-10) — this line is what
+        // makes the wait measurable on glass instead of merely plausible.
+        log::info!(
+            "transport-send: waited {} ms for change to mature at the bound address, {} coin(s) now spendable",
+            started.elapsed().as_millis(),
+            priority.len()
+        );
+        if priority.is_empty() {
+            return Err(AppError::msg(
+                "your last transaction is still settling — try again in a few seconds",
+            ));
+        }
     }
     let priority_len = priority.len();
     let priority = match pin {
@@ -3867,13 +3921,16 @@ fn branch_token(branch: KeyBranch) -> &'static str {
 /// not just money.
 ///
 /// **Why this is a deliberate user action rather than automatic.** Kasia emits
-/// a stash from inside its handshake flow. We cannot: a backup is funded from
-/// `receive/0`, and immediately after a handshake spends that address its
-/// change is unconfirmed, so `mature_utxos_at` finds nothing. Nor can several
-/// backups be emitted back to back, for the same reason — and there is exactly
-/// one `PENDING_TRANSPORT` slot, so preparing one while a confirm sheet is open
-/// would destroy the plan the user is looking at. One explicit action, one
-/// transaction, everything in it.
+/// a stash from inside its handshake flow. We do not: there is exactly one
+/// `PENDING_TRANSPORT` slot, so preparing a backup while a confirm sheet is
+/// open would destroy the plan the user is looking at, and a backup that
+/// appeared unbidden would spend a fee the user never agreed to. One explicit
+/// action, one transaction, everything in it.
+///
+/// A backup fired straight after a handshake used to fail outright, because it
+/// is funded from `receive/0` and that address's change was still immature.
+/// `prepare_transport_send` now waits for its own change instead of refusing,
+/// so the cost of firing one too early is a short pause, not an error.
 ///
 /// The value is a self-send that returns as change (D-069), so the honest cost
 /// is the network fee.

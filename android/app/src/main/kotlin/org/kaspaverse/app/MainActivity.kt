@@ -158,12 +158,22 @@ class MainActivity : FlutterFragmentActivity() {
                                 val view = Intent(Intent.ACTION_VIEW)
                                     .setDataAndType(android.net.Uri.parse(uriText), mime)
                                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                // Always OFFER the list rather than firing at
+                                // whatever the system decided is the default.
+                                // A default set once — an editor tapped when a
+                                // viewer was wanted — otherwise silently owns
+                                // every file of that type forever, with no way
+                                // back from inside the app.
+                                val chooser = Intent.createChooser(view, null)
+                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                startActivity(view)
+                                startActivity(chooser)
                                 result.success(true)
                             } catch (e: android.content.ActivityNotFoundException) {
-                                // Nothing installed can open this type. Not a
-                                // failure of ours — the caller says so plainly.
+                                // A belt only, now that the chooser is what
+                                // gets started: the chooser always resolves, so
+                                // "nothing can open this" is a sentence Android
+                                // says inside it rather than an error we see.
                                 result.success(false)
                             } catch (e: Exception) {
                                 result.error(CODE_SAVE_FAILED, e.message, null)

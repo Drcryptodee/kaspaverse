@@ -343,6 +343,165 @@ void main() {
       expect(abandoned, 1, reason: 'the orphaned stash is released');
     });
 
+    testWidgets('a slow prepare says so instead of freezing', (tester) async {
+      // A prepare in the messages lane can BLOCK for twenty-odd seconds
+      // waiting for the previous send's change to mature — that wait replaced
+      // an outright refusal, and an unresponsive screen would be a worse bug
+      // than the one it fixed. The card is held back a moment first, because
+      // one that flashes and vanishes on a fast prepare reads as a glitch.
+      final prepared = Completer<SignableSummaryDto>();
+      late BuildContext ctx;
+      await tester.pumpWidget(
+        _host(
+          Builder(
+            builder: (c) {
+              ctx = c;
+              return const SizedBox();
+            },
+          ),
+        ),
+      );
+      final pending = runConfirmSend(
+        ctx,
+        prepare: () => prepared.future,
+        commit: (_) async => _ok(),
+        abandon: () async {},
+      );
+
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text('Preparing'), findsNothing, reason: 'no flash');
+
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Preparing'), findsOneWidget);
+      // The reason is named only once the wait is long enough to need one.
+      expect(find.textContaining('still'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 1300));
+      expect(find.text('This can take a few seconds.'), findsOneWidget);
+
+      prepared.complete(_summary());
+      await tester.pumpAndSettle();
+      expect(find.text('Preparing'), findsNothing, reason: 'the card is gone');
+      expect(find.byType(ConfirmSendSheet), findsOneWidget);
+
+      // Close the sheet so the ceremony's own future resolves.
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      await pending;
+    });
+
+    testWidgets('a prepare landing before the card builds still dismisses it', (
+      tester,
+    ) async {
+      // THE ORPHANED BARRIER. `showDialog`'s builder does not run until the
+      // next frame, while `await pending` resumes on a microtask — so a prepare
+      // finishing inside that gap dismissed against a context the builder had
+      // not yet set, did nothing, and left a barrier with no dismiss, no back
+      // (`PopScope(canPop: false)`) and no cancel sitting over the whole app.
+      // Here the timer fires at 250 ms and the prepare lands at 270 ms, both
+      // inside ONE time advance, so the card is pushed and resolved before any
+      // frame builds it.
+      late BuildContext ctx;
+      await tester.pumpWidget(
+        _host(
+          Builder(
+            builder: (c) {
+              ctx = c;
+              return const SizedBox();
+            },
+          ),
+        ),
+      );
+      final pending = runConfirmSend(
+        ctx,
+        prepare: () =>
+            Future.delayed(const Duration(milliseconds: 270), _summary),
+        commit: (_) async => _ok(),
+        abandon: () async {},
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Preparing'), findsNothing, reason: 'no orphaned card');
+      expect(find.byType(ConfirmSendSheet), findsOneWidget);
+
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      await pending;
+    });
+
+    testWidgets('the card sits under a Material, not the error fallback', (
+      tester,
+    ) async {
+      // Without one, `DialogRoute` inherits MaterialApp's `_errorTextStyle` and
+      // the card renders monospace, weight 900, under a yellow double underline
+      // — the "you forgot a Material" fallback, on the money path.
+      final prepared = Completer<SignableSummaryDto>();
+      late BuildContext ctx;
+      await tester.pumpWidget(
+        _host(
+          Builder(
+            builder: (c) {
+              ctx = c;
+              return const SizedBox();
+            },
+          ),
+        ),
+      );
+      final pending = runConfirmSend(
+        ctx,
+        prepare: () => prepared.future,
+        commit: (_) async => _ok(),
+        abandon: () async {},
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Preparing'), findsOneWidget);
+
+      final style = tester
+          .widget<RichText>(
+            find.descendant(
+              of: find.text('Preparing'),
+              matching: find.byType(RichText),
+            ),
+          )
+          .text
+          .style;
+      expect(style?.fontFamily, isNot('monospace'));
+      expect(style?.decoration, anyOf(isNull, TextDecoration.none));
+
+      prepared.complete(_summary());
+      await tester.pumpAndSettle();
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      await pending;
+    });
+
+    testWidgets('a fast prepare never shows the card at all', (tester) async {
+      late BuildContext ctx;
+      await tester.pumpWidget(
+        _host(
+          Builder(
+            builder: (c) {
+              ctx = c;
+              return const SizedBox();
+            },
+          ),
+        ),
+      );
+      final pending = runConfirmSend(
+        ctx,
+        prepare: () async => _summary(),
+        commit: (_) async => _ok(),
+        abandon: () async {},
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Preparing'), findsNothing);
+      expect(find.byType(ConfirmSendSheet), findsOneWidget);
+
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      await pending;
+    });
+
     test('the fee-strategy field rides the DTO (senderPays, 0)', () {
       // The reserved seam (V5): present on every summary, constant today —
       // the ★ Send-UX pass gives it real choices; nothing estimates here.

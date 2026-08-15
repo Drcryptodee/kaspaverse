@@ -7,13 +7,14 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `next_nonce`, `project_signable`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
+// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
 /// floor for the live UTXO shape, computed by probing the pinned Generator —
 /// D-054), or `None` when the wallet cannot send at all / isn't ready. Public
-/// data only; signerless; no cursor movement (peeks the current change address).
+/// data only; signerless; probes with the address the send will really use, so
+/// the advertised floor is the floor of the transaction that gets built.
 Future<BigInt?> sendMinimum() => RustLib.instance.api.crateApiSendSendMinimum();
 
 /// Phase 1: validate, build the tx chain over the live UTXO context, and stash

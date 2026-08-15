@@ -203,13 +203,16 @@ Future<SignableSummaryDto> transportPrepareTaunt({
 /// not just money.
 ///
 /// **Why this is a deliberate user action rather than automatic.** Kasia emits
-/// a stash from inside its handshake flow. We cannot: a backup is funded from
-/// `receive/0`, and immediately after a handshake spends that address its
-/// change is unconfirmed, so `mature_utxos_at` finds nothing. Nor can several
-/// backups be emitted back to back, for the same reason — and there is exactly
-/// one `PENDING_TRANSPORT` slot, so preparing one while a confirm sheet is open
-/// would destroy the plan the user is looking at. One explicit action, one
-/// transaction, everything in it.
+/// a stash from inside its handshake flow. We do not: there is exactly one
+/// `PENDING_TRANSPORT` slot, so preparing a backup while a confirm sheet is
+/// open would destroy the plan the user is looking at, and a backup that
+/// appeared unbidden would spend a fee the user never agreed to. One explicit
+/// action, one transaction, everything in it.
+///
+/// A backup fired straight after a handshake used to fail outright, because it
+/// is funded from `receive/0` and that address's change was still immature.
+/// `prepare_transport_send` now waits for its own change instead of refusing,
+/// so the cost of firing one too early is a short pause, not an error.
 ///
 /// The value is a self-send that returns as change (D-069), so the honest cost
 /// is the network fee.
