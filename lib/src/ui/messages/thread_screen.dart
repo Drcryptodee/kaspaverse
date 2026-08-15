@@ -1663,13 +1663,18 @@ void _openImageViewer(
   required String name,
   required String heroTag,
 }) {
+  // §6: reduced motion arrives instantly. The Hero flies on the ROUTE's
+  // animation, so zeroing the duration is what grounds the flight — a curve
+  // swap would still sail the thumbnail across the screen.
+  final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+  final flight = reduced ? Duration.zero : KvMotion.fast;
   Navigator.of(context).push(
     PageRouteBuilder<void>(
       opaque: false,
       barrierColor: KvColor.abyss,
       barrierDismissible: true,
-      transitionDuration: KvMotion.fast,
-      reverseTransitionDuration: KvMotion.fast,
+      transitionDuration: flight,
+      reverseTransitionDuration: flight,
       pageBuilder: (_, _, _) =>
           _ImageViewer(bytes: bytes, name: name, heroTag: heroTag),
     ),
@@ -1734,30 +1739,71 @@ class _ImageViewer extends StatelessWidget {
             top: 0,
             left: 0,
             right: 0,
-            child: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: KvSpace.s,
-                  vertical: KvSpace.xs,
-                ),
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: 'Close',
-                      icon: const Icon(Icons.close, color: KvColor.textPrimary),
-                      onPressed: () => Navigator.of(context).maybePop(),
-                    ),
-                    Expanded(
-                      child: Text(
-                        name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: KvColor.textSecondary,
-                        ),
-                      ),
-                    ),
+            // A scrim under the controls, not decoration. The bytes below are
+            // sender-chosen and can be white, and a zoomed image covers the
+            // whole screen — without this the close affordance and the file
+            // name are painted straight onto an unknown background and can
+            // vanish completely.
+            //
+            // The stops carry the whole §11 argument. This box also spans the
+            // status-bar inset, so a plain 0.72→0 ramp spends its darkest part
+            // on empty space and arrives at the control row at ~0.19–0.36 — a
+            // scrim that looks like a fix and measures 1.5:1. Holding full
+            // strength to 70% of the box puts the row inside the flat section
+            // and fades below it, so it still reads as shading on the image
+            // rather than a bar. The extra bottom padding is what the fade is
+            // spent on.
+            //
+            // The file name takes `textPrimary`, not `textSecondary`: the
+            // secondary token is calibrated against `abyss`, and this surface is
+            // an unknown image behind 0.72 of it. Over white that composites to
+            // 2.4:1 — it fails AA at any scrim short of an opaque bar. Primary
+            // measures ~7:1 on the same ground.
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  stops: const [0, 0.7, 1],
+                  colors: [
+                    KvColor.abyss.withValues(alpha: 0.72),
+                    KvColor.abyss.withValues(alpha: 0.72),
+                    KvColor.abyss.withValues(alpha: 0),
                   ],
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: KvSpace.l),
+                child: SafeArea(
+                  bottom: false,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: KvSpace.s,
+                      vertical: KvSpace.xs,
+                    ),
+                    child: Row(
+                      children: [
+                        IconButton(
+                          tooltip: 'Close',
+                          icon: const Icon(
+                            Icons.close,
+                            color: KvColor.textPrimary,
+                          ),
+                          onPressed: () => Navigator.of(context).maybePop(),
+                        ),
+                        Expanded(
+                          child: Text(
+                            name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: KvColor.textPrimary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),

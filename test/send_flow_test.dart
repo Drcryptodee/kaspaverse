@@ -378,6 +378,18 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1300));
       expect(find.text('This can take a few seconds.'), findsOneWidget);
 
+      // Past the point where "a few seconds" has become false, the card says
+      // the one thing a barrier with no exit cannot let the user infer: that it
+      // ends by itself. It still never names the cause — this surface does not
+      // know which branch Rust took (L92).
+      await tester.pump(const Duration(seconds: 7));
+      expect(
+        find.text('Still working. This stops on its own either way.'),
+        findsOneWidget,
+      );
+      expect(find.text('This can take a few seconds.'), findsNothing);
+      expect(find.textContaining('settling'), findsNothing);
+
       prepared.complete(_summary());
       await tester.pumpAndSettle();
       expect(find.text('Preparing'), findsNothing, reason: 'the card is gone');

@@ -55,6 +55,10 @@ pub use kaspa_addresses::Address;
 pub use kaspa_addresses::Version as AddressVersion;
 pub use kaspa_consensus_core::Hash;
 pub use kaspa_wallet_core::rpc::Rpc;
+// The pinned spendable-coin handle. The bridge names it only to hold the set
+// [`WalletEngine::mature_utxos_at`] returns while it waits for that set to
+// stop being empty — it never constructs or inspects one.
+pub use kaspa_wallet_core::utxo::UtxoEntryReference;
 // The signer trait the bridge coerces its `VaultSigner` into (`Arc<dyn SignerT>`)
 // when handing it to [`WalletEngine::prepare_send`] — same trait both crates use.
 pub use kaspa_wallet_core::tx::generator::signer::SignerT;

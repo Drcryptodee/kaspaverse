@@ -33,7 +33,8 @@ use kaspaverse_chain::{
     decode_envelope_body, parse_payload, resolve_return_address, split_comm_body, AcceptanceEvent,
     Address, ChainError, ConversationRecord, ConversationStatus, KeyBranch, MessageDirection,
     MessageRecord, PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore,
-    WatchSource, HANDSHAKE_BOND_SOMPI, STASH_SCOPE_SAVED_HANDSHAKE,
+    UtxoEntryReference, WalletEngine, WatchSource, HANDSHAKE_BOND_SOMPI,
+    STASH_SCOPE_SAVED_HANDSHAKE,
 };
 use kaspaverse_core::attachment::Attachment;
 use kaspaverse_core::frames::{
@@ -1135,9 +1136,24 @@ fn order_priority_for_owner<T>(
 }
 
 /// How long to wait for our own change to become spendable before giving up,
-/// and how often to look. The maturity window is ~10 s (100 DAA at 10 bps);
-/// the budget is deliberately looser than that, because DAA does not advance
-/// on a metronome and the change has to be ACCEPTED before its clock starts.
+/// and how often to look.
+///
+/// The budget covers BOTH legs of [`WalletEngine::settling_at`], and the second
+/// is what binds it:
+///
+/// - For our own change the clock is ACCEPTANCE, not maturity — the pin
+///   force-matures a UTXO belonging to one of our outgoing transactions the
+///   moment its `UtxosChanged` notification arrives (context.rs:590 → 299-300),
+///   so submit → notification is the whole wait, normally about a second.
+/// - For anything that lands in the pending set instead — a third-party payment
+///   to the bound address, or our own change re-inserted by a rescan through
+///   `extend_from_scan` — the clock IS the 100-DAA hold (settings.rs:49), about
+///   ten seconds at mainnet's ten blocks per second.
+///
+/// So 24 s is sized against the ten-second leg with room for a slow link and a
+/// DAA clock that does not advance on a metronome — **not** against the
+/// one-second leg. Tightening it to "a second, loosely" would break the case
+/// this constant actually exists for. See [`await_spendable_at`].
 const MATURITY_WAIT: std::time::Duration = std::time::Duration::from_secs(24);
 const MATURITY_POLL: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -2907,6 +2923,166 @@ pub async fn transport_prepare_bcast(
     ))
 }
 
+/// The spendable coins at `source` — waiting for our own change to mature, but
+/// only when something is genuinely on its way to THIS address.
+///
+/// **Wait for our own change; do not refuse over it (D-148).** Source-address
+/// discipline pins input[0] to `source` and routes change back to it, so every
+/// send in the messages lane is serialized behind the previous one's change
+/// becoming spendable. Refusing during that window told the user their funds
+/// were the problem when the wallet was only waiting on itself, and it fired on
+/// a backup, a handshake and a message alike.
+///
+/// **What is actually being waited on is ACCEPTANCE, not maturity.** The pin
+/// force-matures a UTXO it recognises as belonging to one of our own outgoing
+/// transactions (context.rs:590 → context.rs:299-300), so our change skips the
+/// 100-DAA hold entirely and is spendable the moment the `UtxosChanged`
+/// notification lands — see [`WalletEngine::settling_at`], which reads the
+/// outgoing set for exactly this reason. [`MATURITY_WAIT`] is therefore sized
+/// against the submit → acceptance-notification round trip, which is normally
+/// about a second at ten blocks per second; the budget is loose because a slow
+/// link, not the DAA clock, is what stretches it.
+///
+/// **The wait is gated address-locally** ([`WalletEngine::settling_at`]), not on
+/// the wallet's folded balance. The balance answered a different question than
+/// the one being asked: it could report a payment settling on an unrelated
+/// address — buying this send a pointless twenty-four-second block it always
+/// ends by refusing — or report nothing at all before the first snapshot lands,
+/// refusing instantly on a funded address that was mid-settle. An address that
+/// has simply never been funded is a different answer and deserves a different
+/// sentence; waiting twenty seconds to say "no coins" helps nobody.
+///
+/// **Call this BEFORE measuring anything about the coin shape.** A floor
+/// computed while the wallet is all-immature is measured over a UTXO set this
+/// wait exists to change — and on a wallet whose every coin is settling there is
+/// no floor to compute at all (`send.rs`,
+/// `no_mature_coin_means_no_floor_at_all`), so the caller refuses with the
+/// anti-dust sentence and never reaches this wait. Blaming the user's coin shape
+/// for what is only a clock is the L92 scar in a second lane.
+async fn await_spendable_at(
+    engine: &WalletEngine,
+    source: &Address,
+) -> Result<Vec<UtxoEntryReference>, AppError> {
+    let mut priority = engine
+        .mature_utxos_at(source)
+        .await
+        .map_err(AppError::chain)?;
+    if !priority.is_empty() {
+        return Ok(priority);
+    }
+    // Which address this is decides BOTH refusal sentences below, so it is
+    // computed once — after the fast path, so an ordinary send never pays for a
+    // derivation only a refusal needs.
+    //
+    // `receive/0` is the identity address, the only one the wallet ever shows.
+    // Anything else is a conversation bound to the slot that decrypted its
+    // handshake, or one a restore payload bound to a change branch
+    // (`restored_conversation`). Those cannot be named to the user — the app
+    // never surfaces a bound address — so no sentence below may prescribe
+    // funding one.
+    let identity = vault::wallet_address_at(Branch::Receive, 0).ok();
+    let is_identity = identity.as_ref() == Some(source);
+    if !engine.settling_at(source) {
+        // ONE re-read before the hardest sentence in this file. The pin has a
+        // state where a coin is in neither set we just looked at:
+        // `handle_pending` retains a matured entry OUT of the processor's
+        // pending map (processor.rs:279-285) and only THEN awaits `promote`,
+        // which is what puts it into `mature` (context.rs:395-405). Read across
+        // that gap and a wallet whose coin matured microseconds ago is told it
+        // has no money.
+        //
+        // The sleep is the honest part. Re-reading immediately only narrows the
+        // gap — nothing orders our read after the promote — whereas one poll
+        // interval comfortably outlasts a promote made of local map operations.
+        // It is spent only on the way to a refusal, and it is 1/60th of the wait
+        // this branch is refusing to spend.
+        tokio::time::sleep(MATURITY_POLL).await;
+        priority = engine
+            .mature_utxos_at(source)
+            .await
+            .map_err(AppError::chain)?;
+        if !priority.is_empty() {
+            return Ok(priority);
+        }
+        // The address itself never reaches logcat — it would tie the device to
+        // an on-chain identity. Which KIND of address it is, is the whole
+        // diagnosis and leaks nothing.
+        log::warn!(
+            "transport-send: refusing — source is dry and nothing is settling (identity address: {is_identity})"
+        );
+        return Err(AppError::msg(if is_identity {
+            // "nothing on the way that I can see", not "nothing on the way":
+            // one thing is invisible from here — a coinbase in stasis
+            // (`settling_at`'s named blind spot). Prescribing "receive some KAS"
+            // as the ONLY way forward would be false for a miner.
+            "your wallet address has no spendable coins yet, and nothing on the way that I can see \
+             — receive some KAS to it to send from here"
+        } else {
+            // A conversation bound somewhere other than receive/0. Both halves
+            // of the refill/drain question, said out loud (wallet-security
+            // item 19, L92's destination): what REFILLS such an address is only
+            // that conversation's own sends, because since D-148 every
+            // payment's change goes home to receive/0; what DRAINS it is any
+            // ordinary payment, because `prepare_send` draws from the
+            // Generator's general UTXO iterator over every watched window
+            // address with no exclusion for bound slots. So a payment can
+            // strand a conversation the same way it once stranded the whole
+            // wallet — one lane narrower, and with no address to show the user.
+            // Logged as an open item; this sentence only refuses to lie about it.
+            "this conversation can't send right now — its own return address has no coins, \
+             and nothing is on the way to it"
+        }));
+    }
+    let started = std::time::Instant::now();
+    let deadline = started + MATURITY_WAIT;
+    while priority.is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(MATURITY_POLL).await;
+        priority = engine
+            .mature_utxos_at(source)
+            .await
+            .map_err(AppError::chain)?;
+    }
+    // Say how long it actually took, every time. The fix's only other evidence
+    // is an error the user DOESN'T see, and an absence proves nothing about a
+    // window this short (INV-10) — this line is what makes the wait measurable
+    // on glass instead of merely plausible.
+    log::info!(
+        "transport-send: waited {} ms for change to mature at the bound address, {} coin(s) now spendable",
+        started.elapsed().as_millis(),
+        priority.len()
+    );
+    if priority.is_empty() {
+        // The budget expired. Count what the pin still calls unsettled at this
+        // address so a repeat is diagnosable from a log rather than a block
+        // explorer — a COUNT, never the txids: in this lane a txid IS a
+        // message's identity (§0.4), and logcat is not where that belongs.
+        log::warn!(
+            "transport-send: {} ms elapsed with nothing spendable at the source; still-settling: {}",
+            started.elapsed().as_millis(),
+            engine.settling_at(source)
+        );
+        // Deliberately does NOT say "your last transaction is still settling",
+        // and names a second path. Reaching here means something addressed to us
+        // never arrived inside the budget, and the pin cannot tell us why: an
+        // outgoing transaction that is submitted but never accepted is NEVER
+        // evicted (`handle_outgoing` only retires one that has an acceptance
+        // score, processor.rs:336-345), so this can also be a dead transaction
+        // that will latch until a rescan. "A few seconds" alone would be a
+        // promise the code cannot keep — naming a cause it did not check is the
+        // L92 scar. Branched on the same rule as the dry sentence above: sending
+        // a user to the Receive screen when the starved address is a
+        // conversation's own is sending them to the wrong subsystem.
+        return Err(AppError::msg(if is_identity {
+            "still waiting on coins to reach your wallet address — try again in a few seconds, \
+             and reopen the app if it keeps saying this"
+        } else {
+            "still waiting on coins to reach this conversation's return address — try again in \
+             a few seconds, and reopen the app if it keeps saying this"
+        }));
+    }
+    Ok(priority)
+}
+
 /// Build + stash one encrypted-kind transport send over the shared two-phase
 /// seam; returns the B7 summary (payload kind decoded from the BUILT tx).
 ///
@@ -2919,14 +3095,30 @@ pub async fn transport_prepare_bcast(
 /// the next send. If `source` holds no spendable UTXO we surface an honest
 /// "still confirming" message rather than silently spend from another address
 /// (which fragments that identity — the whole bug).
+///
+/// **`priority` is passed IN, already waited for.** Every caller runs
+/// [`await_spendable_at`] itself, because two of them must measure the coin
+/// shape (`minimum_sendable`) after the wait and before this call. Waiting again
+/// here would make the messages lane traverse the budget twice — up to 48 s
+/// under a modal the user cannot dismiss — for a set the caller already holds.
+/// One wait per send, owned by whoever needed it first.
 async fn prepare_transport_send(
     dest: Address,
     amount_sompi: u64,
     wire: Vec<u8>,
     source: Address,
+    priority: Vec<UtxoEntryReference>,
     intent: TransportIntent,
     pin: PinPolicy,
 ) -> Result<SignableSummaryDto, AppError> {
+    // `await_spendable_at` errors rather than returning empty, and the pinned
+    // Generator rejects an empty priority outright (a pinned send with nothing
+    // to pin is a silent identity change — `prepare_send_pinned`). This is the
+    // belt on the seam between them; it never crosses the bridge.
+    debug_assert!(
+        !priority.is_empty(),
+        "priority must come from `await_spendable_at`, which never yields empty"
+    );
     // D-069 structural check: a comm-carried kind IS a self-send — its
     // destination and pinned source are the same bound address (value
     // returns as change; the sheet leads with the fee). Debug-only belt: the
@@ -2942,62 +3134,6 @@ async fn prepare_transport_send(
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
-    // WAIT FOR OUR OWN CHANGE — do not refuse over it.
-    //
-    // Source-address discipline pins input[0] to `source` and routes change
-    // back to it, so every send in the messages lane is serialized behind the
-    // previous one's change becoming spendable. The pinned wallet holds a user
-    // transaction immature for `user_transaction_maturity_period_daa = 100`
-    // (`wallet/core/src/utxo/settings.rs:49` @ `cfafeb4`) — about ten seconds
-    // at mainnet's ten blocks per second. Refusing during that window told the
-    // user their funds were the problem when the wallet was only waiting on
-    // itself, and it fired on a backup, a handshake and a message alike.
-    //
-    // Only wait when something IS settling. A bound address that has simply
-    // never been funded is a different answer and deserves a different
-    // sentence — waiting twenty seconds to say "no coins" helps nobody.
-    let mut priority = engine
-        .mature_utxos_at(&source)
-        .await
-        .map_err(AppError::chain)?;
-    if priority.is_empty() {
-        if !wallet::latest_snapshot()
-            .is_some_and(|s| s.pending_sompi.unwrap_or(0) > 0 || s.outgoing_sompi.unwrap_or(0) > 0)
-        {
-            return Err(AppError::msg(
-                // NOT "this conversation's address": this path also serves the
-                // backup and an outbound handshake, neither of which is a
-                // conversation the user is looking at. The sentence has to be
-                // true for every caller and name the way out — the address is
-                // the one the wallet already shows on Receive, so "your wallet
-                // address" is a thing the user can act on.
-                "your wallet address has no spendable coins yet — receive some KAS to it first",
-            ));
-        }
-        let started = std::time::Instant::now();
-        let deadline = started + MATURITY_WAIT;
-        while priority.is_empty() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(MATURITY_POLL).await;
-            priority = engine
-                .mature_utxos_at(&source)
-                .await
-                .map_err(AppError::chain)?;
-        }
-        // Say how long it actually took, every time. The fix's only other
-        // evidence is an error the user DOESN'T see, and an absence proves
-        // nothing about a window this short (INV-10) — this line is what
-        // makes the wait measurable on glass instead of merely plausible.
-        log::info!(
-            "transport-send: waited {} ms for change to mature at the bound address, {} coin(s) now spendable",
-            started.elapsed().as_millis(),
-            priority.len()
-        );
-        if priority.is_empty() {
-            return Err(AppError::msg(
-                "your last transaction is still settling — try again in a few seconds",
-            ));
-        }
-    }
     let priority_len = priority.len();
     let priority = match pin {
         PinPolicy::Default => priority,
@@ -3304,11 +3440,16 @@ pub async fn transport_prepare_handshake(
         },
     };
 
+    let engine = wallet::engine_handle()
+        .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    let priority = await_spendable_at(&engine, &own_address).await?;
+
     prepare_transport_send(
         dest,
         HANDSHAKE_BOND_SOMPI,
         wire,
         own_address, // source-address discipline: input[0] + change = receive/0
+        priority,
         TransportIntent::Handshake {
             conversation,
             reseal,
@@ -3653,11 +3794,14 @@ pub async fn transport_prepare_accept(
         .map_err(AppError::core)?
         .to_bytes();
 
+    let priority = await_spendable_at(&engine, &own_address).await?;
+
     prepare_transport_send(
         dest.clone(),
         HANDSHAKE_BOND_SOMPI, // the refund — the same provenance-cited norm
         wire,
         own_address, // source-address discipline: input[0] = the address they know
+        priority,
         TransportIntent::Accept {
             conversation_id,
             contact_address: dest.to_string(),
@@ -3786,6 +3930,12 @@ async fn prepare_comm_plaintext(
     // self-send shape, so the floor it finds is the one that gets built.
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    // FIRST, because the floor below is measured over the mature UTXO set and
+    // this is the wait that set is waiting on. Measure first and an all-immature
+    // wallet has no floor at all — `minimum_sendable` answers `None` and the
+    // send dies blaming the user's coin shape for a clock. The set travels down
+    // into `prepare_transport_send`, so the budget is spent once.
+    let priority = await_spendable_at(&engine, &own_address).await?;
     let floor = engine
         .minimum_sendable(own_address.clone())
         .map_err(AppError::chain)?
@@ -3806,6 +3956,7 @@ async fn prepare_comm_plaintext(
         floor,
         wire,
         own_address, // source discipline: input[0] + change = the same bound addr
+        priority,
         TransportIntent::Comm {
             conversation_id,
             alias_on_wire: my_alias,
@@ -3928,9 +4079,10 @@ fn branch_token(branch: KeyBranch) -> &'static str {
 /// action, one transaction, everything in it.
 ///
 /// A backup fired straight after a handshake used to fail outright, because it
-/// is funded from `receive/0` and that address's change was still immature.
-/// `prepare_transport_send` now waits for its own change instead of refusing,
-/// so the cost of firing one too early is a short pause, not an error.
+/// is funded from `receive/0` and that address's change had not come back yet.
+/// [`await_spendable_at`] — which this function runs before it measures
+/// anything — now waits for that change instead of refusing, so the cost of
+/// firing one too early is a short pause, not an error.
 ///
 /// The value is a self-send that returns as change (D-069), so the honest cost
 /// is the network fee.
@@ -4011,6 +4163,9 @@ pub async fn transport_prepare_stash() -> Result<SignableSummaryDto, AppError> {
 
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    // Same order, same reason as the comm path: the floor is a measurement of
+    // the mature set, so it must be taken after the wait, never before it.
+    let priority = await_spendable_at(&engine, &own_address).await?;
     let floor = engine
         .minimum_sendable(own_address.clone())
         .map_err(AppError::chain)?
@@ -4023,6 +4178,7 @@ pub async fn transport_prepare_stash() -> Result<SignableSummaryDto, AppError> {
         floor,
         wire,
         own_address,
+        priority,
         TransportIntent::SelfStash {
             covered,
             timestamp_ms,

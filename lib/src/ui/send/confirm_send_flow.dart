@@ -11,11 +11,17 @@ import 'confirm_send_sheet.dart';
 /// card would flash and vanish, which reads as a glitch rather than progress.
 const Duration _showProgressAfter = Duration(milliseconds: 250);
 
-/// How long the card waits before naming the reason. Any prepare slow enough
-/// to reach here is waiting on our own change to mature — see
-/// `prepare_transport_send` — but the sentence is hedged because a slow link
-/// can also get here, and the wallet should not assert what it has not checked.
+/// How long the card waits before naming the reason. Any prepare slow enough to
+/// reach here is waiting on coins to reach the send's own source address — see
+/// `await_spendable_at`, which every transport caller runs once — but the
+/// sentence is hedged because a slow link can also get here, and the wallet
+/// should not assert what it has not checked.
 const Duration _explainAfter = Duration(milliseconds: 1200);
+
+/// How long before the card stops saying "a few seconds" and says it will end
+/// by itself. Past this the first line has become false, and the barrier the
+/// user cannot dismiss has been silent long enough to read as a hang.
+const Duration _reassureAfter = Duration(seconds: 7);
 
 /// THE one confirm-send ceremony (V5): prepare in Rust → open the shared
 /// hold-to-sign sheet over the Rust-decoded [SignableSummaryDto] (B7) →
@@ -105,8 +111,23 @@ Future<SendOutcomeDto?> runConfirmSend(
 /// The barrier stays non-dismissible on purpose: a build is running in Rust and
 /// there is exactly one `PENDING_TRANSPORT` slot, so letting the user reach the
 /// surface underneath would let a second prepare overwrite the plan the first
-/// one is about to show them. The wait it covers is bounded in Rust
-/// (`MATURITY_WAIT`) and every RPC under it carries its own timeout.
+/// one is about to show them. That defence is only as good as the bound it
+/// covers, so the bound is kept to ONE `MATURITY_WAIT`: every transport caller
+/// runs `await_spendable_at` once and hands the coins it waited for down to
+/// `prepare_transport_send` rather than letting it wait again.
+///
+/// **The wait itself makes no network call**, so an unresponsive node cannot
+/// stretch it: each poll reads the pinned `UtxoContext`'s in-memory mature set
+/// (`get_utxos` filters `context().mature` — no RPC, no `await` in its body),
+/// which leaves the deadline as the only clock. Every RPC under the BUILD that
+/// follows carries its own timeout.
+///
+/// **No cancel, deliberately** (ux ruling, this session). Nothing is signed,
+/// broadcast or at risk during the wait, so DS-3's friction-tracks-
+/// irreversibility rule does not demand an exit. The proposed cancel would set
+/// a flag and call `transport_abandon()` when the prepare resolved — and that
+/// call is NOT nonce-guarded, so cancelling one send could clear a LATER send's
+/// valid stashed plan. That trades an inconvenience for a correctness defect.
 VoidCallback _showPreparing(BuildContext context) {
   final navigator = Navigator.of(context, rootNavigator: true);
   final route = DialogRoute<void>(
@@ -138,7 +159,9 @@ class _PreparingCard extends StatefulWidget {
 
 class _PreparingCardState extends State<_PreparingCard> {
   Timer? _timer;
+  Timer? _reassureTimer;
   bool _explain = false;
+  bool _reassure = false;
 
   @override
   void initState() {
@@ -146,11 +169,15 @@ class _PreparingCardState extends State<_PreparingCard> {
     _timer = Timer(_explainAfter, () {
       if (mounted) setState(() => _explain = true);
     });
+    _reassureTimer = Timer(_reassureAfter, () {
+      if (mounted) setState(() => _reassure = true);
+    });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _reassureTimer?.cancel();
     super.dispose();
   }
 
@@ -165,7 +192,15 @@ class _PreparingCardState extends State<_PreparingCard> {
         // for your last transaction to settle" — which this surface never
         // checked and which is simply false on a first backup or a first
         // handshake, where nothing has been sent yet.
-        'This can take a few seconds.',
+        //
+        // The late line is the §12 half: on a barrier with no exit, the one
+        // thing the user needs and cannot infer is that it ENDS. That much is
+        // provable here — the Rust wait is deadline-bounded and a prepare error
+        // propagates to the caller's own surface — where naming the cause still
+        // is not, so it stays unnamed (L92).
+        _reassure
+            ? 'Still working. This stops on its own either way.'
+            : 'This can take a few seconds.',
         textAlign: TextAlign.center,
         style: theme.textTheme.bodyMedium?.copyWith(
           color: KvColor.textSecondary,

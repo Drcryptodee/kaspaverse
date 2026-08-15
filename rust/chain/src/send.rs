@@ -28,12 +28,14 @@
 use std::sync::Arc;
 
 use kaspa_addresses::Address;
+use kaspa_consensus_core::tx::Transaction;
+use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wallet_core::tx::generator::signer::SignerT;
 use kaspa_wallet_core::tx::generator::{
     Generator, GeneratorSettings, GeneratorSummary, PendingTransaction,
 };
 use kaspa_wallet_core::tx::{Fees, PaymentDestination, PaymentOutputs};
-use kaspa_wallet_core::utxo::UtxoEntryReference;
+use kaspa_wallet_core::utxo::{OutgoingTransaction, UtxoEntryReference};
 
 use crate::error::{ChainError, Result};
 use crate::wallet_sync::WalletEngine;
@@ -252,6 +254,89 @@ impl WalletEngine {
         Ok(entries.into_iter().map(Into::into).collect())
     }
 
+    /// Is something on its way to `address` that will make it spendable — i.e.
+    /// is waiting worth anything, or is this address simply unfunded?
+    ///
+    /// **Address-LOCAL, because that is the question being asked.** The wallet's
+    /// folded `pending`/`outgoing` balance answers it for the WHOLE wallet, and
+    /// the two answers disagree in both directions: a payment settling on an
+    /// unrelated address makes the wallet look busy while this address stays
+    /// empty forever, and a wallet whose balance snapshot has not landed yet
+    /// looks idle while this address is mid-settle. Either way the caller says a
+    /// sentence the code never checked — the L92 scar.
+    ///
+    /// Two sets are read, and for our OWN change the first one is the whole
+    /// answer — the 100-DAA hold does not apply to it:
+    ///
+    /// 1. **Submitted, not yet accepted** — the change output exists only inside
+    ///    our own outgoing transaction; no UTXO exists anywhere yet. Read from
+    ///    the processor's outgoing set, decoding each output's script back to an
+    ///    address with the pin's own standard decoder (INV-9 — the same
+    ///    `extract_script_pub_key_address` the receive scan uses). This is the
+    ///    live window for a send of ours: when the `UtxosChanged` notification
+    ///    lands, `handle_utxo_added` passes `force_maturity_if_outgoing` for any
+    ///    UTXO whose txid it recognises as an outgoing transaction of ours
+    ///    (context.rs:590), and `insert` then puts it **straight into `mature`**,
+    ///    skipping `pending` entirely (context.rs:299-300).
+    /// 2. **Accepted, not yet mature** — held immature for
+    ///    `user_transaction_maturity_period_daa = 100` (settings.rs:49). By the
+    ///    note above this is NOT where our own change waits; it catches a
+    ///    third-party payment arriving at the address, and our own change when a
+    ///    rescan re-inserts it through `extend_from_scan` (context.rs:447),
+    ///    which knows nothing about outgoing transactions and so cannot force
+    ///    maturity. Read from the processor's pending set, which the pin keeps
+    ///    live: every context insert mirrors into it (context.rs:310-315),
+    ///    `handle_pending` retains away entries that matured
+    ///    (processor.rs:279-285) and `remove` prunes it (context.rs:364-368).
+    ///    This leg matches on the entry's own `address` field as the node
+    ///    reported it (`consensus/client/src/utxo.rs:174`), NOT by decoding a
+    ///    script the way leg 1 does — the two legs do not share leg 1's
+    ///    provenance. Safe here because the field going `None` fails toward a
+    ///    refusal, never toward spending, and because what it gates is whether
+    ///    to wait, never an amount (INV-8).
+    ///
+    /// **Blind spot, deliberate:** a coinbase inside
+    /// `coinbase_transaction_stasis_period_daa` (500) sits in a third map,
+    /// `stasis` (context.rs:303-308), which is not read here. Mining to a bound
+    /// address therefore reads as "not settling" — correctly, for this
+    /// caller's purpose: 500 DAA is fifty times the wait budget, so waiting
+    /// would be worse than refusing. The refusal sentence must not claim
+    /// receiving is the only way forward.
+    ///
+    /// Maturity is never classified here — the pin decides what is pending and
+    /// what is outgoing; this only asks which of ITS answers name `address`.
+    /// Synchronous on purpose: it holds sharded map guards, which must not be
+    /// carried across an `.await`.
+    pub fn settling_at(&self, address: &Address) -> bool {
+        let context = self.context();
+        let processor = context.processor();
+
+        // Submitted, not yet accepted. Clone the handles OUT of the map first
+        // (each is an `Arc` bump): `transaction()` takes the pending
+        // transaction's own lock, and taking it while a DashMap shard guard is
+        // still alive is a lock order this module has no reason to own.
+        let outgoing: Vec<OutgoingTransaction> = processor
+            .outgoing()
+            .iter()
+            .map(|outgoing| outgoing.value().clone())
+            .collect();
+        if outgoing
+            .iter()
+            .any(|outgoing| pays_to(&outgoing.pending_transaction().transaction(), address))
+        {
+            return true;
+        }
+
+        // Accepted, not yet mature. Bound, not returned directly: `processor`
+        // borrows `context`, which must outlive the shard guards this iterator
+        // holds.
+        let pending_here = processor
+            .pending()
+            .iter()
+            .any(|pending| pending.value().entry().address().as_ref() == Some(address));
+        pending_here
+    }
+
     /// Build (unsigned) a send that PINS input[0] to a chosen source address and
     /// routes change back to it — the D2 source-address discipline (P4/D-067,
     /// the L47 scar): a conversation always presents ONE input[0] return address
@@ -404,6 +489,20 @@ const PROBE_LADDER_START_SOMPI: u64 = 1_000_000;
 /// Bisection precision: 0.001 KAS — display precision; probes are cheap but
 /// sompi-exact minima are false precision (fees shift the boundary anyway).
 const PROBE_PRECISION_SOMPI: u64 = 100_000;
+
+/// Does any output of `tx` pay `address`?
+///
+/// The script is decoded back to an address with the pin's own standard decoder
+/// rather than by comparing raw script bytes: the same function the receive scan
+/// uses (`transport.rs`), so a script shape it can read is a script shape this
+/// agrees with. A non-standard output simply does not match — it cannot be an
+/// ordinary address payment.
+fn pays_to(tx: &Transaction, address: &Address) -> bool {
+    tx.outputs.iter().any(|output| {
+        extract_script_pub_key_address(&output.script_public_key, address.prefix)
+            .is_ok_and(|decoded| &decoded == address)
+    })
+}
 
 /// Classify one candidate amount by running a real (unsigned, non-broadcast)
 /// generation over the live context. Public data only: simulated payment to our
@@ -580,6 +679,9 @@ fn map_generate_error(e: kaspa_wallet_core::error::Error) -> ChainError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
+    use kaspa_consensus_core::tx::TransactionOutput;
+    use kaspa_txscript::pay_to_address_script;
     use kaspa_wallet_core::tx::generator::PendingTransaction as Pt;
     use kaspa_wallet_core::utils::kaspa_to_sompi;
     use kaspa_wallet_core::utxo::UtxoEntryReference;
@@ -953,6 +1055,100 @@ mod tests {
         assert_eq!(
             probe(min - 2 * PROBE_PRECISION_SOMPI).unwrap(),
             ProbeOutcome::TooSmall
+        );
+    }
+
+    /// The output half of [`WalletEngine::settling_at`]: a submitted-but-not-yet
+    /// accepted transaction is recognised as "on its way to `address`" only when
+    /// it actually pays that address. Getting this wrong in either direction is
+    /// a live refusal or a pointless twenty-four-second wait.
+    #[test]
+    fn an_outgoing_transaction_is_matched_by_the_address_it_pays() {
+        let change = addr(CHANGE);
+        let dest = addr(DEST);
+        let tx = |outputs: Vec<Address>| {
+            Transaction::new(
+                0,
+                vec![],
+                outputs
+                    .iter()
+                    .map(|a| TransactionOutput::new(20_000_000, pay_to_address_script(a)))
+                    .collect(),
+                0,
+                SUBNETWORK_ID_NATIVE,
+                0,
+                vec![],
+            )
+        };
+        // The transport shape: pay a stranger, change home to our bound address.
+        let send = tx(vec![dest.clone(), change.clone()]);
+        assert!(pays_to(&send, &change), "our own change output counts");
+        assert!(pays_to(&send, &dest), "so does the payment output");
+
+        // The false-wait case the wallet-global gate could not tell apart: a
+        // transaction settling somewhere else entirely.
+        let elsewhere = tx(vec![dest.clone()]);
+        assert!(
+            !pays_to(&elsewhere, &change),
+            "a transaction that pays another address is not this address settling"
+        );
+
+        // No outputs at all must never read as "something is coming".
+        assert!(!pays_to(&tx(vec![]), &change));
+    }
+
+    /// The premise behind the caller-ordering law in `prepare_transport_send`:
+    /// an all-immature wallet has NO floor, so a floor computed before the
+    /// maturity wait cannot return a number to wait with.
+    ///
+    /// This is the pin answering, not us: an empty spendable set makes the very
+    /// first probe `InsufficientFunds` ⇒ `TooLarge`, the ladder never anchors,
+    /// and the hunt closes on an empty window. A caller that reads that `None`
+    /// as "your balance can't cover this (anti-dust floor)" blames the coin
+    /// shape for what is only a clock — the L92 scar, one lane over.
+    #[test]
+    fn no_mature_coin_means_no_floor_at_all() {
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            // Empty: every coin the wallet owns is still immature.
+            let entries: Vec<UtxoEntryReference> = vec![];
+            let payment: PaymentDestination = PaymentOutputs::from((addr(DEST), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                Box::new(entries.into_iter()),
+                None,
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+        assert_eq!(
+            probe(PROBE_LADDER_START_SOMPI).unwrap(),
+            ProbeOutcome::TooLarge,
+            "an empty spendable set is a shortfall at every amount"
+        );
+        assert_eq!(
+            search_minimum(probe).unwrap(),
+            None,
+            "no mature coin ⇒ no sendable minimum exists"
         );
     }
 

@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `tail_start`, `take_intent`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `PinPolicy`, `TransportHub`, `TransportIntent`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -210,9 +210,10 @@ Future<SignableSummaryDto> transportPrepareTaunt({
 /// action, one transaction, everything in it.
 ///
 /// A backup fired straight after a handshake used to fail outright, because it
-/// is funded from `receive/0` and that address's change was still immature.
-/// `prepare_transport_send` now waits for its own change instead of refusing,
-/// so the cost of firing one too early is a short pause, not an error.
+/// is funded from `receive/0` and that address's change had not come back yet.
+/// [`await_spendable_at`] — which this function runs before it measures
+/// anything — now waits for that change instead of refusing, so the cost of
+/// firing one too early is a short pause, not an error.
 ///
 /// The value is a self-send that returns as change (D-069), so the honest cost
 /// is the network fee.
