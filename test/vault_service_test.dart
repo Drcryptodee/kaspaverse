@@ -49,6 +49,53 @@ void main() {
     expect(extraWord.every((b) => b == 0), isTrue);
   });
 
+  // ── The verify quiz's decoys (D-136 amendment) ───────────────────────────
+  //
+  // The board used to be the user's twelve words shuffled, which meant the
+  // confirm screen displayed the whole recovery phrase. Decoys dilute it. The
+  // property worth pinning here is the one that is easy to break silently: that
+  // decoys are actually SENT, and that a wallet can still be created when the
+  // wordlist cannot be read.
+
+  test('revealAndVerify sends decoy words to the native quiz', () async {
+    Map<Object?, Object?>? seen;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('org.kaspaverse.app/ceremony'),
+          (call) async {
+            if (call.method == 'revealAndVerify') {
+              seen = call.arguments as Map<Object?, Object?>;
+              return true;
+            }
+            return null;
+          },
+        );
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('org.kaspaverse.app/ceremony'),
+            null,
+          ),
+    );
+
+    expect(await VaultService.instance.revealAndVerify(), isTrue);
+    final decoys = (seen?['decoys'] as List?)?.cast<String>();
+    expect(decoys, isNotNull, reason: 'the argument must exist at all');
+    // NOT satisfiable by an empty list. The first version of this test asserted
+    // only "distinct and non-blank", both of which `[]` satisfies — so a
+    // regression that silently stopped producing decoys (asset renamed,
+    // `load()` throwing, the count zeroed) would have stayed green while the
+    // board reverted to the bare phrase. Assert the count.
+    expect(
+      decoys,
+      hasLength(24),
+      reason:
+          'the full sample must be sent — the native side does the filtering',
+    );
+    expect(decoys!.toSet().length, decoys.length, reason: 'distinct');
+    expect(decoys.where((w) => w.trim().isEmpty), isEmpty);
+  });
+
   // ── D-133: the auto-lock grace, and the ceremony handoff ─────────────────
 
   group('auto-lock policy', () {

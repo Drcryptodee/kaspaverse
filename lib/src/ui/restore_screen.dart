@@ -68,7 +68,8 @@ class RestoreScreen extends StatefulWidget {
   State<RestoreScreen> createState() => _RestoreScreenState();
 }
 
-class _RestoreScreenState extends State<RestoreScreen> {
+class _RestoreScreenState extends State<RestoreScreen>
+    with WidgetsBindingObserver {
   Bip39Wordlist? _wordlist;
   int _target = 12;
   final List<int> _indices = []; // selected wordlist indices — the secret order
@@ -80,12 +81,36 @@ class _RestoreScreenState extends State<RestoreScreen> {
   bool _busy = false;
   String? _message;
 
+  /// Whether the picked words are being held revealed.
+  ///
+  /// They used to render in plaintext for the whole entry — so by word twelve
+  /// the entire recovery phrase, in order, sat on screen for as long as the
+  /// user took to finish. A restore is exactly when someone is reading from a
+  /// piece of paper in a room they may not control, and the phrase is worth the
+  /// wallet. Masked by default, shown only while the reveal control is held
+  /// (§0.6's register — reveal-on-hold, never reveal-by-default), so checking
+  /// your typing stays possible and is a deliberate act with a known duration.
+  bool _wordsRevealed = false;
+
   /// Why Path A is (un)available, resolved once after the commit.
   String _biometricStatus = 'unknown';
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // A hold does not survive leaving the app. Nothing guarantees a pointer
+    // cancel is delivered when the platform takes the window away, so without
+    // this the screen could come back with the whole recovery phrase unmasked
+    // and no finger down — the same latch just closed for multi-touch, and it
+    // would make the "only while held" claim above untrue.
+    if (state != AppLifecycleState.resumed && _wordsRevealed) {
+      setState(() => _wordsRevealed = false);
+    }
+  }
+
+  @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final injected = widget.wordlist;
     if (injected != null) {
       _wordlist = injected;
@@ -98,6 +123,7 @@ class _RestoreScreenState extends State<RestoreScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _extra.dispose();
     _passphrase.dispose();
     // The picked words ARE the phrase. A back-gesture out of the flow left them
@@ -441,6 +467,46 @@ class _RestoreScreenState extends State<RestoreScreen> {
                 // once chips + the bottom block exceeded the step, the content
                 // that could not be seen was silently clipped — on the surface
                 // where the user is checking a recovery phrase word by word.
+                if (_indices.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: KvSpace.s),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      // Hold, not toggle. A toggle can be left on and walked
+                      // away from; a hold has the duration the user is actually
+                      // present for, which is the property that matters on a
+                      // phrase worth the wallet.
+                      child: GestureDetector(
+                        onLongPressStart: (_) =>
+                            setState(() => _wordsRevealed = true),
+                        onLongPressEnd: (_) =>
+                            setState(() => _wordsRevealed = false),
+                        onLongPressCancel: () =>
+                            setState(() => _wordsRevealed = false),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _wordsRevealed
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
+                              size: KvSpace.m,
+                              color: KvColor.textSecondary,
+                            ),
+                            const SizedBox(width: KvSpace.xs),
+                            Text(
+                              _wordsRevealed
+                                  ? 'Showing — release to hide'
+                                  : 'Hold to check your words',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: KvColor.textSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 Expanded(
                   child: SingleChildScrollView(
                     child: Wrap(
@@ -450,7 +516,13 @@ class _RestoreScreenState extends State<RestoreScreen> {
                         for (var k = 0; k < _indices.length; k++)
                           Chip(
                             label: Text(
-                              '${k + 1}. ${_wordlist!.words[_indices[k]]}',
+                              _wordsRevealed
+                                  ? '${k + 1}. ${_wordlist!.words[_indices[k]]}'
+                                  // Fixed-width mask: a per-word length would
+                                  // leak the length of every word in the
+                                  // phrase, which narrows the candidate set for
+                                  // anyone who glances at the screen.
+                                  : '${k + 1}. ••••••',
                               style: theme.textTheme.bodySmall,
                             ),
                           ),
@@ -482,7 +554,17 @@ class _RestoreScreenState extends State<RestoreScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton(
-                      onPressed: () => setState(() => _step = _Step.extraWord),
+                      onPressed: () => setState(() {
+                        // Clear the hold latch on the way out. A long-press
+                        // held with one finger while another taps Continue
+                        // disposes the recognizer without ever firing
+                        // onLongPressEnd, so the flag would survive — and
+                        // coming back would then render the whole phrase
+                        // unmasked with no hold at all. Same multi-touch shape
+                        // already scarred in RevealActivity.
+                        _wordsRevealed = false;
+                        _step = _Step.extraWord;
+                      }),
                       child: const Text('Continue'),
                     ),
                   ),
@@ -640,6 +722,7 @@ class _RestoreScreenState extends State<RestoreScreen> {
           const SizedBox(height: KvSpace.sm),
           TextButton(
             onPressed: () => setState(() {
+              _wordsRevealed = false; // re-entering masked, never latched on
               _step = _Step.words;
               _previewAddress = null;
             }),

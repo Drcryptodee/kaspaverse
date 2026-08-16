@@ -14,15 +14,16 @@ class CeremonyMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const color = KvColor.primaryMuted;
     return ExcludeSemantics(
       child: Container(
         width: KvSpace.xxl + KvSpace.l,
         height: KvSpace.xxl + KvSpace.l,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: KvColor.primaryMuted.withValues(alpha: 0.12),
+          color: color.withValues(alpha: 0.12),
         ),
-        child: Icon(icon, size: KvSpace.xl, color: KvColor.primaryMuted),
+        child: Icon(icon, size: KvSpace.xl, color: color),
       ),
     );
   }

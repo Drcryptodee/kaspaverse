@@ -221,7 +221,22 @@ class MainActivity : FlutterFragmentActivity() {
                             result.error("BUSY", "a reveal is already in progress", null)
                         } else {
                             pendingReveal = result
-                            revealLauncher.launch(Intent(this, RevealActivity::class.java))
+                            // Decoy words travel INWARD only, and they are not
+                            // secret: they are plain BIP39 wordlist entries the
+                            // app already ships as an asset. Dart supplies them
+                            // so the quiz can dilute the real words without
+                            // Kotlin needing the wordlist, and without anything
+                            // leaving the JNI lane. INV-1 governs secrets going
+                            // out; this is public data coming in.
+                            val decoys = call.argument<List<String>>("decoys")
+                            revealLauncher.launch(
+                                Intent(this, RevealActivity::class.java).apply {
+                                    putStringArrayListExtra(
+                                        RevealActivity.EXTRA_DECOYS,
+                                        ArrayList(decoys ?: emptyList())
+                                    )
+                                }
+                            )
                         }
                     }
 

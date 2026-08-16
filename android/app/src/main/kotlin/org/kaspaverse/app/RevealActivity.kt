@@ -15,6 +15,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import kotlin.random.asKotlinRandom
 
 /**
  * The §0.6 native word-reveal + verify surface (P1.4, D-037/D-039) — the ONE place
@@ -51,6 +52,32 @@ class RevealActivity : Activity() {
     // no warning token because it was never mirrored (ux-auditor, this wave).
     private val cWarning = Color.parseColor("#FBBF24")
 
+    companion object {
+        /**
+         * Intent extra carrying candidate decoy words for the verify quiz.
+         *
+         * Plain BIP39 wordlist entries — the app already ships the list as an
+         * asset and Dart reads it. Public data travelling INWARD, which is why
+         * it may cross the channel at all: INV-1 governs secrets leaving the
+         * native/Rust side, and nothing here is a secret. The user's own words
+         * still never leave the JNI lane.
+         */
+        const val EXTRA_DECOYS = "kv.reveal.decoys"
+    }
+
+    /**
+     * The shuffles on this screen are SECURITY, not presentation.
+     *
+     * The board's pre-shuffle order is fully secret-revealing — the phrase in
+     * order, then decoys — so the permutation is the only thing standing
+     * between a photographed 24-chip board and both membership and ordering.
+     * Kotlin's default `shuffled()` is `java.util.Collections.shuffle`'s shared
+     * 48-bit LCG, whose state is recoverable from a few outputs; the quiz's
+     * asked positions are drawn from the same stream. A predictable permutation
+     * would hand back exactly what the dilution was added to take away.
+     */
+    private val secureShuffle = java.security.SecureRandom().asKotlinRandom()
+
     private val MATCH = LinearLayout.LayoutParams.MATCH_PARENT
     private val WRAP = LinearLayout.LayoutParams.WRAP_CONTENT
 
@@ -70,6 +97,13 @@ class RevealActivity : Activity() {
     // Verify quiz: confirm the word at each of N distinct positions, in order.
     private val QUIZ_POSITIONS = 4
     private val QUIZ_COLS = 3
+
+    /**
+     * Total chips on the quiz board: the user's twelve words PLUS decoys.
+     * Never fewer than twelve — see [buildChipSet] for why that floor is the
+     * whole security property.
+     */
+    private val QUIZ_CHIPS = 24
     /** Wrong taps allowed per attempt before we send the user back to the words. */
     private val QUIZ_MAX_WRONG = 3
 
@@ -154,7 +188,7 @@ class RevealActivity : Activity() {
     }
 
     /**
-     * Drop the 12 word strings the quiz chips hold, then the chips.
+     * Drop the word strings the quiz chips hold, then the chips.
      *
      * Called on teardown AND on the retry path — the 3-wrong-taps bounce detaches
      * a whole chip set, and re-assigning the list without clearing it would leave
@@ -328,7 +362,7 @@ class RevealActivity : Activity() {
         // word) so a tapped word maps to exactly one position.
         val seen = HashSet<String>()
         val chosen = ArrayList<Int>()
-        for (p in (0 until 12).shuffled()) {
+        for (p in (0 until 12).shuffled(secureShuffle)) {
             if (seen.add(w[p])) chosen.add(p)
             if (chosen.size == QUIZ_POSITIONS) break
         }
@@ -346,9 +380,9 @@ class RevealActivity : Activity() {
         root.addView(
             body(
                 "Tap the matching word for each position, in order. All 12 of your " +
-                    "words are here, in a random order, so only your own copy tells " +
-                    "you which one belongs where. Three wrong taps and you go back " +
-                    "to the words."
+                    "words are here, mixed in with words that are not yours, so only " +
+                    "your own copy tells you which one belongs where. Three wrong " +
+                    "taps and you go back to the words."
             )
         )
         root.addView(spacer(dp(16)))
@@ -361,13 +395,31 @@ class RevealActivity : Activity() {
         quizPrompt = prompt
         root.addView(prompt) // fixed header — never scrolls away from its chips
 
-        // The chip set is ALL 12 words, not the 4 expected (F1/D-136): the set
-        // leaks no ordering, carries no elimination channel, and requires the
-        // position knowledge the ceremony exists to verify. No decoys, no
-        // wordlist — the words are already in memory.
+        // The board is ALL TWELVE of the user's words, plus decoys on top —
+        // never a subset of them. D-136 item 1 and `design_system.md:427` both
+        // say so ("the candidate set is every word in the phrase, never the
+        // answer subset"), and the reason is quantitative, not stylistic.
+        //
+        // The pinned adversary holds the word multiset but not the order —
+        // which is not exotic here, because item 2 FORCES a hold-reveal of all
+        // twelve immediately before every attempt, including after a bounce.
+        // Against that adversary a board of the 4 answers + 8 decoys is not
+        // harder than all-12, it is dramatically easier: the decoys are
+        // filtered to be words they do NOT hold, so the board labels its own
+        // answers by exclusion. The candidate set collapses 12 -> 4, and four
+        // known words over four known positions against a 3-strike budget is a
+        // blind pass rate of 3/8 versus all-12's 1/792. Tried, measured and
+        // reverted here (wallet-security-auditor BLOCK, 2026-08-16).
+        //
+        // Decoys ON TOP cost that property nothing: a solver holding the
+        // multiset still excludes them and still faces 12 candidates per
+        // position, so 1/792 stands exactly — while an OBSERVER of the screen
+        // now sees the phrase diluted among 24 words instead of reading it off
+        // directly. That is the exposure the founder asked to close, bought
+        // with no give-back.
         releaseQuizChips()
         root.addView(
-            scroll(chipGrid(w.toList().shuffled())).apply {
+            scroll(chipGrid(buildChipSet(w))).apply {
                 layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f)
             }
         )
@@ -375,7 +427,45 @@ class RevealActivity : Activity() {
         setContentView(root)
     }
 
-    /** 12 chips laid out [QUIZ_COLS] to a row so the prompt above stays visible. */
+    /**
+     * The quiz board: **all twelve of the user's words**, diluted with decoys.
+     *
+     * The twelve are the candidate set D-136 and `design_system.md:427` require
+     * — never a subset of them, and never the answers alone. Decoys are added
+     * on top purely so an observer cannot read the phrase off the screen; they
+     * are plain BIP39 wordlist entries arriving from Dart (public data, inward
+     * only). Any colliding with a word the user holds is dropped, so a chip can
+     * never be both a decoy and some position's correct answer.
+     *
+     * With no usable decoys the board is exactly the phrase — D-136's all-12
+     * behaviour, the strongest case, not a degraded one. The failure mode to
+     * fear here is the opposite direction: **fewer than twelve is never valid**,
+     * because a solver holding the multiset excludes every decoy and is then
+     * choosing among whatever of their own words remain.
+     */
+    private fun buildChipSet(words: Array<String>): List<String> {
+        val mine = words.toHashSet()
+        // Seeded with EVERY word in the phrase. This line is the security
+        // property; decoys below are cosmetic dilution on top of it, and must
+        // never become a substitute for it.
+        val board = LinkedHashSet(words.toList())
+        val decoys = (intent.getStringArrayListExtra(EXTRA_DECOYS) ?: arrayListOf())
+            .filter { it.isNotBlank() && it !in mine }
+            .distinct()
+            .shuffled(secureShuffle)
+        for (d in decoys) {
+            if (board.size >= QUIZ_CHIPS) break
+            board.add(d)
+        }
+        if (board.size < QUIZ_CHIPS) {
+            // No count interpolated: it would be `sent - collisions with the
+            // phrase`, a value derived from secret material, in logcat.
+            Log.i(TAG, "quiz board under-diluted — fewer decoys than asked for")
+        }
+        return board.toList().shuffled(secureShuffle)
+    }
+
+    /** Chips laid out [QUIZ_COLS] to a row so the prompt above stays visible. */
     private fun chipGrid(labels: List<String>): View {
         val grid = column()
         for (rowWords in labels.chunked(QUIZ_COLS)) {

@@ -100,6 +100,15 @@ class _CreateScreenState extends State<CreateScreen> {
   /// Anchor for [_say], so a reason beat can prove it is on screen rather than
   /// merely in the tree.
   final GlobalKey _messageKey = GlobalKey();
+
+  /// Whether the current beat is a WARNING rather than an instruction.
+  ///
+  /// The two read differently and should look different: "Enter the extra word,
+  /// or tap Skip" is guidance, while "those didn't match" is the app telling you
+  /// something went wrong on the screen that decides whether your backup works.
+  /// `KvColor.error` is reserved for fund risk and destruction, so this is
+  /// `warning` — the degraded tier, not the destructive one.
+  bool _messageIsWarning = false;
   bool _sealed = false; // ceremony consumed — don't abandon on dispose
 
   /// Why Path A is (un)available, resolved once after the seal. Drives whether
@@ -177,8 +186,11 @@ class _CreateScreenState extends State<CreateScreen> {
   /// mistyped the confirm would see the step revert and the dots reset, with
   /// the explanation off-screen: present, findable by a test, and invisible.
   /// Scrolling it into view is the part that holds at any text scale.
-  void _say(String message) {
-    setState(() => _message = message);
+  void _say(String message, {bool warning = false}) {
+    setState(() {
+      _message = message;
+      _messageIsWarning = warning;
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ctx = _messageKey.currentContext;
       if (!mounted || ctx == null) return;
@@ -240,6 +252,7 @@ class _CreateScreenState extends State<CreateScreen> {
         "Those didn't match. Enter the extra word again, then confirm it — or "
         'tap Skip to create your wallet with no extra word, and cross it off '
         'your backup.',
+        warning: true,
       );
       return;
     }
@@ -290,6 +303,7 @@ class _CreateScreenState extends State<CreateScreen> {
         // the wallet does not exist yet.
         _say(
           'Could not finish creating your wallet. Your funds are safe — try again.',
+          warning: true,
         );
       }
     }
@@ -400,6 +414,7 @@ class _CreateScreenState extends State<CreateScreen> {
               'This encrypts your wallet on this device. Enter it each time to '
               'unlock — choose something only you know.',
           buffer: _passphrase,
+          mark: Icons.lock_outline, // unlocks the app ON THIS DEVICE
           primaryLabel: 'Next',
           onPrimary: _submitPassphrase,
         ),
@@ -411,6 +426,10 @@ class _CreateScreenState extends State<CreateScreen> {
               'layer. You will need it every time you restore, so write it down '
               'too. Leave it empty to skip. (Letters, digits and symbols only.)',
           buffer: _extraWord,
+          // Keyed and warning-tinted: this one becomes part of the wallet, and
+          // getting it wrong is the failure the confirm step exists to catch.
+          mark: Icons.vpn_key_outlined,
+          markTint: KvColor.warning,
           primaryLabel: _busy ? 'Creating…' : 'Next',
           onPrimary: _busy ? null : _submitExtraWord,
           secondaryLabel: 'Skip',
@@ -435,6 +454,8 @@ class _CreateScreenState extends State<CreateScreen> {
               'This word becomes part of your wallet, so if what you wrote is '
               'not what you typed, those words will not bring your wallet back.',
           buffer: _extraWordConfirm,
+          mark: Icons.vpn_key_outlined, // same secret, same mark
+          markTint: KvColor.warning,
           primaryLabel: _busy ? 'Creating…' : 'Create wallet',
           onPrimary: _busy ? null : _confirmExtraWord,
         ),
@@ -477,6 +498,12 @@ class _CreateScreenState extends State<CreateScreen> {
     required SecretByteBuffer buffer,
     required String primaryLabel,
     required VoidCallback? onPrimary,
+    // The two secret steps were the same screen twice — same chrome, same dots,
+    // same keyboard — so nothing but the heading said whether you were typing
+    // the thing that unlocks this phone or the thing your written backup
+    // depends on. The mark carries that difference at a glance.
+    required IconData mark,
+    Color? markTint,
     String? secondaryLabel,
     VoidCallback? onSecondary,
   }) {
@@ -500,10 +527,32 @@ class _CreateScreenState extends State<CreateScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          heading,
-                          style: theme.textTheme.headlineSmall,
-                          textAlign: TextAlign.center,
+                        // INLINE with the heading, not a disc above it. The
+                        // disc read well and cost ~88 dp, which pushed `Skip`
+                        // off a 600 dp-tall viewport — the same below-the-fold
+                        // class this screen was just fixed for. A tinted glyph
+                        // beside the title separates the two steps at a glance
+                        // and costs no vertical space at all.
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            ExcludeSemantics(
+                              child: Icon(
+                                mark,
+                                size: KvSpace.l,
+                                color: markTint ?? KvColor.primaryMuted,
+                              ),
+                            ),
+                            const SizedBox(width: KvSpace.s),
+                            Flexible(
+                              child: Text(
+                                heading,
+                                style: theme.textTheme.headlineSmall,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ],
                         ),
                         const SizedBox(height: KvSpace.s),
                         Text(
@@ -533,7 +582,9 @@ class _CreateScreenState extends State<CreateScreen> {
                             _message!,
                             key: _messageKey,
                             style: theme.textTheme.bodyMedium?.copyWith(
-                              color: KvColor.textSecondary,
+                              color: _messageIsWarning
+                                  ? KvColor.warning
+                                  : KvColor.textSecondary,
                             ),
                             textAlign: TextAlign.center,
                           ),

@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../rust/api/error.dart';
 import '../rust/api/vault.dart' as vault_api;
+import '../ui/secret/bip39_wordlist.dart';
 
 /// Owns the app's single subscription to the bridge vault-status stream and
 /// the lifecycle kill switch (P1 §0.11: backgrounding drops vault state).
@@ -186,9 +188,58 @@ class VaultService with WidgetsBindingObserver {
   /// (INV-1) — only the boolean verdict returns. The native Activity pauses
   /// Flutter, so this suppresses the §0.11 auto-lock for the handoff (the native
   /// surface is the ceremony's guardian meanwhile — it drops on background).
-  Future<bool> revealAndVerify() => runCeremony(
-    () async => await ceremony.invokeMethod<bool>('revealAndVerify') ?? false,
-  );
+  Future<bool> revealAndVerify() => runCeremony(() async {
+    final decoys = await _quizDecoys();
+    return await ceremony.invokeMethod<bool>('revealAndVerify', {
+          'decoys': decoys,
+        }) ??
+        false;
+  });
+
+  /// Candidate decoy words for the native verify quiz.
+  ///
+  /// **Public data going IN, never a secret coming out.** These are plain BIP39
+  /// wordlist entries the app already ships as an asset; the recovery words
+  /// themselves stay on the JNI lane and never touch this channel (INV-1). The
+  /// native side drops any candidate that collides with one of the user's own
+  /// words before it reaches the board.
+  ///
+  /// Dart supplies them because Dart is where the wordlist already lives —
+  /// asking Kotlin to carry a second copy would have meant a second asset to
+  /// keep honest.
+  ///
+  /// Failure is deliberately not fatal: with no decoys the native board is
+  /// simply the phrase itself — D-136's all-12 board, the strongest case, just
+  /// undiluted. A wallet must not become uncreatable because an asset read
+  /// hiccupped.
+  ///
+  /// The sample is drawn with NO knowledge of the user's words, and the native
+  /// side filters collisions. That split is deliberate: filtering here would
+  /// make the list a partial oracle on the phrase.
+  Future<List<String>> _quizDecoys() async {
+    try {
+      final wordlist = await Bip39Wordlist.load();
+      // DISTINCT pool. `picked` is a Set, so bounding the loop on
+      // `wordlist.words.length` would spin forever on an asset with fewer than
+      // `_quizDecoyCount` unique entries — a hang on the UI isolate, mid
+      // create-ceremony. Nothing verifies the asset's contents at runtime, so
+      // the loop must not assume them.
+      final pool = wordlist.words.toSet().toList();
+      if (pool.isEmpty) return const [];
+      final rng = Random.secure();
+      final picked = <String>{};
+      // A few more than the board can hold, since the native side discards any
+      // that collide with the user's twelve.
+      while (picked.length < _quizDecoyCount && picked.length < pool.length) {
+        picked.add(pool[rng.nextInt(pool.length)]);
+      }
+      return picked.toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static const int _quizDecoyCount = 24;
 
   /// Write [bytes] to a destination the user picks in the system document
   /// picker, offering [name]. Returns the destination, or null if they backed
