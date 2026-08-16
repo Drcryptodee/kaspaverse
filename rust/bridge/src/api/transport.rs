@@ -25,6 +25,7 @@
 //! be routed through the plaintext `bcast` lane (§4 type-level separation).
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -450,6 +451,69 @@ static HUB_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 /// V1 consumer #2 (reorg tombstones) — replaced like [`HUB_TASK`] on re-unlock
 /// so one stream never feeds two folders.
 static ACCEPTANCE_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+/// F4's reconnect replay — replaced like [`HUB_TASK`] so a re-unlock never
+/// leaves two tasks walking the DAG over the same gap.
+static REPLAY_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
+/// Which block the reconnect replay must walk from (F4) — the whole subtlety
+/// of that fix, kept as a state machine so it can be proven without a socket.
+///
+/// The bound is captured when the socket **drops**. Reading the cursor when the
+/// replay wakes instead would look identical and do nothing: subscriptions are
+/// registered before `emit(Connected)` in `handle_connect`, so post-reconnect
+/// `BlockAdded` notifications can already have advanced the persisted cursor
+/// past the gap by then, and the walk would start above the messages it exists
+/// to recover.
+/// Deliberately NOT `#[derive(Default)]`. A derived `Default` is a **public**
+/// associated fn returning this type, and FRB reads that as a reason to export
+/// it: codegen generated a whole Dart `ReplayGap` class and pulled `Hash` into
+/// a new generated `lib.dart`, putting an internal state machine on the FFI
+/// surface for nothing. A private constructor keeps this side of the bridge.
+struct ReplayGap {
+    low: Option<kaspaverse_chain::Hash>,
+}
+
+impl ReplayGap {
+    fn new() -> Self {
+        Self { low: None }
+    }
+
+    /// The socket dropped. `cursor_now` is the persisted cursor read at this
+    /// instant — at most `TRANSPORT_CURSOR_MIN_WRITE_SECS` behind the true
+    /// drop point, which errs BELOW the gap, where dedup-by-txid absorbs it.
+    ///
+    /// **Earliest bound wins**, the same rule as [`Self::on_lag`]. An armed
+    /// bound is only ever cleared by a `Connected` that consumed it, so if one
+    /// survives to here its gap is still unwalked and it is necessarily the
+    /// earlier of the two. Overwriting would raise the floor above that gap —
+    /// the silent no-op this type exists to prevent, arriving by a second door
+    /// — and an unguarded `on_drop(None)` would erase an armed bound outright.
+    /// Reachable whenever a `Connected` is lost to a lag, which the sizing
+    /// below makes ordinary rather than exotic.
+    fn on_drop(&mut self, cursor_now: Option<kaspaverse_chain::Hash>) {
+        self.arm(cursor_now);
+    }
+
+    /// Events were lost, and a drop may be among them. Arm from the best bound
+    /// available rather than assume the window was covered (PB-025).
+    fn on_lag(&mut self, cursor_now: Option<kaspaverse_chain::Hash>) {
+        self.arm(cursor_now);
+    }
+
+    /// One rule, one place: never raise the floor, never clear an armed bound.
+    fn arm(&mut self, cursor_now: Option<kaspaverse_chain::Hash>) {
+        if self.low.is_none() {
+            self.low = cursor_now;
+        }
+    }
+
+    /// The socket came back. `None` = nothing to replay (the first connect of a
+    /// session, whose gap the unlock catch-up already owns). One shot: a bound
+    /// consumed here must not re-walk on the next reconnect.
+    fn on_connect(&mut self) -> Option<kaspaverse_chain::Hash> {
+        self.low.take()
+    }
+}
 /// Sparse, content-free change pings (a conversation id) — Dart re-pulls.
 static THREAD_PINGS: OnceLock<broadcast::Sender<String>> = OnceLock::new();
 
@@ -1496,7 +1560,7 @@ pub async fn transport_start() -> Result<(), AppError> {
     // and missed messages surface as the walk finds them (P5/D-067). The fold
     // task above is already draining, so the replay's matches are folded (and
     // deduped by txid against anything the live scan already caught).
-    monitor.set_transport_cursor(cursor_path);
+    monitor.set_transport_cursor(cursor_path.clone());
     let catch_up_monitor = monitor.clone();
     let fill_hub = hub.clone();
     tokio::spawn(async move {
@@ -1515,6 +1579,139 @@ pub async fn transport_start() -> Result<(), AppError> {
         // makes the overlap free.
         run_fill(&fill_hub).await;
     });
+
+    // ── F4: replay the gap on RECONNECT, not only on unlock ────────────────
+    //
+    // `catch_up_transport` had exactly ONE call site — the spawn just above,
+    // inside `transport_start`, which early-returns while the hub's decryptor
+    // is live. So it ran once per vault unlock and never again, and every
+    // `ciph_msg:` landing in a block while the socket was down was lost:
+    // notifications are live-only (D-049), and within
+    // `TRANSPORT_CURSOR_MIN_WRITE_SECS` of the first post-reconnect block the
+    // persisted cursor advances past the gap, so the next app open could not
+    // recover it either. The watchdog only fires past `lastBlockAgeSecs > 30`
+    // and the endpoint race must then rebind, so a real gap is ~300 blocks.
+    //
+    // The sibling acceptance lane has recovered its own gap on every reconnect
+    // since V1 (`acceptance.rs`, the `DagEvent::Connected` arm). This is that
+    // pattern, owed to the message lane. Note what D-087's PB-022 sweep asked
+    // — "is each subscription re-established?" (it was) — and what it did not:
+    // "is each *gap* replayed?"
+    //
+    // **The low bound is taken when the socket DROPS, never when the replay
+    // wakes.** Subscriptions are registered before `emit(Connected)` in
+    // `handle_connect`, so post-reconnect `BlockAdded` notifications can
+    // already be advancing the persisted cursor by the time `Connected`
+    // reaches this task — reading the cursor then would silently hand the walk
+    // a low bound above the gap and make the whole thing a no-op.
+    let replay_monitor = monitor.clone();
+    let mut dag_rx = monitor.subscribe();
+    // **The walk runs OFF this loop**, and that is load-bearing rather than
+    // tidy. Awaiting `catch_up_transport` inline would stop draining `dag_rx`
+    // for the length of a walk, and this receiver is not idle: `DagEvent`
+    // carries `VirtualDaaScore` + `SinkBlueScore` at roughly the block rate
+    // into a 256-slot broadcast, so a stalled loop overflows it in tens of
+    // seconds while a real ~300-block walk over mobile takes longer. Every
+    // walk would then end in `Lagged`, and — worse — a `Disconnected` arriving
+    // during one would be handled only after it finished, reading the cursor
+    // at a moment when the reconnect had already dragged it past the gap.
+    // That is precisely the no-op `ReplayGap` exists to prevent, re-entering
+    // one level up: the fix defeating itself through the door it built.
+    let replay = tokio::spawn(async move {
+        let read_cursor = || kaspaverse_chain::DagMonitor::read_transport_cursor(&cursor_path);
+        let mut gap = ReplayGap::new();
+        // Single-flight, so a flapping socket cannot fan out overlapping walks
+        // over the same blocks.
+        let walking = Arc::new(AtomicBool::new(false));
+        let sweeping = Arc::new(AtomicBool::new(false));
+        // Sweep immediately the first time, then at most every
+        // `SWEEP_INTERVAL`.
+        let mut last_sweep = tokio::time::Instant::now() - SWEEP_INTERVAL;
+        loop {
+            match dag_rx.recv().await {
+                Ok(kaspaverse_chain::DagEvent::Disconnected) => gap.on_drop(read_cursor()),
+                Ok(kaspaverse_chain::DagEvent::Connected { .. }) => {}
+                Ok(_) => {}
+                Err(RecvError::Lagged(n)) => {
+                    log::info!("transport-hub: dag events lagged — {n} dropped, arming replay");
+                    gap.on_lag(read_cursor());
+                }
+                Err(RecvError::Closed) => break,
+            }
+            // ONE decision point, re-evaluated after every event rather than
+            // only on `Connected`. That is what closes the liveness hole: a
+            // bound armed while a walk was in flight would otherwise wait for
+            // a further reconnect that may never come. `VirtualDaaScore` and
+            // `SinkBlueScore` tick at roughly the block rate, so this is
+            // re-checked continuously for as long as the chain is moving —
+            // and if it is not moving, there is no gap accruing either.
+            //
+            // Connectivity is asked of the MONITOR, not remembered from an
+            // event this task saw. A latch would be exactly as lossy as the
+            // receiver feeding it: the `Lagged` arm exists because a lag can
+            // hide a drop, and the same lag can hide the `Connected` — leaving
+            // the task holding an armed bound while believing the socket is
+            // down, with nothing able to consume it until a fresh reconnect
+            // that may never come.
+            let connected = replay_monitor.is_connected();
+            if connected && !walking.load(Ordering::SeqCst) {
+                if let Some(low) = gap.on_connect() {
+                    walking.store(true, Ordering::SeqCst);
+                    let walk_monitor = replay_monitor.clone();
+                    let done = walking.clone();
+                    tokio::spawn(async move {
+                        match walk_monitor.catch_up_transport(Some(low)).await {
+                            Ok(n) => log::info!(
+                                "transport-hub: reconnect replay re-emitted {n} match(es)"
+                            ),
+                            Err(e) => {
+                                log::warn!("transport-hub: reconnect replay ended early: {e}")
+                            }
+                        }
+                        done.store(false, Ordering::SeqCst);
+                    });
+                }
+            }
+            // F5's completion lane rides here for the same reason the walk
+            // does: this is the one task in the hub that wakes at the block
+            // rate without being on the fold's critical path. Single-flight,
+            // spawned rather than awaited, and skipped entirely when nothing
+            // is parked — which is the overwhelmingly common case.
+            // THROTTLED, not merely single-flight. Single-flight caps
+            // concurrency at one; it does not cap RATE, and this loop wakes at
+            // roughly 20 events/s. An entry whose lookup fails FAST — a node
+            // that answers `get_utxo_return_address` with an immediate error —
+            // would otherwise be retried as fast as the previous attempt
+            // returned: a spin against our own node, and being rate-limited or
+            // dropped by it produces a `Disconnected`, which is this loop's own
+            // trigger machinery. Resolution latency is dominated by the
+            // activity record landing, never by how often we ask, so a slow
+            // cadence costs nothing real.
+            if connected
+                && last_sweep.elapsed() >= SWEEP_INTERVAL
+                && !sweeping.load(Ordering::SeqCst)
+                && !PENDING_ACCEPTANCE
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_empty()
+            {
+                last_sweep = tokio::time::Instant::now();
+                sweeping.store(true, Ordering::SeqCst);
+                let done = sweeping.clone();
+                tokio::spawn(async move {
+                    sweep_parked_acceptances().await;
+                    done.store(false, Ordering::SeqCst);
+                });
+            }
+        }
+    });
+    if let Some(old) = REPLAY_TASK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .replace(replay)
+    {
+        old.abort();
+    }
 
     // V1 gap-age signal (deliverable 6): resolve the pre-catch-up cursor's
     // block time in the background (the socket may still be dialing) and
@@ -1550,6 +1747,11 @@ pub async fn transport_start() -> Result<(), AppError> {
                     {
                         adopt_alias_from_sender(txid, *accepting_daa_score).await;
                         backfill_invitation_sender(txid, *accepting_daa_score).await;
+                        // F5: the acceptance leg's sender check. Same event,
+                        // same reason as the two above — the return-address
+                        // lookup needs the accepting block's DAA score, which
+                        // is exactly what has just landed.
+                        complete_acceptance_from_sender(txid, *accepting_daa_score).await;
                         continue;
                     }
                     let txid = match &event {
@@ -1779,6 +1981,24 @@ enum DropReason {
     /// A handshake for a conversation we already hold — its alias is one we
     /// already answer to. Not a new request, so not an invitation.
     ConversationAlreadyKnown,
+    /// An acceptance that echoes our alias but whose sender the node has not
+    /// named yet (F5). Held, not lost: the claim is parked and the acceptance
+    /// event completes it once the return-address lookup can run. On the fill
+    /// lane it is simply refused — an indexer's txid label cannot authenticate
+    /// the payload it is paired with.
+    ///
+    /// **Settled, not Held**, and deliberately so ([`DropReason::outcome`]):
+    /// this is the most attacker-mintable row in the pipeline — our alias
+    /// rides the wire in cleartext and the envelope seals to a published
+    /// address — so a cursor that held here could be pinned forever by one
+    /// forged acceptance, which is the denial-of-service that rule exists to
+    /// prevent. The cost is D-139's, restated: an acceptance recoverable only
+    /// from the archive no longer completes a conversation. It is not folded
+    /// into an invitation either, because we know exactly what it is and
+    /// minting a stranger's card for a contact we already hold is the worse
+    /// error. The counterparty's next comm re-learns their alias through
+    /// [`adopt_alias_from_sender`], on the same sender proof.
+    AcceptanceUnverified,
     /// A self-stash row our own key opened but could not AUTHENTICATE.
     ///
     /// The seal is to our published key, so opening it proves only that someone
@@ -1946,6 +2166,12 @@ fn dropped(kind: &str, txid: &str, reason: DropReason, origin: EventOrigin) -> F
 /// be able to cost more than it can give.
 const SENDER_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Floor on how often [`sweep_parked_acceptances`] may run. Its driver wakes at
+/// roughly the block rate, and what the sweep waits for — the wallet's own
+/// activity record — lands on its own schedule, so asking oftener buys nothing
+/// and a fast-failing lookup would otherwise spin against our own node.
+const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn resolve_handshake_sender(txid: &str) -> Option<String> {
     let engine = wallet::engine_handle()?;
     // The bond's own activity record — absent until the tx is accepted, which
@@ -2029,6 +2255,120 @@ fn take_parked_alias(txid: &str) -> Option<String> {
     Some(parked.remove(pos).1)
 }
 
+/// The identity an acceptance wants to write, held until the chain names who
+/// sent it (F5). Everything here came out of an envelope **anyone can mint** —
+/// it is a claim, never applied on its own authority.
+#[derive(Clone)]
+struct ParkedAcceptance {
+    conversation_id: String,
+    their_alias: String,
+    bound_branch: KeyBranch,
+    bound_index: u32,
+    /// The sealed envelope, carried so the deferred completion can store the
+    /// same `Handshake` row the immediate one does. Without it the two lanes
+    /// persisted different state for the same event — and the deferred lane is
+    /// the COMMON live case, so the thread would usually lose the row.
+    /// Ciphertext at rest (§0.4), exactly as `MessageRecord.envelope` holds it.
+    envelope: Vec<u8>,
+    /// The payload's own timestamp, so a deferred row sorts where the
+    /// immediate one would have.
+    unix_ms: u64,
+}
+
+/// Acceptances awaiting their sender, keyed by txid.
+///
+/// Bounded and in-memory for the same reason as [`PENDING_ALIAS`]: these txids
+/// are attacker-mintable, so nothing here may be durable or unbounded. Losing
+/// an entry costs the conversation nothing permanent — it stays
+/// `PendingOutbound`, and the counterparty's next comm re-learns their alias
+/// through [`adopt_alias_from_sender`], which applies the same sender check.
+static PENDING_ACCEPTANCE: Mutex<Vec<(String, ParkedAcceptance)>> = Mutex::new(Vec::new());
+
+/// Whether this txid's acceptance is already awaiting its sender. Checked
+/// before the work, like [`alias_already_parked`]: the DAG delivers one
+/// transaction in several blocks.
+fn acceptance_already_parked(txid: &str) -> bool {
+    PENDING_ACCEPTANCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|(t, _)| t == txid)
+}
+
+/// Remember what an acceptance claims while we wait to learn who sent it.
+fn park_acceptance(txid: &str, claim: ParkedAcceptance) {
+    let mut parked = PENDING_ACCEPTANCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if parked.iter().any(|(t, _)| t == txid) {
+        return;
+    }
+    if parked.len() >= PENDING_ALIAS_CAPACITY {
+        parked.remove(0);
+    }
+    parked.push((txid.to_string(), claim));
+}
+
+fn take_parked_acceptance(txid: &str) -> Option<ParkedAcceptance> {
+    let mut parked = PENDING_ACCEPTANCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let pos = parked.iter().position(|(t, _)| t == txid)?;
+    Some(parked.remove(pos).1)
+}
+
+/// What may be done with an acceptance that echoes one of our aliases (F5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptanceVerdict {
+    /// Our node named the sender and it is this conversation's contact.
+    /// Complete now — nobody else could have sent it.
+    Complete,
+    /// A sender is known and it is NOT our contact. Not an answer to this
+    /// conversation; let the address lane treat it as whatever it really is.
+    NotOurContact,
+    /// No sender yet, on the node lane. Park the claim and ask the chain.
+    AwaitSender,
+    /// No sender, and none is obtainable — the fill lane's txid is an indexer
+    /// label, so resolving against it would authenticate the label rather than
+    /// the payload (D-139/D-074).
+    Refuse,
+}
+
+/// The whole F5 gate, as a pure decision — kept out of the fold so it can be
+/// driven exhaustively without a hub, a socket or a node.
+///
+/// `origin == Node` is re-asserted here rather than inherited from the fact
+/// that the caller only resolves senders on the node lane. That coupling is
+/// real today and invisible tomorrow; the rule this branch enforces is
+/// D-139's, so it states its own premise.
+fn acceptance_verdict(
+    origin: EventOrigin,
+    resolved_sender: Option<&str>,
+    contact_address: &str,
+) -> AcceptanceVerdict {
+    // Node truth or nothing — stated ONCE, at the top, rather than repeated as
+    // a condition on each arm. Said per-arm it drifted: a fill row with a
+    // matching sender fell to `NotOurContact` and thence to the address lane,
+    // which cannot match a fill row either, so it minted an invitation —
+    // contradicting `AcceptanceUnverified`'s own promise that it is never
+    // folded into one. Refusing here says the law where it belongs and leaves
+    // no arm whose behaviour differs from its documentation.
+    if origin != EventOrigin::Node {
+        return AcceptanceVerdict::Refuse;
+    }
+    match resolved_sender {
+        Some(sender)
+            // An address-less row can never match: it would otherwise answer
+            // to a sender that resolved to nothing.
+            if !contact_address.is_empty() && sender == contact_address =>
+        {
+            AcceptanceVerdict::Complete
+        }
+        Some(_) => AcceptanceVerdict::NotOurContact,
+        None => AcceptanceVerdict::AwaitSender,
+    }
+}
+
 /// Learn a contact's alias from a message we could not route.
 ///
 /// **This is what makes an alias re-learnable, and the class of failure that
@@ -2055,13 +2395,27 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
     let Ok(monitor) = dag::shared_monitor().await else {
         return;
     };
-    let sender = match resolve_return_address(&monitor.rpc(), txid, accepting_daa_score).await {
-        Ok(sender) => sender,
-        Err(e) => {
+    // Bounded like every other lookup on this loop. `resolve_return_address`
+    // carries no deadline of its own, and all three sender lanes are awaited
+    // INLINE on the acceptance-event receiver — so an unbounded one ahead of
+    // the others stalls the whole loop, which costs tombstones, status chips
+    // and the lanes behind it. (Pre-existing gap, taken here because the wave's own comment three functions down claims the property this loop did not have.)
+    let sender = match tokio::time::timeout(
+        SENDER_LOOKUP_TIMEOUT,
+        resolve_return_address(&monitor.rpc(), txid, accepting_daa_score),
+    )
+    .await
+    {
+        Ok(Ok(sender)) => sender,
+        Ok(Err(e)) => {
             log::info!(
                 "transport-intake: sender lookup failed for tx={txid}: {}",
                 kaspaverse_chain::sanitize_node_text(&e.to_string())
             );
+            return;
+        }
+        Err(_) => {
+            log::info!("transport-intake: sender lookup timed out for tx={txid}");
             return;
         }
     };
@@ -2091,6 +2445,184 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
         "transport-intake: learned a contact's alias from their message (tx={txid}) — \
          conversation active"
     );
+    ping(&conversation_id);
+}
+
+/// Complete a handshake acceptance once the chain names its sender (F5).
+///
+/// **The acceptance leg used to complete on a decryptable payload alone.** Its
+/// whole gate was "the envelope opened, and it echoes an alias one of our
+/// `PendingOutbound` conversations answers to" — no origin check, no sender
+/// check, no bond check. Neither half is a secret: `prepare_comm_plaintext`
+/// writes `comm:<alias>:` **outside** the envelope in cleartext, and D-142
+/// item 3 deliberately permits sending while `PendingOutbound`, so the very
+/// state that leaks our alias is the one that never expires; and the envelope
+/// is sealed to OUR public key, which is a published receive address, so
+/// anyone may mint one (this file says so twice already). A party who read one
+/// pre-acceptance message could therefore flip that conversation `Active` with
+/// their own alias and a key slot of their choosing, for the price of one dust
+/// transaction — unrouting the real contact and landing inside a thread the
+/// user trusts.
+///
+/// The proof that fixes it is the one [`adopt_alias_from_sender`] already
+/// uses, and its reasoning transfers verbatim: the sender address from our own
+/// node's return-address lookup at the accepting block's DAA score (INV-8),
+/// compared against the contact address WE chose when we opened the
+/// conversation. Only the real counterparty can complete a handshake; a
+/// stranger sealing an acceptance to our published key matches nothing.
+///
+/// Why this is deferred rather than checked at the fold: the lookup needs the
+/// bond's own activity record, which does not exist yet when the acceptance is
+/// first folded, so the live lane almost always resolves nothing there. This
+/// is the primary path — the same relationship [`backfill_invitation_sender`]
+/// has to its own fold — not a fallback.
+///
+/// Node lane only, by construction: the DAA score comes from the VCC stream
+/// our own node emits, never from a fill row.
+async fn complete_acceptance_from_sender(txid: &str, accepting_daa_score: u64) {
+    if !acceptance_already_parked(txid) {
+        return; // nothing held for this txid — don't pay for an RPC
+    }
+    let Ok(monitor) = dag::shared_monitor().await else {
+        return;
+    };
+    // Bounded, like `resolve_handshake_sender` three functions down.
+    // `resolve_return_address` carries no deadline of its own, and this is
+    // awaited inline on the acceptance-event loop — whose receiver drops
+    // events when it lags, costing tombstones and status chips. A dependency's
+    // default timeout posture is never the one we rely on.
+    match tokio::time::timeout(
+        SENDER_LOOKUP_TIMEOUT,
+        resolve_return_address(&monitor.rpc(), txid, accepting_daa_score),
+    )
+    .await
+    {
+        Ok(Ok(sender)) => apply_parked_acceptance(txid, &sender),
+        Ok(Err(e)) => log::info!(
+            "transport-intake: acceptance sender lookup failed for tx={txid}: {}",
+            kaspaverse_chain::sanitize_node_text(&e.to_string())
+        ),
+        Err(_) => log::info!("transport-intake: acceptance sender lookup timed out for tx={txid}"),
+    }
+}
+
+/// The same completion, for a txid whose accepting score nobody handed us
+/// (F5's second trigger — see the acceptance-event loop). Resolves the score
+/// itself from the bond's activity record, which is how an acceptance
+/// recovered by the catch-up or the F4 replay gets completed at all: its block
+/// was folded before the claim was ever parked, so no future batch will name
+/// it. A no-op when the record has not landed yet; the sweep runs again.
+async fn complete_parked_acceptance(txid: &str) {
+    if !acceptance_already_parked(txid) {
+        return;
+    }
+    let Some(sender) = resolve_handshake_sender(txid).await else {
+        return;
+    };
+    apply_parked_acceptance(txid, &sender);
+}
+
+/// Try every parked acceptance whose sender the wallet can now name.
+///
+/// **This is what makes a replayed acceptance completable at all**, and the
+/// reason it exists is worth stating plainly, because the obvious alternative
+/// does not work. Both event-driven triggers ultimately need a *future* VCC
+/// batch to name the txid: `SenderResolvable` comes from `fold_batch`'s filter
+/// over `batch.accepted`, and `AcceptanceTracker::watch` installs a record at
+/// `Submitted`, which only `on_added` — also driven by `batch.accepted` — ever
+/// promotes to `Accepted`. An acceptance recovered by the unlock catch-up or
+/// the F4 replay sits in an OLD block: the tracker's own forward-only cursor
+/// walked past it on the very same `Connected`, and does strictly less work
+/// than the transport walk, so by the time the claim is parked no batch will
+/// ever name that txid again. A watch registered there is inert, not slow.
+///
+/// This lane asks a different oracle. `resolve_handshake_sender`'s only real
+/// precondition is `engine.activity_daa_score(txid)` — the WALLET-SYNC activity
+/// record, which fills independently of the tracker's cursor — so a sweep costs
+/// one free map lookup per parked claim until that record lands, and one
+/// bounded RPC after. Driven from the replay task, which already wakes at
+/// roughly the block rate.
+async fn sweep_parked_acceptances() {
+    let parked: Vec<String> = PENDING_ACCEPTANCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|(txid, _)| txid.clone())
+        .collect();
+    for txid in parked {
+        complete_parked_acceptance(&txid).await;
+    }
+}
+
+/// Take the parked claim and apply it **iff** `sender` is the contact we chose.
+/// The gate itself; both triggers land here so there is exactly one place that
+/// can rewrite a conversation's identity from an acceptance.
+fn apply_parked_acceptance(txid: &str, sender: &str) {
+    // Everything that can fail WITHOUT a decision happens before the claim is
+    // taken. `take_parked_acceptance` is one-shot, so taking first and then
+    // discovering the hub is gone would destroy a legitimate claim on a
+    // condition that is nothing to do with it — and this now runs on a detached
+    // sweep task that can outlive a vault lock, which is exactly when `hub()`
+    // fails. Held means held.
+    let Ok(hub) = hub() else { return };
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(claim) = take_parked_acceptance(txid) else {
+        return;
+    };
+    let Some(existing) = store.conversation(&claim.conversation_id) else {
+        return;
+    };
+    // THE GATE — the same function the fold's Complete arm calls, not a second
+    // hand-rolled copy of the rule. The copy is how the `origin != Node`
+    // condition drifted per-arm earlier in this very wave and ended up minting
+    // an invitation; and since this deferred lane is the COMMON live case, a
+    // divergence here would be the one that actually shipped. Routing both
+    // writers through `acceptance_verdict` also means the five tests that
+    // range over it cover this lane too.
+    //
+    // Re-read under the write lock rather than trusting the fold-time
+    // snapshot: the user may have accepted, hidden or otherwise moved this
+    // conversation while we were on the network.
+    if existing.status != ConversationStatus::PendingOutbound
+        || acceptance_verdict(EventOrigin::Node, Some(sender), &existing.contact_address)
+            != AcceptanceVerdict::Complete
+    {
+        log::info!(
+            "transport-intake: acceptance tx={txid} was not sent by this conversation's \
+             contact — refused"
+        );
+        return;
+    }
+
+    let mut conversation = existing.clone();
+    let conversation_id = conversation.conversation_id.clone();
+    conversation.their_alias = Some(claim.their_alias);
+    conversation.status = ConversationStatus::Active;
+    // REBIND to the slot that actually opened it — the key the counterparty
+    // resolved for us and will keep sealing to. Safe only now: this rewrites
+    // who the conversation talks to, on evidence the node produced.
+    conversation.bound_branch = claim.bound_branch;
+    conversation.bound_index = claim.bound_index;
+    conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now_unix_ms());
+    unhide_on_inbound(&mut store, &conversation_id);
+    warn_store(store.upsert_conversation(conversation));
+    // The same row the immediate lane records. Withheld at fold time because
+    // the claim was unauthenticated; stored now, on the far side of the gate,
+    // so the two lanes leave the thread in the same state. `NodeScanned` is
+    // exact: this path is unreachable except from the node lane.
+    warn_store(store.record_message(MessageRecord {
+        txid: txid.to_string(),
+        conversation_id: conversation_id.clone(),
+        direction: MessageDirection::Inbound,
+        kind: StoredKind::Handshake,
+        envelope: claim.envelope,
+        unix_ms: claim.unix_ms,
+        alias_on_wire: None,
+        sealed_to: None,
+        provenance: RowSource::NodeScanned,
+    }));
+    drop(store);
+    log::info!("transport-intake: acceptance tx={txid} confirmed by sender — conversation active");
     ping(&conversation_id);
 }
 
@@ -2128,13 +2660,27 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     let Ok(monitor) = dag::shared_monitor().await else {
         return;
     };
-    let sender = match resolve_return_address(&monitor.rpc(), txid, accepting_daa_score).await {
-        Ok(sender) => sender,
-        Err(e) => {
+    // Bounded like every other lookup on this loop. `resolve_return_address`
+    // carries no deadline of its own, and all three sender lanes are awaited
+    // INLINE on the acceptance-event receiver — so an unbounded one ahead of
+    // the others stalls the whole loop, which costs tombstones, status chips
+    // and the lanes behind it. (Same gap, same loop.)
+    let sender = match tokio::time::timeout(
+        SENDER_LOOKUP_TIMEOUT,
+        resolve_return_address(&monitor.rpc(), txid, accepting_daa_score),
+    )
+    .await
+    {
+        Ok(Ok(sender)) => sender,
+        Ok(Err(e)) => {
             log::info!(
                 "transport-intake: invitation sender lookup failed for tx={txid}: {}",
                 kaspaverse_chain::sanitize_node_text(&e.to_string())
             );
+            return;
+        }
+        Err(_) => {
+            log::info!("transport-intake: invitation sender lookup timed out for tx={txid}");
             return;
         }
     };
@@ -2435,43 +2981,11 @@ async fn handle_inbound_handshake(
             return FoldOutcome::Recorded;
         }
 
-        // An acceptance response completes a conversation we initiated: their
-        // fresh alias arrives in `alias`, OUR alias echoes back in `their_alias`.
-        if payload.is_acceptance() {
-            let echoed = payload.their_alias.as_deref().unwrap_or_default();
-            if let Some(existing) = store.conversation_awaiting_response(echoed) {
-                let mut conversation = existing.clone();
-                conversation.their_alias = Some(payload.alias.clone());
-                conversation.status = ConversationStatus::Active;
-                // REBIND to the slot that actually opened it — this is the key
-                // the counterparty resolved for us and will keep sealing to.
-                conversation.bound_branch = to_key_branch(slot.0);
-                conversation.bound_index = slot.1;
-                // Never regress the activity clock: a FILLED old acceptance must
-                // not re-sort the conversation above newer traffic.
-                conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(now);
-                let conversation_id = conversation.conversation_id.clone();
-                unhide_on_inbound(&mut store, &conversation_id);
-                warn_store(store.upsert_conversation(conversation));
-                warn_store(store.record_message(MessageRecord {
-                    txid: txid.to_string(),
-                    conversation_id: conversation_id.clone(),
-                    direction: MessageDirection::Inbound,
-                    kind: StoredKind::Handshake,
-                    envelope: envelope_bytes,
-                    unix_ms: payload.timestamp,
-                    alias_on_wire: None,
-                    sealed_to: None,
-                    provenance: origin.row_source(),
-                }));
-                drop(store);
-                watch_acceptance(txid, block_time_ms);
-                ping(&conversation_id);
-                return FoldOutcome::Recorded;
-            }
-            // An acceptance we have no pending side for — fall through and treat
-            // it as a fresh inbound handshake (the live app does the same).
-        }
+        // The acceptance leg used to live HERE, completing a conversation on
+        // nothing but a decryptable payload and an echoed alias — both of them
+        // public. It now runs below, after the node has named the sender
+        // (F5); this scope keeps only the override lane, which was already
+        // node-gated.
     }
 
     // ── D-139: the counterparty's ADDRESS is the conversation key ──────────
@@ -2540,6 +3054,156 @@ async fn handle_inbound_handshake(
         // reaches its txid.
         None
     };
+    // ── F5: the acceptance leg, on NODE TRUTH ONLY ─────────────────────────
+    //
+    // An acceptance response completes a conversation we initiated: their
+    // fresh alias arrives in `alias`, OUR alias echoes back in `their_alias`.
+    //
+    // It sits here, after the resolve and before the D-139 match, for two
+    // reasons. It needs `resolved_sender`, which is only available past the
+    // await; and it must keep its precedence over the address lane, which
+    // would otherwise claim the same conversation by a different key and log
+    // it as something it is not.
+    //
+    // The rule is D-139's, applied to the lane that was missed: this branch
+    // rewrites an EXISTING conversation's identity — their alias and the key
+    // slot we seal to — so it may only run on evidence the node itself
+    // produced. The old gate ("the envelope opened, and it echoes an alias we
+    // answer to") authenticated nobody: the alias rides the wire in cleartext
+    // outside the envelope, and the envelope is sealed to a published receive
+    // address, so both halves are available to any observer for the price of
+    // one dust transaction.
+    if payload.is_acceptance() {
+        let echoed = payload.their_alias.as_deref().unwrap_or_default();
+        let pending = {
+            let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+            store.conversation_awaiting_response(echoed).cloned()
+        };
+        if let Some(existing) = pending {
+            match acceptance_verdict(
+                origin,
+                resolved_sender.as_deref(),
+                &existing.contact_address,
+            ) {
+                // The node named the sender, and it is the contact WE chose
+                // when we opened this conversation. Only they could have sent
+                // it; complete now.
+                AcceptanceVerdict::Complete => {
+                    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                    // RE-READ under the write lock. The row above was cloned
+                    // under a *different* acquisition, and writing that
+                    // snapshot back would clobber anything a concurrent FRB
+                    // worker settled in between — the check and the state it
+                    // protects must be one critical section (L73). The
+                    // deferred sibling re-reads for the same reason; before
+                    // this the two lanes disagreed about their own rule.
+                    let Some(current) = store.conversation(&existing.conversation_id) else {
+                        return dropped(HANDSHAKE, txid, DropReason::StoreRace, origin);
+                    };
+                    // Re-run the WHOLE verdict against the re-read row, not
+                    // just its status. Checking only `status` inside the lock
+                    // while the address half still rested on the pre-lock
+                    // snapshot would leave the rule half-enforced — and the
+                    // address is the load-bearing half of this gate.
+                    if current.status != ConversationStatus::PendingOutbound
+                        || acceptance_verdict(
+                            origin,
+                            resolved_sender.as_deref(),
+                            &current.contact_address,
+                        ) != AcceptanceVerdict::Complete
+                    {
+                        return dropped(HANDSHAKE, txid, DropReason::StoreRace, origin);
+                    }
+                    let mut conversation = current.clone();
+                    conversation.their_alias = Some(payload.alias.clone());
+                    conversation.status = ConversationStatus::Active;
+                    // REBIND to the slot that actually opened it — this is the
+                    // key the counterparty resolved for us and will keep
+                    // sealing to.
+                    conversation.bound_branch = to_key_branch(slot.0);
+                    conversation.bound_index = slot.1;
+                    // Never regress the activity clock: a FILLED old acceptance
+                    // must not re-sort the conversation above newer traffic.
+                    conversation.last_activity_unix_ms =
+                        conversation.last_activity_unix_ms.max(now);
+                    let conversation_id = conversation.conversation_id.clone();
+                    unhide_on_inbound(&mut store, &conversation_id);
+                    warn_store(store.upsert_conversation(conversation));
+                    warn_store(store.record_message(MessageRecord {
+                        txid: txid.to_string(),
+                        conversation_id: conversation_id.clone(),
+                        direction: MessageDirection::Inbound,
+                        kind: StoredKind::Handshake,
+                        envelope: envelope_bytes,
+                        unix_ms: payload.timestamp,
+                        alias_on_wire: None,
+                        sealed_to: None,
+                        provenance: origin.row_source(),
+                    }));
+                    drop(store);
+                    watch_acceptance(txid, block_time_ms);
+                    ping(&conversation_id);
+                    return FoldOutcome::Recorded;
+                }
+                // The node named a DIFFERENT sender. Whatever this is, it is
+                // not this conversation's counterparty answering — fall
+                // through and let the address lane treat it as what it is: a
+                // handshake from whoever actually sent it.
+                AcceptanceVerdict::NotOurContact => {
+                    log::info!(
+                        "transport-intake: acceptance tx={txid} echoes our alias but was sent \
+                         by someone else — not completing"
+                    );
+                }
+                // No sender yet. This is the COMMON live case, not an error:
+                // the return-address lookup needs the bond's own activity
+                // record, which does not exist when the acceptance is first
+                // folded. Park the claim and ask the chain who sent it. Nothing
+                // is written to the conversation and no row is stored yet — an
+                // unauthenticated claim earns neither, exactly as an unroutable
+                // comm earns none; both land once the sender is proven.
+                AcceptanceVerdict::AwaitSender => {
+                    if !acceptance_already_parked(txid) {
+                        park_acceptance(
+                            txid,
+                            ParkedAcceptance {
+                                conversation_id: existing.conversation_id.clone(),
+                                their_alias: payload.alias.clone(),
+                                bound_branch: to_key_branch(slot.0),
+                                bound_index: slot.1,
+                                envelope: envelope_bytes,
+                                unix_ms: payload.timestamp,
+                            },
+                        );
+                        if let Some(tracker) = dag::tracker_handle() {
+                            tracker.note_sender_interest(txid);
+                        }
+                        // `note_sender_interest` is the fast path, not the only
+                        // one: it fires only for a txid named by a FUTURE VCC
+                        // batch, so an acceptance folded out of the unlock
+                        // catch-up or the F4 replay — an OLD block, whose batch
+                        // the tracker walked past on the same `Connected` —
+                        // would never be signalled by it. That is precisely the
+                        // traffic F4 exists to recover, so the claim is ALSO
+                        // swept by [`sweep_parked_acceptances`], which asks the
+                        // wallet's own activity record and does not depend on a
+                        // batch arriving at all.
+                        log::info!("transport-intake: acceptance tx={txid} held — awaiting sender");
+                    }
+                    return dropped(HANDSHAKE, txid, DropReason::AcceptanceUnverified, origin);
+                }
+                // A FILL row never parks: its txid is an indexer claim, so
+                // resolving a sender for it would authenticate the label, not
+                // the payload (D-139/D-074).
+                AcceptanceVerdict::Refuse => {
+                    return dropped(HANDSHAKE, txid, DropReason::AcceptanceUnverified, origin);
+                }
+            }
+        }
+        // An acceptance we have no pending side for — fall through and treat
+        // it as a fresh inbound handshake (the live app does the same).
+    }
+
     let can_match_by_address = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         store.conversations_have_any_contact_address()
@@ -5336,6 +6000,256 @@ mod tests {
             EventOrigin::Fill,
             "the two lanes must stay distinguishable — the identity rule keys on it"
         );
+    }
+
+    // ── F4: the reconnect replay walks from the DROP, not from the wake ───
+
+    fn hash_of(byte: u8) -> kaspaverse_chain::Hash {
+        kaspaverse_chain::Hash::from_bytes([byte; 32])
+    }
+
+    /// **The race the fix exists to survive.** `AT_DROP` is where the gap
+    /// begins; `AFTER_RECONNECT` is where the persisted cursor has already been
+    /// dragged to by the `BlockAdded` notifications that resume before
+    /// `Connected` reaches this task. A replay that read the cursor on wake
+    /// would walk from `AFTER_RECONNECT` — above every message in the gap — and
+    /// be a silent no-op that looks exactly like a working fix.
+    #[test]
+    fn the_replay_walks_from_the_cursor_as_it_stood_at_the_drop() {
+        const AT_DROP: u8 = 0x11;
+        const AFTER_RECONNECT: u8 = 0x99;
+
+        let mut gap = ReplayGap::new();
+        gap.on_drop(Some(hash_of(AT_DROP)));
+        // …blocks resume and the live scan advances the persisted cursor…
+        let _cursor_now = Some(hash_of(AFTER_RECONNECT));
+        assert_eq!(
+            gap.on_connect(),
+            Some(hash_of(AT_DROP)),
+            "the replay must start where the gap did, not where the cursor got to"
+        );
+    }
+
+    /// The first connect of a session replays nothing: no drop has happened, so
+    /// there is no gap, and `transport_start`'s own catch-up already owns the
+    /// closed-app window. Arming here would double-walk every unlock.
+    #[test]
+    fn a_first_connect_replays_nothing() {
+        let mut gap = ReplayGap::new();
+        assert_eq!(gap.on_connect(), None);
+    }
+
+    /// One shot. A bound already walked must not be walked again on the next
+    /// reconnect — that would re-emit the same gap on every future bind.
+    #[test]
+    fn a_replayed_gap_is_not_replayed_again() {
+        let mut gap = ReplayGap::new();
+        gap.on_drop(Some(hash_of(1)));
+        assert!(gap.on_connect().is_some());
+        assert_eq!(
+            gap.on_connect(),
+            None,
+            "a second reconnect must not re-walk a gap already covered"
+        );
+    }
+
+    /// A lag may have hidden a drop, so it arms — but it must never overwrite a
+    /// bound already taken at a real drop, which is older and therefore covers
+    /// more. Overwriting would narrow the walk to above the gap: the same
+    /// silent no-op, arriving by a different door.
+    #[test]
+    fn a_lag_arms_the_replay_but_never_narrows_an_existing_bound() {
+        let mut fresh = ReplayGap::new();
+        fresh.on_lag(Some(hash_of(0x55)));
+        assert_eq!(
+            fresh.on_connect(),
+            Some(hash_of(0x55)),
+            "a lag that may have hidden a drop must still arm a replay"
+        );
+
+        let mut armed = ReplayGap::new();
+        armed.on_drop(Some(hash_of(0x11))); // the real drop, lower
+        armed.on_lag(Some(hash_of(0x99))); // a later lag, higher
+        assert_eq!(
+            armed.on_connect(),
+            Some(hash_of(0x11)),
+            "the earlier bound wins — a lag must never raise the floor"
+        );
+    }
+
+    /// The reverse order, which the first pass left untested and got wrong:
+    /// `on_drop` overwrote unconditionally while `on_lag` refused to, so a
+    /// lag-armed bound was silently raised by the next real drop and the window
+    /// between them was never walked. Reachable whenever a `Connected` is lost
+    /// to a lag — which a 256-slot event buffer against block-rate traffic
+    /// makes ordinary, not exotic. Both entry points now obey one rule
+    /// (wallet-security + consensus, F4).
+    #[test]
+    fn a_drop_never_narrows_a_bound_a_lag_already_armed() {
+        let mut gap = ReplayGap::new();
+        gap.on_lag(Some(hash_of(0x11))); // armed low by a lag…
+        gap.on_drop(Some(hash_of(0x99))); // …then a real drop, higher
+        assert_eq!(
+            gap.on_connect(),
+            Some(hash_of(0x11)),
+            "the earlier bound wins whichever call armed it"
+        );
+    }
+
+    /// Two drops with no `Connected` between them — the shape a lost
+    /// `Connected` produces. The first gap is still unwalked, so its bound is
+    /// the one that must survive.
+    #[test]
+    fn a_second_drop_keeps_the_first_gaps_bound() {
+        let mut gap = ReplayGap::new();
+        gap.on_drop(Some(hash_of(0x11)));
+        gap.on_drop(Some(hash_of(0x22)));
+        assert_eq!(gap.on_connect(), Some(hash_of(0x11)));
+    }
+
+    /// A cursor that reads back `None` must not ERASE an armed bound. Wiping it
+    /// would turn a recoverable gap into a permanent one, silently — and the
+    /// unguarded `self.low = cursor_now` did exactly that.
+    #[test]
+    fn an_unreadable_cursor_never_erases_an_armed_bound() {
+        let mut gap = ReplayGap::new();
+        gap.on_drop(Some(hash_of(0x11)));
+        gap.on_drop(None);
+        gap.on_lag(None);
+        assert_eq!(gap.on_connect(), Some(hash_of(0x11)));
+    }
+
+    /// No cursor at all (a first-ever run has none) arms nothing rather than
+    /// walking from an invented point.
+    #[test]
+    fn a_drop_with_no_persisted_cursor_arms_nothing() {
+        let mut gap = ReplayGap::new();
+        gap.on_drop(None);
+        assert_eq!(gap.on_connect(), None);
+    }
+
+    // ── F5: the acceptance leg is gated on node truth ─────────────────────
+
+    const VICTIM_CONTACT: &str =
+        "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf";
+    const ATTACKER: &str = "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692";
+
+    /// **The takeover, refused.** The acceptance leg used to complete and
+    /// REBIND a `PendingOutbound` conversation on a decryptable payload plus an
+    /// echoed alias — and neither is private. `prepare_comm_plaintext` writes
+    /// `comm:<alias>:` outside the envelope in cleartext, D-142 item 3 lets us
+    /// send while `PendingOutbound` (the state that leaks the alias and never
+    /// expires), and the envelope seals to our published receive address, which
+    /// anyone may seal to. So one dust transaction bought a stranger the
+    /// conversation: their alias, their key slot, status `Active`.
+    ///
+    /// The gate is the one `adopt_alias_from_sender` already applied to the
+    /// comm lane — our own node's return-address lookup, compared against the
+    /// contact address WE chose.
+    #[test]
+    fn an_acceptance_from_a_stranger_never_completes_a_conversation() {
+        assert_eq!(
+            acceptance_verdict(EventOrigin::Node, Some(ATTACKER), VICTIM_CONTACT),
+            AcceptanceVerdict::NotOurContact,
+            "a sender who is not our contact must never complete the handshake"
+        );
+        assert_eq!(
+            acceptance_verdict(EventOrigin::Node, Some(VICTIM_CONTACT), VICTIM_CONTACT),
+            AcceptanceVerdict::Complete,
+            "the real counterparty must still be able to answer"
+        );
+    }
+
+    /// An address-less row must not be completable by a sender that resolved
+    /// to nothing. Both empty is the trap: string equality alone would call it
+    /// a match and hand the conversation to whoever asked.
+    #[test]
+    fn an_addressless_conversation_matches_no_sender() {
+        assert_eq!(
+            acceptance_verdict(EventOrigin::Node, Some(""), ""),
+            AcceptanceVerdict::NotOurContact
+        );
+        assert_eq!(
+            acceptance_verdict(EventOrigin::Node, Some(ATTACKER), ""),
+            AcceptanceVerdict::NotOurContact
+        );
+    }
+
+    /// The fill lane may not complete an acceptance even when it somehow
+    /// carries a matching sender: its txid is an indexer CLAIM, so nothing
+    /// binds the payload that opened to the transaction that was labelled with
+    /// it (D-139/D-074 — the same rule the address lane got in August).
+    #[test]
+    fn the_fill_lane_can_never_complete_an_acceptance() {
+        // Every fill input REFUSES — including a matching sender, which the
+        // caller cannot currently produce but the rule must still cover. The
+        // first pass returned `NotOurContact` there, falling through to an
+        // address lane that cannot match a fill row either, so it minted an
+        // invitation — contradicting `AcceptanceUnverified`'s own promise that
+        // it is never folded into one (consensus-auditor, F5).
+        for sender in [None, Some(VICTIM_CONTACT), Some(ATTACKER), Some("")] {
+            assert_eq!(
+                acceptance_verdict(EventOrigin::Fill, sender, VICTIM_CONTACT),
+                AcceptanceVerdict::Refuse,
+                "node truth only — a fill row must refuse, sender={sender:?}"
+            );
+        }
+    }
+
+    /// The live lane's ordinary case. `resolve_handshake_sender` needs the
+    /// bond's own activity record, which does not exist when the acceptance is
+    /// first folded — so the common path is HELD, not completed and not lost.
+    #[test]
+    fn an_unresolved_sender_holds_the_acceptance_rather_than_applying_it() {
+        assert_eq!(
+            acceptance_verdict(EventOrigin::Node, None, VICTIM_CONTACT),
+            AcceptanceVerdict::AwaitSender
+        );
+    }
+
+    /// The park is bounded, idempotent and one-shot: these txids are
+    /// attacker-mintable, so an unbounded or replayable hold would be a second
+    /// hole where the first one was.
+    #[test]
+    fn the_acceptance_park_is_bounded_idempotent_and_one_shot() {
+        let claim = |id: &str| ParkedAcceptance {
+            conversation_id: id.to_string(),
+            their_alias: "aaaaaaaaaaaa".to_string(),
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            envelope: vec![0xAB, 0xCD],
+            unix_ms: 1_700_000_000_000,
+        };
+        PENDING_ACCEPTANCE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+
+        park_acceptance("tx-a", claim("conv-a"));
+        assert!(acceptance_already_parked("tx-a"));
+        park_acceptance("tx-a", claim("conv-IMPOSTOR"));
+        let taken = take_parked_acceptance("tx-a").expect("parked");
+        assert_eq!(
+            taken.conversation_id, "conv-a",
+            "a second park must not overwrite the first claim"
+        );
+        assert!(
+            take_parked_acceptance("tx-a").is_none(),
+            "one shot — a taken claim cannot be replayed"
+        );
+
+        for n in 0..(PENDING_ALIAS_CAPACITY + 8) {
+            park_acceptance(&format!("{n:064x}"), claim("conv-bulk"));
+        }
+        let held = PENDING_ACCEPTANCE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        assert_eq!(held, PENDING_ALIAS_CAPACITY, "bounded");
+        PENDING_ACCEPTANCE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// The provenance labels are a STRINGLY-TYPED SEAM: Rust emits them,

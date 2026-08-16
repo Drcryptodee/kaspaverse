@@ -16,8 +16,9 @@ import 'widgets/kv_loader.dart';
 ///
 ///   beginCreate → native FLAG_SECURE reveal + verify ([RevealActivity], over the
 ///   ceremony channel — words never cross to Dart, INV-1) → set passphrase →
-///   optional ASCII extra word → sealAndPersist (leaves the vault unlocked) →
-///   optional biometric enroll → pop (the shell then shows home).
+///   optional ASCII extra word (typed twice and matched, because it is
+///   seed-determining) → sealAndPersist (leaves the vault unlocked) → optional
+///   biometric enroll → pop (the shell then shows home).
 ///
 /// The passphrase + extra-word steps are §0.6 secret screens: [SecretScreenGuard]
 /// (FLAG_SECURE + a11y refusal), [SecretByteBuffer] (never a Dart `String`,
@@ -70,15 +71,35 @@ class CreateScreen extends StatefulWidget {
   State<CreateScreen> createState() => _CreateScreenState();
 }
 
-enum _Step { preparing, passphrase, extraWord, enrolling }
+enum _Step { preparing, passphrase, extraWord, extraWordConfirm, enrolling }
 
 class _CreateScreenState extends State<CreateScreen> {
   final SecretByteBuffer _passphrase = SecretByteBuffer();
   final SecretByteBuffer _extraWord = SecretByteBuffer();
 
+  /// The confirm-repeat of the extra word. A second buffer is a second secret:
+  /// it enters once, inward, as bytes, is compared in place, and is wiped at
+  /// the seal, on the way back, and on dispose (INV-1/3).
+  ///
+  /// Why this step exists at all: unlike the passphrase — which is mistypeable
+  /// and still recoverable, because the quiz-verified twelve words plus the
+  /// extra word the user *meant* still restore the wallet — the extra word is
+  /// seed-determining. It is the BIP39 PBKDF2 salt
+  /// (`vault.rs` `ceremony.into_seed`), so one wrong character seals a wallet
+  /// that the user's own written backup can never reproduce. It is typed
+  /// exactly once, ever; the native reveal quiz covers the twelve words only
+  /// and runs before this word exists; there is no delete-wallet path and the
+  /// vault refuses to seal over an existing blob, so the backup cannot even be
+  /// tested by restoring over the top. Nothing downstream would ever say so.
+  final SecretByteBuffer _extraWordConfirm = SecretByteBuffer();
+
   _Step _step = _Step.preparing;
   bool _busy = false;
   String? _message;
+
+  /// Anchor for [_say], so a reason beat can prove it is on screen rather than
+  /// merely in the tree.
+  final GlobalKey _messageKey = GlobalKey();
   bool _sealed = false; // ceremony consumed — don't abandon on dispose
 
   /// Why Path A is (un)available, resolved once after the seal. Drives whether
@@ -120,6 +141,7 @@ class _CreateScreenState extends State<CreateScreen> {
   void dispose() {
     _passphrase.dispose();
     _extraWord.dispose();
+    _extraWordConfirm.dispose();
     // Back-gesture out of the flow before sealing: drop the held ceremony.
     // Fire-and-forget; idempotent Rust-side.
     if (!_sealed) _abandonLane();
@@ -145,15 +167,83 @@ class _CreateScreenState extends State<CreateScreen> {
     }
   }
 
+  /// Show a reason, and make sure it is actually READABLE.
+  ///
+  /// Position alone could not carry this. Above the buttons the beat is in the
+  /// right place by §12's error anatomy, but on a 360×640 phone at 1.3× the
+  /// heading and subtitle already fill the viewport on their own — the scroll
+  /// area is only ~360 dp once the fixed keyboard takes its 224 — so wherever
+  /// the message sits in the column, it can start below the fold. A user who
+  /// mistyped the confirm would see the step revert and the dots reset, with
+  /// the explanation off-screen: present, findable by a test, and invisible.
+  /// Scrolling it into view is the part that holds at any text scale.
+  void _say(String message) {
+    setState(() => _message = message);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _messageKey.currentContext;
+      if (!mounted || ctx == null) return;
+      // Decelerate, no overshoot — a custody surface (DS-5).
+      Scrollable.ensureVisible(
+        ctx,
+        duration: KvMotion.fast,
+        curve: KvMotion.out,
+        alignment: 0.5,
+      );
+    });
+  }
+
   void _submitPassphrase() {
     if (_passphrase.isEmpty) {
-      setState(() => _message = 'Enter a passphrase first.');
+      _say('Enter a passphrase first.');
       return;
     }
     setState(() {
       _step = _Step.extraWord;
       _message = null;
     });
+  }
+
+  /// Leaving the extra-word entry. Empty is not sealed from here — `Skip` owns
+  /// that path and says so — so the primary never means two different things.
+  /// A non-empty word must be typed a second time before it can determine a
+  /// seed. Mirrors [_submitPassphrase]: the button stays live and an invalid
+  /// state answers with a message rather than a dead control.
+  void _submitExtraWord() {
+    if (_extraWord.isEmpty) {
+      _say('Enter the extra word, or tap Skip.');
+      return;
+    }
+    setState(() {
+      _step = _Step.extraWordConfirm;
+      _message = null;
+    });
+  }
+
+  /// The gate. On a mismatch BOTH buffers are wiped and the user re-enters from
+  /// the start: a mismatch means one of the two is wrong and neither the user
+  /// nor the app can see which, so letting them retype only the confirm would
+  /// invite them to "correct" the copy until it matches a first entry that was
+  /// itself the typo. Nothing is compared or held as a Dart `String`.
+  void _confirmExtraWord() {
+    if (!_extraWord.matches(_extraWordConfirm)) {
+      _extraWord.wipe();
+      _extraWordConfirm.wipe();
+      setState(() => _step = _Step.extraWord);
+      // Says what Skip now MEANS, because by this point the entry step has
+      // already told them to write the word down. Bouncing back puts an
+      // unchanged "Skip" under their thumb, and taking it would seal a wallet
+      // with no extra word while their paper record says there is one — a
+      // mismatch they could not detect and could not test, since there is no
+      // delete path and the vault refuses to seal over an existing blob
+      // (ux-auditor, DS-3).
+      _say(
+        "Those didn't match. Enter the extra word again, then confirm it — or "
+        'tap Skip to create your wallet with no extra word, and cross it off '
+        'your backup.',
+      );
+      return;
+    }
+    _doSeal();
   }
 
   Future<void> _doSeal() async {
@@ -172,6 +262,7 @@ class _CreateScreenState extends State<CreateScreen> {
       // either buffer (wallet-security-auditor, Track 2).
       _passphrase.wipe();
       _extraWord.wipe();
+      _extraWordConfirm.wipe();
       if (!mounted) return;
       final status = await _safeBiometricProbe();
       if (!mounted) return;
@@ -193,11 +284,13 @@ class _CreateScreenState extends State<CreateScreen> {
           _popWith('Your setup session ended for safety. Please start again.');
         }
       } else {
-        setState(() {
-          _busy = false;
-          _message =
-              'Could not finish creating your wallet. Your funds are safe — try again.';
-        });
+        setState(() => _busy = false);
+        // Through `_say` like every other beat on this screen. A seal failure
+        // is the LAST one that can afford to be off-screen: it is the reason
+        // the wallet does not exist yet.
+        _say(
+          'Could not finish creating your wallet. Your funds are safe — try again.',
+        );
       }
     }
   }
@@ -240,17 +333,16 @@ class _CreateScreenState extends State<CreateScreen> {
       // message, just return to the step so "Not now" is still there.
       setState(() {
         _busy = false;
-        _message = e.code == 'cancelled' ? null : enrollFailureCopy(e.code);
+        _message = null;
       });
+      if (e.code != 'cancelled') _say(enrollFailureCopy(e.code));
     } catch (_) {
       // Never swallowed to a silent pop again: that is what made enrolment
       // present as "I tapped it and nothing happened". The user stays on the
       // step, is told what happened, and can retry or skip.
       if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _message = enrollFailureCopy('failed');
-      });
+      setState(() => _busy = false);
+      _say(enrollFailureCopy('failed'));
     }
   }
 
@@ -275,6 +367,14 @@ class _CreateScreenState extends State<CreateScreen> {
       case _Step.extraWord:
         setState(() {
           _step = _Step.passphrase;
+          _message = null;
+        });
+      case _Step.extraWordConfirm:
+        // Back to the entry to re-type it; the half-typed confirm is a secret
+        // and does not survive the step it belongs to.
+        _extraWordConfirm.wipe();
+        setState(() {
+          _step = _Step.extraWord;
           _message = null;
         });
       case _Step.enrolling:
@@ -311,8 +411,8 @@ class _CreateScreenState extends State<CreateScreen> {
               'layer. You will need it every time you restore, so write it down '
               'too. Leave it empty to skip. (Letters, digits and symbols only.)',
           buffer: _extraWord,
-          primaryLabel: _busy ? 'Creating…' : 'Create wallet',
-          onPrimary: _busy ? null : _doSeal,
+          primaryLabel: _busy ? 'Creating…' : 'Next',
+          onPrimary: _busy ? null : _submitExtraWord,
           secondaryLabel: 'Skip',
           onSecondary: _busy
               ? null
@@ -320,6 +420,23 @@ class _CreateScreenState extends State<CreateScreen> {
                   _extraWord.wipe();
                   _doSeal();
                 },
+        ),
+        _Step.extraWordConfirm => _secretStep(
+          title: 'your recovery words',
+          heading: 'Type the extra word again',
+          // Read it BACK from the written record, not from memory. Two entries
+          // typed seconds apart from the same short-term memory prove only that
+          // the user can repeat themselves — and a wallet is restored from what
+          // they wrote down, not from what they remembered this minute. Asking
+          // them to read it back is the difference between checking the typing
+          // and checking the backup, and it costs nothing.
+          subtitle:
+              'Read it back from where you wrote it down and type it again. '
+              'This word becomes part of your wallet, so if what you wrote is '
+              'not what you typed, those words will not bring your wallet back.',
+          buffer: _extraWordConfirm,
+          primaryLabel: _busy ? 'Creating…' : 'Create wallet',
+          onPrimary: _busy ? null : _confirmExtraWord,
         ),
         _Step.enrolling => _enroll(),
       },
@@ -398,6 +515,29 @@ class _CreateScreenState extends State<CreateScreen> {
                         ),
                         const SizedBox(height: KvSpace.l),
                         MaskedDots(length: buffer.length),
+                        // The reason beat sits ABOVE the buttons, not after
+                        // them. Below, it started ~416 dp down a 360 dp
+                        // viewport (the keyboard is fixed and takes 224 dp of
+                        // the 584), so on a 360×640 handset it was off-screen
+                        // at 1.0× and on the V60 at ~1.3×. A user who mistyped
+                        // the confirm saw the step revert and the dots reset
+                        // with nothing saying why — verbatim the defect
+                        // 3227d32 was written to end, and the same class as
+                        // the enroll-overflow fix further down this file.
+                        // Moving it here also lands "Enter a passphrase first."
+                        // and "or tap Skip", which had the same problem
+                        // (ux-auditor, DS-3/§12).
+                        if (_message != null) ...[
+                          const SizedBox(height: KvSpace.m),
+                          Text(
+                            _message!,
+                            key: _messageKey,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: KvColor.textSecondary,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
                         const SizedBox(height: KvSpace.l),
                         SizedBox(
                           width: double.infinity,
@@ -411,16 +551,6 @@ class _CreateScreenState extends State<CreateScreen> {
                           TextButton(
                             onPressed: onSecondary,
                             child: Text(secondaryLabel),
-                          ),
-                        ],
-                        if (_message != null) ...[
-                          const SizedBox(height: KvSpace.m),
-                          Text(
-                            _message!,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: KvColor.textSecondary,
-                            ),
-                            textAlign: TextAlign.center,
                           ),
                         ],
                       ],
@@ -489,6 +619,21 @@ class _CreateScreenState extends State<CreateScreen> {
                       ),
                       textAlign: TextAlign.center,
                     ),
+                    // Above the buttons and key'd, the same anatomy as
+                    // `_secretStep` — this step overflowed by 206 px once
+                    // already (Track 2), and a reason laid out after the
+                    // controls is the shape that hid it.
+                    if (_message != null) ...[
+                      const SizedBox(height: KvSpace.m),
+                      Text(
+                        _message!,
+                        key: _messageKey,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: KvColor.textSecondary,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
                     const SizedBox(height: KvSpace.xl),
                     if (ready)
                       SizedBox(
@@ -505,16 +650,6 @@ class _CreateScreenState extends State<CreateScreen> {
                       onPressed: _busy ? null : _finish,
                       child: Text(ready ? 'Not now' : 'Continue'),
                     ),
-                    if (_message != null) ...[
-                      const SizedBox(height: KvSpace.m),
-                      Text(
-                        _message!,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: KvColor.textSecondary,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
                   ],
                 ),
               ),

@@ -54,6 +54,23 @@ class SecretByteBuffer {
   /// would clear the live buffer mid-edit.
   Uint8List snapshot() => _store.sublist(0, _len);
 
+  /// Whether [other] holds exactly the same bytes — the confirm-repeat gate on
+  /// the create ceremony's extra word. Compares in-place: neither buffer is
+  /// copied out, and nothing here becomes a Dart `String` (INV-1/3). Dart
+  /// privacy is per-library, so reaching into `other`'s private store is legal
+  /// and keeps the bytes from ever leaving this class.
+  ///
+  /// Deliberately NOT constant-time, and not claimed to be: it early-returns on
+  /// a length mismatch, and both operands are the same user's own bytes on
+  /// their own device, so there is no attacker positioned to time it.
+  bool matches(SecretByteBuffer other) {
+    if (_len != other._len) return false;
+    for (var i = 0; i < _len; i++) {
+      if (_store[i] != other._store[i]) return false;
+    }
+    return true;
+  }
+
   /// Zero the backing store and reset to empty. Safe to reuse afterwards.
   void wipe() {
     _store.fillRange(0, _store.length, 0);

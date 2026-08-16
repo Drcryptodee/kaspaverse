@@ -17,6 +17,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +36,25 @@ use crate::frb_generated::StreamSink;
 
 /// The sole strong owner of the unlocked vault (None = locked).
 static VAULT: Mutex<Option<UnlockedVault>> = Mutex::new(None);
+
+/// Monotonic lock generation — the §0.11 lifecycle lock's memory (F3).
+///
+/// Every install of an unlocked vault sits at the far end of slow work: an
+/// Argon2id KDF of about a second on the passphrase lanes, an unbounded
+/// BiometricPrompt + Keystore round-trip on the JNI one. `lock_vault` used to
+/// clear `VAULT` and return, recording nothing a later install could observe,
+/// so a lock landing inside that window was **silently overwritten**: the
+/// wallet came back unlocked in the background with its auto-lock timer already
+/// cancelled Dart-side. `lockVault` and `unlockWithPassphrase` are both
+/// `executeNormal` on FRB's worker pool, so this is a genuine race on real
+/// threads — and with the default grace of 0 seconds its trigger is pressing
+/// Home, taking a call, or a full-screen notification.
+///
+/// The rule is L73's: a check and the state it protects must be ONE critical
+/// section. So this counter is read and written **only while holding the
+/// `VAULT` guard** — that mutex, not the atomic's own ordering, is what makes
+/// lock-vs-install a decision with exactly two outcomes, both correct.
+static LOCK_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// App-private directory the platform hands us at init; the sealed blob and the
 /// lockout counter live here (INV-3 — never SharedPreferences).
 static VAULT_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -505,19 +525,14 @@ pub(crate) fn derive_wallet_branches(
     Ok((receive, change))
 }
 
-/// The change address at `index` (public — derived from the account xpub), for a
-/// send's fresh change (P1.6, D-041). Same single derivation site; the keychain
-/// never leaves this module (INV-1). Errors if locked.
-pub(crate) fn change_address_at(index: u32) -> Result<Address, AppError> {
-    let guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
-    let vault = guard
-        .as_ref()
-        .ok_or_else(|| AppError::msg("wallet is locked"))?;
-    vault
-        .keychain()
-        .change_address(index)
-        .map_err(AppError::core)
-}
+// `change_address_at(index)` lived here until Wave B. Its last caller was the
+// storage-mass hint in `send.rs`, which had no business deriving a fresh
+// `change/N` at all — payment change returns to `receive/0`
+// (`payment_change_address`), and pricing the hint against a different coin
+// shape than the send uses made it wrong as well as inconsistent. Nothing is
+// lost by its removal: it was exactly `wallet_address_at(Branch::Change, index)`
+// below, which any future caller with a real reason can use. Deleting it makes
+// the rule structural instead of a comment someone has to notice.
 
 /// The watched-window address at an arbitrary `(branch, index)` slot — the
 /// P2.3 re-seal-to-self target (a conversation's §0.7 bound slot). Public
@@ -659,8 +674,28 @@ fn broadcast_status() {
     let _ = status_tx().send(current_status()); // fails only with no subscribers
 }
 
-fn set_vault(v: UnlockedVault) {
-    *VAULT.lock().unwrap_or_else(PoisonError::into_inner) = Some(v);
+/// Sample the lock generation. Every unlock lane calls this **before** its slow
+/// work starts, and presents the value back to [`set_vault_if_current`].
+fn lock_epoch() -> u64 {
+    let _guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    LOCK_EPOCH.load(Ordering::SeqCst)
+}
+
+/// Install a freshly unlocked vault — unless a lock landed since `epoch`.
+///
+/// Returns `false` when the install was refused, in which case `v` drops here
+/// and its keychain Arc with it. The caller must NOT report an unlocked vault
+/// on a `false`; the truth goes out over [`broadcast_status`], which is what
+/// the Dart shell actually gates on (it never shows home optimistically).
+#[must_use]
+fn set_vault_if_current(v: UnlockedVault, epoch: u64) -> bool {
+    let mut guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+    if LOCK_EPOCH.load(Ordering::SeqCst) != epoch {
+        log::info!("vault install refused — a lock landed while it was being unlocked");
+        return false;
+    }
+    *guard = Some(v);
+    true
 }
 
 // ── FRB surface ───────────────────────────────────────────────────────────
@@ -777,6 +812,9 @@ pub fn seal_and_persist(
             "a vault already exists; refusing to overwrite",
         ));
     }
+    // Sampled before the KDF: a lifecycle lock landing any time after this
+    // point must win over the install below (F3).
+    let epoch = lock_epoch();
     let ceremony = CREATE_CEREMONY
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -785,10 +823,20 @@ pub fn seal_and_persist(
     let seed = ceremony.into_seed(&extra_word).map_err(AppError::core)?;
     let blob = seal_seed(&seed, &passphrase, params.into()).map_err(AppError::core)?;
     atomic_write(&blob_path()?, &blob).map_err(|e| AppError::io("write blob", e))?;
-    set_vault(UnlockedVault::new(
-        KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?,
-    ));
-    log::info!("vault created (path=passphrase scheme=argon2id, ceremony-backed)");
+    let installed = set_vault_if_current(
+        UnlockedVault::new(KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?),
+        epoch,
+    );
+    // Still `Ok`: the wallet WAS created and the blob is on disk, so an error
+    // here would tell the user their wallet does not exist while it does — and
+    // send them into a retry that `refusing to overwrite` will reject. The
+    // creation succeeded; it is simply locked, which is what backgrounding
+    // during it means. `broadcast_status` carries that.
+    if installed {
+        log::info!("vault created (path=passphrase scheme=argon2id, ceremony-backed)");
+    } else {
+        log::info!("vault created (path=passphrase scheme=argon2id) — locked on arrival");
+    }
     broadcast_status();
     Ok(())
 }
@@ -831,16 +879,23 @@ pub fn restore_and_persist(
             "a vault already exists; refusing to overwrite",
         ));
     }
+    // Sampled before the KDF — see `seal_and_persist` (F3).
+    let epoch = lock_epoch();
     let seed = MnemonicCeremony::restore(&phrase)
         .map_err(AppError::core)?
         .into_seed(&extra_word)
         .map_err(AppError::core)?;
     let blob = seal_seed(&seed, &passphrase, params.into()).map_err(AppError::core)?;
     atomic_write(&blob_path()?, &blob).map_err(|e| AppError::io("write blob", e))?;
-    set_vault(UnlockedVault::new(
-        KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?,
-    ));
-    log::info!("vault restored (path=passphrase scheme=argon2id)");
+    let installed = set_vault_if_current(
+        UnlockedVault::new(KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?),
+        epoch,
+    );
+    if installed {
+        log::info!("vault restored (path=passphrase scheme=argon2id)");
+    } else {
+        log::info!("vault restored (path=passphrase scheme=argon2id) — locked on arrival");
+    }
     broadcast_status();
     Ok(())
 }
@@ -870,13 +925,25 @@ pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
         )));
     }
     log::info!("vault unlock attempt (path=passphrase)");
+    // Sampled before the KDF. THIS is the reported repro: press Home inside the
+    // ~1 s Argon2id window and the lock used to be overwritten by the unlock it
+    // was racing (F3).
+    let epoch = lock_epoch();
     let blob = read_blob()?;
     match unseal_seed(&blob, &passphrase) {
         Ok(seed) => {
             let keychain = KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?;
-            set_vault(UnlockedVault::new(keychain));
-            let _ = write_lockout(Lockout::default()); // reset on success
-            log::info!("vault unlock ok (path=passphrase)");
+            let installed = set_vault_if_current(UnlockedVault::new(keychain), epoch);
+            // The passphrase was right, so the lockout resets either way —
+            // refusing the install is a lifecycle decision, never a failed
+            // attempt, and counting it as one would let backgrounding the app
+            // during an unlock walk the user into a lockout.
+            let _ = write_lockout(Lockout::default());
+            if installed {
+                log::info!("vault unlock ok (path=passphrase)");
+            } else {
+                log::info!("vault unlock superseded by a lock (path=passphrase)");
+            }
             broadcast_status();
             Ok(())
         }
@@ -905,9 +972,25 @@ pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
 /// a sign is concurrently finishing. Also the Flutter lifecycle hook: Dart calls
 /// this on background/detach.
 pub fn lock_vault() {
-    if let Some(vault) = VAULT.lock().unwrap_or_else(PoisonError::into_inner).take() {
-        vault.lock(); // consumes; drops the bridge's strong Arc
-        log::info!("vault locked");
+    {
+        let mut guard = VAULT.lock().unwrap_or_else(PoisonError::into_inner);
+        // Bump FIRST, and **unconditionally** — not only when a vault was
+        // actually taken. The reported repro is an unlock: the vault is
+        // already `None` when Home is pressed, so a bump conditional on
+        // `take()` finding something would leave that exact case unguarded and
+        // the fix would prove nothing. What is being recorded is the user's
+        // intent — "locked as of now" — which is a fact about the lifecycle,
+        // not about what happened to be resident.
+        //
+        // Inside the guard, so this and every `set_vault_if_current` are
+        // serialized by one mutex (L73). Only two interleavings exist and both
+        // end locked: bump-then-install refuses the install; install-then-bump
+        // takes the vault it just installed.
+        LOCK_EPOCH.fetch_add(1, Ordering::SeqCst);
+        if let Some(vault) = guard.take() {
+            vault.lock(); // consumes; drops the bridge's strong Arc
+            log::info!("vault locked");
+        }
     }
     // §0.11: a background/detach mid-create must not leave the phrase resident.
     // Dropping the held ceremony zeroizes it (D-038); abandon is idempotent.
@@ -974,11 +1057,29 @@ pub fn kdf_bench_ms(params: VaultKdfParams) -> Result<u64, AppError> {
 /// passphrase one, so it resets the lockout.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn load_vault_from_seed_bytes(seed: Box<[u8; 64]>) -> Result<(), AppError> {
+    // Sampled at the JNI hand-off — and note precisely what that does and does
+    // NOT cover (F3). The unbounded part of this lane is the BiometricPrompt +
+    // Keystore round-trip, and that happens entirely BEFORE Rust is called, so
+    // this sample cannot see it. What covers that window is Dart's ceremony
+    // deferral: `unlockBiometric` routes through `VaultService.runCeremony`,
+    // which holds a §0.11 lock rather than firing it and settles it in its
+    // `finally` — which is exactly why the passphrase lanes, which do NOT route
+    // through it, were the ones that raced.
+    //
+    // So this is defence in depth over the sliver from the seed's arrival to
+    // the install, and a guard that stays correct if that deferral is ever
+    // narrowed. It is not the biometric lane's primary protection, and must
+    // not be cited as one.
+    let epoch = lock_epoch();
     let keychain = KeyChain::from_seed(SecretSeed::from_seed_bytes(seed), Prefix::Mainnet)
         .map_err(AppError::core)?;
-    set_vault(UnlockedVault::new(keychain));
+    let installed = set_vault_if_current(UnlockedVault::new(keychain), epoch);
     let _ = write_lockout(Lockout::default());
-    log::info!("vault unlock ok (path=biometric)");
+    if installed {
+        log::info!("vault unlock ok (path=biometric)");
+    } else {
+        log::info!("vault unlock superseded by a lock (path=biometric)");
+    }
     broadcast_status();
     Ok(())
 }
@@ -1067,6 +1168,99 @@ pub(crate) mod tests {
         // the next test a wallet that had already found funds.
         *SCAN_MARKS.lock().unwrap_or_else(PoisonError::into_inner) = None;
         (guard, dir)
+    }
+
+    // ── F3: a lock landing during a slow KDF is not overwritten ───────────
+
+    fn a_vault() -> UnlockedVault {
+        UnlockedVault::new(
+            KeyChain::from_seed(
+                SecretSeed::from_seed_bytes(Box::new([7u8; 64])),
+                Prefix::Mainnet,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// **The race, as reported.** `set_vault` was unconditional, so a §0.11
+    /// lifecycle lock that landed while Argon2id was running got clobbered by
+    /// the unlock it was racing — leaving the wallet unlocked in the background
+    /// with its auto-lock timer already cancelled Dart-side.
+    #[test]
+    fn a_lock_during_the_kdf_wins_over_the_install_it_raced() {
+        let (_g, _dir) = enter();
+        // The unlock lane samples the epoch, then spends a second in the KDF…
+        let epoch = lock_epoch();
+        // …and the user presses Home inside that window.
+        lock_vault();
+        // The install must now be refused, not applied.
+        assert!(
+            !set_vault_if_current(a_vault(), epoch),
+            "an install from before the lock must be refused"
+        );
+        assert!(!is_unlocked(), "the wallet must still be locked");
+    }
+
+    /// The bump is UNCONDITIONAL, and this is the test that says why. The
+    /// reported repro is an unlock, so `VAULT` is already `None` when Home is
+    /// pressed — a generation bumped only when `take()` found something would
+    /// leave exactly that case unguarded, and the fix would prove nothing.
+    #[test]
+    fn locking_an_already_locked_vault_still_supersedes_an_unlock_in_flight() {
+        let (_g, _dir) = enter();
+        assert!(!is_unlocked(), "precondition: locked, as at an unlock");
+        let epoch = lock_epoch();
+        lock_vault(); // takes nothing — and must still count
+        assert!(!set_vault_if_current(a_vault(), epoch));
+        assert!(!is_unlocked());
+    }
+
+    /// The other interleaving, which must still succeed: no lock landed, so the
+    /// unlock installs. A guard that refused here would simply break unlocking.
+    #[test]
+    fn an_uncontested_unlock_still_installs() {
+        let (_g, _dir) = enter();
+        let epoch = lock_epoch();
+        assert!(set_vault_if_current(a_vault(), epoch));
+        assert!(is_unlocked());
+        lock_vault();
+        assert!(!is_unlocked());
+    }
+
+    /// Install-then-lock — the opposite order — must also end locked. Both
+    /// interleavings are correct; that is the point of putting the generation
+    /// under the same mutex as the state it guards (L73).
+    #[test]
+    fn a_lock_after_the_install_takes_the_vault_it_found() {
+        let (_g, _dir) = enter();
+        let epoch = lock_epoch();
+        assert!(set_vault_if_current(a_vault(), epoch));
+        lock_vault();
+        assert!(!is_unlocked());
+        // And the stale epoch cannot be replayed to resurrect it.
+        assert!(!set_vault_if_current(a_vault(), epoch));
+        assert!(!is_unlocked());
+    }
+
+    /// Driven on real threads rather than by simulating the interleaving, so
+    /// the claim is about the lock discipline and not about the order these
+    /// statements happen to be written in. Whichever side wins, the wallet ends
+    /// locked — never unlocked-after-a-lock.
+    #[test]
+    fn the_race_ends_locked_whichever_side_wins() {
+        let (_g, _dir) = enter();
+        for _ in 0..200 {
+            *VAULT.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            let epoch = lock_epoch();
+            let installer = std::thread::spawn(move || set_vault_if_current(a_vault(), epoch));
+            let locker = std::thread::spawn(lock_vault);
+            let installed = installer.join().unwrap();
+            locker.join().unwrap();
+            assert!(
+                !is_unlocked(),
+                "a lock and an install raced and left the vault UNLOCKED (installed={installed})"
+            );
+        }
     }
 
     // ── Pure-logic tests (no global state) ────────────────────────────────

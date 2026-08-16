@@ -324,10 +324,22 @@ pub async fn send_prepare(
             // past the Generator's per-tx mass ceiling (INV-8 — surface it
             // honestly, WITH the exact way out: the computed minimum for this
             // wallet's coin shape, not a mystery — D-054).
-            let hint = engine
-                .minimum_sendable(vault::change_address_at(wallet::next_change_index())?)
+            // Two corrections, both carried from Wave A (SOURCE_OF_TRUTH §19).
+            //
+            // The address is `payment_change_address()`, not a fresh
+            // `change/N` — the last derivation in this file that still
+            // contradicted the rule stated ten lines above, and it would have
+            // priced the hint against a coin shape the send itself never uses.
+            //
+            // And it is fallible-but-optional, so it may NOT use `?`. This is
+            // the error arm: a failure to compute the hint used to propagate as
+            // THE error, replacing "your amount is too small, here is the way
+            // out" with a derivation failure that explains nothing. An optional
+            // extra that can delete the explanation it decorates is worse than
+            // no extra at all.
+            let hint = payment_change_address()
                 .ok()
-                .flatten()
+                .and_then(|change| engine.minimum_sendable(change).ok().flatten())
                 .map(|m| {
                     format!(
                         " The smallest sendable right now is about {} KAS.",

@@ -134,6 +134,10 @@ void main() {
     await settle(tester);
     await tester.tap(find.text('b')); // extra word "b"
     await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
+    await settle(tester);
+    await tester.tap(find.text('b')); // confirm-repeat, matching
+    await settle(tester);
     await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
     await settle(tester);
 
@@ -149,6 +153,204 @@ void main() {
       find.text('open'),
       findsOneWidget,
     ); // popped to home host after enroll
+  });
+
+  // ── F1: the extra word is seed-determining, so it is typed twice ────────
+  //
+  // It was typed ONCE, blind: masked dots render `buffer.length` and never the
+  // characters, the native quiz covers the twelve words only and runs before
+  // this word exists, and both buffers were wiped the instant the seal
+  // returned. One wrong character sealed a wallet the user's own written
+  // backup could never reproduce — with no delete path and no seal-over-an-
+  // existing-blob, they could not even test the backup by restoring — and
+  // nothing on the device would ever have said so.
+
+  Future<void> toExtraWord(
+    WidgetTester tester, {
+    required void Function(Uint8List extra) onSeal,
+    Future<void> Function(Finder)? tap,
+  }) async {
+    final press =
+        tap ??
+        (Finder f) async {
+          await tester.tap(f);
+          await settle(tester);
+        };
+    await pumpHost(
+      tester,
+      CreateScreen(
+        begin: () async {},
+        reveal: () async => true,
+        abandon: () async {},
+        seal: (p, x) async => onSeal(Uint8List.fromList(x)),
+        biometricStatus: () async => 'no_hardware',
+        enroll: () async => true,
+        checkAccessibility: () async => false,
+        setSecure: ({required bool enable}) async {},
+      ),
+    );
+    await settle(tester);
+    await press(find.text('a')); // passphrase
+    await press(find.widgetWithText(FilledButton, 'Next'));
+    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
+  }
+
+  testWidgets('a mistyped extra word is caught instead of sealed', (
+    tester,
+  ) async {
+    var sealCalls = 0;
+    await toExtraWord(tester, onSeal: (_) => sealCalls++);
+
+    await tester.tap(find.text('b')); // entry: "b"
+    await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
+    await settle(tester);
+
+    expect(find.text('Type the extra word again'), findsOneWidget);
+    await tester.tap(find.text('c')); // confirm: "c" — the typo
+    await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
+    await settle(tester);
+
+    // Nothing sealed, and the user is back at the entry with BOTH buffers
+    // wiped: a mismatch means one of the two is wrong and neither the user nor
+    // the app can see which, so re-typing only the copy would let them
+    // "correct" it until it matched a first entry that was itself the typo.
+    expect(sealCalls, 0);
+    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
+    expect(find.textContaining("didn't match"), findsOneWidget);
+    expect(find.text('Use the keyboard below'), findsOneWidget); // 0 dots
+  });
+
+  testWidgets('the mismatch reason is ON SCREEN on a small phone at 1.3x', (
+    tester,
+  ) async {
+    // Proving the message exists is not proving the user can read it. Laid out
+    // after both buttons it began ~416 dp down a 360 dp viewport — present in
+    // the tree, findable by `find.textContaining`, and entirely below the
+    // fold. Every other test here runs at the 800x600 default and would have
+    // stayed green. This is the reachability gap 3227d32's commit message
+    // named and the enroll-overflow fix hit before it.
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1.0;
+    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      tester.platformDispatcher.clearTextScaleFactorTestValue();
+    });
+
+    Future<void> tapScrolled(Finder f) async {
+      await tester.ensureVisible(f); // the buttons themselves scroll here
+      await settle(tester);
+      await tester.tap(f);
+      await settle(tester);
+    }
+
+    await toExtraWord(tester, onSeal: (_) {}, tap: tapScrolled);
+    await tapScrolled(find.text('b'));
+    await tapScrolled(find.widgetWithText(FilledButton, 'Next'));
+    await tapScrolled(find.text('c'));
+    await tapScrolled(find.widgetWithText(FilledButton, 'Create wallet'));
+
+    final message = find.textContaining("didn't match");
+    expect(message, findsOneWidget);
+    final box = tester.getRect(message);
+    final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+    expect(
+      box.top >= 0 && box.bottom <= screen.height,
+      isTrue,
+      reason:
+          'the reason beat must be visible without scrolling — it was at '
+          '${box.top.toStringAsFixed(0)}..${box.bottom.toStringAsFixed(0)} dp '
+          'on a ${screen.height.toStringAsFixed(0)} dp screen',
+    );
+  });
+
+  testWidgets('a matching extra word seals exactly the bytes typed', (
+    tester,
+  ) async {
+    Uint8List? sealedExtra;
+    await toExtraWord(tester, onSeal: (x) => sealedExtra = x);
+
+    for (final c in ['b', 'c']) {
+      await tester.tap(find.text(c));
+      await settle(tester);
+    }
+    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
+    await settle(tester);
+    for (final c in ['b', 'c']) {
+      await tester.tap(find.text(c));
+      await settle(tester);
+    }
+    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
+    await settle(tester);
+
+    expect(sealedExtra, equals(Uint8List.fromList([0x62, 0x63]))); // 'bc'
+  });
+
+  testWidgets('a longer confirm than entry does not match', (tester) async {
+    // The length-mismatch arm: a dropped or doubled character is exactly what
+    // a dot count cannot show, since the user cannot see the word to count against.
+    var sealCalls = 0;
+    await toExtraWord(tester, onSeal: (_) => sealCalls++);
+
+    await tester.tap(find.text('b'));
+    await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
+    await settle(tester);
+    for (final c in ['b', 'b']) {
+      await tester.tap(find.text(c));
+      await settle(tester);
+    }
+    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
+    await settle(tester);
+
+    expect(sealCalls, 0);
+    expect(find.textContaining("didn't match"), findsOneWidget);
+  });
+
+  testWidgets('backing out of the confirm returns to the entry', (
+    tester,
+  ) async {
+    await toExtraWord(tester, onSeal: (_) {});
+    await tester.tap(find.text('b'));
+    await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
+    await settle(tester);
+    await tester.tap(find.byType(BackButton));
+    await settle(tester);
+
+    // Back at the entry, which still holds the word — only the half-typed
+    // confirm is wiped.
+    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
+    expect(find.byIcon(Icons.circle), findsOneWidget); // one dot: "b" survived
+  });
+
+  testWidgets('Skip still seals an empty extra word with no confirm step', (
+    tester,
+  ) async {
+    // The audit's constraint: the Skip path wipes to empty first and must be
+    // untouched by the confirm gate.
+    Uint8List? sealedExtra;
+    await toExtraWord(tester, onSeal: (x) => sealedExtra = x);
+    await tester.tap(find.text('Skip'));
+    await settle(tester);
+
+    expect(sealedExtra, isEmpty);
+    expect(find.text('Type the extra word again'), findsNothing);
+  });
+
+  testWidgets('an empty entry is not sealed by the primary button', (
+    tester,
+  ) async {
+    var sealCalls = 0;
+    await toExtraWord(tester, onSeal: (_) => sealCalls++);
+    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
+    await settle(tester);
+
+    expect(sealCalls, 0); // Skip owns the empty path, and says so
+    expect(find.textContaining('or tap Skip'), findsOneWidget);
   });
 
   // ── Track 2: honest degrade on the enrolment step ───────────────────────

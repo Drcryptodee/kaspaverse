@@ -62,4 +62,77 @@ void main() {
     expect(b.snapshot(), isEmpty);
     b.dispose();
   });
+
+  // ── matches: the confirm-repeat gate on the seed-determining extra word ──
+
+  SecretByteBuffer of(String s, {int initialCapacity = 64}) {
+    final b = SecretByteBuffer(initialCapacity: initialCapacity);
+    s.split('').forEach(b.appendChar);
+    return b;
+  }
+
+  test('matches is true for identical bytes', () {
+    final a = of('correct horse');
+    final b = of('correct horse');
+    expect(a.matches(b), isTrue);
+    expect(b.matches(a), isTrue);
+    a.dispose();
+    b.dispose();
+  });
+
+  test('matches is false for one wrong character — including case', () {
+    final a = of('Battery');
+    for (final wrong in ['battery', 'Bettery', 'Batterz']) {
+      final b = of(wrong);
+      expect(a.matches(b), isFalse, reason: wrong);
+      b.dispose();
+    }
+    a.dispose();
+  });
+
+  test('matches is false on a length mismatch either way', () {
+    final a = of('staple');
+    final short = of('stapl');
+    final long = of('staples');
+    expect(a.matches(short), isFalse);
+    expect(a.matches(long), isFalse);
+    expect(short.matches(a), isFalse);
+    expect(long.matches(a), isFalse);
+    a.dispose();
+    short.dispose();
+    long.dispose();
+  });
+
+  test('matches compares the live length, not the backing store', () {
+    // The store is over-allocated and reused across a wipe, so a stale tail
+    // must not decide the comparison — and two buffers that grew to different
+    // capacities must still compare equal on the same content.
+    final a = of('zzzzzzzzzz', initialCapacity: 4); // forced two growths
+    a.wipe();
+    'ab'.split('').forEach(a.appendChar);
+    final b = of('ab', initialCapacity: 64);
+    expect(a.matches(b), isTrue);
+    expect(b.matches(a), isTrue);
+    a.dispose();
+    b.dispose();
+  });
+
+  test('two empty buffers match — the Skip path is not a mismatch', () {
+    final a = SecretByteBuffer();
+    final b = SecretByteBuffer();
+    expect(a.matches(b), isTrue);
+    a.dispose();
+    b.dispose();
+  });
+
+  test('matches handles multi-byte characters', () {
+    final a = of('café');
+    final b = of('café');
+    final c = of('cafe');
+    expect(a.matches(b), isTrue);
+    expect(a.matches(c), isFalse); // 5 bytes vs 4
+    a.dispose();
+    b.dispose();
+    c.dispose();
+  });
 }
