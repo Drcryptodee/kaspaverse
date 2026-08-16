@@ -44,6 +44,7 @@ pubspec.lock.bak
 # to end (S4-54). Add an internal path ONCE, here, and both checks widen with it.
 # gate:internal-record-begin
 CLAUDE.md
+AGENTS.md
 .claude/
 docs/
 # gate:internal-record-end
