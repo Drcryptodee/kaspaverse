@@ -6,7 +6,7 @@
          Normal permission, no runtime prompt; reads availability only. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
-        android:label="KaspaVerse"
+        android:label="${appLabel}"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
