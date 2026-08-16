@@ -477,32 +477,42 @@ class _RestoreScreenState extends State<RestoreScreen>
                       // present for, which is the property that matters on a
                       // phrase worth the wallet.
                       child: GestureDetector(
+                        // Opaque + a 48 dp floor: the first version's hit area
+                        // was just the glyph and its label, about 20 dp tall, so
+                        // it had to be aimed at rather than pressed. 48 dp is
+                        // the design system's minimum target, and `opaque`
+                        // makes the whole strip — including the gap between
+                        // icon and text — take the press.
+                        behavior: HitTestBehavior.opaque,
                         onLongPressStart: (_) =>
                             setState(() => _wordsRevealed = true),
                         onLongPressEnd: (_) =>
                             setState(() => _wordsRevealed = false),
                         onLongPressCancel: () =>
                             setState(() => _wordsRevealed = false),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              _wordsRevealed
-                                  ? Icons.visibility_outlined
-                                  : Icons.visibility_off_outlined,
-                              size: KvSpace.m,
-                              color: KvColor.textSecondary,
-                            ),
-                            const SizedBox(width: KvSpace.xs),
-                            Text(
-                              _wordsRevealed
-                                  ? 'Showing — release to hide'
-                                  : 'Hold to check your words',
-                              style: theme.textTheme.bodySmall?.copyWith(
+                        child: SizedBox(
+                          height: KvSpace.control - KvSpace.s,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                _wordsRevealed
+                                    ? Icons.visibility_outlined
+                                    : Icons.visibility_off_outlined,
+                                size: KvSpace.m,
                                 color: KvColor.textSecondary,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: KvSpace.xs),
+                              Text(
+                                _wordsRevealed
+                                    ? 'Showing — release to hide'
+                                    : 'Hold to check your words',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: KvColor.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
