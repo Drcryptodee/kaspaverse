@@ -112,7 +112,22 @@ echo "$CERTS" | grep -q "CN=Android Debug" \
 # APK); rotation = new keystore + this line + a DECISION_LOG entry + a public
 # announcement. Anyone can re-check it with:
 #   apksigner verify --print-certs <apk> | grep SHA-256
-EXPECTED_CERT_SHA256="ef7ac03d67e324f9b08f372fd1b1270ae77518ce31966fdf10fb36d95d94b696"
+#
+# ROTATED 2026-08-16, before any release existed (product-audit run 2, F6). The
+# first upload key's subject was the founder's legal name and home city, and a
+# certificate subject is readable inside every APK it signs — so every artifact
+# this project ever shipped would have carried it, permanently, while the repo
+# was otherwise pseudonymous. The window to change that closes the moment one
+# APK is published: Android rejects an update signed by a different key, so a
+# later rotation orphans every install. Nothing had shipped (the releases list
+# was empty), so it cost nothing. The subject is now the project, not a person.
+#
+# The grep below is intentionally a SUBSTRING match on the digest and not on the
+# line label: build-tools 35 prints "Signer #1 certificate SHA-256 digest:",
+# build-tools 37 prints "V2 Signer: certificate SHA-256 digest:". Anchoring to
+# either label would make this assertion pass or fail on the SDK version rather
+# than on the key. Verified against both, on a real signed artifact.
+EXPECTED_CERT_SHA256="aba293ebe5176a05497391dade3a12f827e87b114360c1ff9443ff1d9d5b1cb6"
 echo "$CERTS" | grep -qi "SHA-256 digest: $EXPECTED_CERT_SHA256" \
   || die "signer cert does not match the pinned KaspaVerse upload cert — wrong keystore?"
 

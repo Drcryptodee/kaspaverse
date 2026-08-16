@@ -17,6 +17,11 @@
 // surface while the founder authenticates (biometric system sheet — the
 // harness never touches secret material, INV-1/2/3).
 //
+// Do not invent a `flutter drive` line for this file. The one invocation that is
+// safe to run against a device holding a real vault lives in
+// test_driver/perf_driver.dart, and the reason it needs --keep-app-running is
+// written out there.
+//
 // Home carries ambient period animations (status-beacon pulse keyed to the
 // wall clock), so this harness NEVER calls pumpAndSettle — real-time dwells
 // under LiveTestWidgetsFlutterBindingFramePolicy.benchmarkLive let the engine
@@ -62,58 +67,63 @@ void main() {
   // enrollment, a registered finding), so propagate device pointer events.
   binding.shouldPropagateDevicePointerEvents = true;
 
-  testWidgets('baseline: four-surface frame trace', (tester) async {
-    // ── 1. startup: launch → first stable frame ──────────────────────────
-    await binding.traceAction(() async {
-      app.main();
-      // First frames of the shell (splash → lock surface). Timed pumps, not
-      // pumpAndSettle: the surface may animate indefinitely.
-      await dwell(tester, const Duration(seconds: 3));
-    }, reportKey: 'startup');
+  testWidgets(
+    'baseline: four-surface frame trace',
+    (tester) async {
+      // ── 1. startup: launch → first stable frame ──────────────────────────
+      await binding.traceAction(() async {
+        app.main();
+        // First frames of the shell (splash → lock surface). Timed pumps, not
+        // pumpAndSettle: the surface may animate indefinitely.
+        await dwell(tester, const Duration(seconds: 3));
+      }, reportKey: 'startup');
 
-    // ── founder-on-glass: unlock (outside any trace) ─────────────────────
-    final homeMarker = find.text('Send');
-    final unlocked = await waitFor(tester, homeMarker, limit: unlockWait);
-    expect(
-      unlocked,
-      isTrue,
-      reason: 'vault was not unlocked within $unlockWait — '
-          'the founder must authenticate on glass during this run',
-    );
-    // Let post-unlock work (wallet start, first sync paint) settle a moment
-    // so the steady-state trace measures dwell, not the unlock transition.
-    await dwell(tester, const Duration(seconds: 5));
-
-    // ── 2. home steady-state: 10 s dwell ─────────────────────────────────
-    await binding.traceAction(() async {
-      await dwell(tester, const Duration(seconds: 10));
-    }, reportKey: 'home_steady');
-
-    // ── 3. send screen: push + dwell + pop (navigation only) ────────────
-    await binding.traceAction(() async {
-      await tester.tap(find.text('Send'));
+      // ── founder-on-glass: unlock (outside any trace) ─────────────────────
+      final homeMarker = find.text('Send');
+      final unlocked = await waitFor(tester, homeMarker, limit: unlockWait);
+      expect(
+        unlocked,
+        isTrue,
+        reason:
+            'vault was not unlocked within $unlockWait — '
+            'the founder must authenticate on glass during this run',
+      );
+      // Let post-unlock work (wallet start, first sync paint) settle a moment
+      // so the steady-state trace measures dwell, not the unlock transition.
       await dwell(tester, const Duration(seconds: 5));
-    }, reportKey: 'send_screen');
-    // Pop back to home (SendScreen is a pushed route; nothing was entered).
-    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
-    navigator.pop();
-    final backHome = await waitFor(tester, homeMarker);
-    expect(backHome, isTrue, reason: 'did not return to home after send pop');
 
-    // ── 4. thread screen: contacts → first conversation → dwell ─────────
-    await binding.traceAction(() async {
-      await tester.tap(find.text('Message'));
-      await dwell(tester, const Duration(seconds: 3));
-      // Open the first conversation if one exists (the standing Kasia
-      // thread on the reference device). If none, the contacts dwell alone
-      // still yields the surface's frame profile — recorded as such.
-      final tile = find.byType(ListTile);
-      if (tile.evaluate().isNotEmpty) {
-        await tester.tap(tile.first);
+      // ── 2. home steady-state: 10 s dwell ─────────────────────────────────
+      await binding.traceAction(() async {
+        await dwell(tester, const Duration(seconds: 10));
+      }, reportKey: 'home_steady');
+
+      // ── 3. send screen: push + dwell + pop (navigation only) ────────────
+      await binding.traceAction(() async {
+        await tester.tap(find.text('Send'));
         await dwell(tester, const Duration(seconds: 5));
-      } else {
-        await dwell(tester, const Duration(seconds: 5));
-      }
-    }, reportKey: 'thread_screen');
-  }, timeout: const Timeout(Duration(minutes: 10)));
+      }, reportKey: 'send_screen');
+      // Pop back to home (SendScreen is a pushed route; nothing was entered).
+      final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+      navigator.pop();
+      final backHome = await waitFor(tester, homeMarker);
+      expect(backHome, isTrue, reason: 'did not return to home after send pop');
+
+      // ── 4. thread screen: contacts → first conversation → dwell ─────────
+      await binding.traceAction(() async {
+        await tester.tap(find.text('Message'));
+        await dwell(tester, const Duration(seconds: 3));
+        // Open the first conversation if one exists (the standing Kasia
+        // thread on the reference device). If none, the contacts dwell alone
+        // still yields the surface's frame profile — recorded as such.
+        final tile = find.byType(ListTile);
+        if (tile.evaluate().isNotEmpty) {
+          await tester.tap(tile.first);
+          await dwell(tester, const Duration(seconds: 5));
+        } else {
+          await dwell(tester, const Duration(seconds: 5));
+        }
+      }, reportKey: 'thread_screen');
+    },
+    timeout: const Timeout(Duration(minutes: 10)),
+  );
 }

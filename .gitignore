@@ -34,6 +34,16 @@ pubspec.lock.bak
 # Engineering record + AI workflow — local only, versioned in the private ops
 # mirror (D-047, widened to the whole tree by D-102). The public repo carries the
 # product; the record behind it is internal and goes to auditors as a whole.
+#
+# THE MARKERS BELOW ARE LOAD-BEARING. tools/gate.sh reads the entries between them
+# as the definition of the boundary — both for `internal-record boundary` (nothing
+# internal is tracked here) and `internal-record pointers` (nothing tracked here
+# points AT it). Until run 2 the gate hand-copied this list, so a router file added
+# beside CLAUDE.md — a real near-term intent, AGENTS.md — would have been ignored
+# here and unchecked there, which is the half-enforced state D-102 replaced D-047
+# to end (S4-54). Add an internal path ONCE, here, and both checks widen with it.
+# gate:internal-record-begin
 CLAUDE.md
 .claude/
 docs/
+# gate:internal-record-end

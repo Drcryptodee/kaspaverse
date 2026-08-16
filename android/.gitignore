@@ -1,8 +1,17 @@
-gradle-wrapper.jar
+# The Gradle wrapper is TRACKED, deliberately (product-audit run 2, F2). These
+# three files were ignored by the Flutter scaffold, so `git archive HEAD` produced
+# an android/ with no `gradlew` — and the gate's `kotlin compile` lane, added
+# precisely because GREEN had never been evidence about KeystoreVault.kt or
+# RevealActivity.kt, therefore could not run in CI at all. It did not go RED; it
+# emitted no row, and strict mode counts SKIPs, not absences.
+#
+# All three, not just the two the Linux lane needs: `gradle wrapper` regenerates
+# them as one artifact, so a tracked gradlew beside an ignored gradlew.bat
+# desyncs on the next run. The jar is a binary on the build path (INV-7), so the
+# gate asserts its SHA-256 against the value Gradle publishes for this version —
+# see the `gradle wrapper jar` lane in tools/gate.sh.
 /.gradle
 /captures/
-/gradlew
-/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/

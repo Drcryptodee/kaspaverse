@@ -4,6 +4,27 @@
 # and fill it in locally — type the values in your own editor/terminal only;
 # never paste passwords into a chat session or a committed file.
 #
+# Generate the upload keystore first (one-time, OUTSIDE the repo). Run this in
+# YOUR OWN terminal. Let keytool PROMPT for the passwords — do not pass them on
+# the command line, and do not let a script or an assistant read them out of a
+# file. This project's own key was regenerated non-interactively once, reusing a
+# password that had already passed through a session transcript; that is the
+# specific mistake this paragraph exists to stop being repeated.
+#
+#   keytool -genkeypair -v -keystore <a path outside the repo>.jks \
+#     -alias upload -keyalg RSA -keysize 4096 -validity 10950 \
+#     -dname "CN=KaspaVerse, O=KaspaVerse, C=NG"
+#
+# Then `chmod 600` BOTH the keystore and your filled-in android/key.properties —
+# keytool creates the keystore with your umask, which on a typical Linux box is
+# world-readable. The gate fails if key.properties is not 0600.
+#
+# The -dname is deliberately pseudonymous and should stay that way. Android never
+# validates its contents and the certificate is self-signed, so nothing depends on
+# it being a real identity — but whatever it says ships, readable, inside every
+# APK the project ever signs. It carried a legal name and home city until the
+# rotation; keep it to the project, not a person.
+#
 # storeFile is an absolute path OUTSIDE the repo (e.g. ~/keystores/…).
 storeFile=/home/CHANGE_ME/keystores/kaspaverse-upload.jks
 storePassword=CHANGE_ME
