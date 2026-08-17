@@ -98,6 +98,20 @@ pub struct ConversationDto {
     /// The local name the user gave this address, when they gave one. Device
     /// only — never on the wire, never in a backup.
     pub contact_name: Option<String>,
+    /// This thread has been REPLACED by a newer live one with the same
+    /// counterparty, and typing here would reach nobody.
+    ///
+    /// A conversation is a pair of locally-minted aliases, and the protocol's
+    /// only repair is for one side to forget and re-handshake. When they do,
+    /// we correctly accept the new handshake — and the old row is left holding
+    /// an alias no one monitors any more. Sending into it succeeds at every
+    /// layer we control (built, signed, broadcast, fee paid) and is read by no
+    /// one. This bool is what lets the UI say so instead of the user
+    /// discovering it hours later.
+    ///
+    /// Derived per pull from the record set, never stored — see
+    /// `TransportStore::superseded_by`.
+    pub superseded: bool,
 }
 
 /// A file a counterparty sent. Every field here is OURS: the name is scrubbed
@@ -574,6 +588,137 @@ pub struct FillReportDto {
     pub at_unix_ms: u64,
 }
 
+/// Generation counter for "the user destroyed content", bumped by
+/// [`transport_wipe_all`] AND [`transport_clear_messages`].
+///
+/// A history fill is spawned on every unlock and walks for as long as the
+/// indexer takes. It loads the cursors once at entry and blind-writes the
+/// whole struct at exit, so a wipe landing mid-walk was undone twice over: the
+/// rows folded after the erase went straight into the emptied store, and the
+/// final save wrote the PRE-wipe cursors back over the floor
+/// (`consensus-auditor` BLOCK, 2026-08-17). `floor_persisted` was true when it
+/// was written and false a minute later.
+///
+/// Same shape as the vault's `LOCK_EPOCH` (D-158) and for the same reason: a
+/// long operation must not commit state a user action has since invalidated.
+/// Read once at walk entry — BEFORE the cursors it guards — and compared
+/// before every fold and every save.
+///
+/// A per-conversation clear bumps it too, and that is not over-caution: the
+/// clear floors one comm cursor while an in-flight walk holds a pre-clear copy
+/// of the whole struct and blind-writes it back at the end, which would both
+/// clobber the floor and re-fold every historical inbound comm into the thread
+/// the user just emptied. The cost of the bump is one fill run that resumes at
+/// the next open.
+static ERASE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The generation in force right now.
+fn erase_epoch() -> u64 {
+    ERASE_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Serialises an erasure's {floor, bump} against a fill's {epoch read, cursor
+/// load} and {epoch check, cursor save}.
+///
+/// **Ordering alone was not enough, and the reason is worth keeping.** Reading
+/// the epoch before the cursors closed the "fill already running" case. It did
+/// not close "fill about to start": the erase bumped first and stamped the
+/// floor afterwards, so a walk beginning inside that window read the NEW epoch
+/// and the PRE-floor cursors, matched every guard it later met, folded our own
+/// on-chain backup into the emptied store and saved floor-0 cursors over the
+/// top. The window is the whole erase body — two fsync+rename pairs plus file
+/// I/O — and it is reachable without an adversary: the fill auto-runs on every
+/// unlock and the settings sheet has a "check now" (`consensus-auditor` BLOCK,
+/// 2026-08-17, round 4).
+///
+/// A plain `Mutex<()>`, held across no `.await` at any of its four sites (L7).
+///
+/// **Stated residual: one row per lane can still land.** The fold guards sit
+/// immediately before an `.await` on `handle_inbound`, so an erase committing
+/// inside that await folds one row into the emptied store before the next
+/// iteration abandons. Widening the gate to cover it would hold a plain mutex
+/// across an await, which this project forbids for better reasons than this one
+/// is worth; the real close is an erase check inside the fold's own store-lock
+/// scope. Bounded to one row per lane, and said out loud rather than left for a
+/// reader to discover.
+static ERASE_GATE: Mutex<()> = Mutex::new(());
+
+/// The walk's own read of {generation, cursors}, taken atomically against
+/// [`seal_erasure`] under [`ERASE_GATE`].
+///
+/// Extracted so the property can be TESTED through the same door the walk uses.
+/// The pair is what matters — an epoch and the cursors that belong to it — and
+/// asserting it any other way pins a lookalike rather than the thing that
+/// protects the walk.
+fn gated_walk_start(dir: &std::path::Path) -> (u64, kaspaverse_chain::history_fill::FillCursors) {
+    let _gate = ERASE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    (
+        erase_epoch(),
+        kaspaverse_chain::history_fill::FillCursors::load(dir),
+    )
+}
+
+/// Stamp the fill's erase floor, then bump the generation — both under
+/// [`ERASE_GATE`], floor FIRST.
+///
+/// **The gate and the ordering buy different things, and both are load-bearing.**
+/// Measured, not argued — each was removed in turn and the tests watched:
+///
+/// - **Floor-before-bump** gives "sees generation N ⟹ generation N's floor is
+///   already on disk". It holds even with an ungated reader, because the save
+///   happens-before the bump. Remove it (bump between `mutate` and `save`) with
+///   the reader ungated and `a_walk_can_never_see_a_generation_without_its_floor`
+///   goes red on the first iteration.
+/// - **The gate** gives atomicity to the two read-modify-write pairs the
+///   ordering cannot reach: the walk's `{epoch read, cursors load}` and its
+///   `{epoch check, cursors save}`. Without it the final check is a TOCTOU and
+///   the walk writes its stale cursor map over a floor stamped microseconds
+///   earlier — the round-4 BLOCK.
+///
+/// So neither subsumes the other, and an earlier version of this comment
+/// claiming the gate made the ordering merely defensive was wrong.
+///
+/// Returns whether the floor is durable. `false` is a real outcome the caller
+/// must surface, not an error to swallow: the content is already destroyed by
+/// the time it matters, and the honest report is "erased, but the catch-up
+/// could still bring it back".
+fn seal_erasure(mutate: impl FnOnce(&mut kaspaverse_chain::history_fill::FillCursors)) -> bool {
+    let _gate = ERASE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    let persisted = match vault::transport_store_dir() {
+        Ok(dir) => {
+            // The parent is created by the write itself (`write_json*`), which
+            // is where it belongs: the sibling `transport_set_fill_config` had
+            // the identical missing-parent shape and no guard, so a wallet with
+            // no conversations errored on saving a setting. Found by the
+            // ordering test failing on a fresh harness dir, not by reasoning
+            // about it.
+            let mut cursors = kaspaverse_chain::history_fill::FillCursors::load(&dir);
+            mutate(&mut cursors);
+            match cursors.save(&dir) {
+                Ok(()) => true,
+                // Loud: a silent failure here means the next catch-up rebuilds
+                // what the user just destroyed, and the caller renders a
+                // different sentence for it.
+                Err(e) => {
+                    log::warn!("transport-erase: the fill floor did NOT persist: {e}");
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            // Shape only — an `AppError` here names the vault state, not a
+            // path, but it is not `Display` and this lane logs no content.
+            log::warn!(
+                "transport-erase: no store dir, so no fill floor: {}",
+                e.message
+            );
+            false
+        }
+    };
+    ERASE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    persisted
+}
+
 /// Last run's report (per process; the notice re-derives on each open).
 static LAST_FILL: Mutex<Option<FillReportDto>> = Mutex::new(None);
 /// One fill at a time — an open-time auto-run and a settings-sheet "check
@@ -693,7 +838,7 @@ async fn fill_walks(
     dir: &std::path::Path,
     config: &kaspaverse_chain::history_fill::FillConfig,
 ) -> FillReportDto {
-    use kaspaverse_chain::history_fill::{encode_hex, walk_pages, FillCursors, IndexerClient};
+    use kaspaverse_chain::history_fill::{encode_hex, walk_pages, IndexerClient};
 
     let mut report = FillReportDto {
         ran: true,
@@ -711,7 +856,19 @@ async fn fill_walks(
             return report;
         }
     };
-    let mut cursors = FillCursors::load(dir);
+    // BEFORE the cursors, and the order is the guarantee. Read after, and an
+    // erase landing in between is invisible: we would hold PRE-erase cursors
+    // under a POST-erase epoch, the comparison would match forever, every fold
+    // would land in the emptied store and the save would write the old resume
+    // positions back over the floor — the very race this guard exists for,
+    // through a microsecond window. Reading first can only fail the safe way:
+    // post-erase cursors under a pre-erase epoch abort the walk.
+    //
+    // (The vault's `LOCK_EPOCH` reads its generation under the `VAULT` guard,
+    // which is what makes its two outcomes both correct. There is no such
+    // serialisation here, so the ordering has to do that work — hence this
+    // comment rather than a citation.)
+    let (epoch, mut cursors) = gated_walk_start(dir);
 
     // Backup sweep (D-138): the conversations we parked on chain ourselves.
     //
@@ -741,7 +898,7 @@ async fn fill_walks(
         match vault::wallet_address_at(Branch::Receive, 0) {
             Ok(owner_address) => {
                 let owner = owner_address.to_string();
-                let start = cursors.stash.get(&owner).copied().unwrap_or(0);
+                let start = cursors.start_at(&cursors.stash, &owner);
                 let outcome = walk_pages(
                     |cursor| {
                         client.self_stash_by_owner(&owner, STASH_SCOPE_SAVED_HANDSHAKE, cursor)
@@ -880,7 +1037,21 @@ async fn fill_walks(
                     );
                 }
                 if let (true, Some((_, tx_id, snapshot))) = (outcome.complete, &newest) {
+                    // THE LANE THE ERASE MOST NEEDS DEFENDING. This fold
+                    // rebuilds conversations from our own on-chain backup, and
+                    // `stash_row_is_free` passes trivially against an empty
+                    // store — so a walk that was already in the network when
+                    // the user tapped Delete would restore everything into the
+                    // store that was just emptied, and the later guards would
+                    // then dutifully decline to save the cursors for a store
+                    // that is already repopulated.
+                    if erase_epoch() != epoch {
+                        return abandon_wiped_walk(report);
+                    }
                     for payload in snapshot.rows() {
+                        if erase_epoch() != epoch {
+                            return abandon_wiped_walk(report);
+                        }
                         match fold_stash_row(hub, tx_id, payload, &mut created, windows) {
                             FoldOutcome::Recorded => report.new_rows += 1,
                             FoldOutcome::Settled => {}
@@ -901,7 +1072,23 @@ async fn fill_walks(
                 // honest "not confirmed readable" to "all backed up" — taking
                 // the one assurance the user acts on from an untrusted claim,
                 // which is the shape INV-8 exists to refuse.
+                // Writes the side file the erase deleted, so it is a commit
+                // point too: re-asserting "coverage proven" about a backup for
+                // conversations that no longer exist.
+                if erase_epoch() != epoch {
+                    return abandon_wiped_walk(report);
+                }
                 if let Some((_, proven_txid, _)) = &newest {
+                    // Under the gate, like the cursor save — this WRITES the
+                    // side file `transport_wipe_all` deletes, so a bare epoch
+                    // check leaves a window in which a committing wipe has its
+                    // `stash.state` re-created underneath it, re-asserting
+                    // "coverage proven" about a backup of conversations that no
+                    // longer exist.
+                    let _gate = ERASE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+                    if erase_epoch() != epoch {
+                        return abandon_wiped_walk(report);
+                    }
                     let mut state = kaspaverse_chain::history_fill::StashState::load(dir);
                     if !state.confirmed_readable
                         && !state.last_txid.is_empty()
@@ -1010,7 +1197,7 @@ async fn fill_walks(
             break;
         }
         let address = address.to_string();
-        let start = cursors.handshakes.get(&address).copied().unwrap_or(0);
+        let start = cursors.start_at(&cursors.handshakes, &address);
         let outcome = walk_pages(
             |cursor| client.handshakes_by_receiver(&address, cursor),
             start,
@@ -1038,6 +1225,9 @@ async fn fill_walks(
                 addresses: vec![address.clone()],
                 block_time_ms: Some(row.block_time),
             };
+            if erase_epoch() != epoch {
+                return abandon_wiped_walk(report);
+            }
             match handle_inbound(hub, event, EventOrigin::Fill).await {
                 FoldOutcome::Recorded => report.new_rows += 1,
                 FoldOutcome::Settled => {}
@@ -1104,7 +1294,7 @@ async fn fill_walks(
             break;
         }
         let alias_hex = encode_hex(their_alias.as_bytes());
-        let start = cursors.comms.get(&conversation_id).copied().unwrap_or(0);
+        let start = cursors.start_at(&cursors.comms, &conversation_id);
         let outcome = walk_pages(
             |cursor| client.comms_by_sender(&contact_address, &alias_hex, cursor),
             start,
@@ -1130,6 +1320,9 @@ async fn fill_walks(
                 addresses: Vec::new(),
                 block_time_ms: Some(row.block_time),
             };
+            if erase_epoch() != epoch {
+                return abandon_wiped_walk(report);
+            }
             match handle_inbound(hub, event, EventOrigin::Fill).await {
                 FoldOutcome::Recorded => report.new_rows += 1,
                 FoldOutcome::Settled => {}
@@ -1148,9 +1341,30 @@ async fn fill_walks(
         }
     }
 
-    if let Err(e) = cursors.save(dir) {
-        log::warn!("history-fill: cursor save failed: {e}");
+    // The last commit point. `cursors` was loaded before the erase, so saving
+    // it now would restore every pre-wipe resume position — including over the
+    // floor that makes the erase durable.
+    {
+        let _gate = ERASE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        if erase_epoch() != epoch {
+            return abandon_wiped_walk(report);
+        }
+        if let Err(e) = cursors.save(dir) {
+            log::warn!("history-fill: cursor save failed: {e}");
+        }
     }
+    report
+}
+
+/// Stop a walk whose store was erased under it, writing NOTHING.
+///
+/// Reported as incomplete rather than as a clean run, because it is: the
+/// honest-notice logic keys on `!complete` and the user should be told history
+/// catch-up did not finish, not shown a tick over a walk that was abandoned.
+fn abandon_wiped_walk(mut report: FillReportDto) -> FillReportDto {
+    log::info!("history-fill: abandoned — messages were erased mid-walk; no rows, no cursors");
+    report.complete = false;
+    report.error = Some("history was erased while catching up".to_string());
     report
 }
 
@@ -3987,16 +4201,21 @@ pub async fn transport_prepare_handshake(
             .iter()
             .find(|r| r.status == ConversationStatus::PendingOutbound && r.initiated_by_me)
             .cloned();
-        // Un-hide ONLY the row this call actually acts on. Restoring every
-        // hidden row for the address would hand back the broken duplicate the
-        // user hid — the very state this change exists to converge away from.
-        // INV-6 needs the row we reuse or refuse toward to be reachable, and
-        // nothing more.
-        let acted_on = rows
-            .iter()
-            .find(|r| r.status == ConversationStatus::Active)
-            .or(reuse.as_ref());
-        if let Some(row) = acted_on {
+        // Un-hide ONLY the row this call reuses. Restoring every hidden row
+        // for the address would hand back the broken duplicate the user hid —
+        // the very state this change exists to converge away from. INV-6 needs
+        // the row we reuse to be reachable, and nothing more.
+        //
+        // **An Active row is deliberately NOT un-hidden here**, and that is a
+        // correction (`consensus-auditor`, 2026-08-17). Un-hiding it and then
+        // refusing against it made "hide this, then invite them again" close
+        // its own exit: the row came back and the refusal below pointed at it.
+        // With the send path now also refusing a superseded conversation, a
+        // contact whose live thread is the broken one had NO per-contact way
+        // out at all — only the total wipe, which costs every other
+        // conversation. That satisfies INV-6 by the letter and fails it where
+        // it matters.
+        if let Some(row) = reuse.as_ref() {
             // Through `may_unhide`, like every other un-hide site. It is a
             // no-op today — a `PendingInbound` row carries no contact address,
             // so it cannot appear in this vector at all — but recording the
@@ -4011,7 +4230,15 @@ pub async fn transport_prepare_handshake(
                 log::info!("transport-send: re-adding a hidden contact — conversation restored");
             }
         }
-        if rows.iter().any(|r| r.status == ConversationStatus::Active) {
+        // Tombstoned rows do not block a fresh invitation. Hiding one IS the
+        // user saying "not this thread", so treating it as a live conversation
+        // and refusing would leave the address unreachable by any per-contact
+        // gesture — the same INV-6 reason the expired-invitation carve-out
+        // below already gives for falling through.
+        if rows.iter().any(|r| {
+            r.status == ConversationStatus::Active
+                && !store.is_conversation_tombstoned(&r.conversation_id)
+        }) {
             return Err(AppError::msg(
                 "you already have a conversation with this address. Open it from your messages instead of sending another invitation.",
             ));
@@ -4025,13 +4252,7 @@ pub async fn transport_prepare_handshake(
         // An expired, dismissed or archive-sourced invitation deliberately does
         // NOT match: the accept path refuses those permanently, so refusing here
         // too would make that address unreachable forever (INV-6).
-        if rows.iter().any(|r| {
-            r.status == ConversationStatus::PendingInbound
-                && r.their_alias.is_some()
-                && r.handshake_txid.is_some()
-                && !store.is_conversation_tombstoned(&r.conversation_id)
-                && !invite_expired(r.status, r.created_unix_ms, now_unix_ms())
-        }) {
+        if rows.iter().any(|r| invitation_is_acceptable(&store, r)) {
             return Err(AppError::msg(
                 "this address already invited you — accept their invitation instead. \
                  That returns the bond they paid and opens the conversation; sending \
@@ -4155,47 +4376,63 @@ pub fn transport_existing_conversation(
         .cloned()
         .collect();
 
-    // THEIR invitation outranks sending one of our own.
+    // A LIVE CONVERSATION OUTRANKS EVERYTHING — checked first, deliberately.
     //
-    // If this address already invited us, the cheapest and only sensible move
-    // is to ACCEPT — that refunds the bond they already paid and opens the
-    // conversation at once. Sending our own handshake instead spends a second
-    // 0.2 KAS and leaves theirs stranded, which is what happened for as long as
-    // an invitation carried no sender address to match on.
+    // This used to start with the invitation branch, and the reason it gave was
+    // sound but conditional: accepting refunds the bond they already paid,
+    // where sending our own handshake spends a SECOND 0.2 KAS. That argument
+    // only holds when the alternative is spending. If a working thread already
+    // exists, opening it spends nothing at all, so nothing outranks it.
+    //
+    // Left first, the invitation branch became an own-goal
+    // (`wallet-security-auditor`, 2026-08-17): `conversations_for_contact_address`
+    // sorts oldest-established first, so "add this contact" could route to a
+    // stale-but-still-acceptable invitation (`invite_expired` bounds that to
+    // the pruning horizon — days, not months); accepting it re-stamps
+    // `created_unix_ms` to now,
+    // which makes THAT row the newest Active one — superseding the thread that
+    // actually works, refusing sends into it, and leaving the dead alias as the
+    // only sendable one. Exactly the failure this change exists to end,
+    // re-created by our own routing.
+    //
+    // Their invitation is not lost by this: it stays in Requests, where
+    // accepting it is a deliberate act rather than a side effect of typing an
+    // address.
+    let found = rows
+        .iter()
+        .find(|c| {
+            comm_sendable(c.status, c.initiated_by_me, &c.contact_address, &c.my_alias)
+                && store.superseded_by(&c.conversation_id).is_none()
+        })
+        .map(|c| (c.conversation_id.clone(), c.status));
+
+    // Only when no live thread exists: THEIR invitation outranks sending one
+    // of our own, because accepting refunds the bond they already paid.
     //
     // Only when the accept path would actually succeed. Expired, dismissed or
     // archive-sourced invitations are refused there, and routing the user into
     // a dead end would leave them unable to reach that address at all (INV-6).
-    let acceptable = rows.iter().find(|c| {
-        c.status == ConversationStatus::PendingInbound
-            && c.their_alias.is_some()
-            && c.handshake_txid.is_some()
-            && !store.is_conversation_tombstoned(&c.conversation_id)
-            && !invite_expired(c.status, c.created_unix_ms, now_unix_ms())
-            && !matches!(
-                c.handshake_txid
-                    .as_deref()
-                    .and_then(|t| store.message(t))
-                    .map(|m| m.provenance),
-                Some(RowSource::FillSourced)
-            )
-    });
-    if let Some(invitation) = acceptable {
-        return Ok(Some(ContactRouteDto {
-            conversation_id: invitation.conversation_id.clone(),
-            accept_first: true,
-        }));
+    if found.is_none() {
+        let acceptable = rows.iter().find(|c| invitation_is_acceptable(&store, c));
+        if let Some(invitation) = acceptable {
+            return Ok(Some(ContactRouteDto {
+                conversation_id: invitation.conversation_id.clone(),
+                accept_first: true,
+            }));
+        }
     }
 
-    // Otherwise: a conversation the user could actually TALK in — decided by
-    // the same predicate the send path uses, not a second copy of the rule.
-    // Opening a thread you cannot speak in would answer "you already have this
-    // contact" with a dead end.
-    let found = rows
-        .iter()
-        .find(|c| comm_sendable(c.status, c.initiated_by_me, &c.contact_address, &c.my_alias))
-        .map(|c| (c.conversation_id.clone(), c.status));
-
+    // `found` was computed above, before the invitation branch, because a live
+    // thread outranks it. It is a conversation the user could actually TALK in
+    // — decided by the same predicate the send path uses, not a second copy of
+    // the rule — and it must be the LIVE one.
+    // `conversations_for_contact_address` sorts oldest-established first (an
+    // inbound fold wants the row it can complete), so on a contact who
+    // re-handshaked after wiping their client, a bare `find` routes the user
+    // into the replaced thread: the exact dead end this function exists to
+    // avoid, reached by answering "you already have this contact" with the one
+    // row that no longer works. Skipping superseded rows uses the same derived
+    // rule the send path refuses on, so the two can never disagree.
     let Some((conversation_id, status)) = found else {
         return Ok(None);
     };
@@ -4319,6 +4556,14 @@ pub async fn transport_prepare_accept(
         if conversation.status != ConversationStatus::PendingInbound {
             return Err(AppError::msg("this conversation isn't awaiting an accept"));
         }
+        // ── EVERY CONDITION BELOW IS ALSO A CONDITION OF
+        // `invitation_is_acceptable`. The gates that POINT here mirror this
+        // rule; tightening this one without tightening that one is how the app
+        // came to refuse a handshake saying "accept their invitation instead"
+        // while Accept refused saying "your node has no record of this". These
+        // are stated separately only because each failure earns its own
+        // sentence — the SET must stay identical.
+        //
         // The invariant lives at the SPEND, not in the render path. A
         // dismissed invitation is unreachable today only because the list
         // filters it out and Dart is the sole caller — so any future surface
@@ -4360,17 +4605,38 @@ pub async fn transport_prepare_accept(
         // for: an archive that manufactured a whole contact (consensus-auditor,
         // run-1 fix wave re-verify).
         //
+        // **An ALLOWLIST, not a denylist** (`consensus-auditor`, 2026-08-17).
+        // This used to refuse only `FillSourced`, which meant a MISSING row —
+        // `None` — sailed through the one gate standing between an unverified
+        // claim and a 0.2 KAS spend. `None` is reachable without anyone
+        // deleting anything: the inbound fold upserts the conversation and
+        // records its handshake row under two separate `warn_store` calls, so
+        // a swallowed write error leaves a `PendingInbound` row whose
+        // `handshake_txid` points at nothing. It was also reachable by simply
+        // clearing the thread until that path learned to keep this row.
+        // Naming what MAY spend leaves nothing to be forgotten, and puts
+        // `Unknown` on the refusing side explicitly rather than by omission.
+        //
         // A wait, not a dead end (INV-6): the node-override lane flips the row
         // to `NodeScanned` the moment our own scan reaches that txid, and this
         // clears itself.
-        if matches!(
-            store.message(&txid).map(|m| m.provenance),
-            Some(RowSource::FillSourced)
-        ) {
+        if !accept_provenance_ok(&store, &txid) {
+            // Two different truths, two different sentences. "From an archive"
+            // is false when the row is simply missing, and a wrong diagnosis
+            // sends the user to wait for a catch-up that will never fix it.
             return Err(AppError::msg(
-                "this invitation came from a history archive and your own node has \
-                 not seen it yet — accepting would return the bond on an unverified \
-                 claim. It will clear once your node catches up.",
+                if matches!(
+                    store.message(&txid).map(|m| m.provenance),
+                    Some(RowSource::FillSourced)
+                ) {
+                    "this invitation came from a history archive and your own node has \
+                     not seen it yet — accepting would return the bond on an unverified \
+                     claim. It will clear once your node catches up."
+                } else {
+                    "your node has no record of this invitation, so the bond cannot be \
+                     returned safely. Long-press the request to hide it, then add them \
+                     as a contact yourself."
+                },
             ));
         }
         (
@@ -4568,6 +4834,24 @@ async fn prepare_comm_plaintext(
                 }
                 _ => "this conversation isn't ready to send yet",
             }));
+        }
+        // REFUSE A REPLACED THREAD — the one failure this lane cannot detect
+        // downstream. Every other refusal above describes a state we can see;
+        // this one describes a state only the COUNTERPARTY can see. Their
+        // client wiped and re-handshaked, so it monitors the new alias pair
+        // and nothing else, while this row still holds a perfectly valid alias
+        // of ours. The send would build, sign, broadcast, pay its fee and
+        // arrive nowhere, reporting success at every step.
+        //
+        // Refusing costs the user nothing — the live thread is right there and
+        // the message re-types in seconds. Not refusing costs a fee and a
+        // message they believe was delivered, which is how this was found:
+        // hours of one-way silence with no error anywhere.
+        if store.superseded_by(&conversation_id).is_some() {
+            return Err(AppError::msg(
+                "this conversation has been replaced — your contact started a new one, and only \
+                 that thread reaches them. Open the newer conversation with them and send there.",
+            ));
         }
         (
             conversation.contact_address.clone(),
@@ -4997,6 +5281,50 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 conversation.my_alias = my_alias;
                 conversation.status = ConversationStatus::Active;
                 conversation.last_activity_unix_ms = timestamp_ms;
+                // Re-stamp establishment on OUR clock at the moment the
+                // conversation actually becomes one.
+                //
+                // `created_unix_ms` now ORDERS things — `superseded_by` uses
+                // it to decide which of two threads with one contact is live,
+                // and a losing thread is refused. Until this line the value on
+                // an inbound row came from `block_time_ms` at fold, which on
+                // the fill lane is an INDEXER's claim (`transport.rs`'s fill
+                // rows pass the indexer's `block_time` straight through). The
+                // existing defences do hold — accept refuses a `FillSourced`
+                // handshake, and the node's own scan re-stamps the row while
+                // it is still `PendingInbound` — but both are indirect, and a
+                // bound the design depends on should be asserted rather than
+                // inferred (`consensus-auditor`, 2026-08-17). This asserts it:
+                // no value an archive ever supplied can survive into the
+                // ordering, because going Active overwrites it.
+                //
+                // **Load-bearing together with `transport_existing_conversation`'s
+                // ordering**: this stamp makes a freshly-accepted row the newest
+                // Active one for its contact, which is correct only because that
+                // function looks for a live thread BEFORE it offers an
+                // invitation. Reverting either one alone re-opens the case where
+                // accepting a stale invitation supersedes a working thread.
+                //
+                // **Monotone within its comparison set, not merely "now".** A
+                // device clock correction backwards between two establishments
+                // with one contact would otherwise invert the comparison, and
+                // `superseded_by` would refuse the live thread and route the
+                // user into the dead one with full confidence — the original
+                // bug, endorsed by the fix for it (`consensus-auditor`,
+                // 2026-08-17). Stepping past the newest Active row for this
+                // same contact costs nothing when the clock is sane and is the
+                // whole guarantee when it is not.
+                let newest_for_contact = store
+                    .conversations_for_contact_address(&conversation.contact_address)
+                    .into_iter()
+                    .filter(|c| c.conversation_id != conversation.conversation_id)
+                    .filter(|c| c.status == ConversationStatus::Active)
+                    .map(|c| c.created_unix_ms)
+                    .max();
+                conversation.created_unix_ms = match newest_for_contact {
+                    Some(newest) => timestamp_ms.max(newest.saturating_add(1)),
+                    None => timestamp_ms,
+                };
                 let sealed_to = Some((conversation.bound_branch, conversation.bound_index));
                 warn_store(store.upsert_conversation(conversation));
                 warn_store(store.record_message(MessageRecord {
@@ -5085,6 +5413,52 @@ pub fn transport_abandon() {
 
 // ── Pull surfaces (Dart renders and drops; nothing content-bearing streams) ─
 
+/// Is this invitation one the user could still Accept — and therefore one no
+/// other gesture may quietly step around?
+///
+/// **Three gates asked this question and two of them asked it differently.**
+/// `transport_existing_conversation` routes to Accept, `transport_prepare_handshake`
+/// refuses a second bond because Accept is available, and `transport_start_over`
+/// must not destroy history for a request that Accept would answer. When the
+/// spend gate tightened to an allowlist (`accept_provenance_ok`) and these did
+/// not, the app could refuse a handshake saying "accept their invitation
+/// instead" while Accept refused saying "your node has no record of this" —
+/// two contradictory refusals and an unreachable address (INV-6,
+/// `wallet-security-auditor`, 2026-08-17).
+///
+/// `handshake_txid` presence is implied: `accept_provenance_ok` needs the row
+/// it names.
+fn invitation_is_acceptable(store: &TransportStore, c: &ConversationRecord) -> bool {
+    c.status == ConversationStatus::PendingInbound
+        && c.their_alias.is_some()
+        && !store.is_conversation_tombstoned(&c.conversation_id)
+        && !invite_expired(c.status, c.created_unix_ms, now_unix_ms())
+        && c.handshake_txid
+            .as_deref()
+            .is_some_and(|txid| accept_provenance_ok(store, txid))
+}
+
+/// May we accept this invitation's bond refund, on provenance grounds?
+///
+/// **An allowlist, and ONE copy of it.** Accepting SPENDS: it returns 0.2 KAS
+/// to an address resolved from the claimed handshake tx, so the row backing
+/// that claim must be one our own node saw (`NodeScanned`) or one we wrote
+/// ourselves (`Own`). `FillSourced` is an untrusted archive's word (D-070);
+/// `Unknown` is a pre-provenance frame; **`None` is no row at all** — reachable
+/// without any deletion, because the inbound fold upserts the conversation and
+/// records its handshake row under two separate `warn_store` calls.
+///
+/// Shared because the router and the spend used to hold different versions of
+/// it: `transport_existing_conversation` excluded only `FillSourced`, so it
+/// would route the user to Accept and the accept would then refuse — the dead
+/// end that function's own comment says leaves an address unreachable (INV-6).
+fn accept_provenance_ok(store: &TransportStore, handshake_txid: &str) -> bool {
+    matches!(
+        store.message(handshake_txid).map(|m| m.provenance),
+        Some(RowSource::NodeScanned | RowSource::Own)
+    )
+}
+
 /// Whether a pending-inbound invitation is PERMANENTLY dead (V5, finding
 /// 15): its bond is older than the node's pruning horizon, so
 /// `transport_prepare_accept`'s sender resolution can never succeed — the
@@ -5119,6 +5493,7 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
         .map(|c| ConversationDto {
             invite_expired: invite_expired(c.status, c.created_unix_ms, now),
             contact_name: names.get(&c.contact_address).map(str::to_string),
+            superseded: store.superseded_by(&c.conversation_id).is_some(),
             conversation_id: c.conversation_id,
             contact_address: c.contact_address,
             my_alias: c.my_alias,
@@ -5171,6 +5546,439 @@ pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppErr
     // survives by design; it simply stops being listed.
     ping(&conversation_id);
     Ok(())
+}
+
+/// Forget what was SAID in one conversation, keeping the conversation itself.
+///
+/// The narrow, safe half of "delete this chat": it removes exactly what
+/// [`transport_hide_conversation`] removes — every stored message row — and
+/// then stops. The row stays listed, stays sendable, stays matchable. The
+/// thread simply starts empty.
+///
+/// **Why this exists beside hide rather than inside it.** Hide answers "I do
+/// not want to see this person"; it purges the content AND takes the row off
+/// the list, and it comes back the moment they write. This answers a different
+/// question — "I do not want these words on my phone" — for a conversation the
+/// user intends to keep using. Folding the two together would mean the only
+/// way to clear a thread is to also stop seeing it.
+///
+/// **Why it does not delete the row.** The row holds the counterparty's alias,
+/// which is the only thing that routes their messages to us and is never
+/// re-announced on the wire. Deleting it is the July regression; that is what
+/// [`transport_wipe_all`] is for, and it is safe there only because it leaves
+/// nothing behind to be orphaned.
+///
+/// Local only. The ciphertext stays on chain forever (D-088) — the confirm
+/// copy must say so.
+///
+/// Idempotent: clearing an unknown or already-empty conversation is a no-op
+/// success.
+pub fn transport_clear_messages(conversation_id: String) -> Result<WipeReportDto, AppError> {
+    let hub = hub()?;
+    // Sealed BEFORE anything is removed, exactly like the wipe. A fill walking
+    // right now holds a pre-clear copy of the cursors and blind-writes it back
+    // when it finishes — clobbering this floor and re-folding every historical
+    // inbound comm into the thread being emptied, leaving a half-restored
+    // thread under a "N messages cleared" notice.
+    //
+    // Only this conversation's comm cursor moves: a clear is a statement about
+    // one thread, and raising the global floor would silently stop the catch-up
+    // for every other conversation the user still wants.
+    let floor_persisted = seal_erasure(|cursors| {
+        let entry = cursors.comms.entry(conversation_id.clone()).or_default();
+        *entry = (*entry).max(now_unix_ms());
+    });
+    let cleared = {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        // THE ESTABLISHING HANDSHAKE ROW IS NOT "A MESSAGE" AND IS NOT CLEARED.
+        //
+        // It is evidence a money gate depends on. `transport_prepare_accept`
+        // refuses to refund a bond whose handshake row is `FillSourced` (an
+        // indexer claim, D-070) — and that check reads the row through
+        // `handshake_txid`. Delete it and the check evaluates
+        // `matches!(None, Some(FillSourced))` → false, so a fail-CLOSED guard
+        // on a 0.2 KAS spend silently becomes fail-open
+        // (`wallet-security-auditor`, 2026-08-17). The gesture is also offered
+        // on an invitation card, which is exactly where that matters.
+        //
+        // Nothing is lost by keeping it: a handshake row carries no body to
+        // the thread view — it renders as a system line, not as words anyone
+        // said.
+        let keep = store
+            .conversation(&conversation_id)
+            .and_then(|c| c.handshake_txid.clone());
+        let txids: Vec<String> = store
+            .messages_for(&conversation_id)
+            .into_iter()
+            .map(|m| m.txid)
+            .filter(|txid| Some(txid) != keep.as_ref())
+            .collect();
+        // COUNT WHAT WENT, NOT WHAT WAS ASKED FOR, and surface a failure
+        // instead of warning past it (`ffi-leak-auditor`, 2026-08-17). The
+        // sibling purge inside `transport_hide_conversation` uses
+        // `warn_store`, which is survivable there because it reports no
+        // number; here the count reaches the user as "N messages cleared", and
+        // a swallowed write error would make that a promise the disk never
+        // kept. Partial progress is reported honestly by the error, not
+        // rolled back — the rows that did go are gone.
+        let mut cleared = 0usize;
+        for txid in txids {
+            store.remove_message(&txid).map_err(AppError::chain)?;
+            cleared += 1;
+        }
+        cleared
+    };
+
+    log::info!(
+        "transport-clear: {cleared} message row(s) removed from one conversation, \
+         floor_persisted={floor_persisted}"
+    );
+    ping(&conversation_id);
+    Ok(WipeReportDto {
+        conversations: 0,
+        messages: u32::try_from(cleared).unwrap_or(u32::MAX),
+        side_files_cleared: 0,
+        // A clear touches one conversation's words; no invitation dies here.
+        pending_bonds: 0,
+        floor_persisted,
+    })
+}
+
+/// What a wipe destroyed. Counts and shapes only — a report about erasing
+/// user content may not carry any of it across the bridge (§4).
+#[derive(Clone, Debug)]
+pub struct WipeReportDto {
+    pub conversations: u32,
+    pub messages: u32,
+    /// Contact names and the backup-coverage record: cleared alongside,
+    /// because each is a claim about data that no longer exists.
+    pub side_files_cleared: u32,
+    /// Unanswered contact requests destroyed — each holding 0.2 KAS the sender
+    /// paid, which only an Accept could have returned. Somebody else's money,
+    /// so it gets its own number and its own sentence in the confirmation.
+    pub pending_bonds: u32,
+    /// Did the history-catch-up floor persist?
+    ///
+    /// **The one field here a user must be told about.** The floor is what
+    /// stops the next indexer fill rebuilding every conversation from our own
+    /// on-chain backup and re-downloading every message from a third party.
+    /// If it did not persist, the erase happened but is not durable against
+    /// the next catch-up — and the confirm sheet promised "cannot be undone".
+    ///
+    /// It is a field rather than an error because the store IS wiped by then:
+    /// failing the call would report "nothing was deleted" about an empty
+    /// store, which is the worse lie. So the call succeeds and says which kind
+    /// of success it was.
+    pub floor_persisted: bool,
+}
+
+/// Retire every live conversation with one contact, so a fresh contact request
+/// to them can be minted. The per-contact exit (INV-6).
+///
+/// **One operation, because two were worse than none.** The gesture is
+/// "hide the broken thread, then invite them again", and doing that from Dart
+/// as two calls half-applies in exactly the case it exists for: with TWO live
+/// conversations against one address — the situation this whole change is
+/// about — hiding one leaves the other `Active`, and
+/// [`transport_prepare_handshake`] then refuses, having already destroyed the
+/// first thread's messages. The user loses history and sends nothing
+/// (`consensus-auditor`, 2026-08-17). Retiring them ALL first makes the
+/// following prepare succeed by construction.
+///
+/// **Tombstone, never delete.** Every row keeps the counterparty's alias, so
+/// if they write to an old thread it comes back with its binding intact — the
+/// July regression is not re-opened here.
+///
+/// **Messages ARE destroyed**, the same purge [`transport_hide_conversation`]
+/// performs, because that is what hiding a thread means in this app. The
+/// caller's copy must say so.
+///
+/// **`Active` rows only.** An unaccepted invitation is deliberately untouched:
+/// hiding one is permanent (`may_unhide` refuses `PendingInbound`), and it is
+/// the only route to refunding the 0.2 KAS bond the counterparty already paid.
+/// Retiring it to send our own handshake would spend 0.2 KAS of ours to strand
+/// 0.2 KAS of theirs.
+///
+/// **Deliberately does NOT call `transport_abandon`, unlike the total wipe.**
+/// The wipe must, because its Handshake arm would upsert a prepare-time
+/// snapshot into an emptied store and mint back a conversation the user
+/// erased. Here it cannot: `PENDING_INTENT` is a single slot, a staged
+/// handshake to this same contact cannot coexist with this call's own
+/// invitation/Active preconditions, and a staged Comm confirm writes a NEW
+/// message row rather than restoring an erased one.
+///
+/// Returns what was retired AND whether the catch-up floor is durable. That
+/// last flag is not decoration: this sheet promises "the messages do not [come
+/// back]", and without a persisted floor an opt-in history catch-up can hand
+/// them back. Zero conversations is a success — there was nothing live to
+/// retire, and the caller may go straight to the handshake.
+pub fn transport_start_over(contact_address: String) -> Result<WipeReportDto, AppError> {
+    let dest = validate_mainnet_address(&contact_address)?;
+    let hub = hub()?;
+
+    // ONE set, computed ONCE, under a lock held across the whole operation.
+    //
+    // This read the set, dropped the lock to seal, and re-derived it — and the
+    // gap was two file operations wide, one of them an fsync. A conversation
+    // turning `Active` inside it (an inbound comm firing `unhide_on_inbound`,
+    // an accept completing) landed in the retire set but never in the floored
+    // set: its messages destroyed, its comm cursor untouched, and the next fill
+    // handing that history back from a third-party indexer (INV-8). The
+    // function exists BECAUSE doing this in two steps half-applies, and it was
+    // reproducing that internally (`consensus-auditor`, 2026-08-17, round 5).
+    //
+    // Lock order is `store` then `ERASE_GATE`, which is the only ordering
+    // anywhere in this file — nothing takes the store while holding the gate,
+    // so this cannot deadlock. `seal_erasure` is sync, so no `.await` crosses
+    // the guard (L7).
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let rows: Vec<ConversationRecord> = store
+        .conversations_for_contact_address(&dest.to_string())
+        .into_iter()
+        .cloned()
+        .collect();
+
+    // REFUSE BEFORE DESTROYING, not after.
+    //
+    // The handshake that follows this call refuses when an acceptable
+    // invitation from the same contact exists — and by then we would have
+    // purged the messages and tombstoned the threads for a request that never
+    // went out. That is the exact scenario the feature exists for (they wiped,
+    // re-handshaked, and an invitation now sits beside a stale Active row), so
+    // it is not a corner (`wallet-security-auditor`, 2026-08-17). Same sentence
+    // as the prepare's, because it is the same fact.
+    if rows.iter().any(|c| invitation_is_acceptable(&store, c)) {
+        return Err(AppError::msg(
+            "this address already invited you — accept their invitation instead. \
+             That returns the bond they paid and opens the conversation; sending \
+             your own would spend a second one. If you would rather not, \
+             long-press the request and hide it first.",
+        ));
+    }
+
+    let targets: Vec<String> = rows
+        .iter()
+        .filter(|c| c.status == ConversationStatus::Active)
+        .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
+        .map(|c| c.conversation_id.clone())
+        .collect();
+
+    // This purges messages, so it is a content destruction like the other two
+    // and seals the same way — otherwise an in-flight fill re-folds the very
+    // history we retire, and `unhide_on_inbound` brings the dead thread back.
+    // No global floor: only these conversations' comm cursors move, because a
+    // start-over is a statement about one contact, and raising the global floor
+    // would stop catch-up for every other conversation the user still wants.
+    let floor_persisted = seal_erasure(|cursors| {
+        let floor = now_unix_ms();
+        for id in &targets {
+            let entry = cursors.comms.entry(id.clone()).or_default();
+            *entry = (*entry).max(floor);
+        }
+    });
+
+    let mut purged = 0usize;
+    for conversation_id in &targets {
+        let txids: Vec<String> = store
+            .messages_for(conversation_id)
+            .into_iter()
+            .map(|m| m.txid)
+            .collect();
+        for txid in txids {
+            // Counted, and a write failure stops the whole call — the same
+            // honesty `transport_clear_messages` owes, for the same reason:
+            // the caller renders this number as "messages deleted".
+            store.remove_message(&txid).map_err(AppError::chain)?;
+            purged += 1;
+        }
+        store
+            .tombstone_conversation(conversation_id)
+            .map_err(AppError::chain)?;
+    }
+    drop(store);
+
+    log::info!(
+        "transport-start-over: {} live conversation(s) retired for one contact, \
+         {purged} message row(s) purged, floor_persisted={floor_persisted}",
+        targets.len()
+    );
+    for conversation_id in &targets {
+        ping(conversation_id);
+    }
+    Ok(WipeReportDto {
+        conversations: u32::try_from(targets.len()).unwrap_or(u32::MAX),
+        messages: u32::try_from(purged).unwrap_or(u32::MAX),
+        side_files_cleared: 0,
+        // Active rows only — start-over refuses outright when an acceptable
+        // invitation exists, so none is ever destroyed here.
+        pending_bonds: 0,
+        floor_persisted,
+    })
+}
+
+/// What [`transport_wipe_all`] would destroy, without destroying it.
+///
+/// The confirm sheet's number comes from HERE and never from the conversation
+/// list, which filters hidden rows the wipe still destroys. `side_files_cleared`
+/// is always 0 — nothing has been cleared yet.
+pub fn transport_wipe_preview() -> Result<WipeReportDto, AppError> {
+    let hub = hub()?;
+    let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let report = store.wipe_preview();
+    Ok(WipeReportDto {
+        conversations: u32::try_from(report.conversations).unwrap_or(u32::MAX),
+        messages: u32::try_from(report.messages).unwrap_or(u32::MAX),
+        side_files_cleared: 0,
+        pending_bonds: u32::try_from(report.pending_bonds).unwrap_or(u32::MAX),
+        // Nothing has been floored yet; a preview claims no durability.
+        floor_persisted: false,
+    })
+}
+
+/// Erase every conversation, every message and every local trace of them.
+///
+/// **Why the TOTAL erase is the safe one, and a single-row delete is not.**
+/// A conversation row is the only place a counterparty's alias lives, and a
+/// client that already knows us answers a repeat handshake with silence
+/// (`conversation-manager-service.ts:181-213`). Delete one row and they keep
+/// writing into a thread we can no longer route — the July regression, which
+/// is why [`transport_hide_conversation`] tombstones instead of removing.
+/// Erasing EVERYTHING leaves nothing half-bound: no surviving row holds a lost
+/// alias, and the user knows they are starting over with everyone.
+///
+/// It is also, measured on the founder's device 2026-08-17, how a broken
+/// conversation actually gets repaired. A client that has forgotten you is the
+/// only one that will handshake you afresh, and a fresh handshake is what
+/// re-binds both sides. This is that gesture, made available on our side.
+///
+/// **What it does NOT touch, deliberately:**
+/// - `fill.config` — the indexer posture is a setting the user chose, not
+///   data they wrote. Wiping it would silently re-enter the §0 default.
+/// - `scan.cursor` — a position on the chain, not user content. Resetting it
+///   would re-walk history the user just asked to be rid of.
+///
+///   **And that is only half the truth, so read the other half.** The node
+///   catch-up walks FORWARD from that cursor, so an erase landing while a
+///   replay is in flight can re-fold handshakes mined before it and re-create
+///   conversations in the emptied store as fresh invitations. Comms cannot come
+///   back that way (post-erase they drop unrouted, `NoConversationForAlias`),
+///   and the window is bounded by the cursor's own write cadence and
+///   `MAX_CATCHUP_PAGES` — but it is a real, accepted residual, not a free
+///   omission. The node lane has no epoch guard; closing it means an erase
+///   check inside the fold's own lock scope, which is a change to the live
+///   intake path and is deliberately NOT made at the end of this sitting
+///   (`consensus-auditor`, 2026-08-17, dispositioned). IDEAS_BACKLOG carries
+///   its trigger.
+/// - The vault, keys and coins. This erases messages, never money.
+///
+/// **What it cannot do:** reach the chain. Every message is public ciphertext
+/// on a public DAG, permanently, and anyone holding the seed can decrypt it
+/// again (D-088). The confirm copy says so; this doc says so; nothing in this
+/// lane may imply otherwise.
+///
+/// Not undoable. The caller owns the confirmation.
+pub fn transport_wipe_all() -> Result<WipeReportDto, AppError> {
+    let hub = hub()?;
+
+    // FIRST, before anything is destroyed. A prepare in flight otherwise
+    // outlives the wipe, and confirming its signature afterwards runs
+    // `apply_intent` against an empty store: the Handshake arm upserts its
+    // prepare-time snapshot and the conversation the user just erased comes
+    // back fully formed, while the Comm arm records a message against a
+    // conversation id that no longer exists. Ordered first because abandoning
+    // AFTER leaves a window for exactly that confirm; abandoning first has
+    // none — a confirm either applies to the live store and is then erased, or
+    // finds nothing. The plan is built-but-unsigned, so dropping it spends
+    // nothing.
+    transport_abandon();
+
+    // SEAL THE ERASURE BEFORE DESTROYING ANYTHING. This stamps the catch-up
+    // floor and bumps the generation under one gate, so a fill walk already
+    // running fails its next commit check and one about to start reads the
+    // floored cursors. Doing it first also means the store is never emptied
+    // while a walk still believes its pre-erase cursors are current.
+    //
+    // A wipe is a statement about all history up to now, so `now` is the floor
+    // — stamped as a SCALAR, not raised per key. Raising per key covered only
+    // keys that already existed, and with the fill disabled by default the
+    // usual state is that `fill.cursors` does not exist at all: the raise
+    // touched nothing, the save "succeeded", and enabling History & backup
+    // later rebuilt everything. `FillCursors::start_at` applies the scalar to
+    // every lane, including ones added later.
+    //
+    // This does NOT close the door on a deliberate future restore: that would
+    // be its own explicit action, lowering the floor on purpose.
+    let floor_persisted = seal_erasure(|cursors| {
+        cursors.raise_floor(now_unix_ms());
+        // Belt, not the mechanism: `start_at` already floors every lane, and
+        // these keys name conversations that will not exist in a moment.
+        cursors.comms.clear();
+    });
+
+    let report = {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.wipe().map_err(AppError::chain)?
+    };
+
+    // Two side files assert something about the rows just destroyed: names
+    // label addresses we no longer have a thread with, and the stash state
+    // claims a backup covers a list that no longer exists. Both read as their
+    // default when missing, so removal IS the reset.
+    //
+    // Counted, not fatal: the store is already wiped, and failing the whole
+    // call over a leftover label would report "nothing was deleted" about a
+    // store that is empty — the worst possible lie in this lane.
+    let mut side_files_cleared = 0u32;
+    if let Ok(dir) = vault::transport_store_dir() {
+        for path in [
+            kaspaverse_chain::ContactNames::path(&dir),
+            kaspaverse_chain::history_fill::StashState::path(&dir),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => side_files_cleared += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!("transport-wipe: a side file survived: {e}"),
+            }
+        }
+    }
+
+    // In-memory claims about txids that no longer have a home. Left standing,
+    // a parked acceptance would complete into a conversation the user deleted
+    // and mint it back from nothing.
+    PENDING_ALIAS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    PENDING_ACCEPTANCE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+
+    log::info!(
+        "transport-wipe: {} conversation(s) and {} message(s) erased, {side_files_cleared} side file(s) cleared, floor_persisted={floor_persisted}",
+        report.conversations,
+        report.messages
+    );
+    // The notice inputs changed and nothing else can say so: the backup
+    // coverage this screen reports was just deleted, and the gap notice is
+    // derived from cursors that no longer exist.
+    //
+    // NOT a list refresh — the empty ping is the notice sentinel and Dart
+    // answers it with `refreshFillState()` alone (`messaging_service.dart`).
+    // The conversation list is re-pulled by the CALLER, which is the only
+    // side that knows the wipe was asked for; a per-conversation ping is not
+    // available here because there is deliberately no conversation left to
+    // name.
+    ping_notice_inputs();
+
+    Ok(WipeReportDto {
+        conversations: u32::try_from(report.conversations).unwrap_or(u32::MAX),
+        messages: u32::try_from(report.messages).unwrap_or(u32::MAX),
+        side_files_cleared,
+        pending_bonds: u32::try_from(report.pending_bonds).unwrap_or(u32::MAX),
+        floor_persisted,
+    })
 }
 
 /// A conversation's thread, oldest first — DECRYPT-ON-VIEW (§0.4): sealed
@@ -5565,6 +6373,148 @@ fn to_dto(event: TransportEvent) -> TransportEventDto {
 mod tests {
     use super::*;
 
+    /// FLOOR BEFORE BUMP. This ordering BLOCKED twice in one sitting and was
+    /// argued in four paragraphs of prose with nothing asserting it.
+    ///
+    /// Bump-then-floor leaves a window the width of the whole erase body: a
+    /// fill walk starting inside it reads the NEW generation and the PRE-floor
+    /// cursors, matches every guard it later meets, folds our own on-chain
+    /// backup into the emptied store, and saves floor-0 cursors over the top.
+    /// The observation point is inside the mutate closure — the only place that
+    /// can see the ordering rather than infer it.
+    #[test]
+    fn seal_erasure_stamps_the_floor_before_it_bumps_the_generation() {
+        let (_guard, _dir) = crate::api::vault::tests::enter();
+        let before = erase_epoch();
+
+        let mut epoch_during_floor = None;
+        let persisted = seal_erasure(|cursors| {
+            epoch_during_floor = Some(erase_epoch());
+            cursors.raise_floor(4_242);
+        });
+
+        assert!(
+            persisted,
+            "the floor must be durable for the flag to be true"
+        );
+        assert_eq!(
+            epoch_during_floor,
+            Some(before),
+            "the generation must still be the OLD one while the floor is written — \
+             bumping first was the round-4 BLOCK"
+        );
+        assert_eq!(erase_epoch(), before + 1, "and bumped exactly once after");
+
+        let dir = vault::transport_store_dir().unwrap();
+        assert_eq!(
+            kaspaverse_chain::history_fill::FillCursors::load(&dir).floor_unix_ms,
+            4_242,
+            "the floor is on disk, not merely in the closure"
+        );
+
+        // THE PROPERTY THAT ACTUALLY PROTECTS THE WALK: a start taken through
+        // the same door the walk uses sees the new generation AND the floored
+        // cursors together. Asserting the closure's view alone would still pass
+        // with the bump moved between `mutate` and `save` — which re-opens the
+        // window in full, because the walk reads the cursors from DISK.
+        let (walk_epoch, walk_cursors) = gated_walk_start(&dir);
+        assert_eq!(walk_epoch, before + 1);
+        assert_eq!(
+            walk_cursors.floor_unix_ms, 4_242,
+            "a walk that sees the new generation must also see the floor — \
+             seeing one without the other is the whole race"
+        );
+    }
+
+    /// THE GATE, ON REAL THREADS — the property the single-threaded test above
+    /// cannot reach.
+    ///
+    /// An observer that sees generation N must see the floor generation N
+    /// stamped. Seeing one without the other IS the race: a walk holding
+    /// pre-floor cursors under a post-floor epoch matches every guard it later
+    /// meets and writes its stale cursors back over the erase.
+    ///
+    /// Seal `i` stamps floor `i * 1000` and bumps to `base + i`, so the
+    /// invariant is checkable from the pair alone, with no shared bookkeeping
+    /// between the threads.
+    #[test]
+    fn a_walk_can_never_see_a_generation_without_its_floor() {
+        let (_guard, _dir) = crate::api::vault::tests::enter();
+        let dir = vault::transport_store_dir().unwrap();
+        let base = erase_epoch();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader_dir = dir.clone();
+        let reader = std::thread::spawn(move || {
+            let mut observations = 0u32;
+            while !reader_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let (epoch, cursors) = gated_walk_start(&reader_dir);
+                let seen = epoch - base;
+                assert!(
+                    cursors.floor_unix_ms >= seen * 1_000,
+                    "observed generation {seen} with floor {} — a walk saw a                      generation without the floor that generation stamped",
+                    cursors.floor_unix_ms
+                );
+                observations += 1;
+            }
+            observations
+        });
+
+        // Through `catch_unwind`, so a failing assertion here still STOPS and
+        // JOINS the reader. Left to unwind, the reader survives the test as a
+        // detached thread spinning on `ERASE_GATE` and a file read, then panics
+        // on its own against a frozen floor — a second failure attributed to no
+        // test, on a gate that is already red. The one arbiter of "done" does
+        // not get to be confusing (INV-10).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in 1..=200u64 {
+                assert!(seal_erasure(|c| {
+                    c.raise_floor(i * 1_000);
+                }));
+            }
+        }));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let observations = reader.join().expect("the reader must not have panicked");
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+
+        assert!(
+            observations > 0,
+            "the reader has to have actually looked, or this proves nothing"
+        );
+        assert_eq!(erase_epoch(), base + 200);
+    }
+
+    /// Two erases racing must be order-free, because nothing serialises the
+    /// USER's taps: `raise_floor` is a `max`, so the later floor wins and an
+    /// out-of-order pair can never walk the floor backwards.
+    #[test]
+    fn erasures_are_idempotent_and_never_lower_the_floor() {
+        let (_guard, _dir) = crate::api::vault::tests::enter();
+        let before = erase_epoch();
+
+        assert!(seal_erasure(|c| {
+            c.raise_floor(9_000);
+        }));
+        assert!(seal_erasure(|c| {
+            c.raise_floor(1_000);
+        }));
+
+        let dir = vault::transport_store_dir().unwrap();
+        assert_eq!(
+            kaspaverse_chain::history_fill::FillCursors::load(&dir).floor_unix_ms,
+            9_000,
+            "a later erase with an earlier clock must not hand back erased history"
+        );
+        assert_eq!(
+            erase_epoch(),
+            before + 2,
+            "every erase bumps, even a no-op one"
+        );
+    }
+
     /// Finding 7, second half (V5): the transport prepare path classifies an
     /// `InsufficientFunds` refusal through the SAME shortfall classifier as
     /// the payment path — settling change (`outgoing`) reads as "still
@@ -5747,19 +6697,129 @@ mod tests {
     /// by `transport_thread` and `transport_thread_since`).
     /// No `log::`/`tracing` call in this file may reference a plaintext,
     /// text, or body binding — reviewed by ffi-leak; this test scans every
-    /// log line the module has (content words, not an allowlist).
+    /// log call the module has (content words, not an allowlist).
+    ///
+    /// **It scans the whole MACRO, not the line `log::` appears on**, and that
+    /// is a correction. It used to check one line, while nearly every log call
+    /// in this file wraps — so the format string, where the identifiers
+    /// actually are, sat on the lines it never looked at. Discovered by
+    /// red-proving the widened word list: an injected
+    /// `contact_address {dest}` line passed a guard written to forbid exactly
+    /// that. A tripwire nobody has tried to trip is a hope, not a check
+    /// (PB-031).
+    ///
+    /// **What it is not:** a proof. It knows the identifier NAMES this module
+    /// uses, so a log line that binds an address to a differently-named local
+    /// and prints that still passes. It is a tripwire for the mistake people
+    /// actually make — reaching for the variable that is in scope — and the
+    /// review is still the authority. Said plainly here because overclaiming a
+    /// guard's reach is the thing this very change was fixing.
     #[test]
     fn module_logs_are_lifecycle_only() {
         let source = include_str!("transport.rs");
-        for line in source
-            .lines()
-            .map(str::trim_start)
-            .filter(|l| l.contains("log::") && !l.starts_with("//"))
-        {
-            assert!(
-                !line.contains("text") && !line.contains("plaintext") && !line.contains("body"),
-                "content-adjacent log line: {line}"
-            );
+        // Accumulate each `log::` call to its balanced closing paren, so a
+        // wrapped macro is judged as one string.
+        let mut calls: Vec<String> = Vec::new();
+        let mut pending: Option<(String, i32)> = None;
+        for raw in source.lines() {
+            let line = raw.trim_start();
+            if pending.is_none() && (!line.contains("log::") || line.starts_with("//")) {
+                continue;
+            }
+            let (mut buf, mut depth) = pending.take().unwrap_or_default();
+            buf.push(' ');
+            buf.push_str(line);
+            // Comment lines inside a call carry prose, not emitted text.
+            if !line.starts_with("//") {
+                depth += i32::try_from(line.matches('(').count()).unwrap_or(0);
+                depth -= i32::try_from(line.matches(')').count()).unwrap_or(0);
+            }
+            if depth <= 0 {
+                calls.push(buf);
+            } else {
+                pending = Some((buf, depth));
+            }
+        }
+        assert!(
+            calls.len() > 20,
+            "the scanner found only {} log calls — it has stopped matching",
+            calls.len()
+        );
+        const CONTENT: [&str; 3] = ["text", "plaintext", "body"];
+        // WIDENED (`ffi-leak-auditor`, 2026-08-17). The original words caught
+        // message BODIES and nothing else, while §4's discipline is that
+        // identities stay out of logcat too — an address ties the device to an
+        // on-chain identity, and in this lane a conversation id and an alias
+        // are routing identities.
+        const IDENTITY: [&str; 3] = ["conversation_id", "contact_address", "alias"];
+
+        for call in calls {
+            // What is EMITTED is the format string. Split it off so an
+            // argument can be judged by a different rule.
+            let (format, args) = match (call.find('"'), call.rfind('"')) {
+                (Some(a), Some(b)) if b > a => (&call[a..=b], &call[b + 1..]),
+                _ => (call.as_str(), ""),
+            };
+
+            // An argument may MEASURE an identity — `conversation_id.is_empty()`
+            // emits a bool and is the three-lights sentinel — but may never
+            // pass one whole. The projection is the whole distinction, so it is
+            // what the check looks for.
+            // WHOLE identifiers only. `sanitize_node_text` is a sanitizer, not
+            // a body, and matching "text" inside it would train the next reader
+            // to silence the guard rather than answer it.
+            let is_boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let occurrences = |haystack: &str, word: &str| -> Vec<usize> {
+                let mut out = Vec::new();
+                let bytes = haystack.as_bytes();
+                for (at, _) in haystack.match_indices(word) {
+                    let before = haystack[..at].chars().next_back();
+                    let after = haystack[at + word.len()..].chars().next();
+                    // A trailing `.` or `(` still counts as a boundary — that
+                    // is the projection case, judged below.
+                    if is_boundary(before) && (is_boundary(after) || after == Some('.')) {
+                        let _ = bytes;
+                        out.push(at);
+                    }
+                }
+                out
+            };
+            // In the format string what matters is INLINE CAPTURE — `{alias}`
+            // emits the value; "learned a contact's alias" is prose, and a log
+            // lane that cannot say what it did in English is a worse lane.
+            for word in CONTENT.iter().chain(IDENTITY.iter()) {
+                for opener in [format!("{{{word}}}"), format!("{{{word}:")] {
+                    assert!(
+                        !format.contains(&opener),
+                        "a log's FORMAT STRING captures {word}: {call}"
+                    );
+                }
+            }
+            // ONE rule for both lists: an argument may MEASURE the thing —
+            // `plaintext.len()`, `conversation_id.is_empty()` — and may never
+            // pass it whole. The projection is the entire distinction between a
+            // shape and a leak (§4), so it is exactly what is checked.
+            // The two functions whose entire job is to turn content into a
+            // shape. NAMED, not pattern-matched, so adding a third is a
+            // deliberate act a reviewer sees in the diff rather than a regex
+            // quietly widening.
+            const SHAPERS: [&str; 2] = ["describe_shape(", "sanitize_node_text("];
+            for word in CONTENT.iter().chain(IDENTITY.iter()) {
+                for at in occurrences(args, word) {
+                    let after = &args[at + word.len()..];
+                    // MEASURED — `plaintext.len()`, `conversation_id.is_empty()`.
+                    if after.starts_with('.') {
+                        continue;
+                    }
+                    // Or SHAPED — handed to one of the two describers above.
+                    let before = args[..at].trim_end().trim_end_matches('&');
+                    assert!(
+                        SHAPERS.iter().any(|shaper| before.ends_with(shaper)),
+                        "a log ARGUMENT passes {word} whole rather than measuring \
+                         or shaping it: {call}"
+                    );
+                }
+            }
         }
     }
 

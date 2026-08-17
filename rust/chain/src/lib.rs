@@ -43,7 +43,7 @@ pub use transport::{
 };
 pub use transport_store::{
     ConversationRecord, ConversationStatus, KeyBranch, MessageDirection, MessageRecord, RowSource,
-    StoredKind, TransportStore,
+    StoredKind, TransportStore, WipeReport,
 };
 pub use wallet_sync::{
     ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,

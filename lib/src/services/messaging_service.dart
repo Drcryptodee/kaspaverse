@@ -152,6 +152,21 @@ class MessagingService {
       (conversationId) =>
           transportHideConversation(conversationId: conversationId);
 
+  @visibleForTesting
+  static Future<WipeReportDto> Function(String conversationId) clearMessagesFn =
+      (conversationId) =>
+          transportClearMessages(conversationId: conversationId);
+
+  @visibleForTesting
+  static Future<WipeReportDto> Function() wipeAllFn = transportWipeAll;
+
+  @visibleForTesting
+  static Future<WipeReportDto> Function() wipePreviewFn = transportWipePreview;
+
+  @visibleForTesting
+  static Future<WipeReportDto> Function(String contactAddress) startOverFn =
+      (contactAddress) => transportStartOver(contactAddress: contactAddress);
+
   /// All conversations, most recently active first (public-wire-class data).
   final ValueNotifier<List<ConversationDto>> conversations = ValueNotifier(
     const <ConversationDto>[],
@@ -382,6 +397,73 @@ class MessagingService {
       await refresh();
     } on AppError catch (e) {
       error.value = e.message;
+    }
+  }
+
+  /// Forget the words in one conversation, keep the conversation. The row
+  /// stays listed and stays sendable — only the thread empties. Nothing is
+  /// removed on-chain. Returns how many rows went.
+  /// Rethrows, like [wipeAll]. Returning 0 on failure would render "0 messages
+  /// cleared." over a partial delete that really happened — Rust deliberately
+  /// fails mid-loop rather than warning past a write error, and swallowing it
+  /// here would undo that honesty at the last step.
+  Future<WipeReportDto> clearMessages(String conversationId) async {
+    try {
+      final cleared = await clearMessagesFn(conversationId);
+      await refresh();
+      return cleared;
+    } on AppError catch (e) {
+      error.value = e.message;
+      await refresh();
+      rethrow;
+    }
+  }
+
+  /// Retire every live conversation with one contact so a fresh contact
+  /// request can be sent. ONE Rust call, not hide-then-invite from here: with
+  /// two live threads on one address, hiding one leaves the other Active and
+  /// the handshake then refuses — after the first thread's messages are gone.
+  /// Rethrows, because the caller must not send a request believing the old
+  /// threads were retired when they were not.
+  Future<WipeReportDto> startOver(String contactAddress) async {
+    try {
+      final retired = await startOverFn(contactAddress);
+      await refresh();
+      return retired;
+    } on AppError catch (e) {
+      error.value = e.message;
+      await refresh();
+      rethrow;
+    }
+  }
+
+  /// What a [wipeAll] would destroy — the number the confirm sheet must show.
+  ///
+  /// NOT the length of [conversations]: that list hides tombstoned rows and
+  /// the wipe destroys them too, so the visible count under-promises by
+  /// exactly the rows the user already tried to put out of sight.
+  Future<WipeReportDto> wipePreview() => wipePreviewFn();
+
+  /// Erase every conversation and every message on this device.
+  ///
+  /// Irreversible, and deliberately total: a single-conversation delete would
+  /// orphan a counterparty who never re-announces themselves, which is why
+  /// [hide] tombstones. Nothing is removed on-chain — the ciphertext is public
+  /// and permanent, and the confirm copy says so. Rethrows so the caller can
+  /// tell the user it did not happen rather than silently reporting success.
+  Future<WipeReportDto> wipeAll() async {
+    try {
+      final report = await wipeAllFn();
+      await refresh();
+      await refreshFillState();
+      return report;
+    } on AppError catch (e) {
+      error.value = e.message;
+      // Refresh on the way out, like the sibling erase paths: the wipe can fail
+      // AFTER `transport_abandon` and the floor stamp have already changed
+      // state, so the list on screen may no longer be the truth.
+      await refresh();
+      rethrow;
     }
   }
 

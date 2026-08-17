@@ -16,6 +16,7 @@ ConversationDto conversation(
   String id, {
   String status = 'active',
   bool inviteExpired = false,
+  bool superseded = false,
   String? contactName,
   String address =
       'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf',
@@ -30,6 +31,7 @@ ConversationDto conversation(
   lastActivityUnixMs: BigInt.two,
   inviteExpired: inviteExpired,
   contactName: contactName,
+  superseded: superseded,
 );
 
 ThreadMessageDto message(
@@ -896,6 +898,420 @@ void main() {
       await openRequests(tester);
       expect(find.text('Accept'), findsOneWidget);
       expect(find.text('Wants to connect'), findsOneWidget);
+    });
+
+    /// THE SILENT LANE, MADE LOUD.
+    ///
+    /// The founder's device, 2026-08-17: two live conversations against one
+    /// contact because they wiped their client and re-handshaked. The older
+    /// row still said "Active" and still had a composer, and every message
+    /// typed into it was broadcast to an alias nobody monitors. Nothing
+    /// errored — that is why it took hours to notice.
+    testWidgets('a replaced conversation says so and keeps its history', (
+      tester,
+    ) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('old', superseded: true),
+        conversation('new'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      // It is named, not merely dimmed — and only the replaced one is.
+      expect(find.text('Replaced'), findsOneWidget);
+      expect(find.text('Active'), findsOneWidget);
+      expect(find.textContaining('started a new conversation'), findsOneWidget);
+
+      // Still openable, and it opens READ-ONLY: the history is real and the
+      // user came looking for it. Hiding the row instead would answer a lost
+      // message by deleting the evidence.
+      MessagingService.threadSinceFn = (_, _) async => delta(const []);
+      await tester.tap(find.text('Replaced'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<ThreadScreen>(find.byType(ThreadScreen)).superseded,
+        isTrue,
+      );
+    });
+
+    testWidgets('a replaced thread offers no composer to type into', (
+      tester,
+    ) async {
+      MessagingService.threadSinceFn = (_, _) async => delta([message('t1')]);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: ThreadScreen(
+            conversationId: 'old',
+            contactLabel: 'kaspa:qq…',
+            superseded: true,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The words are still there — this is not a deletion.
+      expect(find.textContaining('hello over L1'), findsOneWidget);
+      // But there is nowhere to type and nothing to send.
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byIcon(Icons.send_outlined), findsNothing);
+      expect(find.textContaining('would not reach them'), findsOneWidget);
+    });
+
+    testWidgets('delete-all names the count and what it cannot reach', (
+      tester,
+    ) async {
+      var wiped = false;
+      MessagingService.wipeAllFn = () async {
+        wiped = true;
+        return WipeReportDto(
+          conversations: 3,
+          messages: 17,
+          pendingBonds: 0,
+          sideFilesCleared: 3,
+          floorPersisted: true,
+        );
+      };
+      // Rust counts THREE — the third is hidden, so the screen's own list
+      // cannot see it. That gap is the whole reason the preview exists.
+      MessagingService.wipePreviewFn = () async => WipeReportDto(
+        conversations: 3,
+        messages: 17,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      MessagingService.conversationsFn = () async => [
+        conversation('c1'),
+        conversation('c2'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete all messages').last);
+      await tester.pumpAndSettle();
+
+      // The count IS the guard — a number the user can check beats "are you
+      // sure". And the sheet may never imply it reached the chain.
+      expect(find.textContaining('3 conversations'), findsWidgets);
+      expect(find.textContaining('17 messages'), findsWidgets);
+      expect(
+        find.textContaining('including any you have hidden'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('stay on Kaspa permanently'), findsOneWidget);
+      expect(find.textContaining('wallet and coins are not'), findsOneWidget);
+      // The repair instruction — the useful half.
+      expect(find.textContaining('Asking them to start it'), findsOneWidget);
+      expect(wiped, isFalse, reason: 'opening the sheet must delete nothing');
+
+      await tester.tap(find.text('Delete 3 conversations'));
+      await tester.pumpAndSettle();
+      expect(wiped, isTrue);
+      expect(find.textContaining('Deleted 3 conversations'), findsOneWidget);
+    });
+
+    testWidgets('cancelling delete-all deletes nothing', (tester) async {
+      var wiped = false;
+      MessagingService.wipeAllFn = () async {
+        wiped = true;
+        return WipeReportDto(
+          conversations: 0,
+          messages: 0,
+          pendingBonds: 0,
+          sideFilesCleared: 0,
+          floorPersisted: true,
+        );
+      };
+      MessagingService.wipePreviewFn = () async => WipeReportDto(
+        conversations: 1,
+        messages: 4,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete all messages').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(wiped, isFalse);
+      // The sheet is gone, so its singular button is gone with it — and it
+      // WAS singular, because one is one: a plural reads as a miscount on the
+      // one screen where the count is the consent.
+      expect(find.text('Delete 1 conversation'), findsNothing);
+    });
+
+    testWidgets('clearing one thread keeps the conversation', (tester) async {
+      String? cleared;
+      MessagingService.clearMessagesFn = (id) async {
+        cleared = id;
+        return WipeReportDto(
+          conversations: 0,
+          messages: 6,
+          pendingBonds: 0,
+          sideFilesCleared: 0,
+          floorPersisted: true,
+        );
+      };
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Clear messages'));
+      await tester.pumpAndSettle();
+
+      // It must be told apart from Hide, which sits right beneath it and also
+      // purges content — the promise that survives is the conversation.
+      expect(find.textContaining('conversation stays'), findsOneWidget);
+      expect(find.textContaining('stay there permanently'), findsOneWidget);
+      expect(cleared, isNull, reason: 'the sheet alone clears nothing');
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Clear messages'));
+      await tester.pumpAndSettle();
+      expect(cleared, 'c1');
+      expect(find.textContaining('6 messages cleared'), findsOneWidget);
+    });
+
+    /// THE PER-CONTACT EXIT (INV-6). One Rust call, because doing it as
+    /// hide-then-invite half-applied in exactly the case it exists for: with
+    /// two live threads on one address, hiding one left the other Active and
+    /// the handshake then refused — after the first thread's messages were
+    /// already destroyed.
+    testWidgets('start over retires the old threads before it invites', (
+      tester,
+    ) async {
+      final calls = <String>[];
+      MessagingService.startOverFn = (address) async {
+        calls.add('startOver:$address');
+        return WipeReportDto(
+          conversations: 2,
+          messages: 11,
+          pendingBonds: 0,
+          sideFilesCleared: 0,
+          floorPersisted: true,
+        );
+      };
+      MessagingService.prepareHandshakeFn = (address) async {
+        calls.add('handshake:$address');
+        throw const AppError(message: 'stop here');
+      };
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start over with this contact'));
+      await tester.pumpAndSettle();
+
+      // The consent has to name the destruction, not call it hiding.
+      expect(find.textContaining('every conversation'), findsOneWidget);
+      // And the reason it might not work — an app that still remembers you.
+      expect(find.textContaining('may accept silently'), findsOneWidget);
+      expect(calls, isEmpty, reason: 'the sheet alone does nothing');
+
+      await tester.tap(find.text('Review request'));
+      await tester.pumpAndSettle();
+
+      // Order is the whole property: retire, THEN invite.
+      expect(calls, [
+        'startOver:${conversation('c1').contactAddress}',
+        'handshake:${conversation('c1').contactAddress}',
+      ]);
+    });
+
+    testWidgets('start over is not offered on an invitation', (tester) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+      await openRequests(tester);
+
+      await tester.longPress(find.text('Wants to connect'));
+      await tester.pumpAndSettle();
+      // Hiding an invitation is permanent, and it is the only route to
+      // refunding the bond they already paid.
+      expect(find.text('Start over with this contact'), findsNothing);
+    });
+
+    /// A DURABILITY FAILURE GETS ITS OWN SENTENCE ON ALL THREE PATHS.
+    ///
+    /// The floor is what stops the next history catch-up handing the messages
+    /// back. When it does not persist, "cannot be undone" is not yet true and
+    /// the user is the only one who can act on it — so none of the three erase
+    /// gestures may report the plain success line.
+    testWidgets('an unstuck history floor is said out loud, not logged', (
+      tester,
+    ) async {
+      MessagingService.wipeAllFn = () async => WipeReportDto(
+        conversations: 1,
+        messages: 3,
+        pendingBonds: 0,
+        sideFilesCleared: 1,
+        floorPersisted: false,
+      );
+      MessagingService.wipePreviewFn = () async => WipeReportDto(
+        conversations: 1,
+        messages: 3,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete all messages').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete 1 conversation'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('could not be stopped'), findsOneWidget);
+      expect(find.textContaining('may come back'), findsOneWidget);
+    });
+
+    testWidgets('a thread cleared without a floor says so too', (tester) async {
+      MessagingService.clearMessagesFn = (_) async => WipeReportDto(
+        conversations: 0,
+        messages: 4,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Clear messages'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Clear messages'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('could not be stopped'), findsOneWidget);
+      // Never the plain success line beside it.
+      expect(find.text('4 messages cleared.'), findsNothing);
+    });
+
+    testWidgets('start over warns in the CONFIRM SHEET, not under it', (
+      tester,
+    ) async {
+      MessagingService.startOverFn = (_) async => WipeReportDto(
+        conversations: 1,
+        messages: 5,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      // The ceremony must actually OPEN — the note lives in the sheet, so a
+      // prepare that throws would prove nothing about where the warning went.
+      MessagingService.prepareHandshakeFn = (_) async => summary();
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start over with this contact'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review request'));
+      await tester.pumpAndSettle();
+
+      // A SnackBar here would be covered by the confirm sheet within a frame;
+      // the note travels INTO the sheet instead.
+      expect(find.textContaining('may come back'), findsWidgets);
+    });
+
+    /// SOMEBODY ELSE'S MONEY GETS ITS OWN SENTENCE.
+    ///
+    /// An unanswered request holds a 0.2 KAS bond the sender paid, and Accept
+    /// is the only route back to them. The wipe destroys those rows, so the
+    /// consent has to say so — it is the one number on that sheet that is not
+    /// about the user's own data.
+    testWidgets('the wipe names the bonds it strands', (tester) async {
+      MessagingService.wipePreviewFn = () async => WipeReportDto(
+        conversations: 4,
+        messages: 20,
+        pendingBonds: 2,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete all messages').last);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('2 unanswered contact requests'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('can no longer be returned'), findsOneWidget);
+    });
+
+    testWidgets('with no unanswered requests the bond clause stays away', (
+      tester,
+    ) async {
+      MessagingService.wipePreviewFn = () async => WipeReportDto(
+        conversations: 1,
+        messages: 2,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: true,
+      );
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete all messages').last);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('unanswered contact'), findsNothing);
+    });
+
+    /// Start over retires EVERY live thread with the contact, so on a replaced
+    /// row it would take the working successor the card just pointed at.
+    testWidgets('start over is not offered on a replaced row', (tester) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('old', superseded: true),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('Replaced'));
+      await tester.pumpAndSettle();
+      expect(find.text('Start over with this contact'), findsNothing);
     });
 
     testWidgets('both tabs render at zero, each saying its own thing', (

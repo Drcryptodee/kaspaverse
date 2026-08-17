@@ -123,10 +123,21 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         Ok(())
     }
 
+    /// Delete a record for good.
+    ///
+    /// **Append first, mutate second** — the same law [`Self::wipe`] states,
+    /// and this used to have it backwards. Dropping the record from the map
+    /// before the frame is durable means a failed write leaves an empty screen
+    /// over a log that still holds the `Upsert`, so everything the caller
+    /// reported as deleted comes back at the next start. Callers that swallow
+    /// the error (the message-purge lanes do) turned that into a silent lie.
+    /// This order makes a failure honest: nothing is removed, and the `Err`
+    /// says so.
     pub(crate) fn remove(&mut self, key: &str) -> Result<()> {
-        if self.records.remove(key).is_some() {
-            self.tombstoned.remove(key);
+        if self.records.contains_key(key) {
             self.append(&Frame::Remove(key.to_string()))?;
+            self.records.remove(key);
+            self.tombstoned.remove(key);
         }
         Ok(())
     }
@@ -156,6 +167,52 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
 
     pub(crate) fn is_tombstoned(&self, key: &str) -> bool {
         self.tombstoned.contains(key)
+    }
+
+    /// Erase every record, on disk and in memory.
+    ///
+    /// **The file is emptied before the maps are, and that order is the whole
+    /// safety property.** These two must never disagree: clear memory first
+    /// and a failed write leaves a log full of records that the next append
+    /// would extend, so a restart resurrects everything the user asked to
+    /// destroy. Emptying the file first means a failure returns `Err` with
+    /// both halves still intact and consistent — the caller retries, and
+    /// nothing is half-deleted.
+    ///
+    /// Atomic via temp-file + rename, like [`Self::compact_if_larger_than`]:
+    /// a crash mid-wipe leaves either the whole old log or an empty one, never
+    /// a torn frame that `replay` would stop at.
+    ///
+    /// **And durable, not merely atomic.** The empty file is fsynced before
+    /// the rename and the directory entry is fsynced after it. Without both,
+    /// a power loss seconds after "delete everything" can leave the old log
+    /// on disk and the user believing it is gone — every ordinary
+    /// [`Self::append`] on this log already pays `sync_all`, so an erase that
+    /// did not would be the one write we left to chance.
+    ///
+    /// Not `remove_file`: the log is re-opened for append by the same live
+    /// object, and an absent parent directory is a different failure to
+    /// diagnose than an empty file.
+    pub(crate) fn wipe(&mut self) -> Result<()> {
+        let parent = self.path.parent();
+        if let Some(parent) = parent {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = self.path.with_extension("wipe.tmp");
+        std::fs::File::create(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, &self.path)?;
+        // The rename itself is metadata; without this the directory entry can
+        // still be the old one after a crash. Best-effort: on the platforms
+        // that refuse a directory fsync this is not an erase failure, and the
+        // data write above is already durable.
+        if let Some(parent) = parent {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        self.records.clear();
+        self.tombstoned.clear();
+        Ok(())
     }
 
     /// Rewrite the file as one Upsert per live record (+ its tombstone flag)
@@ -197,6 +254,62 @@ mod tests {
             id: id.to_string(),
             value,
         }
+    }
+
+    /// A REMOVE THAT FAILS MUST REMOVE NOTHING.
+    ///
+    /// `remove` used to drop the record from the map and only then append the
+    /// frame, so a failed write left an empty screen over a log that still
+    /// held the `Upsert` — everything reported deleted came back at the next
+    /// start. The append is made to fail by putting a FILE where the log's
+    /// parent directory has to be, so `create_dir_all` cannot succeed.
+    #[test]
+    fn a_failed_remove_leaves_the_record_intact() {
+        let dir = std::env::temp_dir().join(format!("kv-kvlog-remove-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("log.kvlog");
+        let mut log = Log::<Row>::load(path.clone(), |r| r.id.clone()).unwrap();
+        log.upsert("a".to_string(), row("a", 1)).unwrap();
+
+        // Replace the log's parent with a regular file: every subsequent
+        // append fails, and so must every remove.
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+
+        assert!(
+            log.remove("a").is_err(),
+            "a remove that cannot append must fail"
+        );
+        assert!(
+            log.records.contains_key("a"),
+            "and it must leave the record where the durable log still has it"
+        );
+
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    /// A wipe is durable, not merely atomic: the emptied file must survive a
+    /// reload, and the temp file must never be left behind to be replayed.
+    #[test]
+    fn a_wipe_leaves_an_empty_log_and_no_debris() {
+        let path = test_path("wipe-debris");
+        let mut log = Log::<Row>::load(path.clone(), |r| r.id.clone()).unwrap();
+        for id in ["a", "b", "c"] {
+            log.upsert(id.to_string(), row(id, 1)).unwrap();
+        }
+        log.tombstone("b").unwrap();
+        log.wipe().unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(
+            !path.with_extension("wipe.tmp").exists(),
+            "the temp file must be renamed away, never left to confuse a later read"
+        );
+        let reloaded = Log::<Row>::load(path, |r| r.id.clone()).unwrap();
+        assert!(reloaded.records.is_empty());
+        assert!(!reloaded.is_tombstoned("b"));
     }
 
     fn test_path(tag: &str) -> PathBuf {

@@ -42,11 +42,19 @@ class ThreadScreen extends StatefulWidget {
     super.key,
     required this.conversationId,
     required this.contactLabel,
+    this.superseded = false,
     this.messaging,
   });
 
   final String conversationId;
   final String contactLabel;
+
+  /// A newer live conversation with this same contact exists, so this thread's
+  /// alias reaches nobody. Read-only: the history is real and stays readable,
+  /// but the composer is replaced by a notice. Passed in rather than re-fetched
+  /// because the list already holds the answer and the send path in Rust
+  /// refuses independently — this is the courtesy, not the guarantee.
+  final bool superseded;
 
   /// Test seam; defaults to the singleton.
   final MessagingService? messaging;
@@ -369,45 +377,48 @@ class _ThreadScreenState extends State<ThreadScreen> {
           children: [
             Expanded(child: _body(theme)),
             const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                KvSpace.s,
-                KvSpace.s,
-                KvSpace.s,
-                KvSpace.s,
-              ),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: 'New challenge or taunt',
-                    onPressed: _openArcadeComposer,
-                    icon: const Icon(Icons.sports_esports_outlined),
-                    color: KvColor.primaryMuted,
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: _compose,
-                      minLines: 1,
-                      maxLines: 4,
-                      textInputAction: TextInputAction.newline,
-                      decoration: const InputDecoration(
-                        hintText: 'Encrypted message…',
-                        border: InputBorder.none,
+            if (widget.superseded)
+              _ReplacedNotice(theme: theme)
+            else
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  KvSpace.s,
+                  KvSpace.s,
+                  KvSpace.s,
+                  KvSpace.s,
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      tooltip: 'New challenge or taunt',
+                      onPressed: _openArcadeComposer,
+                      icon: const Icon(Icons.sports_esports_outlined),
+                      color: KvColor.primaryMuted,
+                    ),
+                    Expanded(
+                      child: TextField(
+                        controller: _compose,
+                        minLines: 1,
+                        maxLines: 4,
+                        textInputAction: TextInputAction.newline,
+                        decoration: const InputDecoration(
+                          hintText: 'Encrypted message…',
+                          border: InputBorder.none,
+                        ),
                       ),
                     ),
-                  ),
-                  IconButton(
-                    tooltip: 'Review & send',
-                    onPressed: () {
-                      KvHaptic.selection();
-                      _send();
-                    },
-                    icon: const Icon(Icons.send_outlined),
-                    color: KvColor.primary,
-                  ),
-                ],
+                    IconButton(
+                      tooltip: 'Review & send',
+                      onPressed: () {
+                        KvHaptic.selection();
+                        _send();
+                      },
+                      icon: const Icon(Icons.send_outlined),
+                      color: KvColor.primary,
+                    ),
+                  ],
+                ),
               ),
-            ),
           ],
         ),
       ),
@@ -583,6 +594,42 @@ String _clock(BuildContext context, BigInt unixMs) =>
       TimeOfDay.fromDateTime(_at(unixMs)),
       alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
     );
+
+/// What stands where the composer was on a replaced thread.
+///
+/// A disabled text field would still read as "type here" and leave the user
+/// wondering why nothing happens. Replacing it outright says the thread is
+/// closed, and says why — which is the whole point: the failure this prevents
+/// was silent, and silence is what made it cost hours.
+class _ReplacedNotice extends StatelessWidget {
+  const _ReplacedNotice({required this.theme});
+
+  final ThemeData theme;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(KvSpace.m),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.history, size: 20, color: KvColor.textTertiary),
+          const SizedBox(width: KvSpace.s),
+          Expanded(
+            child: Text(
+              'This conversation was replaced. Your contact started a new one '
+              'with you — messages sent here would not reach them. Open the '
+              'newer thread from the contacts list.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 /// The line between one day's messages and the next.
 ///

@@ -85,6 +85,16 @@ pub struct ConversationRecord {
     /// established with (inbound envelopes open with this slot first).
     pub bound_branch: KeyBranch,
     pub bound_index: u32,
+    /// When this conversation was established.
+    ///
+    /// **Two clock domains, by status.** While `PendingInbound` it is the
+    /// handshake's BLOCK time (indexer-claimed on a fill-sourced row, node
+    /// truth once our own scan overrides it); on the transition to `Active`
+    /// the accept re-stamps it from our LOCAL clock. That is deliberate: this
+    /// field now orders which of two threads with one contact is live
+    /// (`superseded_by`), and an ordering key must not be a value an archive
+    /// supplied. `invite_expired` reads the pending-side value only, so the
+    /// pruning-horizon gate is unaffected.
     pub created_unix_ms: u64,
     pub last_activity_unix_ms: u64,
     /// The establishing handshake tx (inbound rows: the bond tx — also the
@@ -203,6 +213,17 @@ impl BorshDeserialize for MessageRecord {
             provenance,
         })
     }
+}
+
+/// What a [`TransportStore::wipe`] destroyed. Counts only — a report about
+/// erasing user content may not carry any of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WipeReport {
+    pub conversations: usize,
+    pub messages: usize,
+    /// Unanswered inbound invitations — each holding a bond only an Accept can
+    /// return.
+    pub pending_bonds: usize,
 }
 
 /// The P2.3 transport store: conversations + messages over two logs in an
@@ -419,6 +440,153 @@ impl TransportStore {
                 .then(a.conversation_id.cmp(&b.conversation_id))
         });
         rows
+    }
+
+    /// Destroy every conversation and every message. Returns what was there.
+    ///
+    /// This is the total erase, and it is total ON PURPOSE. A per-conversation
+    /// delete is a different and much more dangerous operation: a conversation
+    /// row is the ONLY place a counterparty's alias lives, and a client that
+    /// already knows us never re-announces itself, so deleting one row leaves
+    /// them writing to a thread we can no longer route (the July regression —
+    /// see [`Self::tombstone_conversation`], which exists because of it).
+    ///
+    /// Erasing everything is safe precisely because it leaves nothing
+    /// half-bound: there is no surviving row for a lost alias to orphan, and
+    /// the user knows they are starting over with everyone. That is also how
+    /// the live population's own "delete all" behaves, and — measured on the
+    /// founder's device — how a broken conversation actually gets repaired: a
+    /// client that has forgotten you is the only one that will handshake you
+    /// afresh.
+    ///
+    /// Messages first: if the conversation wipe fails after this, the store is
+    /// left with rows whose threads are empty, which is recoverable and
+    /// visible. The reverse leaves messages that belong to nothing, routable
+    /// by no lookup and invisible to every screen.
+    pub fn wipe(&mut self) -> Result<WipeReport> {
+        let report = self.wipe_preview();
+        self.messages.wipe()?;
+        self.conversations.wipe()?;
+        Ok(report)
+    }
+
+    /// What [`Self::wipe`] WOULD destroy, without destroying it.
+    ///
+    /// Exists so a confirmation can name a true number. The obvious source for
+    /// that number — the conversation list the user is looking at — is the
+    /// wrong one: it filters tombstoned rows, and the wipe does not. A user
+    /// with three visible and four hidden conversations would be asked to
+    /// confirm "delete 3" and then told "deleted 7", which is worse than no
+    /// number at all on the one screen where the number IS the consent.
+    ///
+    /// Deliberately the same expression as `wipe`'s own accounting, called by
+    /// it, so the two cannot drift.
+    pub fn wipe_preview(&self) -> WipeReport {
+        WipeReport {
+            conversations: self.conversations.records.len(),
+            messages: self.messages.records.len(),
+            // Counted separately because it is somebody else's money. An
+            // unaccepted invitation holds a bond the counterparty paid, and
+            // accepting is the only route to returning it — so destroying the
+            // row keeps their 0.2 KAS with no way to give it back. The user is
+            // entitled to know that before they agree, not after.
+            //
+            // **Deliberately NOT the same set the wipe destroys.** The wipe
+            // takes tombstoned rows too, but a DISMISSED invitation's bond is
+            // already permanently unreturnable — un-hiding refuses a
+            // `PendingInbound` row and the accept refuses a tombstoned one — so
+            // the wipe is not what strands it, and the sheet's causal claim
+            // ("can no longer be returned") would be false about them.
+            pending_bonds: self
+                .conversations
+                .records
+                .values()
+                .filter(|c| c.status == ConversationStatus::PendingInbound)
+                .filter(|c| !self.conversations.is_tombstoned(&c.conversation_id))
+                .count(),
+        }
+    }
+
+    /// The LIVE conversation that has replaced this one with the same
+    /// counterparty, if any — the row a message typed here would have to go
+    /// through to arrive.
+    ///
+    /// ## Why this is derived and not a stored flag
+    ///
+    /// A Kasia-family conversation is a pair of locally-minted aliases. The
+    /// protocol's only repair for a broken one is for a side to FORGET and
+    /// re-handshake — a client that still remembers you answers a repeat
+    /// handshake with silence (`conversation-manager-service.ts:181-213`), so
+    /// forgetting is the mechanism, not a mistake. We therefore must keep
+    /// accepting a fresh handshake from an address we already talk to.
+    ///
+    /// What we must NOT do is keep the old row sendable afterwards. Measured
+    /// on the founder's device 2026-08-17: the counterparty wiped and
+    /// re-handshaked at 2026-08-15 21:34:38Z, 78 seconds after the last
+    /// message on the old row. Both conversations were left `Active` against
+    /// the same address, both listed, both sendable — and the old one's alias
+    /// is monitored by nobody. Every message typed there is built, signed,
+    /// broadcast, charged a fee, and read by no one. Silence is the whole
+    /// failure mode: nothing errors.
+    ///
+    /// Derived rather than stored because [`ConversationRecord`] is
+    /// `#[derive(BorshDeserialize)]` and positional — appending a field makes
+    /// every existing frame undecodable and `replay()` stops at the first
+    /// failure, replaying a live device to zero conversations. The rule needs
+    /// no migration: it reads correctly against records written months ago.
+    ///
+    /// Newest-wins by `created_unix_ms`, because establishment order is the
+    /// only thing that says which alias pair the counterparty is actually
+    /// listening on. `conversation_id` breaks a tie so the answer is
+    /// deterministic rather than HashMap-ordered.
+    ///
+    /// A tombstoned successor cannot supersede anything: the user hid it, so
+    /// it is not somewhere their messages should be routed either.
+    pub fn superseded_by(&self, conversation_id: &str) -> Option<&ConversationRecord> {
+        let row = self.conversations.records.get(conversation_id)?;
+        // No address, nothing to be superseded BY — a PendingInbound row that
+        // has not resolved its sender shares no identity with anything.
+        if row.contact_address.is_empty() {
+            return None;
+        }
+        // AN INVITATION IS NEVER SUPERSEDED, however many live threads we have
+        // with that address.
+        //
+        // "Superseded" means "do not type here" — a statement about SENDING.
+        // The action on a `PendingInbound` row is Accept, which returns the
+        // 0.2 KAS bond the counterparty already paid. Marking one superseded
+        // takes that button away and strands their money with no other route
+        // to it (`wallet-security-auditor`, 2026-08-17). Their bond is not
+        // ours to strand because we happen to have a newer thread.
+        if row.status == ConversationStatus::PendingInbound {
+            return None;
+        }
+        self.conversations
+            .records
+            .values()
+            .filter(|c| {
+                c.conversation_id != row.conversation_id
+                    && c.contact_address == row.contact_address
+                    && c.status == ConversationStatus::Active
+                    // Sendable, not merely Active. The refusal this rule
+                    // drives points the user at the successor, so a successor
+                    // that would ALSO refuse turns one dead end into two —
+                    // exactly the no-exit shape INV-6 forbids. An `Active` row
+                    // with an empty alias is narrow (only the restore path can
+                    // mint one) but it is reachable, and the send gate's own
+                    // predicate requires the alias.
+                    && !c.my_alias.is_empty()
+                    && !self.conversations.is_tombstoned(&c.conversation_id)
+            })
+            .filter(|c| {
+                (c.created_unix_ms, c.conversation_id.as_str())
+                    > (row.created_unix_ms, row.conversation_id.as_str())
+            })
+            .max_by(|a, b| {
+                a.created_unix_ms
+                    .cmp(&b.created_unix_ms)
+                    .then_with(|| a.conversation_id.cmp(&b.conversation_id))
+            })
     }
 
     /// Whether any conversation knows WHO it is talking to but not what alias
@@ -928,6 +1096,361 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A WIPE THAT COMES BACK IS NOT A WIPE.
+    ///
+    /// The log is append-only and replayed at load, so clearing the in-memory
+    /// maps alone would look perfect until the next app start put every
+    /// conversation back. The reload is the assertion that matters.
+    #[test]
+    fn a_wipe_survives_a_reload() {
+        let dir = test_dir("wipe-survives-reload");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+
+        for id in ["one", "two", "three"] {
+            store.upsert_conversation(conversation(id, 10)).unwrap();
+            store
+                .record_message(message(&format!("tx-{id}"), id, 10, 1))
+                .unwrap();
+        }
+        // A tombstone must not outlive the wipe either — it is a claim about a
+        // record that no longer exists.
+        assert!(store.tombstone_conversation("two").unwrap());
+
+        let report = store.wipe().unwrap();
+        assert_eq!(report.conversations, 3);
+        assert_eq!(report.messages, 3);
+        assert!(store.list_conversations().is_empty());
+
+        let reloaded = TransportStore::load(dir).unwrap();
+        assert!(
+            reloaded.list_conversations().is_empty(),
+            "a wiped store must still be empty after the log replays"
+        );
+        assert!(reloaded.conversation("one").is_none());
+        assert!(reloaded.message("tx-one").is_none());
+        assert!(
+            !reloaded.is_conversation_tombstoned("two"),
+            "a tombstone for a destroyed record must not replay"
+        );
+    }
+
+    /// The store stays USABLE after a wipe — this is a clear, not a close.
+    /// The user carries on in the same session: new handshakes land, and they
+    /// must survive their own reload too.
+    #[test]
+    fn a_wiped_store_still_accepts_and_persists_new_rows() {
+        let dir = test_dir("wipe-then-write");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.upsert_conversation(conversation("old", 10)).unwrap();
+        store.wipe().unwrap();
+
+        store
+            .upsert_conversation(conversation("fresh", 20))
+            .unwrap();
+        store
+            .record_message(message("tx-fresh", "fresh", 20, 2))
+            .unwrap();
+
+        let reloaded = TransportStore::load(dir).unwrap();
+        assert_eq!(reloaded.list_conversations().len(), 1);
+        assert!(reloaded.conversation("fresh").is_some());
+        assert!(
+            reloaded.conversation("old").is_none(),
+            "the wiped row must not come back underneath the new one"
+        );
+    }
+
+    /// THE COUNT THE USER CONSENTS TO IS THE COUNT THAT DIES.
+    ///
+    /// Both auditors caught this independently: the confirm sheet used to take
+    /// its number from the conversation LIST, which filters hidden rows, while
+    /// the wipe destroys them too. Ask to delete 1, be told 3 died.
+    #[test]
+    fn the_preview_counts_hidden_rows_because_the_wipe_destroys_them() {
+        let dir = test_dir("wipe-preview-counts-hidden");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        store
+            .upsert_conversation(conversation("visible", 10))
+            .unwrap();
+        for id in ["hidden-a", "hidden-b"] {
+            store.upsert_conversation(conversation(id, 10)).unwrap();
+            assert!(store.tombstone_conversation(id).unwrap());
+        }
+
+        // One live invitation and one dismissed: only the live one names a
+        // bond the wipe is responsible for stranding.
+        let mut live_invite = conversation("invite-live", 10);
+        live_invite.status = ConversationStatus::PendingInbound;
+        store.upsert_conversation(live_invite).unwrap();
+        let mut dead_invite = conversation("invite-dismissed", 10);
+        dead_invite.status = ConversationStatus::PendingInbound;
+        store.upsert_conversation(dead_invite).unwrap();
+        assert!(store.tombstone_conversation("invite-dismissed").unwrap());
+
+        let preview = store.wipe_preview();
+        assert_eq!(
+            preview.conversations, 5,
+            "the preview must count what the wipe kills, hidden rows included"
+        );
+        assert_eq!(
+            preview.pending_bonds, 1,
+            "a dismissed invitation's bond was already unreturnable — the wipe \
+             is not what stranded it, so claiming it would be false"
+        );
+        // The list — what the old count came from — sees one.
+        assert_eq!(
+            store
+                .list_conversations()
+                .iter()
+                .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
+                .count(),
+            2
+        );
+        assert_eq!(
+            store.wipe().unwrap(),
+            preview,
+            "preview promised, wipe kept"
+        );
+    }
+
+    /// AN INVITATION KEEPS ITS ACCEPT BUTTON, WHATEVER ELSE WE HAVE.
+    ///
+    /// Accepting is the only route to refunding the 0.2 KAS bond the
+    /// counterparty already paid. Marking a `PendingInbound` row superseded
+    /// took that button off the card and stranded their money with no other
+    /// way to it — the card rendered the "Replaced" body instead.
+    #[test]
+    fn an_invitation_is_never_superseded_so_its_bond_can_always_be_refunded() {
+        let dir = test_dir("superseded-never-an-invitation");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        // An invitation that HAS resolved its sender — the case that could
+        // actually collide with a live thread on the same address.
+        let mut invitation = conversation("invitation", 10);
+        invitation.contact_address = KASIA.to_string();
+        invitation.created_unix_ms = 100;
+        invitation.status = ConversationStatus::PendingInbound;
+        invitation.my_alias = String::new();
+        invitation.initiated_by_me = false;
+        store.upsert_conversation(invitation).unwrap();
+
+        let mut live = conversation("live", 20);
+        live.contact_address = KASIA.to_string();
+        live.created_unix_ms = 200;
+        store.upsert_conversation(live).unwrap();
+
+        assert!(
+            store.superseded_by("invitation").is_none(),
+            "an unaccepted invitation must never be marked replaced — accepting \
+             it is how their bond comes back"
+        );
+    }
+
+    /// A successor that cannot itself be sent in must not silence anything —
+    /// pointing a refusal at a second refusal is a no-exit (INV-6).
+    #[test]
+    fn an_aliasless_successor_supersedes_nothing() {
+        let dir = test_dir("superseded-needs-alias");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        let mut old = conversation("old", 10);
+        old.contact_address = KASIA.to_string();
+        old.created_unix_ms = 100;
+        store.upsert_conversation(old).unwrap();
+
+        // Active, same contact, newer — but with no alias of ours it has
+        // nothing to put on the wire, so `comm_sendable` refuses it too.
+        let mut mute = conversation("mute", 20);
+        mute.contact_address = KASIA.to_string();
+        mute.created_unix_ms = 200;
+        mute.my_alias = String::new();
+        store.upsert_conversation(mute).unwrap();
+
+        assert!(store.superseded_by("old").is_none());
+    }
+
+    /// Wiping an empty store is a no-op success, not an error — the user may
+    /// press it twice, and the second press must not look like a failure.
+    #[test]
+    fn wiping_nothing_reports_nothing_and_succeeds() {
+        let dir = test_dir("wipe-empty");
+        let mut store = TransportStore::load(dir).unwrap();
+        let report = store.wipe().unwrap();
+        assert_eq!(report, WipeReport::default());
+        assert_eq!(store.wipe().unwrap(), WipeReport::default());
+    }
+
+    /// THE FOUNDER'S DEVICE, 2026-08-17 — the shape this rule exists for.
+    ///
+    /// Pulled with `run-as` and decoded: two `Active` rows against
+    /// `kaspa:qqwsnxvu…`, the second created 78 seconds after the last message
+    /// on the first, because the counterparty wiped its state and re-handshaked.
+    /// Both listed, both sendable, and only the newer alias pair is monitored
+    /// by anyone. The timestamps below are the real ones.
+    #[test]
+    fn a_replaced_conversation_names_its_successor() {
+        let dir = test_dir("superseded-founder-shape");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        let mut old = conversation("ec272a74601a639f52d7c3ac7a4beafb", 1_755_293_600_000);
+        old.contact_address = KASIA.to_string();
+        old.my_alias = "8caa5e3c79ff".to_string();
+        old.created_unix_ms = 1_755_124_758_000; // 2026-08-13 22:39:18Z
+        store.upsert_conversation(old).unwrap();
+
+        let mut new = conversation("be2aefdb54ce91378e2047029ed7f26d", 1_755_376_251_000);
+        new.contact_address = KASIA.to_string();
+        new.my_alias = "cf53a09c0d81".to_string();
+        new.created_unix_ms = 1_755_293_678_000; // 2026-08-15 21:34:38Z
+        store.upsert_conversation(new).unwrap();
+
+        assert_eq!(
+            store
+                .superseded_by("ec272a74601a639f52d7c3ac7a4beafb")
+                .map(|c| c.conversation_id.as_str()),
+            Some("be2aefdb54ce91378e2047029ed7f26d"),
+            "the old row must name the thread that replaced it"
+        );
+        assert!(
+            store
+                .superseded_by("be2aefdb54ce91378e2047029ed7f26d")
+                .is_none(),
+            "the live row is superseded by nothing — otherwise both go silent"
+        );
+    }
+
+    /// A successor the user HID cannot claim traffic either. Hiding it says
+    /// "not here"; routing the user's typing into it would say the opposite.
+    #[test]
+    fn a_hidden_successor_supersedes_nothing() {
+        let dir = test_dir("superseded-hidden-successor");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        let mut old = conversation("old", 10);
+        old.contact_address = KASIA.to_string();
+        old.created_unix_ms = 100;
+        store.upsert_conversation(old).unwrap();
+
+        let mut new = conversation("new", 20);
+        new.contact_address = KASIA.to_string();
+        new.created_unix_ms = 200;
+        store.upsert_conversation(new).unwrap();
+        assert!(store.tombstone_conversation("new").unwrap());
+
+        assert!(
+            store.superseded_by("old").is_none(),
+            "a hidden successor must not silence the row it replaced"
+        );
+    }
+
+    /// Only an `Active` row replaces anything. An invitation we have not
+    /// accepted has no alias of ours on the wire, so nothing routes to it —
+    /// letting it supersede would break a working thread for a card the user
+    /// never touched.
+    #[test]
+    fn only_an_active_successor_supersedes() {
+        let dir = test_dir("superseded-needs-active");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        let mut old = conversation("old", 10);
+        old.contact_address = KASIA.to_string();
+        old.created_unix_ms = 100;
+        store.upsert_conversation(old).unwrap();
+
+        let mut pending = conversation("pending", 20);
+        pending.contact_address = KASIA.to_string();
+        pending.created_unix_ms = 200;
+        pending.status = ConversationStatus::PendingInbound;
+        pending.my_alias = String::new();
+        store.upsert_conversation(pending).unwrap();
+
+        assert!(store.superseded_by("old").is_none());
+    }
+
+    /// Different counterparties share nothing. The address is the identity.
+    #[test]
+    fn distinct_contacts_never_supersede_each_other() {
+        let dir = test_dir("superseded-distinct");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        let mut a = conversation("a", 10);
+        a.contact_address = KASIA.to_string();
+        a.created_unix_ms = 100;
+        store.upsert_conversation(a).unwrap();
+
+        let mut b = conversation("b", 20);
+        b.contact_address = KACHAT.to_string();
+        b.created_unix_ms = 200;
+        store.upsert_conversation(b).unwrap();
+
+        assert!(store.superseded_by("a").is_none());
+        assert!(store.superseded_by("b").is_none());
+    }
+
+    /// A `PendingInbound` row carries no contact address until its accept
+    /// resolves the sender. Empty is not a value — every unresolved invitation
+    /// would otherwise supersede every other one.
+    #[test]
+    fn an_addressless_row_is_never_superseded() {
+        let dir = test_dir("superseded-addressless");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        let mut orphan = conversation("orphan", 10);
+        orphan.contact_address = String::new();
+        orphan.created_unix_ms = 100;
+        orphan.status = ConversationStatus::PendingInbound;
+        store.upsert_conversation(orphan).unwrap();
+
+        let mut other = conversation("other", 20);
+        other.contact_address = String::new();
+        other.created_unix_ms = 200;
+        store.upsert_conversation(other).unwrap();
+
+        assert!(store.superseded_by("orphan").is_none());
+    }
+
+    /// Two rows minted in the same millisecond must still resolve to ONE
+    /// answer, and the same answer every call — the record set is a HashMap.
+    #[test]
+    fn an_equal_creation_time_breaks_deterministically_on_id() {
+        let dir = test_dir("superseded-tiebreak");
+        let mut store = TransportStore::load(dir).unwrap();
+
+        for id in ["aaa", "bbb", "ccc"] {
+            let mut c = conversation(id, 10);
+            c.contact_address = KASIA.to_string();
+            c.created_unix_ms = 500;
+            store.upsert_conversation(c).unwrap();
+        }
+
+        assert_eq!(
+            store
+                .superseded_by("aaa")
+                .map(|c| c.conversation_id.as_str()),
+            Some("ccc"),
+            "highest id wins the tie, every time"
+        );
+        assert!(
+            store.superseded_by("ccc").is_none(),
+            "the tie-break winner is superseded by nobody — no cycles"
+        );
+        // Called repeatedly: a HashMap-ordered answer would eventually differ.
+        for _ in 0..64 {
+            assert_eq!(
+                store
+                    .superseded_by("bbb")
+                    .map(|c| c.conversation_id.as_str()),
+                Some("ccc")
+            );
+        }
+    }
+
+    /// The founder's Kasia counterpart.
+    const KASIA: &str = "kaspa:qqwsnxvukqew5hx5r7y5dr938hnw7hmgs7ca87zlvwlrps6rxdy2ja3xknpvj";
+    /// A different counterparty entirely.
+    const KACHAT: &str = "kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr";
 
     fn test_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kv-tstore-{tag}-{}", std::process::id()));

@@ -374,6 +374,42 @@ pub struct FillCursors {
     /// carrying a field an older build cannot decode (`kvlog.rs`).
     #[serde(default)]
     pub stash: HashMap<String, u64>,
+    /// **Nothing before this is ours to fetch.** A wipe stamps it; every lane
+    /// start is raised to it.
+    ///
+    /// It is a SCALAR, and that is the whole point. The first cut of the erase
+    /// raised each per-key cursor instead, which covered only keys that
+    /// already existed — and with the fill disabled by default (§0), the
+    /// common case is that `fill.cursors` does not exist at all. The maps were
+    /// then empty, the raise touched nothing, the save "succeeded", and
+    /// enabling History & backup later rebuilt every conversation from our own
+    /// on-chain backup and re-downloaded every message from a third-party
+    /// indexer — after a confirmation that said it could not be undone
+    /// (`consensus-auditor` BLOCK, 2026-08-17). A scalar covers absent keys,
+    /// addresses that enter the sweep later, and lanes that have never walked,
+    /// by construction rather than by enumeration.
+    ///
+    /// **Wall-clock ms, compared against block times, and the two clocks are
+    /// not the same clock.** [`FUTURE_SKEW_MS`] is this lane's tolerance in the
+    /// OTHER direction (a ceiling in `walk_pages`), so it does not bound this;
+    /// the error here is the device's own offset δ from block time, both ways:
+    ///
+    /// - clock ahead by δ → the floor lands δ ABOVE block-now, so the rows lost
+    ///   are the ones mined in the δ *after* the erase: genuinely new messages
+    ///   the fill will never recover. Mitigated by the live node lane, which
+    ///   has no floor and delivers them as they arrive.
+    /// - clock behind by δ → rows in `[floor, floor + δ)` still pass
+    ///   (`since_block_time` is INCLUSIVE), so up to δ of erased history can
+    ///   return through a fill.
+    ///
+    /// Stated rather than papered over: BOTH directions cost something real and
+    /// bounded, and a wall-clock floor cannot avoid either. Do NOT
+    /// "fix" it by subtracting a skew allowance — that widens the first case
+    /// into deliberately handing back erased history. Closing it properly means
+    /// flooring on the highest block time already observed, which needs a
+    /// block-time high-water mark this lane does not keep yet.
+    #[serde(default)]
+    pub floor_unix_ms: u64,
 }
 
 /// What the last committed self-stash snapshot covered (D-138).
@@ -437,12 +473,63 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -
         .unwrap_or_default()
 }
 
+/// The cheap write: whole-file, no fsync. Correct for state whose loss costs a
+/// redundant network round trip and nothing else.
+///
+/// Creates the parent, because these files live beside a store that may not
+/// exist yet — a wallet with no conversations can still reach the History &
+/// backup sheet and save a config.
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)
         .map_err(|e| ChainError::Message(format!("fill state encode failed: {e}")))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChainError::Message(format!("fill state dir failed: {e}")))?;
+    }
     std::fs::write(path, bytes)
         .map_err(|e| ChainError::Message(format!("fill state write failed: {e}")))?;
     Ok(())
+}
+
+/// The durable write: temp file, fsync, rename, fsync the directory.
+///
+/// **For state whose loss un-does a user's erasure.** The content erase pays
+/// exactly this (`kvlog::Log::wipe`) on the argument that an erase must not be
+/// the one write left to chance — and the catch-up floor is now part of that
+/// same erase. A power loss seconds after "delete everything" must not leave a
+/// durably-empty store beside a floor that never reached the disk, because the
+/// next enabled catch-up would then rebuild the conversations from our own
+/// on-chain backup and re-download the messages from an untrusted indexer
+/// (INV-8), after the app reported success (INV-10).
+///
+/// Deliberately NOT used by `FillConfig` or `StashState`: their own docs say
+/// losing them costs a redundant snapshot or a re-read, never history.
+pub(crate) fn write_json_durable<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|e| ChainError::Message(format!("fill state encode failed: {e}")))?;
+    let parent = path.parent();
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChainError::Message(format!("fill state dir failed: {e}")))?;
+    }
+    let tmp = path.with_extension("tmp");
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        // The rename is metadata; without this the directory entry can still
+        // be the old one after a crash. Best-effort — the data above is
+        // already durable, and some platforms refuse a directory fsync.
+        if let Some(parent) = parent {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    };
+    write().map_err(|e| ChainError::Message(format!("fill state write failed: {e}")))
 }
 
 impl FillConfig {
@@ -462,12 +549,34 @@ impl FillCursors {
         read_json(&dir.join(CURSORS_FILE))
     }
 
+    /// DURABLE, unlike its siblings: this file carries [`Self::floor_unix_ms`],
+    /// and losing that after an erase lets the next catch-up rebuild everything
+    /// the user destroyed.
     pub fn save(&self, dir: &Path) -> Result<()> {
-        write_json(&dir.join(CURSORS_FILE), self)
+        write_json_durable(&dir.join(CURSORS_FILE), self)
     }
 
     pub fn path(dir: &Path) -> PathBuf {
         dir.join(CURSORS_FILE)
+    }
+
+    /// Where a lane must actually start: its own cursor, never below the floor.
+    ///
+    /// **Every lane start goes through here**, so a lane added later inherits
+    /// the erase guarantee instead of having to remember it. A missing key
+    /// reads as 0 and is then raised, which is exactly the case the scalar
+    /// exists for.
+    pub fn start_at(&self, lane: &HashMap<String, u64>, key: &str) -> u64 {
+        lane.get(key).copied().unwrap_or(0).max(self.floor_unix_ms)
+    }
+
+    /// Raise the floor to `now`, never lower it. Returns the floor in force.
+    ///
+    /// `max`, so a clock that jumps backwards cannot hand back erased history,
+    /// and so two erases in a row never walk the floor down.
+    pub fn raise_floor(&mut self, now_unix_ms: u64) -> u64 {
+        self.floor_unix_ms = self.floor_unix_ms.max(now_unix_ms);
+        self.floor_unix_ms
     }
 }
 
@@ -621,6 +730,71 @@ mod tests {
         assert_eq!(cursors.handshakes.get("kaspa:a"), Some(&7));
         assert_eq!(cursors.comms.get("c1"), Some(&9));
         assert!(cursors.stash.is_empty(), "new field defaults, never errors");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE ERASE FLOOR COVERS KEYS THAT DO NOT EXIST — which is the usual case.
+    ///
+    /// The first cut raised each per-key cursor instead, and the fill is
+    /// disabled by default (§0), so the usual state at a wipe is that
+    /// `fill.cursors` does not exist at all: the raise iterated an empty map,
+    /// the save "succeeded", and enabling History & backup later rebuilt every
+    /// conversation from our own on-chain backup and re-downloaded every
+    /// message from a third-party indexer — after a confirmation that said it
+    /// could not be undone (`consensus-auditor` BLOCK, 2026-08-17).
+    #[test]
+    fn the_floor_holds_for_lanes_that_have_no_cursor_yet() {
+        let mut cursors = FillCursors::default();
+        assert_eq!(
+            cursors.start_at(&cursors.handshakes.clone(), "never-walked"),
+            0,
+            "with no floor, an unknown key walks all of history — the contract"
+        );
+
+        assert_eq!(cursors.raise_floor(5_000), 5_000);
+
+        // The case that mattered: a key with no entry at all.
+        assert_eq!(
+            cursors.start_at(&cursors.handshakes.clone(), "never-walked"),
+            5_000,
+            "an absent key must still start at the floor"
+        );
+        // And one that exists but sits behind it.
+        cursors.comms.insert("c1".to_string(), 900);
+        assert_eq!(cursors.start_at(&cursors.comms.clone(), "c1"), 5_000);
+        // A cursor already ahead is never walked backwards.
+        cursors.comms.insert("c2".to_string(), 9_999);
+        assert_eq!(cursors.start_at(&cursors.comms.clone(), "c2"), 9_999);
+    }
+
+    /// The floor only ever ratchets: a clock that jumps backwards, or a second
+    /// erase, must not hand back history the first one destroyed.
+    #[test]
+    fn the_floor_never_walks_backwards() {
+        let mut cursors = FillCursors::default();
+        cursors.raise_floor(8_000);
+        assert_eq!(cursors.raise_floor(3_000), 8_000);
+        assert_eq!(cursors.floor_unix_ms, 8_000);
+    }
+
+    /// And it survives the round trip, or the next process start un-erases.
+    #[test]
+    fn the_floor_persists_across_a_reload() {
+        let dir = std::env::temp_dir().join(format!("kv-floor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cursors = FillCursors::default();
+        cursors.raise_floor(4_242);
+        cursors.save(&dir).unwrap();
+
+        assert_eq!(FillCursors::load(&dir).floor_unix_ms, 4_242);
+        // A file written before the field existed still loads, floor 0.
+        std::fs::write(FillCursors::path(&dir), br#"{"handshakes":{"a":1}}"#).unwrap();
+        let old = FillCursors::load(&dir);
+        assert_eq!(old.floor_unix_ms, 0);
+        assert_eq!(old.handshakes.get("a"), Some(&1));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

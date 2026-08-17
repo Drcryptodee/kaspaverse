@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `decrypt_drop`, `dropped`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `decrypt_drop`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `ParkedAcceptance`, `PinPolicy`, `ReplayGap`, `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -263,6 +263,135 @@ Future<void> transportHideConversation({required String conversationId}) =>
       conversationId: conversationId,
     );
 
+/// Forget what was SAID in one conversation, keeping the conversation itself.
+///
+/// The narrow, safe half of "delete this chat": it removes exactly what
+/// [`transport_hide_conversation`] removes — every stored message row — and
+/// then stops. The row stays listed, stays sendable, stays matchable. The
+/// thread simply starts empty.
+///
+/// **Why this exists beside hide rather than inside it.** Hide answers "I do
+/// not want to see this person"; it purges the content AND takes the row off
+/// the list, and it comes back the moment they write. This answers a different
+/// question — "I do not want these words on my phone" — for a conversation the
+/// user intends to keep using. Folding the two together would mean the only
+/// way to clear a thread is to also stop seeing it.
+///
+/// **Why it does not delete the row.** The row holds the counterparty's alias,
+/// which is the only thing that routes their messages to us and is never
+/// re-announced on the wire. Deleting it is the July regression; that is what
+/// [`transport_wipe_all`] is for, and it is safe there only because it leaves
+/// nothing behind to be orphaned.
+///
+/// Local only. The ciphertext stays on chain forever (D-088) — the confirm
+/// copy must say so.
+///
+/// Idempotent: clearing an unknown or already-empty conversation is a no-op
+/// success.
+Future<WipeReportDto> transportClearMessages({
+  required String conversationId,
+}) => RustLib.instance.api.crateApiTransportTransportClearMessages(
+  conversationId: conversationId,
+);
+
+/// Retire every live conversation with one contact, so a fresh contact request
+/// to them can be minted. The per-contact exit (INV-6).
+///
+/// **One operation, because two were worse than none.** The gesture is
+/// "hide the broken thread, then invite them again", and doing that from Dart
+/// as two calls half-applies in exactly the case it exists for: with TWO live
+/// conversations against one address — the situation this whole change is
+/// about — hiding one leaves the other `Active`, and
+/// [`transport_prepare_handshake`] then refuses, having already destroyed the
+/// first thread's messages. The user loses history and sends nothing
+/// (`consensus-auditor`, 2026-08-17). Retiring them ALL first makes the
+/// following prepare succeed by construction.
+///
+/// **Tombstone, never delete.** Every row keeps the counterparty's alias, so
+/// if they write to an old thread it comes back with its binding intact — the
+/// July regression is not re-opened here.
+///
+/// **Messages ARE destroyed**, the same purge [`transport_hide_conversation`]
+/// performs, because that is what hiding a thread means in this app. The
+/// caller's copy must say so.
+///
+/// **`Active` rows only.** An unaccepted invitation is deliberately untouched:
+/// hiding one is permanent (`may_unhide` refuses `PendingInbound`), and it is
+/// the only route to refunding the 0.2 KAS bond the counterparty already paid.
+/// Retiring it to send our own handshake would spend 0.2 KAS of ours to strand
+/// 0.2 KAS of theirs.
+///
+/// **Deliberately does NOT call `transport_abandon`, unlike the total wipe.**
+/// The wipe must, because its Handshake arm would upsert a prepare-time
+/// snapshot into an emptied store and mint back a conversation the user
+/// erased. Here it cannot: `PENDING_INTENT` is a single slot, a staged
+/// handshake to this same contact cannot coexist with this call's own
+/// invitation/Active preconditions, and a staged Comm confirm writes a NEW
+/// message row rather than restoring an erased one.
+///
+/// Returns what was retired AND whether the catch-up floor is durable. That
+/// last flag is not decoration: this sheet promises "the messages do not [come
+/// back]", and without a persisted floor an opt-in history catch-up can hand
+/// them back. Zero conversations is a success — there was nothing live to
+/// retire, and the caller may go straight to the handshake.
+Future<WipeReportDto> transportStartOver({required String contactAddress}) =>
+    RustLib.instance.api.crateApiTransportTransportStartOver(
+      contactAddress: contactAddress,
+    );
+
+/// What [`transport_wipe_all`] would destroy, without destroying it.
+///
+/// The confirm sheet's number comes from HERE and never from the conversation
+/// list, which filters hidden rows the wipe still destroys. `side_files_cleared`
+/// is always 0 — nothing has been cleared yet.
+Future<WipeReportDto> transportWipePreview() =>
+    RustLib.instance.api.crateApiTransportTransportWipePreview();
+
+/// Erase every conversation, every message and every local trace of them.
+///
+/// **Why the TOTAL erase is the safe one, and a single-row delete is not.**
+/// A conversation row is the only place a counterparty's alias lives, and a
+/// client that already knows us answers a repeat handshake with silence
+/// (`conversation-manager-service.ts:181-213`). Delete one row and they keep
+/// writing into a thread we can no longer route — the July regression, which
+/// is why [`transport_hide_conversation`] tombstones instead of removing.
+/// Erasing EVERYTHING leaves nothing half-bound: no surviving row holds a lost
+/// alias, and the user knows they are starting over with everyone.
+///
+/// It is also, measured on the founder's device 2026-08-17, how a broken
+/// conversation actually gets repaired. A client that has forgotten you is the
+/// only one that will handshake you afresh, and a fresh handshake is what
+/// re-binds both sides. This is that gesture, made available on our side.
+///
+/// **What it does NOT touch, deliberately:**
+/// - `fill.config` — the indexer posture is a setting the user chose, not
+///   data they wrote. Wiping it would silently re-enter the §0 default.
+/// - `scan.cursor` — a position on the chain, not user content. Resetting it
+///   would re-walk history the user just asked to be rid of.
+///
+///   **And that is only half the truth, so read the other half.** The node
+///   catch-up walks FORWARD from that cursor, so an erase landing while a
+///   replay is in flight can re-fold handshakes mined before it and re-create
+///   conversations in the emptied store as fresh invitations. Comms cannot come
+///   back that way (post-erase they drop unrouted, `NoConversationForAlias`),
+///   and the window is bounded by the cursor's own write cadence and
+///   `MAX_CATCHUP_PAGES` — but it is a real, accepted residual, not a free
+///   omission. The node lane has no epoch guard; closing it means an erase
+///   check inside the fold's own lock scope, which is a change to the live
+///   intake path and is deliberately NOT made at the end of this sitting
+///   (`consensus-auditor`, 2026-08-17, dispositioned). IDEAS_BACKLOG carries
+///   its trigger.
+/// - The vault, keys and coins. This erases messages, never money.
+///
+/// **What it cannot do:** reach the chain. Every message is public ciphertext
+/// on a public DAG, permanently, and anyone holding the seed can decrypt it
+/// again (D-088). The confirm copy says so; this doc says so; nothing in this
+/// lane may imply otherwise.
+///
+/// Not undoable. The caller owns the confirmation.
+Future<WipeReportDto> transportWipeAll() =>
+    RustLib.instance.api.crateApiTransportTransportWipeAll();
+
 /// A conversation's thread, oldest first — DECRYPT-ON-VIEW (§0.4): sealed
 /// rows open here, per call, while the vault is unlocked; the plaintext
 /// crosses once as the display DTO and Dart drops it with the widget. Vault
@@ -456,6 +585,21 @@ class ConversationDto {
   /// only — never on the wire, never in a backup.
   final String? contactName;
 
+  /// This thread has been REPLACED by a newer live one with the same
+  /// counterparty, and typing here would reach nobody.
+  ///
+  /// A conversation is a pair of locally-minted aliases, and the protocol's
+  /// only repair is for one side to forget and re-handshake. When they do,
+  /// we correctly accept the new handshake — and the old row is left holding
+  /// an alias no one monitors any more. Sending into it succeeds at every
+  /// layer we control (built, signed, broadcast, fee paid) and is read by no
+  /// one. This bool is what lets the UI say so instead of the user
+  /// discovering it hours later.
+  ///
+  /// Derived per pull from the record set, never stored — see
+  /// `TransportStore::superseded_by`.
+  final bool superseded;
+
   const ConversationDto({
     required this.conversationId,
     required this.contactAddress,
@@ -467,6 +611,7 @@ class ConversationDto {
     required this.lastActivityUnixMs,
     required this.inviteExpired,
     this.contactName,
+    required this.superseded,
   });
 
   @override
@@ -480,7 +625,8 @@ class ConversationDto {
       createdUnixMs.hashCode ^
       lastActivityUnixMs.hashCode ^
       inviteExpired.hashCode ^
-      contactName.hashCode;
+      contactName.hashCode ^
+      superseded.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -496,7 +642,8 @@ class ConversationDto {
           createdUnixMs == other.createdUnixMs &&
           lastActivityUnixMs == other.lastActivityUnixMs &&
           inviteExpired == other.inviteExpired &&
-          contactName == other.contactName;
+          contactName == other.contactName &&
+          superseded == other.superseded;
 }
 
 /// The user's fill posture, for the settings surface. `default_endpoint`
@@ -915,3 +1062,60 @@ class TxStatusDto {
 /// maps an enum-with-fields to a freezed class (the dag.rs DTO note); the
 /// per-state numbers ride [`TxStatusDto`]'s optional fields instead.
 enum TxStatusKind { submitted, accepted, confirmed, displaced, stalled }
+
+/// What a wipe destroyed. Counts and shapes only — a report about erasing
+/// user content may not carry any of it across the bridge (§4).
+class WipeReportDto {
+  final int conversations;
+  final int messages;
+
+  /// Contact names and the backup-coverage record: cleared alongside,
+  /// because each is a claim about data that no longer exists.
+  final int sideFilesCleared;
+
+  /// Unanswered contact requests destroyed — each holding 0.2 KAS the sender
+  /// paid, which only an Accept could have returned. Somebody else's money,
+  /// so it gets its own number and its own sentence in the confirmation.
+  final int pendingBonds;
+
+  /// Did the history-catch-up floor persist?
+  ///
+  /// **The one field here a user must be told about.** The floor is what
+  /// stops the next indexer fill rebuilding every conversation from our own
+  /// on-chain backup and re-downloading every message from a third party.
+  /// If it did not persist, the erase happened but is not durable against
+  /// the next catch-up — and the confirm sheet promised "cannot be undone".
+  ///
+  /// It is a field rather than an error because the store IS wiped by then:
+  /// failing the call would report "nothing was deleted" about an empty
+  /// store, which is the worse lie. So the call succeeds and says which kind
+  /// of success it was.
+  final bool floorPersisted;
+
+  const WipeReportDto({
+    required this.conversations,
+    required this.messages,
+    required this.sideFilesCleared,
+    required this.pendingBonds,
+    required this.floorPersisted,
+  });
+
+  @override
+  int get hashCode =>
+      conversations.hashCode ^
+      messages.hashCode ^
+      sideFilesCleared.hashCode ^
+      pendingBonds.hashCode ^
+      floorPersisted.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WipeReportDto &&
+          runtimeType == other.runtimeType &&
+          conversations == other.conversations &&
+          messages == other.messages &&
+          sideFilesCleared == other.sideFilesCleared &&
+          pendingBonds == other.pendingBonds &&
+          floorPersisted == other.floorPersisted;
+}

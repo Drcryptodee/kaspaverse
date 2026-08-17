@@ -244,6 +244,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WalletSnapshot dco_decode_wallet_snapshot(dynamic raw);
 
   @protected
+  WipeReportDto dco_decode_wipe_report_dto(dynamic raw);
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
@@ -504,6 +507,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WalletSnapshot sse_decode_wallet_snapshot(SseDeserializer deserializer);
+
+  @protected
+  WipeReportDto sse_decode_wipe_report_dto(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
@@ -843,6 +849,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     WalletSnapshot self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_wipe_report_dto(WipeReportDto self, SseSerializer serializer);
 }
 
 // Section: wire_class

@@ -162,6 +162,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
         builder: (_) => ThreadScreen(
           conversationId: conversation.conversationId,
           contactLabel: contactLabel(conversation),
+          superseded: conversation.superseded,
           messaging: _messaging,
         ),
       ),
@@ -196,13 +197,202 @@ class _ContactsScreenState extends State<ContactsScreen> {
       builder: (_) => _RowActionsSheet(
         label: contactLabel(conversation),
         canName: conversation.contactAddress.isNotEmpty,
+        // Active rows ONLY. On an invitation, "start over" would hide the card
+        // permanently — `may_unhide` refuses `PendingInbound` — and spend 0.2
+        // KAS of ours while stranding the 0.2 KAS bond they already paid, which
+        // only Accept can return.
+        // Never on a REPLACED row. Start over retires every Active thread with
+        // this contact — including the working successor the card body has
+        // just told the user to open. Highest-cost mis-tap in the surface,
+        // offered on the card the app itself labelled broken. Costs no exit:
+        // the successor is always sendable, and Start over is available there.
+        canStartOver:
+            conversation.status == 'active' &&
+            conversation.contactAddress.isNotEmpty &&
+            !conversation.superseded,
+        // Nothing to clear on an invitation but the handshake row, which is
+        // deliberately kept (a bond gate reads it) — so it would report "0
+        // messages cleared" over a card that visibly still has a row on it.
+        canClear: conversation.status != 'pending_in',
       ),
     );
     if (!mounted || action == null) return;
     if (action == 'name') {
       await _nameContact(conversation);
+    } else if (action == 'restart') {
+      await _startOver(conversation);
+    } else if (action == 'clear') {
+      await _clearMessages(conversation);
     } else if (action == 'hide') {
       await _hide(conversation);
+    }
+  }
+
+  /// The per-contact exit (INV-6): hide this thread, then send them a fresh
+  /// contact request.
+  ///
+  /// **It has to be its own door, and that is the point.** Going through
+  /// `_addContact` cannot work: `existingConversation` finds the hidden row,
+  /// un-hides it (the only thing that restores a hidden conversation) and
+  /// hands it straight back — so "hide it, then re-invite" was "hide it, then
+  /// un-hide it", and a contact whose only live thread was broken had no exit
+  /// but deleting every conversation they had.
+  ///
+  /// **`startOver` is ONE Rust call, not hide-then-invite from here.** Doing it
+  /// as two half-applied in exactly the case it exists for: with two live
+  /// threads on one address, hiding one leaves the other Active and the
+  /// handshake then refuses — after the first thread's messages are already
+  /// gone. Rust retires them all, so the prepare that follows succeeds by
+  /// construction. A failure aborts before any spend.
+  Future<void> _startOver(ConversationDto conversation) async {
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _StartOverSheet(label: contactLabel(conversation)),
+    );
+    if (confirmed != true) return;
+    final WipeReportDto retired;
+    try {
+      retired = await _messaging.startOver(conversation.contactAddress);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+      return;
+    }
+    if (!mounted) return;
+    // The sheet promised the messages do not come back. Without a durable floor
+    // an opt-in history catch-up can return them, and the user is the only one
+    // who can act on that — so it rides the CONFIRM SHEET's own note, not a
+    // SnackBar. A SnackBar here is buried within a frame: `_runPrepare` opens a
+    // modal bottom sheet over exactly where it renders, on the one path that
+    // also spends 0.2 KAS.
+    const bond =
+        'Carries a 0.2 KAS bond — the network norm. It comes back when they '
+        'accept; if their app still has you as a contact it may complete the '
+        'chat silently and the bond is not returned.';
+    await _runPrepare(
+      () => _messaging.prepareHandshake(conversation.contactAddress),
+      preparingObject: 'contact request',
+      contextNote: retired.floorPersisted
+          ? bond
+          : 'Your old messages were deleted, but history catch-up could not be '
+                'stopped for them — they may come back. $bond',
+    );
+  }
+
+  /// The total erase: every conversation, every message, every local trace.
+  ///
+  /// Irreversible, so the confirm names the COUNT rather than asking "are you
+  /// sure" — a number the user can check against what they think they have is
+  /// a far better guard than a second tap, and it costs no new widget.
+  ///
+  /// Deliberately not a hold-to-confirm: DS §3 rations the glow treatment to
+  /// primary actions and live data, and dressing a destructive erase in the
+  /// signing control's teal would say the opposite of what it does.
+  Future<void> _wipeAll() async {
+    KvHaptic.selection();
+    // Asked of Rust, never counted off this screen's list: that list filters
+    // hidden conversations and the wipe destroys them too, so the visible
+    // number would under-promise by exactly the rows the user already tried to
+    // put out of sight — and the number is the consent.
+    final WipeReportDto preview;
+    try {
+      preview = await _messaging.wipePreview();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+      return;
+    }
+    if (!mounted) return;
+    if (preview.conversations == 0 && preview.messages == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('There is nothing to delete.')),
+      );
+      return;
+    }
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _WipeAllSheet(preview: preview),
+    );
+    if (confirmed != true) return;
+    try {
+      final report = await _messaging.wipeAll();
+      if (!mounted) return;
+      final deleted =
+          'Deleted ${report.conversations} conversation'
+          '${report.conversations == 1 ? '' : 's'} '
+          'and ${report.messages} message'
+          '${report.messages == 1 ? '' : 's'}.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          // The floor is what makes the erase stick against the next history
+          // catch-up. If it did not persist, the sheet's "cannot be undone"
+          // is not yet true and the user is the only one who can act on it —
+          // so this is the one outcome that gets its own sentence and its own
+          // dwell time, rather than a success line that quietly isn't.
+          duration: report.floorPersisted
+              ? const Duration(seconds: 4)
+              : const Duration(seconds: 10),
+          content: Text(
+            report.floorPersisted
+                ? deleted
+                : '$deleted But history catch-up could not be stopped — '
+                      'turn off History & backup, or they may come back.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      // Never a silent failure on a destructive action: the user must not walk
+      // away believing their messages are gone when they are still here.
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    }
+  }
+
+  /// Empty one thread, keep the conversation. The narrow half of "delete this
+  /// chat" — the row stays listed and stays sendable, so a counterparty who
+  /// never re-announces themselves is not orphaned (the reason hide
+  /// tombstones rather than deletes).
+  Future<void> _clearMessages(ConversationDto conversation) async {
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _ClearMessagesSheet(label: contactLabel(conversation)),
+    );
+    if (confirmed != true) return;
+    try {
+      final report = await _messaging.clearMessages(
+        conversation.conversationId,
+      );
+      if (!mounted) return;
+      final n = report.messages;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: report.floorPersisted
+              ? const Duration(seconds: 4)
+              : const Duration(seconds: 10),
+          content: Text(
+            report.floorPersisted
+                ? (n == 1 ? '1 message cleared.' : '$n messages cleared.')
+                : '$n cleared — but history catch-up could not be stopped for '
+                      'this thread, so they may come back.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      // A partial clear is real — some rows ARE gone. Say what went wrong
+      // rather than a count, which would read as "nothing happened".
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
     }
   }
 
@@ -296,6 +486,33 @@ class _ContactsScreenState extends State<ContactsScreen> {
               showHistoryFillSheet(context, _messaging, onBackUp: _backUp);
             },
           ),
+          // The total erase. Behind an overflow rather than a bare icon: it is
+          // the one gesture on this screen that cannot be undone, and it must
+          // never sit one mis-tap away from "History & backup", which is its
+          // exact opposite.
+          PopupMenuButton<String>(
+            tooltip: 'More',
+            onSelected: (value) {
+              if (value == 'wipe') _wipeAll();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'wipe',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    Icons.delete_forever_outlined,
+                    // §3: `error` is rationed to fund risk and DESTRUCTION;
+                    // `warning` is the degraded-state voice. Amber on the app's
+                    // one irreversible action was the wrong register.
+                    color: KvColor.error,
+                  ),
+                  title: Text('Delete all messages'),
+                  subtitle: Text('Every conversation, on this device'),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -353,13 +570,29 @@ class _ContactsScreenState extends State<ContactsScreen> {
 /// Long-press actions for one row. Two choices, named plainly — a menu this
 /// short does not need icons or a title bar competing with them.
 class _RowActionsSheet extends StatelessWidget {
-  const _RowActionsSheet({required this.label, required this.canName});
+  const _RowActionsSheet({
+    required this.label,
+    required this.canName,
+    this.canStartOver = false,
+    this.canClear = true,
+  });
 
   final String label;
 
   /// An invitation carries no address until its sender is recorded, and a
   /// name is keyed on the address — so there is nothing to name yet.
   final bool canName;
+
+  /// Active conversations only, and never a replaced one. Starting over hides
+  /// the thread, and hiding an invitation is permanent — it would bury the only
+  /// route to refunding the bond the counterparty already paid, while spending
+  /// one of ours. On a replaced row it would retire the working successor too.
+  final bool canStartOver;
+
+  /// An invitation's only message row is its handshake, which the clear
+  /// deliberately keeps (a bond gate reads it) — so clearing one is a no-op
+  /// that reports zero.
+  final bool canClear;
 
   @override
   Widget build(BuildContext context) {
@@ -386,11 +619,42 @@ class _RowActionsSheet extends StatelessWidget {
                 subtitle: const Text('Shown only on this device'),
                 onTap: () => Navigator.of(context).pop('name'),
               ),
+            if (canStartOver)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.restart_alt),
+                title: const Text('Start over with this contact'),
+                subtitle: const Text(
+                  'Deletes your messages and sends a new request (0.2 KAS)',
+                ),
+                onTap: () => Navigator.of(context).pop('restart'),
+              ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.cleaning_services_outlined),
+              title: const Text('Clear messages'),
+              // The distinction from Hide, in one line: this one keeps the
+              // conversation working. Without it the two read as the same
+              // gesture and the user picks the wrong one.
+              // A greyed-out row with no reason is worse than no row. Say
+              // why on the one card where the user would ask.
+              subtitle: Text(
+                canClear
+                    ? 'Empties the thread; you can still message'
+                    : 'Nothing to clear until you accept',
+              ),
+              enabled: canClear,
+              onTap: () => Navigator.of(context).pop('clear'),
+            ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.visibility_off_outlined),
               title: const Text('Hide conversation'),
-              subtitle: const Text('Comes back if they write again'),
+              // Says the destructive half FIRST. It read as the gentlest item
+              // in the menu and it purges the thread.
+              subtitle: const Text(
+                'Clears the thread; comes back if they write',
+              ),
               onTap: () => Navigator.of(context).pop('hide'),
             ),
           ],
@@ -595,11 +859,23 @@ class _ConversationCard extends StatelessWidget {
     final expired = c.status == 'pending_in' && c.inviteExpired;
     final pendingIn = c.status == 'pending_in' && !expired;
     final pendingOut = c.status == 'pending_out';
+    // Rust's derived rule: a newer live thread with this same contact exists,
+    // so this one's alias reaches nobody. It stays open and readable — the
+    // history is real — but it can no longer be typed in.
+    final replaced = c.superseded;
 
+    // ORDER MATTERS, AND IT MUST MATCH THE BODY CHAIN BELOW. When the label
+    // said one thing and the body another, a `pending_in` row could render
+    // "Wants to connect" over the Replaced body — losing its Accept button and
+    // with it the only route to refunding the counterparty's bond. Rust also
+    // refuses to mark an invitation superseded, so this is belt and braces;
+    // the two orderings are kept identical so they cannot drift again.
     final (String statusLine, Color statusColor) = expired
         ? ('Invitation expired', KvColor.textTertiary)
         : pendingIn
         ? ('Wants to connect', KvColor.info)
+        : replaced
+        ? ('Replaced', KvColor.textTertiary)
         : pendingOut
         ? ('Awaiting their accept', KvColor.textTertiary)
         : ('Active', KvColor.primaryMuted);
@@ -626,6 +902,8 @@ class _ConversationCard extends StatelessWidget {
                         ? Icons.mail_outline
                         : pendingIn
                         ? Icons.mark_email_unread_outlined
+                        : replaced
+                        ? Icons.history
                         : Icons.forum_outlined,
                     size: 20,
                     color: statusColor,
@@ -685,6 +963,17 @@ class _ConversationCard extends StatelessWidget {
                     },
                     icon: const Icon(Icons.handshake_outlined, size: 18),
                     label: const Text('Accept'),
+                  ),
+                ),
+              ] else if (replaced) ...[
+                const SizedBox(height: KvSpace.sm),
+                Text(
+                  // Says what happened, what it means, and where to go — the
+                  // three things the silence never said.
+                  'They started a new conversation with you. This one is '
+                  'history only — open the newer thread to message them.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: KvColor.textSecondary,
                   ),
                 ),
               ],
@@ -759,6 +1048,238 @@ class _HideSheet extends StatelessWidget {
             FilledButton.tonal(
               onPressed: () => Navigator.of(context).pop(true),
               child: const Text('Hide'),
+            ),
+            const SizedBox(height: KvSpace.s),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Confirm starting a conversation over with one contact.
+///
+/// The copy has to be honest about the one thing that decides whether this
+/// works: a client that still remembers you may answer a repeat request with
+/// silence. That is not a defect we can fix from here — it is how the wire
+/// protocol behaves — so the sheet says it rather than promising a repair.
+class _StartOverSheet extends StatelessWidget {
+  const _StartOverSheet({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          KvSpace.m,
+          KvSpace.gutter,
+          KvSpace.l,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Text('Start over', style: theme.textTheme.titleMedium),
+            ),
+            const SizedBox(height: KvSpace.m),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontFamily: KvFont.mono,
+              ),
+            ),
+            const SizedBox(height: KvSpace.sm),
+            Text(
+              'Deletes your messages with this contact — every conversation '
+              'you have with them — hides those threads, and sends a fresh '
+              'contact request carrying the usual 0.2 KAS bond.\n\n'
+              'Use this when messages stop getting through. It works best when '
+              'they have also cleared their side — an app that still has you '
+              'as a contact may accept silently and send nothing back, in '
+              'which case the bond is not returned. A thread comes back if '
+              'they write to it again — the messages do not.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+              ),
+            ),
+            const SizedBox(height: KvSpace.l),
+            FilledButton.tonal(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Review request'),
+            ),
+            const SizedBox(height: KvSpace.s),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Confirm the total erase.
+///
+/// Three things this copy must do, in order: name what goes (with a number the
+/// user can check), name the one thing that CANNOT go (the chain — D-088; this
+/// app never implies deletion it cannot perform), and name the consequence
+/// people actually care about, which is that contacts have to handshake again.
+///
+/// That last line is not a warning bolted on — it is the useful half. A
+/// counterparty who still remembers you answers a repeat handshake with
+/// silence, so after this the reliable move is for THEM to start the new
+/// conversation. Saying so here is what turns a destructive button into the
+/// repair gesture it actually is.
+class _WipeAllSheet extends StatelessWidget {
+  const _WipeAllSheet({required this.preview});
+
+  /// Rust's count of what the wipe would destroy — hidden rows included.
+  final WipeReportDto preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final conversationCount = preview.conversations;
+    final messageCount = preview.messages;
+    final plural = conversationCount == 1 ? '' : 's';
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          KvSpace.m,
+          KvSpace.gutter,
+          KvSpace.l,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Text(
+                'Delete all messages',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: KvColor.error,
+                ),
+              ),
+            ),
+            const SizedBox(height: KvSpace.m),
+            Text(
+              'This deletes $conversationCount conversation$plural and '
+              '$messageCount message${messageCount == 1 ? '' : 's'} from this '
+              'device, including any you have hidden. It cannot be undone.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: KvSpace.sm),
+            Text(
+              'Messages already sent stay on Kaspa permanently — this clears '
+              'your copy, not the chain, and this app will not fetch them '
+              'back, including from your backup. Your wallet and coins are '
+              'not touched.\n\n'
+              'A contact can appear again as a new request — their messages do '
+              'not come back.\n\n'
+              '${preview.pendingBonds > 0 ? 'This also deletes '
+                        '${preview.pendingBonds} unanswered contact '
+                        'request${preview.pendingBonds == 1 ? '' : 's'} — the 0.2 '
+                        'KAS bond each sender paid can no longer be returned to '
+                        'them.\n\n' : ''}'
+              'To talk to someone again afterwards, one of you has to send a '
+              'new contact request. Asking them to start it is the reliable '
+              'way round: an app that still remembers you may not answer a '
+              'repeat request.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+              ),
+            ),
+            const SizedBox(height: KvSpace.l),
+            // FILLED, not tonal — this is where the added ceremony weight
+            // lives. A tonal button here reads identical to the benign "Clear
+            // messages" confirm one gesture away, and the two do very
+            // different things. No new widget, no hold gesture: DS §8's
+            // hold-to-sign is the SIGNING ceremony, and its glow is rationed
+            // to value-committing primary actions — dressing an erase in that
+            // register would say "this is the thing you want".
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: FilledButton.styleFrom(
+                backgroundColor: KvColor.error,
+                foregroundColor: KvColor.surface,
+              ),
+              child: Text('Delete $conversationCount conversation$plural'),
+            ),
+            const SizedBox(height: KvSpace.s),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Confirm emptying ONE thread while keeping the conversation.
+///
+/// The copy's whole job is to separate this from Hide, which sits directly
+/// beneath it in the same menu and also purges content. Says what survives
+/// (the conversation), what does not (the words), and the one thing neither
+/// gesture can do (reach the chain — D-088).
+class _ClearMessagesSheet extends StatelessWidget {
+  const _ClearMessagesSheet({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.gutter,
+          KvSpace.m,
+          KvSpace.gutter,
+          KvSpace.l,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Text('Clear messages', style: theme.textTheme.titleMedium),
+            ),
+            const SizedBox(height: KvSpace.m),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontFamily: KvFont.mono,
+              ),
+            ),
+            const SizedBox(height: KvSpace.sm),
+            Text(
+              'Empties this thread on your device. The conversation stays on '
+              'your list. Messages already on Kaspa stay there permanently; '
+              'this only clears your copy.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+              ),
+            ),
+            const SizedBox(height: KvSpace.l),
+            FilledButton.tonal(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Clear messages'),
             ),
             const SizedBox(height: KvSpace.s),
             TextButton(
