@@ -20,6 +20,7 @@ pub mod link;
 mod link_rpc;
 mod send;
 pub mod spans;
+mod spend_policy;
 mod transport;
 mod transport_store;
 mod wallet_sync;

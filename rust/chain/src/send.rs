@@ -38,6 +38,7 @@ use kaspa_wallet_core::tx::{Fees, PaymentDestination, PaymentOutputs};
 use kaspa_wallet_core::utxo::{OutgoingTransaction, UtxoEntryReference};
 
 use crate::error::{ChainError, Result};
+use crate::spend_policy;
 use crate::wallet_sync::WalletEngine;
 use crate::Rpc;
 
@@ -56,7 +57,12 @@ pub struct SendSummary {
     pub fee_sompi: u64,
     /// `amount + fee` (what leaves the wallet, excluding returned change).
     pub total_sompi: u64,
-    /// Aggregate mass across the chain (grams).
+    /// Aggregate OVERALL mass across the chain (grams) — the max-of-dimensions
+    /// number that includes KIP-9 storage mass. The fee is NOT priced from
+    /// this (storage is excluded from the relay-fee floor), so the two never
+    /// reconcile: a 1 KAS send from a fat UTXO reports ~10,000 here and pays
+    /// for ~2,036. Diagnostic only — never render it beside `fee_sompi`
+    /// without saying which it is (the confirm screen shows the fee alone).
     pub mass: u64,
     /// Number of generated transactions (1 normally; >1 when chained past 100k mass).
     pub tx_count: u32,
@@ -224,8 +230,8 @@ impl WalletEngine {
         rpc: Rpc,
         payload: Option<Vec<u8>>,
     ) -> Result<PreparedSend> {
-        // A plain payment: no priority selection — the Generator draws inputs in
-        // its own order. UTXO hygiene (fresh change) is the caller's choice.
+        // A plain payment: no pinned block — the spend order is wholly the
+        // wallet policy's (spend_policy.rs: riders first, then largest-first).
         self.prepare_send_inner(
             destination,
             amount_sompi,
@@ -391,10 +397,11 @@ impl WalletEngine {
 
     /// Shared build core for [`prepare_send`] and [`prepare_send_pinned`]:
     /// register the change address, run the pinned Generator over the live
-    /// context, iterate the whole (possibly chained) tx set unsigned, and
-    /// project the B7 summary from the BUILT txs. `priority` = `None` is the
-    /// plain path (byte-identical to the pre-D2 behaviour); `Some(entries)`
-    /// pins input[0].
+    /// context in the spend-policy order, iterate the whole (possibly chained)
+    /// tx set unsigned, and project the B7 summary from the BUILT txs.
+    /// `priority` = `None` is the plain path (policy order: riders, then
+    /// largest-first); `Some(entries)` is the pinned path (the same policy
+    /// with the pinned block wholly first — input[0] identity, D-067).
     #[allow(clippy::too_many_arguments)]
     async fn prepare_send_inner(
         &self,
@@ -410,45 +417,67 @@ impl WalletEngine {
         // (ii) Watch the change address so the change UTXO this send returns is
         // visible + spendable (else it would be stranded). Idempotent for an
         // already-watched address (the pinned source is always in the window).
+        // BEFORE the snapshot below, so a coin this scan surfaces is in the
+        // policy's pool.
         context
             .scan_and_register_addresses(vec![change.clone()], None)
             .await?;
 
-        let payment: PaymentDestination =
-            PaymentOutputs::from((destination.clone(), amount_sompi)).into();
-        let settings = GeneratorSettings::try_new_with_context(
-            context,
-            priority, // None = plain draw; Some = input[0] pinned to the source
-            change,   // change_address (registered above + on the signer)
-            1,        // sig_op_count — single-sig (§0.2)
-            1,        // minimum_signatures
-            payment,
-            // fee_rate = None is the RELAY-FEE FLOOR, not a "normal" bucket:
-            // `calc_fee_rate` returns 0 for None (generator.rs:804-805), so the
-            // fee is `calc_minimum_transaction_fee_from_mass(compute_mass)`
-            // (generator.rs:649) — the cheapest a node will relay. NOTE the
-            // basis is COMPUTE mass; storage mass is excluded from the floor
-            // (check_transaction_standard.rs:127-146), so a dust-heavy send
-            // reports a mass far above what it pays for.
-            None,
-            Fees::SenderPays(0), // priority fee 0; NOT Fees::None (generator.rs:384)
-            payload,             // final-tx payload (P2.1 transport spine)
-            None,                // multiplexer
-        )?;
+        // The spend order is wallet policy (spend_policy.rs): the pinned block
+        // wholly first (D-067 — input[0] identity), then up to RIDER_LIMIT of
+        // the smallest coins, then the rest largest-first. Handed to the
+        // Generator as its native priority list over the LIVE context —
+        // never `try_new_with_iterator`, which would trade the context's
+        // mature/pending bookkeeping for a dead snapshot. A coin maturing
+        // after this snapshot still flows through the context iterator behind
+        // the list (ascending, as the pin keeps it) — spendable, merely last.
+        let mature: Vec<UtxoEntryReference> = context
+            .get_utxos(None, None)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let pinned = priority.unwrap_or_default();
+        let ridered =
+            spend_policy::select_spend_priority(&mature, &pinned, spend_policy::RIDER_LIMIT);
 
-        let generator = Generator::try_new(settings, Some(signer), None)?;
-
-        // Iterate the whole chain (compounding batches + final). Unsigned.
-        let mut pending = Vec::new();
-        loop {
-            match generator.generate_transaction() {
-                Ok(Some(tx)) => pending.push(tx),
-                Ok(None) => break,
-                Err(e) => return Err(map_generate_error(e)),
+        let (pending, summary) = {
+            let (pending, summary) = generate_chain(
+                &context,
+                ridered,
+                &change,
+                &destination,
+                amount_sompi,
+                payload.clone(),
+                signer.clone(),
+            )?;
+            // The rider law's no-new-leg guarantee, enforced by construction:
+            // a one-transaction chain cannot have gained a leg (one is the
+            // floor), so only a chained result pays the comparison generation.
+            // No mass arithmetic of ours decides this (INV-9) — the pinned
+            // Generator is run both ways and the shorter chain wins.
+            if pending.len() > 1 {
+                let riderless = spend_policy::select_spend_priority(&mature, &pinned, 0);
+                let (p, s) = generate_chain(
+                    &context,
+                    riderless,
+                    &change,
+                    &destination,
+                    amount_sompi,
+                    payload.clone(),
+                    signer.clone(),
+                )?;
+                if p.len() < pending.len() {
+                    (p, s)
+                } else {
+                    (pending, summary)
+                }
+            } else {
+                (pending, summary)
             }
-        }
+        };
 
-        let mut summary = project_summary(&generator.summary(), destination.to_string());
+        let mut summary = project_summary(&summary, destination.to_string());
         // B7: the payload size the confirm shows is read back from the BUILT
         // final tx, never echoed from the caller's argument.
         summary.payload_len = final_payload_len(&pending);
@@ -458,6 +487,64 @@ impl WalletEngine {
             rpc,
         })
     }
+}
+
+/// One full (unsigned) generation over the live context with an explicit spend
+/// order. Pure plumbing shared by the ridered and riderless passes of
+/// `prepare_send_inner`; generation never mutates the context (context
+/// registration happens only in `try_submit`, pending.rs:214-219 @ `cfafeb4`),
+/// so running it twice is side-effect-free and a discarded chain simply drops.
+fn generate_chain(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+    order: Vec<UtxoEntryReference>,
+    change: &Address,
+    destination: &Address,
+    amount_sompi: u64,
+    payload: Option<Vec<u8>>,
+    signer: Arc<dyn SignerT>,
+) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
+    let payment: PaymentDestination =
+        PaymentOutputs::from((destination.clone(), amount_sompi)).into();
+    let settings = GeneratorSettings::try_new_with_context(
+        context.clone(),
+        // The full spend order as priority entries: consumed in list order
+        // BEFORE the context iterator, and de-duplicated out of that iterator
+        // by outpoint identity (generator.rs:588-614 @ `cfafeb4`). An empty
+        // order (empty wallet) degrades to the plain draw.
+        (!order.is_empty()).then_some(order),
+        change.clone(), // change_address (registered by the caller + on the signer)
+        1,              // sig_op_count — single-sig (§0.2)
+        1,              // minimum_signatures
+        payment,
+        // fee_rate = None is the RELAY-FEE FLOOR, not a "normal" bucket:
+        // `calc_fee_rate` returns 0 for None (generator.rs:804-805), so the
+        // fee is `calc_minimum_transaction_fee_from_mass(compute_mass)`
+        // (generator.rs:649). That basis is the wallet's minimum-relay proxy:
+        // mostly compute mass, with the payload component hardened to account
+        // for normalized transient byte mass (generator.rs:646-648) — the
+        // mempool's own post-Toccata floor is max(compute, normalized
+        // transient) (check_transaction_standard.rs:145). STORAGE mass is the
+        // one dimension excluded from the floor, which is why a dust-heavy
+        // send reports an overall mass far above what it pays for.
+        None,
+        Fees::SenderPays(0), // priority fee 0; NOT Fees::None (generator.rs:384)
+        payload,             // final-tx payload (P2.1 transport spine)
+        None,                // multiplexer
+    )?;
+
+    let generator = Generator::try_new(settings, Some(signer), None)?;
+
+    // Iterate the whole chain (compounding batches + final). Unsigned.
+    let mut pending = Vec::new();
+    loop {
+        match generator.generate_transaction() {
+            Ok(Some(tx)) => pending.push(tx),
+            Ok(None) => break,
+            Err(e) => return Err(map_generate_error(e)),
+        }
+    }
+    let summary = generator.summary();
+    Ok((pending, summary))
 }
 
 /// Payload bytes on the final tx of a built chain (pure; shared by prepare and
@@ -507,15 +594,20 @@ fn pays_to(tx: &Transaction, address: &Address) -> bool {
 /// Classify one candidate amount by running a real (unsigned, non-broadcast)
 /// generation over the live context. Public data only: simulated payment to our
 /// own change address (mass depends on script SIZE, not identity), no signer.
+/// `order` is the SAME spend order a real send would use (spend_policy) — an
+/// amount can build under one input order and die of storage mass under
+/// another, so probing a different order would advertise a floor for a
+/// transaction the wallet never builds.
 fn probe_context(
     context: &kaspa_wallet_core::utxo::UtxoContext,
     change: &Address,
     amount_sompi: u64,
+    order: Option<&[UtxoEntryReference]>,
 ) -> Result<ProbeOutcome> {
     let payment: PaymentDestination = PaymentOutputs::from((change.clone(), amount_sompi)).into();
     let settings = match GeneratorSettings::try_new_with_context(
         context.clone(),
-        None,
+        order.map(<[UtxoEntryReference]>::to_vec),
         change.clone(),
         1,
         1,
@@ -632,9 +724,49 @@ impl WalletEngine {
     /// or `None` when no amount below the balance is sendable. Signerless,
     /// offline, public data only; the change address doubles as the probe
     /// destination (identical script size ⇒ identical mass).
-    pub fn minimum_sendable(&self, change: Address) -> Result<Option<u64>> {
+    ///
+    /// `pinned`: the priority entries the real send will pin (D-067) — pass
+    /// the same set handed to [`Self::prepare_send_pinned`], or `&[]` for a
+    /// plain send. The probe walks the coins in the send's own order
+    /// (spend_policy), so the floor it reports is the floor of the transaction
+    /// that actually gets built.
+    pub fn minimum_sendable(
+        &self,
+        change: Address,
+        pinned: &[UtxoEntryReference],
+    ) -> Result<Option<u64>> {
         let context = self.context();
-        search_minimum(|amount| probe_context(&context, &change, amount))
+        let mature = mature_snapshot_sync(&context)?;
+        let order = spend_policy::select_spend_priority(&mature, pinned, spend_policy::RIDER_LIMIT);
+        let order = (!order.is_empty()).then_some(order);
+        search_minimum(|amount| probe_context(&context, &change, amount, order.as_deref()))
+    }
+}
+
+/// A synchronous snapshot of the live context's mature set, in context order.
+///
+/// The pin's `UtxoContext::get_utxos` is async in signature only: its body
+/// (context.rs:757-807 @ `cfafeb4`) takes a std mutex and contains no await
+/// point, so its future is Ready on the first poll and polling it once with a
+/// no-op waker is a complete execution, not a gamble. If a future pin bump
+/// makes it genuinely asynchronous, this returns a typed error — never a hang,
+/// never a spin — which is the tripwire forcing this sync call site
+/// ([`WalletEngine::minimum_sendable`]) to be re-plumbed rather than silently
+/// probing a stale or empty order.
+fn mature_snapshot_sync(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+) -> Result<Vec<UtxoEntryReference>> {
+    use std::future::Future;
+    let fut = context.get_utxos(None, None);
+    let mut fut = std::pin::pin!(fut);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match fut.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(entries) => Ok(entries?.into_iter().map(Into::into).collect()),
+        std::task::Poll::Pending => Err(ChainError::Message(
+            "the pinned UtxoContext::get_utxos became genuinely asynchronous — \
+             re-plumb minimum_sendable's mature snapshot before trusting its floor"
+                .into(),
+        )),
     }
 }
 
@@ -685,6 +817,8 @@ mod tests {
     use kaspa_wallet_core::tx::generator::PendingTransaction as Pt;
     use kaspa_wallet_core::utils::kaspa_to_sompi;
     use kaspa_wallet_core::utxo::UtxoEntryReference;
+
+    use crate::spend_policy::RIDER_LIMIT;
     use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
 
     // Upstream gen1 mainnet vectors (keychain.rs / hd.rs) — valid, distinct.
@@ -821,6 +955,271 @@ mod tests {
             tx.inputs[0].previous_outpoint.transaction_id, priority_txid,
             "input[0] is the pinned priority UTXO even when it can't cover alone"
         );
+    }
+
+    /// The founder's measured fragmentation shape (2026-08-13): 12 x 0.5 +
+    /// 6 x 2 + 3 x 10 + 1 x 200 KAS = 248 KAS across 22 coins. The spend-policy
+    /// fence tests below assert the pinned Generator's EXACT numbers over it —
+    /// reproduced from the original probe, never re-derived. A pin bump that
+    /// moves any of them must fail here loudly.
+    fn fragmented_fixture() -> Vec<f64> {
+        std::iter::repeat_n(0.5, 12)
+            .chain(std::iter::repeat_n(2.0, 6))
+            .chain(std::iter::repeat_n(10.0, 3))
+            .chain(std::iter::once(200.0))
+            .collect()
+    }
+
+    /// A generator whose pool is `pool` (iterator order as given) and whose
+    /// priority list is `order` — the production shape of the spend policy
+    /// (`prepare_send_inner` hands the full policy order to the priority slot
+    /// over the live context; the iterator path proves identical draw
+    /// mechanics, as `offline_generator_pinned` already establishes).
+    fn offline_generator_over(
+        pool: &[UtxoEntryReference],
+        order: Vec<UtxoEntryReference>,
+        send_kas: f64,
+        change: Address,
+    ) -> Generator {
+        let payment: PaymentDestination =
+            PaymentOutputs::from((addr(DEST), kaspa_to_sompi(send_kas))).into();
+        let settings = GeneratorSettings::try_new_with_iterator(
+            mainnet(),
+            // Owned, not borrowed: the settings box the Generator stores is
+            // 'static, so a borrowing iterator cannot cross into it.
+            #[allow(clippy::unnecessary_to_owned)]
+            Box::new(pool.to_vec().into_iter()),
+            (!order.is_empty()).then_some(order),
+            change,
+            1,
+            1,
+            payment,
+            None,
+            Fees::SenderPays(0),
+            None,
+            None,
+        )
+        .unwrap();
+        Generator::try_new(settings, None, None).unwrap()
+    }
+
+    /// THE SPEND-POLICY FENCE, part 1 — the starting reality (2026-08-13,
+    /// reproduced): the pinned context's ASCENDING order (smallest-first, the
+    /// pre-policy wallet) versus pure DESCENDING (largest-first, Kaspium's
+    /// order), over the founder's measured wallet shape. The entire fee gap is
+    /// input count at the identical relay floor: one extra input costs 1,118
+    /// grams = 111,800 sompi here, and smallest-first drags in up to 22.
+    #[test]
+    fn spend_policy_table_reproduces_the_measured_orderings() {
+        let mut asc = fragmented_fixture();
+        asc.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut desc = fragmented_fixture();
+        desc.sort_by(|a, b| b.partial_cmp(a).unwrap());
+
+        // (send KAS, ascending inputs/fee, descending inputs/fee) — sompi-exact.
+        let table = [
+            (1.0, (3, 427_200), (2, 315_400)),
+            (10.0, (15, 1_768_800), (1, 203_600)),
+            (100.0, (22, 2_551_400), (1, 203_600)),
+        ];
+        for (send, (asc_inputs, asc_fee), (desc_inputs, desc_fee)) in table {
+            let generator = offline_generator(&asc, send, addr(CHANGE));
+            drain(&generator);
+            let s = project_summary(&generator.summary(), DEST.to_string());
+            assert_eq!(
+                (s.utxo_count, s.fee_sompi, s.tx_count),
+                (asc_inputs, asc_fee, 1),
+                "ascending (pre-policy) order for a {send} KAS send"
+            );
+
+            let generator = offline_generator(&desc, send, addr(CHANGE));
+            drain(&generator);
+            let s = project_summary(&generator.summary(), DEST.to_string());
+            assert_eq!(
+                (s.utxo_count, s.fee_sompi, s.tx_count),
+                (desc_inputs, desc_fee, 1),
+                "descending (largest-first) order for a {send} KAS send"
+            );
+        }
+
+        // The true 1-in-2-out floor: one fat coin, any ordinary amount.
+        let generator = offline_generator(&[200.0], 10.0, addr(CHANGE));
+        drain(&generator);
+        let s = project_summary(&generator.summary(), DEST.to_string());
+        assert_eq!(
+            (s.utxo_count, s.fee_sompi),
+            (1, 203_600),
+            "the one-input floor"
+        );
+    }
+
+    /// THE SPEND-POLICY FENCE, part 2 — the ending reality: the policy order
+    /// (riders first, then largest-first) through the Generator's priority
+    /// slot, exactly as production wires it. Every ordinary send from the
+    /// fragmented wallet is 2 riders + 1 fat coin = 3 inputs at 427,200 sompi:
+    /// the 10/100 KAS sends collapse 15->3 and 22->3, and the marginal cost of
+    /// the riders is bounded by RIDER_LIMIT extra inputs over pure
+    /// largest-first — asserted mechanically, not claimed.
+    #[test]
+    fn spend_policy_collapses_the_fragmented_send_within_the_rider_bound() {
+        // Pure largest-first input counts from the table test above.
+        let table = [(1.0, 2u32), (10.0, 1), (100.0, 1)];
+        for (send, largest_first_inputs) in table {
+            let entries: Vec<UtxoEntryReference> = fragmented_fixture()
+                .iter()
+                .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+                .collect();
+            let order = crate::spend_policy::select_spend_priority(&entries, &[], RIDER_LIMIT);
+            let generator = offline_generator_over(&entries, order.clone(), send, addr(CHANGE));
+            let pending = drain(&generator);
+            let s = project_summary(&generator.summary(), DEST.to_string());
+            assert_eq!(
+                (s.utxo_count, s.fee_sompi, s.tx_count),
+                (3, 427_200, 1),
+                "policy order for a {send} KAS send: 2 riders + 1 fat coin"
+            );
+            assert!(
+                s.utxo_count <= largest_first_inputs + RIDER_LIMIT as u32,
+                "rider law: at most RIDER_LIMIT inputs over pure largest-first"
+            );
+
+            // The Generator drew the policy list IN ORDER: the built inputs are
+            // a prefix of it (riders lead, largest funds).
+            let tx = pending
+                .iter()
+                .find(|pt| pt.is_final())
+                .unwrap()
+                .transaction();
+            for (i, input) in tx.inputs.iter().enumerate() {
+                assert_eq!(
+                    input.previous_outpoint.transaction_id,
+                    order[i].transaction_id(),
+                    "input[{i}] must be policy order[{i}]"
+                );
+            }
+        }
+    }
+
+    /// THE RIDER INVARIANT (spend-policy deliverable 3): over N successive
+    /// sends from the fragmented wallet, the UTXO count STRICTLY decreases —
+    /// largest-first alone would tread water (one coin out, one change back),
+    /// so this is the riders provably draining the pile. Also proves the
+    /// no-new-leg law the cheap way: every round builds exactly one
+    /// transaction.
+    #[test]
+    fn riders_strictly_drain_a_fragmented_wallet() {
+        let change = addr(CHANGE);
+        let mut entries: Vec<UtxoEntryReference> = fragmented_fixture()
+            .iter()
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+            .collect();
+
+        for round in 0..8 {
+            let before = entries.len();
+            let order = crate::spend_policy::select_spend_priority(&entries, &[], RIDER_LIMIT);
+            let generator = offline_generator_over(&entries, order, 1.0, change.clone());
+            let pending = drain(&generator);
+            assert_eq!(pending.len(), 1, "round {round}: riders never add a leg");
+            let tx = pending[0].transaction();
+
+            // Advance the simulated wallet: consumed inputs leave, the change
+            // output returns (the payment output goes to DEST and is gone).
+            let consumed: std::collections::HashSet<_> = tx
+                .inputs
+                .iter()
+                .map(|input| input.previous_outpoint.transaction_id)
+                .collect();
+            entries.retain(|entry| !consumed.contains(&entry.transaction_id()));
+            let change_value = tx
+                .outputs
+                .iter()
+                .find(|output| {
+                    extract_script_pub_key_address(&output.script_public_key, change.prefix)
+                        .is_ok_and(|decoded| decoded == change)
+                })
+                .map(|output| output.value)
+                .expect("an ordinary 1 KAS send from this wallet returns change");
+            entries.push(UtxoEntryReference::simulated(change_value));
+
+            assert!(
+                entries.len() < before,
+                "round {round}: UTXO count must strictly decrease ({before} -> {})",
+                entries.len()
+            );
+        }
+
+        // Six sends carry twelve riders: every 0.5 KAS fragment is gone (the
+        // riders drain from the bottom).
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.amount() == kaspa_to_sompi(0.5)),
+            "all twelve 0.5 KAS fragments must be absorbed within eight sends"
+        );
+        // Two regimes, both draining: while 0.5 KAS fragments last (rounds
+        // 1-6) a send is 2 riders + 1 fat coin, net -2; once the smallest
+        // coins are 2 KAS, the two riders alone cover a 1 KAS send, the
+        // Generator stops at 2 inputs, and the net is -1. 22 - 6*2 - 2*1 = 8.
+        assert_eq!(entries.len(), 8, "six -2 rounds, then two -1 rounds");
+    }
+
+    /// THE PIN COMPOSES WITH THE POLICY (D-067, the L47 scar): the pinned
+    /// entry stays order[0] and lands at input[0] of the built transaction,
+    /// with the riders and largest-first pool drawn behind it for the
+    /// shortfall. The pin is deliberately MID-SIZED — bigger than the
+    /// fragments, smaller than the pool's coins — so a policy that dropped it
+    /// into the pool would bury it behind both the riders AND the larger
+    /// coins (verified red under exactly that mutation; a smallest-coin pin
+    /// would pass by accident through the rider slot). No test before this
+    /// one would have caught a policy that silently overwrote the pin.
+    #[test]
+    fn pinned_entry_survives_the_policy_at_input_zero() {
+        let bound = addr(CHANGE);
+        let pin = UtxoEntryReference::simulated_with_address(kaspa_to_sompi(1.5), &bound);
+        let pin_txid = pin.transaction_id();
+
+        // The pinned entry lives in the mature set too (production always
+        // does: mature_utxos_at reads the same context) — the policy must
+        // de-duplicate it, not spend it twice.
+        let mut mature: Vec<UtxoEntryReference> = fragmented_fixture()
+            .iter()
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+            .collect();
+        mature.push(pin.clone());
+
+        let order = crate::spend_policy::select_spend_priority(
+            &mature,
+            std::slice::from_ref(&pin),
+            RIDER_LIMIT,
+        );
+        assert_eq!(
+            order[0].transaction_id(),
+            pin_txid,
+            "the pin leads the order"
+        );
+        assert_eq!(order.len(), mature.len(), "the pin is not duplicated");
+
+        // 1.5 KAS cannot cover a 5 KAS send: riders + pool are drawn behind
+        // the pin, and the pin is STILL input[0].
+        let generator = offline_generator_over(&mature, order.clone(), 5.0, bound);
+        let pending = drain(&generator);
+        let tx = pending
+            .iter()
+            .find(|pt| pt.is_final())
+            .unwrap()
+            .transaction();
+        assert!(tx.inputs.len() >= 2, "the pool is drawn for the shortfall");
+        assert_eq!(
+            tx.inputs[0].previous_outpoint.transaction_id, pin_txid,
+            "input[0] is the pinned entry even under the largest-first policy"
+        );
+        for (i, input) in tx.inputs.iter().enumerate() {
+            assert_eq!(
+                input.previous_outpoint.transaction_id,
+                order[i].transaction_id(),
+                "inputs follow the policy order exactly"
+            );
+        }
     }
 
     #[test]

@@ -212,8 +212,9 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
           ),
         ],
         const SizedBox(height: KvSpace.m),
-        // The exact costs — never "≈ free" (KIP-9 storage mass can be
-        // non-trivial); all 8 decimals on a signing surface (DS-2). For a
+        // The exact costs — never "≈ free" (the relay floor prices compute +
+        // transient bytes; a payload is never free, and KIP-9 storage gates
+        // what BUILDS); all 8 decimals on a signing surface (DS-2). For a
         // self-send the "Total" is replaced by the returning value, stated as
         // a return, not a cost.
         Container(

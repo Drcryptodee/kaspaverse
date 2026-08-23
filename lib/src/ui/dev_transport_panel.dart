@@ -101,7 +101,9 @@ class _DevTransportPanelState extends State<DevTransportPanel> {
       'amount=${_kas(summary.amountSompi)} KAS\n'
       '  fee=${_kas(summary.feeSompi)} (no-payload fee=${_kas(plain.feeSompi)} '
       '→ payload delta=${_kas(summary.feeSompi - plain.feeSompi)} KAS)\n'
-      '  mass=${summary.mass} (no-payload ${plain.mass}) '
+      // Overall mass (max incl. KIP-9 storage) — NOT the fee basis; the fee
+      // floor excludes storage, so these two lines never reconcile.
+      '  overall-mass=${summary.mass} (no-payload ${plain.mass}; ≠ fee basis) '
       'txs=${summary.txCount} utxos=${summary.utxoCount}',
     );
   });

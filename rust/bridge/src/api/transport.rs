@@ -4884,8 +4884,10 @@ async fn prepare_comm_plaintext(
     // send dies blaming the user's coin shape for a clock. The set travels down
     // into `prepare_transport_send`, so the budget is spent once.
     let priority = await_spendable_at(&engine, &own_address).await?;
+    // The floor is probed with the SAME pinned set the send below will pin, so
+    // it prices the pinned spend order, not a hypothetical plain one.
     let floor = engine
-        .minimum_sendable(own_address.clone())
+        .minimum_sendable(own_address.clone(), &priority)
         .map_err(AppError::chain)?
         .ok_or_else(|| {
             AppError::msg("your balance can't cover a message right now (anti-dust floor)")
@@ -5114,8 +5116,9 @@ pub async fn transport_prepare_stash() -> Result<SignableSummaryDto, AppError> {
     // Same order, same reason as the comm path: the floor is a measurement of
     // the mature set, so it must be taken after the wait, never before it.
     let priority = await_spendable_at(&engine, &own_address).await?;
+    // Probed with the pinned set for the same reason as the comm path above.
     let floor = engine
-        .minimum_sendable(own_address.clone())
+        .minimum_sendable(own_address.clone(), &priority)
         .map_err(AppError::chain)?
         .ok_or_else(|| {
             AppError::msg("your balance can't cover a backup right now (anti-dust floor)")

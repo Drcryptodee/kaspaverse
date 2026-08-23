@@ -76,8 +76,11 @@ pub struct SignableSummaryDto {
     /// The mainnet address Rust validated and built into the payment output.
     pub destination: String,
     pub amount_sompi: u64,
-    /// The Generator's exact aggregate fee — never "≈ free" (KIP-9 storage
-    /// mass; payload mass is priced in here for payload-bearing flows).
+    /// The Generator's exact aggregate fee — never "≈ free". The basis is the
+    /// wallet's minimum-relay proxy: ≈ compute mass, with the payload
+    /// component hardened for normalized transient bytes (so payload-bearing
+    /// flows are priced in here); storage mass is EXCLUDED from the floor,
+    /// which is why `mass` below never reconciles with this number.
     pub fee_sompi: u64,
     /// `amount + fee` (what leaves the wallet, excluding returned change).
     pub total_sompi: u64,
@@ -260,7 +263,7 @@ pub fn send_minimum() -> Result<Option<u64>, AppError> {
         return Ok(None); // engine not up yet — the UI simply shows no hint
     };
     engine
-        .minimum_sendable(payment_change_address()?)
+        .minimum_sendable(payment_change_address()?, &[])
         .map_err(AppError::chain)
 }
 
@@ -339,7 +342,7 @@ pub async fn send_prepare(
             // no extra at all.
             let hint = payment_change_address()
                 .ok()
-                .and_then(|change| engine.minimum_sendable(change).ok().flatten())
+                .and_then(|change| engine.minimum_sendable(change, &[]).ok().flatten())
                 .map(|m| {
                     format!(
                         " The smallest sendable right now is about {} KAS.",
