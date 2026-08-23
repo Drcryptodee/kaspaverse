@@ -2,10 +2,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../rust/api/send.dart' show SendOutcomeDto, SignableSummaryDto;
 import '../rust/api/wallet.dart' show DeepScanReport;
 import 'address_text.dart';
 import 'biometric_copy.dart';
+import 'error_text.dart';
 import 'network_sheet.dart';
+import 'send/confirm_send_sheet.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/glass_panel.dart';
@@ -147,6 +150,9 @@ class WalletSettingsScope {
     required this.receiveAddress,
     required this.deepScan,
     this.receiveRoute,
+    this.consolidate,
+    this.commitSend,
+    this.abandonSend,
   });
 
   final Future<String> Function() receiveAddress;
@@ -156,6 +162,14 @@ class WalletSettingsScope {
   final Future<DeepScanReport> Function() deepScan;
 
   final WidgetBuilder? receiveRoute;
+
+  /// Merge coins (consolidation): Rust builds + stashes the plan, this screen
+  /// opens the ONE signing surface ([ConfirmSendSheet]) over its summary. All
+  /// three seams present ⇒ the row renders; absent ⇒ hidden (tests, and any
+  /// build without the send stack wired).
+  final Future<SignableSummaryDto> Function()? consolidate;
+  final Future<SendOutcomeDto> Function(BigInt nonce)? commitSend;
+  final Future<void> Function()? abandonSend;
 }
 
 /// The About section's public build identity.
@@ -202,6 +216,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   final ValueNotifier<SettingsStatus?> _biometric = ValueNotifier(null);
   final ValueNotifier<SettingsStatus?> _address = ValueNotifier(null);
   final ValueNotifier<SettingsStatus?> _scan = ValueNotifier(null);
+  final ValueNotifier<SettingsStatus?> _merge = ValueNotifier(null);
   final ValueNotifier<SettingsStatus?> _version = ValueNotifier(null);
   final ValueNotifier<SettingsStatus?> _signature = ValueNotifier(null);
   late final ValueNotifier<SettingsStatus?> _grace;
@@ -259,6 +274,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     _biometric.dispose();
     _address.dispose();
     _scan.dispose();
+    _merge.dispose();
     _version.dispose();
     _signature.dispose();
     _grace.dispose();
@@ -409,6 +425,19 @@ class _SettingsScreenState extends State<SettingsScreen>
           status: _scan,
           onTap: _runDeepScan,
         ),
+        if (widget.wallet.consolidate != null &&
+            widget.wallet.commitSend != null &&
+            widget.wallet.abandonSend != null)
+          SettingsRow(
+            id: 'merge-coins',
+            icon: Icons.join_full_outlined,
+            title: 'Merge coins',
+            subtitle:
+                'Combine your spendable coins into one, so future sends '
+                'cost less. You pay one network fee.',
+            status: _merge,
+            onTap: _runMergeCoins,
+          ),
       ],
     ),
     SettingsSection(
@@ -451,6 +480,60 @@ class _SettingsScreenState extends State<SettingsScreen>
   ];
 
   // ── row actions ──────────────────────────────────────────────────────────
+
+  /// Merge coins: prepare in Rust, then hand the summary to the ONE signing
+  /// surface — the same anti-blind-signing sheet every send uses (B7, DS-3).
+  /// A refusal ("nothing to merge", dust beneath the fee) lands as the row's
+  /// own status line, in Rust's honest words.
+  Future<void> _runMergeCoins() async {
+    final consolidate = widget.wallet.consolidate;
+    final commit = widget.wallet.commitSend;
+    final abandon = widget.wallet.abandonSend;
+    if (consolidate == null || commit == null || abandon == null) return;
+    if (_busyRow != null) return;
+    setState(() => _busyRow = 'merge-coins');
+    _merge.value = const SettingsStatus(
+      'Preparing…',
+      tone: SettingsTone.neutral,
+    );
+    try {
+      final summary = await consolidate();
+      if (!mounted) return;
+      _merge.value = null;
+      final outcome = await showModalBottomSheet<SendOutcomeDto?>(
+        context: context,
+        backgroundColor: KvColor.surface,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => ConfirmSendSheet(
+          summary: summary,
+          commit: commit,
+          abandon: abandon,
+        ),
+      );
+      if (!mounted) return;
+      if (outcome != null && !outcome.partial && outcome.error == null) {
+        // The new single coin arrives via the live sync; this line only
+        // reports that the merge was broadcast.
+        _merge.value = const SettingsStatus('Merged — balance updating');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      // Rust's refusals are already plain English; render them, not a shrug.
+      // "Nothing to merge" is the wallet in its BEST state — it must not wear
+      // the degraded amber (§3: the same rule deep-scan's "Nothing new found"
+      // follows). Real failures keep the honest degraded tone.
+      final message = displayError(e);
+      _merge.value = SettingsStatus(
+        message,
+        tone: message.startsWith('nothing to merge')
+            ? SettingsTone.neutral
+            : SettingsTone.degraded,
+      );
+    } finally {
+      if (mounted) setState(() => _busyRow = null);
+    }
+  }
 
   Future<void> _runDeepScan() async {
     if (_busyRow != null) return;

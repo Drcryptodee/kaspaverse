@@ -446,8 +446,8 @@ impl WalletEngine {
                 &context,
                 ridered,
                 &change,
-                &destination,
-                amount_sompi,
+                PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                Fees::SenderPays(0),
                 payload.clone(),
                 signer.clone(),
             )?;
@@ -462,8 +462,8 @@ impl WalletEngine {
                     &context,
                     riderless,
                     &change,
-                    &destination,
-                    amount_sompi,
+                    PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                    Fees::SenderPays(0),
                     payload.clone(),
                     signer.clone(),
                 )?;
@@ -498,13 +498,11 @@ fn generate_chain(
     context: &kaspa_wallet_core::utxo::UtxoContext,
     order: Vec<UtxoEntryReference>,
     change: &Address,
-    destination: &Address,
-    amount_sompi: u64,
+    payment: PaymentDestination,
+    fees: Fees,
     payload: Option<Vec<u8>>,
     signer: Arc<dyn SignerT>,
 ) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
-    let payment: PaymentDestination =
-        PaymentOutputs::from((destination.clone(), amount_sompi)).into();
     let settings = GeneratorSettings::try_new_with_context(
         context.clone(),
         // The full spend order as priority entries: consumed in list order
@@ -527,9 +525,14 @@ fn generate_chain(
         // one dimension excluded from the floor, which is why a dust-heavy
         // send reports an overall mass far above what it pays for.
         None,
-        Fees::SenderPays(0), // priority fee 0; NOT Fees::None (generator.rs:384)
-        payload,             // final-tx payload (P2.1 transport spine)
-        None,                // multiplexer
+        // The caller's fee mode. Payments: Fees::SenderPays(0), NOT Fees::None
+        // (generator.rs:384 rejects a no-fee payment output). Sweeps invert
+        // BOTH rules (generator.rs:375-386): PaymentDestination::Change
+        // REQUIRES Fees::None, and a full-balance ReceiverPays deducts the fee
+        // from the payment itself.
+        fees,
+        payload, // final-tx payload (P2.1 transport spine)
+        None,    // multiplexer
     )?;
 
     let generator = Generator::try_new(settings, Some(signer), None)?;
@@ -545,6 +548,614 @@ fn generate_chain(
     }
     let summary = generator.summary();
     Ok((pending, summary))
+}
+
+/// How a drain (sweep / consolidation) is expressed to the pinned Generator —
+/// chosen by [`plan_drain`], because no single Generator mode covers every
+/// case (each limit below is measured at the pin `cfafeb4` and held by the
+/// permanent tests in this module):
+///
+/// - **`ReceiverPays`** — a full-balance payment with `Fees::ReceiverPays(0)`:
+///   the fee comes out of the payment output, so change is zero by
+///   construction and a SINGLE coin can be swept. This is the arm that frees
+///   the founder's trap: a one-coin wallet has NO ordinary-send shape that
+///   empties it — measured 2026-08-23 on a single 0.481524 KAS coin, every
+///   `SenderPays` amount above 0.373 KAS dies of the change side's KIP-9
+///   storage mass (surfacing as `StorageMassExceeded` / the Generator's own
+///   post-build `MassCalculationError`), and the Generator's native sweep
+///   refuses one coin outright (`aggregated_utxos < 2` → NoOp,
+///   generator.rs:777-780). It is also the only arm that can respect an
+///   exclusion list, because the drawn set is bounded by the priority entries
+///   plus the amount. Within one stage the accumulator's ReceiverPays gate is
+///   `inputs >= amount − fees_of_FINALIZED_stages` (generator.rs:700-705), and
+///   nothing has finalized yet — so a single-transaction ReceiverPays drain
+///   draws the ENTIRE offered set, and [`verify_drain`]'s balance check holds
+///   to the sompi. This arm DOES ride the pin's `Fees::ReceiverPays` final-tx
+///   branch — the one its own author marks "TODO - currently unreachable at
+///   the API level" (generator.rs:865) — which is why every use is defended
+///   twice: sompi-exact pin tests in this module, and the runtime
+///   `swept + fee == consumed` refusal. A CHAINED ReceiverPays could
+///   additionally stop drawing early once stage fees accumulate, so
+///   [`finish_drain`] refuses that shape outright.
+///
+///   The arm's one sharp edge is guarded BEFORE generation: when the offered
+///   value cannot cover the shape's own fee, the pin's finalizer would
+///   underflow `output.value -= transaction_fees` (generator.rs:1071 — a
+///   debug-build panic). [`receiver_pays_fee_floor`] reads that fee from the
+///   Generator itself and the drain refuses typed below it.
+/// - **`Drain`** — the Generator's native sweep: `PaymentDestination::Change`
+///   with `Fees::None` (generator.rs:375-386: a Change destination REQUIRES
+///   `Fees::None`, the exact inverse of the payment rule) and the change
+///   address set to the drain's destination. Consumes EVERY coin the context
+///   iterator yields — exactly right for a whole-wallet exit across all
+///   watched addresses, exactly wrong under exclusions.
+enum DrainArm {
+    ReceiverPays {
+        amount_sompi: u64,
+        priority: Vec<UtxoEntryReference>,
+    },
+    Drain,
+}
+
+/// Split the mature snapshot into (offered, excluded_count) for a drain.
+/// Address-matched, and under an exclusion list it FAILS CLOSED on the corner
+/// the pin's types leave open: a coin whose `utxo.address` is `None` cannot be
+/// matched to an exclusion, so offering it would bypass the one custody check
+/// `verify_drain` enforces — it is counted excluded instead. (Unreachable for
+/// coins this context scanned — they arrive via address registration — but
+/// the type says Option, so the code refuses to guess.) With no exclusions
+/// (a sweep — the total exit) everything is offered.
+fn drain_included(
+    mature: Vec<UtxoEntryReference>,
+    exclude: &[Address],
+) -> (Vec<UtxoEntryReference>, usize) {
+    if exclude.is_empty() {
+        return (mature, 0);
+    }
+    let total = mature.len();
+    let included: Vec<UtxoEntryReference> = mature
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .utxo
+                .address
+                .as_ref()
+                .is_some_and(|address| !exclude.contains(address))
+        })
+        .collect();
+    let excluded_count = total - included.len();
+    (included, excluded_count)
+}
+
+/// Pick the Generator mode for a drain over `included` coins. Pure; the
+/// permanent tests drive every branch. `has_exclusions` is whether the CALLER
+/// is withholding coins (consolidation around live conversation addresses) —
+/// it forces the bounded arm even when `included` is large.
+fn plan_drain(included: Vec<UtxoEntryReference>, has_exclusions: bool) -> Result<DrainArm> {
+    if included.is_empty() {
+        return Err(ChainError::Message(
+            "nothing spendable to move right now".into(),
+        ));
+    }
+    if has_exclusions || included.len() == 1 {
+        let amount_sompi = included.iter().map(|entry| entry.amount()).sum();
+        // Order is cosmetic for a full draw; ascending keeps the built
+        // transaction's input list deterministic for a given coin set.
+        let mut priority = included;
+        priority.sort_by_key(|entry| entry.amount());
+        return Ok(DrainArm::ReceiverPays {
+            amount_sompi,
+            priority,
+        });
+    }
+    Ok(DrainArm::Drain)
+}
+
+/// What a verified drain will do — every number read back from the BUILT
+/// chain (B7), never echoed from intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrainFacts {
+    /// What the destination receives: the final transaction's single output.
+    swept_sompi: u64,
+    /// The Generator's aggregate fee across the chain.
+    fee_sompi: u64,
+    /// Wallet coins consumed (chain-internal edge outputs not counted).
+    absorbed_utxos: u32,
+}
+
+/// Verify a built drain chain before it is allowed anywhere near a stash:
+/// the final transaction pays the drain destination and NOTHING else (a
+/// residue output would mean the wallet is not emptied — the whole point);
+/// under an exclusion list every consumed wallet coin is one the caller
+/// offered (the custody line: a conversation's coin must never ride out
+/// inside a "consolidation"); and on a single-transaction result the
+/// arithmetic balances to the sompi against the coins actually consumed —
+/// `swept + fee == consumed`, so "the wallet ends at exactly zero" is proven
+/// by construction, not claimed. Fails typed and closed; a drain that cannot
+/// prove itself is refused, never broadcast.
+fn verify_drain(
+    pending: &[PendingTransaction],
+    summary: &GeneratorSummary,
+    destination: &Address,
+    included: Option<&[UtxoEntryReference]>,
+) -> Result<DrainFacts> {
+    let final_pt = pending.iter().find(|pt| pt.is_final()).ok_or_else(|| {
+        // One coin through the native sweep NoOps upstream; plan_drain routes
+        // that to ReceiverPays, so reaching this is a plan/Generator drift.
+        ChainError::Message("the drain built no final transaction — refusing".into())
+    })?;
+    let final_tx = final_pt.transaction();
+    if final_tx.outputs.len() != 1 {
+        return Err(ChainError::Message(format!(
+            "the drain would leave {} outputs instead of one — refusing",
+            final_tx.outputs.len()
+        )));
+    }
+    if !pays_to(&final_tx, destination) {
+        return Err(ChainError::Message(
+            "the drain's output does not pay the drain destination — refusing".into(),
+        ));
+    }
+    // A chained drain's intermediate legs pay the SAME destination (the
+    // Generator's sweep target is its change slot) — asserted per leg, not
+    // trusted from the Generator's shape: the chained arm moves the whole
+    // wallet, so it gets the same runtime proof the single-tx arm gets.
+    for pt in pending.iter().filter(|pt| !pt.is_final()) {
+        let leg = pt.transaction();
+        if !leg.outputs.iter().all(|output| {
+            extract_script_pub_key_address(&output.script_public_key, destination.prefix)
+                .is_ok_and(|decoded| &decoded == destination)
+        }) {
+            return Err(ChainError::Message(
+                "a drain leg pays outside the drain destination — refusing".into(),
+            ));
+        }
+    }
+
+    // Wallet coins consumed = inputs whose previous outpoint is NOT a
+    // transaction of this very chain (those are the compounding edges).
+    let chain_txids: std::collections::HashSet<_> = pending.iter().map(|pt| pt.id()).collect();
+    let consumed: Vec<_> = pending
+        .iter()
+        .flat_map(|pt| pt.transaction().inputs.clone())
+        .filter(|input| !chain_txids.contains(&input.previous_outpoint.transaction_id))
+        .collect();
+
+    if let Some(included) = included {
+        let offered: std::collections::HashSet<(kaspa_consensus_core::tx::TransactionId, u32)> =
+            included
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.utxo.outpoint.transaction_id(),
+                        entry.utxo.outpoint.index(),
+                    )
+                })
+                .collect();
+        for input in &consumed {
+            let key = (
+                input.previous_outpoint.transaction_id,
+                input.previous_outpoint.index,
+            );
+            if !offered.contains(&key) {
+                return Err(ChainError::Message(
+                    "the drain drew a coin outside its offered set — refusing".into(),
+                ));
+            }
+        }
+    }
+
+    let swept_sompi = final_tx.outputs[0].value;
+    let fee_sompi = summary.aggregate_fees();
+    if pending.len() == 1 {
+        let consumed_value: u64 = final_pt
+            .utxo_entries()
+            .values()
+            .map(|entry| entry.amount())
+            .sum();
+        if swept_sompi.saturating_add(fee_sompi) != consumed_value {
+            return Err(ChainError::Message(
+                "the drain's arithmetic does not balance — refusing".into(),
+            ));
+        }
+    }
+    Ok(DrainFacts {
+        swept_sompi,
+        fee_sompi,
+        absorbed_utxos: consumed.len() as u32,
+    })
+}
+
+impl WalletEngine {
+    /// Send max — empty every watched address to `destination` in one
+    /// transaction (the wallet's EXIT: a self-custody wallet whose answer to
+    /// "get all my money out" is "use another wallet" has a hole in the
+    /// property it sells). The workable amount is `balance − fee` and the fee
+    /// depends on the transaction spending it, so the BUILDER solves it — via
+    /// the Generator's own modes ([`DrainArm`]), never an amount computed in
+    /// the UI. `change_home` is our own address for the ReceiverPays arm's
+    /// never-materializing change slot; the native-sweep arm's target is the
+    /// destination itself.
+    ///
+    /// A wallet too fragmented for a one-transaction sweep is REFUSED toward
+    /// consolidation rather than chained: the native sweep's intermediate
+    /// legs pay the sweep target, and with an external destination those legs
+    /// would be unsignable by us — a partial, confusing broadcast. Refusal is
+    /// typed and the way out (consolidate, then sweep) ships beside it.
+    pub async fn prepare_sweep(
+        &self,
+        destination: Address,
+        change_home: Address,
+        signer: Arc<dyn SignerT>,
+        rpc: Rpc,
+    ) -> Result<PreparedSend> {
+        self.prepare_drain(destination, change_home, &[], true, signer, rpc)
+            .await
+    }
+
+    /// Consolidate — absorb the wallet's spendable coins into ONE coin at
+    /// `destination` (our own receive/0), so future sends pay the one-input
+    /// floor instead of dragging the fragment pile. `exclude` withholds the
+    /// bound addresses of live conversations: since D-148 nothing refills a
+    /// non-identity bound address, so a consolidation that swallowed those
+    /// coins would strand every off-identity conversation (the open item at
+    /// `await_spendable_at`) — the exclusion keeps the chat lane funded and
+    /// [`verify_drain`] enforces it on the BUILT transaction, not on intent.
+    pub async fn prepare_consolidate(
+        &self,
+        destination: Address,
+        exclude: &[Address],
+        signer: Arc<dyn SignerT>,
+        rpc: Rpc,
+    ) -> Result<PreparedSend> {
+        self.prepare_drain(
+            destination.clone(),
+            destination,
+            exclude,
+            false,
+            signer,
+            rpc,
+        )
+        .await
+    }
+
+    async fn prepare_drain(
+        &self,
+        destination: Address,
+        change_home: Address,
+        exclude: &[Address],
+        is_exit: bool,
+        signer: Arc<dyn SignerT>,
+        rpc: Rpc,
+    ) -> Result<PreparedSend> {
+        let context = self.context();
+        let mature: Vec<UtxoEntryReference> = context
+            .get_utxos(None, None)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let has_exclusions = !exclude.is_empty();
+        let (included, excluded_count) = drain_included(mature, exclude);
+        let included_for_verify = has_exclusions.then(|| included.clone());
+
+        if !is_exit && included.len() < 2 {
+            // One coin in, one coin out is a pure fee burn — nothing merges.
+            // Name the real cause when the exclusion line is what emptied the
+            // offer (counts only, never an address).
+            return Err(ChainError::Message(if excluded_count > 0 {
+                format!(
+                    "nothing to merge — {excluded_count} coin(s) stay reserved \
+                     for your conversations, and the rest is already one coin"
+                )
+            } else {
+                "nothing to merge — your spendable coins are already consolidated".into()
+            }));
+        }
+
+        let arm = plan_drain(included, has_exclusions)?;
+        let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
+        let (pending, summary) = match arm {
+            DrainArm::ReceiverPays {
+                amount_sompi,
+                priority,
+            } => {
+                let network_id = context.processor().network_id()?;
+                let fee_floor = receiver_pays_fee_floor(network_id, &priority, &destination)?;
+                if amount_sompi <= fee_floor {
+                    return Err(ChainError::Message(
+                        "these coins are worth less than the network fee to move them".into(),
+                    ));
+                }
+                generate_chain(
+                    &context,
+                    priority,
+                    &change_home,
+                    PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                    Fees::ReceiverPays(0),
+                    None,
+                    signer,
+                )?
+            }
+            DrainArm::Drain => generate_chain(
+                &context,
+                Vec::new(),
+                &destination, // the native sweep's target IS the change slot
+                PaymentDestination::Change,
+                Fees::None,
+                None,
+                signer,
+            )?,
+        };
+
+        let summary = finish_drain(
+            &pending,
+            &summary,
+            &destination,
+            included_for_verify.as_deref(),
+            chained_drain_allowed,
+            is_exit,
+        )?;
+        Ok(PreparedSend {
+            pending,
+            summary,
+            rpc,
+        })
+    }
+}
+
+/// The fee of the ReceiverPays drain SHAPE (n inputs, one output), read from
+/// the pinned Generator itself — the guard that keeps a below-fee coin set
+/// out of the pin's unchecked `output.value -= transaction_fees`
+/// (generator.rs:1071, a debug-build panic when fees exceed value; INV-2).
+///
+/// The probe runs the SAME shape with every coin value raised far above any
+/// fee, so the probe itself cannot underflow. The fee transfers exactly: a
+/// transaction's compute mass prices bytes (input count, script sizes), not
+/// values, and the one-output sweep's storage term is ~0 on both sides
+/// (output ≈ inputs). Nothing here computes mass — the Generator prices both
+/// shapes (INV-9).
+fn receiver_pays_fee_floor(
+    network_id: kaspa_wrpc_client::prelude::NetworkId,
+    priority: &[UtxoEntryReference],
+    destination: &Address,
+) -> Result<u64> {
+    // ~10,000 KAS of headroom per coin: not a protocol constant, purely "so
+    // large the probed fee can never reach it" — the fee it shields against
+    // is ~10^5 sompi per shape at the pin's floor.
+    const PROBE_HEADROOM_SOMPI: u64 = 1_000_000_000_000;
+    let probe_entries: Vec<UtxoEntryReference> = priority
+        .iter()
+        .map(|entry| {
+            let address = entry
+                .utxo
+                .address
+                .clone()
+                .unwrap_or_else(|| destination.clone());
+            UtxoEntryReference::simulated_with_address(
+                entry.amount().saturating_add(PROBE_HEADROOM_SOMPI),
+                &address,
+            )
+        })
+        .collect();
+    // Saturating: the inflation is artificial, so an enormous coin count
+    // could overflow a plain sum (a debug panic — the exact class this guard
+    // exists to kill). Saturated, the Generator refuses typed and the drain
+    // refuses with it.
+    let probe_amount: u64 = probe_entries
+        .iter()
+        .fold(0u64, |acc, entry| acc.saturating_add(entry.amount()));
+    let payment: PaymentDestination =
+        PaymentOutputs::from((destination.clone(), probe_amount)).into();
+    let settings = GeneratorSettings::try_new_with_iterator(
+        network_id,
+        Box::new(probe_entries.into_iter()),
+        None,
+        destination.clone(),
+        1,
+        1,
+        payment,
+        None,
+        Fees::ReceiverPays(0),
+        None,
+        None,
+    )?;
+    match probe_shape(settings)? {
+        Some((_, fee)) => Ok(fee),
+        // The inflated shape refusing to build means the Generator cannot
+        // price this coin set at all — refuse rather than guess a fee.
+        None => Err(ChainError::Message(
+            "these coins cannot be priced for a sweep right now".into(),
+        )),
+    }
+}
+
+/// The shared post-generation tail of every drain — chain policy, the
+/// [`verify_drain`] custody checks, and the B7 projection — extracted so the
+/// offline tests run the EXACT code production runs, not a mirror of it.
+///
+/// `chained_drain_allowed` is true only for a consolidation on the native
+/// Drain arm (the Generator's canonical compound, every leg paying our own
+/// address). An EXIT must be one transaction — the native sweep's
+/// intermediate legs pay the sweep target, and with an external destination
+/// those legs would be unsignable by us: a partial, confusing broadcast. And
+/// a chained ReceiverPays rides the upstream branch marked unreachable (see
+/// [`DrainArm`]). Both are refused typed, with the way out named.
+fn finish_drain(
+    pending: &[PendingTransaction],
+    summary: &GeneratorSummary,
+    destination: &Address,
+    included: Option<&[UtxoEntryReference]>,
+    chained_drain_allowed: bool,
+    is_exit: bool,
+) -> Result<SendSummary> {
+    if pending.len() > 1 && !chained_drain_allowed {
+        // Two different users hit this wall; neither may get the other's
+        // advice. A SWEEP can consolidate first (that action exists and
+        // chains freely). A consolidation forced onto the bounded arm by
+        // conversation reservations has no one-transaction answer today —
+        // say what IS true: ordinary sends drain fragments (the rider), and
+        // the total exit remains available. The bounded multi-pass merge is
+        // ledgered debt, not silence.
+        return Err(ChainError::Message(if is_exit {
+            "too many coins to sweep in one transaction — merge your coins first, then sweep".into()
+        } else {
+            "too many coins to merge in one transaction while some stay reserved for your \
+             conversations — ordinary sends absorb a few fragments each, so retry after \
+             spending, or sweep everything to a new wallet"
+                .into()
+        }));
+    }
+
+    let facts = verify_drain(pending, summary, destination, included)?;
+
+    // B7: what the confirm renders is the BUILT chain's own facts — the
+    // destination receives `swept`, not the ReceiverPays arm's requested
+    // amount (which includes the fee the Generator deducts).
+    Ok(SendSummary {
+        destination: destination.to_string(),
+        amount_sompi: facts.swept_sompi,
+        fee_sompi: facts.fee_sompi,
+        total_sompi: facts.swept_sompi.saturating_add(facts.fee_sompi),
+        mass: summary.aggregate_mass(),
+        tx_count: summary.number_of_generated_transactions() as u32,
+        utxo_count: facts.absorbed_utxos,
+        payload_len: 0,
+    })
+}
+
+/// The consolidation preview's honesty pair: what one representative send
+/// costs from TODAY's coin shape versus from the ONE coin the consolidation
+/// will leave — both numbers generated by the pinned Generator over real
+/// shapes, never computed here (INV-9). The "after" probe prices against a
+/// coin with the BUILT output's exact value and the destination's exact
+/// standard script (only the outpoint is simulated, and outpoints carry no
+/// mass) — the comparison is against the coin the user will actually hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpendComparison {
+    /// The representative amount both sides were priced at (half the
+    /// consolidated value — a mid-shape ordinary send).
+    pub amount_sompi: u64,
+    /// Inputs an ordinary send of that amount draws TODAY (policy order).
+    pub now_utxos: u32,
+    /// Its fee today.
+    pub now_fee_sompi: u64,
+    /// The same send's fee from the single consolidated coin.
+    pub after_fee_sompi: u64,
+}
+
+impl WalletEngine {
+    /// Price the consolidation's "what it saves per future send" line. `None`
+    /// when either side cannot be priced (a probe refusing is a shape fact,
+    /// not an error — the preview then simply omits the savings line rather
+    /// than invent one). Signerless, offline, public data only.
+    pub fn consolidation_savings(
+        &self,
+        prepared: &PreparedSend,
+    ) -> Result<Option<SpendComparison>> {
+        let summary = prepared.summary();
+        let amount_sompi = summary.amount_sompi / 2;
+        if amount_sompi == 0 {
+            return Ok(None);
+        }
+        let destination = match Address::try_from(summary.destination.as_str()) {
+            Ok(address) => address,
+            Err(_) => return Ok(None),
+        };
+
+        // TODAY: an ordinary send from the live context in the real spend
+        // order (riders + largest-first) — the fee the user pays now.
+        let context = self.context();
+        let mature = mature_snapshot_sync(&context)?;
+        let order = spend_policy::select_spend_priority(&mature, &[], spend_policy::RIDER_LIMIT);
+        let payment: PaymentDestination =
+            PaymentOutputs::from((destination.clone(), amount_sompi)).into();
+        let settings = GeneratorSettings::try_new_with_context(
+            context.clone(),
+            (!order.is_empty()).then_some(order),
+            destination.clone(),
+            1,
+            1,
+            payment,
+            None,
+            Fees::SenderPays(0),
+            None,
+            None,
+        )?;
+        let Some((now_utxos, now_fee_sompi)) = probe_shape(settings)? else {
+            return Ok(None);
+        };
+
+        // AFTER: the same send from the coin the consolidation will create —
+        // exact value, exact standard script for the destination (mass depends
+        // on script size and values, and `simulated_with_address` builds the
+        // real `pay_to_address_script`); only the outpoint is simulated, and
+        // outpoints carry no mass.
+        let Some(final_pt) = prepared.pending.iter().find(|pt| pt.is_final()) else {
+            return Ok(None);
+        };
+        let final_tx = final_pt.transaction();
+        let Some(output) = final_tx.outputs.first() else {
+            return Ok(None);
+        };
+        let entry = UtxoEntryReference::simulated_with_address(output.value, &destination);
+        let network_id = context.processor().network_id()?;
+        let payment: PaymentDestination =
+            PaymentOutputs::from((destination.clone(), amount_sompi)).into();
+        let settings = GeneratorSettings::try_new_with_iterator(
+            network_id,
+            Box::new(std::iter::once(entry)),
+            None,
+            destination,
+            1,
+            1,
+            payment,
+            None,
+            Fees::SenderPays(0),
+            None,
+            None,
+        )?;
+        let Some((_, after_fee_sompi)) = probe_shape(settings)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(SpendComparison {
+            amount_sompi,
+            now_utxos,
+            now_fee_sompi,
+            after_fee_sompi,
+        }))
+    }
+}
+
+/// Run one signerless generation and read (inputs, fee) from its summary —
+/// `None` when the shape refuses to build (too small / too large / dead
+/// zone), which for a PREVIEW is an answer, not an error.
+fn probe_shape(settings: GeneratorSettings) -> Result<Option<(u32, u64)>> {
+    let generator = match Generator::try_new(settings, None, None) {
+        Ok(generator) => generator,
+        Err(e) => return probe_shape_refusal(e),
+    };
+    loop {
+        match generator.generate_transaction() {
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
+            Err(e) => return probe_shape_refusal(e),
+        }
+    }
+    let summary = generator.summary();
+    Ok(Some((
+        summary.aggregated_utxos() as u32,
+        summary.aggregate_fees(),
+    )))
+}
+
+/// A build refusal is `Ok(None)` for a preview; a real failure propagates.
+fn probe_shape_refusal(e: kaspa_wallet_core::error::Error) -> Result<Option<(u32, u64)>> {
+    match probe_error(e) {
+        Ok(_) => Ok(None),
+        Err(other) => Err(other),
+    }
 }
 
 /// Payload bytes on the final tx of a built chain (pure; shared by prepare and
@@ -634,7 +1245,19 @@ fn probe_context(
 }
 
 /// Map a generation error onto a probe outcome (or a real failure).
+///
+/// `MassCalculationError` is classified TooSmall alongside `StorageMassExceeded`:
+/// at the pin it is the Generator's own post-build mass double-check
+/// (generator.rs:1108-1110/1166-1168 — "should never occur") tripping when a
+/// near-balance amount leaves change whose storage mass the accumulation-phase
+/// estimate under-counted. Measured on a single 0.481524 KAS coin: amounts in
+/// the dead zone between "max ordinary send" and "sweep" surface as THIS error,
+/// not StorageMassExceeded. Both mean the same thing for a probe — this amount
+/// does not fit this coin shape — and both bound the search from below.
 fn probe_error(e: kaspa_wallet_core::error::Error) -> Result<ProbeOutcome> {
+    if matches!(e, kaspa_wallet_core::error::Error::MassCalculationError) {
+        return Ok(ProbeOutcome::TooSmall);
+    }
     match map_generate_error(e) {
         ChainError::StorageMassExceeded { .. } => Ok(ProbeOutcome::TooSmall),
         ChainError::InsufficientFunds { .. } => Ok(ProbeOutcome::TooLarge),
@@ -1220,6 +1843,473 @@ mod tests {
                 "inputs follow the policy order exactly"
             );
         }
+    }
+
+    /// Offline analog of `prepare_drain`: same plan, same Generator modes,
+    /// same `finish_drain` tail — the pool iterator plays the live context
+    /// (INCLUDING excluded coins, exactly as production's context iterator
+    /// would offer them).
+    fn run_drain_offline(
+        entries: &[UtxoEntryReference],
+        exclude: &[Address],
+        destination: &Address,
+        change_home: &Address,
+        is_exit: bool,
+    ) -> Result<(Vec<Pt>, SendSummary)> {
+        let has_exclusions = !exclude.is_empty();
+        let (included, _) = drain_included(entries.to_vec(), exclude);
+        let included_for_verify = has_exclusions.then(|| included.clone());
+        let arm = plan_drain(included, has_exclusions)?;
+        let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
+        let (order, payment, fees): (Vec<UtxoEntryReference>, PaymentDestination, Fees) = match arm
+        {
+            DrainArm::ReceiverPays {
+                amount_sompi,
+                priority,
+            } => {
+                // Same guard as production: below the shape's own fee the
+                // pin's finalizer would underflow (generator.rs:1071).
+                let fee_floor = receiver_pays_fee_floor(mainnet(), &priority, destination)?;
+                if amount_sompi <= fee_floor {
+                    return Err(ChainError::Message(
+                        "these coins are worth less than the network fee to move them".into(),
+                    ));
+                }
+                (
+                    priority,
+                    PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                    Fees::ReceiverPays(0),
+                )
+            }
+            DrainArm::Drain => (Vec::new(), PaymentDestination::Change, Fees::None),
+        };
+        let change = match (&payment, &fees) {
+            (PaymentDestination::Change, _) => destination.clone(),
+            _ => change_home.clone(),
+        };
+        let settings = GeneratorSettings::try_new_with_iterator(
+            mainnet(),
+            #[allow(clippy::unnecessary_to_owned)]
+            Box::new(entries.to_vec().into_iter()),
+            (!order.is_empty()).then_some(order),
+            change,
+            1,
+            1,
+            payment,
+            None,
+            fees,
+            None,
+            None,
+        )?;
+        let generator = Generator::try_new(settings, None, None)?;
+        let mut pending = Vec::new();
+        loop {
+            match generator.generate_transaction() {
+                Ok(Some(tx)) => pending.push(tx),
+                Ok(None) => break,
+                Err(e) => return Err(map_generate_error(e)),
+            }
+        }
+        let summary = finish_drain(
+            &pending,
+            &generator.summary(),
+            destination,
+            included_for_verify.as_deref(),
+            chained_drain_allowed,
+            is_exit,
+        )?;
+        Ok((pending, summary))
+    }
+
+    /// THE EXIT, part 1 — the founder's trap, reproduced then freed. Measured
+    /// 2026-08-22 on the dev wallet: ONE mature coin of 0.48152400 KAS and
+    /// every send refused. Reproduced here at the pin: ordinary sends build
+    /// only in a window near [0.107, 0.373] KAS — the top of the range dies
+    /// of the change output's storage mass — so the wallet can never be
+    /// EMPTIED by any amount a user could type. The sweep's ReceiverPays arm
+    /// frees it in one 1-in-1-out transaction whose output + fee equal the
+    /// balance to the sompi: the wallet ends at exactly zero.
+    #[test]
+    fn sweep_frees_the_one_coin_trap() {
+        let balance = 48_152_400u64; // 0.481524 KAS
+        let coin = [0.481524f64];
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            let entries: Vec<UtxoEntryReference> = coin
+                .iter()
+                .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+                .collect();
+            let payment: PaymentDestination = PaymentOutputs::from((addr(DEST), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                Box::new(entries.into_iter()),
+                None,
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+        // The trap, pinned: a floor exists (the app honestly advertised one)…
+        assert_eq!(search_minimum(probe).unwrap(), Some(10_687_500));
+        // …but nothing near the balance builds: the wallet cannot be emptied
+        // by an ordinary send at ANY amount.
+        assert_eq!(probe(40_000_000).unwrap(), ProbeOutcome::TooSmall);
+        assert_eq!(probe(48_000_000).unwrap(), ProbeOutcome::TooSmall);
+        assert_eq!(probe(balance).unwrap(), ProbeOutcome::TooLarge);
+
+        // The sweep frees it: one transaction, one input, one output.
+        let entries = vec![UtxoEntryReference::simulated(kaspa_to_sompi(0.481524))];
+        let (pending, summary) =
+            run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap();
+        assert_eq!(pending.len(), 1);
+        let tx = pending[0].transaction();
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 1));
+        assert_eq!(
+            (summary.amount_sompi, summary.fee_sompi),
+            (47_948_800, 203_600),
+            "swept value and fee, sompi-exact at the pin"
+        );
+        assert_eq!(
+            summary.amount_sompi + summary.fee_sompi,
+            balance,
+            "the wallet ends at exactly zero"
+        );
+        assert_eq!((summary.tx_count, summary.utxo_count), (1, 1));
+    }
+
+    /// THE EXIT, part 2 — the deeper trap the session prompt names as the
+    /// acceptance fixture: a wallet whose `minimum_sendable` is `None` (NO
+    /// ordinary amount builds at all) still sweeps to exactly zero.
+    #[test]
+    fn sweep_frees_the_wallet_that_cannot_send_at_all() {
+        let coin = [0.15f64];
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            let entries: Vec<UtxoEntryReference> = coin
+                .iter()
+                .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+                .collect();
+            let payment: PaymentDestination = PaymentOutputs::from((addr(DEST), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                Box::new(entries.into_iter()),
+                None,
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+        assert_eq!(
+            search_minimum(probe).unwrap(),
+            None,
+            "the fixture state: no amount is sendable at all"
+        );
+        let entries = vec![UtxoEntryReference::simulated(kaspa_to_sompi(0.15))];
+        let (_, summary) =
+            run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap();
+        assert_eq!(
+            summary.amount_sompi + summary.fee_sompi,
+            15_000_000,
+            "swept + fee == balance: exactly zero remains"
+        );
+        assert_eq!(summary.fee_sompi, 203_600);
+    }
+
+    /// THE EXIT, part 3 — a multi-coin, multi-address wallet drains through
+    /// the Generator's native sweep: every watched coin is consumed in ONE
+    /// transaction and the arithmetic balances to the sompi.
+    #[test]
+    fn sweep_drains_every_watched_coin_in_one_tx() {
+        let elsewhere = addr(CHANGE);
+        let mut entries: Vec<UtxoEntryReference> = fragmented_fixture()
+            .iter()
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+            .collect();
+        // Three of the coins live at a DIFFERENT watched address — the sweep
+        // must not care where a coin lives (the receive/0-stranding exit gap).
+        for value in [0.7, 0.9, 1.1] {
+            entries.push(UtxoEntryReference::simulated_with_address(
+                kaspa_to_sompi(value),
+                &elsewhere,
+            ));
+        }
+        let total: u64 = entries.iter().map(|entry| entry.amount()).sum();
+        let (pending, summary) =
+            run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap();
+        assert_eq!(pending.len(), 1, "25 coins fit one transaction");
+        assert_eq!(summary.utxo_count, 25, "every coin, every address");
+        assert_eq!(
+            summary.amount_sompi + summary.fee_sompi,
+            total,
+            "swept + fee == the whole balance"
+        );
+    }
+
+    /// An EXIT must be one transaction: a wallet too fragmented to sweep in
+    /// one is refused TOWARD consolidation (the native sweep's intermediate
+    /// legs pay the sweep target — unsignable by us when it is external).
+    #[test]
+    fn sweep_refuses_to_chain_and_names_the_way_out() {
+        let entries: Vec<UtxoEntryReference> = std::iter::repeat_n(1.0, 400)
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(v)))
+            .collect();
+        let err = run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap_err();
+        assert!(
+            err.to_string().contains("merge your coins first"),
+            "the refusal names the way out: {err}"
+        );
+    }
+
+    /// CONSOLIDATION respects the exclusion line: conversation-bound coins
+    /// are not offered, not drawn, and still in the wallet afterwards — and
+    /// `verify_drain` enforces that on the BUILT transaction, red-proven by
+    /// handing it a chain that DID consume an excluded coin.
+    #[test]
+    fn consolidation_respects_the_exclusion_line() {
+        let home = addr(DEST); // receive/0 stand-in: destination AND change
+        let bound = addr(CHANGE); // a conversation's bound address
+        let mut entries: Vec<UtxoEntryReference> = [5.0, 0.5, 12.0, 0.5, 2.0]
+            .iter()
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+            .collect();
+        let conversation_coins: Vec<UtxoEntryReference> = [0.3, 0.4]
+            .iter()
+            .map(|v| UtxoEntryReference::simulated_with_address(kaspa_to_sompi(*v), &bound))
+            .collect();
+        entries.extend(conversation_coins.iter().cloned());
+        let included_total: u64 = kaspa_to_sompi(5.0 + 0.5 + 12.0 + 0.5 + 2.0);
+
+        let (pending, summary) =
+            run_drain_offline(&entries, std::slice::from_ref(&bound), &home, &home, false).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(summary.utxo_count, 5, "absorbs exactly the offered coins");
+        assert_eq!(
+            summary.amount_sompi + summary.fee_sompi,
+            included_total,
+            "the conversation's 0.7 KAS is untouched"
+        );
+        let tx = pending[0].transaction();
+        let consumed: std::collections::HashSet<_> = tx
+            .inputs
+            .iter()
+            .map(|input| input.previous_outpoint.transaction_id)
+            .collect();
+        for coin in &conversation_coins {
+            assert!(
+                !consumed.contains(&coin.transaction_id()),
+                "a bound coin must never ride out inside a consolidation"
+            );
+        }
+
+        // The custody line, red-proven: a chain that consumed MORE than the
+        // offered set must be refused by verify_drain itself.
+        let offered: Vec<UtxoEntryReference> = entries
+            .iter()
+            .filter(|entry| entry.utxo.address.is_none())
+            .take(3)
+            .cloned()
+            .collect();
+        let settings = GeneratorSettings::try_new_with_iterator(
+            mainnet(),
+            Box::new(entries.clone().into_iter()),
+            None,
+            home.clone(),
+            1,
+            1,
+            PaymentDestination::Change,
+            None,
+            Fees::None,
+            None,
+            None,
+        )
+        .unwrap();
+        let generator = Generator::try_new(settings, None, None).unwrap();
+        let all_pending = drain(&generator);
+        let err = verify_drain(&all_pending, &generator.summary(), &home, Some(&offered));
+        assert!(
+            err.is_err()
+                && err
+                    .unwrap_err()
+                    .to_string()
+                    .contains("outside its offered set"),
+            "verify_drain must refuse a chain that drew past the offered coins"
+        );
+    }
+
+    /// The fail-closed corner of the exclusion filter: under an exclusion
+    /// list, a coin with NO address on record is counted EXCLUDED — it cannot
+    /// be matched against the list, so offering it would bypass the one
+    /// custody check `verify_drain` enforces. (With no exclusions — a sweep —
+    /// everything is offered.)
+    #[test]
+    fn an_addressless_coin_is_never_offered_under_exclusions() {
+        let home = addr(DEST);
+        let bound = addr(CHANGE);
+        let with_addr: Vec<UtxoEntryReference> = [4.0, 6.0]
+            .iter()
+            .map(|v| UtxoEntryReference::simulated_with_address(kaspa_to_sompi(*v), &home))
+            .collect();
+        // `simulated` (no _with_address) still carries a random address at the
+        // pin — build a genuinely address-less entry by clearing the field...
+        // which the pin does not expose. So prove the rule at the filter
+        // itself, over the pin's own Option: an entry whose address is None.
+        let mut mystery = UtxoEntryReference::simulated(kaspa_to_sompi(9.0));
+        {
+            let utxo = std::sync::Arc::get_mut(&mut mystery.utxo)
+                .expect("freshly built simulated entry has one owner");
+            utxo.address = None;
+        }
+        let mut entries = with_addr.clone();
+        entries.push(mystery.clone());
+
+        // Under exclusions: the address-less coin is excluded (fails closed).
+        let (included, excluded_count) =
+            drain_included(entries.clone(), std::slice::from_ref(&bound));
+        assert_eq!(included.len(), 2);
+        assert_eq!(excluded_count, 1, "the None-address coin counts excluded");
+        assert!(
+            !included
+                .iter()
+                .any(|entry| entry.transaction_id() == mystery.transaction_id()),
+            "a coin that cannot be matched to the exclusion list is not offered"
+        );
+
+        // With no exclusions (a sweep): everything is offered.
+        let (included, excluded_count) = drain_included(entries, &[]);
+        assert_eq!((included.len(), excluded_count), (3, 0));
+    }
+
+    /// A big consolidation to SELF chains through the Generator's canonical
+    /// compound: every leg pays our own address, the whole pile lands as one
+    /// coin, and the aggregate arithmetic still balances to the sompi.
+    #[test]
+    fn consolidation_chains_the_canonical_compound() {
+        let home = addr(DEST);
+        let entries: Vec<UtxoEntryReference> = std::iter::repeat_n(1.0, 400)
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(v)))
+            .collect();
+        let total: u64 = entries.iter().map(|entry| entry.amount()).sum();
+        let (pending, summary) = run_drain_offline(&entries, &[], &home, &home, false).unwrap();
+        assert!(pending.len() > 1, "400 coins must chain");
+        assert_eq!(
+            summary.utxo_count, 400,
+            "absorbed counts wallet coins, not chain-internal edges"
+        );
+        assert_eq!(summary.tx_count as usize, pending.len());
+        assert_eq!(
+            summary.amount_sompi + summary.fee_sompi,
+            total,
+            "swept + aggregate fees == the whole pile"
+        );
+    }
+
+    /// The ReceiverPays underflow guard, at its exact boundary (the pin's
+    /// 1-in-1-out fee for this shape is 203,600 sompi — read from the
+    /// Generator by `receiver_pays_fee_floor`, asserted here at fee−1 / fee /
+    /// fee+1). Below or at the fee: refused typed BEFORE generation reaches
+    /// the pin's unchecked `output.value -= transaction_fees`
+    /// (generator.rs:1071 — a debug-build overflow panic; this test passing
+    /// at all proves no panic fires). Just above: the 1-sompi output dies of
+    /// KIP-9 storage — still typed, still no panic.
+    #[test]
+    fn a_below_fee_coin_refuses_at_the_exact_boundary() {
+        let fee = 203_600u64;
+        for (value, expect_worthless) in [(fee - 1, true), (fee, true), (fee + 1, false)] {
+            let entries = vec![UtxoEntryReference::simulated(value)];
+            let err =
+                run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap_err();
+            if expect_worthless {
+                assert!(
+                    err.to_string().contains("worth less than the network fee"),
+                    "value {value}: expected the fee-floor refusal, got {err}"
+                );
+            } else {
+                // One sompi of output: the guard lets it through and the
+                // Generator's own mass check refuses it — TYPED (reaching
+                // this assert at all proves no overflow panic fired; debug
+                // builds carry overflow checks). It must not be the
+                // fee-floor sentence: the guard's job ended at the fee.
+                assert!(
+                    !err.to_string().contains("worth less than the network fee"),
+                    "value {value}: the guard must stop AT the fee, got {err}"
+                );
+            }
+        }
+    }
+
+    /// The same guard on the multi-coin ReceiverPays arm (a consolidation
+    /// forced onto it by exclusions, over coins beneath the fee).
+    #[test]
+    fn a_below_fee_exclusion_merge_refuses_typed() {
+        let home = addr(DEST);
+        let bound = addr(CHANGE);
+        let mut entries: Vec<UtxoEntryReference> = std::iter::repeat_n(3_000u64, 10)
+            .map(UtxoEntryReference::simulated)
+            .collect();
+        entries.push(UtxoEntryReference::simulated_with_address(
+            kaspa_to_sompi(1.0),
+            &bound,
+        ));
+        let err = run_drain_offline(&entries, std::slice::from_ref(&bound), &home, &home, false)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("worth less than the network fee"),
+            "expected the fee-floor refusal, got {err}"
+        );
+    }
+
+    /// Coins collectively worth less than the fee to move them are refused
+    /// typed — the network's own economics, said honestly, never a panic and
+    /// never a transaction that pays more than it moves.
+    #[test]
+    fn draining_dust_beneath_the_fee_refuses_typed() {
+        let entries: Vec<UtxoEntryReference> = std::iter::repeat_n(0.0001, 10)
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(v)))
+            .collect();
+        let err = run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChainError::InsufficientFunds { .. } | ChainError::Message(_)
+            ),
+            "a dust pile beneath the fee refuses typed, got: {err}"
+        );
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub use link::{sanitize_node_text, EscalationOutcome, SignedTxRetention};
 // The signed-tx DTO the retention/escalation path carries (a broadcast public
 // tx — no key material). Named here so the bridge never imports rpc-core.
 pub use kaspa_wrpc_client::prelude::RpcTransaction;
-pub use send::{PreparedSend, SendOutcome, SendSummary};
+pub use send::{PreparedSend, SendOutcome, SendSummary, SpendComparison};
 pub use transport::{
     compose_bcast, compose_comm_wire, compose_handshake_wire, compose_self_stash_wire,
     decode_envelope_body, parse_payload, resolve_return_address, split_comm_body,

@@ -5477,6 +5477,35 @@ fn invite_expired(status: ConversationStatus, created_unix_ms: u64, now_ms: u64)
         && now_ms.saturating_sub(created_unix_ms) > kaspaverse_chain::pruning_horizon_ms()
 }
 
+/// The addresses a coin-consolidation must leave alone: the bound own-address
+/// of every non-tombstoned conversation whose binding is NOT the identity slot
+/// (receive/0). Since D-148 every payment's change goes home to receive/0, so
+/// NOTHING refills a non-identity bound address — a consolidation that
+/// swallowed those coins would strand its conversation, unable to send until
+/// hand-refilled (the open item logged at `await_spendable_at`). Status is
+/// deliberately ignored: all three states can still move funds from their
+/// binding (a PendingInbound accept refunds the bond from it), and hidden
+/// rows can be revived by inbound traffic.
+///
+/// Fails CLOSED (no transport hub → error, never an empty list): an empty
+/// answer on a wallet that HAS live conversations would quietly de-fund them,
+/// which is the exact harm this set exists to prevent.
+pub(crate) fn drain_exclusions() -> Result<Vec<Address>, AppError> {
+    let hub = hub()?;
+    let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let slots: HashSet<(Branch, u32)> = store
+        .list_conversations()
+        .into_iter()
+        .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
+        .map(|c| (to_core_branch(c.bound_branch), c.bound_index))
+        .filter(|slot| *slot != (Branch::Receive, 0))
+        .collect();
+    slots
+        .into_iter()
+        .map(|(branch, index)| vault::wallet_address_at(branch, index))
+        .collect()
+}
+
 /// All conversations, most recently active first.
 pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
     let hub = hub()?;

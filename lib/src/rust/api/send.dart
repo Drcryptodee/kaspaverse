@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
+// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
@@ -29,6 +29,26 @@ Future<SignableSummaryDto> sendPrepare({
   destination: destination,
   amountSompi: amountSompi,
 );
+
+/// Phase 1 of the wallet's EXIT: build the sweep — every spendable coin, from
+/// every watched address, to `destination` in one transaction — stash it, and
+/// return the B7 summary. The swept amount is the BUILT transaction's single
+/// output (the fee already deducted by the Generator), so the confirm renders
+/// exactly what the destination receives and `amount + fee == balance` to the
+/// sompi. Commit rides the ordinary [`send_commit`] path with the same nonce
+/// guard, acceptance watch, and abandon affordance.
+Future<SignableSummaryDto> sweepPrepare({required String destination}) =>
+    RustLib.instance.api.crateApiSendSweepPrepare(destination: destination);
+
+/// Phase 1 of consolidation: merge the wallet's spendable coins into ONE coin
+/// at receive/0, leaving live conversations' bound addresses untouched
+/// (`transport::drain_exclusions` — fails closed if the transport store is
+/// unavailable). The preview carries the honest savings pair when it can be
+/// priced; a preview probe failing never fails the consolidation itself (an
+/// optional extra that can delete the action it decorates is worse than no
+/// extra — the send-hint scar, SOURCE_OF_TRUTH §19).
+Future<SignableSummaryDto> consolidatePrepare() =>
+    RustLib.instance.api.crateApiSendConsolidatePrepare();
 
 /// Phase 2: sign + broadcast the stashed plan identified by `nonce`. Refuses a
 /// stale/mismatched nonce or an empty stash (the user re-confirms). Advances the
@@ -115,6 +135,19 @@ enum SignableKind {
 
   /// Dev/broadcast lane: plaintext payload to an arbitrary address.
   bcast,
+
+  /// Sweep — send max, the wallet's EXIT: every spendable coin, from every
+  /// watched address, to an external destination in ONE transaction whose
+  /// output + fee equal the balance to the sompi. The amount is SOLVED by
+  /// the Rust builder (it depends on the fee of the transaction spending
+  /// it), never typed or computed in Dart.
+  sweep,
+
+  /// Consolidate — the wallet's spendable coins merged into ONE coin at
+  /// receive/0, so future sends pay the one-input floor. Coins at live
+  /// conversations' bound addresses are excluded (`drain_exclusions`) and
+  /// the chain layer refuses on the BUILT transaction if one is drawn.
+  consolidate,
 }
 
 /// THE canonical Rust-decoded summary every signable flow renders (B7 — NOT
@@ -133,8 +166,11 @@ class SignableSummaryDto {
   final String destination;
   final BigInt amountSompi;
 
-  /// The Generator's exact aggregate fee — never "≈ free" (KIP-9 storage
-  /// mass; payload mass is priced in here for payload-bearing flows).
+  /// The Generator's exact aggregate fee — never "≈ free". The basis is the
+  /// wallet's minimum-relay proxy: ≈ compute mass, with the payload
+  /// component hardened for normalized transient bytes (so payload-bearing
+  /// flows are priced in here); storage mass is EXCLUDED from the floor,
+  /// which is why `mass` below never reconciles with this number.
   final BigInt feeSompi;
 
   /// `amount + fee` (what leaves the wallet, excluding returned change).
@@ -159,6 +195,23 @@ class SignableSummaryDto {
   /// Reserved (V5): the priority component — 0 today, everywhere.
   final BigInt priorityFeeSompi;
 
+  /// Consolidate only (`None` on every other kind): the representative
+  /// amount the savings comparison below was priced at — half the
+  /// consolidated value, an ordinary mid-shape send.
+  final BigInt? typicalAmountSompi;
+
+  /// Consolidate only: inputs that send draws from TODAY's coins.
+  final int? typicalNowUtxos;
+
+  /// Consolidate only: its fee from today's coins.
+  final BigInt? typicalNowFeeSompi;
+
+  /// Consolidate only: the same send's fee from the single consolidated
+  /// coin. All four are the pinned Generator's own numbers over real
+  /// shapes (probed in `chain::send::consolidation_savings`), never
+  /// arithmetic done here or in Dart.
+  final BigInt? typicalAfterFeeSompi;
+
   const SignableSummaryDto({
     required this.nonce,
     required this.kind,
@@ -173,6 +226,10 @@ class SignableSummaryDto {
     this.payloadKind,
     required this.feeStrategy,
     required this.priorityFeeSompi,
+    this.typicalAmountSompi,
+    this.typicalNowUtxos,
+    this.typicalNowFeeSompi,
+    this.typicalAfterFeeSompi,
   });
 
   @override
@@ -189,7 +246,11 @@ class SignableSummaryDto {
       payloadLen.hashCode ^
       payloadKind.hashCode ^
       feeStrategy.hashCode ^
-      priorityFeeSompi.hashCode;
+      priorityFeeSompi.hashCode ^
+      typicalAmountSompi.hashCode ^
+      typicalNowUtxos.hashCode ^
+      typicalNowFeeSompi.hashCode ^
+      typicalAfterFeeSompi.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -208,5 +269,9 @@ class SignableSummaryDto {
           payloadLen == other.payloadLen &&
           payloadKind == other.payloadKind &&
           feeStrategy == other.feeStrategy &&
-          priorityFeeSompi == other.priorityFeeSompi;
+          priorityFeeSompi == other.priorityFeeSompi &&
+          typicalAmountSompi == other.typicalAmountSompi &&
+          typicalNowUtxos == other.typicalNowUtxos &&
+          typicalNowFeeSompi == other.typicalNowFeeSompi &&
+          typicalAfterFeeSompi == other.typicalAfterFeeSompi;
 }

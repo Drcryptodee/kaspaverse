@@ -191,6 +191,14 @@ class WalletService {
   @visibleForTesting
   static Future<BigInt?> Function() sendMinimumFn = sendMinimum;
 
+  @visibleForTesting
+  static Future<SignableSummaryDto> Function(String destination)
+  sweepPrepareFn = (destination) => sweepPrepare(destination: destination);
+
+  @visibleForTesting
+  static Future<SignableSummaryDto> Function() consolidatePrepareFn =
+      consolidatePrepare;
+
   /// Phase 1: build + stash the send in Rust; returns the Rust-decoded summary
   /// the confirm renders (B7). Throws [AppError] on a bad address / shortfall.
   Future<SignableSummaryDto> prepareSend(
@@ -209,6 +217,16 @@ class WalletService {
 
   /// Drop a stashed-but-unconfirmed send (confirm dismissed).
   Future<void> abandonSend() => sendAbandonFn();
+
+  /// Phase 1 of the wallet's EXIT: build + stash the sweep — everything
+  /// spendable, from every watched address, to `destination`; the amount is
+  /// solved by the Rust builder (B7). Commits via [commitSend].
+  Future<SignableSummaryDto> prepareSweep(String destination) =>
+      sweepPrepareFn(destination);
+
+  /// Phase 1 of consolidation: merge spendable coins into one at receive/0,
+  /// live conversations' bound addresses excluded. Commits via [commitSend].
+  Future<SignableSummaryDto> prepareConsolidate() => consolidatePrepareFn();
 
   void _apply(WalletSnapshot snapshot) {
     // The V2 stream-freeze diagnostic: if the bridge logs a fold this line

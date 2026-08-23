@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/rust/api/error.dart';
+import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
@@ -32,6 +34,7 @@ void main() {
     Future<DeepScanReport> Function()? deepScan,
     Future<String> Function()? receiveAddress,
     Future<Map<String, String>> Function()? packageInfo,
+    Future<SignableSummaryDto> Function()? consolidate,
   }) => SettingsScreen(
     security: SecurityScope(
       biometricStatus: biometricStatus ?? () async => 'ready',
@@ -46,6 +49,16 @@ void main() {
           receiveAddress ??
           () async => 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
       deepScan: deepScan ?? () async => scanned,
+      consolidate: consolidate,
+      commitSend: consolidate == null
+          ? null
+          : (_) async => SendOutcomeDto(
+              finalTxid: 'a' * 64,
+              submitted: 1,
+              total: 1,
+              partial: false,
+            ),
+      abandonSend: consolidate == null ? null : () async {},
     ),
     about: AboutScope(
       packageInfo:
@@ -332,5 +345,76 @@ void main() {
       screen(packageInfo: () async => throw PlatformException(code: 'x')),
     );
     expect(find.text('—'), findsWidgets);
+  });
+
+  group('Merge coins (consolidation reachability + honesty)', () {
+    SignableSummaryDto mergeSummary() => SignableSummaryDto(
+      nonce: BigInt.one,
+      kind: SignableKind.consolidate,
+      destination: 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
+      amountSompi: BigInt.from(24700000000),
+      feeSompi: BigInt.from(427200),
+      totalSompi: BigInt.from(24700427200),
+      mass: BigInt.from(4272),
+      txCount: 1,
+      utxoCount: 22,
+      payloadLen: null,
+      payloadKind: null,
+      feeStrategy: FeeStrategyKind.senderPays,
+      priorityFeeSompi: BigInt.zero,
+    );
+
+    testWidgets('the row exists only when wired, and opens the ONE signing '
+        'surface over Rust\'s summary', (tester) async {
+      // Unwired (every pre-existing test): no row — the harness default
+      // proves the hidden state.
+      await pump(tester, screen());
+      expect(find.text('Merge coins'), findsNothing);
+
+      var prepares = 0;
+      await pump(
+        tester,
+        screen(
+          consolidate: () async {
+            prepares++;
+            return mergeSummary();
+          },
+        ),
+      );
+      expect(find.text('Merge coins'), findsOneWidget);
+
+      await tester.tap(find.text('Merge coins'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(prepares, 1);
+      // The same anti-blind-signing sheet every send uses (B7): kind-derived
+      // title, fee-led headline, the absorbed count from the DTO.
+      expect(find.text('Confirm merge'), findsOneWidget);
+      expect(find.text('Costs you'), findsOneWidget);
+      expect(find.textContaining('Merges 22 coins into one'), findsOneWidget);
+    });
+
+    testWidgets('a Rust refusal lands as the row status, in Rust\'s words', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        screen(
+          consolidate: () async => throw const AppError(
+            message:
+                'nothing to merge — your spendable coins are already '
+                'consolidated',
+          ),
+        ),
+      );
+      await tester.tap(find.text('Merge coins'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        find.textContaining('nothing to merge'),
+        findsOneWidget,
+        reason: 'the honest refusal renders, never a shrug',
+      );
+    });
   });
 }

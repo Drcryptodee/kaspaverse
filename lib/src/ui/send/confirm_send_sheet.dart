@@ -58,7 +58,16 @@ String _defaultTitle(SignableKind kind) => switch (kind) {
   SignableKind.selfSendFrame => 'Confirm message',
   SignableKind.stake => 'Confirm stake',
   SignableKind.bcast => 'Confirm broadcast',
+  SignableKind.sweep => 'Confirm send all',
+  SignableKind.consolidate => 'Confirm merge',
 };
+
+/// Inline KAS figure for sentence copy — full 8 decimals (DS-2 applies to
+/// every number on a signing surface, prose included).
+String _kas(BigInt sompi) {
+  final parts = kasParts(sompi);
+  return '${parts.integer}.${parts.fraction}';
+}
 
 class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
   bool _committed = false;
@@ -142,6 +151,12 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
     // The mode is Rust's decode (SignableKind on the summary), never a
     // caller flag — the last un-Rust-vouched fact left this surface at V5.
     final selfSend = s.kind == SignableKind.selfSendFrame;
+    final sweep = s.kind == SignableKind.sweep;
+    final consolidate = s.kind == SignableKind.consolidate;
+    // Flows whose value returns to our own wallet: the honest headline cost
+    // is the fee, and our own address is not rendered as a "destination"
+    // (D-069's rule, which a merge shares).
+    final returnsToSelf = selfSend || consolidate;
     final title = widget.title ?? _defaultTitle(s.kind);
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -154,7 +169,7 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         // cost is the network fee — never the returning value (D-069).
         Center(
           child: Text(
-            selfSend ? 'Costs you' : 'Sending',
+            returnsToSelf ? 'Costs you' : 'Sending',
             style: theme.textTheme.labelSmall?.copyWith(
               color: KvColor.textSecondary,
             ),
@@ -163,14 +178,15 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         const SizedBox(height: KvSpace.xs),
         Center(
           child: AmountText(
-            selfSend ? s.feeSompi : s.amountSompi,
+            returnsToSelf ? s.feeSompi : s.amountSompi,
             role: AmountRole.screen,
           ),
         ),
         const SizedBox(height: KvSpace.l),
-        // A self-send goes to our OWN address — showing that raw address reads
-        // as "sending to a stranger". Drop it; the thread is the destination.
-        if (!selfSend)
+        // A self-send (message or merge) goes to our OWN address — showing
+        // that raw address reads as "sending to a stranger". Drop it; the
+        // thread (or the wallet itself) is the destination.
+        if (!returnsToSelf)
           _Field(
             label: 'To',
             child: Container(
@@ -188,8 +204,42 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
               ),
             ),
           ),
+        // Kind-derived plain-English lines, each citing only the DTO's own
+        // built-tx numbers (B7: the summary stays the single source).
+        if (sweep) ...[
+          const SizedBox(height: KvSpace.s),
+          Text(
+            'This empties your wallet: all ${s.utxoCount} spendable '
+            '${s.utxoCount == 1 ? 'coin moves' : 'coins move'} to this '
+            'address, and the fee comes out of the total.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+        ],
+        if (consolidate) ...[
+          Text(
+            'Merges ${s.utxoCount} coins into one at your own address — the '
+            'value stays yours, so future sends need fewer coins and cost '
+            'less.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: KvColor.textSecondary,
+            ),
+          ),
+          if (s.typicalNowFeeSompi != null &&
+              s.typicalAfterFeeSompi != null) ...[
+            const SizedBox(height: KvSpace.s),
+            Text(
+              'A typical send today costs ${_kas(s.typicalNowFeeSompi!)} KAS '
+              'in fees — after this, ${_kas(s.typicalAfterFeeSompi!)} KAS.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: KvColor.textSecondary,
+              ),
+            ),
+          ],
+        ],
         if (widget.contextNote != null) ...[
-          if (!selfSend) const SizedBox(height: KvSpace.s),
+          if (!returnsToSelf || consolidate) const SizedBox(height: KvSpace.s),
           Text(
             widget.contextNote!,
             style: theme.textTheme.bodySmall?.copyWith(
@@ -230,7 +280,7 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
             children: [
               _CostRow(label: 'Network fee', sompi: s.feeSompi),
               const Divider(),
-              if (selfSend)
+              if (returnsToSelf)
                 _CostRow(label: 'Returns to you', sompi: s.amountSompi)
               else
                 _CostRow(label: 'Total', sompi: s.totalSompi),
@@ -259,9 +309,11 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         ],
         const SizedBox(height: KvSpace.xl),
         _HoldToSign(
-          label: selfSend
-              ? 'Hold to send message'
-              : 'Hold to send ${amount.integer}.${amount.fraction} KAS',
+          label: switch (s.kind) {
+            SignableKind.selfSendFrame => 'Hold to send message',
+            SignableKind.consolidate => 'Hold to merge ${s.utxoCount} coins',
+            _ => 'Hold to send ${amount.integer}.${amount.fraction} KAS',
+          },
           onComplete: _commit,
         ),
         const SizedBox(height: KvSpace.s),
@@ -511,17 +563,32 @@ class _HoldToSignState extends State<_HoldToSign>
             child: Stack(
               alignment: Alignment.center,
               children: [
-                // Decelerate-only fill (DS-5 vault register; never overshoot).
+                // Decelerate-only fill (DS-5 vault register; never
+                // overshoot). Under reduced motion the progress renders as an
+                // opacity ramp over the whole button instead of a width sweep
+                // (§6/§11) — the 800ms hold itself is safety friction and
+                // never shortens.
                 Positioned.fill(
                   child: AnimatedBuilder(
                     animation: _controller,
-                    builder: (context, _) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: FractionallySizedBox(
-                        widthFactor: KvMotion.out.transform(_controller.value),
-                        child: Container(color: KvColor.primary),
-                      ),
-                    ),
+                    builder: (context, _) {
+                      final progress = KvMotion.out.transform(
+                        _controller.value,
+                      );
+                      if (MediaQuery.of(context).disableAnimations) {
+                        return Opacity(
+                          opacity: progress,
+                          child: Container(color: KvColor.primary),
+                        );
+                      }
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: FractionallySizedBox(
+                          widthFactor: progress,
+                          child: Container(color: KvColor.primary),
+                        ),
+                      );
+                    },
                   ),
                 ),
                 // Scale the full-precision label down rather than ever clip or

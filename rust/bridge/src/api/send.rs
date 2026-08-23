@@ -50,6 +50,17 @@ pub enum SignableKind {
     Stake,
     /// Dev/broadcast lane: plaintext payload to an arbitrary address.
     Bcast,
+    /// Sweep — send max, the wallet's EXIT: every spendable coin, from every
+    /// watched address, to an external destination in ONE transaction whose
+    /// output + fee equal the balance to the sompi. The amount is SOLVED by
+    /// the Rust builder (it depends on the fee of the transaction spending
+    /// it), never typed or computed in Dart.
+    Sweep,
+    /// Consolidate — the wallet's spendable coins merged into ONE coin at
+    /// receive/0, so future sends pay the one-input floor. Coins at live
+    /// conversations' bound addresses are excluded (`drain_exclusions`) and
+    /// the chain layer refuses on the BUILT transaction if one is drawn.
+    Consolidate,
 }
 
 /// Reserved fee-strategy discriminant (V5). One variant today — every flow
@@ -98,6 +109,19 @@ pub struct SignableSummaryDto {
     pub fee_strategy: FeeStrategyKind,
     /// Reserved (V5): the priority component — 0 today, everywhere.
     pub priority_fee_sompi: u64,
+    /// Consolidate only (`None` on every other kind): the representative
+    /// amount the savings comparison below was priced at — half the
+    /// consolidated value, an ordinary mid-shape send.
+    pub typical_amount_sompi: Option<u64>,
+    /// Consolidate only: inputs that send draws from TODAY's coins.
+    pub typical_now_utxos: Option<u32>,
+    /// Consolidate only: its fee from today's coins.
+    pub typical_now_fee_sompi: Option<u64>,
+    /// Consolidate only: the same send's fee from the single consolidated
+    /// coin. All four are the pinned Generator's own numbers over real
+    /// shapes (probed in `chain::send::consolidation_savings`), never
+    /// arithmetic done here or in Dart.
+    pub typical_after_fee_sompi: Option<u64>,
 }
 
 /// The ONE stash-side projection every prepare path shares (V5 — replaces
@@ -130,6 +154,10 @@ pub(crate) fn project_signable(
         payload_len,
         payload_kind,
         fee_strategy: FeeStrategyKind::SenderPays,
+        typical_amount_sompi: None,
+        typical_now_utxos: None,
+        typical_now_fee_sompi: None,
+        typical_after_fee_sompi: None,
         priority_fee_sompi: 0,
     }
 }
@@ -368,6 +396,89 @@ pub async fn send_prepare(
         &summary,
         None,
     ))
+}
+
+/// Phase 1 of the wallet's EXIT: build the sweep — every spendable coin, from
+/// every watched address, to `destination` in one transaction — stash it, and
+/// return the B7 summary. The swept amount is the BUILT transaction's single
+/// output (the fee already deducted by the Generator), so the confirm renders
+/// exactly what the destination receives and `amount + fee == balance` to the
+/// sompi. Commit rides the ordinary [`send_commit`] path with the same nonce
+/// guard, acceptance watch, and abandon affordance.
+pub async fn sweep_prepare(destination: String) -> Result<SignableSummaryDto, AppError> {
+    let dest = validate_mainnet_address(&destination)?;
+    let change_home = payment_change_address()?;
+    if dest == change_home {
+        // Sweeping to our own identity address is a consolidation without the
+        // conversation-address exclusions — the one shape that quietly
+        // de-funds the chat lane. Route the intent to the action built for it.
+        return Err(AppError::msg(
+            "that is this wallet's own address — use \"Merge coins\" to tidy your \
+             own wallet; Sweep moves everything to another wallet",
+        ));
+    }
+    let engine = wallet::engine_handle()
+        .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    let signer: Arc<dyn SignerT> = Arc::new(wallet::wallet_signer()?);
+    let rpc = dag::shared_monitor().await?.rpc();
+
+    let prepared = engine
+        .prepare_sweep(dest, change_home, signer, rpc)
+        .await
+        .map_err(map_drain_error)?;
+
+    let nonce = next_nonce();
+    let summary = prepared.summary().clone();
+    *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    Ok(project_signable(nonce, SignableKind::Sweep, &summary, None))
+}
+
+/// Phase 1 of consolidation: merge the wallet's spendable coins into ONE coin
+/// at receive/0, leaving live conversations' bound addresses untouched
+/// (`transport::drain_exclusions` — fails closed if the transport store is
+/// unavailable). The preview carries the honest savings pair when it can be
+/// priced; a preview probe failing never fails the consolidation itself (an
+/// optional extra that can delete the action it decorates is worse than no
+/// extra — the send-hint scar, SOURCE_OF_TRUTH §19).
+pub async fn consolidate_prepare() -> Result<SignableSummaryDto, AppError> {
+    let engine = wallet::engine_handle()
+        .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    let destination = payment_change_address()?;
+    let exclude = super::transport::drain_exclusions()?;
+    let signer: Arc<dyn SignerT> = Arc::new(wallet::wallet_signer()?);
+    let rpc = dag::shared_monitor().await?.rpc();
+
+    let prepared = engine
+        .prepare_consolidate(destination, &exclude, signer, rpc)
+        .await
+        .map_err(map_drain_error)?;
+
+    let savings = engine.consolidation_savings(&prepared).ok().flatten();
+
+    let nonce = next_nonce();
+    let summary = prepared.summary().clone();
+    *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    let mut dto = project_signable(nonce, SignableKind::Consolidate, &summary, None);
+    if let Some(saving) = savings {
+        dto.typical_amount_sompi = Some(saving.amount_sompi);
+        dto.typical_now_utxos = Some(saving.now_utxos);
+        dto.typical_now_fee_sompi = Some(saving.now_fee_sompi);
+        dto.typical_after_fee_sompi = Some(saving.after_fee_sompi);
+    }
+    Ok(dto)
+}
+
+/// Drain refusals arrive typed from the chain layer with their copy already
+/// honest (each is a refusal, not a fault); the two families that need a
+/// friendlier sentence than their Debug form are mapped here.
+fn map_drain_error(e: ChainError) -> AppError {
+    match e {
+        ChainError::InsufficientFunds { .. } => {
+            AppError::msg("these coins are worth less than the network fee to move them")
+        }
+        ChainError::Message(m) => AppError::msg(m),
+        other => AppError::chain(other),
+    }
 }
 
 /// Take the plan identified by `nonce` out of a stash. Refuses a

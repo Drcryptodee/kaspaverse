@@ -22,6 +22,9 @@ SignableSummaryDto _summary({
   SignableKind kind = SignableKind.payment,
   int? payloadLen,
   String? payloadKind,
+  int utxoCount = 2,
+  BigInt? typicalNowFeeSompi,
+  BigInt? typicalAfterFeeSompi,
 }) => SignableSummaryDto(
   nonce: BigInt.one,
   kind: kind,
@@ -31,11 +34,17 @@ SignableSummaryDto _summary({
   totalSompi: BigInt.from(1240002036),
   mass: BigInt.from(2036),
   txCount: txCount,
-  utxoCount: 2,
+  utxoCount: utxoCount,
   payloadLen: payloadLen,
   payloadKind: payloadKind,
   feeStrategy: FeeStrategyKind.senderPays,
   priorityFeeSompi: BigInt.zero,
+  typicalAmountSompi: typicalNowFeeSompi == null
+      ? null
+      : BigInt.from(500000000),
+  typicalNowUtxos: typicalNowFeeSompi == null ? null : 3,
+  typicalNowFeeSompi: typicalNowFeeSompi,
+  typicalAfterFeeSompi: typicalAfterFeeSompi,
 );
 
 SendOutcomeDto _ok() =>
@@ -79,6 +88,56 @@ void main() {
       await tester.enterText(find.byType(TextField).at(1), _addr);
       await tester.pump();
       expect(review().onPressed, isNotNull, reason: 'enabled once valid');
+    });
+
+    testWidgets('Send everything needs only an address and prepares the '
+        'SWEEP, not a payment', (tester) async {
+      var paymentPrepares = 0;
+      var sweepPrepares = 0;
+      String? sweptTo;
+      await tester.pumpWidget(
+        _host(
+          SendScreen(
+            mature: ValueNotifier<BigInt?>(BigInt.from(48152400)),
+            prepare: (_, _) async {
+              paymentPrepares++;
+              return _summary();
+            },
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            prepareSweep: (destination) async {
+              sweepPrepares++;
+              sweptTo = destination;
+              return _summary(kind: SignableKind.sweep, utxoCount: 1);
+            },
+          ),
+        ),
+      );
+
+      // The exit is on screen and TAPPABLE even while both fields are empty
+      // — a wallet the anti-dust floor has trapped types no amount at all,
+      // and a control that greys out silently would not say what it needs.
+      await tester.tap(find.text('Send everything'));
+      await tester.pump();
+      expect(sweepPrepares, 0, reason: 'no address yet — nothing prepared');
+      expect(
+        find.textContaining('Enter the destination address first'),
+        findsOneWidget,
+        reason: 'the button answers with words, never a silent grey',
+      );
+
+      await tester.enterText(find.byType(TextField).at(1), _addr);
+      await tester.pump();
+      await tester.tap(find.text('Send everything'));
+      // Bounded pumps: the sheet's ambient glow animates continuously, so
+      // pumpAndSettle would never settle.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(sweepPrepares, 1);
+      expect(paymentPrepares, 0, reason: 'the sweep never rides prepare()');
+      expect(sweptTo, _addr);
+      // The one signing surface opened over the sweep summary.
+      expect(find.text('Confirm send all'), findsOneWidget);
     });
 
     testWidgets('a malformed amount keeps Review disabled', (tester) async {
@@ -279,6 +338,64 @@ void main() {
       expect(find.text('Total'), findsOneWidget);
       expect(find.text('Confirm accept'), findsOneWidget);
       expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
+    });
+
+    testWidgets('a sweep confirms the whole-wallet exit in the DTO\'s own '
+        'numbers', (tester) async {
+      // The swept amount IS the built final tx's single output (fee already
+      // deducted by the Generator) — the sheet renders it as what the
+      // destination receives, plus the empties-wallet sentence with the
+      // absorbed coin count.
+      await tester.pumpWidget(
+        _sheet(_summary(kind: SignableKind.sweep, utxoCount: 7)),
+      );
+      expect(find.text('Confirm send all'), findsOneWidget);
+      expect(find.text('Sending'), findsOneWidget);
+      // DS-8: the destination is reviewed in full form.
+      expect(find.textContaining('kaspa:'), findsOneWidget);
+      expect(find.textContaining('all 7 spendable coins move'), findsOneWidget);
+      expect(find.text('Total'), findsOneWidget);
+      expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
+    });
+
+    testWidgets('a merge renders as returning value with the savings pair '
+        'from the DTO', (tester) async {
+      await tester.pumpWidget(
+        _sheet(
+          _summary(
+            kind: SignableKind.consolidate,
+            utxoCount: 22,
+            typicalNowFeeSompi: BigInt.from(427200),
+            typicalAfterFeeSompi: BigInt.from(203600),
+          ),
+        ),
+      );
+      expect(find.text('Confirm merge'), findsOneWidget);
+      // The honest headline is the fee; the value returns to us.
+      expect(find.text('Costs you'), findsOneWidget);
+      expect(find.text('Returns to you'), findsOneWidget);
+      // Our own address is not rendered as a destination (D-069's rule).
+      expect(find.textContaining('kaspa:'), findsNothing);
+      expect(find.textContaining('Merges 22 coins into one'), findsOneWidget);
+      // The savings sentence quotes the Generator's own probed fees, exact.
+      expect(
+        find.text(
+          'A typical send today costs 0.00427200 KAS in fees — after this, '
+          '0.00203600 KAS.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Hold to merge 22 coins'), findsOneWidget);
+    });
+
+    testWidgets('a merge whose savings could not be priced omits the line — '
+        'never invents one', (tester) async {
+      await tester.pumpWidget(
+        _sheet(_summary(kind: SignableKind.consolidate, utxoCount: 5)),
+      );
+      expect(find.text('Confirm merge'), findsOneWidget);
+      expect(find.textContaining('A typical send today'), findsNothing);
+      expect(find.textContaining('Merges 5 coins into one'), findsOneWidget);
     });
 
     testWidgets('a hypothetical P4 stake flow renders through the one sheet', (

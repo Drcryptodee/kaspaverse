@@ -24,6 +24,7 @@ class SendScreen extends StatefulWidget {
     required this.commit,
     required this.abandon,
     this.minimumSendable,
+    this.prepareSweep,
   });
 
   /// Spendable (mature) balance, for the informational "available" line. The
@@ -37,6 +38,11 @@ class SendScreen extends StatefulWidget {
   prepare;
   final Future<SendOutcomeDto> Function(BigInt nonce) commit;
   final Future<void> Function() abandon;
+
+  /// Send max — the sweep builder (Rust solves the amount: it depends on the
+  /// fee of the transaction spending it, so the field's number can never be
+  /// right). Null hides the affordance (tests that only exercise payments).
+  final Future<SignableSummaryDto> Function(String destination)? prepareSweep;
 
   /// The smallest currently-sendable amount (sompi), probed from the pinned
   /// Generator over the live coin shape (D-054) — advisory display only; the
@@ -112,12 +118,37 @@ class _SendScreenState extends State<SendScreen> {
   Future<void> _review() async {
     final amountSompi = _amountSompi;
     if (amountSompi == null || amountSompi <= BigInt.zero) return;
+    await _reviewWith(() => widget.prepare(_address.text.trim(), amountSompi));
+  }
+
+  /// "Send everything": the sweep flow — same address field, same confirm
+  /// sheet, no amount (Rust solves it). The affordance stays TAPPABLE even
+  /// before an address is entered, and answers with words instead of a
+  /// silently greyed door (the dust-trapped user it exists for must never
+  /// meet a control that won't say what it needs).
+  Future<void> _reviewSweep() async {
+    final prepareSweep = widget.prepareSweep;
+    if (prepareSweep == null) return;
+    if (!_addressLooksValid) {
+      setState(
+        () => _error =
+            'Enter the destination address first — no amount is needed to '
+            'send everything.',
+      );
+      return;
+    }
+    await _reviewWith(() => prepareSweep(_address.text.trim()));
+  }
+
+  Future<void> _reviewWith(
+    Future<SignableSummaryDto> Function() prepare,
+  ) async {
     setState(() {
       _building = true;
       _error = null;
     });
     try {
-      final summary = await widget.prepare(_address.text.trim(), amountSompi);
+      final summary = await prepare();
       if (!mounted) return;
       // The confirm renders Rust's decode (summary), not the form (B7).
       final outcome = await showModalBottomSheet<SendOutcomeDto?>(
@@ -228,6 +259,13 @@ class _SendScreenState extends State<SendScreen> {
                     ? const KvLoader.inline()
                     : const Text('Review'),
               ),
+              if (widget.prepareSweep != null) ...[
+                const SizedBox(height: KvSpace.xs),
+                TextButton(
+                  onPressed: _building ? null : _reviewSweep,
+                  child: const Text('Send everything'),
+                ),
+              ],
             ],
           ),
         ),

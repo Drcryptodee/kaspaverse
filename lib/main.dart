@@ -124,6 +124,7 @@ class KaspaVerseApp extends StatelessWidget {
             commit: wallet.commitSend,
             abandon: wallet.abandonSend,
             minimumSendable: wallet.minimumSendable,
+            prepareSweep: wallet.prepareSweep,
           ),
           messagesRoute: (_) => const ContactsScreen(),
           // Track 2: the app's settings surface, and the only door to biometric
@@ -142,6 +143,9 @@ class KaspaVerseApp extends StatelessWidget {
               receiveAddress: vaultReceiveAddress,
               deepScan: deepScan,
               receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
+              consolidate: wallet.prepareConsolidate,
+              commitSend: wallet.commitSend,
+              abandonSend: wallet.abandonSend,
             ),
             about: AboutScope(packageInfo: VaultService.instance.packageInfo),
             // The SAME sheet the home beacon opens, over the same notifiers —
