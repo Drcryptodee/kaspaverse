@@ -110,6 +110,11 @@ pub struct PreparedSend {
     pending: Vec<PendingTransaction>,
     summary: SendSummary,
     rpc: Rpc,
+    /// The live [`UtxoContext`], carried ONLY for a drain built on the
+    /// `ReceiverPays` arm — see [`PreparedSend::commit`] for why that arm alone
+    /// needs it. `None` for every ordinary payment and for the `Change`-
+    /// destination drain, whose accounting the pin already gets exactly right.
+    discharge_outgoing: Option<kaspa_wallet_core::utxo::UtxoContext>,
 }
 
 impl PreparedSend {
@@ -166,7 +171,10 @@ impl PreparedSend {
             match pt.try_submit(self.rpc.rpc_api()).await {
                 Ok(txid) => {
                     submitted += 1;
-                    let txid = txid.to_string();
+                    // The typed id outlives the string form: the discharge
+                    // below needs it, and it must run AFTER the acceptance hook.
+                    let tx_id = txid;
+                    let txid = tx_id.to_string();
                     // V1 span: the node acked this submit RPC — the anchor
                     // that decomposes broadcast-lag from chain-lag in the
                     // submit→accepted baseline (public txid only, INV-3).
@@ -179,6 +187,76 @@ impl PreparedSend {
                     }
                     final_txid = Some(txid.clone());
                     submitted_txids.push(txid);
+                    // Discharge the pin's outgoing record for a `ReceiverPays`
+                    // EXIT drain, the moment `try_submit` has registered it
+                    // (pending.rs:214-219 @ `cfafeb4`).
+                    //
+                    // WHY THIS ARM. `UtxoContext::calculate_balance`
+                    // (context.rs:506-547) adjusts the mature balance by
+                    // `+aggregate_input_value - (fees + payment_value)` for
+                    // every outgoing tx that is not yet accepted. That identity
+                    // is exact when the fee is paid ON TOP of the payment,
+                    // which is every shape upstream can reach.
+                    // `Fees::ReceiverPays` deducts the fee FROM the payment
+                    // while `payment_value` stays the full REQUESTED amount
+                    // (fixed at generator.rs:432, before the deduction at
+                    // generator.rs:1067-1073), so the fee is counted twice and
+                    // the balance reads exactly one fee short. The
+                    // `Change`-destination drain needs nothing: `payment_value()`
+                    // is `None` there (generator.rs:376-380), taking the
+                    // compound branch where `fees + aggregate_output_value ==
+                    // aggregate_input_value` and the adjustment nets to zero.
+                    //
+                    // WHY ONLY THE EXIT. The record retires itself as soon as
+                    // one of the transaction's outputs lands in the wallet:
+                    // `tag_as_accepted_at_daa_score` (outgoing.rs:68) is called
+                    // from `handle_utxo_added` (context.rs:577, tag at :625),
+                    // after which
+                    // `calculate_balance` filters it out. A consolidation's coin
+                    // comes home to `receive/0`, so a `ReceiverPays` MERGE
+                    // self-heals — and its record must stay, because
+                    // `outgoing_without_batch_tx` (context.rs:528) is the sole
+                    // input to the "still settling from your last send"
+                    // classifier (consensus finding 7); discharging it early
+                    // would re-open that regression from the other side. A
+                    // sweep pays an external address, so nothing ever lands,
+                    // nothing is ever tagged, and the only purge
+                    // (`handle_outgoing`, processor.rs:337-348) is gated on that
+                    // tag and never fires. `context.clear()` is then the only
+                    // discharge left — which is exactly why this residue
+                    // survives an address-discovery pass and dies on a restart.
+                    //
+                    // Measured on device 2026-08-23: after a sweep, five
+                    // 1.00000000 KAS deposits displayed as 4.99796400 — short by
+                    // the sweep's 203,600 sompi fee — cleared by a process
+                    // restart, not by a rescan. Funds were never at risk (the
+                    // drain path reads the mature ENTRY SET, not this figure);
+                    // the number lied.
+                    //
+                    // The processor's own copy is deliberately left alone:
+                    // `update_utxos` reads it for `force_maturity_if_outgoing`
+                    // and `settling_at` reads it for the messages lane.
+                    if let Some(context) = &self.discharge_outgoing {
+                        // NOT a `debug_assert!`: everything here runs AFTER an
+                        // irreversible broadcast, and this file's own law is
+                        // fallible-throughout (INV-2). A pin that stopped
+                        // registering the record must be reported, never
+                        // panicked — least of all in the one build where the
+                        // panic costs the founder an exit that already left.
+                        if context.remove_outgoing_transaction(&tx_id).is_none() {
+                            log::warn!(
+                                "send: the pin no longer registers the outgoing tx — \
+                                 the drain discharge is a no-op"
+                            );
+                        }
+                        // Publish the corrected figure now. `try_submit` already
+                        // pushed a balance carrying the double-count, so without
+                        // this the wrong number stands until the next balance
+                        // event (on a sweep, that is the next deposit).
+                        if let Err(e) = context.update_balance().await {
+                            log::warn!("send: balance refresh after drain discharge failed ({e})");
+                        }
+                    }
                 }
                 Err(e) => {
                     return SendOutcome {
@@ -485,6 +563,10 @@ impl WalletEngine {
             pending,
             summary,
             rpc,
+            // An ordinary payment's outgoing record is LOAD-BEARING while the
+            // change is unconfirmed: the pin adds it back so the user sees
+            // their money immediately. Never discharge it here.
+            discharge_outgoing: None,
         })
     }
 }
@@ -855,6 +937,8 @@ impl WalletEngine {
 
         let arm = plan_drain(included, has_exclusions)?;
         let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
+        // Read BEFORE the match consumes `arm`.
+        let discharge = discharges_outgoing(&arm, is_exit);
         let (pending, summary) = match arm {
             DrainArm::ReceiverPays {
                 amount_sompi,
@@ -900,6 +984,7 @@ impl WalletEngine {
             pending,
             summary,
             rpc,
+            discharge_outgoing: discharge.then(|| context.clone()),
         })
     }
 }
@@ -968,6 +1053,24 @@ fn receiver_pays_fee_floor(
             "these coins cannot be priced for a sweep right now".into(),
         )),
     }
+}
+
+/// Does this drain need the pin's outgoing record discharged after submit?
+///
+/// Both halves are load-bearing and each protects a different regression:
+///
+/// - `ReceiverPays` ONLY, because that is the arm whose fee the pin's
+///   `calculate_balance` double-counts (the `Change` arm's adjustment nets to
+///   zero — see [`PreparedSend::commit`]).
+/// - EXIT ONLY, because a record retires itself as soon as one of the
+///   transaction's outputs lands in the wallet. A consolidation's coin comes
+///   home to `receive/0` and self-heals, and its `outgoing` bucket is the sole
+///   input to the "still settling from your last send" classifier (consensus
+///   finding 7) — discharging it early re-opens that regression from the other
+///   side. Only a sweep pays an address the wallet does not watch, so only a
+///   sweep is never retired.
+fn discharges_outgoing(arm: &DrainArm, is_exit: bool) -> bool {
+    matches!(arm, DrainArm::ReceiverPays { .. }) && is_exit
 }
 
 /// The shared post-generation tail of every drain — chain policy, the
@@ -1426,6 +1529,17 @@ fn map_generate_error(e: kaspa_wallet_core::error::Error) -> ChainError {
         // the compose path maps this to the honest friendly error, §4).
         kaspa_wallet_core::error::Error::GeneratorTransactionIsTooHeavy => {
             ChainError::TransactionTooHeavy
+        }
+        // The Generator's post-build mass double-check (generator.rs:1108-1110)
+        // surfaces the SAME dead zone as `StorageMassExceedsMaximumTransactionMass`
+        // — `probe_error` already collapses the two for exactly this reason
+        // (see its note) — but left un-mapped it reached the user as the raw
+        // upstream Display text "Mass calculation error". One layer down, the
+        // same collapse, so both halves of the dead zone earn the same honest
+        // sentence. `storage_mass: 0` because this arm carries no measured mass;
+        // no caller reads the number (the copy is driven by `minimum_sendable`).
+        kaspa_wallet_core::error::Error::MassCalculationError => {
+            ChainError::StorageMassExceeded { storage_mass: 0 }
         }
         other => ChainError::from(other),
     }
@@ -1919,6 +2033,98 @@ mod tests {
             is_exit,
         )?;
         Ok((pending, summary))
+    }
+
+    /// The discharge predicate, all four combinations. Each `false` row is a
+    /// regression this rule prevents: dropping `is_exit` zeroes the `outgoing`
+    /// bucket the "still settling" classifier reads (consensus finding 7), and
+    /// widening past `ReceiverPays` discharges an arm whose accounting the pin
+    /// already gets exactly right.
+    #[test]
+    fn only_a_receiver_pays_exit_discharges_its_outgoing_record() {
+        let rp = DrainArm::ReceiverPays {
+            amount_sompi: 48_152_400,
+            priority: vec![UtxoEntryReference::simulated(48_152_400)],
+        };
+        assert!(
+            discharges_outgoing(&rp, true),
+            "a sweep: nothing comes home"
+        );
+        assert!(
+            !discharges_outgoing(&rp, false),
+            "a ReceiverPays MERGE self-heals when its coin returns to receive/0"
+        );
+        assert!(
+            !discharges_outgoing(&DrainArm::Drain, true),
+            "the Change arm's balance adjustment already nets to zero"
+        );
+        assert!(!discharges_outgoing(&DrainArm::Drain, false));
+    }
+
+    /// The residue the 2026-08-23 device sitting measured, pinned as an
+    /// arithmetic signature on the BUILT transaction — the closest an offline
+    /// fence can get, because the pin's `register_outgoing_transaction` is
+    /// `pub(crate)` and only `try_submit` (which broadcasts) can reach it.
+    ///
+    /// `UtxoContext::calculate_balance` (context.rs:506-547) charges an
+    /// unaccepted outgoing tx as `fees + payment_value` against a credit of
+    /// `aggregate_input_value`. So `fees + payment_value > aggregate_input_value`
+    /// IS the double-count, readable straight off the transaction, and the
+    /// excess is exactly one fee. `PreparedSend::commit` discharges the record
+    /// for the exit drain because of it. The `Change` arm must show the
+    /// opposite: no payment value at all, hence the compound branch, which nets
+    /// to zero and is deliberately left alone.
+    ///
+    /// Mutation check: the day a pin bump makes `ReceiverPays` report the
+    /// post-deduction value as `payment_value`, the first assert flips and the
+    /// discharge becomes wrong — which is precisely when we need to be told.
+    #[test]
+    fn the_receiver_pays_arm_carries_the_pins_fee_double_count() {
+        // A one-coin wallet: the founder's measured trap, which only the
+        // `ReceiverPays` arm can empty.
+        let entries = vec![UtxoEntryReference::simulated(48_152_400)];
+        let (pending, _) =
+            run_drain_offline(&entries, &[], &addr(DEST), &addr(CHANGE), true).unwrap();
+        let pt = pending.iter().find(|pt| pt.is_final()).unwrap();
+
+        let payment = pt
+            .payment_value()
+            .expect("the ReceiverPays arm builds a PAYMENT, so it has a payment value");
+        assert_eq!(
+            payment, 48_152_400,
+            "payment_value stays the REQUESTED full balance — the pin fixes it \
+             before deducting the fee (generator.rs:432 vs :1067-1073)"
+        );
+        assert!(
+            pt.aggregate_output_value() < payment,
+            "the fee came OUT of the payment: built output {} vs requested {}",
+            pt.aggregate_output_value(),
+            payment
+        );
+        assert_eq!(
+            pt.fees() + payment - pt.aggregate_input_value(),
+            pt.fees(),
+            "the balance adjustment overstates the outflow by exactly one fee"
+        );
+
+        // The Change arm: no payment value, so the compound branch applies and
+        // `fees + outputs == inputs` exactly. Nothing to discharge.
+        let merge_entries = vec![
+            UtxoEntryReference::simulated(100_000_000),
+            UtxoEntryReference::simulated(100_000_000),
+        ];
+        let (merge_pending, _) =
+            run_drain_offline(&merge_entries, &[], &addr(CHANGE), &addr(CHANGE), false).unwrap();
+        let mpt = merge_pending.iter().find(|pt| pt.is_final()).unwrap();
+        assert!(
+            mpt.payment_value().is_none(),
+            "a Change-destination drain has no payment value (generator.rs:376-380)"
+        );
+        assert_eq!(
+            mpt.fees() + mpt.aggregate_output_value(),
+            mpt.aggregate_input_value(),
+            "the compound branch nets to zero — the Change arm needs no discharge"
+        );
     }
 
     /// THE EXIT, part 1 — the founder's trap, reproduced then freed. Measured

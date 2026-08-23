@@ -4145,8 +4145,8 @@ fn friendly_prepare_error(
             outgoing_sompi,
         )),
         ChainError::StorageMassExceeded { .. } => AppError::msg(
-            "this send is too small for your current coins (Kaspa's anti-dust rule) — \
-             wait for pending funds or add to your balance",
+            "this send is too small for your current coins — the network anti-dust \
+             rule. Nothing was sent — wait for pending funds or add to your balance.",
         ),
         other => AppError::chain(other),
     }

@@ -212,6 +212,45 @@ fn fully_broadcast(outcome: &SendOutcome) -> bool {
         && outcome.submitted == outcome.total
 }
 
+/// The storage-mass refusal, in the words the shape actually earns.
+///
+/// Both of a transaction's outputs face the same KIP-9 anti-dust bar, so a
+/// refusal has TWO causes wearing one error: below the floor the PAYMENT is the
+/// dust, and above it the CHANGE is. `probe_error` deliberately collapses them
+/// into `ProbeOutcome::TooSmall` because the minimum-search needs one monotone
+/// bucket — but the sentence must not inherit that collapse, because the floor
+/// wording sends a change-side user toward a BIGGER amount, which is the exact
+/// wrong direction.
+///
+/// Found on glass 2026-08-23: a 0.50 KAS send from a single 0.57725200 KAS coin
+/// was told it was "too small" and pointed at 0.10437500 — the floor the same
+/// screen was rendering two lines above.
+///
+/// `minimum` is the computed floor when it is known; `None` (the derivation
+/// failed) degrades to the floor sentence WITHOUT the hint, never to silence.
+pub(crate) fn storage_mass_message(amount_sompi: u64, minimum: Option<u64>) -> String {
+    if minimum.is_some_and(|m| amount_sompi > m) {
+        return "this amount leaves change too small to keep — the network \
+                anti-dust rule for your current coins. Nothing was sent — send a \
+                little less, or use Send everything to empty the wallet."
+            .to_string();
+    }
+    let Some(floor) = minimum else {
+        // The floor did not compute, so we know the shape was refused but not
+        // WHICH side it failed on. Asserting "too small" here would be the same
+        // misdirection this function exists to remove, minus the number.
+        return "this amount doesn't fit your current coins — the network \
+                anti-dust rule. Nothing was sent — try a different amount, or use \
+                Send everything to empty the wallet."
+            .to_string();
+    };
+    format!(
+        "this amount is too small for your current coins — the network anti-dust \
+         rule. Nothing was sent — the smallest that works right now is {} KAS.",
+        kas_exact(floor)
+    )
+}
+
 /// Classify an `InsufficientFunds` refusal honestly against the live balance
 /// buckets (the Generator spends only MATURE UTXOs). Change from our own
 /// just-broadcast send rides the `outgoing` bucket until the network hands it
@@ -243,17 +282,13 @@ pub(crate) fn shortfall_message(
     }
 }
 
-/// Display a sompi amount as KAS with trailing zeros trimmed (display-only —
-/// never consensus math). Pure; tested.
-fn kas_display(sompi: u64) -> String {
-    let kas = sompi / 100_000_000;
-    let frac = sompi % 100_000_000;
-    if frac == 0 {
-        format!("{kas}")
-    } else {
-        let s = format!("{kas}.{frac:08}");
-        s.trim_end_matches('0').to_string()
-    }
+/// A sompi amount as KAS with all 8 decimals, exactly as the send screen's own
+/// minimum line renders it (`kasParts`, `format.dart`). Display-only — never
+/// consensus math. One datum two lines apart must not wear two forms (DS-2),
+/// and a trimmed threshold reads as an invitation to type it back in short.
+/// Pure; tested.
+fn kas_exact(sompi: u64) -> String {
+    format!("{}.{:08}", sompi / 100_000_000, sompi % 100_000_000)
 }
 
 /// WHERE A PAYMENT'S CHANGE GOES — `receive/0`, the same address everything
@@ -368,20 +403,22 @@ pub async fn send_prepare(
             // out" with a derivation failure that explains nothing. An optional
             // extra that can delete the explanation it decorates is worse than
             // no extra at all.
-            let hint = payment_change_address()
+            //
+            // Which SIDE of the window we are on decides the sentence, and the
+            // discriminator is already computed here. Both outputs face the
+            // same anti-dust bar, so a refusal ABOVE the floor is the CHANGE
+            // being dust, not the payment — and the floor sentence points such
+            // a user at a BIGGER amount, the exact wrong direction. Measured on
+            // glass 2026-08-23: a 0.50 KAS send from a single 0.57725200 coin
+            // was told "too small" and pointed at 0.10437500, the floor the
+            // same screen was rendering. `probe_error` collapses both
+            // storage-mass refusals into `ProbeOutcome::TooSmall` because the
+            // bisection needs one monotone bucket; the COPY must not inherit
+            // that collapse.
+            let minimum = payment_change_address()
                 .ok()
-                .and_then(|change| engine.minimum_sendable(change, &[]).ok().flatten())
-                .map(|m| {
-                    format!(
-                        " The smallest sendable right now is about {} KAS.",
-                        kas_display(m)
-                    )
-                })
-                .unwrap_or_default();
-            return Err(AppError::msg(format!(
-                "this amount is too small to send from your current coins — Kaspa's \
-                 anti-dust rule (storage mass) prices tiny outputs.{hint}"
-            )));
+                .and_then(|change| engine.minimum_sendable(change, &[]).ok().flatten());
+            return Err(AppError::msg(storage_mass_message(amount_sompi, minimum)));
         }
         Err(e) => return Err(AppError::chain(e)),
     };
@@ -477,6 +514,17 @@ fn map_drain_error(e: ChainError) -> AppError {
             AppError::msg("these coins are worth less than the network fee to move them")
         }
         ChainError::Message(m) => AppError::msg(m),
+        // The drain surfaces have no amount field to correct, so the payment
+        // path's floor/ceiling split has nothing to say here — but the raw
+        // Display ("storage mass N exceeds the per-tx maximum") is not a
+        // sentence anyone can act on, and since `map_generate_error` now folds
+        // `MassCalculationError` into this variant it also carries a
+        // `storage_mass` of 0 that would read as a fabricated measurement.
+        // Name the shape's real problem and stop.
+        ChainError::StorageMassExceeded { .. } => AppError::msg(
+            "these coins can't be moved — they fall under the network anti-dust \
+             rule for your current coins. Nothing was sent.",
+        ),
         other => AppError::chain(other),
     }
 }
@@ -613,6 +661,72 @@ mod tests {
         }
     }
 
+    /// The founder's measured dead zone (2026-08-23, on glass): a single
+    /// 0.57725200 KAS coin, floor 0.10437500, asking for 0.50. The refusal must
+    /// name the CHANGE and offer the two real ways out — never the floor
+    /// sentence, which points the user at a bigger amount.
+    #[test]
+    fn the_dead_zone_names_the_change_not_the_amount() {
+        let msg = storage_mass_message(50_000_000, Some(10_437_500));
+        assert!(msg.contains("leaves change too small to keep"), "{msg}");
+        assert!(
+            msg.contains("Nothing was sent"),
+            "the funds beat, §12: {msg}"
+        );
+        assert!(
+            !msg.contains("storage mass"),
+            "jargon: the screen's own minimum line says 'network anti-dust rule'"
+        );
+        assert!(msg.contains("send a little less"), "{msg}");
+        assert!(msg.contains("Send everything"), "{msg}");
+        assert!(
+            !msg.contains("this amount is too small to send"),
+            "the floor sentence must not survive above the floor: {msg}"
+        );
+    }
+
+    /// Below the floor the PAYMENT really is the dust, so the floor sentence
+    /// stands — with the computed way out.
+    #[test]
+    fn below_the_floor_still_names_the_floor_and_its_number() {
+        let msg = storage_mass_message(5_000_000, Some(10_437_500));
+        assert!(msg.contains("too small for your current coins"), "{msg}");
+        // Exact-8, matching the minimum line the same screen renders (DS-2).
+        assert!(msg.contains("0.10437500"), "{msg}");
+        assert!(
+            msg.contains("Nothing was sent"),
+            "the funds beat, §12: {msg}"
+        );
+        assert!(!msg.contains("leaves change too small"), "{msg}");
+    }
+
+    /// The boundary is strict: AT the floor the amount is sendable-adjacent and
+    /// the floor sentence is still the honest one. (Mutation fence — flipping
+    /// the comparison to `>=` reds this and nothing else.)
+    #[test]
+    fn at_the_floor_exactly_it_is_still_the_floor_sentence() {
+        let msg = storage_mass_message(10_437_500, Some(10_437_500));
+        assert!(msg.contains("too small for your current coins"), "{msg}");
+        assert!(!msg.contains("leaves change too small"), "{msg}");
+    }
+
+    /// An unknown floor degrades to the bare floor sentence — never to the
+    /// change sentence (which would be an unproven claim) and never to silence.
+    #[test]
+    fn an_unknown_floor_degrades_without_inventing_a_cause() {
+        let msg = storage_mass_message(50_000_000, None);
+        // Neither cause may be asserted: we do not know which side failed.
+        assert!(msg.contains("doesn't fit your current coins"), "{msg}");
+        assert!(!msg.contains("too small for your current coins"), "{msg}");
+        assert!(!msg.contains("leaves change too small"), "{msg}");
+        assert!(
+            !msg.contains("smallest sendable"),
+            "no hint without a number"
+        );
+        // It still names a way out.
+        assert!(msg.contains("Send everything"), "{msg}");
+    }
+
     /// V5: the reserved fee-strategy seam holds the ONE live strategy —
     /// `SenderPays` with zero priority (the Generator's `Fees::SenderPays(0)`)
     /// — on every projection, regardless of kind.
@@ -737,13 +851,14 @@ mod tests {
         assert!(shortfall_message(60, 10, 20, 30).contains("still settling"));
     }
 
+    /// The floor is rendered with all 8 decimals, matching the minimum line
+    /// the same screen shows two rows above it (DS-2).
     #[test]
-    fn kas_display_trims_honestly() {
-        assert_eq!(kas_display(100_000_000), "1");
-        assert_eq!(kas_display(10_000_000), "0.1");
-        assert_eq!(kas_display(12_345_678), "0.12345678");
-        assert_eq!(kas_display(23_000_000), "0.23");
-        assert_eq!(kas_display(0), "0");
+    fn kas_exact_matches_the_screens_own_minimum_line() {
+        assert_eq!(kas_exact(10_437_500), "0.10437500");
+        assert_eq!(kas_exact(100_000_000), "1.00000000");
+        assert_eq!(kas_exact(0), "0.00000000");
+        assert_eq!(kas_exact(12_345_678), "0.12345678");
     }
 
     #[test]

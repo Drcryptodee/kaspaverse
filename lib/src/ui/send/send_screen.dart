@@ -243,8 +243,12 @@ class _SendScreenState extends State<SendScreen> {
                         const SizedBox(height: KvSpace.m),
                         Text(
                           _error!,
+                          // `KvColor.error` is reserved for fund risk and
+                          // destruction (tokens.dart) — a refusal to BUILD is
+                          // neither, and red made a neutral sentence read as
+                          // blame (§13; same call as create_screen.dart).
                           style: theme.textTheme.bodyMedium?.copyWith(
-                            color: KvColor.error,
+                            color: KvColor.warning,
                           ),
                         ),
                       ],

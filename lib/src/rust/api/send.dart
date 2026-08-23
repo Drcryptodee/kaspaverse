@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_display`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `take_stashed`, `validate_mainnet_address`
+// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_exact`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `storage_mass_message`, `take_stashed`, `validate_mainnet_address`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
