@@ -358,6 +358,7 @@ void main() {
       mass: BigInt.from(4272),
       txCount: 1,
       utxoCount: 22,
+      resultingCoins: 1,
       payloadLen: null,
       payloadKind: null,
       feeStrategy: FeeStrategyKind.senderPays,

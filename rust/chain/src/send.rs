@@ -68,6 +68,21 @@ pub struct SendSummary {
     pub tx_count: u32,
     /// Number of UTXOs consumed as inputs.
     pub utxo_count: u32,
+    /// How many coins this send LEAVES at its destination — the answer to
+    /// "merges N coins into how many?", and deliberately NOT derivable from
+    /// `tx_count`.
+    ///
+    /// The two drain arms both chain past one transaction and leave opposite
+    /// results: the native `Drain` compound is N transactions ending in ONE
+    /// output (`verify_drain` refuses anything else), while a batched merge is
+    /// N transactions each leaving its own coin. A render layer that branched
+    /// on `tx_count` to tell a user how many coins they end with was wrong on
+    /// the commoner of the two (ux audit, this sitting) — so the layer that
+    /// KNOWS which arm ran publishes the fact instead of letting Dart infer it.
+    ///
+    /// `0` where the question does not apply: an ordinary payment leaves change
+    /// whose count is not this field's business.
+    pub resulting_coins: u32,
     /// Payload bytes on the FINAL built transaction (0 = none) — read back from
     /// the generated tx itself, never echoed from the caller (B7; P2.1
     /// anti-blind-signing parity: the confirm renders what will be signed).
@@ -299,6 +314,7 @@ impl WalletEngine {
     /// `None` = a plain payment. Size is bounded by the Generator's per-tx mass
     /// ceiling, surfaced as its own typed error — never a magic constant here
     /// (§4 watch-out).
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare_send(
         &self,
         destination: Address,
@@ -307,9 +323,11 @@ impl WalletEngine {
         signer: Arc<dyn SignerT>,
         rpc: Rpc,
         payload: Option<Vec<u8>>,
+        exclude: &[Address],
     ) -> Result<PreparedSend> {
         // A plain payment: no pinned block — the spend order is wholly the
-        // wallet policy's (spend_policy.rs: riders first, then largest-first).
+        // wallet policy's (spend_policy.rs: riders first, then largest-first,
+        // reserved coins dead last).
         self.prepare_send_inner(
             destination,
             amount_sompi,
@@ -318,6 +336,7 @@ impl WalletEngine {
             signer,
             rpc,
             payload,
+            exclude,
         )
         .await
     }
@@ -453,6 +472,7 @@ impl WalletEngine {
         signer: Arc<dyn SignerT>,
         rpc: Rpc,
         payload: Option<Vec<u8>>,
+        exclude: &[Address],
     ) -> Result<PreparedSend> {
         if priority.is_empty() {
             return Err(ChainError::Message(
@@ -469,6 +489,7 @@ impl WalletEngine {
             signer,
             rpc,
             payload,
+            exclude,
         )
         .await
     }
@@ -490,6 +511,7 @@ impl WalletEngine {
         signer: Arc<dyn SignerT>,
         rpc: Rpc,
         payload: Option<Vec<u8>>,
+        exclude: &[Address],
     ) -> Result<PreparedSend> {
         let context = self.context();
         // (ii) Watch the change address so the change UTXO this send returns is
@@ -516,11 +538,15 @@ impl WalletEngine {
             .map(Into::into)
             .collect();
         let pinned = priority.unwrap_or_default();
-        let ridered =
-            spend_policy::select_spend_priority(&mature, &pinned, spend_policy::RIDER_LIMIT);
+        let ridered = spend_policy::select_spend_priority(
+            &mature,
+            &pinned,
+            spend_policy::RIDER_LIMIT,
+            exclude,
+        );
 
         let (pending, summary) = {
-            let (pending, summary) = generate_chain(
+            let (ridden, ridden_summary) = generate_chain(
                 &context,
                 ridered,
                 &change,
@@ -529,45 +555,134 @@ impl WalletEngine {
                 payload.clone(),
                 signer.clone(),
             )?;
-            // The rider law's no-new-leg guarantee, enforced by construction:
-            // a one-transaction chain cannot have gained a leg (one is the
-            // floor), so only a chained result pays the comparison generation.
-            // No mass arithmetic of ours decides this (INV-9) — the pinned
-            // Generator is run both ways and the shorter chain wins.
-            if pending.len() > 1 {
-                let riderless = spend_policy::select_spend_priority(&mature, &pinned, 0);
-                let (p, s) = generate_chain(
-                    &context,
-                    riderless,
-                    &change,
-                    PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
-                    Fees::SenderPays(0),
-                    payload.clone(),
-                    signer.clone(),
-                )?;
-                if p.len() < pending.len() {
-                    (p, s)
-                } else {
-                    (pending, summary)
-                }
-            } else {
-                (pending, summary)
-            }
+            // BOTH shapes are always generated now, and the second generation
+            // is no longer just the leg check. The pinned Generator is the only
+            // judge of either limit — nothing here prices anything (INV-9);
+            // generation is side-effect-free, so the losing chain simply drops.
+            //
+            // **The comparison shape is a QUESTION, never a gate**, so it is
+            // `.ok()` and not `?`. Its failure is a fact about a transaction we
+            // may never ship, and propagating it would refuse a payment the
+            // ridden shape already built. Not theoretical: the riderless order
+            // stops one coin earlier and leaves SMALLER change, and the pin's
+            // `calculate_mass` (generator.rs:970-972) errors before the
+            // storage-mass input-relief block at :849 can pull another input —
+            // so on the founder's own measured wallet, moving the amount 0.01
+            // KAS (100.90 → 100.91) kills the cheap shape while the ridden one
+            // builds in a single transaction. Found by the consensus audit of
+            // this change; the cliff is frozen in
+            // `a_refusing_comparison_shape_never_refuses_the_send`.
+            let comparison = generate_chain(
+                &context,
+                spend_policy::select_spend_priority(&mature, &pinned, 0, exclude),
+                &change,
+                PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                Fees::SenderPays(0),
+                payload.clone(),
+                signer.clone(),
+            )
+            .ok();
+            shipped_shape((ridden, ridden_summary), comparison, || {
+                let order = spend_policy::select_spend_priority(
+                    &mature,
+                    &pinned,
+                    spend_policy::RIDER_LIMIT,
+                    exclude,
+                );
+                let order = (!order.is_empty()).then_some(order);
+                // Same law as the comparison generation: the floor is a
+                // DECORATION on a decision, and `riderless_wins` already fails
+                // closed onto the riders when it is unknown
+                // (`an_unknown_floor_keeps_the_riders`). A probe error may not
+                // become the send's error.
+                search_minimum(|amount| probe_context(&context, &change, amount, order.as_deref()))
+                    .ok()
+                    .flatten()
+            })
         };
 
-        let mut summary = project_summary(&summary, destination.to_string());
-        // B7: the payload size the confirm shows is read back from the BUILT
-        // final tx, never echoed from the caller's argument.
-        summary.payload_len = final_payload_len(&pending);
-        Ok(PreparedSend {
+        Ok(finish_prepared_send(
             pending,
-            summary,
+            &summary,
+            &mature,
+            &pinned,
+            exclude,
+            &destination,
             rpc,
-            // An ordinary payment's outgoing record is LOAD-BEARING while the
-            // change is unconfirmed: the pin adds it back so the user sees
-            // their money immediately. Never discharge it here.
-            discharge_outgoing: None,
-        })
+        ))
+    }
+}
+
+/// The shared tail of every ordinary send: the reserved-draw trace, then the
+/// B7 projection off the BUILT chain. Extracted so the two ways
+/// `prepare_send_inner` can settle on a shape — the comparison decided it, or
+/// the comparison never built — run the same code rather than a copy of it.
+/// How many coins this send drew from ANOTHER conversation's reserve.
+///
+/// The pinned block is subtracted first, and that is the whole subtlety: on a
+/// transport send the pinned coins ARE a bound address, so `is_reserved` matches
+/// them and they are always consumed — input[0] identity, D-067. Counting them
+/// would make every message from an off-identity conversation report that a
+/// payment had raided a reserve, which is the opposite of what this trace exists
+/// to say (wallet-security delta re-review, this sitting). Pure; fenced in both
+/// directions.
+fn reserved_coins_drawn(
+    mature: &[UtxoEntryReference],
+    pinned: &[UtxoEntryReference],
+    consumed: &std::collections::HashMap<(kaspa_consensus_core::tx::TransactionId, u32), u64>,
+    exclude: &[Address],
+) -> usize {
+    fn key(entry: &UtxoEntryReference) -> (kaspa_consensus_core::tx::TransactionId, u32) {
+        (
+            entry.utxo.outpoint.transaction_id(),
+            entry.utxo.outpoint.index(),
+        )
+    }
+    let own: std::collections::HashSet<_> = pinned.iter().map(key).collect();
+    mature
+        .iter()
+        .filter(|entry| spend_policy::is_reserved(entry, exclude))
+        .filter(|entry| !own.contains(&key(entry)))
+        .filter(|entry| consumed.contains_key(&key(entry)))
+        .count()
+}
+
+fn finish_prepared_send(
+    pending: Vec<PendingTransaction>,
+    summary: &GeneratorSummary,
+    mature: &[UtxoEntryReference],
+    pinned: &[UtxoEntryReference],
+    exclude: &[Address],
+    destination: &Address,
+    rpc: Rpc,
+) -> PreparedSend {
+    // Observability for the one outcome the demotion cannot prevent: the free
+    // coins did not cover the payment, so it reached into ANOTHER conversation's
+    // reserve and that conversation may now be unfunded. Counts only (INV-3),
+    // and silent when nothing was reserved. This is the only trace that answers
+    // "my messages stopped working after I paid someone".
+    if !exclude.is_empty() {
+        let consumed = wallet_coins_consumed(&pending);
+        let drew = reserved_coins_drawn(mature, pinned, &consumed, exclude);
+        if drew > 0 {
+            log::info!(
+                "send: drew {drew} reserved coin(s) — the free coins did not cover this send"
+            );
+        }
+    }
+
+    let mut summary = project_summary(summary, destination.to_string());
+    // B7: the payload size the confirm shows is read back from the BUILT final
+    // tx, never echoed from the caller's argument.
+    summary.payload_len = final_payload_len(&pending);
+    PreparedSend {
+        pending,
+        summary,
+        rpc,
+        // An ordinary payment's outgoing record is LOAD-BEARING while the
+        // change is unconfirmed: the pin adds it back so the user sees their
+        // money immediately. Never discharge it here.
+        discharge_outgoing: None,
     }
 }
 
@@ -630,6 +745,194 @@ fn generate_chain(
     }
     let summary = generator.summary();
     Ok((pending, summary))
+}
+
+/// The wallet's OWN coins a built chain consumes, by outpoint, with their
+/// values: every input entry except the compounding edges (an intermediate
+/// leg's output feeding the next leg, which is this chain's own money, not the
+/// wallet's pile).
+///
+/// This is the VALUE-side read, used by the rider comparison to price what one
+/// shape absorbs and another leaves behind. [`verify_drain`] keeps its own
+/// INPUT-side walk deliberately: a custody check must judge the transaction's
+/// actual inputs and fail closed on one with no matching entry, which a map of
+/// entries cannot express. Same notion, two jobs, and the difference is the
+/// reason they are not one function.
+fn wallet_coins_consumed(
+    pending: &[PendingTransaction],
+) -> std::collections::HashMap<(kaspa_consensus_core::tx::TransactionId, u32), u64> {
+    let chain_txids: std::collections::HashSet<_> = pending.iter().map(|pt| pt.id()).collect();
+    pending
+        .iter()
+        .flat_map(|pt| pt.utxo_entries().values().cloned().collect::<Vec<_>>())
+        .filter(|entry| !chain_txids.contains(&entry.utxo.outpoint.transaction_id()))
+        .map(|entry| {
+            (
+                (
+                    entry.utxo.outpoint.transaction_id(),
+                    entry.utxo.outpoint.index(),
+                ),
+                entry.amount(),
+            )
+        })
+        .collect()
+}
+
+/// Which of the two generated shapes the send ships — the whole decision in one
+/// testable place, so the untestable half of `prepare_send_inner` (it needs a
+/// live `UtxoContext`) is only plumbing.
+///
+/// `comparison` is `None` when the riderless shape did not build at all. That
+/// is a fact about a transaction we may never ship and never a reason to refuse
+/// the send: the proven shape ships. `floor` is LAZY — it costs ~a dozen
+/// Generator probes and only one branch of the decision reads it, so a shape
+/// that cannot win never pays for it.
+///
+/// **What the second generation costs, measured** (consensus audit asked, so it
+/// was measured rather than argued). Release build, x86 desktop, an 88-coin
+/// wallet — the fragmented, chat-active shape the rider exists for: one ridden
+/// generation ~22 µs, the added riderless generation ~14 µs, a full
+/// `search_minimum` floor lookup ~177 µs. Worst case on a send is therefore
+/// ~0.2 ms, three orders of magnitude under the 200 ms design bar — and on a
+/// genuinely fragmented wallet the floor lookup never runs at all, because
+/// fragments worth more than their pickup make the cheap shape fail
+/// [`riderless_is_candidate`] before it is reached. Desktop numbers; the device
+/// is arm64 and slower, and the margin is wide enough that it does not matter.
+fn shipped_shape(
+    ridden: (Vec<PendingTransaction>, GeneratorSummary),
+    comparison: Option<(Vec<PendingTransaction>, GeneratorSummary)>,
+    floor: impl FnOnce() -> Option<u64>,
+) -> (Vec<PendingTransaction>, GeneratorSummary) {
+    let Some((riderless, riderless_summary)) = comparison else {
+        // `info!`, not `debug!`: the bridge's facade caps at `Info` on device
+        // AND on host (logging.rs:57/64), so a `debug!` here would be a
+        // diagnostic that cannot emit in any build — L40 one level down. It
+        // fires at most once per prepare (wallet-security audit, this sitting).
+        log::info!("send: the riderless comparison shape did not build — keeping the riders");
+        return ridden;
+    };
+    let ridden_fee = ridden.1.aggregate_fees();
+    let riderless_fee = riderless_summary.aggregate_fees();
+    // What the cheap shape would LEAVE BEHIND, read off the built transaction —
+    // the Generator's own change figure (pending.rs:175 @ `cfafeb4`), zero when
+    // it absorbed the change into the fee.
+    let riderless_change = riderless
+        .iter()
+        .find(|pt| pt.is_final())
+        .map_or(0, PendingTransaction::change_value);
+    // What dropping the riders would COST the wallet: the coins the ridden
+    // chain absorbs and the cheap one leaves behind, at their own values. Read
+    // off both built chains — nothing predicted.
+    let kept_back = wallet_coins_consumed(&riderless);
+    let extra_absorbed = wallet_coins_consumed(&ridden.0)
+        .iter()
+        .filter(|(outpoint, _)| !kept_back.contains_key(*outpoint))
+        .fold(0u64, |acc, (_, value)| acc.saturating_add(*value));
+    // A change of zero manufactures no coin at all, so it needs no floor.
+    let floor = if riderless_is_candidate(
+        ridden.0.len(),
+        riderless.len(),
+        ridden_fee,
+        riderless_fee,
+        extra_absorbed,
+    ) && riderless_change != 0
+    {
+        floor()
+    } else {
+        None
+    };
+    if riderless_wins(
+        ridden.0.len(),
+        riderless.len(),
+        ridden_fee,
+        riderless_fee,
+        riderless_change,
+        extra_absorbed,
+        floor,
+    ) {
+        (riderless, riderless_summary)
+    } else {
+        ridden
+    }
+}
+
+/// The cheap-shape GATE: same number of transactions, strictly lower fee, and
+/// the coins it declines to absorb are worth LESS than the fee it saves.
+///
+/// Split out from [`riderless_wins`] so the expensive half of the rule (the
+/// wallet's floor, ~a dozen Generator probes) is paid for only by a shape that
+/// could actually win. Every number here is the Generator's own aggregate or a
+/// coin's own value; nothing computes a fee (INV-9).
+fn riderless_is_candidate(
+    ridden_legs: usize,
+    riderless_legs: usize,
+    ridden_fee: u64,
+    riderless_fee: u64,
+    extra_absorbed: u64,
+) -> bool {
+    riderless_legs == ridden_legs
+        && riderless_fee < ridden_fee
+        && extra_absorbed <= ridden_fee - riderless_fee
+}
+
+/// Which of the two built shapes a send ships — the rider law's limits, judged
+/// on BUILT chains only.
+///
+/// 1. **The leg law (D-165, unchanged).** A rider may never add a transaction
+///    to the chain. A shorter riderless chain therefore wins outright: an extra
+///    leg is a whole extra transaction's fee, which no absorption repays.
+/// 2. **The self-financing law.** Where the two shapes are the same length, the
+///    riders may only be dropped if the coins they would have absorbed are
+///    worth LESS than the fee dropping them saves. The wallet never pays more
+///    to pick up a coin than the coin is worth — and, the other way round, it
+///    never declines to pick up a coin worth many times the pickup.
+/// 3. **The change-shape law.** And even then, only if the cheap shape does not
+///    manufacture a coin the wallet could not afterwards send alone.
+///
+/// **Why not a coin-count threshold.** "Skip the riders when the wallet is
+/// tidy" was measured against the founder's real wallet on 2026-08-23 and
+/// refuted: coins 0.481524 + 1.0 + 100.0 KAS, sending 100.90, the riderless
+/// shape costs 315,400 with 2 inputs but leaves change of 9,684,600 sompi —
+/// below that wallet's own floor. The cheap path manufactures a new trap coin
+/// on the very send that saved 0.0011 KAS, and a count threshold fires
+/// precisely there (three coins is "tidy" by any threshold proposed).
+///
+/// **Why limit 2 exists as well as limit 3** (measured while building this, and
+/// the reason this rule is not the two-clause version the backlog proposed).
+/// The change-shape clause ALONE was run over the canonical 22-coin fragmented
+/// fixture (`riders_strictly_drain_a_fragmented_wallet`): it dropped the riders
+/// on all eight rounds and left every one of the twelve 0.5 KAS fragments in
+/// place, because a fat wallet's riderless change is always healthy. That is
+/// D-165's hygiene half repealed in exactly the wallet the rider exists for.
+/// The self-financing clause restores it — a 0.5 KAS fragment absorbed for
+/// ~0.0011 KAS is worth 447× its pickup — while still dropping riders that
+/// genuinely destroy value (a 0.0005 KAS speck costing 0.0011 to collect).
+///
+/// `extra_absorbed` is the value of the coins the RIDDEN chain consumes and the
+/// riderless one does not — read off both built chains, never predicted.
+/// `floor` is the wallet's own smallest sendable amount (the number the send
+/// screen shows), or `None` when it could not be computed; unknown fails CLOSED
+/// onto the ridden shape. A `riderless_change` of zero was absorbed into the
+/// fee and leaves no coin to strand.
+fn riderless_wins(
+    ridden_legs: usize,
+    riderless_legs: usize,
+    ridden_fee: u64,
+    riderless_fee: u64,
+    riderless_change: u64,
+    extra_absorbed: u64,
+    floor: Option<u64>,
+) -> bool {
+    if riderless_legs < ridden_legs {
+        return true;
+    }
+    riderless_is_candidate(
+        ridden_legs,
+        riderless_legs,
+        ridden_fee,
+        riderless_fee,
+        extra_absorbed,
+    ) && (riderless_change == 0 || floor.is_some_and(|floor| riderless_change >= floor))
 }
 
 /// How a drain (sweep / consolidation) is expressed to the pinned Generator —
@@ -901,7 +1204,35 @@ impl WalletEngine {
         .await
     }
 
+    /// The refusal half of the drain's observability (see the plan/built lines
+    /// inside): a wrapper so that EVERY typed refusal exit — the empty offer,
+    /// the fee floor, the custody checks, the chain-shape rules — emits exactly
+    /// one line, without threading a log call through each `?`.
+    ///
+    /// The refusal REASON is deliberately absent: a typed chain error can carry
+    /// amounts (`InsufficientFunds`, `StorageMassExceeded`) and this lane is
+    /// lifecycle only (INV-3). The preceding plan line is what localises it —
+    /// a refusal with no plan line never reached the Generator.
     async fn prepare_drain(
+        &self,
+        destination: Address,
+        change_home: Address,
+        exclude: &[Address],
+        is_exit: bool,
+        signer: Arc<dyn SignerT>,
+        rpc: Rpc,
+    ) -> Result<PreparedSend> {
+        let result = self
+            .prepare_drain_inner(destination, change_home, exclude, is_exit, signer, rpc)
+            .await;
+        if result.is_err() {
+            log::info!("drain: {} refused", drain_kind(is_exit));
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_drain_inner(
         &self,
         destination: Address,
         change_home: Address,
@@ -935,8 +1266,20 @@ impl WalletEngine {
             }));
         }
 
+        let offered_count = included.len();
         let arm = plan_drain(included, has_exclusions)?;
         let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
+        // The diagnosis lane for every "sweep won't work" report. Counts and
+        // state words ONLY — never an amount, never an address (INV-3; the
+        // transport lane's `module_logs_are_lifecycle_only` is the template,
+        // and `send_logs_are_lifecycle_only` below is this file's copy of it).
+        // The arm is chosen from data no screen shows, and the 2026-08-23
+        // device sitting had to reason about a drain refusal from screenshots.
+        log::info!(
+            "drain: {} planning the {} arm over {offered_count} coin(s), {excluded_count} reserved",
+            drain_kind(is_exit),
+            drain_arm_name(&arm)
+        );
         // Read BEFORE the match consumes `arm`.
         let discharge = discharges_outgoing(&arm, is_exit);
         let (pending, summary) = match arm {
@@ -951,15 +1294,46 @@ impl WalletEngine {
                         "these coins are worth less than the network fee to move them".into(),
                     ));
                 }
-                generate_chain(
+                let built = generate_chain(
                     &context,
-                    priority,
+                    priority.clone(),
                     &change_home,
                     PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
                     Fees::ReceiverPays(0),
                     None,
-                    signer,
-                )?
+                    signer.clone(),
+                )?;
+                // The one shape that used to dead-end: a MERGE the bounded arm
+                // cannot fit in one transaction. It is not a dead end — it is
+                // several one-transaction merges over disjoint coins (D-166's
+                // debt, repaid). A SWEEP still refuses toward "merge first":
+                // its legs would pay an external address and be unsignable by
+                // us, which batching does not change.
+                if !is_exit && built.0.len() > 1 {
+                    let (pending, summary) =
+                        batched_merge(priority, &destination, excluded_count, &mut |coins| {
+                            try_batch(
+                                &context,
+                                coins,
+                                &destination,
+                                &change_home,
+                                &signer,
+                                network_id,
+                            )
+                        })?;
+                    log::info!(
+                        "drain: merge built — {} coin(s) absorbed across {} tx",
+                        summary.utxo_count,
+                        summary.tx_count
+                    );
+                    return Ok(PreparedSend {
+                        pending,
+                        summary,
+                        rpc,
+                        discharge_outgoing: discharge.then(|| context.clone()),
+                    });
+                }
+                built
             }
             DrainArm::Drain => generate_chain(
                 &context,
@@ -980,6 +1354,12 @@ impl WalletEngine {
             chained_drain_allowed,
             is_exit,
         )?;
+        log::info!(
+            "drain: {} built — {} coin(s) absorbed across {} tx",
+            drain_kind(is_exit),
+            summary.utxo_count,
+            summary.tx_count
+        );
         Ok(PreparedSend {
             pending,
             summary,
@@ -987,6 +1367,200 @@ impl WalletEngine {
             discharge_outgoing: discharge.then(|| context.clone()),
         })
     }
+}
+
+/// The bounded multi-pass merge — D-166's conscious debt, repaid.
+///
+/// A consolidation forced onto the bounded arm by live conversations used to
+/// have NO one-tap answer once the offered pile outgrew a single transaction:
+/// the refusal named ordinary sends and a full sweep and stopped there, which
+/// is a liveness dead-end for exactly the wallet consolidation exists for
+/// (long-lived, chat-active, fragmented). It is not a dead end — it is several
+/// one-transaction merges over DISJOINT coin sets, previewed as one ceremony.
+///
+/// **Why disjoint batches are safe where a chain was not.** The bounded arm
+/// cannot chain (its accumulator under-draws once stage fees exist, and its
+/// multi-stage behaviour is upstream-untested — see [`DrainArm`]). Batches
+/// avoid that entirely: each is a SINGLE `ReceiverPays` transaction over its
+/// own coins, so each gets the same sompi-exact `swept + fee == consumed`
+/// proof, the same one-output check, and the same offered-set custody check as
+/// a lone merge. Generation does not mutate the context, and the batches share
+/// no outpoint, so building them all against the same live snapshot cannot
+/// double-spend. `commit` broadcasts them in order and already reports a typed
+/// partial result if one fails after another has landed (L8).
+///
+/// Coins are taken SMALLEST FIRST, because reducing the count is the point and
+/// the small end is where the pile lives; [`largest_single_tx_batch`] grows the
+/// batch past any below-fee prefix rather than refusing at it.
+///
+/// The result leaves one coin PER BATCH, not one coin — the confirm says so,
+/// and the action is idempotent, so a second tap merges those.
+fn batched_merge(
+    mut rest: Vec<UtxoEntryReference>,
+    destination: &Address,
+    reserved_count: usize,
+    build: &mut impl FnMut(&[UtxoEntryReference]) -> Result<BatchFit>,
+) -> Result<(Vec<PendingTransaction>, SendSummary)> {
+    // Smallest first: a batch of k coins becomes one coin whatever the k, so
+    // the count reduction is the same either way — but starting at the bottom
+    // is what actually clears a fragment pile.
+    rest.sort_by_key(UtxoEntryReference::amount);
+
+    let mut all_pending: Vec<PendingTransaction> = Vec::new();
+    let mut swept_total = 0u64;
+    let mut fee_total = 0u64;
+    let mut mass_total = 0u64;
+    let mut absorbed_total = 0u32;
+    let mut passes = 0usize;
+
+    while passes < MERGE_BATCH_LIMIT && rest.len() >= 2 {
+        let Some((taken, pending, summary)) = largest_single_tx_batch(&rest, build)? else {
+            break;
+        };
+        // The SAME custody proof a single-transaction merge gets, per batch:
+        // one output, paying our own address, drawing only coins this batch
+        // offered, and balancing to the sompi.
+        let facts = verify_drain(&pending, &summary, destination, Some(&rest[..taken]))?;
+        swept_total = swept_total.saturating_add(facts.swept_sompi);
+        fee_total = fee_total.saturating_add(facts.fee_sompi);
+        mass_total = mass_total.saturating_add(summary.aggregate_mass());
+        absorbed_total = absorbed_total.saturating_add(facts.absorbed_utxos);
+        all_pending.extend(pending);
+        rest.drain(..taken);
+        passes += 1;
+    }
+
+    if all_pending.is_empty() {
+        // Nothing could be batched at all — say which wall was hit rather than
+        // repeating the old dead-end sentence. The reserve is named ONLY when
+        // coins were actually withheld: a live conversation whose binding holds
+        // no mature coin still forces this arm, and blaming a reserve that took
+        // nothing sends the next reader to the wrong subsystem
+        // (wallet-security audit, this sitting).
+        return Err(ChainError::Message(if reserved_count > 0 {
+            "these coins can't be merged right now — what is left over after \
+             your conversations' reserves is worth less than the fee to move it. \
+             Nothing was sent — ordinary sends absorb a few fragments each, so \
+             this clears as you spend, and Send everything still empties the \
+             wallet."
+                .into()
+        } else {
+            "these coins can't be merged right now — they are worth less than \
+             the network fee to move them. Nothing was sent — ordinary sends \
+             absorb a few fragments each, so this clears as you spend."
+                .to_string()
+        }));
+    }
+
+    log::info!(
+        "drain: merge batched into {passes} pass(es), {} coin(s) left over",
+        rest.len()
+    );
+
+    Ok((
+        all_pending,
+        SendSummary {
+            destination: destination.to_string(),
+            amount_sompi: swept_total,
+            fee_sompi: fee_total,
+            total_sompi: swept_total.saturating_add(fee_total),
+            mass: mass_total,
+            // One transaction per batch, by construction — every batch is
+            // verified `pending.len() == 1` before it is accepted.
+            tx_count: passes as u32,
+            utxo_count: absorbed_total,
+            // One coin per pass — the arm where the two counts coincide, and
+            // exactly why they must still be separate fields.
+            resulting_coins: passes as u32,
+            payload_len: 0,
+        },
+    ))
+}
+
+/// How many transactions ONE merge tap may broadcast.
+///
+/// Wallet policy, not a consensus number (INV-9 is untouched — every fee, mass
+/// and fit here is still the Generator's answer). One hold-to-sign should not
+/// fire an unbounded burst at the node, and every pass costs its own fee. Four
+/// passes clear a few hundred coins at the pin's per-transaction input ceiling,
+/// and whatever remains merges on the next tap: the action is idempotent, and
+/// the confirm says how many transactions it is about to send.
+const MERGE_BATCH_LIMIT: usize = 4;
+
+/// One attempt at a batch of a given size.
+enum BatchFit {
+    /// The Generator built it — with however many transactions it needed.
+    Built(Vec<PendingTransaction>, GeneratorSummary),
+    /// The coins offered are worth less than the fee to move them: the batch is
+    /// too SMALL, and the answer is to take more coins, not fewer.
+    BelowFee,
+}
+
+/// Build one bounded (`ReceiverPays`) drain over exactly `coins`, with the
+/// pin's `output.value -= fees` underflow guarded before generation — the same
+/// two steps the single-transaction arm takes, factored out so the batching
+/// loop runs the identical code path rather than a copy of it.
+fn try_batch(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+    coins: &[UtxoEntryReference],
+    destination: &Address,
+    change_home: &Address,
+    signer: &Arc<dyn SignerT>,
+    network_id: kaspa_wrpc_client::prelude::NetworkId,
+) -> Result<BatchFit> {
+    let amount_sompi = coins
+        .iter()
+        .fold(0u64, |acc, entry| acc.saturating_add(entry.amount()));
+    let fee_floor = receiver_pays_fee_floor(network_id, coins, destination)?;
+    if amount_sompi <= fee_floor {
+        return Ok(BatchFit::BelowFee);
+    }
+    let (pending, summary) = generate_chain(
+        context,
+        coins.to_vec(),
+        change_home,
+        PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+        Fees::ReceiverPays(0),
+        None,
+        signer.clone(),
+    )?;
+    Ok(BatchFit::Built(pending, summary))
+}
+
+/// The LARGEST prefix of `coins` the pinned Generator moves in ONE
+/// transaction — built, not predicted.
+///
+/// The valid batch sizes form an interval, and the two ways out of it push in
+/// opposite directions: too few coins and the set is worth less than the fee to
+/// move it (take MORE), too many and the Generator splits the chain (take
+/// FEWER). Both are read from real attempts, so the bisection needs no model of
+/// mass or of the pin's input ceiling (INV-9). What it returns is the chain it
+/// actually built at that size, so nothing is re-generated on the way out.
+///
+/// `None` = no batch of two or more coins works from here at all.
+fn largest_single_tx_batch(
+    coins: &[UtxoEntryReference],
+    build: &mut impl FnMut(&[UtxoEntryReference]) -> Result<BatchFit>,
+) -> Result<Option<(usize, Vec<PendingTransaction>, GeneratorSummary)>> {
+    // A batch of one coin is a pure fee burn — one coin in, the same coin out
+    // minus the fee. Nothing merges, so two is the floor.
+    let mut lo = 2usize;
+    let mut hi = coins.len();
+    let mut best = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        match build(&coins[..mid])? {
+            BatchFit::Built(pending, summary) if pending.len() == 1 => {
+                best = Some((mid, pending, summary));
+                lo = mid + 1;
+            }
+            // Chained: this many coins do not fit one transaction.
+            BatchFit::Built(_, _) => hi = mid - 1,
+            // Worth less than its own fee: this is too FEW coins, not too many.
+            BatchFit::BelowFee => lo = mid + 1,
+        }
+    }
+    Ok(best)
 }
 
 /// The fee of the ReceiverPays drain SHAPE (n inputs, one output), read from
@@ -1055,6 +1629,25 @@ fn receiver_pays_fee_floor(
     }
 }
 
+/// The two drain kinds, in the user's own words — for logs only.
+fn drain_kind(is_exit: bool) -> &'static str {
+    if is_exit {
+        "sweep"
+    } else {
+        "merge"
+    }
+}
+
+/// Which Generator mode a drain planned onto — for logs only. The names are
+/// this module's own vocabulary ([`DrainArm`]), not upstream identifiers, so a
+/// logcat line stays readable beside the doc that explains the choice.
+fn drain_arm_name(arm: &DrainArm) -> &'static str {
+    match arm {
+        DrainArm::ReceiverPays { .. } => "bounded",
+        DrainArm::Drain => "native",
+    }
+}
+
 /// Does this drain need the pin's outgoing record discharged after submit?
 ///
 /// Both halves are load-bearing and each protects a different regression:
@@ -1079,7 +1672,11 @@ fn discharges_outgoing(arm: &DrainArm, is_exit: bool) -> bool {
 ///
 /// `chained_drain_allowed` is true only for a consolidation on the native
 /// Drain arm (the Generator's canonical compound, every leg paying our own
-/// address). An EXIT must be one transaction — the native sweep's
+/// address). Since D-170 the merge half of the refusal below is a BACKSTOP:
+/// production intercepts a bounded merge that outgrew one transaction and
+/// routes it to [`batched_merge`] before this is reached. It still guards every
+/// other caller, including the offline harness that proves it. An EXIT must be
+/// one transaction — the native sweep's
 /// intermediate legs pay the sweep target, and with an external destination
 /// those legs would be unsignable by us: a partial, confusing broadcast. And
 /// a chained ReceiverPays rides the upstream branch marked unreachable (see
@@ -1123,6 +1720,10 @@ fn finish_drain(
         mass: summary.aggregate_mass(),
         tx_count: summary.number_of_generated_transactions() as u32,
         utxo_count: facts.absorbed_utxos,
+        // ONE, however many transactions it took: `verify_drain` has already
+        // refused any chain whose final transaction has more than one output,
+        // so the compound arm provably ends in a single coin.
+        resulting_coins: 1,
         payload_len: 0,
     })
 }
@@ -1155,6 +1756,7 @@ impl WalletEngine {
     pub fn consolidation_savings(
         &self,
         prepared: &PreparedSend,
+        exclude: &[Address],
     ) -> Result<Option<SpendComparison>> {
         let summary = prepared.summary();
         let amount_sompi = summary.amount_sompi / 2;
@@ -1170,7 +1772,8 @@ impl WalletEngine {
         // order (riders + largest-first) — the fee the user pays now.
         let context = self.context();
         let mature = mature_snapshot_sync(&context)?;
-        let order = spend_policy::select_spend_priority(&mature, &[], spend_policy::RIDER_LIMIT);
+        let order =
+            spend_policy::select_spend_priority(&mature, &[], spend_policy::RIDER_LIMIT, exclude);
         let payment: PaymentDestination =
             PaymentOutputs::from((destination.clone(), amount_sompi)).into();
         let settings = GeneratorSettings::try_new_with_context(
@@ -1194,6 +1797,19 @@ impl WalletEngine {
         // on script size and values, and `simulated_with_address` builds the
         // real `pay_to_address_script`); only the outpoint is simulated, and
         // outpoints carry no mass.
+        // A BATCHED merge leaves one coin per pass, not one coin, so the
+        // "after" premise — price the same send from the single coin this
+        // creates — is simply false. The preview then says nothing rather than
+        // pricing against the first batch's coin and understating the fee.
+        //
+        // Gated on the FACT, never on `tx_count`: the native compound arm
+        // chains freely and still ends in ONE coin, so a transaction-count gate
+        // deleted a true savings line on the commoner arm — and then logged
+        // "a probe shape refused" when no probe had run (consensus delta
+        // re-review, this sitting).
+        if summary.resulting_coins > 1 {
+            return Ok(None);
+        }
         let Some(final_pt) = prepared.pending.iter().find(|pt| pt.is_final()) else {
             return Ok(None);
         };
@@ -1444,6 +2060,65 @@ fn search_minimum(mut probe: impl FnMut(u64) -> Result<ProbeOutcome>) -> Result<
     Ok(Some(hi))
 }
 
+/// Find the largest KNOWN-BUILDABLE amount, by climbing from a tested anchor
+/// toward the balance. The mirror of [`search_minimum`] — and deliberately NOT
+/// its symmetric twin, because the two boundaries are not symmetric.
+///
+/// Sendability is monotone at the bottom (below the floor the PAYMENT is dust,
+/// and it stays dust all the way down) but it is NOT monotone at the top: above
+/// the ceiling the CHANGE is dust, except at the single point where the change
+/// vanishes into the fee entirely. So a bisection here cannot prove it found
+/// the true supremum, and an unproven upper bound is worse than none — it would
+/// send a user to an amount that refuses again.
+///
+/// The contract is therefore weaker and honest: **every value this returns was
+/// probed and built**. `lo` starts at a re-probed anchor and only ever moves to
+/// a value the Generator accepted, so the answer is a real transaction shape,
+/// under-reported by at most [`PROBE_PRECISION_SOMPI`] — the conservative
+/// direction for a ceiling.
+///
+/// `balance` is the mature total, used as the initial not-Builds bound without
+/// probing it: with `Fees::SenderPays` the fee rides ON TOP of the payment
+/// (generator.rs:862 @ `cfafeb4`), so an amount equal to the whole balance
+/// cannot build. If a pin bump ever made that false, this returns a value below
+/// the true maximum — conservative, never a bound that does not build.
+fn search_maximum(
+    mut probe: impl FnMut(u64) -> Result<ProbeOutcome>,
+    anchor: u64,
+    balance: u64,
+) -> Result<Option<u64>> {
+    // No room to climb ⇒ nothing was searched ⇒ no superlative to report. The
+    // anchor does build, so returning it would be TRUE — and it would still be
+    // "the largest that works right now" asserted over a space this function
+    // never looked at, which is the same overclaim an unproven bound would be.
+    // The copy degrades to its numberless sentence instead (consensus delta
+    // re-review, this sitting). Checked BEFORE the anchor probe, so the
+    // hopeless case costs nothing.
+    if balance <= anchor {
+        return Ok(None);
+    }
+    // The anchor is RE-PROBED rather than trusted. `search_minimum` closes its
+    // bisection on `TooLarge` as well as `Builds` (the shrinking-window arm),
+    // so its answer is a bound, not a promise — and this function's entire
+    // contract is that what it hands back was built.
+    if probe(anchor)? != ProbeOutcome::Builds {
+        return Ok(None);
+    }
+    let mut lo = anchor; // greatest known-Builds — the answer, always tested
+    let mut hi = balance; // known not-Builds (see the doc note above)
+    while hi.saturating_sub(lo) > PROBE_PRECISION_SOMPI {
+        let mid = lo + (hi - lo) / 2;
+        match probe(mid)? {
+            ProbeOutcome::Builds => lo = mid,
+            // TooSmall here is the CHANGE being dust, not the payment: above a
+            // buildable anchor the only way to fail downward is the change
+            // side. Either refusal bounds the window from above.
+            ProbeOutcome::TooSmall | ProbeOutcome::TooLarge => hi = mid,
+        }
+    }
+    Ok(Some(lo))
+}
+
 impl WalletEngine {
     /// The smallest payment the pinned Generator will build from the CURRENT
     /// mature UTXO set (the KIP-9 floor, exact, for this wallet's coin shape) —
@@ -1460,13 +2135,90 @@ impl WalletEngine {
         &self,
         change: Address,
         pinned: &[UtxoEntryReference],
+        exclude: &[Address],
     ) -> Result<Option<u64>> {
         let context = self.context();
         let mature = mature_snapshot_sync(&context)?;
-        let order = spend_policy::select_spend_priority(&mature, pinned, spend_policy::RIDER_LIMIT);
+        let order = spend_policy::select_spend_priority(
+            &mature,
+            pinned,
+            spend_policy::RIDER_LIMIT,
+            exclude,
+        );
         let order = (!order.is_empty()).then_some(order);
         search_minimum(|amount| probe_context(&context, &change, amount, order.as_deref()))
     }
+
+    /// The largest payment the pinned Generator will build from the CURRENT
+    /// mature UTXO set — the mirror of [`Self::minimum_sendable`], for the
+    /// other half of the same window. `None` when the wallet cannot send at
+    /// all, or when no anchor could be proven (never a guess).
+    ///
+    /// **What it promises, exactly:** the returned amount was handed to the
+    /// Generator and built. It is not "the most that could ever work" — the top
+    /// boundary is not monotone (above it the CHANGE is dust, and only the
+    /// single point where change vanishes into the fee builds again), so no
+    /// probe can claim the supremum. It is the largest amount we have PROVEN,
+    /// which is the only kind of number a refusal may offer a user.
+    ///
+    /// Cost: this runs [`search_minimum`] for its anchor and then climbs, so it
+    /// is roughly twice a floor lookup. It belongs on the refusal path (where a
+    /// user is already stopped and owed a number), not on the send path.
+    pub fn maximum_sendable(
+        &self,
+        change: Address,
+        pinned: &[UtxoEntryReference],
+        exclude: &[Address],
+    ) -> Result<Option<u64>> {
+        let context = self.context();
+        let mature = mature_snapshot_sync(&context)?;
+        // The climb's upper bound counts the FREE coins only.
+        //
+        // The demote-never-withhold law says a user may spend into the reserved
+        // tail when nothing else covers the payment; it does not say the wallet
+        // should RECOMMEND it. This number is rendered as "the largest that
+        // works right now", and the dead zone sits just under the sweep, so a
+        // ceiling folded over the whole mature set would be an instruction to
+        // drain every conversation binding — the D-148 harm, prescribed by us,
+        // from addresses the app never shows (wallet-security audit, this
+        // sitting).
+        //
+        // Honest residual: this bounds what is OFFERED, not what the Generator
+        // draws. An amount just under the free total can still need one
+        // reserved coin for its fee, and `finish_prepared_send`'s reserved-draw
+        // line is what reports that if it happens.
+        //
+        let balance = free_balance(&mature, exclude);
+        let order = spend_policy::select_spend_priority(
+            &mature,
+            pinned,
+            spend_policy::RIDER_LIMIT,
+            exclude,
+        );
+        let order = (!order.is_empty()).then_some(order);
+        let mut probe = |amount| probe_context(&context, &change, amount, order.as_deref());
+        // The floor is the one amount we know sits inside the buildable band,
+        // so it is the anchor — re-probed inside `search_maximum`.
+        let Some(anchor) = search_minimum(&mut probe)? else {
+            return Ok(None);
+        };
+        search_maximum(probe, anchor, balance)
+    }
+}
+
+/// The value of the coins a send may draw on WITHOUT reaching into the reserved
+/// tail — the upper bound [`WalletEngine::maximum_sendable`]'s climb is allowed
+/// to point at.
+///
+/// Mirrors `select_spend_priority`'s own short-circuit: with no reservations
+/// nothing is reserved, so the whole mature set counts. Saturating, because a
+/// wrapped total would hand the climb a nonsense bound (a balance that
+/// overflows u64 is impossible on this network).
+fn free_balance(mature: &[UtxoEntryReference], exclude: &[Address]) -> u64 {
+    mature
+        .iter()
+        .filter(|entry| exclude.is_empty() || !spend_policy::is_reserved(entry, exclude))
+        .fold(0u64, |acc, entry| acc.saturating_add(entry.amount()))
 }
 
 /// A synchronous snapshot of the live context's mature set, in context order.
@@ -1510,6 +2262,9 @@ fn project_summary(gs: &GeneratorSummary, destination: String) -> SendSummary {
         mass: gs.aggregate_mass(),
         tx_count: gs.number_of_generated_transactions() as u32,
         utxo_count: gs.aggregated_utxos() as u32,
+        // Not a drain: an ordinary payment's change count is not this field's
+        // business, and 0 is how it says so.
+        resulting_coins: 0,
         payload_len: 0, // set by the caller from the BUILT chain (B7)
     }
 }
@@ -1806,7 +2561,7 @@ mod tests {
                 .iter()
                 .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
                 .collect();
-            let order = crate::spend_policy::select_spend_priority(&entries, &[], RIDER_LIMIT);
+            let order = crate::spend_policy::select_spend_priority(&entries, &[], RIDER_LIMIT, &[]);
             let generator = offline_generator_over(&entries, order.clone(), send, addr(CHANGE));
             let pending = drain(&generator);
             let s = project_summary(&generator.summary(), DEST.to_string());
@@ -1843,6 +2598,673 @@ mod tests {
     /// so this is the riders provably draining the pile. Also proves the
     /// no-new-leg law the cheap way: every round builds exactly one
     /// transaction.
+    /// How many riders the SHIPPED decision keeps for this pool and amount —
+    /// `RIDER_LIMIT` or 0, decided by [`riderless_wins`] over both built
+    /// shapes, exactly as `prepare_send_inner` decides it.
+    fn shipped_riders(pool: &[UtxoEntryReference], send_kas: f64) -> usize {
+        let (ridden, riderless) = both_shapes(pool, send_kas);
+        let extra = extra_absorbed(&ridden, &riderless);
+        let floor = if riderless_is_candidate(
+            ridden.legs,
+            riderless.legs,
+            ridden.fee,
+            riderless.fee,
+            extra,
+        ) && riderless.change != 0
+        {
+            offline_floor(pool)
+        } else {
+            None
+        };
+        if riderless_wins(
+            ridden.legs,
+            riderless.legs,
+            ridden.fee,
+            riderless.fee,
+            riderless.change,
+            extra,
+            floor,
+        ) {
+            0
+        } else {
+            spend_policy::RIDER_LIMIT
+        }
+    }
+
+    /// A batch builder over an offline coin set — the same two steps
+    /// `try_batch` takes in production (fee-floor guard, then one
+    /// `ReceiverPays` generation over exactly the offered coins), expressed
+    /// with `try_new_with_iterator` because these tests have no live context.
+    fn offline_batch_builder<'a>(
+        entries: &'a [UtxoEntryReference],
+        destination: &'a Address,
+        change_home: &'a Address,
+    ) -> impl FnMut(&[UtxoEntryReference]) -> Result<BatchFit> + 'a {
+        move |coins| {
+            let amount_sompi = coins
+                .iter()
+                .fold(0u64, |acc, entry| acc.saturating_add(entry.amount()));
+            let fee_floor = receiver_pays_fee_floor(mainnet(), coins, destination)?;
+            if amount_sompi <= fee_floor {
+                return Ok(BatchFit::BelowFee);
+            }
+            let settings = GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                #[allow(clippy::unnecessary_to_owned)]
+                Box::new(entries.to_vec().into_iter()),
+                Some(coins.to_vec()),
+                change_home.clone(),
+                1,
+                1,
+                PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                None,
+                Fees::ReceiverPays(0),
+                None,
+                None,
+            )?;
+            let generator = Generator::try_new(settings, None, None)?;
+            let mut pending = Vec::new();
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(tx)) => pending.push(tx),
+                    Ok(None) => break,
+                    Err(e) => return Err(map_generate_error(e)),
+                }
+            }
+            Ok(BatchFit::Built(pending, generator.summary()))
+        }
+    }
+
+    /// Every custody line a batched merge must hold, checked on the BUILT
+    /// transactions rather than on intent: each pass is exactly one
+    /// transaction with exactly one output paying our own address, the passes
+    /// share no coin, and the coins consumed are exactly the ones offered.
+    fn assert_batch_custody(pending: &[Pt], destination: &Address, offered: &[UtxoEntryReference]) {
+        let offered_keys: std::collections::HashSet<_> = offered
+            .iter()
+            .map(|entry| {
+                (
+                    entry.utxo.outpoint.transaction_id(),
+                    entry.utxo.outpoint.index(),
+                )
+            })
+            .collect();
+        let mut seen: std::collections::HashSet<(kaspa_consensus_core::tx::TransactionId, u32)> =
+            std::collections::HashSet::new();
+        for pt in pending {
+            assert!(pt.is_final(), "every pass is a standalone transaction");
+            let tx = pt.transaction();
+            assert_eq!(tx.outputs.len(), 1, "one output per pass");
+            assert!(pays_to(&tx, destination), "and it pays our own address");
+            for input in &tx.inputs {
+                let key = (
+                    input.previous_outpoint.transaction_id,
+                    input.previous_outpoint.index,
+                );
+                assert!(offered_keys.contains(&key), "a pass drew an unoffered coin");
+                assert!(seen.insert(key), "two passes spent the same coin");
+            }
+        }
+    }
+
+    /// **D-166's conscious debt, repaid.** A pile too big for one transaction
+    /// used to refuse with no path forward; it now merges in bounded passes.
+    /// 200 coins at the pin's own single-transaction ceiling (88, found by the
+    /// bisection, never hardcoded) is three passes with nothing left over.
+    #[test]
+    fn a_pile_too_big_for_one_transaction_merges_in_bounded_passes() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        let entries: Vec<UtxoEntryReference> = (0..200)
+            .map(|_| UtxoEntryReference::simulated_with_address(50_000_000, &home))
+            .collect();
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        let (pending, summary) = batched_merge(entries.clone(), &home, 0, &mut build).unwrap();
+
+        assert_eq!(summary.tx_count, 3, "88 + 88 + 24");
+        assert_eq!(pending.len(), 3, "one transaction per pass");
+        assert_eq!(summary.utxo_count, 200, "every coin absorbed");
+        assert_batch_custody(&pending, &home, &entries);
+        // The whole point: 200 coins become 3, and a second tap merges those.
+        assert!(
+            (summary.tx_count as usize) < entries.len(),
+            "the pile actually shrank"
+        );
+    }
+
+    /// The bound is real and it is not silent: a pile past `MERGE_BATCH_LIMIT`
+    /// passes merges what it can and leaves the rest, and the summary reports
+    /// exactly what will be moved — the confirm renders those numbers, so the
+    /// user is never told the wallet was emptied when it was not.
+    #[test]
+    fn the_pass_limit_holds_and_the_summary_reports_only_what_moves() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        let entries: Vec<UtxoEntryReference> = (0..400)
+            .map(|_| UtxoEntryReference::simulated_with_address(50_000_000, &home))
+            .collect();
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        let (pending, summary) = batched_merge(entries.clone(), &home, 0, &mut build).unwrap();
+
+        assert_eq!(summary.tx_count as usize, MERGE_BATCH_LIMIT);
+        assert_eq!(pending.len(), MERGE_BATCH_LIMIT);
+        assert_eq!(summary.utxo_count, 352, "4 passes x 88 coins");
+        assert!(
+            (summary.utxo_count as usize) < entries.len(),
+            "48 coins stay behind — and the summary says 352, not 400"
+        );
+        assert_batch_custody(&pending, &home, &entries);
+    }
+
+    /// Smallest first: the pile is cleared from the bottom, because that is
+    /// where a fragment pile lives. (Mutation fence — reversing the sort reds
+    /// this and nothing else.)
+    #[test]
+    fn batches_take_the_smallest_coins_first() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        // 100 small coins and 5 fat ones: one pass of 88 must be all small.
+        let mut entries: Vec<UtxoEntryReference> = (0..100)
+            .map(|_| UtxoEntryReference::simulated_with_address(50_000_000, &home))
+            .collect();
+        entries
+            .extend((0..5).map(|_| UtxoEntryReference::simulated_with_address(900_000_000, &home)));
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        let (pending, _) = batched_merge(entries.clone(), &home, 0, &mut build).unwrap();
+        let first = pending[0].transaction();
+        let by_outpoint: std::collections::HashMap<_, _> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    (
+                        entry.utxo.outpoint.transaction_id(),
+                        entry.utxo.outpoint.index(),
+                    ),
+                    entry.amount(),
+                )
+            })
+            .collect();
+        assert!(
+            first.inputs.iter().all(|input| {
+                by_outpoint[&(
+                    input.previous_outpoint.transaction_id,
+                    input.previous_outpoint.index,
+                )] == 50_000_000
+            }),
+            "the first pass clears the small end"
+        );
+    }
+
+    /// The ceiling may never RECOMMEND draining a conversation's coins: the
+    /// climb's upper bound counts the free coins only. (Mutation fence —
+    /// dropping the filter reds this and nothing else.)
+    #[test]
+    fn the_ceiling_bound_never_counts_the_reserved_tail() {
+        let free = addr(DEST);
+        let bound = addr(CHANGE);
+        let mature = vec![
+            UtxoEntryReference::simulated_with_address(400_000_000, &free),
+            UtxoEntryReference::simulated_with_address(600_000_000, &bound),
+        ];
+        assert_eq!(
+            free_balance(&mature, std::slice::from_ref(&bound)),
+            400_000_000,
+            "the reserved coin is not something to point a user at"
+        );
+        // With nothing reserved the whole balance is fair game — the same
+        // short-circuit `select_spend_priority` takes.
+        assert_eq!(free_balance(&mature, &[]), 1_000_000_000);
+    }
+
+    /// A pile whose every coin is worth less than the fee to move it refuses
+    /// typed — and names the reserve, not a mystery. The batch search grows
+    /// past a below-fee prefix, so reaching this means no batch of any size
+    /// pays for itself.
+    #[test]
+    fn a_pile_worth_less_than_its_own_fee_refuses_typed() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        let entries: Vec<UtxoEntryReference> = (0..3)
+            .map(|_| UtxoEntryReference::simulated_with_address(1_000, &home))
+            .collect();
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        // Nothing was withheld, so the refusal may NOT blame a reserve.
+        let err = batched_merge(entries.clone(), &home, 0, &mut build).unwrap_err();
+        assert!(
+            matches!(&err, ChainError::Message(m) if m.contains("worth less than the network fee")),
+            "{err:?}"
+        );
+        assert!(
+            !matches!(&err, ChainError::Message(m) if m.contains("conversations")),
+            "an error may not name a cause the code never checked: {err:?}"
+        );
+        // With coins actually reserved, the reserve IS the honest cause.
+        let reserved = batched_merge(entries.clone(), &home, 3, &mut build).unwrap_err();
+        assert!(
+            matches!(&reserved, ChainError::Message(m) if m.contains("conversations' reserves")),
+            "{reserved:?}"
+        );
+    }
+
+    /// One coin cannot merge with itself: a single-coin batch is a pure fee
+    /// burn, so the search never offers one. (Mutation fence — lowering the
+    /// batch floor from 2 to 1 reds this.)
+    #[test]
+    fn a_single_coin_is_never_a_batch() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        let entries = vec![UtxoEntryReference::simulated_with_address(
+            5_000_000_000,
+            &home,
+        )];
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        assert!(largest_single_tx_batch(&entries, &mut build)
+            .unwrap()
+            .is_none());
+    }
+
+    /// One built shape's facts, read back from the Generator (never computed).
+    struct Shape {
+        legs: usize,
+        inputs: u32,
+        fee: u64,
+        change: u64,
+        consumed: std::collections::HashMap<(kaspa_consensus_core::tx::TransactionId, u32), u64>,
+    }
+
+    /// Build `send_kas` from `pool` twice — with riders and without — exactly
+    /// as `prepare_send_inner` does, and read both shapes back off the built
+    /// transactions.
+    fn both_shapes(pool: &[UtxoEntryReference], send_kas: f64) -> (Shape, Shape) {
+        let build = |riders: usize| {
+            let order = spend_policy::select_spend_priority(pool, &[], riders, &[]);
+            let generator = offline_generator_over(pool, order, send_kas, addr(CHANGE));
+            let pending = drain(&generator);
+            let summary = generator.summary();
+            Shape {
+                legs: pending.len(),
+                inputs: summary.aggregated_utxos() as u32,
+                fee: summary.aggregate_fees(),
+                change: pending
+                    .iter()
+                    .find(|pt| pt.is_final())
+                    .map_or(0, PendingTransaction::change_value),
+                consumed: wallet_coins_consumed(&pending),
+            }
+        };
+        (build(spend_policy::RIDER_LIMIT), build(0))
+    }
+
+    /// What the ridden shape absorbs and the cheap one leaves behind — the same
+    /// read `prepare_send_inner` does over the two built chains.
+    fn extra_absorbed(ridden: &Shape, riderless: &Shape) -> u64 {
+        ridden
+            .consumed
+            .iter()
+            .filter(|(outpoint, _)| !riderless.consumed.contains_key(*outpoint))
+            .fold(0u64, |acc, (_, value)| acc.saturating_add(*value))
+    }
+
+    /// The wallet's own floor over an offline pool, in the send's order — the
+    /// same number `minimum_sendable` computes over a live context.
+    fn offline_floor(pool: &[UtxoEntryReference]) -> Option<u64> {
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            let order =
+                spend_policy::select_spend_priority(pool, &[], spend_policy::RIDER_LIMIT, &[]);
+            let payment: PaymentDestination = PaymentOutputs::from((addr(CHANGE), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                // Owned, not borrowed: the settings box the Generator stores is
+                // 'static, so a borrowing iterator cannot cross into it.
+                #[allow(clippy::unnecessary_to_owned)]
+                Box::new(pool.to_vec().into_iter()),
+                Some(order),
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+        search_minimum(probe).unwrap()
+    }
+
+    /// **The measurement that refuted the count-threshold rider**, frozen as a
+    /// fence. The founder's real wallet on 2026-08-23: 0.481524 + 1.0 + 100.0
+    /// KAS, sending 100.90. Both shapes are reproduced to the sompi, and the
+    /// rule must KEEP the more expensive ridden one — the cheap shape's change
+    /// of 0.09684600 KAS is below this wallet's own floor, so saving 0.0011 KAS
+    /// would have manufactured a coin that cannot be sent alone.
+    #[test]
+    fn the_cheap_shape_loses_when_it_would_leave_a_trap_coin() {
+        let pool: Vec<UtxoEntryReference> = [48_152_400u64, 100_000_000, 10_000_000_000]
+            .into_iter()
+            .map(UtxoEntryReference::simulated)
+            .collect();
+        let (ridden, riderless) = both_shapes(&pool, 100.90);
+
+        // The measured shapes, to the sompi (a pin bump that moves them reds
+        // here — these numbers came off the real Generator, not a model).
+        assert_eq!((ridden.legs, ridden.inputs, ridden.fee), (1, 3, 427_200));
+        assert_eq!(ridden.change, 57_725_200);
+        assert_eq!(
+            (riderless.legs, riderless.inputs, riderless.fee),
+            (1, 2, 315_400)
+        );
+        assert_eq!(riderless.change, 9_684_600);
+        assert_eq!(ridden.fee - riderless.fee, 111_800, "what the rider cost");
+
+        let floor = offline_floor(&pool).expect("this wallet can send");
+        assert!(
+            riderless.change < floor,
+            "the cheap change {} is below this wallet's floor {floor} — that is \
+             the whole point of the measurement",
+            riderless.change
+        );
+        // Two independent reasons the ridden shape survives here, and the test
+        // pins BOTH — the trap, and the fact that the riders paid for
+        // themselves many times over.
+        let extra = extra_absorbed(&ridden, &riderless);
+        assert_eq!(extra, 48_152_400, "the trap coin the riders absorb");
+        assert!(
+            extra > ridden.fee - riderless.fee,
+            "the riders are self-financing: {extra} absorbed for {} in fee",
+            ridden.fee - riderless.fee
+        );
+        assert!(
+            !riderless_wins(
+                ridden.legs,
+                riderless.legs,
+                ridden.fee,
+                riderless.fee,
+                riderless.change,
+                extra,
+                Some(floor)
+            ),
+            "the ridden shape must survive: the cheap one manufactures a trap"
+        );
+    }
+
+    /// **The comparison shape is a question, never a gate** — the consensus
+    /// audit's BLOCK, frozen. The founder's measured wallet, 0.01 KAS higher
+    /// than the fixture above: the riderless order stops one coin earlier and
+    /// leaves change small enough that the pin's `calculate_mass`
+    /// (generator.rs:970-972) errors BEFORE the storage-mass input-relief block
+    /// at :849 can pull another input. The ridden shape builds in one
+    /// transaction at the same amount, so the send must ship — a refusal here
+    /// would be a wallet that will not send money it can plainly send.
+    ///
+    /// It fences two things and, said plainly, not a third. It pins the SHAPE
+    /// FACT (this cliff is real, at this wallet, at this amount) and it drives
+    /// the decision seam [`shipped_shape`] with the `None` the failure
+    /// produces, asserting the ridden chain ships and that the floor lookup is
+    /// never even reached. What no offline test can reach is
+    /// `prepare_send_inner` itself — it needs a live `UtxoContext` — so that
+    /// the production call site says `.ok()` and not `?` remains a one-line
+    /// read, not a proof.
+    #[test]
+    fn a_refusing_comparison_shape_never_refuses_the_send() {
+        let pool: Vec<UtxoEntryReference> = [48_152_400u64, 100_000_000, 10_000_000_000]
+            .into_iter()
+            .map(UtxoEntryReference::simulated)
+            .collect();
+        let build = |riders: usize| {
+            let order = spend_policy::select_spend_priority(&pool, &[], riders, &[]);
+            let generator = offline_generator_over(&pool, order, 100.91, addr(CHANGE));
+            let mut pending = Vec::new();
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(tx)) => pending.push(tx),
+                    Ok(None) => break,
+                    Err(e) => return Err(map_generate_error(e)),
+                }
+            }
+            Ok((pending, generator.summary()))
+        };
+
+        // The cheap shape dies of the CHANGE side's storage mass...
+        let riderless = build(0);
+        assert!(
+            matches!(
+                riderless,
+                Err(ChainError::StorageMassExceeded { .. } | ChainError::Message(_))
+            ),
+            "the riderless shape must refuse at this amount, got {:?}",
+            riderless.map(|(p, s)| (p.len(), s.aggregate_fees()))
+        );
+        // ...while the ridden shape builds cleanly, in ONE transaction.
+        let (ridden, ridden_summary) = build(spend_policy::RIDER_LIMIT)
+            .expect("the ridden shape builds — this is the send the wallet ships");
+        assert_eq!(ridden.len(), 1);
+        assert_eq!(ridden_summary.aggregated_utxos(), 3);
+        // And the decision seam ships that chain when the comparison is the
+        // `None` a refusal produces — without touching the floor at all.
+        let (shipped, shipped_summary) = shipped_shape((ridden, ridden_summary), None, || {
+            panic!("a shape that never built must not trigger a floor lookup")
+        });
+        assert_eq!(shipped.len(), 1, "the send ships the proven chain");
+        assert_eq!(shipped_summary.aggregated_utxos(), 3);
+    }
+
+    /// The other side of the rule: a speck worth LESS than the fee to pick it
+    /// up is left alone, and the user keeps the money. 0.001 KAS beside a 500
+    /// KAS coin, sending 100 — the rider is a pure extra input, it costs more
+    /// than the speck is worth, and the change it declines to grow is far above
+    /// the floor either way.
+    #[test]
+    fn a_speck_that_costs_more_than_it_is_worth_is_left_alone() {
+        let pool: Vec<UtxoEntryReference> = [100_000u64, 50_000_000_000]
+            .into_iter()
+            .map(UtxoEntryReference::simulated)
+            .collect();
+        let (ridden, riderless) = both_shapes(&pool, 100.0);
+
+        assert_eq!(ridden.legs, riderless.legs, "same chain length");
+        assert!(
+            riderless.inputs < ridden.inputs,
+            "the rider is a real extra input here: {} vs {}",
+            riderless.inputs,
+            ridden.inputs
+        );
+        assert!(riderless.fee < ridden.fee, "and it costs real sompi");
+
+        let extra = extra_absorbed(&ridden, &riderless);
+        assert_eq!(extra, 100_000, "the speck the rider would have absorbed");
+        assert!(
+            extra <= ridden.fee - riderless.fee,
+            "and it is worth less than the {} sompi it costs to collect",
+            ridden.fee - riderless.fee
+        );
+
+        let floor = offline_floor(&pool).expect("this wallet can send");
+        assert!(
+            riderless.change >= floor,
+            "the change {} clears the floor {floor}",
+            riderless.change
+        );
+        assert!(riderless_wins(
+            ridden.legs,
+            riderless.legs,
+            ridden.fee,
+            riderless.fee,
+            riderless.change,
+            extra,
+            Some(floor)
+        ));
+    }
+
+    /// **The counterfactual that justifies the self-financing clause**, frozen
+    /// so the claim in [`riderless_wins`]'s doc is checkable rather than
+    /// asserted. Run the canonical 22-coin fragmented wallet through the
+    /// two-clause rule the backlog proposed (leg law + change shape, with no
+    /// value bar): it drops the riders, because a fat wallet's riderless change
+    /// is always healthy. That is D-165's hygiene half repealed in exactly the
+    /// wallet the rider exists for.
+    #[test]
+    fn without_the_value_bar_the_fragmented_wallet_stops_draining() {
+        let pool: Vec<UtxoEntryReference> = fragmented_fixture()
+            .iter()
+            .map(|v| UtxoEntryReference::simulated(kaspa_to_sompi(*v)))
+            .collect();
+        let (ridden, riderless) = both_shapes(&pool, 1.0);
+        let floor = offline_floor(&pool).expect("this wallet can send");
+
+        // The two-clause rule: exactly the shipped one with the value bar
+        // neutralised (nothing to absorb ⇒ nothing to weigh).
+        assert!(
+            riderless_wins(
+                ridden.legs,
+                riderless.legs,
+                ridden.fee,
+                riderless.fee,
+                riderless.change,
+                0,
+                Some(floor)
+            ),
+            "the two-clause rule drops the riders here — the measurement"
+        );
+        // The shipped rule keeps them, because what they pick up is worth far
+        // more than the pickup.
+        let extra = extra_absorbed(&ridden, &riderless);
+        assert!(
+            extra > ridden.fee - riderless.fee,
+            "{extra} absorbed for {} in fee",
+            ridden.fee - riderless.fee
+        );
+        assert!(!riderless_wins(
+            ridden.legs,
+            riderless.legs,
+            ridden.fee,
+            riderless.fee,
+            riderless.change,
+            extra,
+            Some(floor)
+        ));
+    }
+
+    /// A fragment worth many times its pickup rides even though the cheap shape
+    /// is cheaper AND leaves healthy change — the self-financing clause, which
+    /// is the whole of D-165's hygiene half. (Mutation fence — deleting the
+    /// `extra_absorbed <= saving` clause from `riderless_is_candidate` reds
+    /// this and the fragmented-wallet drain test, and nothing else.)
+    #[test]
+    fn a_fragment_worth_more_than_its_pickup_still_rides() {
+        let pool: Vec<UtxoEntryReference> = [50_000_000u64, 50_000_000_000]
+            .into_iter()
+            .map(UtxoEntryReference::simulated)
+            .collect();
+        let (ridden, riderless) = both_shapes(&pool, 100.0);
+        let extra = extra_absorbed(&ridden, &riderless);
+        assert_eq!(extra, 50_000_000, "half a KAS, absorbed by the rider");
+        assert!(riderless.fee < ridden.fee, "the cheap shape IS cheaper");
+        let floor = offline_floor(&pool).expect("this wallet can send");
+        assert!(
+            riderless.change >= floor,
+            "and its change IS healthy — only the value bar stops it"
+        );
+        assert!(!riderless_wins(
+            ridden.legs,
+            riderless.legs,
+            ridden.fee,
+            riderless.fee,
+            riderless.change,
+            extra,
+            Some(floor)
+        ));
+    }
+
+    /// The leg law (D-165) still outranks everything: a shorter riderless chain
+    /// wins whatever its change looks like, because an extra transaction costs
+    /// a whole extra fee that no fragment absorption repays.
+    #[test]
+    fn a_shorter_chain_wins_regardless_of_the_change_it_leaves() {
+        // Cheaper is false (the shorter chain costs MORE in aggregate) and the
+        // change is a trap and the floor is unknown — every other clause says
+        // no, and the leg law still says yes.
+        assert!(riderless_wins(2, 1, 10_000, 90_000, 1, u64::MAX, None));
+    }
+
+    /// The change-shape clause ISOLATED — the one case where it alone decides.
+    /// The riders are not self-financing (a 0.0005 KAS speck for 0.001 KAS of
+    /// fee), so the value bar says drop them; the cheap shape's change would be
+    /// below the floor, so the change clause overrules and they ride.
+    /// (Mutation fence — deleting the change clause reds this and nothing
+    /// else; the measured founder wallet does NOT isolate it, because there the
+    /// value bar already keeps the riders.)
+    #[test]
+    fn a_worthless_rider_still_rides_when_dropping_it_would_leave_a_trap() {
+        // saving 100_000; speck 50_000 (bar passes); change 0.05 KAS under a
+        // 0.10 KAS floor.
+        assert!(!riderless_wins(
+            1,
+            1,
+            200_000,
+            100_000,
+            5_000_000,
+            50_000,
+            Some(10_000_000)
+        ));
+        // Same shape, healthy change: now the speck really is not worth
+        // collecting and the user keeps the fee.
+        assert!(riderless_wins(
+            1,
+            1,
+            200_000,
+            100_000,
+            50_000_000,
+            50_000,
+            Some(10_000_000)
+        ));
+    }
+
+    /// An unknown floor fails CLOSED onto the ridden shape: we decline to save
+    /// a fee we cannot prove is safe to save. (Mutation fence — turning the
+    /// `is_some_and` into an `is_none_or` reds this and nothing else.)
+    #[test]
+    fn an_unknown_floor_keeps_the_riders() {
+        assert!(!riderless_wins(1, 1, 427_200, 315_400, 9_684_600, 0, None));
+    }
+
+    /// Change absorbed into the fee leaves no coin to strand, so the cheap
+    /// shape wins without a floor lookup at all.
+    #[test]
+    fn a_shape_that_leaves_no_change_needs_no_floor() {
+        assert!(riderless_wins(1, 1, 427_200, 315_400, 0, 0, None));
+    }
+
+    /// A tie is not a saving: equal fees keep the riders, which is what makes
+    /// the rider free-when-the-Generator-needed-it-anyway case still absorb
+    /// fragments. (Mutation fence — relaxing `<` to `<=` reds this.)
+    #[test]
+    fn an_equal_fee_keeps_the_riders() {
+        assert!(!riderless_wins(
+            1,
+            1,
+            427_200,
+            427_200,
+            50_000_000_000,
+            0,
+            Some(10_000_000)
+        ));
+    }
+
     #[test]
     fn riders_strictly_drain_a_fragmented_wallet() {
         let change = addr(CHANGE);
@@ -1853,7 +3275,12 @@ mod tests {
 
         for round in 0..8 {
             let before = entries.len();
-            let order = crate::spend_policy::select_spend_priority(&entries, &[], RIDER_LIMIT);
+            // The shape the wallet would actually SHIP, not just the ridden
+            // order: since the change-shape law, a cheaper riderless shape can
+            // win. Modelling only the ridden order would assert a drain
+            // property the send path no longer promises.
+            let riders = shipped_riders(&entries, 1.0);
+            let order = crate::spend_policy::select_spend_priority(&entries, &[], riders, &[]);
             let generator = offline_generator_over(&entries, order, 1.0, change.clone());
             let pending = drain(&generator);
             assert_eq!(pending.len(), 1, "round {round}: riders never add a leg");
@@ -1928,6 +3355,7 @@ mod tests {
             &mature,
             std::slice::from_ref(&pin),
             RIDER_LIMIT,
+            &[],
         );
         assert_eq!(
             order[0].transaction_id(),
@@ -2687,6 +4115,298 @@ mod tests {
             (5_000_000..=5_200_000).contains(&min),
             "min {min} in window"
         );
+    }
+
+    /// The ceiling's mirror of the floor test: every value the climb returns
+    /// must be one the probe accepts. (Mutation fence — moving `lo = mid` onto
+    /// the refusal arm reds this and nothing else.)
+    #[test]
+    fn the_climb_only_ever_returns_a_value_it_proved() {
+        // Floor 0.05 KAS, ceiling 4.00 KAS, balance 5.00 KAS: the shape a real
+        // wallet has (payment dust below, change dust above).
+        let floor = 5_000_000;
+        let ceiling = 400_000_000;
+        let mut probe = move |v: u64| {
+            Ok(if v < floor {
+                ProbeOutcome::TooSmall
+            } else if v <= ceiling {
+                ProbeOutcome::Builds
+            } else if v <= 500_000_000 {
+                ProbeOutcome::TooSmall // the CHANGE is the dust up here
+            } else {
+                ProbeOutcome::TooLarge
+            })
+        };
+        let max = search_maximum(&mut probe, floor, 500_000_000)
+            .unwrap()
+            .expect("the anchor builds, so a maximum exists");
+        assert_eq!(
+            probe(max).unwrap(),
+            ProbeOutcome::Builds,
+            "the reported maximum {max} must itself build"
+        );
+        assert!(max <= ceiling, "never above the real ceiling: {max}");
+        assert!(
+            ceiling - max <= PROBE_PRECISION_SOMPI,
+            "within display precision of the real ceiling: {max}"
+        );
+    }
+
+    /// An anchor that does not build is refused outright rather than returned.
+    /// `search_minimum` can close on a `TooLarge` bound it never saw build, so
+    /// the climb must not inherit that as a promise.
+    #[test]
+    fn an_unproven_anchor_yields_no_ceiling_at_all() {
+        let probe = |_: u64| Ok(ProbeOutcome::TooLarge);
+        assert_eq!(search_maximum(probe, 1_000_000, 5_000_000).unwrap(), None);
+    }
+
+    /// A wallet with no room above its floor reports NO ceiling — not the
+    /// floor wearing the word "largest".
+    ///
+    /// The floor does build, so answering with it would be true; it would also
+    /// be a superlative asserted over a space the climb never entered. Both
+    /// edges are fenced: the bound equal to the anchor, and the bound BELOW it
+    /// (which is reachable, because the climb's bound counts the free coins
+    /// only while the anchor was probed over the whole order). (Mutation fence
+    /// — deleting the `balance <= anchor` guard reds this and nothing else.)
+    #[test]
+    fn no_room_to_climb_means_no_ceiling_is_claimed() {
+        assert_eq!(
+            search_maximum(synthetic(5_000_000, 5_000_000), 5_000_000, 5_000_000).unwrap(),
+            None,
+            "the bound equals the anchor: nothing above it was searched"
+        );
+        assert_eq!(
+            search_maximum(synthetic(5_000_000, 9_000_000), 5_000_000, 3_000_000).unwrap(),
+            None,
+            "the free coins do not even reach the floor"
+        );
+    }
+
+    /// The reserved-draw trace must be silent on the healthy pinned path and
+    /// loud on the harm it exists to report.
+    ///
+    /// A transport send PINS its conversation's own bound address (input[0]
+    /// identity, D-067) — which `is_reserved` matches, and which is always
+    /// consumed. Counting it would make every message from an off-identity
+    /// conversation report a raided reserve, the opposite of the fact. (Mutation
+    /// fence — dropping the `!own.contains` filter reds the first half and
+    /// nothing else.)
+    #[test]
+    fn the_reserved_trace_ignores_a_send_s_own_pinned_binding() {
+        let bound = addr(CHANGE);
+        let other = addr(DEST);
+        let mine = UtxoEntryReference::simulated_with_address(5_000_000_000, &bound);
+        let neighbour = UtxoEntryReference::simulated_with_address(2_000_000_000, &other);
+        let mature = vec![mine.clone(), neighbour.clone()];
+        let exclude = [bound.clone(), other.clone()];
+        let key = |entry: &UtxoEntryReference| {
+            (
+                entry.utxo.outpoint.transaction_id(),
+                entry.utxo.outpoint.index(),
+            )
+        };
+
+        // A pinned send that spends only its own binding: nothing to report.
+        let consumed = std::collections::HashMap::from([(key(&mine), mine.amount())]);
+        assert_eq!(
+            reserved_coins_drawn(&mature, std::slice::from_ref(&mine), &consumed, &exclude),
+            0
+        );
+        // The same send reaching into a NEIGHBOUR's reserve: reported.
+        let consumed = std::collections::HashMap::from([
+            (key(&mine), mine.amount()),
+            (key(&neighbour), neighbour.amount()),
+        ]);
+        assert_eq!(
+            reserved_coins_drawn(&mature, std::slice::from_ref(&mine), &consumed, &exclude),
+            1
+        );
+        // A plain payment (nothing pinned) that draws a reserved coin: reported.
+        assert_eq!(reserved_coins_drawn(&mature, &[], &consumed, &exclude), 2);
+    }
+
+    /// The founder's measured dead zone, priced by the REAL Generator: one
+    /// 0.57725200 KAS coin, floor 0.10437500 on glass, 0.40 builds, 0.50
+    /// refuses (device, 2026-08-23). The reported ceiling must land inside
+    /// that measured window — and must itself build.
+    #[test]
+    fn the_measured_dead_zone_gets_a_real_ceiling() {
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            let entries = vec![UtxoEntryReference::simulated(57_725_200)];
+            let payment: PaymentDestination = PaymentOutputs::from((addr(CHANGE), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                Box::new(entries.into_iter()),
+                None,
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+        let min = search_minimum(probe)
+            .unwrap()
+            .expect("the measured coin can send something");
+        let max = search_maximum(probe, min, 57_725_200)
+            .unwrap()
+            .expect("and it has a proven ceiling");
+        assert_eq!(
+            probe(max).unwrap(),
+            ProbeOutcome::Builds,
+            "the ceiling {max} must build — an unproven bound is worse than none"
+        );
+        assert!(
+            max >= 40_000_000,
+            "0.40 KAS built on glass, so the ceiling is at least that: {max}"
+        );
+        assert!(
+            max < 50_000_000,
+            "0.50 KAS refused on glass, so the ceiling is below it: {max}"
+        );
+        assert!(max > min, "the window has room: {min}..{max}");
+        // The offline fixture reproduces the DEVICE number to the sompi: the
+        // floor this coin rendered on glass was 0.10437500 KAS. A pin bump that
+        // moves the KIP-9 floor reds here (the C5 tripwire family).
+        assert_eq!(min, 10_437_500, "the glass floor, reproduced offline");
+    }
+
+    /// The §4 lifecycle-discipline tripwire for THIS file — the funds path's
+    /// copy of the transport lane's `module_logs_are_lifecycle_only`.
+    ///
+    /// The drain lines added for diagnosis (arm, coin counts, refused-vs-built)
+    /// sit in the one module that has every amount and every address in scope,
+    /// so the mistake people actually make here is reaching for the variable
+    /// that is already bound. Counts and state words only (INV-3).
+    ///
+    /// Prose is judged separately from data, exactly as the transport lane does
+    /// it: "balance refresh failed" is a sentence, `{balance}` is a leak. What
+    /// is checked is what gets EMITTED — inline captures in the format string,
+    /// and the identifiers passed as arguments — and here the argument rule is
+    /// STRICTER than transport's: a forbidden word may not appear in an
+    /// argument identifier at all, not even measured. This lane logs lifecycle,
+    /// never quantities, so there is nothing legitimate to measure.
+    ///
+    /// **What it is not:** a proof. It knows the identifier NAMES this module
+    /// uses; a log line that copies an amount into a differently-named local
+    /// and prints that still passes. It is a tripwire for the mistake people
+    /// actually make, and the review is the authority — said plainly, because
+    /// overclaiming a guard's reach is worse than not having it.
+    #[test]
+    fn send_logs_are_lifecycle_only() {
+        let source = include_str!("send.rs");
+        // Accumulate each `log::` call to its balanced closing paren, so a
+        // wrapped macro is judged as one string.
+        let mut calls: Vec<String> = Vec::new();
+        let mut pending: Option<(String, i32)> = None;
+        for raw in source.lines() {
+            let line = raw.trim_start();
+            if pending.is_none() && (!line.contains("log::") || line.starts_with("//")) {
+                continue;
+            }
+            let (mut buf, mut depth) = pending.take().unwrap_or_default();
+            buf.push(' ');
+            buf.push_str(line);
+            // Comment lines inside a call carry prose, not emitted text.
+            if !line.starts_with("//") {
+                depth += i32::try_from(line.matches('(').count()).unwrap_or(0);
+                depth -= i32::try_from(line.matches(')').count()).unwrap_or(0);
+            }
+            if depth <= 0 {
+                calls.push(buf);
+            } else {
+                pending = Some((buf, depth));
+            }
+        }
+        assert!(
+            calls.len() >= 5,
+            "the scanner found only {} log calls — it has stopped matching",
+            calls.len()
+        );
+        // Both halves of what may never reach logcat from a funds path: what a
+        // coin is worth, and where it went.
+        const FORBIDDEN: [&str; 8] = [
+            "sompi",
+            "amount",
+            "balance",
+            "value",
+            "address",
+            "destination",
+            "txid",
+            "outpoint",
+        ];
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        for call in calls {
+            // Prose inside the format string is a sentence, and a lane that
+            // cannot say in English what it did is a worse lane — so the
+            // literal is judged by one rule and the arguments by another.
+            // Split the format string off at ITS OWN closing quote, not at the
+            // call's last quote. `rfind` swept every argument into the "format"
+            // region the moment any later `"` appeared — a string default, a
+            // `.unwrap_or("x")`, a trailing comment — and that region is only
+            // checked for `{name}` captures, so
+            // `log::info!("drain: {}", amount_sompi.to_string())` passed the
+            // guard as written. Red-proved by the ffi-leak audit, this sitting.
+            let close = call
+                .find('"')
+                .and_then(|a| call[a + 1..].find('"').map(|i| a + 1 + i));
+            let (format, args) = match (call.find('"'), close) {
+                (Some(a), Some(b)) if b > a => (&call[a..=b], &call[b + 1..]),
+                _ => (call.as_str(), ""),
+            };
+            // Inline captures, by NAME — matched as a prefix-bearing whole
+            // identifier so `{amount_sompi}` is caught, not just `{amount}`.
+            for piece in format.split('{').skip(1) {
+                let name: String = piece.chars().take_while(|c| is_ident(*c)).collect();
+                for word in FORBIDDEN {
+                    assert!(
+                        !name.contains(word),
+                        "a log FORMAT STRING captures `{name}` — the drain lane \
+                         is counts and state words only (INV-3): {call}"
+                    );
+                }
+            }
+            // Argument identifiers, every token, strictly.
+            let chars: Vec<char> = args.chars().collect();
+            let mut at = 0;
+            while at < chars.len() {
+                if !is_ident(chars[at]) {
+                    at += 1;
+                    continue;
+                }
+                let start = at;
+                while at < chars.len() && is_ident(chars[at]) {
+                    at += 1;
+                }
+                let token: String = chars[start..at].iter().collect();
+                for word in FORBIDDEN {
+                    assert!(
+                        !token.contains(word),
+                        "a log ARGUMENT names `{token}` — the drain lane is \
+                         counts and state words only (INV-3): {call}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -3775,7 +3775,18 @@ pub async fn transport_prepare_bcast(
     let rpc = dag::shared_monitor().await?.rpc();
 
     let prepared = engine
-        .prepare_send(dest, amount_sompi, change, signer, rpc, Some(payload))
+        .prepare_send(
+            dest,
+            amount_sompi,
+            change,
+            signer,
+            rpc,
+            Some(payload),
+            // Other conversations' coins sort last here too (D-169): a
+            // handshake is an ordinary send with a payload, and it can strand
+            // a neighbour exactly as a payment can.
+            &crate::api::send::spend_exclusions(),
+        )
         .await
         .map_err(AppError::chain)?;
 
@@ -4051,6 +4062,10 @@ async fn prepare_transport_send(
             signer,
             rpc,
             Some(wire),
+            // This conversation's own coins are the PINNED block and are taken
+            // out of the pool before any demotion, so the reservation set can
+            // only ever demote a NEIGHBOUR's coins here (D-169).
+            &crate::api::send::spend_exclusions(),
         )
         .await
         .map_err(|e| {
@@ -4887,7 +4902,11 @@ async fn prepare_comm_plaintext(
     // The floor is probed with the SAME pinned set the send below will pin, so
     // it prices the pinned spend order, not a hypothetical plain one.
     let floor = engine
-        .minimum_sendable(own_address.clone(), &priority)
+        .minimum_sendable(
+            own_address.clone(),
+            &priority,
+            &crate::api::send::spend_exclusions(),
+        )
         .map_err(AppError::chain)?
         .ok_or_else(|| {
             AppError::msg("your balance can't cover a message right now (anti-dust floor)")
@@ -5118,7 +5137,11 @@ pub async fn transport_prepare_stash() -> Result<SignableSummaryDto, AppError> {
     let priority = await_spendable_at(&engine, &own_address).await?;
     // Probed with the pinned set for the same reason as the comm path above.
     let floor = engine
-        .minimum_sendable(own_address.clone(), &priority)
+        .minimum_sendable(
+            own_address.clone(),
+            &priority,
+            &crate::api::send::spend_exclusions(),
+        )
         .map_err(AppError::chain)?
         .ok_or_else(|| {
             AppError::msg("your balance can't cover a backup right now (anti-dust floor)")
@@ -6788,7 +6811,17 @@ mod tests {
         for call in calls {
             // What is EMITTED is the format string. Split it off so an
             // argument can be judged by a different rule.
-            let (format, args) = match (call.find('"'), call.rfind('"')) {
+            // Split the format string off at ITS OWN closing quote, not at the
+            // call's last quote. `rfind` swept every argument into the "format"
+            // region the moment any later `"` appeared — a string default, a
+            // `.unwrap_or("x")`, a trailing comment — and that region is only
+            // checked for `{name}` captures, so
+            // `log::info!("drain: {}", amount_sompi.to_string())` passed the
+            // guard as written. Red-proved by the ffi-leak audit, this sitting.
+            let close = call
+                .find('"')
+                .and_then(|a| call[a + 1..].find('"').map(|i| a + 1 + i));
+            let (format, args) = match (call.find('"'), close) {
                 (Some(a), Some(b)) if b > a => (&call[a..=b], &call[b + 1..]),
                 _ => (call.as_str(), ""),
             };

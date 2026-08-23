@@ -3169,6 +3169,7 @@ impl SseDecode for crate::api::send::SignableSummaryDto {
         let mut var_mass = <u64>::sse_decode(deserializer);
         let mut var_txCount = <u32>::sse_decode(deserializer);
         let mut var_utxoCount = <u32>::sse_decode(deserializer);
+        let mut var_resultingCoins = <u32>::sse_decode(deserializer);
         let mut var_payloadLen = <Option<u32>>::sse_decode(deserializer);
         let mut var_payloadKind = <Option<String>>::sse_decode(deserializer);
         let mut var_feeStrategy = <crate::api::send::FeeStrategyKind>::sse_decode(deserializer);
@@ -3187,6 +3188,7 @@ impl SseDecode for crate::api::send::SignableSummaryDto {
             mass: var_mass,
             tx_count: var_txCount,
             utxo_count: var_utxoCount,
+            resulting_coins: var_resultingCoins,
             payload_len: var_payloadLen,
             payload_kind: var_payloadKind,
             fee_strategy: var_feeStrategy,
@@ -4120,6 +4122,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::send::SignableSummaryDto {
             self.mass.into_into_dart().into_dart(),
             self.tx_count.into_into_dart().into_dart(),
             self.utxo_count.into_into_dart().into_dart(),
+            self.resulting_coins.into_into_dart().into_dart(),
             self.payload_len.into_into_dart().into_dart(),
             self.payload_kind.into_into_dart().into_dart(),
             self.fee_strategy.into_into_dart().into_dart(),
@@ -4892,6 +4895,7 @@ impl SseEncode for crate::api::send::SignableSummaryDto {
         <u64>::sse_encode(self.mass, serializer);
         <u32>::sse_encode(self.tx_count, serializer);
         <u32>::sse_encode(self.utxo_count, serializer);
+        <u32>::sse_encode(self.resulting_coins, serializer);
         <Option<u32>>::sse_encode(self.payload_len, serializer);
         <Option<String>>::sse_encode(self.payload_kind, serializer);
         <crate::api::send::FeeStrategyKind>::sse_encode(self.fee_strategy, serializer);

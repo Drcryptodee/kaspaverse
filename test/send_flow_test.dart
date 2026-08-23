@@ -19,6 +19,7 @@ const _addr =
 /// mode structurally carries no payload fields.
 SignableSummaryDto _summary({
   int txCount = 1,
+  int resultingCoins = 1,
   SignableKind kind = SignableKind.payment,
   int? payloadLen,
   String? payloadKind,
@@ -35,6 +36,7 @@ SignableSummaryDto _summary({
   mass: BigInt.from(2036),
   txCount: txCount,
   utxoCount: utxoCount,
+  resultingCoins: resultingCoins,
   payloadLen: payloadLen,
   payloadKind: payloadKind,
   feeStrategy: FeeStrategyKind.senderPays,
@@ -397,6 +399,76 @@ void main() {
       expect(find.textContaining('A typical send today'), findsNothing);
       expect(find.textContaining('Merges 5 coins into one'), findsOneWidget);
     });
+
+    testWidgets(
+      'a merge too big for one transaction promises the number it will '
+      'actually leave, and names the coin count as the cause',
+      (tester) async {
+        await tester.pumpWidget(
+          _sheet(
+            _summary(
+              kind: SignableKind.consolidate,
+              utxoCount: 352,
+              txCount: 4,
+              resultingCoins: 4,
+            ),
+          ),
+        );
+        // The promise is the truth: 352 coins become 4, not one.
+        expect(find.textContaining('Merges 352 coins into 4'), findsOneWidget);
+        expect(
+          find.textContaining('merging again takes it further'),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('into one at your own address'),
+          findsNothing,
+        );
+        // A merge splits on coin COUNT — the payment sentence would name the
+        // wrong cause on this surface.
+        expect(
+          find.textContaining('more coins than one transaction can hold'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('your amount exceeds'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a CHAINED merge still ends in one coin, and the sheet says so — a '
+      'transaction count is not a coin count',
+      (tester) async {
+        // The native compound arm: many transactions, one final output
+        // (`verify_drain` refuses any other shape), so Rust publishes
+        // resultingCoins = 1 and the sheet must not read the chain length as a
+        // coin count. This is the commoner arm — every payments-only wallet
+        // with no live conversations takes it.
+        await tester.pumpWidget(
+          _sheet(
+            _summary(
+              kind: SignableKind.consolidate,
+              utxoCount: 352,
+              txCount: 4,
+              resultingCoins: 1,
+            ),
+          ),
+        );
+        expect(
+          find.textContaining('Merges 352 coins into one'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('into 4'), findsNothing);
+        expect(
+          find.textContaining('merging again takes it further'),
+          findsNothing,
+        );
+        // The chain-length note is still true and still shown.
+        expect(
+          find.textContaining('more coins than one transaction can hold'),
+          findsOneWidget,
+        );
+      },
+    );
 
     testWidgets('a hypothetical P4 stake flow renders through the one sheet', (
       tester,

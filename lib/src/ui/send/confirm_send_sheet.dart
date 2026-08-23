@@ -219,9 +219,23 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         ],
         if (consolidate) ...[
           Text(
-            'Merges ${s.utxoCount} coins into one at your own address — the '
-            'value stays yours, so future sends need fewer coins and cost '
-            'less.',
+            // A merge too big for one transaction runs in bounded passes and
+            // leaves one coin PER PASS (D-170), so the promise names the number
+            // it will actually leave — and says a second tap goes further,
+            // because the action is idempotent.
+            //
+            // The switch is `resultingCoins`, Rust's own read off the built
+            // chain, NEVER `txCount`: the native compound arm also chains past
+            // one transaction and still ends in exactly one coin, so a
+            // transaction count would state a false coin count on the commoner
+            // path (ux audit, this sitting).
+            s.resultingCoins > 1
+                ? 'Merges ${s.utxoCount} coins into ${s.resultingCoins} at your '
+                      'own address — as far as one merge goes. The value stays '
+                      'yours, and merging again takes it further.'
+                : 'Merges ${s.utxoCount} coins into one at your own address — '
+                      'the value stays yours, so future sends need fewer coins '
+                      'and cost less.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: KvColor.textSecondary,
             ),
@@ -300,8 +314,13 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         if (s.txCount > 1) ...[
           const SizedBox(height: KvSpace.m),
           Text(
-            'Sent as ${s.txCount} transactions (your amount exceeds one '
-            "transaction's size limit).",
+            // A merge splits on COIN COUNT, never on amount — the payment
+            // sentence would name the wrong cause on this surface.
+            consolidate
+                ? 'Sent as ${s.txCount} transactions — more coins than one '
+                      'transaction can hold.'
+                : 'Sent as ${s.txCount} transactions (your amount exceeds one '
+                      "transaction's size limit).",
             style: theme.textTheme.bodySmall?.copyWith(
               color: KvColor.textTertiary,
             ),

@@ -432,9 +432,15 @@ class _SettingsScreenState extends State<SettingsScreen>
             id: 'merge-coins',
             icon: Icons.join_full_outlined,
             title: 'Merge coins',
+            // No fee COUNT and no "all your coins": a pile too big for one
+            // transaction merges in bounded passes, each paying its own fee
+            // (D-170), and coins reserved for live conversations are left where
+            // they are. The confirm carries the real numbers; a door-sign that
+            // promises a total the action does not always deliver is the thing
+            // to avoid here (ux delta re-review, this sitting).
             subtitle:
-                'Combine your spendable coins into one, so future sends '
-                'cost less. You pay one network fee.',
+                'Combine coins you can spend, so future sends cost less. '
+                'You pay the network fee, shown before you sign.',
             status: _merge,
             onTap: _runMergeCoins,
           ),

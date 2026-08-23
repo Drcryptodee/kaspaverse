@@ -103,6 +103,7 @@ SignableSummaryDto summary({
   totalSompi: (amount ?? BigInt.from(20000000)) + BigInt.from(31000),
   mass: BigInt.from(2000),
   txCount: 1,
+  resultingCoins: 0,
   utxoCount: 1,
   payloadLen: 154,
   payloadKind: payloadKind,

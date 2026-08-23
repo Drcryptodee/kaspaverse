@@ -2920,8 +2920,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SignableSummaryDto dco_decode_signable_summary_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 17)
-      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    if (arr.length != 18)
+      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
     return SignableSummaryDto(
       nonce: dco_decode_u_64(arr[0]),
       kind: dco_decode_signable_kind(arr[1]),
@@ -2932,14 +2932,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       mass: dco_decode_u_64(arr[6]),
       txCount: dco_decode_u_32(arr[7]),
       utxoCount: dco_decode_u_32(arr[8]),
-      payloadLen: dco_decode_opt_box_autoadd_u_32(arr[9]),
-      payloadKind: dco_decode_opt_String(arr[10]),
-      feeStrategy: dco_decode_fee_strategy_kind(arr[11]),
-      priorityFeeSompi: dco_decode_u_64(arr[12]),
-      typicalAmountSompi: dco_decode_opt_box_autoadd_u_64(arr[13]),
-      typicalNowUtxos: dco_decode_opt_box_autoadd_u_32(arr[14]),
-      typicalNowFeeSompi: dco_decode_opt_box_autoadd_u_64(arr[15]),
-      typicalAfterFeeSompi: dco_decode_opt_box_autoadd_u_64(arr[16]),
+      resultingCoins: dco_decode_u_32(arr[9]),
+      payloadLen: dco_decode_opt_box_autoadd_u_32(arr[10]),
+      payloadKind: dco_decode_opt_String(arr[11]),
+      feeStrategy: dco_decode_fee_strategy_kind(arr[12]),
+      priorityFeeSompi: dco_decode_u_64(arr[13]),
+      typicalAmountSompi: dco_decode_opt_box_autoadd_u_64(arr[14]),
+      typicalNowUtxos: dco_decode_opt_box_autoadd_u_32(arr[15]),
+      typicalNowFeeSompi: dco_decode_opt_box_autoadd_u_64(arr[16]),
+      typicalAfterFeeSompi: dco_decode_opt_box_autoadd_u_64(arr[17]),
     );
   }
 
@@ -3759,6 +3760,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_mass = sse_decode_u_64(deserializer);
     var var_txCount = sse_decode_u_32(deserializer);
     var var_utxoCount = sse_decode_u_32(deserializer);
+    var var_resultingCoins = sse_decode_u_32(deserializer);
     var var_payloadLen = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_payloadKind = sse_decode_opt_String(deserializer);
     var var_feeStrategy = sse_decode_fee_strategy_kind(deserializer);
@@ -3779,6 +3781,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       mass: var_mass,
       txCount: var_txCount,
       utxoCount: var_utxoCount,
+      resultingCoins: var_resultingCoins,
       payloadLen: var_payloadLen,
       payloadKind: var_payloadKind,
       feeStrategy: var_feeStrategy,
@@ -4609,6 +4612,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.mass, serializer);
     sse_encode_u_32(self.txCount, serializer);
     sse_encode_u_32(self.utxoCount, serializer);
+    sse_encode_u_32(self.resultingCoins, serializer);
     sse_encode_opt_box_autoadd_u_32(self.payloadLen, serializer);
     sse_encode_opt_String(self.payloadKind, serializer);
     sse_encode_fee_strategy_kind(self.feeStrategy, serializer);

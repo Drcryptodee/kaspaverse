@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_exact`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `storage_mass_message`, `take_stashed`, `validate_mainnet_address`
+// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_exact`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `spend_exclusions`, `storage_mass_message`, `take_stashed`, `validate_mainnet_address`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
@@ -178,8 +178,15 @@ class SignableSummaryDto {
   final BigInt mass;
 
   /// 1 normally; >1 when the send chained past one tx's 100k-gram mass.
+  /// **A transaction count is not a coin count** — see `resulting_coins`.
   final int txCount;
   final int utxoCount;
+
+  /// How many coins the send LEAVES at its destination (0 where the question
+  /// does not apply — every kind but a merge). Read straight off the built
+  /// chain by the layer that knows which drain arm ran, because the two arms
+  /// both chain and leave opposite results (ux audit, this sitting).
+  final int resultingCoins;
 
   /// Payload bytes on the built final tx (read back, not echoed); `None`
   /// on a payload-less flow — payment mode never sees frame fields.
@@ -222,6 +229,7 @@ class SignableSummaryDto {
     required this.mass,
     required this.txCount,
     required this.utxoCount,
+    required this.resultingCoins,
     this.payloadLen,
     this.payloadKind,
     required this.feeStrategy,
@@ -243,6 +251,7 @@ class SignableSummaryDto {
       mass.hashCode ^
       txCount.hashCode ^
       utxoCount.hashCode ^
+      resultingCoins.hashCode ^
       payloadLen.hashCode ^
       payloadKind.hashCode ^
       feeStrategy.hashCode ^
@@ -266,6 +275,7 @@ class SignableSummaryDto {
           mass == other.mass &&
           txCount == other.txCount &&
           utxoCount == other.utxoCount &&
+          resultingCoins == other.resultingCoins &&
           payloadLen == other.payloadLen &&
           payloadKind == other.payloadKind &&
           feeStrategy == other.feeStrategy &&

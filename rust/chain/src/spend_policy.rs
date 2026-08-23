@@ -40,19 +40,24 @@
 //!      hold the line at steady state and strictly drain any quieter wallet. A
 //!      funded send consumes `base + riders ≥ 1 + riders` inputs and returns at
 //!      most one change output, so the wallet's UTXO count strictly decreases
-//!      while more than one coin remains (the provable invariant —
-//!      `send.rs::riders_strictly_drain_a_fragmented_wallet`).
+//!      while more than one coin remains — provable, and proved, in
+//!      `send.rs::riders_strictly_drain_a_fragmented_wallet`, which models the
+//!      shape the wallet actually SHIPS rather than this order alone.
 //!    - **Marginal cost is bounded and stated:** at most `RIDER_LIMIT` extra
 //!      inputs versus pure largest-first — ~1,118 grams ≈ 0.0011 KAS each at
 //!      the pin's relay floor (measured, not hardcoded; the fee itself is
 //!      always the Generator's). The rider can also SERVE as the extra input
 //!      the Generator pulls on its own for KIP-9 storage-mass relief
 //!      (`generator.rs:838-852`), in which case part of that margin is free.
-//!    - **A rider never adds a transaction to the chain.** Enforced by
-//!      construction, not prediction: `send.rs` generates with riders, and if
-//!      the chain is longer than one transaction it regenerates without riders
-//!      and keeps the shorter chain (`prepare_send_inner`). No mass arithmetic
-//!      of ours is involved (INV-9).
+//!    - **A rider never adds a transaction to the chain**, and **never costs
+//!      more than the coin it collects** (`send.rs::riderless_wins`, D-171).
+//!      Both are enforced by construction, not prediction: `send.rs` generates
+//!      the send with riders and without, and the pinned Generator's own two
+//!      answers decide. Where the cheap shape would leave change the wallet
+//!      could not then send alone, or would decline a coin worth more than the
+//!      fee it saves, the riders stay. No mass arithmetic of ours is involved
+//!      (INV-9). This module chooses the ORDER; `send.rs` chooses between the
+//!      two orders' built results.
 //!
 //! 3. **The pin composes.** A pinned send (D-067 source-address discipline, the
 //!    L47 scar: the counterpart resolves our identity from input[0]'s
@@ -69,23 +74,44 @@
 //! own order already links freely; this line exists so the choice is on the
 //! record (see DECISION_LOG).
 //!
+//! 4. **Reserved coins go last.** The bound address of every live conversation
+//!    is DEMOTED to the tail of the order rather than withheld (D-169) — see
+//!    [`select_spend_priority`]'s note for why a payment may never be refused
+//!    to protect a chat binding, and why the same address set is a hard custody
+//!    line for a drain but only a preference here.
+//!
 //! **What this deliberately does not do:** no fee estimation, no mass math, no
 //! dust threshold of our own — a "fragment" is simply "currently smallest";
 //! the Generator alone decides what a transaction costs and whether it builds.
 
 use std::collections::HashSet;
 
+use kaspa_wallet_core::prelude::Address;
 use kaspa_wallet_core::utxo::UtxoEntryReference;
 
 /// How many of the wallet's smallest coins ride along on every send — see the
 /// module doc for the derivation and the bounded, stated marginal cost.
 pub(crate) const RIDER_LIMIT: usize = 2;
 
+/// Is this coin RESERVED for a conversation — or unprovably free?
+///
+/// The one definition of the reservation test, so the ordering policy and the
+/// observability that reports on it can never disagree. Fails CLOSED: an
+/// address-less coin is reserved (see the note on [`select_spend_priority`]).
+pub(crate) fn is_reserved(entry: &UtxoEntryReference, exclude: &[Address]) -> bool {
+    // Reads exactly as the rule states: no address to match, OR a match.
+    entry
+        .utxo
+        .address
+        .as_ref()
+        .is_none_or(|address| exclude.contains(address))
+}
+
 /// The complete spend order for one send, expressed as the Generator's
 /// priority-entry list: `pinned` (largest-first among itself, wholly first —
-/// input[0] identity, D-067) ++ up to `riders` smallest pool coins (smallest
-/// first, so the fragment drain starts at the bottom) ++ the remaining pool
-/// largest-first.
+/// input[0] identity, D-067) ++ up to `riders` smallest FREE coins (smallest
+/// first, so the fragment drain starts at the bottom) ++ the remaining free
+/// coins largest-first ++ the RESERVED coins, largest-first, dead last.
 ///
 /// Pure and synchronous: `mature` is a snapshot of the live context's mature
 /// set, `pinned` the caller's pinned entries (usually a subset of `mature`;
@@ -93,10 +119,39 @@ pub(crate) const RIDER_LIMIT: usize = 2;
 /// own priority filter uses). A coin that matures AFTER the snapshot is not in
 /// this list and simply flows through the context iterator behind it — still
 /// spendable, merely last in line.
+///
+/// ## `exclude` — reserved coins, demoted rather than withheld
+///
+/// The bound own-address of every live conversation (`drain_exclusions`).
+/// Since D-148 nothing refills a non-identity bound address, so an ordinary
+/// payment that drew one could strand a conversation with no way to send until
+/// it is hand-refilled — the open item at `await_spendable_at`, narrowed by the
+/// rider law (riders draw strictly fewer small coins than the pin's ascending
+/// order) but not closed by it.
+///
+/// Reserved coins sort **dead last**; they are not removed. That is the whole
+/// design, and it is what makes the "what if everything else is excluded"
+/// question have no answer to give: there is no shortfall path, because a
+/// payment the free coins cannot fund simply keeps drawing into the reserved
+/// tail. **A payment is the wallet's core function and may never be refused to
+/// protect a chat binding** — a stranded conversation is recoverable, a wallet
+/// that will not send is not (INV-6 in spirit). For a DRAIN the same set is a
+/// custody line, enforced on the built transaction (`verify_drain`); here it is
+/// a preference. Same addresses, deliberately different force.
+///
+/// Riders are drawn from the FREE coins only: a rider is a deliberate
+/// absorption, and absorbing a conversation's coin is exactly the harm.
+///
+/// Fails CLOSED on the corner the pin's types leave open, the same way
+/// `drain_included` does: a coin whose `utxo.address` is `None` cannot be
+/// matched against the reserved set, so it is treated as reserved. Unreachable
+/// for coins this context scanned (they arrive via address registration), but
+/// the type says `Option` and the code refuses to guess.
 pub(crate) fn select_spend_priority(
     mature: &[UtxoEntryReference],
     pinned: &[UtxoEntryReference],
     riders: usize,
+    exclude: &[Address],
 ) -> Vec<UtxoEntryReference> {
     let pinned_outpoints: HashSet<&UtxoEntryReference> = pinned.iter().collect();
     // A duplicated outpoint inside `pinned` would ride the Generator's priority
@@ -116,17 +171,28 @@ pub(crate) fn select_spend_priority(
     // Descending; ties keep snapshot order (stable sort ⇒ deterministic).
     pool.sort_by_key(|entry| std::cmp::Reverse(entry.amount()));
 
+    // Reserved coins split off the bottom of the order. `partition` keeps the
+    // relative order inside both halves, so both stay descending.
+    let (mut pool, reserved): (Vec<UtxoEntryReference>, Vec<UtxoEntryReference>) =
+        if exclude.is_empty() {
+            (pool, Vec::new())
+        } else {
+            pool.into_iter()
+                .partition(|entry| !is_reserved(entry, exclude))
+        };
+
     let mut order: Vec<UtxoEntryReference> = pinned.to_vec();
     order.sort_by_key(|entry| std::cmp::Reverse(entry.amount()));
 
-    // Riders: the pool's tail (its smallest), reversed so the very smallest
-    // coin is drawn first.
+    // Riders: the FREE pool's tail (its smallest), reversed so the very
+    // smallest coin is drawn first.
     let rider_count = pool.len().min(riders);
     let keep = pool.len() - rider_count;
     order.extend(pool[keep..].iter().rev().cloned());
     pool.truncate(keep);
 
     order.extend(pool);
+    order.extend(reserved);
     order
 }
 
@@ -150,7 +216,7 @@ mod tests {
     #[test]
     fn unpinned_order_is_riders_then_largest_first() {
         let mature: Vec<_> = [5.0, 0.5, 200.0, 2.0, 10.0].map(entry).into();
-        let order = select_spend_priority(&mature, &[], RIDER_LIMIT);
+        let order = select_spend_priority(&mature, &[], RIDER_LIMIT, &[]);
         // Two smallest lead (smallest first), then the rest descending.
         assert_eq!(amounts(&order), kas(&[0.5, 2.0, 200.0, 10.0, 5.0]));
     }
@@ -158,7 +224,7 @@ mod tests {
     #[test]
     fn no_riders_is_pure_largest_first() {
         let mature: Vec<_> = [5.0, 0.5, 200.0, 2.0, 10.0].map(entry).into();
-        let order = select_spend_priority(&mature, &[], 0);
+        let order = select_spend_priority(&mature, &[], 0, &[]);
         assert_eq!(amounts(&order), kas(&[200.0, 10.0, 5.0, 2.0, 0.5]));
     }
 
@@ -169,7 +235,7 @@ mod tests {
         // The pinned entries are also in the mature snapshot (they always are
         // in production — mature_utxos_at reads the same context).
         mature.extend(pinned.iter().cloned());
-        let order = select_spend_priority(&mature, &pinned, RIDER_LIMIT);
+        let order = select_spend_priority(&mature, &pinned, RIDER_LIMIT, &[]);
         // Pinned first (descending among itself: 7.0 then 0.3), then the two
         // smallest pool coins as riders, then the rest descending. The pinned
         // coins appear exactly once.
@@ -177,11 +243,120 @@ mod tests {
         assert_eq!(order.len(), 5, "pinned entries are not duplicated");
     }
 
+    fn addr(s: &str) -> Address {
+        Address::try_from(s).unwrap()
+    }
+
+    /// Two real mainnet addresses; only the script SHAPE matters here.
+    const FREE: &str = "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf";
+    const BOUND: &str = "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692";
+
+    fn at(kas: f64, address: &str) -> UtxoEntryReference {
+        UtxoEntryReference::simulated_with_address(kaspa_to_sompi(kas), &addr(address))
+    }
+
+    /// A conversation's coins sort DEAD LAST — behind every free coin, and
+    /// behind the riders, which are drawn only from the free pool. The
+    /// Generator therefore reaches them only when nothing else covers the send.
+    #[test]
+    fn reserved_coins_sort_behind_everything_including_the_riders() {
+        let mature = vec![
+            at(3.0, BOUND),
+            at(0.4, FREE),
+            at(50.0, FREE),
+            at(0.2, BOUND),
+            at(1.0, FREE),
+        ];
+        let order = select_spend_priority(&mature, &[], RIDER_LIMIT, &[addr(BOUND)]);
+        // Free riders (0.4 then 1.0 — smallest first), free rest (50.0), then
+        // the reserved pair descending.
+        assert_eq!(amounts(&order), kas(&[0.4, 1.0, 50.0, 3.0, 0.2]));
+        assert_eq!(order.len(), mature.len(), "demoted, never withheld");
+    }
+
+    /// The liveness half, stated as a test: a payment the free coins cannot
+    /// cover still has every reserved coin available behind them. There is no
+    /// shortfall path to get wrong because there is no withholding.
+    #[test]
+    fn a_wallet_whose_free_coins_are_all_reserved_still_offers_everything() {
+        let mature = vec![at(2.0, BOUND), at(5.0, BOUND)];
+        let order = select_spend_priority(&mature, &[], RIDER_LIMIT, &[addr(BOUND)]);
+        assert_eq!(
+            amounts(&order),
+            kas(&[5.0, 2.0]),
+            "all of it, largest-first"
+        );
+    }
+
+    /// Fails CLOSED on the corner the pin's types leave open: a coin with no
+    /// address cannot be matched against the reserved set, so it is treated as
+    /// reserved. (Mutation fence — flipping `is_reserved`'s `is_none_or` to
+    /// `is_some_and` reds this and nothing else.)
+    #[test]
+    fn an_addressless_coin_is_reserved_not_assumed_free() {
+        // `simulated` still carries a random address at the pin, and the pin
+        // exposes no way to build one without — so clear the field the same way
+        // `send.rs::an_addressless_coin_is_never_offered_under_exclusions`
+        // does, over the pin's own `Option`.
+        let mut nameless = UtxoEntryReference::simulated(kaspa_to_sompi(9.0));
+        {
+            let utxo = std::sync::Arc::get_mut(&mut nameless.utxo)
+                .expect("freshly built simulated entry has one owner");
+            utxo.address = None;
+        }
+        let mature = vec![nameless, at(1.0, FREE)];
+        let order = select_spend_priority(&mature, &[], 0, &[addr(BOUND)]);
+        assert_eq!(
+            amounts(&order),
+            kas(&[1.0, 9.0]),
+            "the address-less coin sorts last despite being the largest"
+        );
+        assert!(is_reserved(&order[1], &[addr(BOUND)]));
+    }
+
+    /// The pinned block outranks the reservation: a conversation spending from
+    /// its OWN binding is exactly what the reservation protects, so pinned
+    /// entries leave the pool before any demotion and stay at input[0].
+    #[test]
+    fn the_pinned_block_is_never_demoted_by_its_own_reservation() {
+        let pinned = vec![at(0.3, BOUND)];
+        let mut mature = vec![at(7.0, FREE), at(4.0, BOUND)];
+        // The pinned entries are also in the mature snapshot, as they always
+        // are in production (`mature_utxos_at` reads the same context).
+        mature.extend(pinned.iter().cloned());
+        let order = select_spend_priority(&mature, &pinned, RIDER_LIMIT, &[addr(BOUND)]);
+        assert_eq!(amounts(&order), kas(&[0.3, 7.0, 4.0]));
+    }
+
+    /// No reservations ⇒ the pre-D-169 order: riders then largest-first, with
+    /// the bound coin treated like any other. The SAME coin set with the
+    /// reservation applied sorts differently — which is what makes the first
+    /// assertion an observation rather than a tautology.
+    #[test]
+    fn an_empty_reservation_set_changes_nothing() {
+        let mature = vec![at(3.0, BOUND), at(0.4, FREE), at(50.0, FREE)];
+        assert_eq!(
+            amounts(&select_spend_priority(&mature, &[], RIDER_LIMIT, &[])),
+            kas(&[0.4, 3.0, 50.0]),
+            "no reservations: 3.0 rides as an ordinary small coin"
+        );
+        assert_eq!(
+            amounts(&select_spend_priority(
+                &mature,
+                &[],
+                RIDER_LIMIT,
+                &[addr(BOUND)]
+            )),
+            kas(&[0.4, 50.0, 3.0]),
+            "reserved: it leaves the rider slot and sorts last"
+        );
+    }
+
     #[test]
     fn a_wallet_smaller_than_the_rider_limit_is_taken_whole() {
         let mature: Vec<_> = [3.0].map(entry).into();
-        let order = select_spend_priority(&mature, &[], RIDER_LIMIT);
+        let order = select_spend_priority(&mature, &[], RIDER_LIMIT, &[]);
         assert_eq!(amounts(&order), kas(&[3.0]));
-        assert!(select_spend_priority(&[], &[], RIDER_LIMIT).is_empty());
+        assert!(select_spend_priority(&[], &[], RIDER_LIMIT, &[]).is_empty());
     }
 }

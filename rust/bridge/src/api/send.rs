@@ -97,8 +97,14 @@ pub struct SignableSummaryDto {
     pub total_sompi: u64,
     pub mass: u64,
     /// 1 normally; >1 when the send chained past one tx's 100k-gram mass.
+    /// **A transaction count is not a coin count** — see `resulting_coins`.
     pub tx_count: u32,
     pub utxo_count: u32,
+    /// How many coins the send LEAVES at its destination (0 where the question
+    /// does not apply — every kind but a merge). Read straight off the built
+    /// chain by the layer that knows which drain arm ran, because the two arms
+    /// both chain and leave opposite results (ux audit, this sitting).
+    pub resulting_coins: u32,
     /// Payload bytes on the built final tx (read back, not echoed); `None`
     /// on a payload-less flow — payment mode never sees frame fields.
     pub payload_len: Option<u32>,
@@ -151,6 +157,7 @@ pub(crate) fn project_signable(
         mass: summary.mass,
         tx_count: summary.tx_count,
         utxo_count: summary.utxo_count,
+        resulting_coins: summary.resulting_coins,
         payload_len,
         payload_kind,
         fee_strategy: FeeStrategyKind::SenderPays,
@@ -228,12 +235,38 @@ fn fully_broadcast(outcome: &SendOutcome) -> bool {
 ///
 /// `minimum` is the computed floor when it is known; `None` (the derivation
 /// failed) degrades to the floor sentence WITHOUT the hint, never to silence.
-pub(crate) fn storage_mass_message(amount_sompi: u64, minimum: Option<u64>) -> String {
+///
+/// `maximum` is the PROVEN ceiling (`WalletEngine::maximum_sendable` — an
+/// amount the Generator actually built), and it is the ceiling sentence's
+/// mirror of the floor's number: without it the sentence can only say "send a
+/// little less", which leaves the user bisecting by hand. It is offered ONLY
+/// when it is strictly below what was asked — a bound that does not point
+/// downward answers a different question than the one the user just failed.
+pub(crate) fn storage_mass_message(
+    amount_sompi: u64,
+    minimum: Option<u64>,
+    maximum: Option<u64>,
+) -> String {
     if minimum.is_some_and(|m| amount_sompi > m) {
-        return "this amount leaves change too small to keep — the network \
-                anti-dust rule for your current coins. Nothing was sent — send a \
-                little less, or use Send everything to empty the wallet."
-            .to_string();
+        return match maximum.filter(|m| *m < amount_sompi) {
+            // NOT "the largest that works". `maximum_sendable` says in its own
+            // doc that it cannot claim the supremum (the top boundary is not
+            // monotone), and its climb is bounded by the FREE coins, so amounts
+            // above this one do build — the sentence would even contradict
+            // itself, naming a largest and then offering Send everything, which
+            // is larger. What is true, and all that is needed, is that this
+            // amount was built (ux delta re-review, this sitting).
+            Some(ceiling) => format!(
+                "this amount leaves change too small to keep — the network \
+                 anti-dust rule for your current coins. Nothing was sent — {} \
+                 KAS works right now, or use Send everything to empty the wallet.",
+                kas_exact(ceiling)
+            ),
+            None => "this amount leaves change too small to keep — the network \
+                     anti-dust rule for your current coins. Nothing was sent — send a \
+                     little less, or use Send everything to empty the wallet."
+                .to_string(),
+        };
     }
     let Some(floor) = minimum else {
         // The floor did not compute, so we know the shape was refused but not
@@ -282,10 +315,22 @@ pub(crate) fn shortfall_message(
     }
 }
 
-/// A sompi amount as KAS with all 8 decimals, exactly as the send screen's own
-/// minimum line renders it (`kasParts`, `format.dart`). Display-only — never
-/// consensus math. One datum two lines apart must not wear two forms (DS-2),
-/// and a trimmed threshold reads as an invitation to type it back in short.
+/// A sompi amount as KAS with all 8 decimals — display-only, never consensus
+/// math. A trimmed threshold reads as an invitation to type it back in short,
+/// so all eight digits stay (DS-2).
+///
+/// **It deliberately does NOT group thousands, and that is a stated §5
+/// carve-out, not an oversight.** The send screen's own `Available` and
+/// `Minimum right now` lines go through `kasParts` → `groupThousands`, so a
+/// large number here wears a different form from its neighbours. It exists to
+/// be RETYPED into the amount field, and `sompiFromKas` (`format.dart`)
+/// rejects grouping commas by design — a grouped figure would paste and fail.
+/// The floor hid this (a KIP-9 floor never reaches 1,000 KAS); the proven
+/// ceiling cannot, because it sits just under the balance. Named here because
+/// the ux audit found the old claim — that this matches the minimum line
+/// exactly — had become false, and DS-2 forbids diverging silently, not
+/// diverging.
+///
 /// Pure; tested.
 fn kas_exact(sompi: u64) -> String {
     format!("{}.{:08}", sompi / 100_000_000, sompi % 100_000_000)
@@ -316,6 +361,39 @@ pub(crate) fn payment_change_address() -> Result<Address, AppError> {
     vault::wallet_address_at(Branch::Receive, 0)
 }
 
+/// The conversation-bound addresses an ORDINARY spend sorts DEAD LAST
+/// (`spend_policy::select_spend_priority`) — the same set a merge withholds.
+///
+/// **It fails OPEN, and the asymmetry is the decision.**
+/// `transport::drain_exclusions` fails closed because a merge is an optional
+/// tidy-up and swallowing a conversation's coin is a custody harm with no
+/// upside. A payment is the wallet's core function: refusing to send money
+/// because the transport store will not open would be a brand-new way to brick
+/// the wallet, strictly worse than the behaviour that shipped before this set
+/// existed (no demotion at all). So an unavailable store degrades to "nothing
+/// is reserved" — the pre-D-169 order — and never to a refusal. And because
+/// the reserved coins are only DEMOTED, not withheld, an empty answer costs
+/// priority, never liveness.
+///
+/// **When it actually fires**, said plainly rather than left to the reader:
+/// `hub()` errors until `transport_start()` has completed, and that awaits
+/// address discovery — so every payment made in the start-up window ships the
+/// pre-D-169 order, as does every payment for the whole session if
+/// `transport_start` failed. That is why the degrade logs at `info` instead of
+/// passing quietly: a funds-routing policy that disables itself must say so.
+pub(crate) fn spend_exclusions() -> Vec<Address> {
+    super::transport::drain_exclusions().unwrap_or_else(|_| {
+        // `info!`, not `debug!`: the facade caps at `Info` (logging.rs:57/64),
+        // so a `debug!` here could never emit — and this is the ONLY trace the
+        // fail-open path leaves. `finish_prepared_send`'s reserved-draw line is
+        // guarded on a non-empty set, which is exactly what this degrade
+        // produces, so without this line the wallet would silently ship the
+        // pre-D-169 order for a whole session (wallet-security audit).
+        log::info!("send: the reservation set is unavailable — spending without it");
+        Vec::new()
+    })
+}
+
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
 /// floor for the live UTXO shape, computed by probing the pinned Generator —
 /// D-054), or `None` when the wallet cannot send at all / isn't ready. Public
@@ -326,7 +404,7 @@ pub fn send_minimum() -> Result<Option<u64>, AppError> {
         return Ok(None); // engine not up yet — the UI simply shows no hint
     };
     engine
-        .minimum_sendable(payment_change_address()?, &[])
+        .minimum_sendable(payment_change_address()?, &[], &spend_exclusions())
         .map_err(AppError::chain)
 }
 
@@ -357,9 +435,13 @@ pub async fn send_prepare(
     let signer: Arc<dyn SignerT> = Arc::new(signer);
 
     let rpc = dag::shared_monitor().await?.rpc();
+    // Live conversations' coins sort last (D-169). Read ONCE and reused by the
+    // refusal path's window probes, so the floor and ceiling a user is offered
+    // are the floor and ceiling of the order this send actually tried.
+    let exclude = spend_exclusions();
 
     let prepared = match engine
-        .prepare_send(dest, amount_sompi, change, signer, rpc, None)
+        .prepare_send(dest, amount_sompi, change, signer, rpc, None, &exclude)
         .await
     {
         Ok(prepared) => prepared,
@@ -415,10 +497,31 @@ pub async fn send_prepare(
             // storage-mass refusals into `ProbeOutcome::TooSmall` because the
             // bisection needs one monotone bucket; the COPY must not inherit
             // that collapse.
-            let minimum = payment_change_address()
-                .ok()
-                .and_then(|change| engine.minimum_sendable(change, &[]).ok().flatten());
-            return Err(AppError::msg(storage_mass_message(amount_sompi, minimum)));
+            let minimum = payment_change_address().ok().and_then(|change| {
+                engine
+                    .minimum_sendable(change, &[], &exclude)
+                    .ok()
+                    .flatten()
+            });
+            // The ceiling costs roughly a second floor search (it anchors on
+            // one), so it is computed only on the side of the window that has
+            // a use for it — and, like the floor, it may never replace the
+            // explanation it decorates: `.ok().flatten()` degrades to the
+            // numberless sentence.
+            let maximum = minimum
+                .filter(|m| amount_sompi > *m)
+                .and_then(|_| payment_change_address().ok())
+                .and_then(|change| {
+                    engine
+                        .maximum_sendable(change, &[], &exclude)
+                        .ok()
+                        .flatten()
+                });
+            return Err(AppError::msg(storage_mass_message(
+                amount_sompi,
+                minimum,
+                maximum,
+            )));
         }
         Err(e) => return Err(AppError::chain(e)),
     };
@@ -490,7 +593,22 @@ pub async fn consolidate_prepare() -> Result<SignableSummaryDto, AppError> {
         .await
         .map_err(map_drain_error)?;
 
-    let savings = engine.consolidation_savings(&prepared).ok().flatten();
+    // The preview may not delete the action it decorates (the send-hint scar,
+    // SOURCE_OF_TRUTH §19) — but until now it degraded SILENTLY, so "why is
+    // there no savings line" had no answer anywhere. The two ways it can fail
+    // are different facts and get different words; the error PAYLOAD is never
+    // printed, because a typed chain error can carry amounts (INV-3).
+    let savings = match engine.consolidation_savings(&prepared, &exclude) {
+        Ok(savings @ Some(_)) => savings,
+        Ok(None) => {
+            log::info!("drain: merge savings preview unpriced — a probe shape refused");
+            None
+        }
+        Err(_) => {
+            log::info!("drain: merge savings preview could not be run");
+            None
+        }
+    };
 
     let nonce = next_nonce();
     let summary = prepared.summary().clone();
@@ -657,6 +775,7 @@ mod tests {
             mass: 2_000,
             tx_count: 1,
             utxo_count: 1,
+            resulting_coins: 0,
             payload_len: 154,
         }
     }
@@ -667,7 +786,7 @@ mod tests {
     /// sentence, which points the user at a bigger amount.
     #[test]
     fn the_dead_zone_names_the_change_not_the_amount() {
-        let msg = storage_mass_message(50_000_000, Some(10_437_500));
+        let msg = storage_mass_message(50_000_000, Some(10_437_500), None);
         assert!(msg.contains("leaves change too small to keep"), "{msg}");
         assert!(
             msg.contains("Nothing was sent"),
@@ -685,11 +804,64 @@ mod tests {
         );
     }
 
+    /// The other half of the same defect: in the dead zone the sentence now
+    /// carries a NUMBER, exact-8 like the floor line two lines above it (DS-2),
+    /// so nobody bisects by hand. 0.47103938 is what the pinned Generator
+    /// proved buildable from the measured 0.57725200 coin.
+    #[test]
+    fn the_dead_zone_offers_the_proven_ceiling() {
+        let msg = storage_mass_message(50_000_000, Some(10_437_500), Some(47_103_938));
+        assert!(msg.contains("leaves change too small to keep"), "{msg}");
+        assert!(
+            msg.contains("0.47103938"),
+            "exact-8, like the floor line: {msg}"
+        );
+        assert!(msg.contains("KAS works right now"), "{msg}");
+        assert!(
+            !msg.contains("largest"),
+            "no superlative over a space the probe never searched: {msg}"
+        );
+        assert!(
+            msg.contains("Nothing was sent"),
+            "the funds beat, §12: {msg}"
+        );
+        assert!(msg.contains("Send everything"), "{msg}");
+        assert!(
+            !msg.contains("send a little less"),
+            "the hand-bisection sentence is retired when a number exists: {msg}"
+        );
+    }
+
+    /// A ceiling that does not point DOWNWARD is not offered. The climb can
+    /// only return what it proved, and above a refused amount that proof would
+    /// answer a question the user did not ask. (Mutation fence — dropping the
+    /// `< amount` filter reds this and nothing else.)
+    #[test]
+    fn a_ceiling_at_or_above_the_asked_amount_is_withheld() {
+        for ceiling in [50_000_000, 55_000_000] {
+            let msg = storage_mass_message(50_000_000, Some(10_437_500), Some(ceiling));
+            assert!(
+                msg.contains("send a little less"),
+                "must fall back to the numberless sentence: {msg}"
+            );
+            assert!(!msg.contains("KAS works right now"), "{msg}");
+        }
+    }
+
+    /// Below the floor the ceiling is irrelevant — the floor sentence stands
+    /// whole, and no upper number may leak into it.
+    #[test]
+    fn below_the_floor_no_ceiling_leaks_in() {
+        let msg = storage_mass_message(5_000_000, Some(10_437_500), Some(47_103_938));
+        assert!(msg.contains("too small for your current coins"), "{msg}");
+        assert!(!msg.contains("0.47103938"), "{msg}");
+    }
+
     /// Below the floor the PAYMENT really is the dust, so the floor sentence
     /// stands — with the computed way out.
     #[test]
     fn below_the_floor_still_names_the_floor_and_its_number() {
-        let msg = storage_mass_message(5_000_000, Some(10_437_500));
+        let msg = storage_mass_message(5_000_000, Some(10_437_500), None);
         assert!(msg.contains("too small for your current coins"), "{msg}");
         // Exact-8, matching the minimum line the same screen renders (DS-2).
         assert!(msg.contains("0.10437500"), "{msg}");
@@ -705,7 +877,7 @@ mod tests {
     /// the comparison to `>=` reds this and nothing else.)
     #[test]
     fn at_the_floor_exactly_it_is_still_the_floor_sentence() {
-        let msg = storage_mass_message(10_437_500, Some(10_437_500));
+        let msg = storage_mass_message(10_437_500, Some(10_437_500), None);
         assert!(msg.contains("too small for your current coins"), "{msg}");
         assert!(!msg.contains("leaves change too small"), "{msg}");
     }
@@ -714,7 +886,7 @@ mod tests {
     /// change sentence (which would be an unproven claim) and never to silence.
     #[test]
     fn an_unknown_floor_degrades_without_inventing_a_cause() {
-        let msg = storage_mass_message(50_000_000, None);
+        let msg = storage_mass_message(50_000_000, None, None);
         // Neither cause may be asserted: we do not know which side failed.
         assert!(msg.contains("doesn't fit your current coins"), "{msg}");
         assert!(!msg.contains("too small for your current coins"), "{msg}");
