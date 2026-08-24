@@ -595,9 +595,12 @@ impl WalletEngine {
                 // closed onto the riders when it is unknown
                 // (`an_unknown_floor_keeps_the_riders`). A probe error may not
                 // become the send's error.
-                search_minimum(|amount| probe_context(&context, &change, amount, order.as_deref()))
-                    .ok()
-                    .flatten()
+                search_minimum(
+                    |amount| probe_context(&context, &change, amount, order.as_deref()),
+                    free_balance(&mature, exclude),
+                )
+                .ok()
+                .flatten()
             })
         };
 
@@ -1984,18 +1987,85 @@ fn probe_error(e: kaspa_wallet_core::error::Error) -> Result<ProbeOutcome> {
     }
 }
 
+/// Fractions of the spendable balance to probe when the ladder finds no anchor,
+/// as numerators over 1024. Dense just under 1/2 and widening downward.
+///
+/// Storage mass is harmonic in the OUTPUT values — the pin computes
+/// `C * (|O|/H(O) − |I|/A(I))` over the output harmonic mean
+/// (`consensus/core/src/mass/mod.rs:439-470 @ cfafeb4`) — so for a one-input
+/// two-output shape it is smallest when the payment and the change are EQUAL.
+/// The buildable band, when one exists, therefore straddles the equal-output
+/// point `(B − fee)/2`, which is just below half the spendable value. The
+/// audit's measured repro agrees: a 0.303 KAS coin has its band centred at
+/// 0.993 × B/2.
+///
+/// This is a heuristic about WHERE TO PROBE, never a mass computation (INV-9),
+/// and a missed sample costs a rescue that does not fire — never a wrong answer.
+///
+/// Scope of that claim, precisely: **the rescue phase sets `hi` only from a
+/// probe that returned `Builds`**, so it never introduces an unbuilt value. It
+/// does NOT upgrade `search_minimum`'s contract, which stays what
+/// [`search_maximum`] already documents — a BOUND, not a promise: phase 2's
+/// shrinking-window arm closes on `TooLarge` as well, so the returned floor may
+/// be a value the Generator refused. That is why `search_maximum` re-probes its
+/// anchor, and it is unchanged here.
+///
+/// **Two limits, both conservative, both deliberate:**
+/// - The spacing nearest the centre is `8/1024` = 0.78% of `B`, so a band
+///   narrower than that can be stepped over. F3's own band was 2.7% of `B`, so
+///   it is caught with room; a narrower one simply is not rescued.
+/// - `balance` is the FREE balance, but `select_spend_priority` only DEMOTES
+///   reserved coins to the tail — it never withholds them — so the Generator's
+///   reachable pool can exceed `balance` and the true centre can sit above
+///   `512/1024`. The four fractions above half are the cheap cover for that,
+///   probed last so the descending sweep still finds the lowest anchor first.
+const PROBE_BAND_FRACTIONS_1024: [u64; 18] = [
+    // Descending from the equal-output point: the first hit is the lowest
+    // sampled anchor, and any anchor is enough (the bisect below re-finds the
+    // band's true bottom from it).
+    512, 504, 496, 488, 480, 464, 448, 416, 384, 320, 256, 192, 128, 64,
+    // Last resort: a reachable pool larger than the free balance (see above).
+    544, 576, 640, 768,
+];
+
 /// Find the smallest sendable amount by searching the TooSmall→Builds boundary.
 /// Pure over an injected probe (unit-tested against synthetic boundaries AND the
 /// real Generator). Sendability is not monotonic at the TOP (a near-sweep leaves
 /// dusty change), so the search brackets only the BOTTOM boundary:
 ///
-/// 1. doubling ladder from 0.01 KAS until a `Builds` anchor (or the balance
-///    ceiling — then a short hunt inside the last window);
-/// 2. bisect TooSmall/Builds to display precision.
+/// 1. **phase 1/1b** — doubling ladder from 0.01 KAS until a `Builds` anchor
+///    (or the balance ceiling — then a short hunt inside the last window);
+/// 2. **phase 1c, the rescue** — neither found an anchor, so probe where a band
+///    actually lives (see below);
+/// 3. **phase 2** — bisect TooSmall/Builds to display precision.
 ///
 /// `None` = no sendable amount exists below the balance (the honest answer for
 /// a dust-only wallet).
-fn search_minimum(mut probe: impl FnMut(u64) -> Result<ProbeOutcome>) -> Result<Option<u64>> {
+///
+/// ## Why phase 1c exists (product-audit run 3, F3)
+///
+/// [`probe_error`] collapses BOTH storage-mass refusals into
+/// [`ProbeOutcome::TooSmall`], and the two mean opposite things: below the band
+/// the PAYMENT is dust, above it the CHANGE is. The ladder reads every TooSmall
+/// as "the band is higher" and only ever raises `lo`. So when a rung lands above
+/// a band narrower than the gap beneath it, `lo` is pinned above the entire
+/// buildable range, phase 1b hunts empty space, and the function returns `None`
+/// — which every consumer reads as a fund fact ("your balance can't cover a
+/// message right now", and the send screen's floor line simply vanishes).
+///
+/// Reproduced against the real Generator on one coin of 30,300,000 sompi: rungs
+/// 1M/2M/4M/8M/16M all TooSmall (16M is CHANGE-dust, above the band), 32M
+/// TooLarge, result `None` — while 818 distinct amounts in
+/// `[14_639_000, 15_457_000]` build.
+///
+/// Phase 1c is strictly a RESCUE: it runs only where the function would
+/// otherwise have returned `None`, so every input that already produced an
+/// answer still produces the same one, byte for byte. `balance` is the free
+/// (spendable) balance; pass 0 to disable the rescue.
+fn search_minimum(
+    mut probe: impl FnMut(u64) -> Result<ProbeOutcome>,
+    balance: u64,
+) -> Result<Option<u64>> {
     let mut lo: u64 = 0; // greatest known-TooSmall
     let mut hi: Option<u64> = None; // smallest known-Builds
     let mut ceiling: Option<u64> = None; // smallest known-TooLarge
@@ -2020,29 +2090,63 @@ fn search_minimum(mut probe: impl FnMut(u64) -> Result<ProbeOutcome>) -> Result<
     }
 
     // Phase 1b — the ladder hit the balance ceiling before any Builds: hunt for
-    // a buildable amount inside (lo, ceiling). A handful of probes suffices —
-    // if the window holds no Builds, the wallet genuinely cannot send.
+    // a buildable amount inside (lo, ceiling). A handful of probes suffices.
+    //
+    // Neither exit from this hunt may return `None` directly, and that is the
+    // half F3 turned on: this window is `(lo, ceiling)`, and `lo` is only sound
+    // if every TooSmall rung below it was a PAYMENT-side refusal. When one was a
+    // change-side refusal the band sits BELOW `lo`, this window is empty by
+    // construction, and an early return here would concede `None` over a wallet
+    // that can send. Both exits therefore fall through to phase 1c.
     if hi.is_none() {
-        let Some(mut top) = ceiling else {
-            return Ok(None); // ladder exhausted without Builds or ceiling
-        };
-        for _ in 0..10 {
-            if top.saturating_sub(lo) <= PROBE_PRECISION_SOMPI {
-                return Ok(None);
-            }
-            let mid = lo + (top - lo) / 2;
-            match probe(mid)? {
-                ProbeOutcome::Builds => {
-                    hi = Some(mid);
+        if let Some(mut top) = ceiling {
+            for _ in 0..10 {
+                if top.saturating_sub(lo) <= PROBE_PRECISION_SOMPI {
                     break;
                 }
-                ProbeOutcome::TooSmall => lo = mid,
-                ProbeOutcome::TooLarge => top = mid,
+                let mid = lo + (top - lo) / 2;
+                match probe(mid)? {
+                    ProbeOutcome::Builds => {
+                        hi = Some(mid);
+                        break;
+                    }
+                    ProbeOutcome::TooSmall => lo = mid,
+                    ProbeOutcome::TooLarge => top = mid,
+                }
             }
         }
-        if hi.is_none() {
-            return Ok(None);
+    }
+
+    // Phase 1c — the rescue (F3). The ladder proved nothing about the band: its
+    // TooSmall rungs may have STEPPED OVER it, in which case `lo` is a lie and
+    // phase 1b hunted the wrong window. Probe the place a band actually lives —
+    // straddling half the spendable value — before conceding `None`.
+    //
+    // Descending, so the first hit is the lowest of the sampled anchors; and any
+    // anchor is enough, because below a value the Generator BUILT the only way
+    // left to fail is the payment side, which IS monotone. That is the same
+    // asymmetry `search_maximum` documents from the other end.
+    if hi.is_none() && balance > 0 {
+        for numerator in PROBE_BAND_FRACTIONS_1024 {
+            // u128 so the multiply cannot wrap on a whole-supply balance.
+            let candidate = ((balance as u128 * numerator as u128) / 1024) as u64;
+            if candidate == 0 {
+                break;
+            }
+            if probe(candidate)? == ProbeOutcome::Builds {
+                hi = Some(candidate);
+                // `lo` is discarded on purpose: it was set by TooSmall rungs
+                // that may have been CHANGE-side refusals above the band, so as
+                // a lower bound it is unsound. Below a proven anchor the search
+                // is monotone from zero, so zero is the honest bracket.
+                lo = 0;
+                break;
+            }
         }
+    }
+
+    if hi.is_none() {
+        return Ok(None);
     }
 
     // Phase 2 — bisect the TooSmall/Builds boundary.
@@ -2146,7 +2250,10 @@ impl WalletEngine {
             exclude,
         );
         let order = (!order.is_empty()).then_some(order);
-        search_minimum(|amount| probe_context(&context, &change, amount, order.as_deref()))
+        search_minimum(
+            |amount| probe_context(&context, &change, amount, order.as_deref()),
+            free_balance(&mature, exclude),
+        )
     }
 
     /// The largest payment the pinned Generator will build from the CURRENT
@@ -2199,7 +2306,7 @@ impl WalletEngine {
         let mut probe = |amount| probe_context(&context, &change, amount, order.as_deref());
         // The floor is the one amount we know sits inside the buildable band,
         // so it is the anchor — re-probed inside `search_maximum`.
-        let Some(anchor) = search_minimum(&mut probe)? else {
+        let Some(anchor) = search_minimum(&mut probe, balance)? else {
             return Ok(None);
         };
         search_maximum(probe, anchor, balance)
@@ -2943,7 +3050,11 @@ mod tests {
                 }
             }
         };
-        search_minimum(probe).unwrap()
+        search_minimum(
+            probe,
+            pool.iter().fold(0u64, |a, e| a.saturating_add(e.amount())),
+        )
+        .unwrap()
     }
 
     /// **The measurement that refuted the count-threshold rider**, frozen as a
@@ -3602,7 +3713,10 @@ mod tests {
             }
         };
         // The trap, pinned: a floor exists (the app honestly advertised one)…
-        assert_eq!(search_minimum(probe).unwrap(), Some(10_687_500));
+        assert_eq!(
+            search_minimum(probe, kaspa_to_sompi(0.481524)).unwrap(),
+            Some(10_687_500)
+        );
         // …but nothing near the balance builds: the wallet cannot be emptied
         // by an ordinary send at ANY amount.
         assert_eq!(probe(40_000_000).unwrap(), ProbeOutcome::TooSmall);
@@ -3670,9 +3784,10 @@ mod tests {
             }
         };
         assert_eq!(
-            search_minimum(probe).unwrap(),
+            search_minimum(probe, kaspa_to_sompi(0.15)).unwrap(),
             None,
-            "the fixture state: no amount is sendable at all"
+            "the fixture state: no amount is sendable at all — and the F3 rescue \
+             agrees: nothing straddling half of a 0.15 KAS coin builds either"
         );
         let entries = vec![UtxoEntryReference::simulated(kaspa_to_sompi(0.15))];
         let (_, summary) =
@@ -4094,7 +4209,7 @@ mod tests {
     fn search_finds_the_floor_within_precision() {
         // A ~0.23 KAS floor in a 50-KAS wallet (the founder's neighborhood).
         let floor = 23_000_000;
-        let min = search_minimum(synthetic(floor, 5_000_000_000))
+        let min = search_minimum(synthetic(floor, 5_000_000_000), 5_000_000_000)
             .unwrap()
             .unwrap();
         assert!(min >= floor, "reported minimum must be sendable");
@@ -4108,7 +4223,7 @@ mod tests {
     fn search_hunts_inside_a_tiny_balance_window() {
         // Floor 0.05 KAS, balance 0.08 KAS: the doubling ladder hits the
         // ceiling before a Builds — the hunt must still find the window.
-        let min = search_minimum(synthetic(5_000_000, 8_000_000))
+        let min = search_minimum(synthetic(5_000_000, 8_000_000), 8_000_000)
             .unwrap()
             .unwrap();
         assert!(
@@ -4264,7 +4379,7 @@ mod tests {
                 }
             }
         };
-        let min = search_minimum(probe)
+        let min = search_minimum(probe, 57_725_200)
             .unwrap()
             .expect("the measured coin can send something");
         let max = search_maximum(probe, min, 57_725_200)
@@ -4409,11 +4524,172 @@ mod tests {
         }
     }
 
+    /// A synthetic wallet with a REAL band: TooSmall below `floor` (the payment
+    /// is dust), Builds in `[floor, ceiling]`, TooSmall again above `ceiling`
+    /// (the CHANGE is dust), TooLarge above `balance`.
+    ///
+    /// The shape every real wallet has, and the one no `search_minimum` fixture
+    /// had (F45): [`synthetic`] is monotone at the top, and the only double-sided
+    /// probe in this module was passed exclusively to `search_maximum`. So the
+    /// non-monotonicity F3 lives in could not be expressed, let alone caught.
+    fn banded(floor: u64, ceiling: u64, balance: u64) -> impl FnMut(u64) -> Result<ProbeOutcome> {
+        move |v| {
+            Ok(if v < floor {
+                ProbeOutcome::TooSmall
+            } else if v <= ceiling {
+                ProbeOutcome::Builds
+            } else if v <= balance {
+                ProbeOutcome::TooSmall // the CHANGE is the dust up here
+            } else {
+                ProbeOutcome::TooLarge
+            })
+        }
+    }
+
+    /// F3: a band narrower than the ladder gap beneath it. The doubling ladder
+    /// steps 1M→2M→4M→8M→16M, every rung TooSmall, and 16M is CHANGE-side — so
+    /// `lo` ends up pinned ABOVE the entire buildable range and the old search
+    /// hunted `(16M, 32M)`, which is empty by construction.
+    ///
+    /// Numbers are the audit's real-Generator repro (one coin of 30,300,000
+    /// sompi, band `[14_639_000, 15_457_000]`), used here as a pure fixture so
+    /// the property is pinned without a Generator run.
+    #[test]
+    fn search_finds_a_band_the_ladder_steps_over() {
+        let (floor, ceiling, balance) = (14_639_000u64, 15_457_000u64, 30_300_000u64);
+        let mut probe = banded(floor, ceiling, balance);
+
+        // The precondition that makes this test meaningful: every ladder rung
+        // really is TooSmall, and the one just above the band is the change-side
+        // refusal the search used to misread as "go higher".
+        for rung in [1_000_000u64, 2_000_000, 4_000_000, 8_000_000, 16_000_000] {
+            assert_eq!(
+                probe(rung).unwrap(),
+                ProbeOutcome::TooSmall,
+                "rung {rung} must be TooSmall for this fixture to exercise F3"
+            );
+        }
+        assert!(
+            16_000_000 > ceiling,
+            "the 16M rung must sit ABOVE the band — that is the whole defect"
+        );
+
+        let min = search_minimum(banded(floor, ceiling, balance), balance)
+            .unwrap()
+            .expect("a wallet with an 818-wide buildable band CAN send");
+        assert_eq!(
+            probe(min).unwrap(),
+            ProbeOutcome::Builds,
+            "the reported minimum {min} must itself build"
+        );
+        assert!(
+            min - floor <= PROBE_PRECISION_SOMPI,
+            "and it must be the BOTTOM of the band, within display precision: {min}"
+        );
+    }
+
+    /// The same defect one rung lower, so the fix is not fitted to a single
+    /// arithmetic coincidence: a band that opens just above the 4M rung.
+    #[test]
+    fn search_finds_a_band_above_a_lower_rung() {
+        let (floor, ceiling, balance) = (4_100_000u64, 5_650_000u64, 9_800_000u64);
+        let min = search_minimum(banded(floor, ceiling, balance), balance)
+            .unwrap()
+            .expect("this wallet can send");
+        assert_eq!(
+            banded(floor, ceiling, balance)(min).unwrap(),
+            ProbeOutcome::Builds
+        );
+        assert!(
+            min - floor <= PROBE_PRECISION_SOMPI,
+            "bottom of the band: {min}"
+        );
+    }
+
+    /// The same defect against the REAL pinned Generator, not a fixture — the
+    /// counterexample the audit reproduced (F3). One coin of 30,300,000 sompi:
+    /// the old search returned `None`, and `transport.rs` turned that into "your
+    /// balance can't cover a message right now" while 818 distinct amounts built.
+    ///
+    /// Asserts the two things that matter and nothing about the exact value: a
+    /// floor EXISTS, and the number handed to the user is one the Generator
+    /// actually accepted (INV-9 — the pin decides, never this test's arithmetic).
+    #[test]
+    fn the_real_generator_band_the_ladder_steps_over() {
+        let coin = 30_300_000u64;
+        let probe = |amount: u64| -> Result<ProbeOutcome> {
+            let entries = vec![UtxoEntryReference::simulated(coin)];
+            let payment: PaymentDestination = PaymentOutputs::from((addr(DEST), amount)).into();
+            let settings = match GeneratorSettings::try_new_with_iterator(
+                mainnet(),
+                Box::new(entries.into_iter()),
+                None,
+                addr(CHANGE),
+                1,
+                1,
+                payment,
+                None,
+                Fees::SenderPays(0),
+                None,
+                None,
+            ) {
+                Ok(settings) => settings,
+                Err(e) => return probe_error(e),
+            };
+            let generator = match Generator::try_new(settings, None, None) {
+                Ok(generator) => generator,
+                Err(e) => return probe_error(e),
+            };
+            loop {
+                match generator.generate_transaction() {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(ProbeOutcome::Builds),
+                    Err(e) => return probe_error(e),
+                }
+            }
+        };
+
+        // The preconditions, from the pin itself — these are what make the
+        // fixture above a model of reality rather than a story about it.
+        for rung in [1_000_000u64, 2_000_000, 4_000_000, 8_000_000, 16_000_000] {
+            assert_eq!(
+                probe(rung).unwrap(),
+                ProbeOutcome::TooSmall,
+                "every ladder rung is TooSmall on this coin — rung {rung}"
+            );
+        }
+
+        let min = search_minimum(probe, coin)
+            .unwrap()
+            .expect("this coin has a buildable band — `None` is the F3 defect");
+        assert_eq!(
+            probe(min).unwrap(),
+            ProbeOutcome::Builds,
+            "the floor handed to the user, {min}, must be one the Generator built"
+        );
+    }
+
+    /// The rescue must not invent sendability. A balance whose band is empty
+    /// still reports `None` — otherwise the fix would trade a false "you cannot
+    /// send" for a false "you can", which is the worse of the two.
+    #[test]
+    fn the_rescue_never_manufactures_a_floor() {
+        // floor > ceiling ⇒ the band is empty at every amount.
+        let mut probe = |v: u64| {
+            Ok(if v <= 15_000_000 {
+                ProbeOutcome::TooSmall
+            } else {
+                ProbeOutcome::TooLarge
+            })
+        };
+        assert_eq!(search_minimum(&mut probe, 15_000_000).unwrap(), None);
+    }
+
     #[test]
     fn search_reports_none_when_nothing_is_sendable() {
         // Floor above balance: a dust-only wallet cannot send at all.
         assert_eq!(
-            search_minimum(synthetic(10_000_000, 4_000_000)).unwrap(),
+            search_minimum(synthetic(10_000_000, 4_000_000), 4_000_000).unwrap(),
             None
         );
     }
@@ -4457,7 +4733,7 @@ mod tests {
                 }
             }
         };
-        let min = search_minimum(probe)
+        let min = search_minimum(probe, kaspa_to_sompi(100.0))
             .unwrap()
             .expect("a 100-KAS wallet can send");
         // Expected neighborhood: ~0.1 KAS (10^12/100_000), plus fee margin.
@@ -4561,7 +4837,7 @@ mod tests {
             "an empty spendable set is a shortfall at every amount"
         );
         assert_eq!(
-            search_minimum(probe).unwrap(),
+            search_minimum(probe, 0).unwrap(),
             None,
             "no mature coin ⇒ no sendable minimum exists"
         );

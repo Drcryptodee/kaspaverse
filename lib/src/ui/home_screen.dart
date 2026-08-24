@@ -135,12 +135,23 @@ class WalletScope {
     required this.activity,
     required this.syncing,
     required this.utxoIndexMissing,
+    this.outgoing,
     this.discoveryIncomplete,
     this.onRefreshActivity,
   });
 
   final ValueListenable<BigInt?> mature;
   final ValueListenable<BigInt?> pending;
+
+  /// Value this wallet has SPENT that the network has not handed back yet —
+  /// the pin's `Balance.outgoing`. Optional like [discoveryIncomplete]: absent
+  /// reads as "nothing in flight", which is the pre-F20 behaviour.
+  ///
+  /// Until this was wired, `WalletService.outgoing` was assigned on every
+  /// snapshot and read by nothing in `lib/` (F20, product-audit run 3), so a
+  /// wallet mid-send rendered a confident `0.00000000 KAS` with no hint that
+  /// its own money was in flight.
+  final ValueListenable<BigInt?>? outgoing;
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
@@ -170,6 +181,7 @@ typedef _LinkView = ({BeaconState state, String? error, Duration? age});
 typedef _BalanceView = ({
   BigInt? mature,
   BigInt? pending,
+  BigInt? outgoing,
   bool stale,
   bool syncing,
   bool utxoIndexMissing,
@@ -243,6 +255,7 @@ class _HomeScreenState extends State<HomeScreen> {
       [
         widget.wallet.mature,
         widget.wallet.pending,
+        if (widget.wallet.outgoing != null) widget.wallet.outgoing!,
         widget.wallet.syncing,
         widget.wallet.utxoIndexMissing,
         if (widget.wallet.discoveryIncomplete != null)
@@ -252,6 +265,7 @@ class _HomeScreenState extends State<HomeScreen> {
       () => (
         mature: widget.wallet.mature.value,
         pending: widget.wallet.pending.value,
+        outgoing: widget.wallet.outgoing?.value,
         stale: _dimmed.value,
         syncing: widget.wallet.syncing.value,
         utxoIndexMissing: widget.wallet.utxoIndexMissing.value,
@@ -431,16 +445,47 @@ class _HomeScreenState extends State<HomeScreen> {
                           letterSpacing: 0.2,
                         ),
                       ),
-                      const Spacer(),
-                      // Scoped: connected steady-state never rebuilds here —
-                      // the breath animates itself (KvBreath).
-                      ValueListenableBuilder<_LinkView>(
-                        valueListenable: _link,
-                        builder: (context, link, _) => StatusBeacon(
-                          state: link.state,
-                          error: link.error,
-                          age: link.age,
-                          onTap: _openNetworkSheet,
+                      // The beacon is the ONLY flex child, and that is the
+                      // whole layout decision (F5, product-audit run 3).
+                      //
+                      // It used to be a non-flex child after a `Spacer()`.
+                      // Flutter lays non-flex children out first with UNBOUNDED
+                      // main-axis constraints and hands the remainder to the
+                      // flex ones — so the pill took its intrinsic width, the
+                      // `Flexible`+ellipsis inside StatusBeacon never clamped,
+                      // and the gear was pushed past the Row's clip. Measured
+                      // at dpr 3.0 with the real fonts, in the cold-launch
+                      // `finding a node…` state, the settings door — the app's
+                      // ONLY door to biometric enrolment, the lock-grace
+                      // picker, address scanning and merge — became untappable
+                      // at 320 dp from textScale 1.15, and at 360 dp (the LG
+                      // V60's bucket) at 1.30, which is AOSP's stock maximum.
+                      //
+                      // `Expanded` + right `Align` reproduces the Spacer's
+                      // visual result exactly when there is room — the pill
+                      // still sits hard right against the gear — while giving
+                      // the beacon a BOUNDED constraint so its own ellipsis can
+                      // finally do the job it was written for.
+                      //
+                      // Not `Flexible` on the beacon beside the Spacer: that
+                      // makes two flex children at flex 1 each, so the beacon
+                      // would get half the free space and ellipsize even on a
+                      // wide screen with room to spare — a new defect wearing
+                      // the fix's clothes.
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          // Scoped: connected steady-state never rebuilds here —
+                          // the breath animates itself (KvBreath).
+                          child: ValueListenableBuilder<_LinkView>(
+                            valueListenable: _link,
+                            builder: (context, link, _) => StatusBeacon(
+                              state: link.state,
+                              error: link.error,
+                              age: link.age,
+                              onTap: _openNetworkSheet,
+                            ),
+                          ),
                         ),
                       ),
                       // Understated and last: the header's job is the wordmark
@@ -473,6 +518,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       builder: (context, b, _) => _BalancePanel(
                         mature: b.mature,
                         pending: b.pending,
+                        outgoing: b.outgoing,
                         stale: b.stale,
                         daa: widget.chain.virtualDaaScore,
                         utxoIndexMissing: b.utxoIndexMissing,
@@ -543,7 +589,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(height: KvSpace.xl),
                   Entrance(
                     index: 2,
-                    child: Text('Activity', style: theme.textTheme.titleMedium),
+                    child: Text(
+                      // §0.10's own words, and the empty state's ('No recent
+                      // activity'): the feed is bounded, so the header must not
+                      // promise full history. F29, product-audit run 3.
+                      'Recent activity',
+                      style: theme.textTheme.titleMedium,
+                    ),
                   ),
                   const SizedBox(height: KvSpace.s),
                 ],
@@ -579,6 +631,7 @@ class _BalancePanel extends StatelessWidget {
   const _BalancePanel({
     required this.mature,
     required this.pending,
+    required this.outgoing,
     required this.stale,
     required this.daa,
     required this.utxoIndexMissing,
@@ -588,6 +641,7 @@ class _BalancePanel extends StatelessWidget {
 
   final BigInt? mature;
   final BigInt? pending;
+  final BigInt? outgoing;
   final bool stale;
 
   /// Listened to INSIDE the panel — the chain clock ticks ~10×/s and must
@@ -621,6 +675,16 @@ class _BalancePanel extends StatelessWidget {
           if (pending != null && pending! > BigInt.zero) ...[
             const SizedBox(height: KvSpace.xs),
             _PendingLine(pending: pending!, stale: stale),
+          ],
+          // Money we have spent that the network has not handed back yet. It
+          // matters most at exactly the moment it is easiest to miss: a wallet
+          // that just spent everything reads `0.00000000 KAS`, and without
+          // this line that zero is indistinguishable from an empty wallet
+          // (F4/F20, product-audit run 3). Signless on purpose — the balance
+          // above is already net of it; see [_SettlingLine].
+          if (outgoing != null && outgoing! > BigInt.zero) ...[
+            const SizedBox(height: KvSpace.xs),
+            _SettlingLine(outgoing: outgoing!, stale: stale),
           ],
           _StatusCaption(
             utxoIndexMissing: utxoIndexMissing,
@@ -669,6 +733,56 @@ class _PendingLine extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Value in flight: spent, and not yet handed back by the network.
+///
+/// **It carries NO sign, and that is the whole design.** It looks like
+/// [_PendingLine] and it is NOT its mirror — the two have opposite arithmetic
+/// under identical grammar, which is exactly the trap (consensus-auditor, this
+/// sitting). At the pin the hero figure is already NET of the send:
+/// `mature = (mature_utxos + consumed).saturating_sub(fees + payment)`
+/// (`wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`), while `pending` is a
+/// set DISJOINT from `mature`. So `+ N pending` is money the hero does not yet
+/// contain, and this value is money the hero has already lost. A `− ` prefix
+/// here would invite a second subtraction: a partial send of 30 from 100 would
+/// read `70.00 KAS` over `− 30.00000000`, and 70 − 30 is wrong.
+///
+/// The sign would also be a lie outright on `SignableKind::SelfSendFrame` — the
+/// KaChat message path — where `payment_value()` is `Some`, so the frame's own
+/// amount lands in `outgoing_without_batch_tx` and is rendered here while
+/// travelling straight back to this wallet.
+///
+/// So it is a memo, not a term in a sum: the amount and what it is doing.
+class _SettlingLine extends StatelessWidget {
+  const _SettlingLine({required this.outgoing, required this.stale});
+
+  final BigInt outgoing;
+  final bool stale;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    // ONE focus stop, and the signless design is exactly why it is needed
+    // (ux-auditor, this sitting): `_PendingLine` carries its direction in-band
+    // through the `+`, but here the label is the only thing separating this
+    // amount from the balance above it — unmerged, a screen reader announces
+    // two bare KAS amounts back to back and the qualifier only on the next
+    // swipe. Merged it reads "16.36694716 KAS in flight".
+    return MergeSemantics(
+      child: Row(
+        children: [
+          AmountText(outgoing, role: AmountRole.row, stale: stale),
+          Text(
+            '  in flight',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: KvColor.textTertiary,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -744,6 +858,14 @@ class _StatusCaption extends StatelessWidget {
   }
 }
 
+/// How many rows the feed can hold — the Rust-side bound, mirrored.
+///
+/// **Source of truth is `ACTIVITY_CAP` in `rust/chain/src/wallet_sync.rs`**; the
+/// list crosses the bridge already truncated, so the glass cannot derive the
+/// number and has to carry it. `test/activity_cap_test.dart` reads that Rust
+/// constant and fails if the two ever drift — the mirror is pinned, not trusted.
+const int kActivityFeedCap = 100;
+
 /// The activity list, or a quiet empty state (live, never a forever-skeleton).
 class _ActivityFeed extends StatelessWidget {
   const _ActivityFeed({
@@ -776,6 +898,9 @@ class _ActivityFeed extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // The list arrives already truncated by Rust, so "full" is the only signal
+    // the glass gets that anything was cut (F29).
+    final atCap = records.length >= kActivityFeedCap;
     if (records.isEmpty) {
       return Center(
         child: Column(
@@ -807,15 +932,39 @@ class _ActivityFeed extends StatelessWidget {
       ),
       // A refreshable list must scroll even when short, or the gesture dies.
       physics: onRefresh == null ? null : const AlwaysScrollableScrollPhysics(),
-      itemCount: records.length,
+      // +1 for the bound's own caption when the feed is full (F29).
+      itemCount: records.length + (atCap ? 1 : 0),
       // Txid-keyed so a row keeps its chip's transition state across
       // reconciles (the list is rebuilt on every snapshot).
-      itemBuilder: (context, i) => _ActivityRow(
-        key: ValueKey(records[i].txid),
-        record: records[i],
-        now: now,
-        confirmations: _confirmations(records[i]),
-      ),
+      itemBuilder: (context, i) {
+        if (i == records.length) {
+          // Only a user the bound actually binds ever reads this. Quiet tier
+          // (§1 — the cockpit has one instrument, and this is not it): it
+          // states the bound, it does not offer to lift it. Paging is a
+          // deliberate non-feature (D-175).
+          return Padding(
+            padding: const EdgeInsets.only(top: KvSpace.sm),
+            child: Text(
+              'Showing the $kActivityFeedCap most recent.',
+              textAlign: TextAlign.center,
+              // textTertiary, NOT textDisabled: this is the app's only
+              // disclosure that the user's history has been cut, and
+              // design_system.md:179 reserves `text-disabled` (2.7:1, exempt
+              // from the contrast law) for "disabled controls and decoration
+              // only — never information-bearing text".
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: KvColor.textTertiary,
+              ),
+            ),
+          );
+        }
+        return _ActivityRow(
+          key: ValueKey(records[i].txid),
+          record: records[i],
+          now: now,
+          confirmations: _confirmations(records[i]),
+        );
+      },
     );
     if (onRefresh == null) return list;
     return RefreshIndicator(

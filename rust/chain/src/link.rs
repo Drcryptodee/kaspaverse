@@ -2046,7 +2046,19 @@ mod tests {
 
         // Clean up before asserting, so a failure cannot leave the loop
         // hammering the loopback server for the rest of the suite.
-        let _ = client.disconnect().await;
+        //
+        // BOUNDED, and that is the whole point (F47, product-audit run 3). A raw
+        // `client.disconnect().await` here hung the WHOLE test binary — not
+        // alone, and not in `link::` alone, but under the full 226-test parallel
+        // load, where this test's own subject (a client spinning a re-dial every
+        // ~175 ms) starves its teardown. `bounded_disconnect`'s own doc says the
+        // teardown "MAY never complete (a starved handshake can be orphaned
+        // forever)"; the production paths were bounded for that reason by the C2
+        // fix and this test was not. `cargo test` then blocked forever with no
+        // per-test timeout: three orphaned test binaries were found alive on the
+        // dev box, aged 4h46m, 18h32m and counting, each with this test's thread
+        // parked on a futex.
+        bounded_disconnect(client, DISCONNECT_WAIT_TIMEOUT).await;
 
         assert!(
             total > 1,

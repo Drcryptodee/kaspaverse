@@ -118,9 +118,18 @@ class StatusBeacon extends StatelessWidget {
       // talking to.
       BeaconState.connecting => (KvColor.textTertiary, 'finding a node…'),
       // Degraded link = warning (§3: warning means exactly "stale link").
+      // The age WITHOUT the "as of" framing, and that is a layout invariant,
+      // not a copy preference (ux-auditor, 2026-08-24 fix wave). Once the
+      // header made this pill yield so the Settings gear could survive a
+      // squeeze (F5), the pill is the child that gets ellipsized — and DS-1
+      // requires stale to be dimming PLUS a visible age. At 320 dp / textScale
+      // 1.30 the old 14-character label was cut to `as of…`, losing the one
+      // thing DS-1 asks for; the 8-character form fits every geometry the F5
+      // table covers. `NetworkSheet` keeps the fuller phrasing — it is the
+      // detail surface and has the room.
       BeaconState.stale => (
         KvColor.warning,
-        age == null ? 'no recent update' : 'as of ${formatAge(age!)} ago',
+        age == null ? 'no recent update' : '${formatAge(age!)} ago',
       ),
       // Live mainnet = success GREEN (founder directive 2026-07-11, V2b wrap:
       // "green, not kaspa teal" — a healthy link reads as the universal

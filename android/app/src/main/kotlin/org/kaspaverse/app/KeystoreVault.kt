@@ -1,7 +1,9 @@
 package org.kaspaverse.app
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
@@ -13,6 +15,7 @@ import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
@@ -25,7 +28,9 @@ import javax.crypto.spec.GCMParameterSpec
  * Sealing decisions, all auditor-relevant:
  * - `setUserAuthenticationRequired(true)` + a per-use [BiometricPrompt.CryptoObject]
  *   → the key is usable only inside an authenticated cipher.
- * - StrongBox requested, gracefully degraded to TEE on [StrongBoxUnavailableException].
+ * - StrongBox requested on API 28+, gracefully degraded to TEE on
+ *   [StrongBoxUnavailableException] — and simply not requested below 28, where
+ *   neither the setter nor that exception type exists (minSdk is 26).
  * - `setInvalidatedByBiometricEnrollment(true)` (the default, kept on purpose): a
  *   newly enrolled fingerprint invalidates the key and forces passphrase re-wrap.
  *   That is a feature (theft-via-enrollment defence), not a bug — §0.5.
@@ -200,7 +205,14 @@ object KeystoreVault {
         // the Dart future hung forever and the button stuck (run 1, F4).
         val cipher = try {
             encryptCipher(activity)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable, not Exception: this is the path that reaches createKey, and
+            // a java.lang.Error escaping here is process death rather than a failed
+            // enrolment (F10). Every catch on the two CEREMONY paths — export,
+            // seal, unseal — is Throwable for the same reason. The narrower
+            // `Exception` catches that remain are the pre-ceremony reads
+            // (readBlob/loadKey/Cipher.init), where a java.lang.Error is not a
+            // recoverable enrolment failure and must not be dressed as one.
             onResult(false, Failure(CODE_KEYSTORE, "keystore key creation failed: ${e.message}"))
             return
         }
@@ -219,15 +231,24 @@ object KeystoreVault {
                 onResult(false, Failure(CODE_VAULT, "seed export failed: ${e.message}"))
                 return@authenticate
             }
-            try {
+            // Throwable, like the export above it: this is the LAST beat of the
+            // ceremony, and a java.lang.Error escaping here is F10's outcome —
+            // process death — one statement after the one F10 fixed.
+            //
+            // `onResult(true, null)` sits OUTSIDE the try on purpose: inside, a
+            // throw from the success reply itself would fall into the catch and
+            // reply a second time, which is the un-replied class's twin.
+            val sealed = try {
                 val ciphertext = authedCipher.doFinal(seed)
                 writeBlob(activity, authedCipher.iv, ciphertext)
-                onResult(true, null)
-            } catch (e: Exception) {
+                true
+            } catch (e: Throwable) {
                 onResult(false, Failure(CODE_KEYSTORE, "seal failed: ${e.message}"))
+                false
             } finally {
                 seed.fill(0) // L9 — wipe the plaintext seed copy
             }
+            if (sealed) onResult(true, null)
         }
     }
 
@@ -289,15 +310,20 @@ object KeystoreVault {
                 return@authenticate
             }
             var plaintext: ByteArray? = null
-            try {
+            // Same shape as `enroll`'s seal, and for the same reason: the success
+            // reply sits OUTSIDE the try, so a throw from the reply itself cannot
+            // fall into the catch and reply a second time.
+            val unsealed = try {
                 plaintext = authedCipher.doFinal(ciphertext)
                 VaultBridge.nativeUnlockWithSeed(plaintext)
-                onResult(true, null)
+                true
             } catch (e: Throwable) {
                 onResult(false, Failure(CODE_VAULT, "unseal/load failed: ${e.message}"))
+                false
             } finally {
                 plaintext?.fill(0) // L9
             }
+            if (unsealed) onResult(true, null)
         }
     }
 
@@ -364,6 +390,23 @@ object KeystoreVault {
     }
 
     private fun createKey(strongBox: Boolean): SecretKey {
+        // StrongBox is an API-28 feature, and so is the exception that reports its
+        // absence. minSdk is 26 (build.gradle.kts:66), and an unguarded call on
+        // 26/27 raises NoSuchMethodError — a java.lang.Error, NOT an Exception, so
+        // no `catch (e: Exception)` on the path stops it and DartMessenger hands it
+        // to the thread's uncaught handler: the process dies on the last beat of the
+        // create/restore ceremony, and again on every later "Enable fingerprint
+        // unlock" (F10, product-audit run 3). The enrol affordance really is offered
+        // there — androidx.biometric returns BIOMETRIC_SUCCESS on 26/27.
+        //
+        // Guarded rather than answered by raising minSdk: without StrongBox the key
+        // is TEE-backed, which is exactly the tier the fallback below already
+        // produces on 28+ hardware that has no StrongBox — a tier this vault already
+        // accepts as sound. Every other constraint in this builder works from API 24
+        // (setUserAuthenticationRequired 23, setInvalidatedByBiometricEnrollment 24).
+        // Raising the floor would discard users for no security gain.
+        val strongBoxRequested =
+            strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
         val builder = KeyGenParameterSpec.Builder(
             KEY_ALIAS,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
@@ -375,7 +418,9 @@ object KeystoreVault {
             // Default true; stated explicitly so an auditor sees the intent
             // (a new fingerprint invalidates the key — §0.5).
             .setInvalidatedByBiometricEnrollment(true)
-            .setIsStrongBoxBacked(strongBox)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setIsStrongBoxBacked(strongBoxRequested)
+        }
         val generator = KeyGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE
         )
@@ -383,15 +428,75 @@ object KeystoreVault {
             generator.init(builder.build())
             generator.generateKey().also {
                 // Non-sensitive: which hardware tier holds the key (§2 evidence).
-                android.util.Log.i("KeystoreVault", "key created (strongbox=$strongBox)")
+                // Reports the tier actually ASKED FOR, never the caller's wish — on
+                // 26/27 `strongBox = true` arrives but no StrongBox is requested,
+                // and a log claiming strongbox=true there would be evidence of a
+                // guarantee the key does not carry.
+                android.util.Log.i(
+                    "KeystoreVault",
+                    "key created (requested strongbox=$strongBoxRequested, " +
+                        "observed tier=${observedTier(it)})"
+                )
             }
-        } catch (e: StrongBoxUnavailableException) {
-            if (strongBox) {
+        } catch (e: Exception) {
+            if (strongBoxRequested && isStrongBoxUnavailable(e)) {
                 android.util.Log.i("KeystoreVault", "StrongBox unavailable — TEE fallback")
                 createKey(strongBox = false)
             } else throw e
         }
     }
+
+    /**
+     * The tier the key ACTUALLY landed on, read back from the Keystore — not the
+     * tier we asked for.
+     *
+     * Asking is not getting: `AndroidKeyStore` silently produces a SOFTWARE-backed
+     * key on a device with no secure hardware, and until this was read back, a real
+     * TEE key and a software key logged the identical line and both reported
+     * `PATH_A_READY`. This file's header calls the seal "hardware-backed", and a
+     * custody claim the code cannot substantiate is the kind INV-4 exists to stop
+     * (wallet-security-auditor, 2026-08-24 fix wave). The guard that routes 26/27
+     * onto the non-StrongBox path widened the population landing on the unverified
+     * tier, which is why it is read back here rather than later.
+     *
+     * Observation only — it does NOT refuse a software key. Whether a device with no
+     * secure hardware may hold a Path-A vault at all is a product call about who is
+     * locked out, and it belongs to the founder, not to this function.
+     *
+     * `getSecurityLevel()` is API 31; below that only the coarse
+     * `isInsideSecureHardware` exists, which cannot tell StrongBox from TEE. Failure
+     * to read the tier is reported as `unknown`, never as a tier.
+     */
+    private fun observedTier(key: SecretKey): String = try {
+        val info = SecretKeyFactory
+            .getInstance(key.algorithm, ANDROID_KEYSTORE)
+            .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            when (info.securityLevel) {
+                KeyProperties.SECURITY_LEVEL_STRONGBOX -> "strongbox"
+                KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "tee"
+                KeyProperties.SECURITY_LEVEL_SOFTWARE -> "SOFTWARE"
+                else -> "unknown"
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            if (info.isInsideSecureHardware) "hardware" else "SOFTWARE"
+        }
+    } catch (e: Throwable) {
+        // Never let a diagnostic kill an enrolment that otherwise succeeded —
+        // this whole function is evidence, not control flow.
+        "unknown"
+    }
+
+    /**
+     * [StrongBoxUnavailableException] is itself API 28, so even naming the type has
+     * to sit behind the same version gate as the call that can raise it — which is
+     * why this is an `is` check inside a guard rather than a `catch` clause. Below
+     * 28 nothing requests StrongBox, so nothing can report it unavailable.
+     */
+    private fun isStrongBoxUnavailable(e: Exception): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            e is StrongBoxUnavailableException
 
     // ── Blob A persistence (app-private; format: [ivLen][iv][ciphertext]) ──
 
@@ -453,6 +558,36 @@ object KeystoreVault {
             .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
             .setConfirmationRequired(false)
             .build()
-        prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        // The prompt launch is GUARDED, and the failure it guards is silence,
+        // not an exception (ffi-leak-auditor, 2026-08-24 fix wave).
+        //
+        // `BiometricPrompt.authenticateInternal` in the pinned androidx.biometric
+        // 1.1.0 **logs and returns** — no throw, no AuthenticationCallback — when
+        // the fragment manager is null or the activity's state is already saved
+        // (an `authenticate()` reaching here after `onSaveInstanceState`). This
+        // call sits outside every try in both ceremonies, and `onDone` lives only
+        // inside the callback, so nothing replied: `MainActivity` never called
+        // `result.success`/`result.error` and the Dart future never completed.
+        //
+        // That is worse than a hang on the glass. `VaultService.runCeremony`
+        // decrements `_ceremonyDepth` in the `finally` of `await body()`, so a
+        // future that never completes leaves `_ceremonyHandoffActive` true for the
+        // rest of the process — and `didChangeAppLifecycleState` then skips
+        // `_armLock()` on EVERY later background. **The vault stays unlocked
+        // indefinitely, past the maxLockGraceSecs ceiling** (§0.11 / D-133). In
+        // `enroll` it is worse still: `encryptCipher()` has already deleted the old
+        // key and blob by the time we get here, so a silent return destroys the
+        // user's Path A and wedges the UI at once.
+        //
+        // A callback is therefore invoked on every exit from this function.
+        if (activity.supportFragmentManager.isStateSaved) {
+            onDone(null, Failure(CODE_FAILED, "prompt not shown: activity state already saved"))
+            return
+        }
+        try {
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        } catch (e: Throwable) {
+            onDone(null, Failure(CODE_FAILED, "prompt failed to launch: ${e.message}"))
+        }
     }
 }

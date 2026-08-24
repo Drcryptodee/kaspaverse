@@ -104,8 +104,12 @@ void main() {
       );
 
       expect(find.text('finding a node…'), findsOneWidget);
-      expect(find.text('as of 20 s ago'), findsNothing);
-      expect(find.textContaining('as of'), findsNothing);
+      // The stale phrasing, in the form the CHIP now uses — the beacon dropped
+      // the "as of" framing so the age survives a narrow header (ux-auditor,
+      // 2026-08-24). Asserting the old string here would have quietly become
+      // vacuous: nothing renders it any more, so it could never be found.
+      expect(find.text('20 s ago'), findsNothing);
+      expect(find.textContaining('ago'), findsNothing);
 
       await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
     });

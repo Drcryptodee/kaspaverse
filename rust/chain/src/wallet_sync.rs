@@ -1221,6 +1221,56 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// F46 (product-audit run 3): the test above is named `..._and_capped` and
+    /// inserts THREE records against a cap of 100 — the cap in its own name was
+    /// never exercised, and could be raised, lowered or deleted with the suite
+    /// green. This is the half that can actually fail.
+    ///
+    /// It also pins WHICH rows survive: `.take(ACTIVITY_CAP)` runs after a
+    /// newest-first sort, so the cut must keep the newest and drop the oldest.
+    /// A cut on the wrong side of the sort would hide a user's live payments
+    /// behind their history and still leave the count right.
+    #[test]
+    fn the_cap_keeps_the_newest_and_drops_the_rest() {
+        let dir = std::env::temp_dir().join(format!("kv-wsync-cap-{}", std::process::id()));
+        let path = dir.join("activity.kvlog");
+        let _ = std::fs::remove_file(&path);
+        let mut store = ActivityStore::load(path.clone()).unwrap();
+
+        // Comfortably over the bound, inserted OLDEST first so a cut that
+        // ignored the sort would keep exactly the wrong end.
+        let over = ACTIVITY_CAP + 17;
+        for i in 0..over {
+            // `incoming(id_byte, value, daa)` — the id_byte varies so every
+            // record is a DISTINCT txid (the store is a last-write-wins map
+            // keyed on txid, so a repeated byte would silently upsert one row
+            // and the cap would never be reached).
+            store
+                .upsert(incoming(i as u8, 1_000, (i as u64 + 1) * 10))
+                .unwrap();
+        }
+        assert_eq!(
+            store.records.len(),
+            over,
+            "the STORE keeps everything — only the feed is bounded"
+        );
+
+        let rows = store.list(Some(1_000_000), &HashSet::new());
+        assert_eq!(rows.len(), ACTIVITY_CAP, "the feed is cut to the cap");
+        assert_eq!(
+            rows[0].block_daa_score,
+            over as u64 * 10,
+            "the newest row survives the cut"
+        );
+        assert_eq!(
+            rows[ACTIVITY_CAP - 1].block_daa_score,
+            (over - ACTIVITY_CAP + 1) as u64 * 10,
+            "the cut takes the OLDEST rows, not the newest"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The D2 provenance guard: once a txid is a SEND we originated, a restart
     /// re-scan re-reporting that SAME txid as an incoming deposit is refused —
     /// so conversation change returning to the bound RECEIVE address (source

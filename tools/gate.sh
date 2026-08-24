@@ -93,6 +93,7 @@ else
   expect_lane "flutter app"
 fi
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "kotlin compile (custody platform layer)"
+[ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "android lint (NewApi — custody platform layer)"
 [ -f "$ROOT/android/gradle/wrapper/gradle-wrapper.properties" ] && expect_lane "gradle wrapper (INV-7)"
 [ -f "$ROOT/flutter_rust_bridge.yaml" ] && expect_lane "codegen drift (lib/src/rust/ + frb_generated.rs)"
 expect_lane "contract spine"
@@ -316,14 +317,64 @@ if [ -f "$ROOT/android/build.gradle.kts" ]; then
   if [ ! -f "$ROOT/android/gradlew" ]; then
     skip_check "kotlin compile (custody platform layer)" \
       "android/gradlew absent — the wrapper is tracked since F2, so a clean clone has it"
+    skip_check "android lint (NewApi — custody platform layer)" \
+      "android/gradlew absent — the wrapper is tracked since F2, so a clean clone has it"
   elif [ -z "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}" ] && [ ! -f "$ROOT/android/local.properties" ]; then
     skip_check "kotlin compile (custody platform layer)" \
+      "no Android SDK (ANDROID_HOME / local.properties)"
+    skip_check "android lint (NewApi — custody platform layer)" \
       "no Android SDK (ANDROID_HOME / local.properties)"
   else
     kotlin_compiles() {
       (cd "$ROOT/android" && ./gradlew :app:compileDebugKotlin --console=plain -q)
     }
     run_check "kotlin compile (custody platform layer)" kotlin_compiles
+
+    # ── android lint: the NewApi lane (product-audit run 3, F10) ──
+    # Compiling proves the Kotlin is well-formed against compileSdk. It says
+    # NOTHING about whether a call exists on minSdk — and that gap shipped a
+    # crash: `KeyGenParameterSpec.Builder.setIsStrongBoxBacked` is API 28, minSdk
+    # is 26, so biometric enrolment raised NoSuchMethodError (a java.lang.Error,
+    # which DartMessenger forwards to the uncaught handler = process death) on
+    # the last beat of the create/restore ceremony. `NewApi` is the lint check
+    # that exists for exactly this, and it had never been run on this code.
+    #
+    # Mutation-proven both ways before this lane was added: with the guard
+    # removed, `lintDebug` exits 1 and prints
+    #   KeystoreVault.kt: Error: Call requires API level 28 (current min is 26):
+    #   ...#setIsStrongBoxBacked [NewApi]
+    # with it, exit 0 and 0 errors. Lint's default `abortOnError` makes errors —
+    # not warnings — the verdict, so this lane reds on NewApi and stays quiet
+    # about the warning tier.
+    #
+    # The 32 warnings it does NOT red on, tallied rather than characterised
+    # (dependency-steward caught an earlier "all cosmetic" gloss here that was
+    # wrong for six of them):
+    #
+    #   grep -o 'id="[^"]*"' build/app/reports/lint-results-debug.xml \
+    #     | sed 's/id="//;s/"//' | sort | uniq -c | sort -rn
+    #   18 SetTextI18n · 8 UseKtx · 1 ObsoleteSdkInt · 1 LockedOrientationActivity
+    #    1 DiscouragedApi · 1 ClickableViewAccessibility · 1 ChromeOsAbiSupport
+    #    1 AndroidGradlePluginVersion
+    #
+    # Two of the six are not cosmetic and are live, not theoretical:
+    # `AndroidGradlePluginVersion` is a toolchain-currency signal (dependency-
+    # steward's law), and `ClickableViewAccessibility` at RevealActivity.kt:260
+    # is an accessibility defect one step from D-178's TalkBack call. Left as
+    # warnings deliberately — promoting them is a separate decision with its own
+    # owner — but named here so "warnings" is never read as "nothing".
+    #
+    # The `-x` is load-bearing, not a convenience: `lintDebug` otherwise pulls in
+    # cargokit's native build, which for a raw `./gradlew` invocation resolves to
+    # every ABI including x86_64-android — and kaspa-hashes at the pinned rev
+    # panics "Unsupported OS" there (the same constraint D-022 and the arm64-only
+    # abiFilters already record). Lint analyses JVM sources; it needs no .so.
+    # Excluding it also keeps the lane at ~1 min instead of a full cross-compile.
+    kotlin_lints() {
+      (cd "$ROOT/android" && ./gradlew :app:lintDebug --console=plain -q \
+        -x :kaspaverse_bridge:cargokitCargoBuildKaspaverse_bridgeDebug)
+    }
+    run_check "android lint (NewApi — custody platform layer)" kotlin_lints
   fi
 fi
 

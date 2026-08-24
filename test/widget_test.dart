@@ -175,7 +175,7 @@ void main() {
     // (the balance dims — opacity is unit-tested in amount_text_test).
     now = now.add(const Duration(seconds: 12));
     await tester.pump(const Duration(seconds: 1)); // the 1 s ticker fires
-    expect(find.text('as of 12 s ago'), findsOneWidget);
+    expect(find.text('12 s ago'), findsOneWidget);
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
     expect(find.textContaining('confirmations'), findsNothing);
@@ -479,6 +479,190 @@ void main() {
     // Neither old row wears ANY chip: no streamed counter, no static word.
     expect(find.textContaining('confirmations'), findsNothing);
     expect(find.text('Pending'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+  // ── F4 / F20: money in flight is not an empty wallet ──
+
+  testWidgets('a wallet that has spent everything says so, not just "0"', (
+    tester,
+  ) async {
+    // The window this exists for: the spendable set is genuinely empty because
+    // our own transaction consumed it, and the change has not come back. Every
+    // balance field the pin publishes is a real number, and `mature` really is
+    // zero — so `AmountText` renders a confident `0.00000000 KAS`, which to the
+    // user is indistinguishable from "your money is gone".
+    //
+    // `WalletService.outgoing` had carried this truth since it was written and
+    // NOTHING in lib/ read it (F20): WalletScope did not carry the field at all.
+    final mature = ValueNotifier<BigInt?>(BigInt.parse('1636694716'));
+    final outgoing = ValueNotifier<BigInt?>(BigInt.zero);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        home: HomeScreen(
+          chain: ChainScope(
+            connected: ValueNotifier(true),
+            endpoint: ValueNotifier('wss://node.example/borsh'),
+            virtualDaaScore: ValueNotifier(BigInt.from(2000)),
+            error: ValueNotifier(null),
+            lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
+          ),
+          wallet: WalletScope(
+            mature: mature,
+            pending: ValueNotifier(BigInt.zero),
+            outgoing: outgoing,
+            activity: ValueNotifier(const []),
+            syncing: ValueNotifier(false),
+            utxoIndexMissing: ValueNotifier(false),
+          ),
+          clock: () => DateTime(2026, 8, 24),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Before: a normal wallet, nothing in flight, no settling line.
+    expect(find.textContaining('16.36694716 KAS'), findsOneWidget);
+    expect(find.text('  in flight'), findsNothing);
+
+    // The send lands. mature collapses to a real zero and the value moves into
+    // the outgoing bucket.
+    mature.value = BigInt.zero;
+    outgoing.value = BigInt.parse('1636694716');
+    await tester.pump();
+
+    expect(
+      find.textContaining('0.00000000 KAS'),
+      findsOneWidget,
+      reason: 'the spendable balance really is zero — that stays honest',
+    );
+    expect(
+      find.text('  in flight'),
+      findsOneWidget,
+      reason:
+          'but a wallet with value in flight must say so — a bare 0 here reads '
+          'as "your money is gone" (F4)',
+    );
+    expect(find.textContaining('16.36694716'), findsWidgets);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('the in-flight line is a memo, never a second subtraction', (
+    tester,
+  ) async {
+    // The partial-send case, which the sweep test above cannot see: there the
+    // hero collapses to 0 and "already deducted" and "still to deduct" read the
+    // same, so the suite was structurally blind to the grammar
+    // (consensus-auditor, this sitting).
+    //
+    // At the pin the hero is ALREADY net of the send —
+    // `mature = (mature_utxos + consumed).saturating_sub(fees + payment)`
+    // (`wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`) — so a signed
+    // `− 30.00000000` under `70.00000000 KAS` would invite 70 − 30, and on a
+    // self-send frame the value is travelling back to this wallet anyway.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        home: HomeScreen(
+          chain: ChainScope(
+            connected: ValueNotifier(true),
+            endpoint: ValueNotifier('wss://node.example/borsh'),
+            virtualDaaScore: ValueNotifier(BigInt.from(2000)),
+            error: ValueNotifier(null),
+            lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
+          ),
+          wallet: WalletScope(
+            // 100 KAS held, 30 KAS of it already spent and in flight.
+            mature: ValueNotifier(BigInt.from(7000000000)),
+            pending: ValueNotifier(BigInt.zero),
+            outgoing: ValueNotifier(BigInt.from(3000000000)),
+            activity: ValueNotifier(const []),
+            syncing: ValueNotifier(false),
+            utxoIndexMissing: ValueNotifier(false),
+          ),
+          clock: () => DateTime(2026, 8, 24),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('70.00000000 KAS'), findsOneWidget);
+    expect(find.text('  in flight'), findsOneWidget);
+    expect(
+      find.textContaining('− '),
+      findsNothing,
+      reason:
+          'a minus sign here reads as "subtract this too" against a hero that '
+          'has already had it subtracted',
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  // ── F29 / D-175: the bound discloses itself, and only when it binds ──
+
+  ActivityRecord row(int i) => ActivityRecord(
+    txid: i.toRadixString(16).padLeft(64, '0'),
+    valueSompi: BigInt.from(1000),
+    unixtimeMsec: BigInt.from(DateTime(2026, 8, 24).millisecondsSinceEpoch),
+    blockDaaScore: BigInt.from(1000 - i),
+    direction: ActivityDirection.incoming,
+    isCoinbase: false,
+    maturity: MaturityState.confirmed,
+    stalled: false,
+  );
+
+  Future<void> pumpFeed(WidgetTester tester, int rows) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        home: homeScreen(
+          connected: ValueNotifier(true),
+          endpoint: ValueNotifier('wss://node.example/borsh'),
+          virtualDaaScore: ValueNotifier(BigInt.from(2000)),
+          error: ValueNotifier(null),
+          lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
+          mature: ValueNotifier(BigInt.from(1000)),
+          pending: ValueNotifier(BigInt.zero),
+          activity: ValueNotifier([for (var i = 0; i < rows; i++) row(i)]),
+          syncing: ValueNotifier(false),
+          utxoIndexMissing: ValueNotifier(false),
+          clock: () => DateTime(2026, 8, 24),
+        ),
+      ),
+    );
+    await tester.pump();
+  }
+
+  testWidgets('a full feed says it is showing only the most recent', (
+    tester,
+  ) async {
+    // Rust hands over at most ACTIVITY_CAP rows, so "the list is full" is the
+    // ONLY signal the glass gets that anything was cut. Before D-175 a user at
+    // the bound saw a flat 'Activity' header and no hint at all — the feed's
+    // honesty depended on nobody ever reaching it.
+    await pumpFeed(tester, kActivityFeedCap);
+    expect(find.text('Recent activity'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Showing the $kActivityFeedCap most recent.'),
+      300,
+    );
+    expect(
+      find.text('Showing the $kActivityFeedCap most recent.'),
+      findsOneWidget,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a feed below the bound says nothing about it', (tester) async {
+    // The other half: a caption that always showed would be noise on the
+    // overwhelming majority of wallets, and would state a bound the user has
+    // not met. It appears only where it is true of them.
+    await pumpFeed(tester, 3);
+    expect(find.text('Recent activity'), findsOneWidget);
+    expect(find.textContaining('most recent.'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 }

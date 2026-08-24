@@ -107,6 +107,7 @@ class KaspaVerseApp extends StatelessWidget {
             activity: wallet.activity,
             syncing: wallet.syncing,
             utxoIndexMissing: wallet.utxoIndexMissing,
+            outgoing: wallet.outgoing,
             discoveryIncomplete: wallet.discoveryIncomplete,
             onRefreshActivity: wallet.refreshNow,
           ),

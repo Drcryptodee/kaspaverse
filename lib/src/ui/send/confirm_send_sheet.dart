@@ -529,6 +529,12 @@ class _HoldToSignState extends State<_HoldToSign>
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: KvMotion.deliberate,
+    // NOT `normal`: that is Flutter's default and it scales the duration to
+    // 5% (40ms) whenever the platform reports reduced animations, which would
+    // turn the hold into a tap on the one control that broadcasts an
+    // irreversible transaction. Friction is safety here, not decoration, so it
+    // is preserved even when every other animation in the app collapses.
+    animationBehavior: AnimationBehavior.preserve,
   )..addStatusListener(_onStatus);
   bool _fired = false;
 
@@ -559,84 +565,109 @@ class _HoldToSignState extends State<_HoldToSign>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return GestureDetector(
-      onTapDown: _down,
-      onTapUp: _release,
-      onTapCancel: _release,
-      child: Container(
-        // Glow is rationed to primary actions (§3) — this is THE primary
-        // action; the shadow sits outside the clip so it can breathe.
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(KvRadius.button),
-          boxShadow: const [
-            BoxShadow(color: KvColor.glow, blurRadius: 24, spreadRadius: 2),
-          ],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(KvRadius.button),
-          child: Container(
-            height: KvSpace.control,
-            // Dual teal (token semantics): muted = ambient base, primary = the
-            // "activated" charge sweeping over it. Dark text reads on both.
-            color: KvColor.primaryMuted,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                // Decelerate-only fill (DS-5 vault register; never
-                // overshoot). Under reduced motion the progress renders as an
-                // opacity ramp over the whole button instead of a width sweep
-                // (§6/§11) — the 800ms hold itself is safety friction and
-                // never shortens.
-                Positioned.fill(
-                  child: AnimatedBuilder(
-                    animation: _controller,
-                    builder: (context, _) {
-                      final progress = KvMotion.out.transform(
-                        _controller.value,
-                      );
-                      if (MediaQuery.of(context).disableAnimations) {
-                        return Opacity(
-                          opacity: progress,
-                          child: Container(color: KvColor.primary),
+    return Semantics(
+      // DESCRIPTIVE ONLY — no `onTap`, and that omission is the design.
+      //
+      // This node reported `isButton=false` with no hint, so a screen-reader
+      // user met an unlabelled control that says nothing about what it needs
+      // and does nothing when activated (ux-auditor + wallet-security-auditor,
+      // 2026-08-24 fix wave). `button: true` plus a hint naming the gesture at
+      // least makes the control state its requirement.
+      //
+      // What is deliberately NOT done here: wiring `SemanticsAction.tap` or
+      // `longPress` to `_commit`. A semantics activation is ONE discrete
+      // action, so it would collapse the 800 ms hold to an instant — the exact
+      // F1 defect this same sitting fixed, wearing an accessibility badge. The
+      // control therefore remains unsignable via TalkBack, which is a real and
+      // recorded defect (D-178) awaiting an accessible ceremony that KEEPS the
+      // friction, not a shortcut past it.
+      button: true,
+      hint:
+          'Press and hold for ${KvMotion.deliberate.inMilliseconds} '
+          'milliseconds to sign',
+      child: GestureDetector(
+        onTapDown: _down,
+        onTapUp: _release,
+        onTapCancel: _release,
+        child: Container(
+          // Glow is rationed to primary actions (§3) — this is THE primary
+          // action; the shadow sits outside the clip so it can breathe.
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(KvRadius.button),
+            boxShadow: const [
+              BoxShadow(color: KvColor.glow, blurRadius: 24, spreadRadius: 2),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(KvRadius.button),
+            child: Container(
+              height: KvSpace.control,
+              // Dual teal (token semantics): muted = ambient base, primary = the
+              // "activated" charge sweeping over it. Dark text reads on both.
+              color: KvColor.primaryMuted,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  // Decelerate-only fill (DS-5 vault register; never
+                  // overshoot). Under reduced motion the progress renders as an
+                  // opacity ramp over the whole button instead of a width sweep
+                  // (§6/§11) — the 800ms hold itself is safety friction and
+                  // never shortens. That second half is not free: it holds only
+                  // because the controller above is built with
+                  // `AnimationBehavior.preserve`. Guarded by 'a hold under reduced
+                  // animations still takes the full deliberate duration' in
+                  // test/send_flow_test.dart.
+                  Positioned.fill(
+                    child: AnimatedBuilder(
+                      animation: _controller,
+                      builder: (context, _) {
+                        final progress = KvMotion.out.transform(
+                          _controller.value,
                         );
-                      }
-                      return Align(
-                        alignment: Alignment.centerLeft,
-                        child: FractionallySizedBox(
-                          widthFactor: progress,
-                          child: Container(color: KvColor.primary),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-                // Scale the full-precision label down rather than ever clip or
-                // ellipsize an amount (DS-2), incl. at large text scale.
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.lock_outline,
-                          size: 18,
-                          color: KvColor.abyss,
-                        ),
-                        const SizedBox(width: KvSpace.s),
-                        Text(
-                          widget.label,
-                          style: theme.textTheme.labelLarge?.copyWith(
-                            color: KvColor.abyss,
-                            fontWeight: FontWeight.w600,
+                        if (MediaQuery.of(context).disableAnimations) {
+                          return Opacity(
+                            opacity: progress,
+                            child: Container(color: KvColor.primary),
+                          );
+                        }
+                        return Align(
+                          alignment: Alignment.centerLeft,
+                          child: FractionallySizedBox(
+                            widthFactor: progress,
+                            child: Container(color: KvColor.primary),
                           ),
-                        ),
-                      ],
+                        );
+                      },
                     ),
                   ),
-                ),
-              ],
+                  // Scale the full-precision label down rather than ever clip or
+                  // ellipsize an amount (DS-2), incl. at large text scale.
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.lock_outline,
+                            size: 18,
+                            color: KvColor.abyss,
+                          ),
+                          const SizedBox(width: KvSpace.s),
+                          Text(
+                            widget.label,
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              color: KvColor.abyss,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

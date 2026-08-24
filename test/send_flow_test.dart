@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
@@ -825,5 +826,141 @@ void main() {
       await gesture.up();
       await tester.pumpAndSettle();
     });
+
+    // ---- reduced animations ------------------------------------------------
+    // F1 (product-audit run 3, S1). `AnimationController` defaults to
+    // `AnimationBehavior.normal`, which Flutter scales to 0.05 whenever the
+    // platform reports reduced animations (animation_controller.dart:651) —
+    // 800ms becomes 40ms, and the one control that broadcasts an irreversible
+    // transaction fires on what the user experiences as a tap. Measured on the
+    // real path before the fix: onComplete at 141ms of contact.
+    //
+    // Note why the two tests above cannot catch it: `tester.tap()` advances no
+    // wall clock between down and up, so forward()→reverse() happens in one
+    // instant at ANY scale, and the 850ms hold completes at any scale too. The
+    // defect lives strictly in the middle of the window, so the fence has to
+    // stand there.
+
+    /// Turns the platform's reduced-animations flag on for one test, and proves
+    /// it actually reached the binding the controller reads. Without this
+    /// assertion a silent propagation failure would make the guard below pass
+    /// vacuously — green, and blind to the thing it exists for.
+    void withReducedAnimations(WidgetTester tester) {
+      tester.binding.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(disableAnimations: true);
+      addTearDown(
+        tester.binding.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      expect(
+        SemanticsBinding.instance.disableAnimations,
+        isTrue,
+        reason:
+            'precondition: the flag must reach SemanticsBinding, which is what '
+            'AnimationController consults — otherwise this test proves nothing',
+      );
+    }
+
+    testWidgets(
+      'a hold under reduced animations still takes the full deliberate duration',
+      (tester) async {
+        var commits = 0;
+        withReducedAnimations(tester);
+        await tester.pumpWidget(holdHost(() => commits++));
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.text(label)),
+        );
+        await tester.pump(); // dispatch pointer-down → onTapDown → forward()
+
+        // Walk the window a real finger would occupy. With the defect the
+        // controller is done by 40ms, so the very first step signs.
+        for (var elapsed = 50; elapsed <= 200; elapsed += 50) {
+          await tester.pump(const Duration(milliseconds: 50));
+          expect(
+            commits,
+            0,
+            reason:
+                'signed after only ${elapsed}ms of contact — the hold friction '
+                'collapsed under reduced animations (needs '
+                'AnimationBehavior.preserve)',
+          );
+        }
+
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(commits, 0, reason: 'released early: nothing is signed');
+      },
+    );
+
+    testWidgets(
+      'the hold control announces itself, and semantics still cannot sign it',
+      (tester) async {
+        // Two properties, and the second is the safety one.
+        //
+        // The node reported `isButton=false` with no hint, so a screen-reader
+        // user met an unlabelled control that never said what it needed
+        // (ux-auditor + wallet-security-auditor, 2026-08-24). It is now a
+        // button with a hint naming the gesture.
+        //
+        // But the fix must NOT make it signable by semantics: an accessibility
+        // activation is one discrete action, so honouring it would collapse the
+        // 800 ms friction to an instant — F1 again, with a better excuse. That
+        // the control is still unsignable via TalkBack is a recorded defect
+        // (D-178), not an accident, and this test is what stops a well-meaning
+        // "accessibility fix" from closing it the wrong way.
+        final handle = tester.ensureSemantics();
+        var commits = 0;
+        await tester.pumpWidget(holdHost(() => commits++));
+
+        final node = tester.getSemantics(find.text(label));
+        expect(
+          node.flagsCollection.isButton,
+          isTrue,
+          reason: 'the control must announce itself as a button',
+        );
+        expect(
+          node.hint,
+          contains('hold'),
+          reason: 'and say what gesture it needs',
+        );
+
+        // The safety half. `tester.semantics.tap` dispatches exactly what
+        // TalkBack's double-tap does — SemanticsAction.tap on the node.
+        tester.semantics.tap(find.semantics.byLabel(label));
+        await tester.pumpAndSettle();
+        expect(
+          commits,
+          0,
+          reason:
+              'a semantics activation signed a transaction — that is one '
+              'discrete action standing in for an 800 ms deliberate hold',
+        );
+        handle.dispose();
+      },
+    );
+
+    testWidgets(
+      'a hold under reduced animations still signs once past the duration',
+      (tester) async {
+        // The companion: preserving the duration must not mean never firing.
+        // Without this, a fix that simply broke the controller passes above.
+        var commits = 0;
+        withReducedAnimations(tester);
+        await tester.pumpWidget(holdHost(() => commits++));
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.text(label)),
+        );
+        await tester.pump();
+        await tester.pump(
+          KvMotion.deliberate + const Duration(milliseconds: 50),
+        );
+        expect(
+          commits,
+          1,
+          reason: 'a completed hold still signs, once, with the flag on',
+        );
+        await gesture.up();
+        await tester.pumpAndSettle();
+      },
+    );
   });
 }
