@@ -111,7 +111,21 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
   cd "$ROOT/rust"
   run_check "cargo fmt"    cargo fmt --all --check
   run_check "cargo clippy" cargo clippy --workspace --all-targets -- -D warnings
-  run_check "cargo test"   cargo test --workspace
+  # BOUNDED, and the bound is the check (F47, product-audit run 3 fix wave).
+  # `cargo test` has no per-test timeout: a test that blocks forever blocks the
+  # gate forever, and the gate is the only arbiter of "done" — so a hang is not a
+  # slow run, it is an INV-10 proof that can never arrive. It happened: the chain
+  # crate's suite blocked on an unbounded teardown in a test whose own subject
+  # spins a re-dial every ~175 ms, reproducibly, but ONLY under the full parallel
+  # load of the whole binary. Three orphaned test binaries were found alive on the
+  # dev box, aged 4h46m and 18h32m, each parked on a futex.
+  #
+  # This does not weaken a check — it converts an infinite wait into a RED. The
+  # whole workspace runs in well under a minute today (the chain crate alone: 0.72 s
+  # after the F47 fix), so 600 s is roughly a 60x headroom: it cannot red a merely
+  # slow machine, and it cannot fail to red a hang.
+  cargo_tests() { timeout 600 cargo test --workspace; }
+  run_check "cargo test"   cargo_tests
   if command -v cargo-deny >/dev/null 2>&1; then
     run_check "cargo deny (INV-7)" cargo deny check
   else

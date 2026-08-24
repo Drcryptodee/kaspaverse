@@ -28,7 +28,9 @@ enum BeaconState { connected, connecting, stale, error, offline }
 /// 4. **Finding a node** — [searching]: a race is hunting. This is the fix for
 ///    the 2026-07-30 field observation (a 14–28 s weak-link hunt rendered as
 ///    *"as of 20 s ago"*, which reads as *connected, data slightly stale* —
-///    the exact opposite of the truth).
+///    the exact opposite of the truth). That quote is the PRE-C7 glass, kept as
+///    history; the stale label has since shortened to *"20 s ago"* so the age
+///    survives a narrow header (2026-08-24 — see rule 6's arm below).
 /// 5. No data ever ([age] null) is also *finding a node* — honest in the
 ///    instant between mount and the first race flag.
 /// 6. A dropped link or silence past [staleAfter] is `stale`.
