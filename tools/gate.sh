@@ -4,6 +4,11 @@
 # added at phase entry, never removed without a DECISION_LOG entry).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Defined HERE, not beside its first user: TWO lanes now read the ops index — the
+# secret-shaped-path half of `public-repo hygiene` (L96 rider 2) and `repo-path
+# resolution` — and `set -u` turns a definition that sits below its first reader into
+# an unbound-variable abort mid-run, which is a gate that stops rather than reports.
+OPS_GIT_DIR="${KASPAVERSE_OPS_GIT_DIR:-$HOME/.kaspaverse-ops.git}"
 PASS=0; FAIL=0; SKIP=0; WARN=0
 declare -a RESULTS
 # Every lane that emitted a row, by name. The summary asserts this against the
@@ -105,6 +110,7 @@ expect_lane "contract spine"
 expect_lane "public-repo hygiene (no tracked secrets)"
 expect_lane "internal-record boundary (D-102)"
 expect_lane "internal-record pointers (D-102 / L88)"
+expect_lane "repo-path resolution (L88 / F48)"
 
 # ── Rust workspace ──────────────────────────────────────────────
 if [ -f "$ROOT/rust/Cargo.toml" ]; then
@@ -581,8 +587,40 @@ repo_hygiene() {
     echo "   secret-shaped files are git-tracked:"; echo "$tracked" | sed 's/^/     /'
     bad=1
   fi
+  # THE OPS INDEX TOO — L96's named destination, built 2026-08-25 after the scar recurred.
+  #
+  # L96 was earned when the internal record's local-environment file (keystore + password
+  # references, a LAN
+  # address) was found sitting in the ops index despite months of wrap commands excluding it
+  # by pathspec: `:!pathspec` stops a file being ADDED and does nothing about one already in
+  # the index. It was untracked at `bd08b15` — and it RE-ENTERED at `36d2b54`, because the
+  # fix was a one-time `git rm --cached` plus a ritual instruction to re-grep at each wrap,
+  # and a ritual step is a check nobody runs. That is L22 exactly: an unbuilt destination is
+  # an unenforced law. L96's own rider named this lane as where it belonged.
+  #
+  # The general shape, and the reason this is four lines rather than a checklist item:
+  # **an exclusion asserts a property of the NEXT COMMIT; assert the property of the
+  # REPOSITORY instead.** Same pathspec list as the public half — one list, both indexes, so
+  # the two halves cannot drift into disagreeing about what counts as secret-shaped.
+  if [ -d "$OPS_GIT_DIR" ] && \
+     git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    local ops_tracked
+    ops_tracked="$(git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files -- \
+      '*.keystore' '*.jks' '*.p12' '*.pem' \
+      '*key.properties' '.env' '.env.*' 'id_rsa*' \
+      'docs/environment.local.md')" # gate-allow:internal-path — asserted ABSENT from the ops index too
+    if [ -n "$ops_tracked" ]; then
+      echo "   secret-shaped files are tracked in the INTERNAL RECORD (ops mirror):"
+      echo "$ops_tracked" | sed 's/^/     /'
+      echo "   The wrap's ':!pathspec' exclusion cannot fix this — it only stops a file being"
+      echo "   ADDED. Untrack it: git ops rm --cached <path>   (L96; the blobs already in ops"
+      echo "   history stay there, and purging those is a rewrite, which is founder-owned.)"
+      bad=1
+    fi
+  fi
   # Same pinning as above — `git grep` searches an index, and a steered index is the
   # wrong index. All three git reads in this file are now unsteerable.
+  # gate-allow:dangling-path android/key.properties — gitignored by design (INV-11): every clone creates it by hand from the committed .template, so it is absent here and on CI
   # Tracking is not the only way a secret leaks. `android/key.properties` holds both
   # keystore passwords AND the path to the keystore, and it is created by hand — so it
   # inherits the shell's umask, which on this machine is 002. It sat at 0644 while the
@@ -764,6 +802,287 @@ internal_pointers() {
   return 1
 }
 run_check "internal-record pointers (D-102 / L88)" internal_pointers
+
+# ── Repo-path resolution (L88 / F48 — every internal pointer must land) ──
+# `internal_record` proves the record is not tracked here; `internal_pointers` proves
+# nothing public POINTS at it. Neither asks the simplest question about the other 460
+# files: does the path a sentence sends you to EXIST?
+#
+# It has been answered "no" twice, and both times by hand:
+#   F48  — the one `_ACTIVE` phase file cited a summary that had never existed. The
+#          reader who followed it had no way to tell a missing file from a wrong name.
+#   run 2 — a public-tracked file carried a path into the private record. That half is
+#          `internal_pointers`; this is the other half of the same defect class.
+# Nothing verified either. 225 record docs, 156 of them session archives, all of them
+# navigated BY PATH, and the only check on any of it was somebody reading carefully.
+#
+# BOTH indexes, because the record lives in the second one. The public index is
+# authoritative for a clean clone; the ops mirror (D-102) is added when it is readable.
+# When it is NOT readable but `docs/` is sitting in the working tree, this lane fails
+# CLOSED — half the corpus unchecked is not a pass, it is a lane that did not run.
+# On a clean public clone there is no record on disk and no half to miss, so CI is green
+# for the honest reason rather than the vacuous one.
+#
+# WHAT IS IN SCOPE, and how the scope was chosen. The general form — "every token with a
+# slash resolves" — was measured on this tree first: 10 081 path-shaped tokens, 6 342 of
+# them unresolved, and essentially all of the 6 342 were Dart package URIs, imports
+# relative to their own file, bare basenames in prose, and citations into the PINNED
+# rusty-kaspa crates (INV-9 provenance, and correct). That check is a heuristic tower,
+# and a check with a heuristic tower is a check that gets silenced. So the scope is the
+# part that is DECIDABLE from this repo alone:
+#
+#   * ROOT-ANCHORED — the first segment is a directory this repo actually tracks. The
+#     anchor set is derived from both indexes at run time, never written down here: a
+#     new top-level directory is covered on the day it appears (L88 — the tool that owns
+#     the surface enumerates it, not a list in a comment).
+#   * A CONCRETE FILE — the last segment ends in a source/config extension. That is what
+#     took the count from 6 342 to 66.
+#
+# Residuals, stated rather than papered over (they are gaps, not absences):
+#   - directory references (`contracts/duel_rps/`) are OUT. In prose the shape is
+#     dominated by alternation — "contracts/deps", "test/tooling", "lib/screens" all
+#     read as a slash meaning "or" — and both real incidents were file pointers.
+#   - cwd-relative paths (`./gradlew`, `./check.sh`) are OUT: prose does not carry the
+#     cwd, so the lane cannot decide them without guessing.
+#   - bare root-file names with no directory (`README.md`) are OUT — not a path.
+#   - a `file:line` citation is checked for the FILE. A line number that has since
+#     drifted onto unrelated content is a real defect this lane does not see.
+#
+# TWO HATCHES, both requiring a reason. Inline, at the site, is the primary one and
+# matches `gate-allow:internal-path`'s shape:
+#     gate-allow:dangling-path — <why this path is meant not to resolve>       (this line)
+#     gate-allow:dangling-path <target> — <why>            (that ONE target, this file)
+# It cannot be used on a line that must stay VERBATIM — pasted tool output is INV-10
+# evidence, and editing evidence to please a checker is the failure the gate exists to
+# prevent — nor in a tree whose owner is not the editor. Those go in the register, which
+# is asserted LIVE: an entry matching nothing FAILS, so it can only shrink or be
+# re-justified. The register is excluded from its own scan; it is a list of paths
+# declared not to resolve, and reading it as a source would be circular.
+DANGLING_REGISTER=".claude/gate/dangling-allow.txt" # gate-allow:internal-path — the register this lane READS; ops-mirror-only by D-102, absent on a public clone
+REPO_PATH_EXTS="md|rs|dart|sh|toml|yaml|yml|json|kts|kt|java|gradle|properties|xml|txt|lock|proto|sil|podspec|py|so|jar"
+
+repo_path_targets() {
+  local ops=0 bad=0 anchors="" d esc re hit f n rest tok text reason marker i matched
+  local checked=0 shown=0
+  local -a dirs=() reg_src=() reg_tgt=() reg_hit=() ops_scope=()
+  require_git_repo || { echo "   not a git repository — pointers unverifiable, failing closed"; return 1; }
+
+  if [ -d "$OPS_GIT_DIR" ] && \
+     git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    ops=1
+    # Derived, never named (L88): the ops index's own tracked top-level entries are
+    # exactly the internal record, and nothing else. Used as the pathspec that bounds
+    # the untracked sweep below.
+    mapfile -t ops_scope < <(
+      git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files 2>/dev/null |
+        sed -E 's|/.*||' | sort -u )
+    if [ "${#ops_scope[@]}" -eq 0 ]; then
+      echo "   the internal record's index is readable but names no paths — the untracked"
+      echo "   sweep below would be unbounded. Failing closed."
+      return 1
+    fi
+  elif [ -d "$ROOT/docs" ]; then
+    echo "   the internal record is on disk but its index is not readable"
+    echo "   (KASPAVERSE_OPS_GIT_DIR, default \$HOME/.kaspaverse-ops.git) — that is most of"
+    echo "   the corpus. Failing closed rather than passing on the half this can see."
+    return 1
+  fi
+
+  # The anchor set, derived — never hand-written (L88).
+  mapfile -t dirs < <(
+    { git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files
+      [ "$ops" = 1 ] && git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files
+    } 2>/dev/null | grep '/' | cut -d/ -f1 | sort -u )
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    echo "   no tracked directory found — the anchor set is empty, so this lane would"
+    echo "   match nothing and pass vacuously. Failing closed."
+    return 1
+  fi
+  for d in "${dirs[@]}"; do
+    case "$d" in
+      *[!A-Za-z0-9_.-]*)
+        echo "   tracked top-level entry '$d' is not a plain name — refusing to guess"
+        echo "   what it matches as a regex. Failing closed."; return 1 ;;
+    esac
+    esc="$(printf '%s' "$d" | sed 's/[.]/\\./g')"
+    anchors="${anchors:+$anchors|}$esc"
+  done
+  # `:` is in the boundary class so a package URI is not read as a repo path:
+  # `package:integration_test/integration_test.dart` collides with the tracked
+  # `integration_test/` directory and is a pub package, not a file in this tree.
+  re="(^|[^A-Za-z0-9_./+:-])(\\./)?($anchors)/[A-Za-z0-9_./+-]*\\.($REPO_PATH_EXTS)\\b"
+
+  # L106, encoded into the lane instead of trusted at review time. `checked` below is a
+  # COUNT, and the whole F2/F9 class is a check whose count silently becomes zero: if the
+  # regex, REPO_PATH_EXTS, the anchor escaping or `git grep -o`'s output shape ever stops
+  # matching, every loop body is skipped, `bad` stays 0, and this lane prints
+  # "0 repo-path reference(s) ... resolve" and PASSES — reporting agreement where it has
+  # in fact stopped looking. So: prove the matcher can SEE a reference before believing
+  # any zero it reports. The probe is built from the derived anchor set, never a literal,
+  # so it cannot drift away from what the lane actually searches for.
+  # (consensus-auditor, grounding pass 2026-08-25, C1.)
+  local probe="see ${dirs[0]}/__gate_probe__.md for the rest"
+  if ! printf '%s\n' "$probe" | grep -qE "$re"; then
+    echo "   the repo-path matcher failed its own control: it did not match"
+    echo "     $probe"
+    echo "   built from the derived anchor set. The pattern, REPO_PATH_EXTS or the anchor"
+    echo "   escaping is broken, so a zero from this lane would mean 'stopped looking',"
+    echo "   not 'nothing dangles'. Failing closed."
+    return 1
+  fi
+
+  # The register. Validated before use, like the D-102 boundary: a malformed entry STOPS
+  # the check rather than being skipped, or the lane silently enforces less than the file
+  # advertises while the entry count stays non-zero.
+  if [ -f "$ROOT/$DANGLING_REGISTER" ]; then
+    while IFS= read -r hit || [ -n "$hit" ]; do
+      case "$hit" in ''|'#'*) continue ;; esac
+      f="${hit%%|*}"; rest="${hit#*|}"
+      [ "$rest" = "$hit" ] && { echo "   register entry has no '|': $hit"; return 1; }
+      tok="${rest%%|*}"; reason="${rest#*|}"
+      if [ "$reason" = "$rest" ] || [ -z "$f" ] || [ -z "$tok" ] || [ "${#reason}" -lt 10 ]; then
+        echo "   malformed register entry — need 'source|target|reason' with a reason of"
+        echo "   at least 10 characters. An exemption without a stated reason is not an"
+        echo "   exemption, it is a silenced check:"
+        echo "     $hit"; return 1
+      fi
+      case "$f$tok" in
+        *..*) echo "   register entry uses '..', which escapes the repo: $hit"; return 1 ;;
+      esac
+      reg_src+=("$f"); reg_tgt+=("$tok"); reg_hit+=(0)
+    done < "$ROOT/$DANGLING_REGISTER"
+  fi
+
+  # `--untracked` on the public index: the gate runs BEFORE `git add`, which is exactly
+  # when a new file's pointers would otherwise be invisible (same reason as L20/L61).
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    f="${hit%%:*}"; rest="${hit#*:}"; n="${rest%%:*}"; tok="${rest#*:}"
+    tok="${tok#"${tok%%[A-Za-z0-9_.]*}"}"   # drop the leading word-boundary byte
+    tok="${tok#./}"
+    case "$tok" in *...*) continue ;; esac   # `android/.../Foo.kt` — an ellipsis, not a path
+    checked=$((checked+1))
+    [ -e "$ROOT/$tok" ] && continue
+
+    if [ ! -f "$ROOT/$f" ]; then
+      echo "   could not re-read $f to check for an exemption marker — failing closed"
+      bad=1; continue
+    fi
+    text="$(sed -n "${n}p" "$ROOT/$f" 2>/dev/null)"
+    case "$text" in
+      *gate-allow:dangling-path*)
+        reason="${text#*gate-allow:dangling-path}"
+        reason="$(printf '%s' "$reason" | sed 's/^[[:space:]:—–-]*//')"
+        if [ "${#reason}" -ge 10 ]; then continue; fi
+        echo "   $f:$n  'gate-allow:dangling-path' with no stated reason."
+        echo "     Write why the path is meant not to resolve, after the marker."
+        bad=1; continue ;;
+    esac
+
+    # File-scoped form: 'gate-allow:dangling-path <target> — <reason>' anywhere in the
+    # file exempts that ONE target throughout it. It exists because the line-scoped form
+    # cannot be paid for everywhere: `android/key.properties` is named twelve times
+    # across the signing config, its template, the release script and this file — it is
+    # gitignored by design (INV-11), created by hand from the committed template, so it
+    # is absent from every clean clone and present on the founder's box. That asymmetry
+    # is precisely the local-green/CI-red shape D-024 exists to stop, and the fix must
+    # not be twelve markers threaded through release-signing code and user-facing error
+    # strings. Scoped to a NAMED target, never to the whole file: a second broken path
+    # in the same file is still a finding.
+    marker="$(grep -m1 -F "gate-allow:dangling-path $tok" "$ROOT/$f" 2>/dev/null || true)"
+    if [ -n "$marker" ]; then
+      reason="${marker#*gate-allow:dangling-path $tok}"
+      reason="$(printf '%s' "$reason" | sed 's/^[[:space:]:—–-]*//')"
+      if [ "${#reason}" -ge 10 ]; then continue; fi
+      echo "   $f  file-scoped 'gate-allow:dangling-path $tok' with no stated reason."
+      echo "     Write why the path is meant not to resolve, after the target."
+      bad=1; continue
+    fi
+
+    matched=0
+    for i in "${!reg_src[@]}"; do
+      # shellcheck disable=SC2254 — the register entries ARE globs, deliberately
+      case "$f" in ${reg_src[$i]}) ;; *) continue ;; esac
+      case "$tok" in ${reg_tgt[$i]}) ;; *) continue ;; esac
+      reg_hit[$i]=1; matched=1; break
+    done
+    [ "$matched" = 1 ] && continue
+
+    if [ "$shown" -eq 0 ]; then
+      echo "   these tracked files point at repo paths that do not exist:"
+    fi
+    shown=$((shown+1))
+    [ "$shown" -le 40 ] && echo "     $f:$n  ->  $tok"
+    bad=1
+  # `cd "$ROOT"` inside the subshell, and it is load-bearing: `git grep` walks from the
+  # CURRENT DIRECTORY, and with a cwd outside the work tree it silently answers from the
+  # INDEX instead of the working tree — a lane that cannot see the edit in front of it,
+  # reporting green. Caught by the clean-clone control, which is the only place the two
+  # ever differed. Every other git read here is index-only, so only this one cares.
+  done < <(
+    cd "$ROOT" || exit 0
+    git --git-dir="$ROOT/.git" --work-tree="$ROOT" grep --untracked -nIoE "$re" \
+        -- ":!$DANGLING_REGISTER" 2>/dev/null
+    # The ops half needs `--untracked` for the SAME reason the public half does, and it
+    # needs it harder: the wrap ritual's own output IS new record files (a session prompt,
+    # a summary, NEXT_SESSION.md), written and gated BEFORE `git ops add` — and F48, the
+    # incident this lane exists for, was a phase file citing a summary that had never
+    # existed. Without this the lane is blind at exactly the moment it matters.
+    #
+    # `--no-exclude-standard` is required and is not a loosening: the ops mirror's
+    # info/exclude is literally `*` (which is why the wrap uses `git ops add -f`), and
+    # `git grep --untracked` honours standard excludes — so the plain form returns ZERO
+    # from the internal record, indistinguishable from "nothing to find". Scoped to the
+    # ops index's OWN tracked top-level entries, derived not hand-written, so turning
+    # excludes off cannot pull in rust/target/, build/ or .dart_tool/: those are not in
+    # that index, so they are not in the pathspec. (consensus-auditor 2026-08-25, C2.)
+    [ "$ops" = 1 ] && git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" \
+        grep --untracked --no-exclude-standard -nIoE "$re" \
+        -- "${ops_scope[@]}" ":!$DANGLING_REGISTER" 2>/dev/null
+  )
+
+  [ "$shown" -gt 40 ] && echo "     ... and $((shown-40)) more"
+  if [ "$shown" -gt 0 ]; then
+    echo "   A path in a sentence is an instruction. Fix: retarget it to where the file"
+    echo "   actually is, drop the reference if the target is genuinely gone, or — if it"
+    echo "   is MEANT not to resolve (a template, a rejected path, another project's"
+    echo "   tree) — say so, either inline with 'gate-allow:dangling-path — <reason>' or"
+    echo "   as a 'source|target|reason' line in the register this lane reads."
+  fi
+
+  # Liveness. An exemption that matches nothing is a stale excuse, and a register of
+  # stale excuses is how this lane would rot into decoration (F9's shape: deleting more
+  # must never make the gate happier).
+  for i in "${!reg_src[@]}"; do
+    [ "${reg_hit[$i]}" = 1 ] && continue
+    echo "   STALE exemption — it matches no dangling pointer any more:"
+    echo "     ${reg_src[$i]}|${reg_tgt[$i]}"
+    echo "   The reference was fixed, moved, or now resolves. Delete the line."
+    bad=1
+  done
+
+  # The second half of C1. The probe above proves the PATTERN works; this proves the
+  # SCAN ran. A repo whose tracked corpus cites no repo path at all is not a state this
+  # project can reach — this repo's own router is a routing table of them — so `checked == 0`
+  # means the git-grep invocation produced nothing, not that there was nothing to find.
+  if [ "$checked" -eq 0 ]; then
+    echo "   the scan examined ZERO repo-path references, in a tree whose own router is a"
+    echo "   table of them. The matcher passed its control, so the grep invocation itself"
+    echo "   returned nothing — a lane that has stopped looking, not a clean tree."
+    echo "   Failing closed rather than reporting a vacuous pass."
+    return 1
+  fi
+
+  if [ "$bad" -eq 0 ]; then
+    if [ "$ops" = 1 ]; then
+      echo "   $checked repo-path reference(s) across both indexes resolve; ${#reg_src[@]} live exemption(s)"
+    else
+      echo "   $checked repo-path reference(s) in the public index resolve (no internal record on disk)"
+    fi
+  fi
+  return $bad
+}
+run_check "repo-path resolution (L88 / F48)" repo_path_targets
 
 # ── Roster assertion (the fix for the whole F2/F9/S4-11/S4-54 class) ──
 # Everything above reports what it DID. This reports what nothing did. A lane on

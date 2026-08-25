@@ -10,6 +10,7 @@
 # publishing it (and pushing the tag) happens from the founder's terminal.
 # Setup, one-time: generate an upload keystore, then copy
 # android/key.properties.template to android/key.properties and fill it in.
+# gate-allow:dangling-path android/key.properties — gitignored by design (INV-11): every clone creates it by hand from the committed .template, so it is absent here and on CI
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

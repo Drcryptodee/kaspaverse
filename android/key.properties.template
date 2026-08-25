@@ -1,3 +1,4 @@
+# gate-allow:dangling-path android/key.properties — gitignored by design (INV-11): every clone creates it by hand from the committed .template, so it is absent here and on CI
 # Release-signing credentials — TEMPLATE (this file is committed; the real
 # android/key.properties is gitignored and the gate fails if one is ever
 # tracked). Copy this file to android/key.properties

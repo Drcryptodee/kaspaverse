@@ -11,6 +11,7 @@ plugins {
 // gitignored, never committed (gate hygiene fails on a tracked copy). Template:
 // android/key.properties.template — copy it to android/key.properties and
 // fill in the keystore path, alias and passwords. Never committed.
+// gate-allow:dangling-path android/key.properties — gitignored by design (INV-11): every clone creates it by hand from the committed .template, so it is absent here and on CI
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
