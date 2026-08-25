@@ -51,7 +51,15 @@ pub struct TemplateId(pub Hash);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CovenantState(pub Vec<u8>);
 
-/// The redeem preimage: template ‖ current state, revealed at spend — the
+/// The redeem preimage: the template program together with the current covenant
+/// state, revealed at spend — the
+///
+/// ⚠ NOT literally `template ‖ state` in that order (corrected 2026-08-25). State
+/// must be on the stack before the code that consumes it runs, so the state cannot
+/// sit after the program body. The exact byte layout is deliberately not pinned
+/// here — the toolchain decision is a P3 entry gate and the reference compiler
+/// ships daily. Anything that depends on the ordering must read it from the
+/// compiled artifact, never from this comment.
 /// only thing that can spend the UTXO (lexicon §3.1). Zeroized on drop as
 /// hygiene: for a public state machine it is class-1 derivable material, but
 /// the same type will carry `virtual`-slot expansions whose loss freezes the
@@ -292,7 +300,8 @@ pub struct InputWitnessTemplate {
 /// **Open: this expectation cannot name the successor's *template*, so it
 /// describes single-template families only (D-117, routed to C3).** To check
 /// the promise, the verifier must re-derive the successor output's script
-/// public key = P2SH(template ‖ state); the only template it can reach is
+/// public key = P2SH(redeem preimage — see the ordering note above, it is not
+/// literally template-then-state); the only template it can reach is
 /// [`CovenantTransition::template`], which is the template being *spent*. In
 /// a MUX family the successor is a different template by construction —
 /// chess routes `Mux` → `Pawn` → `Mux` across twelve of them
@@ -347,7 +356,8 @@ pub trait CovenantTransition: Send + Sync {
     /// The template this implementation speaks for.
     fn template(&self) -> TemplateId;
 
-    /// Compute the redeem preimage (template ‖ state) whose P2SH hash is the
+    /// Compute the redeem preimage (program + state; see the ordering note on
+    /// the type above) whose P2SH hash is the
     /// covenant's script public key. Pure; used by genesis, by spend
     /// planning, and by the watcher's re-derivation checks.
     fn redeem_preimage(&self, state: &CovenantState) -> Result<RedeemPreimage>;
