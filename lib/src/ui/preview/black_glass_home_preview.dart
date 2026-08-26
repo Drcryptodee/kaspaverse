@@ -750,44 +750,53 @@ class _NetworkChip extends StatelessWidget {
     return Semantics(
       button: true,
       label: 'Mainnet. Open network and node settings',
-      child: InkWell(
-        onTap: () {},
-        borderRadius: BorderRadius.circular(KvRadius.pill),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
-          padding: const EdgeInsets.symmetric(
-            horizontal: KvSpace.sm,
-            vertical: 5,
+      child: Builder(
+        builder: (context) => InkWell(
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const _NetworkPreview()),
           ),
-          decoration: BoxDecoration(
-            color: KvColor.control,
-            borderRadius: BorderRadius.circular(KvRadius.control),
-            border: Border.all(color: KvColor.edgeHi),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const _Lamp(KvColor.ok),
-              const SizedBox(width: 7),
-              const Text(
-                'Mainnet',
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 12,
-                  height: 16 / 12,
-                  fontWeight: FontWeight.w500,
-                  color: KvColor.inkDim,
+          borderRadius: BorderRadius.circular(KvRadius.control),
+          // A 28dp visual inside a 48dp target. It sits beside a 42dp balance
+          // and was competing with it; a network chip is a way OUT of this
+          // screen, not a thing on it. The smaller visual is declared (BG-12).
+          child: SizedBox(
+            height: KvSpace.touchTarget,
+            child: Center(
+              child: Container(
+                height: 28,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: KvColor.control,
+                  borderRadius: BorderRadius.circular(KvRadius.control),
+                  border: Border.all(color: KvColor.edgeHi),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const _Lamp(KvColor.ok),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'Mainnet',
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 11,
+                        height: 15 / 11,
+                        fontWeight: FontWeight.w500,
+                        color: KvColor.inkDim,
+                      ),
+                    ),
+                    const SizedBox(width: 3),
+                    CustomPaint(
+                      size: const Size(11, 11),
+                      painter: const _GlyphPainter(
+                        _Glyph.chevron,
+                        tone: KvColor.inkMeta,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 5),
-              CustomPaint(
-                size: const Size(12, 12),
-                painter: const _GlyphPainter(
-                  _Glyph.chevron,
-                  tone: KvColor.inkMeta,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -5604,6 +5613,285 @@ class _Gate extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Network & connection.
+//
+// This is where four open threads land, so it is built before the rest of the
+// sweep: the node picker the sovereign-node session shipped with no surface,
+// the explorer choice (D-192), the fiat rate's source (D-193), and the
+// selectable ground when UX-3 adds it.
+//
+// A sovereignty statement wearing a diagnostic's precision: who serves you,
+// how freshly, and the standing offer to serve yourself.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _NetworkPreview extends StatefulWidget {
+  const _NetworkPreview();
+
+  @override
+  State<_NetworkPreview> createState() => _NetworkPreviewState();
+}
+
+class _NetworkPreviewState extends State<_NetworkPreview> {
+  bool _ownNode = false;
+  Explorer _explorer = Explorer.kaspaOrg;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: 'Node & connection',
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                children: [
+                  const SizedBox(height: KvSpace.m),
+                  const _RuledLabel('Serving you'),
+                  const SizedBox(height: KvSpace.s),
+                  Container(
+                    padding: const EdgeInsets.all(KvSpace.m),
+                    decoration: BoxDecoration(
+                      color: KvColor.plate,
+                      borderRadius: BorderRadius.circular(KvRadius.panel),
+                      border: Border.all(color: KvColor.plateEdge),
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            const _Lamp(KvColor.ok),
+                            const SizedBox(width: KvSpace.sm),
+                            Expanded(
+                              child: Text(
+                                _ownNode
+                                    ? '192.168.1.40:16110'
+                                    : 'a public community node',
+                                style: const TextStyle(
+                                  fontFamily: KvFont.mono,
+                                  fontSize: 13,
+                                  height: 18 / 13,
+                                  color: KvColor.ink,
+                                ),
+                              ),
+                            ),
+                            const _Cadence(running: true),
+                          ],
+                        ),
+                        const SizedBox(height: KvSpace.sm),
+                        const _RowRule(),
+                        const _DetailRow('Latency', '84 ms', mono: true),
+                        const _RowRule(),
+                        const _DetailRow('DAA', '523,216,421', mono: true),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.l),
+
+                  // The node picker the sovereign-node session built the Rust,
+                  // bridge and service layer for, with no way to reach it.
+                  const _RuledLabel('Use my own node'),
+                  const SizedBox(height: KvSpace.s),
+                  _Toggle(
+                    on: _ownNode,
+                    title: 'Pin a node I run',
+                    sub: _ownNode
+                        ? 'A pinned node never silently falls back.'
+                        : 'The wallet reaches Kaspa through public community '
+                              'nodes.',
+                    onTap: () => setState(() => _ownNode = !_ownNode),
+                  ),
+                  if (_ownNode) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    const _AddressField(
+                      address: '192.168.1.40:16110',
+                      invalid: false,
+                    ),
+                  ],
+                  const SizedBox(height: KvSpace.l),
+
+                  const _RuledLabel('Explorer'),
+                  const SizedBox(height: KvSpace.s),
+                  Row(
+                    children: [
+                      for (final e in Explorer.values) ...[
+                        _Pick(
+                          label: e.label,
+                          selected: e == _explorer,
+                          onTap: () => setState(() => _explorer = e),
+                        ),
+                        const SizedBox(width: KvSpace.s),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Where “View in explorer” goes. It hands over the '
+                    'transaction id and your network address.',
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      height: 17 / 12,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.l),
+
+                  const _RuledLabel('Rate'),
+                  const SizedBox(height: KvSpace.s),
+                  const _Toggle(
+                    on: true,
+                    title: 'Show a fiat value',
+                    sub:
+                        'api.kaspa.org · a price is the one thing here '
+                        'consensus cannot check.',
+                    onTap: null,
+                  ),
+                  const SizedBox(height: KvSpace.l),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Toggle extends StatelessWidget {
+  const _Toggle({
+    required this.on,
+    required this.title,
+    required this.sub,
+    required this.onTap,
+  });
+
+  final bool on;
+  final String title;
+  final String sub;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(KvRadius.panel),
+      child: Container(
+        padding: const EdgeInsets.all(KvSpace.m),
+        decoration: BoxDecoration(
+          color: KvColor.plate,
+          borderRadius: BorderRadius.circular(KvRadius.panel),
+          border: Border.all(color: KvColor.plateEdge),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 15,
+                      height: 20 / 15,
+                      fontWeight: FontWeight.w600,
+                      color: KvColor.ink,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    sub,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      height: 17 / 12,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: KvSpace.sm),
+            // "On" is a bright neutral, not teal and not green: a toggle is
+            // state the user owns, not a value the chain reports (BG-7).
+            Container(
+              width: 44,
+              height: 26,
+              padding: const EdgeInsets.all(3),
+              alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+              decoration: BoxDecoration(
+                color: on ? KvColor.ink : KvColor.control,
+                borderRadius: BorderRadius.circular(KvRadius.control),
+                border: Border.all(color: on ? KvColor.ink : KvColor.edgeHi),
+              ),
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: on ? KvColor.abyss : KvColor.inkMeta,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Pick extends StatelessWidget {
+  const _Pick({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+        child: Container(
+          height: KvSpace.touchTarget,
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected ? KvColor.keyPressed : KvColor.control,
+            borderRadius: BorderRadius.circular(KvRadius.control),
+            border: Border.all(
+              color: selected ? KvColor.edgeHi : KvColor.hairline,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: 12,
+              color: selected ? KvColor.ink : KvColor.inkMeta,
+            ),
+          ),
+        ),
       ),
     );
   }
