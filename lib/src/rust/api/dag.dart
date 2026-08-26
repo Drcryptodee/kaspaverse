@@ -162,7 +162,7 @@ class DagStatusDto {
   /// on the existing pull).
   final bool osOffline;
 
-  /// The node the user pinned, or `None` for public node discovery (D-185).
+  /// The node the user pinned, or `None` for public node discovery (D-187).
   ///
   /// This is what makes a pinned failure VISIBLE. `endpoint` only speaks
   /// once something has connected, so a pinned node that is down leaves it
@@ -210,7 +210,7 @@ class DagStatusDto {
           pinnedNode == other.pinnedNode;
 }
 
-/// The user's node choice (D-185) — the INV-8 escape hatch made reachable.
+/// The user's node choice (D-187) — the INV-8 escape hatch made reachable.
 ///
 /// `url` is what they chose; `active_url` is what the link is actually bound
 /// to right now. When a node is pinned those agree or the second is `None`
