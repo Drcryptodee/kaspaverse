@@ -27,6 +27,7 @@ library;
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
@@ -213,6 +214,11 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
                       padding: EdgeInsets.only(bottom: KvSpace.m),
                       child: _DegradedNotice(),
                     ),
+                  ),
+                if (_state != MoneyState.empty)
+                  SliverPersistentHeader(
+                    pinned: true,
+                    delegate: _SectionHeader(state: _state, variant: _variant),
                   ),
                 SliverToBoxAdapter(
                   child: _Feed(state: _state, variant: _variant),
@@ -833,16 +839,21 @@ class _ValueLine extends StatelessWidget {
             fontFeatures: [FontFeature.tabularFigures()],
           ),
         ),
-        const SizedBox(width: KvSpace.s),
-        Text(
-          r == null ? 'no rate yet' : ageLabel,
-          style: const TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 11,
-            height: 15 / 11,
-            color: KvColor.etch,
+        // BG-8, as amended at D-187: a fresh reading says nothing. The age
+        // appears only when the rate has gone stale enough to mislead, which
+        // is the same rule the trust line follows.
+        if (r == null || ageLabel.isNotEmpty) ...[
+          const SizedBox(width: KvSpace.s),
+          Text(
+            r == null ? 'no rate yet' : ageLabel,
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 11,
+              height: 15 / 11,
+              color: KvColor.etch,
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -1211,6 +1222,74 @@ const _entries = <_Entry>[
   ),
 ];
 
+/// The section header pins under the plate: scrolling a ledger should never
+/// leave you unsure which ledger you are in.
+class _SectionHeader extends SliverPersistentHeaderDelegate {
+  const _SectionHeader({required this.state, required this.variant});
+
+  final MoneyState state;
+  final HeroVariant variant;
+
+  @override
+  double get minExtent => 40;
+
+  @override
+  double get maxExtent => 40;
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
+    return Container(
+      color: KvColor.abyss,
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      alignment: Alignment.centerLeft,
+      child: Row(
+        children: [
+          if (variant.instrumentRegister) ...[
+            Container(width: 2, height: 10, color: KvColor.primaryMuted),
+            const SizedBox(width: KvSpace.s),
+            const _MicroLabel('ACTIVITY'),
+          ] else
+            const Text(
+              'Activity',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 20 / 15,
+                fontWeight: FontWeight.w600,
+                color: KvColor.ink,
+              ),
+            ),
+          if (state == MoneyState.degraded) ...[
+            const Spacer(),
+            const Text(
+              'Complete to 14:02',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                height: 16 / 12,
+                color: KvColor.warn,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_SectionHeader old) =>
+      old.state != state || old.variant != variant;
+}
+
+/// A hairline between two facts.
+class _RowRule extends StatelessWidget {
+  const _RowRule();
+
+  @override
+  Widget build(BuildContext context) =>
+      Container(height: 1, color: KvColor.plateDivider);
+}
+
 class _Feed extends StatelessWidget {
   const _Feed({required this.state, required this.variant});
 
@@ -1223,44 +1302,7 @@ class _Feed extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-          child: Row(
-            children: [
-              if (variant.instrumentRegister) ...[
-                Container(width: 2, height: 10, color: KvColor.primaryMuted),
-                const SizedBox(width: KvSpace.s),
-                const _MicroLabel('ACTIVITY'),
-              ] else
-                const Text(
-                  'Activity',
-                  style: TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 15,
-                    height: 20 / 15,
-                    fontWeight: FontWeight.w600,
-                    color: KvColor.ink,
-                  ),
-                ),
-              if (state == MoneyState.degraded) ...[
-                const Spacer(),
-                if (variant.instrumentRegister)
-                  const _MicroLabel('COMPLETE TO 14:02', tone: KvColor.warn)
-                else
-                  const Text(
-                    'Complete to 14:02',
-                    style: TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 12,
-                      height: 16 / 12,
-                      color: KvColor.warn,
-                    ),
-                  ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: KvSpace.m),
+        const SizedBox(height: KvSpace.s),
         for (final e in _entries) _Row(entry: e, stale: state.stale),
       ],
     );
@@ -1451,7 +1493,9 @@ class _ThumbActions extends StatelessWidget {
               primary: !empty,
               // BG-12: a disabled control always says why, in words.
               disabledReason: empty ? 'Nothing to send yet' : null,
-              onTap: () {},
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const _SendPreview()),
+              ),
             ),
           ),
         ],
@@ -1990,14 +2034,20 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
                   const SizedBox(height: KvSpace.xl),
 
                   // ── The truth rows ────────────────────────────────────────
+                  // Ruled rows: the hairline is what turns a list of facts
+                  // into a ledger you can read down.
                   const _DetailRow(
                     'From',
                     'kaspa:qz0k4vnr…s8fjm2wa',
                     mono: true,
                   ),
+                  const _RowRule(),
                   const _DetailRow('Fee', '0.00001000 KAS', mono: true),
+                  const _RowRule(),
                   const _DetailRow('Accepted', '14:02:41 · 26 Aug 2026'),
+                  const _RowRule(),
                   const _DetailRow('DAA', '523,216,421', mono: true),
+                  const _RowRule(),
                   const _DetailRow(
                     'Transaction id',
                     'a91f0c…4e77b2',
@@ -2135,9 +2185,10 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
 }
 
 class _DetailRail extends StatelessWidget {
-  const _DetailRail({required this.onBack});
+  const _DetailRail({required this.onBack, this.title = 'Transaction'});
 
   final VoidCallback onBack;
+  final String title;
 
   @override
   Widget build(BuildContext context) {
@@ -2170,9 +2221,9 @@ class _DetailRail extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          const Text(
-            'Transaction',
-            style: TextStyle(
+          Text(
+            title,
+            style: const TextStyle(
               fontFamily: KvFont.ui,
               fontSize: 15,
               fontWeight: FontWeight.w600,
@@ -2906,6 +2957,870 @@ class _PanelAction extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Send — amount and destination. NOTHING signs here.
+//
+// Entry is cheap and reversible, so the screen stays light: no ceremony, no
+// warnings, no friction proportional to a risk that has not been taken yet.
+// Every blocked state says why in words and in amber, because amber means "this
+// needs checking" and red would claim money is at risk when none is (BG-7).
+//
+// The amount pad is the secure keypad in its PLAIN skin — the same primitive
+// that takes a passphrase. One muscle memory for the whole app, one codepath to
+// audit, and amounts inherit the no-system-keyboard guarantee for free.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SendState { empty, belowMinimum, invalidAddress, ready, everything }
+
+extension on SendState {
+  String get label => switch (this) {
+    SendState.empty => 'empty',
+    SendState.belowMinimum => 'below min',
+    SendState.invalidAddress => 'bad address',
+    SendState.ready => 'ready',
+    SendState.everything => 'everything',
+  };
+}
+
+const _available = '1,284.50270000';
+
+class _SendPreview extends StatefulWidget {
+  const _SendPreview();
+
+  @override
+  State<_SendPreview> createState() => _SendPreviewState();
+}
+
+class _SendPreviewState extends State<_SendPreview> {
+  SendState _state = SendState.ready;
+
+  String get _amount => switch (_state) {
+    SendState.empty => '0',
+    SendState.belowMinimum => '0.00000042',
+    SendState.everything => '1,284.50169000',
+    _ => '12.40000000',
+  };
+
+  String get _address => switch (_state) {
+    SendState.empty => '',
+    SendState.invalidAddress => 'kaspa:qpzt3vw8x2mne4ka0000',
+    _ => 'kaspa:qpzt3vw8…x2mne4ka',
+  };
+
+  bool get _blocked =>
+      _state == SendState.empty ||
+      _state == SendState.belowMinimum ||
+      _state == SendState.invalidAddress;
+
+  String? get _why => switch (_state) {
+    SendState.empty => 'Enter an amount and a destination',
+    SendState.belowMinimum => 'This amount is below the network minimum',
+    SendState.invalidAddress => 'That address is not a mainnet Kaspa address',
+    _ => null,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: 'Send',
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                children: [
+                  const SizedBox(height: KvSpace.m),
+                  const _SoftLabel('Amount'),
+                  const SizedBox(height: 6),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          _amount,
+                          style: TextStyle(
+                            fontFamily: KvFont.mono,
+                            fontSize: 32,
+                            height: 38 / 32,
+                            fontWeight: FontWeight.w500,
+                            color: _state == SendState.empty
+                                ? KvColor.inkMeta
+                                : KvColor.ink,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        const Text(
+                          'KAS',
+                          style: TextStyle(
+                            fontFamily: KvFont.mono,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.6,
+                            color: KvColor.primaryMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'available $_available',
+                    style: const TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 12,
+                      height: 16 / 12,
+                      color: KvColor.inkMetaLow,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.m),
+                  const SizedBox(
+                    height: 5,
+                    width: double.infinity,
+                    child: CustomPaint(
+                      painter: _DatumPainter(graduated: false),
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.l),
+
+                  const _SoftLabel('To'),
+                  const SizedBox(height: 6),
+                  _AddressField(
+                    address: _address,
+                    invalid: _state == SendState.invalidAddress,
+                  ),
+
+                  if (_state == SendState.everything) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    // The one chip this screen ever wears. Amber because the
+                    // truth needs attention, not because the user is wrong.
+                    const _Notice(
+                      'Sending everything leaves 0.00101000 KAS behind to '
+                      'cover the fee. Nothing else will fit.',
+                    ),
+                  ],
+                  if (_state == SendState.belowMinimum) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    const _Notice(
+                      'The network will not relay less than 0.00002036 KAS. '
+                      'You are 0.00001994 KAS short.',
+                    ),
+                  ],
+                  if (_state == SendState.invalidAddress) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    const _Notice(
+                      'That is 24 characters. A mainnet address is 67, and '
+                      'this one fails its checksum.',
+                    ),
+                  ],
+                  const SizedBox(height: KvSpace.l),
+                  const _Keypad(),
+                  const SizedBox(height: KvSpace.l),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                0,
+                KvSpace.gutter,
+                KvSpace.m,
+              ),
+              child: Column(
+                children: [
+                  _Action(
+                    label: 'Review this send',
+                    primary: !_blocked,
+                    disabledReason: _why,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const _ConfirmPreview(),
+                      ),
+                    ),
+                  ),
+                  if (!_blocked) ...[
+                    const SizedBox(height: KvSpace.s),
+                    const Text(
+                      'Nothing is signed until you hold to send.',
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 11,
+                        height: 15 / 11,
+                        color: KvColor.inkMetaLow,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            _Switcher(
+              values: SendState.values,
+              value: _state,
+              label: (v) => v.label,
+              onChanged: (v) => setState(() => _state = v),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AddressField extends StatelessWidget {
+  const _AddressField({required this.address, required this.invalid});
+
+  final String address;
+  final bool invalid;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.m,
+        vertical: KvSpace.sm,
+      ),
+      constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+      decoration: BoxDecoration(
+        // Entry is sunken (§1.1), and a blocked field is amber — never red.
+        color: KvColor.well,
+        borderRadius: BorderRadius.circular(KvRadius.key),
+        border: Border.all(color: invalid ? KvColor.warn : KvColor.hairline),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              address.isEmpty ? 'Paste or scan a Kaspa address' : address,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 13,
+                height: 22 / 13,
+                color: address.isEmpty ? KvColor.inkMeta : KvColor.ink,
+              ),
+            ),
+          ),
+          if (address.isNotEmpty) ...[
+            const SizedBox(width: KvSpace.s),
+            const Text(
+              'Clear',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: KvColor.primaryMuted,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Amber, with the exact number. "Too small" is a shrug; "you are 0.00001994
+/// short" is something the user can act on (BG-11's three beats, compressed).
+class _Notice extends StatelessWidget {
+  const _Notice(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.m,
+        vertical: KvSpace.sm,
+      ),
+      decoration: BoxDecoration(
+        color: KvColor.noticeWarnFill,
+        borderRadius: BorderRadius.circular(KvRadius.plate),
+        border: Border.all(color: KvColor.noticeWarnEdge),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 5),
+            child: _Lamp(KvColor.warn),
+          ),
+          const SizedBox(width: KvSpace.sm),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 13,
+                height: 19 / 13,
+                color: KvColor.inkDim,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The secure keypad in its plain skin. The masked skin takes passphrases and
+/// recovery words; this one takes amounts. Same primitive, same press feel,
+/// same guarantee that the system keyboard never sees the input.
+class _Keypad extends StatelessWidget {
+  const _Keypad();
+
+  static const _keys = [
+    '1', '2', '3', //
+    '4', '5', '6', //
+    '7', '8', '9', //
+    '.', '0', '⌫', //
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.count(
+      crossAxisCount: 3,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      mainAxisSpacing: KvSpace.s,
+      crossAxisSpacing: KvSpace.s,
+      childAspectRatio: 2.1,
+      children: [
+        for (final k in _keys)
+          Material(
+            color: KvColor.key,
+            borderRadius: BorderRadius.circular(KvRadius.key),
+            child: InkWell(
+              onTap: () {},
+              borderRadius: BorderRadius.circular(KvRadius.key),
+              child: Container(
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(KvRadius.key),
+                  border: Border.all(color: KvColor.keyEdge),
+                ),
+                child: Text(
+                  k,
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w500,
+                    color: k == '⌫' ? KvColor.inkMeta : KvColor.ink,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The signing ceremony — one surface, every action.
+//
+// It restates what the wallet ACTUALLY BUILT, never what was typed: all eight
+// decimals, the full destination chunked in fours, the exact fee, the change
+// coming back. Nothing signs on a tap; the hold is 800ms and never shortens,
+// including under reduced motion; back always cancels safely.
+//
+// There is no undo on an unpatchable ledger, so every gram of safety in this
+// app lives on this screen, before the signature.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SignPhase { review, holding, prepared, sent, partial, failed }
+
+extension on SignPhase {
+  String get label => switch (this) {
+    SignPhase.review => 'review',
+    SignPhase.holding => 'holding',
+    SignPhase.prepared => 'staged wait',
+    SignPhase.sent => 'sent',
+    SignPhase.partial => 'partial',
+    SignPhase.failed => 'failed',
+  };
+}
+
+class _ConfirmPreview extends StatefulWidget {
+  const _ConfirmPreview();
+
+  @override
+  State<_ConfirmPreview> createState() => _ConfirmPreviewState();
+}
+
+class _ConfirmPreviewState extends State<_ConfirmPreview>
+    with SingleTickerProviderStateMixin {
+  SignPhase _phase = SignPhase.review;
+  int _stage = 0;
+
+  /// **800ms, and it is a constant with no configuration surface** (BG-6).
+  late final AnimationController _hold =
+      AnimationController(vsync: this, duration: KvMotion.deliberate)
+        ..addStatusListener((s) {
+          if (s == AnimationStatus.completed) _stagedWait();
+        });
+
+  @override
+  void dispose() {
+    _hold.dispose();
+    super.dispose();
+  }
+
+  void _down(_) {
+    if (_phase != SignPhase.review) return;
+    setState(() => _phase = SignPhase.holding);
+    _hold.forward();
+  }
+
+  /// Releasing early always cancels. The ring falls back fast and decelerating
+  /// — an early release is not a failure and must not feel like one.
+  void _up(_) {
+    if (_hold.isCompleted) return;
+    _hold.reverse();
+    setState(() => _phase = SignPhase.review);
+  }
+
+  /// The honest shape of a measured 1.3–3.8s submit→accepted. Each stage is
+  /// NAMED, because an indefinite spinner over money is a lie about progress.
+  void _stagedWait() {
+    setState(() {
+      _phase = SignPhase.prepared;
+      _stage = 0;
+    });
+    Future<void>.delayed(const Duration(milliseconds: 700), () {
+      if (mounted) setState(() => _stage = 1);
+    });
+    Future<void>.delayed(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _stage = 2);
+    });
+    Future<void>.delayed(const Duration(milliseconds: 2400), () {
+      if (mounted) setState(() => _phase = SignPhase.sent);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: 'Review this send',
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                children: [
+                  const SizedBox(height: KvSpace.m),
+                  const _SoftLabel('Sending'),
+                  const SizedBox(height: 6),
+                  // Every one of the eight decimals. This is a signing
+                  // surface, and a hidden digit is a lie of omission (BG-6).
+                  const Text(
+                    '12.40000000 KAS',
+                    style: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 32,
+                      height: 38 / 32,
+                      fontWeight: FontWeight.w500,
+                      color: KvColor.ink,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.l),
+                  const _SoftLabel('To'),
+                  const SizedBox(height: 6),
+                  const _ChunkedAddress(),
+                  const SizedBox(height: KvSpace.l),
+                  const _RowRule(),
+                  const _DetailRow('Fee', '0.00001000 KAS', mono: true),
+                  const _RowRule(),
+                  const _DetailRow(
+                    'Change back',
+                    '1,272.10269000 KAS',
+                    mono: true,
+                  ),
+                  const _RowRule(),
+                  const SizedBox(height: KvSpace.m),
+                  Row(
+                    children: [
+                      const _Lamp(KvColor.risk),
+                      const SizedBox(width: KvSpace.sm),
+                      const Expanded(
+                        child: Text(
+                          'Once this is signed it cannot be reversed.',
+                          style: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 13,
+                            height: 18 / 13,
+                            color: KvColor.inkDim,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: KvSpace.l),
+                  if (_phase == SignPhase.prepared) _StagedWait(stage: _stage),
+                  if (_phase == SignPhase.sent) const _Outcome.sent(),
+                  if (_phase == SignPhase.partial) const _Outcome.partial(),
+                  if (_phase == SignPhase.failed) const _Outcome.failed(),
+                  const SizedBox(height: KvSpace.l),
+                ],
+              ),
+            ),
+            if (_phase == SignPhase.review || _phase == SignPhase.holding)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  KvSpace.gutter,
+                  0,
+                  KvSpace.gutter,
+                  KvSpace.m,
+                ),
+                child: _HoldToSign(progress: _hold, onDown: _down, onUp: _up),
+              ),
+            _Switcher(
+              values: SignPhase.values,
+              value: _phase,
+              label: (v) => v.label,
+              onChanged: (v) => setState(() {
+                _phase = v;
+                _stage = 2;
+                _hold.value = v == SignPhase.review ? 0 : 1;
+              }),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Groups of four, with the first and last group carrying extra weight. An
+/// address-poisoning attack buys a prefix and a suffix that LOOK right; the
+/// weighting puts the eye exactly where the attack has to succeed.
+class _ChunkedAddress extends StatelessWidget {
+  const _ChunkedAddress();
+
+  static const _groups = [
+    'qpzt',
+    '3vw8',
+    'mn4k',
+    'a7ep',
+    '0lxh',
+    '2wnf',
+    'scjg',
+    '8y5u',
+    '3e6v',
+    'ddwm',
+    '0s3j',
+    'np4k',
+    'hce2',
+    'mua7',
+    'x2mne4ka',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(KvSpace.m),
+      decoration: BoxDecoration(
+        color: KvColor.well,
+        borderRadius: BorderRadius.circular(KvRadius.plate),
+        border: Border.all(color: KvColor.hairline),
+      ),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        children: [
+          const Text(
+            'kaspa:',
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: 13,
+              height: 20 / 13,
+              color: KvColor.inkMeta,
+            ),
+          ),
+          for (var i = 0; i < _groups.length; i++)
+            Text(
+              _groups[i],
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 13,
+                height: 20 / 13,
+                fontWeight: (i == 0 || i == _groups.length - 1)
+                    ? FontWeight.w600
+                    : FontWeight.w400,
+                color: (i == 0 || i == _groups.length - 1)
+                    ? KvColor.ink
+                    : KvColor.inkDim,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The hold. A 44dp ring inside a 64dp pill, filling over 800ms, with the
+/// haptic at the threshold. **No tap path bypasses it**, and the label names
+/// the action and its object — never "Confirm" (BG-11).
+class _HoldToSign extends StatelessWidget {
+  const _HoldToSign({
+    required this.progress,
+    required this.onDown,
+    required this.onUp,
+  });
+
+  final Animation<double> progress;
+  final void Function(TapDownDetails) onDown;
+  final void Function(TapUpDetails) onUp;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: onDown,
+      onTapUp: onUp,
+      onTapCancel: () => onUp(TapUpDetails(kind: PointerDeviceKind.touch)),
+      child: AnimatedBuilder(
+        animation: progress,
+        builder: (context, _) {
+          final t = progress.value;
+          return Container(
+            height: 64,
+            decoration: BoxDecoration(
+              color: KvColor.chip,
+              borderRadius: BorderRadius.circular(KvRadius.pill),
+              border: Border.all(
+                color: t > 0 ? KvColor.primaryMuted : KvColor.edgeHi,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: CustomPaint(painter: _RingPainter(t)),
+                ),
+                const SizedBox(width: KvSpace.sm),
+                const Text(
+                  'Hold to send 12.40000000 KAS',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    color: KvColor.ink,
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  const _RingPainter(this.t);
+
+  final double t;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = size.center(Offset.zero);
+    final r = size.width / 2 - 3;
+    canvas.drawCircle(
+      c,
+      r,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = KvColor.edgeHi,
+    );
+    if (t <= 0) return;
+    // The one filling ring — one of exactly three things that emit (BG-2).
+    canvas.drawArc(
+      Rect.fromCircle(center: c, radius: r),
+      -math.pi / 2,
+      2 * math.pi * t,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..strokeCap = StrokeCap.round
+        ..color = KvColor.primary,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter old) => old.t != t;
+}
+
+/// Signed → broadcast → accepted, each named as it happens. A single spinner
+/// for two and a half seconds tells the user nothing about which half of the
+/// operation could still fail.
+class _StagedWait extends StatelessWidget {
+  const _StagedWait({required this.stage});
+
+  final int stage;
+
+  static const _steps = [
+    'Signed on this device',
+    'Broadcast to the network',
+    'Accepted by a node',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (var i = 0; i < _steps.length; i++)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(
+              children: [
+                _Lamp(i <= stage ? KvColor.ok : KvColor.warn),
+                const SizedBox(width: KvSpace.sm),
+                Expanded(
+                  child: Text(
+                    _steps[i],
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      fontWeight: i == stage
+                          ? FontWeight.w600
+                          : FontWeight.w400,
+                      color: i <= stage ? KvColor.ink : KvColor.inkMeta,
+                    ),
+                  ),
+                ),
+                if (i == stage && stage < 2) const _Cadence(running: true),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Three beats: what happened → what it means for the funds → what to do.
+/// "Your funds are safe" appears ONLY when provably true — and then always.
+class _Outcome extends StatelessWidget {
+  const _Outcome.sent()
+    : lamp = KvColor.ok,
+      head = 'Sent',
+      body = 'The network accepted it. It will settle over the next minutes.',
+      safe = null,
+      action = 'copy transaction id';
+  const _Outcome.partial()
+    : lamp = KvColor.risk,
+      head = 'Partially sent',
+      body =
+          'One of two destinations went through. The second did not, and that '
+          'amount is still yours.',
+      safe = null,
+      action = 'see what moved';
+  const _Outcome.failed()
+    : lamp = KvColor.warn,
+      head = 'The network refused it',
+      body = 'A node rejected the transaction before it was relayed.',
+      safe = 'Your funds are safe — nothing left your wallet.',
+      action = 'see the raw error';
+
+  final Color lamp;
+  final String head;
+  final String body;
+  final String? safe;
+  final String action;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(KvSpace.m),
+      decoration: BoxDecoration(
+        color: KvColor.plate,
+        borderRadius: BorderRadius.circular(KvRadius.panel),
+        border: Border.all(color: KvColor.plateEdge),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _Lamp(lamp),
+              const SizedBox(width: KvSpace.sm),
+              Text(
+                head,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 17,
+                  height: 22 / 17,
+                  fontWeight: FontWeight.w600,
+                  color: KvColor.ink,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: KvSpace.s),
+          Text(
+            body,
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 13,
+              height: 19 / 13,
+              color: KvColor.inkDim,
+            ),
+          ),
+          if (safe != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              safe!,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 13,
+                height: 19 / 13,
+                fontWeight: FontWeight.w600,
+                color: KvColor.ok,
+              ),
+            ),
+          ],
+          const SizedBox(height: KvSpace.sm),
+          Text(
+            action,
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: KvColor.primaryMuted,
+            ),
+          ),
+        ],
       ),
     );
   }
