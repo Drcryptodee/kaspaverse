@@ -553,7 +553,7 @@ class _Plated extends StatelessWidget {
               // Tapping the network opens the node surface — who serves you,
               // how freshly, and the standing offer to serve yourself. The
               // sovereign-node session owns what lives behind it.
-              const _NetworkChip(),
+              _NetworkChip(state: state),
             ],
           ),
           const SizedBox(height: KvSpace.sm),
@@ -562,8 +562,10 @@ class _Plated extends StatelessWidget {
           _ValueLine(
             empty: integer == '0',
             rate: 0.0752,
-            // Empty = fresh. The age only appears once it could mislead.
-            ageLabel: '',
+            // Fresh says nothing; stale says how old. BG-8 requires the age to
+            // be VISIBLE when a reading is dimmed — the retired variant carried
+            // it and the ratified one had lost it.
+            ageLabel: state.stale ? 'as of 14:02:41 · 3 m ago' : '',
           ),
           const SizedBox(height: KvSpace.m),
           Container(height: 1, color: KvColor.plateDivider),
@@ -743,7 +745,9 @@ class _Instrument extends StatelessWidget {
 /// and a chevron that says it goes somewhere — 48dp of target around a 28dp
 /// visual (BG-12 requires the smaller visual to be declared).
 class _NetworkChip extends StatelessWidget {
-  const _NetworkChip();
+  const _NetworkChip({required this.state});
+
+  final MoneyState state;
 
   @override
   Widget build(BuildContext context) {
@@ -773,7 +777,10 @@ class _NetworkChip extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const _Lamp(KvColor.ok),
+                    // NOT const. A lamp that can only be green is not an
+                    // indicator, and this one sat beside an amber "Link lost"
+                    // on the same plate (BG-8, the P0.3 scar).
+                    _Lamp(state.trustLineSpeaks ? KvColor.warn : KvColor.ok),
                     const SizedBox(width: 6),
                     const Text(
                       'Mainnet',
@@ -861,7 +868,8 @@ class _ValueLine extends StatelessWidget {
               fontFamily: KvFont.ui,
               fontSize: 11,
               height: 15 / 11,
-              color: KvColor.etch,
+              // The carve-out that permits fiat requires this to be readable.
+              color: KvColor.inkMetaLow,
             ),
           ),
         ],
@@ -1048,14 +1056,20 @@ class _CadenceState extends State<_Cadence>
     if (widget.running) _c.repeat();
   }
 
+  /// BG-9: reduced motion collapses everything to opacity except the hold.
+  /// `kv_breath.dart`, which this replaces, honours it — so its successor must.
+  void _sync(bool reduced) {
+    if (widget.running && !reduced && !_c.isAnimating) {
+      _c.repeat();
+    } else if ((!widget.running || reduced) && _c.isAnimating) {
+      _c.stop();
+    }
+  }
+
   @override
   void didUpdateWidget(_Cadence old) {
     super.didUpdateWidget(old);
-    if (widget.running && !_c.isAnimating) {
-      _c.repeat();
-    } else if (!widget.running && _c.isAnimating) {
-      _c.stop();
-    }
+    _sync(MediaQuery.disableAnimationsOf(context));
   }
 
   @override
@@ -1066,6 +1080,7 @@ class _CadenceState extends State<_Cadence>
 
   @override
   Widget build(BuildContext context) {
+    _sync(MediaQuery.disableAnimationsOf(context));
     final stagger =
         KvMotion.cadenceStagger.inMilliseconds / KvMotion.breath.inMilliseconds;
     return ExcludeSemantics(
@@ -1371,7 +1386,12 @@ class _Row extends StatelessWidget {
                     Text(
                       entry.peer,
                       maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      // Clip, never ellipsis: a tail cut on an address throws
+                      // away the last eight payload characters and leaves the
+                      // `kaspa:q…` shape BG-15 forbids. At 320dp / 1.3x this
+                      // row is ~50dp short — which no 412dp device shows.
+                      overflow: TextOverflow.clip,
+                      softWrap: false,
                       style: const TextStyle(
                         fontFamily: KvFont.mono,
                         fontSize: 12,
@@ -1700,7 +1720,10 @@ class _GlyphPainter extends CustomPainter {
           p,
         );
       case _Glyph.navDots:
-        final dot = Paint()..color = KvColor.ink;
+        // Honours `tone` like every other glyph. It did not — and UX-1 extracts
+        // this set, so a dimmed nav mark would have rendered at full brightness
+        // with no error anywhere.
+        final dot = Paint()..color = tone;
         for (final c in const [
           Offset(7.5, 7.5),
           Offset(16.5, 7.5),
@@ -2547,6 +2570,16 @@ class _GaugePainter extends CustomPainter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Navigation — WITHDRAWN (D-190). Do not extract this.
+//
+// The founder judged it on glass and rejected it in favour of a Twitter-style
+// PUSH nav from Claude Design: one that translates the whole app sideways
+// rather than overlaying it, and therefore needs no blur at all. What survives
+// is the reasoning below, not the shape — unequal destinations, one milled
+// block with engraved PLANNED tags rather than four dead buttons, a count that
+// is a number and never a dot, the ringed socket, and BG-13. Those go into the
+// brief; everything geometric here is void.
+//
 // Navigation — summoned, unequal by design, and mortal.
 //
 // Not a rail and not a tab bar: a permanent bar spends the screen's most
@@ -3583,7 +3616,7 @@ class _Keypad extends StatelessWidget {
       physics: const NeverScrollableScrollPhysics(),
       mainAxisSpacing: KvSpace.s,
       crossAxisSpacing: KvSpace.s,
-      childAspectRatio: 2.1,
+      childAspectRatio: 1.75,
       children: [
         for (final k in _keys)
           Material(
@@ -3806,8 +3839,13 @@ class _ChunkedAddress extends StatelessWidget {
 
   final String full;
 
+  /// 67 characters — `kaspa:` + a 61-char payload, which is what the network
+  /// actually produces. The first version was 70, so the ceremony was judged on
+  /// a layout that chunks evenly into 16 groups; a real payload yields 15 plus
+  /// a **one-character weighted last group**, which is exactly where BG-15 puts
+  /// the eye.
   static const _confirmAddress =
-      'kaspa:qpzt3vw8mn4ka7ep0lxh2wnfscjg8y5u3e6vddwm0s3jnp4khce2mua7x2mne4ka';
+      'kaspa:qpzt3vw8mn4ka7ep0lxh2wnfscjg8y5u3e6vddwm0s3jnp4khce2mua7x2mne4';
 
   List<String> get _groups {
     final payload = full.substring(full.indexOf(':') + 1);
@@ -3866,9 +3904,14 @@ class _ChunkedAddress extends StatelessWidget {
   }
 }
 
-/// The hold. A 44dp ring inside a 64dp pill, filling over 800ms, with the
-/// haptic at the threshold. **No tap path bypasses it**, and the label names
-/// the action and its object — never "Confirm" (BG-11).
+/// The hold. A 44dp ring inside a 64dp pill, filling over 800ms. **No tap path
+/// bypasses it**, and the label names the action and its object — never
+/// "Confirm" (BG-11).
+///
+/// **There is no haptic here and the previous docstring claimed one.** §6
+/// requires `mediumImpact` at the threshold and `heavyImpact` on acceptance;
+/// the prototype fires neither, and UX-4 wires them. Recorded rather than left
+/// as a comment that describes a feature it does not implement (item 0).
 class _HoldToSign extends StatelessWidget {
   const _HoldToSign({
     required this.progress,
@@ -4752,13 +4795,18 @@ class _RequestLane extends StatelessWidget {
                 ),
                 const SizedBox(height: KvSpace.sm),
                 const Text(
-                  'Carries a 0.2 KAS bond — the network norm. It comes back '
-                  'when they accept.',
+                  // The accept-path string, not the invite-path one. This card
+                  // is shown to the RECIPIENT, who did not pay the bond — the
+                  // old copy told them it "comes back when they accept", about
+                  // money that was never theirs.
+                  'Accepting returns their 0.2 KAS bond and opens the '
+                  'conversation.',
                   style: TextStyle(
                     fontFamily: KvFont.ui,
-                    fontSize: 11,
-                    height: 16 / 11,
-                    color: KvColor.etch,
+                    fontSize: 12,
+                    height: 17 / 12,
+                    // etch is 2.84:1 and never carries information alone.
+                    color: KvColor.inkDim,
                   ),
                 ),
                 const SizedBox(height: KvSpace.sm),
@@ -4969,6 +5017,11 @@ class _Bubble extends StatelessWidget {
 /// **One action, with the exact cost printed on the control that fires it.**
 /// Founder directive; the carve-out is bound to `SignableKind::SelfSendFrame`,
 /// so a message fires on a tap and a bond or a wager never does.
+///
+/// **And it is gated on a non-empty draft** — condition 5 of the eight
+/// wallet-security set. A one-tap control that spends a fee must not be armed
+/// while there is nothing to send. The prototype shows it always enabled; UX-6
+/// wires the gate.
 class _Composer extends StatelessWidget {
   const _Composer();
 
@@ -5109,7 +5162,30 @@ class _MoreRow extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Secret surfaces.
+// Secret surfaces — READ THIS BEFORE EXTRACTING ANYTHING BELOW.
+//
+// These are LOOK REFERENCES. The phase file promotes this prototype to UX-7's
+// input specification, and a mock promoted to a specification without the
+// specification's constraints is how a security property gets designed away.
+// Four prohibitions, from `wallet-security-auditor` at the UX-0 wrap (D-201):
+//
+//   1. **Real recovery words never render in Dart.** Reveal and verify live in
+//      `android/.../RevealActivity.kt` and nowhere else (D-039); a word never
+//      exists as a Dart `String` (INV-1). `_Reveal` and `_Verify` below are to
+//      be DELETED, never extracted. UX-7's scope on those two screens is
+//      restyling the native file.
+//   2. **The verify board is all twelve words plus decoys on top, never a
+//      subset.** A subset drawn from the answers IS the answer set. That
+//      design was built, measured at 3/8, and reverted on 2026-08-16
+//      (F1/D-136, amended D-161). `vault_architecture.md` "Verify step" owns
+//      the mechanism; `RevealActivity.buildChipSet` owns the implementation.
+//   3. **`SecretScreenGuard` is not chrome.** Any Dart secret surface UX-7 does
+//      build — passphrase entry, unlock, lockout — keeps FLAG_SECURE, the
+//      accessibility refusal, and the fail-closed posture on an unanswerable
+//      a11y query. None of the three is visible in a mock.
+//   4. **No copy affordance, no system keyboard, no variable-width mask.** This
+//      file gets all three right by accident of being a mock. They are
+//      load-bearing.
 //
 // BG-10: assume a watched screen. Reveal on hold, fixed-width masks (a variable
 // mask leaks length), no copy path anywhere in the codebase, screenshots and the
@@ -5311,7 +5387,7 @@ class _SecureKeypad extends StatelessWidget {
       physics: const NeverScrollableScrollPhysics(),
       mainAxisSpacing: KvSpace.s,
       crossAxisSpacing: KvSpace.s,
-      childAspectRatio: 2.1,
+      childAspectRatio: 1.75,
       children: [
         for (final k in _keys)
           Material(
@@ -5459,27 +5535,27 @@ class _Reveal extends StatelessWidget {
   }
 }
 
-/// Recall beats recognition, and the decoys make a lucky guess worthless. A
-/// wrong answer is **amber, not red** — a practice quiz cannot lose funds, and
-/// red stays rationed to money.
+/// A **look reference only** — `RevealActivity.buildChipSet` owns this
+/// ceremony and its security properties. A wrong answer is **amber, not red**:
+/// a practice quiz cannot lose funds, and red stays rationed to money.
+///
+/// The board below is **all twelve words plus decoys on top**. The first
+/// version was ten of twelve, which is the design that was measured at 3/8 and
+/// reverted on 2026-08-16 — a subset drawn from the answers *is* the answer
+/// set, and the docstring that used to sit here claimed "the decoys make a
+/// lucky guess worthless" about a board where they did not.
 class _Verify extends StatelessWidget {
   const _Verify({required this.wrong});
 
   final bool wrong;
 
-  static const _pool = [
-    'ladder',
-    'maple',
-    'anchor',
-    'velvet',
-    'engine',
-    'orbit',
+  /// All twelve, plus decoys on top — never fewer (D-136, amended D-161).
+  static const _pool = <String>[
+    ..._words,
     'marble',
-    'ripple',
-    'fossil',
-    'gravity',
-    'saddle',
     'timber',
+    'lantern',
+    'harbour',
   ];
 
   @override

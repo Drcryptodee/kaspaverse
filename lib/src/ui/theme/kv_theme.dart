@@ -157,9 +157,10 @@ class KvPageTransitionsBuilder extends PageTransitionsBuilder {
   }
 }
 
-/// The app theme. Seeded from the real `primary` (this is where the D-027
-/// `0xFF00E5C7` drift dies), then the design's exact tokens are pinned over the
-/// generated tonal roles. Elevation is lightness + hairline border, never a
+/// The app theme. The `ColorScheme` is **constructed explicitly, never seeded**
+/// — every role is a ramp token, so an unnamed role cannot exist (D-185; this
+/// docstring described the banned practice as current until the wrap audit
+/// caught it). Elevation is lightness + hairline border, never a
 /// drop shadow (BG-4), so surface tint and shadows are zeroed.
 ///
 /// Component themes carry the system so screens stay free of styling: buttons

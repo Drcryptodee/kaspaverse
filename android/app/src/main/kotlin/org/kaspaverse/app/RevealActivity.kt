@@ -349,7 +349,7 @@ class RevealActivity : Activity() {
     private fun armContinue(cont: Button, hint: TextView) {
         cont.setTextColor(cAbyss)
         cont.background = GradientDrawable().apply {
-            cornerRadius = dp(8).toFloat()
+            cornerRadius = dp(100).toFloat()
             setColor(cPrimary)
         }
         hint.text = ""
@@ -444,7 +444,7 @@ class RevealActivity : Activity() {
         root.addView(prompt) // fixed header — never scrolls away from its chips
 
         // The board is ALL TWELVE of the user's words, plus decoys on top —
-        // never a subset of them. D-136 item 1 and `design_system.md:427` both
+        // never a subset of them. D-136 item 1 and `vault_architecture.md` "Verify step" both
         // say so ("the candidate set is every word in the phrase, never the
         // answer subset"), and the reason is quantitative, not stylistic.
         //
@@ -478,7 +478,7 @@ class RevealActivity : Activity() {
     /**
      * The quiz board: **all twelve of the user's words**, diluted with decoys.
      *
-     * The twelve are the candidate set D-136 and `design_system.md:427` require
+     * The twelve are the candidate set D-136 and `vault_architecture.md` "Verify step" require
      * — never a subset of them, and never the answers alone. Decoys are added
      * on top purely so an observer cannot read the phrase off the screen; they
      * are plain BIP39 wordlist entries arriving from Dart (public data, inward
@@ -552,7 +552,7 @@ class RevealActivity : Activity() {
             chip.isEnabled = false
             chip.setTextColor(cAbyss)
             chip.background = GradientDrawable().apply {
-                cornerRadius = dp(8).toFloat()
+                cornerRadius = dp(100).toFloat()
                 setColor(cPrimary)
             }
             quizProgress++
@@ -583,9 +583,9 @@ class RevealActivity : Activity() {
                 c.isEnabled = true
                 c.setTextColor(cTextPrimary)
                 c.background = GradientDrawable().apply {
-                    cornerRadius = dp(8).toFloat()
-                    setColor(cSurfaceAlt)
-                    setStroke(dp(1), cBorder)
+                    cornerRadius = dp(100).toFloat()
+                    setColor(cControl)
+                    setStroke(dp(1), cEdgeHi)
                 }
             }
             val left = QUIZ_MAX_WRONG - quizWrong

@@ -969,7 +969,10 @@ class _ActivityFeed extends StatelessWidget {
     if (onRefresh == null) return list;
     return RefreshIndicator(
       onRefresh: onRefresh!,
-      color: KvColor.primary,
+      // Not teal: a refresh is a mechanism, not the one primary action
+      // (BG-2). RefreshIndicator resolves colorScheme.primary by
+      // default and no component theme covers it.
+      color: KvColor.ink,
       backgroundColor: KvColor.surfaceAlt,
       child: list,
     );
