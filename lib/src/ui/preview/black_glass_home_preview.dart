@@ -36,6 +36,23 @@ import '../theme/tokens.dart';
 
 enum MoneyState { empty, live, syncing, inFlight, degraded }
 
+/// Three readings of the same number. The instrument variant is the export's
+/// own; the other two exist because on glass it read as telemetry rather than
+/// as money — which is a thing no spec file can tell you.
+enum HeroVariant { plated, engraved, instrument }
+
+extension on HeroVariant {
+  /// Whether the whole screen wears instrument register — tracked mono caps on
+  /// labels and the wordmark — or reads in plain sentence case.
+  bool get instrumentRegister => this == HeroVariant.instrument;
+
+  String get label => switch (this) {
+    HeroVariant.plated => 'A plated',
+    HeroVariant.engraved => 'B engraved',
+    HeroVariant.instrument => 'C instrument',
+  };
+}
+
 extension on MoneyState {
   String get label => switch (this) {
     MoneyState.empty => 'empty',
@@ -64,6 +81,7 @@ class BlackGlassHomePreview extends StatefulWidget {
 
 class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
   MoneyState _state = MoneyState.live;
+  HeroVariant _variant = HeroVariant.plated;
 
   @override
   Widget build(BuildContext context) {
@@ -76,29 +94,39 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
             // BG-14: the top 52dp belongs to the real status bar. Nothing is
             // painted there and no status bar is ever drawn.
             const SizedBox(height: KvSpace.statusBarReserve),
-            const _TopRail(),
+            _TopRail(variant: _variant),
             Expanded(
               child: ListView(
                 padding: EdgeInsets.zero,
                 children: [
                   const SizedBox(height: KvSpace.l),
-                  _Hero(state: _state),
+                  _Hero(state: _state, variant: _variant),
                   const SizedBox(height: KvSpace.m),
-                  _TrustLine(state: _state),
+                  // The plated variant carries its own trust line inside the
+                  // plate, so it is not repeated below.
+                  if (_variant != HeroVariant.plated) _TrustLine(state: _state),
                   if (_state == MoneyState.degraded) ...[
                     const SizedBox(height: KvSpace.l),
                     const _DegradedNotice(),
                   ],
                   const SizedBox(height: KvSpace.l),
-                  _Feed(state: _state),
+                  _Feed(state: _state, variant: _variant),
                   const SizedBox(height: KvSpace.l),
                 ],
               ),
             ),
             _ThumbActions(state: _state),
-            _StateSwitcher(
+            _Switcher(
+              values: MoneyState.values,
               value: _state,
+              label: (s) => s.label,
               onChanged: (s) => setState(() => _state = s),
+            ),
+            _Switcher(
+              values: HeroVariant.values,
+              value: _variant,
+              label: (v) => v.label,
+              onChanged: (v) => setState(() => _variant = v),
             ),
           ],
         ),
@@ -113,7 +141,9 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _TopRail extends StatelessWidget {
-  const _TopRail();
+  const _TopRail({required this.variant});
+
+  final HeroVariant variant;
 
   @override
   Widget build(BuildContext context) {
@@ -143,17 +173,30 @@ class _TopRail extends StatelessWidget {
           const Spacer(),
           // The wordmark, engraved rather than set: mono caps, wide tracking,
           // sitting at the same optical weight as a silk-screened panel label.
-          Text(
-            'KASPAVERSE',
-            style: TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: 11,
-              height: 16 / 11,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 2.4,
-              color: KvColor.inkMeta,
+          if (variant.instrumentRegister)
+            const Text(
+              'KASPAVERSE',
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 11,
+                height: 16 / 11,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 2.4,
+                color: KvColor.inkMeta,
+              ),
+            )
+          else
+            const Text(
+              'KaspaVerse',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 20 / 15,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.1,
+                color: KvColor.inkNav,
+              ),
             ),
-          ),
           const SizedBox(width: KvSpace.s),
         ],
       ),
@@ -166,9 +209,10 @@ class _TopRail extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _Hero extends StatelessWidget {
-  const _Hero({required this.state});
+  const _Hero({required this.state, required this.variant});
 
   final MoneyState state;
+  final HeroVariant variant;
 
   static const _integer = '1,284';
   static const _fraction = '5027';
@@ -176,10 +220,28 @@ class _Hero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final empty = state == MoneyState.empty;
-    // BG-5: a real zero renders 0.00000000; it is never a skeleton, and never
-    // a fabricated number standing in for an unknown one.
+    // BG-5: a real zero renders as a real zero; it is never a skeleton and
+    // never a fabricated number standing in for an unknown one.
     final integer = empty ? '0' : _integer;
     final fraction = empty ? '0000' : _fraction;
+
+    final body = switch (variant) {
+      HeroVariant.plated => _Plated(
+        state: state,
+        integer: integer,
+        fraction: fraction,
+      ),
+      HeroVariant.engraved => _Engraved(
+        state: state,
+        integer: integer,
+        fraction: fraction,
+      ),
+      HeroVariant.instrument => _Instrument(
+        state: state,
+        integer: integer,
+        fraction: fraction,
+      ),
+    };
 
     return Opacity(
       opacity: state.stale ? KvFreshness.opacityStale : 1,
@@ -188,70 +250,12 @@ class _Hero extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const _MicroLabel('TOTAL BALANCE'),
-            const SizedBox(height: KvSpace.sm),
-            // A number scales down before it ever truncates (BG-5), which is
-            // also what carries it through 1.3x text scale at 320dp.
             Semantics(
               label: empty ? 'Balance zero KAS' : 'Balance 1,284.5027 KAS',
-              excludeSemantics: true,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      integer,
-                      style: const TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 46,
-                        height: 52 / 46,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: -0.5,
-                        color: KvColor.ink,
-                        fontFeatures: [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                    Text(
-                      '.$fraction',
-                      style: const TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w400,
-                        color: KvColor.inkDim,
-                        fontFeatures: [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: KvSpace.s),
-            // The datum: a graduated rule, not a plain hairline. This is the
-            // move that makes the number read as a measurement.
-            const SizedBox(
-              height: 7,
-              width: double.infinity,
-              child: CustomPaint(painter: _DatumPainter()),
-            ),
-            const SizedBox(height: KvSpace.s),
-            // The scale's unit and its reading time, engraved under the datum
-            // where a panel meter labels itself.
-            Row(
-              children: [
-                const _MicroLabel('KAS'),
-                const Spacer(),
-                _MicroLabel(switch (state) {
-                  MoneyState.degraded => 'AS OF 14:02:41 · 3 M AGO',
-                  MoneyState.syncing => 'STILL COUNTING',
-                  _ => 'UPDATED JUST NOW',
-                }, tone: state.stale ? KvColor.warn : KvColor.inkMetaLow),
-              ],
+              child: ExcludeSemantics(child: body),
             ),
             if (state == MoneyState.inFlight) ...[
-              const SizedBox(height: KvSpace.m),
+              const SizedBox(height: KvSpace.sm),
               const _InFlightLine(),
             ],
           ],
@@ -261,11 +265,296 @@ class _Hero extends StatelessWidget {
   }
 }
 
+/// The number itself. Same in all three variants — what changes around it is
+/// how much technical furniture it wears.
+class _Figure extends StatelessWidget {
+  const _Figure({required this.integer, required this.fraction});
+
+  final String integer;
+  final String fraction;
+
+  /// The plated and engraved variants both read at 42 — one step down from the
+  /// instrument's 46, because the unit now sits beside the number instead of
+  /// being engraved under it, and the line has to hold both.
+  static const double size = 42;
+
+  @override
+  Widget build(BuildContext context) {
+    // A number scales down before it ever truncates (BG-5), which is also what
+    // carries it through 1.3x text scale at 320dp.
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          Text(
+            integer,
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: size,
+              height: 1.14,
+              fontWeight: FontWeight.w500,
+              letterSpacing: -0.5,
+              color: KvColor.ink,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+          Text(
+            '.$fraction',
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: size * 0.48,
+              fontWeight: FontWeight.w400,
+              color: KvColor.inkDim,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+          const SizedBox(width: KvSpace.s),
+          // The unit sits WITH the number, the way a price is written — not
+          // engraved beneath it as a scale label. This is most of what makes
+          // the plated and engraved variants read as money.
+          Text(
+            'KAS',
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: size * 0.33,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.6,
+              color: KvColor.inkMeta,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// **A · Plated.** The balance earns a container, and the trust statement lives
+/// inside it beside the number it vouches for. Sentence case throughout; the
+/// only rule is a hairline separating the figure from its provenance. Warmest
+/// of the three, and the closest to something a person reads as their money.
+class _Plated extends StatelessWidget {
+  const _Plated({
+    required this.state,
+    required this.integer,
+    required this.fraction,
+  });
+
+  final MoneyState state;
+  final String integer;
+  final String fraction;
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color lamp, String words) = _trust(state);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(
+        KvSpace.l,
+        KvSpace.m,
+        KvSpace.l,
+        KvSpace.sm,
+      ),
+      decoration: BoxDecoration(
+        color: KvColor.plate,
+        borderRadius: BorderRadius.circular(KvRadius.panel),
+        border: Border.all(color: KvColor.plateEdge),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SoftLabel('Total balance'),
+          const SizedBox(height: KvSpace.s),
+          _Figure(integer: integer, fraction: fraction),
+          const SizedBox(height: KvSpace.m),
+          Container(height: 1, color: KvColor.plateDivider),
+          const SizedBox(height: KvSpace.sm),
+          Row(
+            children: [
+              _Lamp(lamp),
+              const SizedBox(width: KvSpace.s),
+              Expanded(
+                child: Text(
+                  words,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 13,
+                    height: 18 / 13,
+                    color: KvColor.inkDim,
+                  ),
+                ),
+              ),
+              const SizedBox(width: KvSpace.s),
+              _Cadence(running: state.cadenceRunning),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// **B · Engraved.** No container — the figure still floats in void, but the
+/// telemetry furniture is gone: sentence case, the unit with the number, and a
+/// datum that is a clean rule with end stops rather than a graduated scale.
+class _Engraved extends StatelessWidget {
+  const _Engraved({
+    required this.state,
+    required this.integer,
+    required this.fraction,
+  });
+
+  final MoneyState state;
+  final String integer;
+  final String fraction;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _SoftLabel('Total balance'),
+        const SizedBox(height: KvSpace.s),
+        _Figure(integer: integer, fraction: fraction),
+        const SizedBox(height: KvSpace.sm),
+        const SizedBox(
+          height: 5,
+          width: double.infinity,
+          child: CustomPaint(painter: _DatumPainter(graduated: false)),
+        ),
+        const SizedBox(height: KvSpace.s),
+        Text(
+          switch (state) {
+            MoneyState.degraded => 'As of 14:02:41 · 3 m ago',
+            MoneyState.syncing => 'Still counting',
+            _ => 'Updated just now',
+          },
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 12,
+            height: 16 / 12,
+            color: state.stale ? KvColor.warn : KvColor.inkMetaLow,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// **C · Instrument.** The export's own reading, kept for comparison: tracked
+/// mono caps, a graduated datum, the unit and the reading time engraved beneath
+/// the scale. Precise, and on glass it reads as telemetry rather than money.
+class _Instrument extends StatelessWidget {
+  const _Instrument({
+    required this.state,
+    required this.integer,
+    required this.fraction,
+  });
+
+  final MoneyState state;
+  final String integer;
+  final String fraction;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _MicroLabel('TOTAL BALANCE'),
+        const SizedBox(height: KvSpace.sm),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                integer,
+                style: const TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 46,
+                  height: 52 / 46,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: -0.5,
+                  color: KvColor.ink,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+              Text(
+                '.$fraction',
+                style: const TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w400,
+                  color: KvColor.inkDim,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: KvSpace.s),
+        const SizedBox(
+          height: 7,
+          width: double.infinity,
+          child: CustomPaint(painter: _DatumPainter()),
+        ),
+        const SizedBox(height: KvSpace.s),
+        Row(
+          children: [
+            const _MicroLabel('KAS'),
+            const Spacer(),
+            _MicroLabel(switch (state) {
+              MoneyState.degraded => 'AS OF 14:02:41 · 3 M AGO',
+              MoneyState.syncing => 'STILL COUNTING',
+              _ => 'UPDATED JUST NOW',
+            }, tone: state.stale ? KvColor.warn : KvColor.inkMetaLow),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+(Color, String) _trust(MoneyState state) => switch (state) {
+  MoneyState.degraded => (KvColor.warn, 'Link lost — showing last known'),
+  MoneyState.syncing => (KvColor.warn, 'Counting your coins'),
+  _ => (KvColor.ok, 'Node responding'),
+};
+
+/// Sentence case, Inter, no tracking — a label a person reads, not one an
+/// instrument wears.
+class _SoftLabel extends StatelessWidget {
+  const _SoftLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    text,
+    style: const TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 13,
+      height: 18 / 13,
+      color: KvColor.inkDim,
+    ),
+  );
+}
+
 /// The graduated datum. Long risers mark the ends, a taller notch marks the
 /// decimal, and short graduations run between — a gauge's zero mark, at the
 /// one place in the app a number needs to read as an instrument reading.
 class _DatumPainter extends CustomPainter {
-  const _DatumPainter();
+  const _DatumPainter({this.graduated = true});
+
+  /// A graduated datum reads as a measuring scale. Ungraduated, it is simply
+  /// the rule the figure stands on — which is what a balance actually wants.
+  final bool graduated;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -274,6 +563,20 @@ class _DatumPainter extends CustomPainter {
       ..strokeWidth = 1
       ..isAntiAlias = false;
     canvas.drawLine(Offset(0, 0.5), Offset(size.width, 0.5), rule);
+
+    if (!graduated) {
+      final stop = Paint()
+        ..color = KvColor.tick
+        ..strokeWidth = 1
+        ..isAntiAlias = false;
+      canvas.drawLine(const Offset(0.5, 0), const Offset(0.5, 5), stop);
+      canvas.drawLine(
+        Offset(size.width - 0.5, 0),
+        Offset(size.width - 0.5, 5),
+        stop,
+      );
+      return;
+    }
 
     // Graduations every 12dp, taller every fifth — the rhythm of a scale.
     final tick = Paint()
@@ -300,7 +603,7 @@ class _DatumPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_DatumPainter oldDelegate) => false;
+  bool shouldRepaint(_DatumPainter old) => old.graduated != graduated;
 }
 
 class _InFlightLine extends StatelessWidget {
@@ -627,9 +930,10 @@ const _entries = <_Entry>[
 ];
 
 class _Feed extends StatelessWidget {
-  const _Feed({required this.state});
+  const _Feed({required this.state, required this.variant});
 
   final MoneyState state;
+  final HeroVariant variant;
 
   @override
   Widget build(BuildContext context) {
@@ -641,12 +945,35 @@ class _Feed extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
           child: Row(
             children: [
-              Container(width: 2, height: 10, color: KvColor.tick),
-              const SizedBox(width: KvSpace.s),
-              const _MicroLabel('ACTIVITY'),
+              if (variant.instrumentRegister) ...[
+                Container(width: 2, height: 10, color: KvColor.tick),
+                const SizedBox(width: KvSpace.s),
+                const _MicroLabel('ACTIVITY'),
+              ] else
+                const Text(
+                  'Activity',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    color: KvColor.ink,
+                  ),
+                ),
               if (state == MoneyState.degraded) ...[
                 const Spacer(),
-                const _MicroLabel('COMPLETE TO 14:02', tone: KvColor.warn),
+                if (variant.instrumentRegister)
+                  const _MicroLabel('COMPLETE TO 14:02', tone: KvColor.warn)
+                else
+                  const Text(
+                    'Complete to 14:02',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      height: 16 / 12,
+                      color: KvColor.warn,
+                    ),
+                  ),
               ],
             ],
           ),
@@ -683,7 +1010,7 @@ class _Row extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2),
               child: CustomPaint(
                 size: const Size(KvGlyph.grid, KvGlyph.grid),
-                painter: _GlyphPainter(entry.glyph),
+                painter: _GlyphPainter(entry.glyph, tone: entry.tone),
               ),
             ),
             const SizedBox(width: KvSpace.sm),
@@ -1027,47 +1354,54 @@ class _GlyphPainter extends CustomPainter {
       old.glyph != glyph || old.tone != tone;
 }
 
-/// Debug-only. Not part of the design — it exists so all five states can be
-/// felt in one sitting instead of five builds.
-class _StateSwitcher extends StatelessWidget {
-  const _StateSwitcher({required this.value, required this.onChanged});
+/// Debug-only. Not part of the design — it exists so every state and every
+/// balance treatment can be compared in one sitting instead of five builds.
+class _Switcher<T> extends StatelessWidget {
+  const _Switcher({
+    required this.values,
+    required this.value,
+    required this.label,
+    required this.onChanged,
+  });
 
-  final MoneyState value;
-  final ValueChanged<MoneyState> onChanged;
+  final List<T> values;
+  final T value;
+  final String Function(T) label;
+  final ValueChanged<T> onChanged;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       color: KvColor.well,
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
         child: Row(
           children: [
-            for (final s in MoneyState.values)
+            for (final v in values)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 3),
                 child: InkWell(
-                  onTap: () => onChanged(s),
+                  onTap: () => onChanged(v),
                   borderRadius: BorderRadius.circular(KvRadius.chip),
                   child: Container(
-                    height: KvSpace.xl,
+                    height: 30,
                     padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: s == value ? KvColor.keyPressed : KvColor.abyss,
+                      color: v == value ? KvColor.keyPressed : KvColor.abyss,
                       borderRadius: BorderRadius.circular(KvRadius.chip),
                       border: Border.all(
-                        color: s == value ? KvColor.edgeHi : KvColor.hairline,
+                        color: v == value ? KvColor.edgeHi : KvColor.hairline,
                       ),
                     ),
                     child: Text(
-                      s.label,
+                      label(v),
                       style: TextStyle(
                         fontFamily: KvFont.mono,
                         fontSize: 11,
-                        color: s == value ? KvColor.ink : KvColor.inkMeta,
+                        color: v == value ? KvColor.ink : KvColor.inkMeta,
                       ),
                     ),
                   ),

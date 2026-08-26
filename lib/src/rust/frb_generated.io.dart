@@ -163,6 +163,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MessageStatusDto dco_decode_message_status_dto(dynamic raw);
 
   @protected
+  NodeConfigDto dco_decode_node_config_dto(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -410,6 +413,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MessageStatusDto sse_decode_message_status_dto(SseDeserializer deserializer);
+
+  @protected
+  NodeConfigDto sse_decode_node_config_dto(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -726,6 +732,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     MessageStatusDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_node_config_dto(NodeConfigDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);

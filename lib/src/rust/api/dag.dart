@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `escalation_task`, `fold`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `tracker_handle`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
 /// harness and the debug screen poll it; nothing streams.
@@ -29,6 +29,25 @@ Future<void> dagResume() => RustLib.instance.api.crateApiDagDagResume();
 /// monitor so a silently dead socket (still `connected` in the snapshot) is
 /// caught by a growing block-age.
 Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
+
+/// Read the node choice (file-backed; defaults to discovery).
+Future<NodeConfigDto> dagNodeConfig() =>
+    RustLib.instance.api.crateApiDagDagNodeConfig();
+
+/// Pin the wallet to one node, or clear the pin with `None`.
+///
+/// Persist-then-apply, in that order and both or neither: the URL is validated
+/// in Rust (`chain::validate_node_url` — the same intake guard a resolver
+/// candidate passes, never a second weaker one in Dart), then written, then
+/// applied to the live link. A monitor that does not exist yet needs no apply
+/// step — it reads the file when it starts.
+///
+/// Applying it live rather than at next launch is deliberate: the case that
+/// matters most is a user whose pinned node just died, and telling them to
+/// restart the app to escape a setting they can see on screen is the kind of
+/// dead end that makes people give up on running their own node.
+Future<void> dagSetNodeConfig({String? url}) =>
+    RustLib.instance.api.crateApiDagDagSetNodeConfig(url: url);
 
 /// Force a fresh wRPC connection — the Reconnect button and the watchdog's
 /// recovery (P3/D-068). Hard-drops even a socket the client believes is alive,
@@ -143,6 +162,17 @@ class DagStatusDto {
   /// on the existing pull).
   final bool osOffline;
 
+  /// The node the user pinned, or `None` for public node discovery (D-185).
+  ///
+  /// This is what makes a pinned failure VISIBLE. `endpoint` only speaks
+  /// once something has connected, so a pinned node that is down leaves it
+  /// `None` forever and the glass could only say "not connected" — which
+  /// reads as *the network is down* when the truth is *your node is not
+  /// answering, and by your instruction nothing else will be tried*. Those
+  /// are different sentences and only one of them tells the user what to do.
+  /// Public data: a `wss://` URL the user typed (INV-3).
+  final String? pinnedNode;
+
   const DagStatusDto({
     required this.connected,
     this.endpoint,
@@ -150,6 +180,7 @@ class DagStatusDto {
     this.virtualDaaScore,
     required this.searching,
     required this.osOffline,
+    this.pinnedNode,
   });
 
   static Future<DagStatusDto> default_() =>
@@ -162,7 +193,8 @@ class DagStatusDto {
       lastBlockAgeSecs.hashCode ^
       virtualDaaScore.hashCode ^
       searching.hashCode ^
-      osOffline.hashCode;
+      osOffline.hashCode ^
+      pinnedNode.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -174,7 +206,39 @@ class DagStatusDto {
           lastBlockAgeSecs == other.lastBlockAgeSecs &&
           virtualDaaScore == other.virtualDaaScore &&
           searching == other.searching &&
-          osOffline == other.osOffline;
+          osOffline == other.osOffline &&
+          pinnedNode == other.pinnedNode;
+}
+
+/// The user's node choice (D-185) — the INV-8 escape hatch made reachable.
+///
+/// `url` is what they chose; `active_url` is what the link is actually bound
+/// to right now. When a node is pinned those agree or the second is `None`
+/// (down) — they can never name DIFFERENT nodes, because a pinned monitor
+/// refuses to bind anything else, and showing both is how a user verifies
+/// that rather than taking our word for it.
+class NodeConfigDto {
+  /// The pinned node, or `None` for public node discovery (the default).
+  final String? url;
+
+  /// The endpoint the socket is bound to, or `None` while dark.
+  final String? activeUrl;
+
+  const NodeConfigDto({this.url, this.activeUrl});
+
+  static Future<NodeConfigDto> default_() =>
+      RustLib.instance.api.crateApiDagNodeConfigDtoDefault();
+
+  @override
+  int get hashCode => url.hashCode ^ activeUrl.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is NodeConfigDto &&
+          runtimeType == other.runtimeType &&
+          url == other.url &&
+          activeUrl == other.activeUrl;
 }
 
 /// One span marker crossing the FFI (V1 observability — findings-register
