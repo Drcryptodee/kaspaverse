@@ -896,19 +896,9 @@ class _DatumPainter extends CustomPainter {
       ..isAntiAlias = false;
     canvas.drawLine(Offset(0, 0.5), Offset(size.width, 0.5), rule);
 
-    if (!graduated) {
-      final stop = Paint()
-        ..color = KvColor.primaryMuted
-        ..strokeWidth = 1
-        ..isAntiAlias = false;
-      canvas.drawLine(const Offset(0.5, 0), const Offset(0.5, 5), stop);
-      canvas.drawLine(
-        Offset(size.width - 0.5, 0),
-        Offset(size.width - 0.5, 5),
-        stop,
-      );
-      return;
-    }
+    // Ungraduated: just the rule. End stops turn a line into a SCALE, and an
+    // amount being typed is not being measured against anything.
+    if (!graduated) return;
 
     // Graduations every 12dp, taller every fifth — the rhythm of a scale.
     final tick = Paint()
@@ -1615,6 +1605,8 @@ enum _Glyph {
   assets,
   settings,
   lock,
+  paste,
+  scan,
 }
 
 /// Every glyph is 1–3 strokes on a 24dp grid at 1.75dp with square caps — the
@@ -1774,6 +1766,25 @@ class _GlyphPainter extends CustomPainter {
             math.pi,
           );
         canvas.drawPath(shackle, p);
+      case _Glyph.paste:
+        canvas.drawPath(
+          path([
+            [6, 6, 18, 6, 18, 20, 6, 20, 6, 6],
+            [9.5, 3.5, 14.5, 3.5, 14.5, 7.5, 9.5, 7.5, 9.5, 3.5],
+          ]),
+          p,
+        );
+      case _Glyph.scan:
+        // A viewfinder: four corners and nothing between them.
+        canvas.drawPath(
+          path([
+            [4, 9, 4, 4, 9, 4],
+            [15, 4, 20, 4, 20, 9],
+            [20, 15, 20, 20, 15, 20],
+            [9, 20, 4, 20, 4, 15],
+          ]),
+          p,
+        );
       case _Glyph.chevron:
         canvas.drawPath(
           path([
@@ -3042,7 +3053,7 @@ class _SendPreviewState extends State<_SendPreview> {
                 padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
                 children: [
                   const SizedBox(height: KvSpace.m),
-                  const _SoftLabel('Amount'),
+                  const _RuledLabel('Amount'),
                   const SizedBox(height: 6),
                   FittedBox(
                     fit: BoxFit.scaleDown,
@@ -3078,28 +3089,31 @@ class _SendPreviewState extends State<_SendPreview> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'available $_available',
-                    style: const TextStyle(
-                      fontFamily: KvFont.mono,
-                      fontSize: 12,
-                      height: 16 / 12,
-                      color: KvColor.inkMetaLow,
-                      fontFeatures: [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  const SizedBox(height: KvSpace.m),
-                  const SizedBox(
-                    height: 5,
-                    width: double.infinity,
-                    child: CustomPaint(
-                      painter: _DatumPainter(graduated: false),
-                    ),
+                  const SizedBox(height: KvSpace.sm),
+                  Container(height: 1, color: KvColor.hairline),
+                  const SizedBox(height: KvSpace.s),
+                  Row(
+                    children: [
+                      Text(
+                        'available $_available',
+                        style: const TextStyle(
+                          fontFamily: KvFont.mono,
+                          fontSize: 12,
+                          height: 16 / 12,
+                          color: KvColor.inkMetaLow,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                      const Spacer(),
+                      _MaxChip(
+                        onTap: () =>
+                            setState(() => _state = SendState.everything),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: KvSpace.l),
 
-                  const _SoftLabel('To'),
+                  const _RuledLabel('To'),
                   const SizedBox(height: 6),
                   _AddressField(
                     address: _address,
@@ -3204,6 +3218,8 @@ class _AddressField extends StatelessWidget {
       ),
       child: Row(
         children: [
+          const _FieldAction(_Glyph.paste, 'Paste'),
+          const SizedBox(width: KvSpace.sm),
           Expanded(
             child: Text(
               address.isEmpty ? 'Paste or scan a Kaspa address' : address,
@@ -3229,7 +3245,111 @@ class _AddressField extends StatelessWidget {
               ),
             ),
           ],
+          const SizedBox(width: KvSpace.sm),
+          const _FieldAction(_Glyph.scan, 'Scan a QR code'),
         ],
+      ),
+    );
+  }
+}
+
+/// A ruled label: a short engraved dash, then the word. It is the smallest
+/// machined gesture in the system and it costs one 8dp line.
+class _RuledLabel extends StatelessWidget {
+  const _RuledLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Container(width: 8, height: 1, color: KvColor.inkMeta),
+      const SizedBox(width: KvSpace.s),
+      _SoftLabel(text),
+    ],
+  );
+}
+
+/// An icon inside the address field. 20dp of glyph in a 48dp target — the
+/// smaller visual is declared, per BG-12.
+class _FieldAction extends StatelessWidget {
+  const _FieldAction(this.glyph, this.label);
+
+  final _Glyph glyph;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: InkWell(
+        onTap: () {},
+        borderRadius: BorderRadius.circular(KvRadius.chip),
+        child: SizedBox(
+          width: 28,
+          height: KvSpace.touchTarget,
+          child: Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: _FieldGlyph(glyph: glyph),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FieldGlyph extends StatelessWidget {
+  const _FieldGlyph({this.glyph = _Glyph.paste});
+
+  final _Glyph glyph;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+    size: const Size(20, 20),
+    painter: _GlyphPainter(glyph, tone: KvColor.inkMeta),
+  );
+}
+
+/// Send max. It sits with `available` because that is the number it means, and
+/// it is a chip rather than a button because it fills a field — it does not
+/// commit anything.
+class _MaxChip extends StatelessWidget {
+  const _MaxChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Send the maximum, leaving only the fee',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.chip),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: KvSpace.xl),
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: KvColor.chip,
+            borderRadius: BorderRadius.circular(KvRadius.chip),
+            border: Border.all(color: KvColor.edgeHi),
+          ),
+          child: const Text(
+            'Send max',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 12,
+              height: 16 / 12,
+              fontWeight: FontWeight.w600,
+              color: KvColor.inkBright,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -3432,7 +3552,7 @@ class _ConfirmPreviewState extends State<_ConfirmPreview>
                 padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
                 children: [
                   const SizedBox(height: KvSpace.m),
-                  const _SoftLabel('Sending'),
+                  const _RuledLabel('Sending'),
                   const SizedBox(height: 6),
                   // Every one of the eight decimals. This is a signing
                   // surface, and a hidden digit is a lie of omission (BG-6).
@@ -3448,7 +3568,7 @@ class _ConfirmPreviewState extends State<_ConfirmPreview>
                     ),
                   ),
                   const SizedBox(height: KvSpace.l),
-                  const _SoftLabel('To'),
+                  const _RuledLabel('To'),
                   const SizedBox(height: 6),
                   const _ChunkedAddress(),
                   const SizedBox(height: KvSpace.l),
@@ -3658,11 +3778,32 @@ class _RingPainter extends CustomPainter {
       r,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2
+        ..strokeWidth = 3.5
         ..color = KvColor.edgeHi,
     );
+
+    // The arrow of the thing this control does, sitting inside the ring it
+    // fills. Teal, because the sign ring is one of exactly three things in the
+    // app that emit (BG-2) — and this is the same emission, not a second one.
+    final k = size.width / 24;
+    final arrow = Paint()
+      ..color = KvColor.primary
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = KvGlyph.stroke * k
+      ..strokeCap = KvGlyph.cap
+      ..strokeJoin = StrokeJoin.miter;
+    final a = Path()
+      ..moveTo(12 * k, 17 * k)
+      ..lineTo(12 * k, 7 * k)
+      ..moveTo(8 * k, 11 * k)
+      ..lineTo(12 * k, 7 * k)
+      ..lineTo(16 * k, 11 * k);
+    canvas.drawPath(a, arrow);
+
     if (t <= 0) return;
-    // The one filling ring — one of exactly three things that emit (BG-2).
+    // The filling ring. Fat enough to read as a gauge closing rather than a
+    // hairline creeping — this is the last thing that happens before money
+    // leaves, and it should feel like a mechanism seating.
     canvas.drawArc(
       Rect.fromCircle(center: c, radius: r),
       -math.pi / 2,
@@ -3670,7 +3811,7 @@ class _RingPainter extends CustomPainter {
       false,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5
+        ..strokeWidth = 4.5
         ..strokeCap = StrokeCap.round
         ..color = KvColor.primary,
     );
