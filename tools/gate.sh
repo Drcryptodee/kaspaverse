@@ -100,6 +100,11 @@ fi
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "kotlin compile (custody platform layer)"
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "android lint (NewApi — custody platform layer)"
 [ -f "$ROOT/android/gradle/wrapper/gradle-wrapper.properties" ] && expect_lane "gradle wrapper (INV-7)"
+# Guarded on build.gradle.kts, NOT on verification-metadata.xml: guarding a lane on
+# the artifact it asserts is how the lane disappears exactly when that artifact does
+# (F9's shape, and the wrapper lane's own comment says the same). A deleted
+# verification file must RED, not vanish.
+[ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "gradle dependency verification (INV-7)"
 [ -f "$ROOT/flutter_rust_bridge.yaml" ] && expect_lane "codegen drift (lib/src/rust/ + frb_generated.rs)"
 expect_lane "contract spine"
 # Mirrors this lane's own guard exactly. A roster entry that is stricter than the
@@ -313,6 +318,131 @@ gradle_wrapper_jar() {
 # properties file is tracked, and is not the artifact under assertion.
 if [ -f "$ROOT/android/gradle/wrapper/gradle-wrapper.properties" ]; then
   run_check "gradle wrapper (INV-7)" gradle_wrapper_jar
+fi
+
+# ── Gradle dependency verification (INV-7) ──────────────────────
+# The third ecosystem finally gets an integrity check. Cargo has Cargo.lock +
+# `cargo deny`; pub has pubspec.lock; Gradle had a version STRING, which is a
+# request and not an assertion, while AGP + Kotlin are the largest bodies of
+# third-party code the Android build downloads and executes.
+# android/gradle/verification-metadata.xml pins 690 components / 1261 artifacts
+# by sha256 (D-204). The two lanes BELOW (kotlin compile, android lint) enforce
+# it on every run: adoption needed no new lane and no new network call, because
+# those two already resolve from the network. CI is cold on every push (it
+# caches cargo and Flutter, never ~/.gradle), so CI verifies all 1261 freshly
+# fetched artifacts — that is where this mechanism has its teeth.
+#
+# What THIS lane adds is the part the generator cannot keep honest by itself.
+# `gradle --write-verification-metadata sha256` has a blind spot: it never
+# records what is resolved at SETTINGS time for the dev.flutter.flutter-plugin-
+# loader included build (settings.gradle.kts:20), whose artifacts come from
+# gradlePluginPortal — declared once, in pluginManagement. Proven by four runs:
+# a file generated warm fails cold; generating ON a cold cache still omits them;
+# and a clean regeneration over a cache that had ALREADY fetched them still
+# omits them. Regeneration does not converge. The two kotlin-gradle-plugins-bom
+# 1.9.20 entries are therefore HAND-ADDED — and the documented fix for any
+# verification failure (regenerate) silently DROPS them, turning a green local
+# tree into a red cold CI run at settings evaluation. This lane is what stands
+# between that and a mystery.
+#
+# Deliberately NOT a whole-file digest pin: that would red on every legitimate
+# dependency change and become a constant people bump on reflex, which is the
+# ritual this mechanism exists to avoid. It asserts the fragile part only.
+#
+# Re-derive after a Flutter SDK change (the blind-spot set can move):
+#   rm -rf "${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2" && ./gradlew :app:compileDebugKotlin
+# (GRADLE_USER_HOME is normally UNSET — the bare form expands to /caches/modules-2,
+# wipes nothing, and the blind spot then fails to reproduce against a warm cache,
+# which is the exact wrong inference this lane exists to prevent.)
+# then hand-add whatever it names, hashed from the cache with sha256sum.
+GRADLE_VERIFY_BOM_MODULE_SHA256="7720f845cfe319aa1a6e5b23387e6920a35e99ae4218ca0f6f6e07fd1713093c"
+GRADLE_VERIFY_BOM_POM_SHA256="6f3ba42a3e981700284c956146ef4d716b89adbe5d803ab92553dec216344330"
+gradle_dep_verification() {
+  local f="$ROOT/android/gradle/verification-metadata.xml" bad=0 pair ext want hit
+  if [ ! -f "$f" ]; then
+    echo "   android/gradle/verification-metadata.xml is missing — it is TRACKED (D-204)."
+    echo "   Without it Gradle verifies NOTHING: AGP, Kotlin and 688 further components"
+    echo "   download and execute unasserted on every build. Restore it; do not make this"
+    echo "   pass by deleting the lane."
+    return 1
+  fi
+  # Present on disk is not the assertion — CI's checkout only ever sees TRACKED files,
+  # so an unstaged file passes locally and reds cold in CI, breaking D-024's "same
+  # checks locally and in CI". Same scar as F2, where the kotlin lane's guard had to
+  # move off `gradlew` precisely because it was gitignored. Pinned --git-dir/--work-tree
+  # for the same reason repo_hygiene() pins them: the ops mirror shares this working
+  # tree and an inherited GIT_DIR must not be able to steer the answer.
+  if git --git-dir="$ROOT/.git" --work-tree="$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if ! git --git-dir="$ROOT/.git" --work-tree="$ROOT" \
+         ls-files --error-unmatch -- android/gradle/verification-metadata.xml >/dev/null 2>&1; then
+      echo "   verification-metadata.xml exists but is NOT git-tracked. CI clones only tracked"
+      echo "   files, so this tree is green and the next cold CI run is red. git add it."
+      bad=1
+    fi
+  else
+    echo "   not a git repository — trackedness unverifiable, failing closed"
+    bad=1
+  fi
+  # A present file with verification switched off is the fail-open state: the tree
+  # LOOKS pinned, the diff LOOKS clean, and nothing whatsoever is checked.
+  if ! grep -q "<verify-metadata>true</verify-metadata>" "$f"; then
+    echo "   verification-metadata.xml no longer declares <verify-metadata>true</verify-metadata>."
+    echo "   The file is present but inert. That fails OPEN, which is worse than absent,"
+    echo "   because the file reads as proof."
+    bad=1
+  fi
+  # The OTHER inert states, and the reason this block exists: all four T3 auditors
+  # independently mutated the file into a green-but-verifying-nothing state that the
+  # verify-metadata check above does not see. A single
+  #   <trusted-artifacts><trust group=".*" regex="true"/></trusted-artifacts>
+  # exempts EVERY artifact while all 1261 hashes stay in place; <also-trust> adds a
+  # second accepted digest to a pinned entry; and md5/sha1 assertions are forgeable.
+  # <trust*> is Gradle's own documented escape hatch when verification fails, which
+  # makes it the reflex fix — so it is asserted ABSENT. Adopting PGP or a narrow
+  # exemption later should be a ledgered change, not a silent one.
+  for pair in "trusted-artifacts:<trusted-artifacts" "trust-entry:<trust " \
+              "also-trust:<also-trust" "trusted-keys:<trusted-key" \
+              "ignored-keys:<ignored-keys" "md5:<md5 " "sha1:<sha1 "; do
+    ext="${pair%%:*}"; want="${pair#*:}"
+    if grep -qF "$want" "$f"; then
+      echo "   verification-metadata.xml carries a '$ext' construct ($want)."
+      echo "   Matching artifacts are exempt, or asserted with a forgeable digest, while the"
+      echo "   file still reads as proof — the same fail-open as verify-metadata=false."
+      bad=1
+    fi
+  done
+  # Off-switches that live OUTSIDE the file. Verification can be killed by a build
+  # script call, a properties line, or a CLI flag, none of which touch the XML — so a
+  # future "unblock the red CI" edit would leave every check above green and the
+  # mechanism dead. None are present today; this asserts that they stay absent.
+  # The [i] brackets are load-bearing: without them this pattern matches its OWN
+  # source here and the lane reds on a clean tree — the same self-match the wrapper
+  # lane's comment records, reproduced by the lane written after reading it.
+  hit="$(grep -rlE 'disableDependencyVerif[i]cation|org\.gradle\.dependency\.verif[i]cation|--dependency-verif[i]cation' \
+        "$ROOT/android" "$ROOT/tools/gate.sh" "$ROOT/.github/workflows" 2>/dev/null \
+        | grep -v 'verification-metadata\.xml$')"
+  if [ -n "$hit" ]; then
+    echo "   a dependency-verification off-switch appears outside the metadata file:"
+    echo "$hit" | sed 's/^/     /'
+    echo "   These disable verification while the XML still reads as proof. Remove it, or"
+    echo "   ledger the exemption with its repayment trigger."
+    bad=1
+  fi
+  for pair in "module:$GRADLE_VERIFY_BOM_MODULE_SHA256" "pom:$GRADLE_VERIFY_BOM_POM_SHA256"; do
+    ext="${pair%%:*}"; want="${pair#*:}"
+    if ! grep -A2 "kotlin-gradle-plugins-bom-1\.9\.20\.$ext" "$f" 2>/dev/null | grep -q "$want"; then
+      echo "   the hand-added kotlin-gradle-plugins-bom:1.9.20 .$ext entry is gone or changed."
+      echo "   Regenerating the file drops it every time — the generator cannot see"
+      echo "   settings-time pluginManagement resolution — so this is exactly what a blind"
+      echo "   regeneration looks like locally. Cold CI fails at settings.gradle.kts:20."
+      echo "   Re-add it with sha256 $want"
+      bad=1
+    fi
+  done
+  return $bad
+}
+if [ -f "$ROOT/android/build.gradle.kts" ]; then
+  run_check "gradle dependency verification (INV-7)" gradle_dep_verification
 fi
 
 # ── Android/Kotlin compile (the custody platform layer) ─────────
