@@ -25,6 +25,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 
@@ -102,94 +103,151 @@ class BlackGlassHomePreview extends StatefulWidget {
   State<BlackGlassHomePreview> createState() => _BlackGlassHomePreviewState();
 }
 
-class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
+class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _nav = AnimationController(
+    vsync: this,
+    duration: KvMotion.enter,
+    reverseDuration: KvMotion.calm,
+  );
   MoneyState _state = MoneyState.live;
   HeroVariant _variant = HeroVariant.plated;
 
-  /// A pinned header cannot measure itself, so the plate's height is stated.
-  /// It is deterministic per state — that is the whole reason the trust line
-  /// appearing and disappearing is a design decision and not a layout accident.
-  double get _plateExtent {
-    // Measured on device: the plate without a trust line is 26dp shorter, and
-    // a pinned header that keeps the taller extent leaves a hole under itself.
-    var h = 194.0;
-    if (_state.trustLineSpeaks) h += 26;
-    if (_state == MoneyState.inFlight) h += 56;
-    return h;
+  /// **The extent is measured, not stated.** A `SliverPersistentHeader` demands
+  /// a height it cannot work out for itself, and the first version of this
+  /// carried a hand-guessed number under a comment claiming it had been
+  /// measured — which overflowed the plate by 19dp the moment the padding
+  /// changed. A stated extent is a claim that goes stale on the next edit.
+  ///
+  /// So a zero-height measuring copy of the plate lays out beside the real one,
+  /// reports its natural height, and the header adopts it. It cannot be wrong,
+  /// and it cannot drift: change the plate and the number follows.
+  double _plateExtent = 240;
+
+  final GlobalKey _measureKey = GlobalKey();
+
+  void _syncExtent() {
+    final box = _measureKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final h = box.size.height + KvSpace.sm + KvSpace.m;
+    if ((h - _plateExtent).abs() > 0.5) {
+      setState(() => _plateExtent = h);
+    }
+  }
+
+  @override
+  void dispose() {
+    _nav.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncExtent());
     return Scaffold(
       backgroundColor: KvColor.abyss,
-      body: SafeArea(
-        top: false,
-        child: Column(
-          children: [
-            // BG-14: the top 52dp belongs to the real status bar. Nothing is
-            // painted there and no status bar is ever drawn.
-            const SizedBox(height: KvSpace.statusBarReserve),
-            _TopRail(variant: _variant),
-            Expanded(
-              // The balance is PINNED and the ledger scrolls under it: what you
-              // own is not something you should have to scroll back up to see.
-              // Pull-to-refresh is hosted by the whole scroll view rather than
-              // by the list, so the gesture works from the balance as well —
-              // which is where a user reaches for it first.
-              child: RefreshIndicator(
-                onRefresh: () async {
-                  await Future<void>.delayed(const Duration(milliseconds: 900));
-                },
-                // Not teal: a refresh is a mechanism, not the one primary
-                // action, and teal is rationed to three emissions (BG-2).
-                color: KvColor.ink,
-                backgroundColor: KvColor.key,
-                strokeWidth: 2,
-                child: CustomScrollView(
-                  // Always scrollable, so the pull gesture exists even when the
-                  // ledger is short or empty.
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  slivers: [
-                    SliverPersistentHeader(
-                      pinned: true,
-                      delegate: _PlateHeader(
-                        extent: _plateExtent,
-                        child: _Hero(state: _state, variant: _variant),
-                      ),
+      body: Stack(
+        children: [
+          SafeArea(top: false, child: _body(context)),
+          // BG-13: the panel is mortal. It never survives a lock, and it is
+          // summoned rather than resident — there is no rail and no tab bar
+          // holding a permanent claim on the screen.
+          _NavPanel(controller: _nav),
+        ],
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context) {
+    return Column(
+      children: [
+        // BG-14: the top 52dp belongs to the real status bar. Nothing is
+        // painted there and no status bar is ever drawn.
+        const SizedBox(height: KvSpace.statusBarReserve),
+        _TopRail(variant: _variant, onNav: _nav.forward),
+        Expanded(
+          // The balance is PINNED and the ledger scrolls under it: what you
+          // own is not something you should have to scroll back up to see.
+          // Pull-to-refresh is hosted by the whole scroll view rather than
+          // by the list, so the gesture works from the balance as well —
+          // which is where a user reaches for it first.
+          child: RefreshIndicator(
+            onRefresh: () async {
+              await Future<void>.delayed(const Duration(milliseconds: 900));
+            },
+            // Not teal: a refresh is a mechanism, not the one primary
+            // action, and teal is rationed to three emissions (BG-2).
+            color: KvColor.ink,
+            backgroundColor: KvColor.key,
+            strokeWidth: 2,
+            child: CustomScrollView(
+              // Always scrollable, so the pull gesture exists even when the
+              // ledger is short or empty.
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: [
+                SliverPersistentHeader(
+                  pinned: true,
+                  delegate: _PlateHeader(
+                    extent: _plateExtent,
+                    child: _Hero(state: _state, variant: _variant),
+                  ),
+                ),
+                if (_state == MoneyState.degraded)
+                  const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.only(bottom: KvSpace.m),
+                      child: _DegradedNotice(),
                     ),
-                    if (_state == MoneyState.degraded)
-                      const SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.only(bottom: KvSpace.m),
-                          child: _DegradedNotice(),
-                        ),
-                      ),
-                    SliverToBoxAdapter(
-                      child: _Feed(state: _state, variant: _variant),
+                  ),
+                SliverToBoxAdapter(
+                  child: _Feed(state: _state, variant: _variant),
+                ),
+                const SliverToBoxAdapter(child: SizedBox(height: KvSpace.l)),
+              ],
+            ),
+          ),
+        ),
+        _ThumbActions(state: _state),
+        // The measuring copy. Zero height, laid out with an unbounded
+        // vertical constraint so it reports its NATURAL size, invisible and
+        // untouchable. This is what makes the pinned extent a fact.
+        SizedBox(
+          height: 0,
+          child: OverflowBox(
+            alignment: Alignment.topLeft,
+            minHeight: 0,
+            maxHeight: double.infinity,
+            child: IgnorePointer(
+              child: ExcludeSemantics(
+                child: Opacity(
+                  opacity: 0,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: KvSpace.gutter,
                     ),
-                    const SliverToBoxAdapter(
-                      child: SizedBox(height: KvSpace.l),
+                    child: KeyedSubtree(
+                      key: _measureKey,
+                      child: _Hero(state: _state, variant: _variant),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
-            _ThumbActions(state: _state),
-            _Switcher(
-              values: MoneyState.values,
-              value: _state,
-              label: (s) => s.label,
-              onChanged: (s) => setState(() => _state = s),
-            ),
-            _Switcher(
-              values: HeroVariant.values,
-              value: _variant,
-              label: (v) => v.label,
-              onChanged: (v) => setState(() => _variant = v),
-            ),
-          ],
+          ),
         ),
-      ),
+        _Switcher(
+          values: MoneyState.values,
+          value: _state,
+          label: (s) => s.label,
+          onChanged: (s) => setState(() => _state = s),
+        ),
+        _Switcher(
+          values: HeroVariant.values,
+          value: _variant,
+          label: (v) => v.label,
+          onChanged: (v) => setState(() => _variant = v),
+        ),
+      ],
     );
   }
 }
@@ -214,7 +272,7 @@ class _PlateHeader extends SliverPersistentHeaderDelegate {
     return Container(
       color: KvColor.abyss,
       alignment: Alignment.topCenter,
-      padding: const EdgeInsets.only(top: KvSpace.l, bottom: KvSpace.m),
+      padding: const EdgeInsets.only(top: KvSpace.sm, bottom: KvSpace.m),
       child: child,
     );
   }
@@ -230,31 +288,33 @@ class _PlateHeader extends SliverPersistentHeaderDelegate {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _TopRail extends StatelessWidget {
-  const _TopRail({required this.variant});
+  const _TopRail({required this.variant, required this.onNav});
 
   final HeroVariant variant;
+  final VoidCallback onNav;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.m,
-        KvSpace.s,
-        KvSpace.m,
-        KvSpace.xs,
-      ),
+      padding: const EdgeInsets.fromLTRB(KvSpace.m, 0, KvSpace.m, 0),
       child: Row(
         children: [
           Semantics(
             button: true,
             label: 'Open navigation',
-            child: SizedBox(
-              width: KvSpace.touchTarget,
-              height: KvSpace.touchTarget,
-              child: Center(
-                child: CustomPaint(
-                  size: const Size(KvGlyph.grid, KvGlyph.grid),
-                  painter: const _GlyphPainter(_Glyph.navDots),
+            child: InkWell(
+              onTap: onNav,
+              borderRadius: BorderRadius.circular(KvRadius.pill),
+              // A 24dp mark inside a 48dp target — the smaller visual is
+              // permitted only because the code says so (BG-12).
+              child: const SizedBox(
+                width: KvSpace.touchTarget,
+                height: KvSpace.touchTarget,
+                child: Center(
+                  child: CustomPaint(
+                    size: Size(KvGlyph.grid, KvGlyph.grid),
+                    painter: _GlyphPainter(_Glyph.navDots),
+                  ),
                 ),
               ),
             ),
@@ -440,11 +500,13 @@ class _Plated extends StatelessWidget {
     final (Color lamp, String words) = _trust(state);
     return Container(
       width: double.infinity,
+      // The plate is TALL rather than compressed: the money is the reason the
+      // screen exists, so it gets the room, and the chrome above it gets less.
       padding: const EdgeInsets.fromLTRB(
         KvSpace.l,
-        KvSpace.m,
         KvSpace.l,
-        KvSpace.sm,
+        KvSpace.l,
+        KvSpace.m,
       ),
       decoration: BoxDecoration(
         color: KvColor.plate,
@@ -464,11 +526,11 @@ class _Plated extends StatelessWidget {
               const _NetworkChip(),
             ],
           ),
-          const SizedBox(height: KvSpace.s),
-          _Figure(integer: integer, fraction: fraction),
-          const SizedBox(height: 6),
-          _ValueLine(empty: integer == '0', rate: 0.0752, ageLabel: '2 m ago'),
           const SizedBox(height: KvSpace.sm),
+          _Figure(integer: integer, fraction: fraction),
+          const SizedBox(height: KvSpace.s),
+          _ValueLine(empty: integer == '0', rate: 0.0752, ageLabel: '2 m ago'),
+          const SizedBox(height: KvSpace.m),
           Container(height: 1, color: KvColor.plateDivider),
           const SizedBox(height: KvSpace.sm),
           if (state.trustLineSpeaks) ...[
@@ -1463,7 +1525,22 @@ class _MicroLabel extends StatelessWidget {
   );
 }
 
-enum _Glyph { arrowIn, arrowOut, selfSend, navDots, diamond, chevron }
+enum _Glyph {
+  arrowIn,
+  arrowOut,
+  selfSend,
+  navDots,
+  diamond,
+  chevron,
+  money,
+  chat,
+  games,
+  contracts,
+  finance,
+  assets,
+  settings,
+  lock,
+}
 
 /// Every glyph is 1–3 strokes on a 24dp grid at 1.75dp with square caps — the
 /// icon set is drawn, not imported, which is a supply-chain decision (INV-7)
@@ -1535,6 +1612,93 @@ class _GlyphPainter extends CustomPainter {
         ]) {
           canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.5 * s, dot);
         }
+      case _Glyph.money:
+        // A note, not a coin: a circle with strokes through it reads as a
+        // symbol to be decoded, and a glyph you decode has already failed.
+        canvas.drawPath(
+          path([
+            [3.5, 6.5, 20.5, 6.5, 20.5, 17.5, 3.5, 17.5, 3.5, 6.5],
+          ]),
+          p,
+        );
+        canvas.drawCircle(Offset(12 * s, 12 * s), 2.6 * s, p);
+      case _Glyph.chat:
+        canvas.drawPath(
+          path([
+            [4.5, 5.5, 19.5, 5.5, 19.5, 15.5, 9.5, 15.5, 5.5, 19.5, 5.5, 5.5],
+          ]),
+          p,
+        );
+      case _Glyph.games:
+        canvas.drawPath(
+          path([
+            [5, 5, 19, 5, 19, 19, 5, 19, 5, 5],
+          ]),
+          p,
+        );
+        final dot = Paint()..color = tone;
+        for (final c in const [
+          Offset(9, 9),
+          Offset(15, 9),
+          Offset(9, 15),
+          Offset(15, 15),
+        ]) {
+          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 1.4 * s, dot);
+        }
+      case _Glyph.contracts:
+        canvas.drawPath(
+          path([
+            [7, 4, 17, 4, 17, 20, 7, 20, 7, 4],
+            [10, 9, 14, 9],
+            [10, 13, 14, 13],
+          ]),
+          p,
+        );
+      case _Glyph.finance:
+        // A trend on a baseline. The export's three-bar mark read as "++".
+        canvas.drawPath(
+          path([
+            [4, 19, 20, 19],
+            [5, 15, 9.5, 10.5, 13.5, 13.5, 19, 7],
+            [15, 7, 19, 7, 19, 11],
+          ]),
+          p,
+        );
+      case _Glyph.assets:
+        canvas.drawPath(
+          path([
+            [12, 4, 20, 8.5, 20, 15.5, 12, 20, 4, 15.5, 4, 8.5, 12, 4],
+          ]),
+          p,
+        );
+      case _Glyph.settings:
+        // Sliders. A cross-haired dot is a target, not a setting.
+        canvas.drawPath(
+          path([
+            [4, 7, 20, 7],
+            [4, 12, 20, 12],
+            [4, 17, 20, 17],
+          ]),
+          p,
+        );
+        final knob = Paint()..color = tone;
+        for (final c in const [Offset(9, 7), Offset(15, 12), Offset(11, 17)]) {
+          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.1 * s, knob);
+        }
+      case _Glyph.lock:
+        canvas.drawPath(
+          path([
+            [6, 11, 18, 11, 18, 20, 6, 20, 6, 11],
+          ]),
+          p,
+        );
+        final shackle = Path()
+          ..addArc(
+            Rect.fromCircle(center: Offset(12 * s, 11 * s), radius: 4 * s),
+            math.pi,
+            math.pi,
+          );
+        canvas.drawPath(shackle, p);
       case _Glyph.chevron:
         canvas.drawPath(
           path([
@@ -2198,4 +2362,453 @@ class _GaugePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_GaugePainter old) => old.depth != depth;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Navigation — summoned, unequal by design, and mortal.
+//
+// Not a rail and not a tab bar: a permanent bar spends the screen's most
+// valuable strip on destinations most people open once a week, and it forces
+// every future surface to fit five slots. This is summoned from the top corner,
+// takes the screen's ONE blur, and dies with the lock (BG-13).
+//
+// **The plates are deliberately unequal**, because pretending six destinations
+// matter the same amount is a lie the layout tells. Money is opened constantly,
+// so it is taller, one tone lighter, and wears a teal indicator down its edge.
+// Messages is plain. The unbuilt four are milled into ONE block with engraved
+// PLANNED tags — so "not yet" reads as information rather than as damage, and
+// four dead buttons do not sit at the same rank as two live ones.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _Destination {
+  const _Destination(this.glyph, this.name, this.blurb, {this.count});
+
+  final _Glyph glyph;
+  final String name;
+  final String blurb;
+  final String? count;
+}
+
+const _built = <_Destination>[
+  _Destination(_Glyph.money, 'Money', 'your balance and everything that moved'),
+  _Destination(
+    _Glyph.chat,
+    'Messages',
+    'encrypted, on chain, no server',
+    count: '2',
+  ),
+];
+
+const _planned = <_Destination>[
+  _Destination(_Glyph.games, 'Games', 'provably fair, player against player'),
+  _Destination(_Glyph.contracts, 'Contracts', 'agreements with no admin key'),
+  _Destination(_Glyph.finance, 'Finance', 'money owned by rules you can read'),
+  _Destination(_Glyph.assets, 'Assets', 'tokens others issued, shown honestly'),
+];
+
+class _NavPanel extends StatelessWidget {
+  const _NavPanel({required this.controller});
+
+  final AnimationController controller;
+
+  static const double width = 322;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final t = KvMotion.out.transform(controller.value);
+        if (t == 0) return const SizedBox.shrink();
+        return Stack(
+          children: [
+            // The screen's ONE live blur (BG-4), under a summoned layer and
+            // never inside a scroll. The money behind stays legible as shape
+            // but stops being readable as data — it is not the subject now.
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: controller.reverse,
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(
+                    sigmaX: KvGlass.blurSigma * t,
+                    sigmaY: KvGlass.blurSigma * t,
+                  ),
+                  child: Container(
+                    color: KvColor.abyss.withValues(alpha: 0.62 * t),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              // Rise and fade, decelerating — never a slide race from off
+              // screen, which reads as a drawer being yanked (BG-9).
+              child: Transform.translate(
+                offset: Offset(0, 16 * (1 - t)),
+                child: Opacity(opacity: t, child: const _PanelBody()),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _PanelBody extends StatelessWidget {
+  const _PanelBody();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: _NavPanel.width,
+      decoration: const BoxDecoration(
+        color: KvColor.key,
+        border: Border(right: BorderSide(color: KvColor.edgeHi)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(
+            KvSpace.m,
+            KvSpace.statusBarReserve + KvSpace.sm,
+            KvSpace.m,
+            KvSpace.m,
+          ),
+          children: [
+            Row(
+              children: [
+                const Text(
+                  'KaspaVerse',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    color: KvColor.inkNav,
+                  ),
+                ),
+                const Spacer(),
+                _PanelAction(_Glyph.lock, 'Lock', onTap: () {}),
+              ],
+            ),
+            const SizedBox(height: KvSpace.l),
+
+            // Money — taller, one tone lighter, teal down its edge. The one
+            // teal emission this panel spends (BG-2).
+            _DestinationPlate(_built[0], tall: true, current: true),
+            const SizedBox(height: KvSpace.s),
+            _DestinationPlate(_built[1]),
+
+            const SizedBox(height: KvSpace.l),
+            const Row(
+              children: [
+                // inkMeta, not the sub-AA grey the export used here — this is
+                // information text and it lands on a raised panel.
+                Text(
+                  'ON THE ROADMAP',
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 10,
+                    height: 14 / 10,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 1.8,
+                    color: KvColor.inkMeta,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: KvSpace.sm),
+
+            // One milled block, not four buttons: rank follows reality.
+            Container(
+              decoration: BoxDecoration(
+                color: KvColor.chip,
+                borderRadius: BorderRadius.circular(KvRadius.panel),
+                border: Border.all(color: KvColor.plateDivider),
+              ),
+              child: Column(
+                children: [
+                  for (var i = 0; i < _planned.length; i++) ...[
+                    if (i > 0)
+                      Container(height: 1, color: KvColor.plateDivider),
+                    _PlannedRow(_planned[i]),
+                  ],
+                ],
+              ),
+            ),
+
+            const SizedBox(height: KvSpace.l),
+            Container(height: 1, color: KvColor.plateDivider),
+            const SizedBox(height: KvSpace.sm),
+            _PanelAction(_Glyph.settings, 'Settings', onTap: () {}, wide: true),
+            const SizedBox(height: KvSpace.s),
+            const Text(
+              'The panel does not survive a lock.',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 11,
+                height: 15 / 11,
+                color: KvColor.etch,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A destination: its glyph seated in a ringed socket, its name, and one line
+/// saying what it is for. The socket is what makes the panel read as a designed
+/// object rather than a drawer of text.
+class _DestinationPlate extends StatelessWidget {
+  const _DestinationPlate(this.dest, {this.tall = false, this.current = false});
+
+  final _Destination dest;
+  final bool tall;
+  final bool current;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      selected: current,
+      child: InkWell(
+        onTap: () {},
+        borderRadius: BorderRadius.circular(KvRadius.panel),
+        child: Container(
+          padding: EdgeInsets.fromLTRB(
+            KvSpace.sm,
+            tall ? KvSpace.m : KvSpace.sm,
+            KvSpace.sm,
+            tall ? KvSpace.m : KvSpace.sm,
+          ),
+          decoration: BoxDecoration(
+            color: tall ? KvColor.summoned : KvColor.chip,
+            borderRadius: BorderRadius.circular(KvRadius.panel),
+            border: Border.all(
+              color: tall ? KvColor.summonedEdge : KvColor.plateDivider,
+            ),
+          ),
+          child: Row(
+            children: [
+              if (current) ...[
+                Container(
+                  width: 2,
+                  height: tall ? 36 : 28,
+                  decoration: BoxDecoration(
+                    color: KvColor.primary,
+                    borderRadius: BorderRadius.circular(KvRadius.pill),
+                  ),
+                ),
+                const SizedBox(width: KvSpace.sm),
+              ],
+              _Socket(dest.glyph, lit: current),
+              const SizedBox(width: KvSpace.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      dest.name,
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: tall ? 17 : 15,
+                        height: 22 / 17,
+                        fontWeight: FontWeight.w600,
+                        color: KvColor.ink,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      dest.blurb,
+                      style: const TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 11,
+                        height: 15 / 11,
+                        color: KvColor.inkMeta,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (dest.count != null)
+                // A number, never a dot: a dot begs, and here begging costs the
+                // user a fee.
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: KvColor.keyPressed,
+                    borderRadius: BorderRadius.circular(KvRadius.pill),
+                    border: Border.all(color: KvColor.edgeHi),
+                  ),
+                  child: Text(
+                    dest.count!,
+                    style: const TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 11,
+                      color: KvColor.ink,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlannedRow extends StatelessWidget {
+  const _PlannedRow(this.dest);
+
+  final _Destination dest;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm, vertical: 10),
+      child: Row(
+        children: [
+          _Socket(dest.glyph, dim: true),
+          const SizedBox(width: KvSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  dest.name,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 14,
+                    height: 19 / 14,
+                    fontWeight: FontWeight.w600,
+                    color: KvColor.inkNav,
+                  ),
+                ),
+                Text(
+                  dest.blurb,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 11,
+                    height: 15 / 11,
+                    color: KvColor.inkMeta,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: KvSpace.s),
+          // Engraved, not stamped: recessed fill, hairline edge, mono caps.
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+            decoration: BoxDecoration(
+              color: KvColor.well,
+              borderRadius: BorderRadius.circular(KvRadius.chip),
+              border: Border.all(color: KvColor.noticeEdge),
+            ),
+            child: const Text(
+              'PLANNED',
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 9,
+                height: 13 / 9,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 1,
+                color: KvColor.inkMeta,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The ringed socket. A glyph sitting loose on a plate reads as clip art; the
+/// same glyph seated in a machined ring reads as a control.
+class _Socket extends StatelessWidget {
+  const _Socket(this.glyph, {this.lit = false, this.dim = false});
+
+  final _Glyph glyph;
+  final bool lit;
+  final bool dim;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: KvColor.well,
+        border: Border.all(color: lit ? KvColor.edgeHi : KvColor.hairline),
+      ),
+      child: Center(
+        child: CustomPaint(
+          size: const Size(18, 18),
+          painter: _GlyphPainter(
+            glyph,
+            tone: dim ? KvColor.inkMeta : KvColor.inkNav,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PanelAction extends StatelessWidget {
+  const _PanelAction(
+    this.glyph,
+    this.label, {
+    required this.onTap,
+    this.wide = false,
+  });
+
+  final _Glyph glyph;
+  final String label;
+  final VoidCallback onTap;
+  final bool wide;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.chip),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
+          child: Row(
+            mainAxisSize: wide ? MainAxisSize.max : MainAxisSize.min,
+            children: [
+              CustomPaint(
+                size: const Size(16, 16),
+                painter: _GlyphPainter(glyph, tone: KvColor.inkNav),
+              ),
+              const SizedBox(width: KvSpace.s),
+              Text(
+                label,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  fontWeight: FontWeight.w600,
+                  color: KvColor.inkBright,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
