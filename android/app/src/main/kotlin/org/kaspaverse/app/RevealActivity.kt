@@ -3,6 +3,7 @@ package org.kaspaverse.app
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.util.Log
@@ -56,6 +57,45 @@ class RevealActivity : Activity() {
     // answer, and the bounce notice is a redirection. Amber is exactly the
     // "not yet certain / needs checking" meaning the law assigns it (BG-7).
     private val cWarning = Color.parseColor("#E0B15C")    // KvColor.warn
+    private val cControl = Color.parseColor("#060606")    // KvColor.control
+    private val cEdgeHi = Color.parseColor("#2A2A2A")     // KvColor.edgeHi
+
+    // The two bundled faces, loaded from the Flutter asset bundle. Until now
+    // this screen rendered in Roboto and Droid Sans Mono while every Flutter
+    // surface rendered Inter and JetBrains Mono — a two-font-law violation that
+    // shipped, on the most security-critical screen in the app, unrecorded
+    // until 2026-08-26 (design_system.md §9.2).
+    //
+    // Both files are variable TTFs. `Typeface.create(base, weight, italic)`
+    // needs API 28; below that Android can only pick a bold instance, which is
+    // the honest fallback rather than a fake bold.
+    // FAIL SAFE, deliberately. `createFromAsset` throws if the path is wrong,
+    // and a wrong font on the seed screen is a cosmetic defect while a crash on
+    // the seed screen is a user who cannot back up their wallet. So a missing
+    // asset degrades to the system face and says so in the log.
+    private fun face(path: String, fallback: Typeface): Typeface = try {
+        Typeface.createFromAsset(assets, path)
+    } catch (e: RuntimeException) {
+        Log.w(TAG, "bundled face unavailable, using system face")
+        fallback
+    }
+
+    private val faceUi: Typeface by lazy {
+        face("flutter_assets/assets/fonts/Inter-Variable.ttf", Typeface.DEFAULT)
+    }
+    private val faceMono: Typeface by lazy {
+        face(
+            "flutter_assets/assets/fonts/JetBrainsMono-Variable.ttf",
+            Typeface.MONOSPACE,
+        )
+    }
+
+    private fun uiWeight(w: Int): Typeface =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Typeface.create(faceUi, w, false)
+        } else {
+            Typeface.create(faceUi, if (w >= 600) Typeface.BOLD else Typeface.NORMAL)
+        }
 
     companion object {
         /**
@@ -258,10 +298,10 @@ class RevealActivity : Activity() {
 
         // Muted until the words have actually been on the glass; the tap is never
         // dead — it says what is missing (L87's class: no silent disabled control).
-        val cont = styledButton("I've written them down", cSurfaceAlt, cTextSecondary, stroke = cBorder)
+        val cont = styledButton("I've written them down", cControl, cTextSecondary, stroke = cEdgeHi)
         val hint = body("")
 
-        val hold = styledButton("Hold to reveal", cSurfaceAlt, cTextPrimary, stroke = cBorder)
+        val hold = styledButton("Hold to reveal", cControl, cTextPrimary, stroke = cEdgeHi)
         hold.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -335,12 +375,15 @@ class RevealActivity : Activity() {
         val num = TextView(this).apply {
             text = "${i + 1}"
             setTextColor(cTextSecondary)
-            typeface = Typeface.MONOSPACE
+            typeface = faceMono
             textSize = 13f
             width = dp(28)
         }
         val word = TextView(this).apply {
-            typeface = Typeface.MONOSPACE
+            typeface = faceMono
+            // 16, not §2's 13. A recovery word is copied onto paper once and
+            // never again; legibility beats the type ramp here, and the ramp
+            // was written for screens you read, not screens you transcribe.
             textSize = 16f
         }
         wordViews[i] = word
@@ -393,8 +436,8 @@ class RevealActivity : Activity() {
         root.addView(spacer(dp(16)))
         val prompt = TextView(this).apply {
             setTextColor(cPrimary)
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
+            textSize = 15f
+            typeface = uiWeight(600)
             setPadding(0, 0, 0, dp(12))
         }
         quizPrompt = prompt
@@ -479,7 +522,8 @@ class RevealActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) }
             }
             rowWords.forEachIndexed { c, word ->
-                val chip = styledButton(word, cSurfaceAlt, cTextPrimary, stroke = cBorder).apply {
+                val chip = styledButton(word, cControl, cTextPrimary, stroke = cEdgeHi).apply {
+                    typeface = faceMono
                     textSize = 14f
                     setPadding(dp(4), dp(12), dp(4), dp(12))
                     layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
@@ -571,7 +615,7 @@ class RevealActivity : Activity() {
             )
         )
         root.addView(spacer(dp(24)))
-        val back = styledButton("Go back", cSurfaceAlt, cTextPrimary, stroke = cBorder)
+        val back = styledButton("Go back", cControl, cTextPrimary, stroke = cEdgeHi)
         back.setOnClickListener { finishWith(false) }
         root.addView(back)
         setContentView(root)
@@ -599,21 +643,23 @@ class RevealActivity : Activity() {
         text = t
         setTextColor(cTextPrimary)
         textSize = 22f
-        typeface = Typeface.DEFAULT_BOLD
+        typeface = uiWeight(600)
+        letterSpacing = -0.009f
         setPadding(0, 0, 0, dp(8))
     }
 
     private fun body(t: String) = TextView(this).apply {
         text = t
         setTextColor(cTextSecondary)
-        textSize = 14f
+        typeface = uiWeight(400)
+        textSize = 15f
         setLineSpacing(dp(4).toFloat(), 1f)
     }
 
     /** Body weight, full contrast — for a fact the user must not skim past. */
     private fun strong(t: String) = body(t).apply {
         setTextColor(cTextPrimary)
-        typeface = Typeface.DEFAULT_BOLD
+        typeface = uiWeight(600)
     }
 
     /** Why you are back on this screen. Not an error — a redirection. */
@@ -621,9 +667,14 @@ class RevealActivity : Activity() {
         setTextColor(cWarning)
     }
 
+    /**
+     * Controls are pills at [cControl]; surfaces stay machined (D-194). This
+     * is the native mirror of `KvColor.control` / `KvRadius.control`, and it
+     * is the reason §9.1's mirror list is colours AND geometry.
+     */
     private fun styledButton(text: String, fill: Int, textColor: Int, stroke: Int? = null): Button {
         val bg = GradientDrawable().apply {
-            cornerRadius = dp(8).toFloat()
+            cornerRadius = dp(100).toFloat()
             setColor(fill)
             if (stroke != null) setStroke(dp(1), stroke)
         }
@@ -632,7 +683,8 @@ class RevealActivity : Activity() {
             setTextColor(textColor)
             background = bg
             isAllCaps = false
-            textSize = 16f
+            typeface = uiWeight(600)
+            textSize = 15f
             minHeight = dp(48)
             stateListAnimator = null
             setPadding(dp(16), dp(12), dp(16), dp(12))
