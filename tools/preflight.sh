@@ -73,6 +73,29 @@ if [ "$HAVE_DOCS" = 1 ]; then
       | sed 's/\.md$//' | sort | uniq -c | awk '{printf "%s %s · ", $2, $1}' | sed 's/ · $//')"
   echo "• armed triggers: ${TRIG_N}${TRIG_BY:+  ($TRIG_BY)} — grep -rnE '\[TRIGGER(\]|:)' docs/"
 fi
+# PNN beacon floor (D-201 / D-183 trigger T-C). The reading itself needs the network and
+# stays MANUAL in tools/beacon_floor.sh; this line is offline by construction — it only
+# compares the date that tool stamped into itself against today. T-C is the one re-pin
+# trigger with no instrument until now, and a manual instrument nobody is told to run is
+# how it got that way, so the nudge lives here rather than in anyone's memory.
+if [ -x tools/beacon_floor.sh ]; then
+  BEACON_DATE=""; BEACON_Y=0; BEACON_B=0; BEACON_TOT=0
+  read -r BEACON_DATE BEACON_Y BEACON_B BEACON_TOT <<< "$(bash tools/beacon_floor.sh --stamp 2>/dev/null || true)"
+  if [ -n "$BEACON_DATE" ]; then
+    BEACON_AGE=$(( ( $(date -u +%s) - $(date -u -d "$BEACON_DATE" +%s 2>/dev/null || echo 0) ) / 86400 ))
+    BEACON_NOTE=""
+    [ "$BEACON_AGE" -gt 30 ] && BEACON_NOTE="  ← STALE (>30d): run tools/beacon_floor.sh --record"
+    # Re-run the DERIVED test on the stamped numbers, offline: breach iff 10*b^3 > (y+b)^3.
+    # Staleness alone is not the alarm — a fresh reading that is BELOW the floor would
+    # otherwise print as current and unremarkable, which is the exact failure D-201 exists
+    # to stop one layer down.
+    BEACON_DEN=$((BEACON_Y + BEACON_B))
+    if [ "$BEACON_DEN" -gt 0 ] && [ $((10 * BEACON_B * BEACON_B * BEACON_B)) -gt $((BEACON_DEN * BEACON_DEN * BEACON_DEN)) ]; then
+      BEACON_NOTE="${BEACON_NOTE}  ← BELOW FLOOR: D-183 trigger T-C has FIRED (re-run to confirm, then report)"
+    fi
+    echo "• beacon floor: ${BEACON_Y}/${BEACON_TOT} node-yielding, ${BEACON_B} hung, at ${BEACON_DATE} (${BEACON_AGE}d ago)${BEACON_NOTE}"
+  fi
+fi
 echo "═══════════════════════════════════════════"
 if [ "$HAVE_DOCS" = 1 ]; then
   echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md" # gate-allow:internal-path

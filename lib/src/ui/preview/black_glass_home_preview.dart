@@ -5167,7 +5167,7 @@ class _MoreRow extends StatelessWidget {
 // These are LOOK REFERENCES. The phase file promotes this prototype to UX-7's
 // input specification, and a mock promoted to a specification without the
 // specification's constraints is how a security property gets designed away.
-// Four prohibitions, from `wallet-security-auditor` at the UX-0 wrap (D-201):
+// Four prohibitions, from `wallet-security-auditor` at the UX-0 wrap (D-203):
 //
 //   1. **Real recovery words never render in Dart.** Reveal and verify live in
 //      `android/.../RevealActivity.kt` and nowhere else (D-039); a word never
