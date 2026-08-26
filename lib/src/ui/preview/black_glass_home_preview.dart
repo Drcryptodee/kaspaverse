@@ -58,6 +58,25 @@ extension on HeroVariant {
 }
 
 extension on MoneyState {
+  /// **Silence is the healthy state.** A permanent "Node responding" beside a
+  /// permanently animating meter says nothing changed, twice — and the Mainnet
+  /// chip in the plate already carries a lit lamp, so a healthy screen was
+  /// wearing two liveness indicators that agreed with each other. The trust
+  /// line now EARNS its place by appearing: it shows up when the link is not
+  /// live, and the chip carries the good news on its own.
+  ///
+  /// This tightens BG-8 rather than loosening it. The law requires that a
+  /// chain-derived value wire live · stale · unknown — it never required a
+  /// standing badge for "fine". The age line under the figure already reports
+  /// freshness; what was redundant was the reassurance.
+  bool get trustLineSpeaks =>
+      this == MoneyState.syncing || this == MoneyState.degraded;
+
+  /// **Motion means something is happening.** The cadence rides the trust line,
+  /// so it is the app's loading indicator and its link-lost tell — never ambient
+  /// decoration on a settled screen. Stillness is what "nothing to worry about"
+  /// looks like.
+
   String get label => switch (this) {
     MoneyState.empty => 'empty',
     MoneyState.live => 'live',
@@ -87,6 +106,18 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
   MoneyState _state = MoneyState.live;
   HeroVariant _variant = HeroVariant.plated;
 
+  /// A pinned header cannot measure itself, so the plate's height is stated.
+  /// It is deterministic per state — that is the whole reason the trust line
+  /// appearing and disappearing is a design decision and not a layout accident.
+  double get _plateExtent {
+    // Measured on device: the plate without a trust line is 26dp shorter, and
+    // a pinned header that keeps the taller extent leaves a hole under itself.
+    var h = 194.0;
+    if (_state.trustLineSpeaks) h += 26;
+    if (_state == MoneyState.inFlight) h += 56;
+    return h;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -100,23 +131,47 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
             const SizedBox(height: KvSpace.statusBarReserve),
             _TopRail(variant: _variant),
             Expanded(
-              child: ListView(
-                padding: EdgeInsets.zero,
-                children: [
-                  const SizedBox(height: KvSpace.l),
-                  _Hero(state: _state, variant: _variant),
-                  const SizedBox(height: KvSpace.m),
-                  // The plated variant carries its own trust line inside the
-                  // plate, so it is not repeated below.
-                  if (_variant != HeroVariant.plated) _TrustLine(state: _state),
-                  if (_state == MoneyState.degraded) ...[
-                    const SizedBox(height: KvSpace.l),
-                    const _DegradedNotice(),
+              // The balance is PINNED and the ledger scrolls under it: what you
+              // own is not something you should have to scroll back up to see.
+              // Pull-to-refresh is hosted by the whole scroll view rather than
+              // by the list, so the gesture works from the balance as well —
+              // which is where a user reaches for it first.
+              child: RefreshIndicator(
+                onRefresh: () async {
+                  await Future<void>.delayed(const Duration(milliseconds: 900));
+                },
+                // Not teal: a refresh is a mechanism, not the one primary
+                // action, and teal is rationed to three emissions (BG-2).
+                color: KvColor.ink,
+                backgroundColor: KvColor.key,
+                strokeWidth: 2,
+                child: CustomScrollView(
+                  // Always scrollable, so the pull gesture exists even when the
+                  // ledger is short or empty.
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  slivers: [
+                    SliverPersistentHeader(
+                      pinned: true,
+                      delegate: _PlateHeader(
+                        extent: _plateExtent,
+                        child: _Hero(state: _state, variant: _variant),
+                      ),
+                    ),
+                    if (_state == MoneyState.degraded)
+                      const SliverToBoxAdapter(
+                        child: Padding(
+                          padding: EdgeInsets.only(bottom: KvSpace.m),
+                          child: _DegradedNotice(),
+                        ),
+                      ),
+                    SliverToBoxAdapter(
+                      child: _Feed(state: _state, variant: _variant),
+                    ),
+                    const SliverToBoxAdapter(
+                      child: SizedBox(height: KvSpace.l),
+                    ),
                   ],
-                  const SizedBox(height: KvSpace.l),
-                  _Feed(state: _state, variant: _variant),
-                  const SizedBox(height: KvSpace.l),
-                ],
+                ),
               ),
             ),
             _ThumbActions(state: _state),
@@ -137,6 +192,36 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview> {
       ),
     );
   }
+}
+
+/// Pins the balance while the ledger scrolls beneath it. It paints the ground
+/// itself, so rows passing underneath never show through — a transparent pinned
+/// header is how a sticky plate ends up with text sliding across it.
+class _PlateHeader extends SliverPersistentHeaderDelegate {
+  const _PlateHeader({required this.extent, required this.child});
+
+  final double extent;
+  final Widget child;
+
+  @override
+  double get minExtent => extent;
+
+  @override
+  double get maxExtent => extent;
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
+    return Container(
+      color: KvColor.abyss,
+      alignment: Alignment.topCenter,
+      padding: const EdgeInsets.only(top: KvSpace.l, bottom: KvSpace.m),
+      child: child,
+    );
+  }
+
+  @override
+  bool shouldRebuild(_PlateHeader old) =>
+      old.extent != extent || old.child != child;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,28 +471,30 @@ class _Plated extends StatelessWidget {
           const SizedBox(height: KvSpace.sm),
           Container(height: 1, color: KvColor.plateDivider),
           const SizedBox(height: KvSpace.sm),
-          Row(
-            children: [
-              _Lamp(lamp),
-              const SizedBox(width: KvSpace.s),
-              Expanded(
-                child: Text(
-                  words,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 13,
-                    height: 18 / 13,
-                    color: KvColor.inkDim,
+          if (state.trustLineSpeaks) ...[
+            Row(
+              children: [
+                _Lamp(lamp),
+                const SizedBox(width: KvSpace.s),
+                Expanded(
+                  child: Text(
+                    words,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      color: KvColor.inkDim,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: KvSpace.s),
-              _Cadence(running: state.cadenceRunning),
-            ],
-          ),
-          const SizedBox(height: 6),
+                const SizedBox(width: KvSpace.s),
+                _Cadence(running: state.cadenceRunning),
+              ],
+            ),
+            const SizedBox(height: 6),
+          ],
           // The chain clock, where an instrument puts its reading: small,
           // mono, tabular, and never competing with the money above it.
           Text(
@@ -798,46 +885,6 @@ class _InFlightLine extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Trust line — a lamp, plain English, and the cadence.
 // ─────────────────────────────────────────────────────────────────────────────
-
-class _TrustLine extends StatelessWidget {
-  const _TrustLine({required this.state});
-
-  final MoneyState state;
-
-  @override
-  Widget build(BuildContext context) {
-    final (Color lamp, String words) = switch (state) {
-      MoneyState.degraded => (KvColor.warn, 'Link lost — showing last known'),
-      MoneyState.syncing => (KvColor.warn, 'Counting your coins'),
-      _ => (KvColor.ok, 'Node responding'),
-    };
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-      child: Row(
-        children: [
-          _Lamp(lamp),
-          const SizedBox(width: KvSpace.sm),
-          Expanded(
-            child: Text(
-              words,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 13,
-                height: 18 / 13,
-                fontWeight: FontWeight.w500,
-                color: KvColor.inkDim,
-              ),
-            ),
-          ),
-          const SizedBox(width: KvSpace.sm),
-          _Cadence(running: state.cadenceRunning),
-        ],
-      ),
-    );
-  }
-}
 
 /// A 6dp lamp under an 8dp bloom, no spread — §1.5's only simulated light
 /// besides the cadence and the sign ring. The words beside it carry the
@@ -1582,7 +1629,44 @@ class _Switcher<T> extends StatelessWidget {
 
 /// The depths worth being able to see at once, so the founder can watch the
 /// mark arrive. Debug affordance, not design.
-const _depths = <int>[0, 1, 12, 418, 999, 1000, 2400];
+const _depths = <int>[0, 1, 12, 99, 100, 418, 999, 1000];
+
+/// The two thresholds that mean something, and the words for the three zones
+/// between them.
+///
+/// **Amber was wrong past a hundred.** `warn` means *not yet certain*, and a
+/// transaction a hundred blocks deep is certain enough to act on — holding it
+/// amber until a thousand tells the user to keep worrying for another fifteen
+/// minutes about something already settled. So the gauge has three zones, not
+/// two: **settling** (amber, genuinely uncertain), **safe** (green, deep enough
+/// to rely on), and **final** (green, and the thousand mark closes).
+///
+/// Two thresholds, one hue change: green arrives at safety, and finality is
+/// carried by the mark filling rather than by a fourth colour the palette does
+/// not have (BG-7 — one hue, one meaning).
+const int kSafeDepth = 100;
+const int kFinalDepth = 1000;
+
+/// The explorers that actually exist. **`kas.fyi` shut down** — it was in this
+/// file's copy and in two historical records, and a wallet that hands you a
+/// dead link is worse than one that offers none.
+///
+/// The choice belongs in Settings (UX-3 builds it); it lives here so the
+/// disclosure can name the destination it is actually about to hand your data
+/// to. A generic "an explorer" cannot be a sovereignty decision.
+enum Explorer { kaspaOrg, kaspaStream }
+
+extension on Explorer {
+  String get host => switch (this) {
+    Explorer.kaspaOrg => 'explorer.kaspa.org',
+    Explorer.kaspaStream => 'kaspa.stream',
+  };
+
+  String get label => switch (this) {
+    Explorer.kaspaOrg => 'explorer.kaspa.org',
+    Explorer.kaspaStream => 'kaspa.stream',
+  };
+}
 
 class _TransactionDetailPreview extends StatefulWidget {
   const _TransactionDetailPreview({required this.entry});
@@ -1596,11 +1680,13 @@ class _TransactionDetailPreview extends StatefulWidget {
 
 class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
   int _depth = 418;
+  Explorer _explorer = Explorer.kaspaOrg;
 
   @override
   Widget build(BuildContext context) {
     final e = widget.entry;
-    final settled = _depth >= _GaugePainter.finality;
+    final safe = _depth >= kSafeDepth;
+    final settled = _depth >= kFinalDepth;
     return Scaffold(
       backgroundColor: KvColor.abyss,
       body: SafeArea(
@@ -1685,18 +1771,23 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
                         ),
                       ),
                       const Spacer(),
-                      _Lamp(settled ? KvColor.ok : KvColor.warn),
+                      _Lamp(safe ? KvColor.ok : KvColor.warn),
                       const SizedBox(width: 6),
                       Text(
                         _depth == 0
-                            ? 'broadcast — not yet in a block'
+                            ? 'broadcast — not in a block yet'
                             : settled
-                            ? 'buried past a thousand'
+                            ? 'final'
+                            : safe
+                            ? 'safe to rely on'
                             : 'settling',
                         style: TextStyle(
                           fontFamily: KvFont.ui,
                           fontSize: 13,
-                          color: settled ? KvColor.inkDim : KvColor.warn,
+                          fontWeight: settled
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: safe ? KvColor.ok : KvColor.warn,
                         ),
                       ),
                     ],
@@ -1731,11 +1822,11 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
                     ),
                     child: Row(
                       children: [
-                        const Expanded(
+                        Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
+                              const Text(
                                 'View in explorer',
                                 style: TextStyle(
                                   fontFamily: KvFont.ui,
@@ -1744,11 +1835,11 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
                                   color: KvColor.ink,
                                 ),
                               ),
-                              SizedBox(height: 2),
+                              const SizedBox(height: 2),
                               Text(
-                                'Hands kas.fyi this transaction id and your '
-                                'network address.',
-                                style: TextStyle(
+                                'Hands ${_explorer.host} this transaction id '
+                                'and your network address.',
+                                style: const TextStyle(
                                   fontFamily: KvFont.ui,
                                   fontSize: 12,
                                   height: 17 / 12,
@@ -1767,6 +1858,68 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
                           ),
                         ),
                       ],
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.sm),
+                  Row(
+                    children: [
+                      const Text(
+                        'Explorer',
+                        style: TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 12,
+                          color: KvColor.inkMeta,
+                        ),
+                      ),
+                      const SizedBox(width: KvSpace.sm),
+                      for (final e in Explorer.values)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: InkWell(
+                            onTap: () => setState(() => _explorer = e),
+                            borderRadius: BorderRadius.circular(KvRadius.chip),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: KvSpace.s,
+                                vertical: 5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: e == _explorer
+                                    ? KvColor.keyPressed
+                                    : KvColor.abyss,
+                                borderRadius: BorderRadius.circular(
+                                  KvRadius.chip,
+                                ),
+                                border: Border.all(
+                                  color: e == _explorer
+                                      ? KvColor.edgeHi
+                                      : KvColor.hairline,
+                                ),
+                              ),
+                              child: Text(
+                                e.label,
+                                style: TextStyle(
+                                  fontFamily: KvFont.mono,
+                                  fontSize: 11,
+                                  color: e == _explorer
+                                      ? KvColor.ink
+                                      : KvColor.inkMeta,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'This chooser lives in Settings — it sits here so the '
+                    'disclosure above can name a real destination.',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 11,
+                      height: 15 / 11,
+                      color: KvColor.etch,
                     ),
                   ),
                   const SizedBox(height: KvSpace.xl),
@@ -1915,11 +2068,9 @@ class _GaugePainter extends CustomPainter {
 
   final int depth;
 
-  static const int finality = 1000;
-
   static double _pos(num n) {
     if (n <= 0) return 0;
-    final p = math.log(1 + n) / math.log(1 + finality);
+    final p = math.log(1 + n) / math.log(1 + kFinalDepth);
     return p.clamp(0.0, 1.0);
   }
 
@@ -1945,10 +2096,12 @@ class _GaugePainter extends CustomPainter {
       canvas.drawLine(Offset(x, railY + 1), Offset(x, railY + 3), minor);
     }
 
-    // The fill, from zero to where this transaction actually is.
-    final settled = depth >= finality;
+    // The fill, from zero to where this transaction actually is. Green arrives
+    // at SAFE, not at final — see kSafeDepth.
+    final safe = depth >= kSafeDepth;
+    final settled = depth >= kFinalDepth;
     final fill = Paint()
-      ..color = settled ? KvColor.ok : KvColor.warn
+      ..color = safe ? KvColor.ok : KvColor.warn
       ..strokeWidth = 3
       ..strokeCap = StrokeCap.butt;
     final x = (w * _pos(depth)).clamp(0.0, w);
@@ -1961,24 +2114,58 @@ class _GaugePainter extends CustomPainter {
       ..color = KvColor.tick
       ..strokeWidth = 1
       ..isAntiAlias = false;
-    for (final n in const [1, 10, 100]) {
+    for (final n in const [1, 10]) {
       final sx = (w * _pos(n)).floorToDouble() + 0.5;
       canvas.drawLine(Offset(sx, railY + 1), Offset(sx, railY + 7), stop);
       _label(canvas, '$n', sx, railY + 10, KvColor.inkMetaLow);
     }
 
-    // The thousand mark — taller, brighter, and the only one that is labelled
-    // as a threshold rather than a number.
-    final markPaint = Paint()
-      ..color = settled ? KvColor.ok : KvColor.inkMeta
+    // The SAFE threshold — a named stop, not just a number, because it is the
+    // point the user can stop watching.
+    final safeX = (w * _pos(kSafeDepth)).floorToDouble() + 0.5;
+    final safePaint = Paint()
+      ..color = safe ? KvColor.ok : KvColor.inkMetaLow
       ..strokeWidth = 1.5
       ..isAntiAlias = false;
-    final mx = w - 0.5;
-    canvas.drawLine(Offset(mx, railY - 8), Offset(mx, railY + 8), markPaint);
+    canvas.drawLine(
+      Offset(safeX, railY - 6),
+      Offset(safeX, railY + 7),
+      safePaint,
+    );
     _label(
       canvas,
-      '1,000',
-      mx,
+      'safe',
+      safeX,
+      railY + 10,
+      safe ? KvColor.ok : KvColor.inkMetaLow,
+    );
+
+    // The thousand mark. Finality is carried by the mark CLOSING — an open
+    // bracket that fills — rather than by a fourth hue the palette does not
+    // have. Reaching it is the one moment on this screen worth marking.
+    final mx = w - 1.5;
+    final markPaint = Paint()
+      ..color = settled ? KvColor.ok : KvColor.inkMeta
+      ..strokeWidth = settled ? 3 : 1.5
+      ..isAntiAlias = false;
+    canvas.drawLine(Offset(mx, railY - 9), Offset(mx, railY + 9), markPaint);
+    if (settled) {
+      // The bracket closes: two short returns, like a gauge's end stop seated.
+      canvas.drawLine(
+        Offset(mx - 5, railY - 9),
+        Offset(mx, railY - 9),
+        markPaint,
+      );
+      canvas.drawLine(
+        Offset(mx - 5, railY + 9),
+        Offset(mx, railY + 9),
+        markPaint,
+      );
+    }
+    _label(
+      canvas,
+      settled ? 'final' : '1,000',
+      mx + 1.5,
       railY + 10,
       settled ? KvColor.ok : KvColor.inkMeta,
       alignEnd: true,
