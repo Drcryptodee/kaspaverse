@@ -106,7 +106,10 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
   );
   MoneyState _state = MoneyState.live;
   final HeroVariant _variant = HeroVariant.plated;
-  PanelStyle _panel = PanelStyle.panel;
+  // C compact, founder-chosen 2026-08-26. The switcher stays for now:
+  // "feels kinda modern but not quite yet" is not a closed decision.
+  PanelStyle _panel = PanelStyle.compact;
+  double _dragX = 0;
 
   /// **The extent is measured, not stated.** A `SliverPersistentHeader` demands
   /// a height it cannot work out for itself, and the first version of this
@@ -143,11 +146,28 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
       backgroundColor: KvColor.abyss,
       body: Stack(
         children: [
-          SafeArea(top: false, child: _body(context)),
+          // A left swipe pulls the panel in from the right edge it lives on.
+          // The gesture and the geometry agree, which is what makes it
+          // learnable without being told.
+          GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            // Accumulated travel, not end velocity. A flick's velocity is only
+            // read once the recogniser has already won the arena, and against
+            // a scroll view full of tappable rows that is not reliable —
+            // measured on device, the velocity form never fired.
+            onHorizontalDragStart: (_) => _dragX = 0,
+            onHorizontalDragUpdate: (d) {
+              _dragX += d.delta.dx;
+              if (_dragX < -48 && _nav.status == AnimationStatus.dismissed) {
+                _nav.forward();
+              }
+            },
+            child: SafeArea(top: false, child: _body(context)),
+          ),
           // BG-13: the panel is mortal. It never survives a lock, and it is
           // summoned rather than resident — there is no rail and no tab bar
           // holding a permanent claim on the screen.
-          _NavPanel(controller: _nav, style: _panel),
+          _NavPanel(controller: _nav, style: _panel, onDismiss: _nav.reverse),
         ],
       ),
     );
@@ -471,7 +491,10 @@ class _Figure extends StatelessWidget {
               fontSize: size * 0.33,
               fontWeight: FontWeight.w500,
               letterSpacing: 0.6,
-              color: KvColor.inkMeta,
+              // The one word on this screen that IS the brand. `primaryMuted`
+              // is ambient teal, not an emission, so it costs nothing against
+              // BG-2's cap of three — see §1.5.
+              color: KvColor.primaryMuted,
             ),
           ),
         ],
@@ -529,7 +552,11 @@ class _Plated extends StatelessWidget {
           const SizedBox(height: KvSpace.sm),
           _Figure(integer: integer, fraction: fraction),
           const SizedBox(height: KvSpace.s),
-          _ValueLine(empty: integer == '0', rate: 0.0752, ageLabel: '2 m ago'),
+          _ValueLine(
+            empty: integer == '0',
+            rate: 0.0752,
+            ageLabel: 'rate 2 m ago',
+          ),
           const SizedBox(height: KvSpace.m),
           Container(height: 1, color: KvColor.plateDivider),
           const SizedBox(height: KvSpace.sm),
@@ -770,8 +797,11 @@ class _NetworkChip extends StatelessWidget {
 ///
 ///   * it is **subordinate by scale and tone**, and prefixed `≈`, because KAS is
 ///     the unit of account and this is a convenience beside it;
-///   * it **names its source and its age**, like every other reading the wallet
-///     did not derive itself (BG-8);
+///   * it **wears its age** at the point of display, like every other reading
+///     the wallet did not derive itself (BG-8) — the SOURCE is disclosed where
+///     the source is chosen (the network surface and Settings), not shouted on
+///     the money screen, because a hostname beside a balance is clutter that
+///     stops being read on day two;
 ///   * unknown renders **`—`**, never a fabricated number (BG-5).
 ///
 /// The fourth condition is enforced by its absence: this widget appears on no
@@ -805,7 +835,7 @@ class _ValueLine extends StatelessWidget {
         ),
         const SizedBox(width: KvSpace.s),
         Text(
-          r == null ? 'no rate yet' : 'api.kaspa.org · $ageLabel',
+          r == null ? 'no rate yet' : ageLabel,
           style: const TextStyle(
             fontFamily: KvFont.ui,
             fontSize: 11,
@@ -857,7 +887,7 @@ class _DatumPainter extends CustomPainter {
 
     if (!graduated) {
       final stop = Paint()
-        ..color = KvColor.tick
+        ..color = KvColor.primaryMuted
         ..strokeWidth = 1
         ..isAntiAlias = false;
       canvas.drawLine(const Offset(0.5, 0), const Offset(0.5, 5), stop);
@@ -880,9 +910,10 @@ class _DatumPainter extends CustomPainter {
       canvas.drawLine(Offset(x + 0.5, 1), Offset(x + 0.5, 1 + h), tick);
     }
 
-    // The end stops, brighter, so the scale has a beginning and an end.
+    // The end stops, in ambient teal: a calibration mark, structural rather
+    // than decorative, and the brand sitting on the instrument itself.
     final stop = Paint()
-      ..color = KvColor.tick
+      ..color = KvColor.primaryMuted
       ..strokeWidth = 1
       ..isAntiAlias = false;
     canvas.drawLine(const Offset(0.5, 0), const Offset(0.5, 7), stop);
@@ -1197,7 +1228,7 @@ class _Feed extends StatelessWidget {
           child: Row(
             children: [
               if (variant.instrumentRegister) ...[
-                Container(width: 2, height: 10, color: KvColor.tick),
+                Container(width: 2, height: 10, color: KvColor.primaryMuted),
                 const SizedBox(width: KvSpace.s),
                 const _MicroLabel('ACTIVITY'),
               ] else
@@ -2439,10 +2470,15 @@ const _planned = <_Destination>[
 ];
 
 class _NavPanel extends StatelessWidget {
-  const _NavPanel({required this.controller, required this.style});
+  const _NavPanel({
+    required this.controller,
+    required this.style,
+    required this.onDismiss,
+  });
 
   final AnimationController controller;
   final PanelStyle style;
+  final VoidCallback onDismiss;
 
   @override
   Widget build(BuildContext context) {
@@ -2809,7 +2845,9 @@ class _Socket extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: KvColor.well,
-        border: Border.all(color: lit ? KvColor.edgeHi : KvColor.hairline),
+        border: Border.all(
+          color: lit ? KvColor.primaryMuted : KvColor.hairline,
+        ),
       ),
       child: Center(
         child: CustomPaint(
