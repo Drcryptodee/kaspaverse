@@ -36,14 +36,18 @@ import '../theme/tokens.dart';
 
 enum MoneyState { empty, live, syncing, inFlight, degraded }
 
-/// Three readings of the same number. The instrument variant is the export's
-/// own; the other two exist because on glass it read as telemetry rather than
-/// as money — which is a thing no spec file can tell you.
+/// **Plated is the ratified reading** (founder call, 2026-08-26): the balance
+/// earns a container, the trust statement sits inside it beside the number it
+/// vouches for, and the label is sentence case. The instrument register — tracked
+/// mono caps, a graduated datum, the unit engraved beneath a scale — read as
+/// telemetry on glass, and money is owned rather than measured.
+///
+/// **The graduated datum was not discarded; it was relocated.** It now draws the
+/// confirmation gauge on the transaction-detail surface, where there genuinely is
+/// a scale and a reading.
 enum HeroVariant { plated, engraved, instrument }
 
 extension on HeroVariant {
-  /// Whether the whole screen wears instrument register — tracked mono caps on
-  /// labels and the wordmark — or reads in plain sentence case.
   bool get instrumentRegister => this == HeroVariant.instrument;
 
   String get label => switch (this) {
@@ -365,10 +369,21 @@ class _Plated extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _SoftLabel('Total balance'),
+          Row(
+            children: [
+              const _SoftLabel('Total balance'),
+              const Spacer(),
+              // Tapping the network opens the node surface — who serves you,
+              // how freshly, and the standing offer to serve yourself. The
+              // sovereign-node session owns what lives behind it.
+              const _NetworkChip(),
+            ],
+          ),
           const SizedBox(height: KvSpace.s),
           _Figure(integer: integer, fraction: fraction),
-          const SizedBox(height: KvSpace.m),
+          const SizedBox(height: 6),
+          _ValueLine(empty: integer == '0', rate: 0.0752, ageLabel: '2 m ago'),
+          const SizedBox(height: KvSpace.sm),
           Container(height: 1, color: KvColor.plateDivider),
           const SizedBox(height: KvSpace.sm),
           Row(
@@ -391,6 +406,19 @@ class _Plated extends StatelessWidget {
               const SizedBox(width: KvSpace.s),
               _Cadence(running: state.cadenceRunning),
             ],
+          ),
+          const SizedBox(height: 6),
+          // The chain clock, where an instrument puts its reading: small,
+          // mono, tabular, and never competing with the money above it.
+          Text(
+            'DAA 523,216,421',
+            style: const TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: 11,
+              height: 15 / 11,
+              color: KvColor.inkMetaLow,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
           ),
         ],
       ),
@@ -526,6 +554,120 @@ class _Instrument extends StatelessWidget {
   MoneyState.syncing => (KvColor.warn, 'Counting your coins'),
   _ => (KvColor.ok, 'Node responding'),
 };
+
+/// The network, as a control rather than a caption. A lamp, the network name,
+/// and a chevron that says it goes somewhere — 48dp of target around a 28dp
+/// visual (BG-12 requires the smaller visual to be declared).
+class _NetworkChip extends StatelessWidget {
+  const _NetworkChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Mainnet. Open network and node settings',
+      child: InkWell(
+        onTap: () {},
+        borderRadius: BorderRadius.circular(KvRadius.pill),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: KvSpace.xl),
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.sm,
+            vertical: 5,
+          ),
+          decoration: BoxDecoration(
+            color: KvColor.chip,
+            borderRadius: BorderRadius.circular(KvRadius.pill),
+            border: Border.all(color: KvColor.edgeHi),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const _Lamp(KvColor.ok),
+              const SizedBox(width: 7),
+              const Text(
+                'Mainnet',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 12,
+                  height: 16 / 12,
+                  fontWeight: FontWeight.w500,
+                  color: KvColor.inkDim,
+                ),
+              ),
+              const SizedBox(width: 5),
+              CustomPaint(
+                size: const Size(12, 12),
+                painter: const _GlyphPainter(
+                  _Glyph.chevron,
+                  tone: KvColor.inkMeta,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// What the balance is worth, in fiat.
+///
+/// **Founder call, 2026-08-26 (D-186): fiat exists.** The rate comes from
+/// `api.kaspa.org`, a named and user-replaceable endpoint, and the whole feature
+/// is disable-able. A price is the one claim in this app that consensus cannot
+/// re-verify — no node, no chain and no proof can check it — so INV-8's
+/// carve-out carries conditions, and this widget is where three of them live:
+///
+///   * it is **subordinate by scale and tone**, and prefixed `≈`, because KAS is
+///     the unit of account and this is a convenience beside it;
+///   * it **names its source and its age**, like every other reading the wallet
+///     did not derive itself (BG-8);
+///   * unknown renders **`—`**, never a fabricated number (BG-5).
+///
+/// The fourth condition is enforced by its absence: this widget appears on no
+/// signing surface. What you sign is denominated in the thing that moves.
+class _ValueLine extends StatelessWidget {
+  const _ValueLine({required this.empty, this.rate, required this.ageLabel});
+
+  final bool empty;
+
+  /// Null when no rate has been fetched, or when the user switched it off.
+  final double? rate;
+  final String ageLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    if (empty) return const SizedBox.shrink();
+    final r = rate;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
+      children: [
+        Text(
+          r == null ? '≈ —' : '≈ ${(1284.5027 * r).toStringAsFixed(2)} USD',
+          style: const TextStyle(
+            fontFamily: KvFont.mono,
+            fontSize: 13,
+            height: 18 / 13,
+            color: KvColor.inkMeta,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
+        ),
+        const SizedBox(width: KvSpace.s),
+        Text(
+          r == null ? 'no rate yet' : 'api.kaspa.org · $ageLabel',
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 11,
+            height: 15 / 11,
+            color: KvColor.etch,
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 /// Sentence case, Inter, no tracking — a label a person reads, not one an
 /// instrument wears.
@@ -995,89 +1137,96 @@ class _Row extends StatelessWidget {
   Widget build(BuildContext context) {
     return Opacity(
       opacity: stale ? KvFreshness.opacityStale : 1,
-      child: Padding(
-        // 20dp rhythm, no dividers in motion — the ledger reads by spacing.
-        padding: const EdgeInsets.fromLTRB(
-          KvSpace.gutter,
-          10,
-          KvSpace.gutter,
-          10,
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => _TransactionDetailPreview(entry: entry),
+          ),
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: CustomPaint(
-                size: const Size(KvGlyph.grid, KvGlyph.grid),
-                painter: _GlyphPainter(entry.glyph, tone: entry.tone),
+        child: Padding(
+          // 20dp rhythm, no dividers in motion — the ledger reads by spacing.
+          padding: const EdgeInsets.fromLTRB(
+            KvSpace.gutter,
+            10,
+            KvSpace.gutter,
+            10,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: CustomPaint(
+                  size: const Size(KvGlyph.grid, KvGlyph.grid),
+                  painter: _GlyphPainter(entry.glyph, tone: entry.tone),
+                ),
               ),
-            ),
-            const SizedBox(width: KvSpace.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    entry.title,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 15,
-                      height: 20 / 15,
-                      fontWeight: FontWeight.w500,
-                      color: KvColor.ink,
-                    ),
-                  ),
-                  const SizedBox(height: 1),
-                  // Full width, so the compact form is never truncated twice.
-                  Text(
-                    entry.peer,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontFamily: KvFont.mono,
-                      fontSize: 12,
-                      height: 16 / 12,
-                      color: KvColor.inkMeta,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _Lamp(entry.statusLamp),
-                      const SizedBox(width: 5),
-                      Text(
-                        '${entry.status} · ${entry.age}',
-                        style: const TextStyle(
-                          fontFamily: KvFont.mono,
-                          fontSize: 11,
-                          height: 15 / 11,
-                          color: KvColor.inkMetaLow,
-                          fontFeatures: [FontFeature.tabularFigures()],
-                        ),
+              const SizedBox(width: KvSpace.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      entry.title,
+                      style: const TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 15,
+                        height: 20 / 15,
+                        fontWeight: FontWeight.w500,
+                        color: KvColor.ink,
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                    const SizedBox(height: 1),
+                    // Full width, so the compact form is never truncated twice.
+                    Text(
+                      entry.peer,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 12,
+                        height: 16 / 12,
+                        color: KvColor.inkMeta,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _Lamp(entry.statusLamp),
+                        const SizedBox(width: 5),
+                        Text(
+                          '${entry.status} · ${entry.age}',
+                          style: const TextStyle(
+                            fontFamily: KvFont.mono,
+                            fontSize: 11,
+                            height: 15 / 11,
+                            color: KvColor.inkMetaLow,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: KvSpace.sm),
-            // Direction rides four ways at once — word, sign, colour and
-            // weight — so the row survives greyscale, colour-blindness and a
-            // screen reader (BG-7).
-            Text(
-              entry.amount,
-              style: TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: 15,
-                height: 20 / 15,
-                fontWeight: entry.weight,
-                color: entry.tone,
-                fontFeatures: const [FontFeature.tabularFigures()],
+              const SizedBox(width: KvSpace.sm),
+              // Direction rides four ways at once — word, sign, colour and
+              // weight — so the row survives greyscale, colour-blindness and a
+              // screen reader (BG-7).
+              Text(
+                entry.amount,
+                style: TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 15,
+                  height: 20 / 15,
+                  fontWeight: entry.weight,
+                  color: entry.tone,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1267,7 +1416,7 @@ class _MicroLabel extends StatelessWidget {
   );
 }
 
-enum _Glyph { arrowIn, arrowOut, selfSend, navDots, diamond }
+enum _Glyph { arrowIn, arrowOut, selfSend, navDots, diamond, chevron }
 
 /// Every glyph is 1–3 strokes on a 24dp grid at 1.75dp with square caps — the
 /// icon set is drawn, not imported, which is a supply-chain decision (INV-7)
@@ -1339,6 +1488,13 @@ class _GlyphPainter extends CustomPainter {
         ]) {
           canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.5 * s, dot);
         }
+      case _Glyph.chevron:
+        canvas.drawPath(
+          path([
+            [9, 5, 16, 12, 9, 19],
+          ]),
+          p,
+        );
       case _Glyph.diamond:
         canvas.drawPath(
           path([
@@ -1412,4 +1568,447 @@ class _Switcher<T> extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transaction detail — where the instrument register belongs.
+//
+// The graduated datum was built for the balance and read as telemetry there,
+// because money is owned rather than measured. Here there IS a scale and there
+// IS a reading: burial depth, from the first confirmation to the point where
+// arguing about it stops being interesting. So the gesture moves, and the
+// tracked mono caps come with it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The depths worth being able to see at once, so the founder can watch the
+/// mark arrive. Debug affordance, not design.
+const _depths = <int>[0, 1, 12, 418, 999, 1000, 2400];
+
+class _TransactionDetailPreview extends StatefulWidget {
+  const _TransactionDetailPreview({required this.entry});
+
+  final _Entry entry;
+
+  @override
+  State<_TransactionDetailPreview> createState() =>
+      _TransactionDetailPreviewState();
+}
+
+class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
+  int _depth = 418;
+
+  @override
+  Widget build(BuildContext context) {
+    final e = widget.entry;
+    final settled = _depth >= _GaugePainter.finality;
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(onBack: () => Navigator.of(context).pop()),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                children: [
+                  const SizedBox(height: KvSpace.m),
+                  Row(
+                    children: [
+                      CustomPaint(
+                        size: const Size(KvGlyph.grid, KvGlyph.grid),
+                        painter: _GlyphPainter(e.glyph, tone: e.tone),
+                      ),
+                      const SizedBox(width: KvSpace.sm),
+                      Text(
+                        e.title,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 22,
+                          height: 28 / 22,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.2,
+                          color: KvColor.ink,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: KvSpace.sm),
+                  // A detail surface shows all eight decimals. This is the
+                  // place a number IS a measurement (BG-5).
+                  Text(
+                    e.title == 'Sent'
+                        ? '− 12.40000000 KAS'
+                        : '+ 24.00000000 KAS',
+                    style: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 32,
+                      height: 38 / 32,
+                      fontWeight: FontWeight.w500,
+                      color: e.tone,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.xl),
+
+                  // ── The gauge ──────────────────────────────────────────────
+                  const _MicroLabel('BURIAL DEPTH'),
+                  const SizedBox(height: KvSpace.sm),
+                  SizedBox(
+                    height: 34,
+                    width: double.infinity,
+                    child: CustomPaint(painter: _GaugePainter(depth: _depth)),
+                  ),
+                  const SizedBox(height: KvSpace.s),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text(
+                        _depth == 0 ? '—' : '$_depth',
+                        style: const TextStyle(
+                          fontFamily: KvFont.mono,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w500,
+                          color: KvColor.ink,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Text(
+                        'confirmations',
+                        style: TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 13,
+                          color: KvColor.inkMeta,
+                        ),
+                      ),
+                      const Spacer(),
+                      _Lamp(settled ? KvColor.ok : KvColor.warn),
+                      const SizedBox(width: 6),
+                      Text(
+                        _depth == 0
+                            ? 'broadcast — not yet in a block'
+                            : settled
+                            ? 'buried past a thousand'
+                            : 'settling',
+                        style: TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 13,
+                          color: settled ? KvColor.inkDim : KvColor.warn,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: KvSpace.xl),
+
+                  // ── The truth rows ────────────────────────────────────────
+                  const _DetailRow(
+                    'From',
+                    'kaspa:qz0k4vnr…s8fjm2wa',
+                    mono: true,
+                  ),
+                  const _DetailRow('Fee', '0.00001000 KAS', mono: true),
+                  const _DetailRow('Accepted', '14:02:41 · 26 Aug 2026'),
+                  const _DetailRow('DAA', '523,216,421', mono: true),
+                  const _DetailRow(
+                    'Transaction id',
+                    'a91f0c…4e77b2',
+                    mono: true,
+                    copy: true,
+                  ),
+                  const SizedBox(height: KvSpace.l),
+
+                  // Leaving is a sovereignty decision, so it names exactly what
+                  // it hands over rather than reading as a casual link.
+                  Container(
+                    padding: const EdgeInsets.all(KvSpace.m),
+                    decoration: BoxDecoration(
+                      color: KvColor.chip,
+                      borderRadius: BorderRadius.circular(KvRadius.plate),
+                      border: Border.all(color: KvColor.plateDivider),
+                    ),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'View in explorer',
+                                style: TextStyle(
+                                  fontFamily: KvFont.ui,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: KvColor.ink,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'Hands kas.fyi this transaction id and your '
+                                'network address.',
+                                style: TextStyle(
+                                  fontFamily: KvFont.ui,
+                                  fontSize: 12,
+                                  height: 17 / 12,
+                                  color: KvColor.inkMeta,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: KvSpace.sm),
+                        CustomPaint(
+                          size: const Size(18, 18),
+                          painter: const _GlyphPainter(
+                            _Glyph.chevron,
+                            tone: KvColor.inkMeta,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.xl),
+                ],
+              ),
+            ),
+            _Switcher<int>(
+              values: _depths,
+              value: _depth,
+              label: (d) => d == 0 ? '0' : '$d',
+              onChanged: (d) => setState(() => _depth = d),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DetailRail extends StatelessWidget {
+  const _DetailRail({required this.onBack});
+
+  final VoidCallback onBack;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(KvSpace.m, KvSpace.s, KvSpace.m, 0),
+      child: Row(
+        children: [
+          Semantics(
+            button: true,
+            label: 'Back',
+            child: InkWell(
+              onTap: onBack,
+              borderRadius: BorderRadius.circular(KvRadius.pill),
+              child: const SizedBox(
+                width: KvSpace.touchTarget,
+                height: KvSpace.touchTarget,
+                child: Center(
+                  child: RotatedBox(
+                    quarterTurns: 2,
+                    child: CustomPaint(
+                      size: Size(KvGlyph.grid, KvGlyph.grid),
+                      painter: _GlyphPainter(
+                        _Glyph.chevron,
+                        tone: KvColor.inkNav,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const Spacer(),
+          const Text(
+            'Transaction',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: KvColor.inkDim,
+            ),
+          ),
+          const Spacer(),
+          const SizedBox(width: KvSpace.touchTarget),
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  const _DetailRow(
+    this.label,
+    this.value, {
+    this.mono = false,
+    this.copy = false,
+  });
+
+  final String label;
+  final String value;
+  final bool mono;
+  final bool copy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 108,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 13,
+                height: 18 / 13,
+                color: KvColor.inkMeta,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontFamily: mono ? KvFont.mono : KvFont.ui,
+                fontSize: 13,
+                height: 18 / 13,
+                color: KvColor.ink,
+                fontFeatures: mono
+                    ? const [FontFeature.tabularFigures()]
+                    : null,
+              ),
+            ),
+          ),
+          if (copy)
+            const Text(
+              'copy',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: KvColor.primaryMuted,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The burial gauge. **Logarithmic**, because linear depth makes one
+/// confirmation invisible next to a thousand and the first one is the one the
+/// user is actually waiting for. Graduated at 1 · 10 · 100 · 1,000, and the
+/// thousand mark is taller, brighter and labelled — it is the point the scale
+/// exists to reach.
+///
+/// The fill is amber while settling and green once buried, because that is a
+/// value judgement about certainty (BG-7). It is never teal: teal is light, not
+/// a status.
+class _GaugePainter extends CustomPainter {
+  const _GaugePainter({required this.depth});
+
+  final int depth;
+
+  static const int finality = 1000;
+
+  static double _pos(num n) {
+    if (n <= 0) return 0;
+    final p = math.log(1 + n) / math.log(1 + finality);
+    return p.clamp(0.0, 1.0);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const railY = 20.0;
+    final w = size.width;
+
+    // The datum the whole scale hangs from.
+    final rule = Paint()
+      ..color = KvColor.datum
+      ..strokeWidth = 1
+      ..isAntiAlias = false;
+    canvas.drawLine(const Offset(0, railY), Offset(w, railY), rule);
+
+    // Graduations: a dense run so the scale reads as a scale, plus named stops.
+    final minor = Paint()
+      ..color = KvColor.datum
+      ..strokeWidth = 1
+      ..isAntiAlias = false;
+    for (var i = 1; i <= 60; i++) {
+      final x = (w * i / 61).floorToDouble() + 0.5;
+      canvas.drawLine(Offset(x, railY + 1), Offset(x, railY + 3), minor);
+    }
+
+    // The fill, from zero to where this transaction actually is.
+    final settled = depth >= finality;
+    final fill = Paint()
+      ..color = settled ? KvColor.ok : KvColor.warn
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.butt;
+    final x = (w * _pos(depth)).clamp(0.0, w);
+    if (x > 0) {
+      canvas.drawLine(Offset(0, railY - 3.5), Offset(x, railY - 3.5), fill);
+    }
+
+    // Named stops.
+    final stop = Paint()
+      ..color = KvColor.tick
+      ..strokeWidth = 1
+      ..isAntiAlias = false;
+    for (final n in const [1, 10, 100]) {
+      final sx = (w * _pos(n)).floorToDouble() + 0.5;
+      canvas.drawLine(Offset(sx, railY + 1), Offset(sx, railY + 7), stop);
+      _label(canvas, '$n', sx, railY + 10, KvColor.inkMetaLow);
+    }
+
+    // The thousand mark — taller, brighter, and the only one that is labelled
+    // as a threshold rather than a number.
+    final markPaint = Paint()
+      ..color = settled ? KvColor.ok : KvColor.inkMeta
+      ..strokeWidth = 1.5
+      ..isAntiAlias = false;
+    final mx = w - 0.5;
+    canvas.drawLine(Offset(mx, railY - 8), Offset(mx, railY + 8), markPaint);
+    _label(
+      canvas,
+      '1,000',
+      mx,
+      railY + 10,
+      settled ? KvColor.ok : KvColor.inkMeta,
+      alignEnd: true,
+    );
+  }
+
+  void _label(
+    Canvas canvas,
+    String text,
+    double x,
+    double y,
+    Color color, {
+    bool alignEnd = false,
+  }) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontFamily: KvFont.mono,
+          fontSize: 10,
+          height: 14 / 10,
+          letterSpacing: 0.8,
+          color: color,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(alignEnd ? x - tp.width : x - tp.width / 2, y));
+  }
+
+  @override
+  bool shouldRepaint(_GaugePainter old) => old.depth != depth;
 }

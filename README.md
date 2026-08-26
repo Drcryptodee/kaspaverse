@@ -56,6 +56,13 @@ a claim. Two are shipped.
 Pure L1 — no L2, no house. No servers. No telemetry. Indexers are optional, untrusted
 accelerators, always verifiable against the chain.
 
+**One exception, stated rather than buried: the fiat price.** A market rate is the only
+thing this app can show you that nothing can verify — no node, no chain, no proof. It is
+fetched from a named endpoint you can replace or switch off, it never prices a fee or sizes
+a spend, it appears on **no signing surface** (what you sign is denominated in KAS), and it
+renders `—` rather than a number nobody vouched for. The wallet is fully functional, and
+fully correct, with it off.
+
 ## How this gets paid for
 
 **KaspaVerse takes no cut of your transactions. Not a swap spread, not a send fee, not a
