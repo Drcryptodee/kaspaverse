@@ -3451,8 +3451,8 @@ class _RuledLabel extends StatelessWidget {
 
 /// An icon inside the address field: **20dp of glyph in a 48×48 target**, which
 /// is what the code below actually builds. The first version of this comment
-/// claimed 48 while the code shipped 28 wide — L117 by the same hand that wrote
-/// L117, which is why item 0 exists.
+/// claimed 48 while the code shipped 28 wide — L121 by the same hand that wrote
+/// L121, which is why item 0 exists.
 class _FieldAction extends StatelessWidget {
   const _FieldAction(this.glyph, this.label);
 
