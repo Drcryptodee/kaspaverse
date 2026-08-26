@@ -561,7 +561,8 @@ class _Plated extends StatelessWidget {
           _ValueLine(
             empty: integer == '0',
             rate: 0.0752,
-            ageLabel: 'rate 2 m ago',
+            // Empty = fresh. The age only appears once it could mislead.
+            ageLabel: '',
           ),
           const SizedBox(height: KvSpace.m),
           Container(height: 1, color: KvColor.plateDivider),
@@ -752,14 +753,14 @@ class _NetworkChip extends StatelessWidget {
         onTap: () {},
         borderRadius: BorderRadius.circular(KvRadius.pill),
         child: Container(
-          constraints: const BoxConstraints(minHeight: KvSpace.xl),
+          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
           padding: const EdgeInsets.symmetric(
             horizontal: KvSpace.sm,
             vertical: 5,
           ),
           decoration: BoxDecoration(
-            color: KvColor.chip,
-            borderRadius: BorderRadius.circular(KvRadius.pill),
+            color: KvColor.control,
+            borderRadius: BorderRadius.circular(KvRadius.control),
             border: Border.all(color: KvColor.edgeHi),
           ),
           child: Row(
@@ -795,7 +796,7 @@ class _NetworkChip extends StatelessWidget {
 
 /// What the balance is worth, in fiat.
 ///
-/// **Founder call, 2026-08-26 (D-186): fiat exists.** The rate comes from
+/// **Founder call, 2026-08-26 (D-191): fiat exists.** The rate comes from
 /// `api.kaspa.org`, a named and user-replaceable endpoint, and the whole feature
 /// is disable-able. A price is the one claim in this app that consensus cannot
 /// re-verify — no node, no chain and no proof can check it — so INV-8's
@@ -839,7 +840,7 @@ class _ValueLine extends StatelessWidget {
             fontFeatures: [FontFeature.tabularFigures()],
           ),
         ),
-        // BG-8, as amended at D-187: a fresh reading says nothing. The age
+        // BG-8, as amended at D-192: a fresh reading says nothing. The age
         // appears only when the rate has gone stale enough to mislead, which
         // is the same rule the trust line follows.
         if (r == null || ageLabel.isNotEmpty) ...[
@@ -1518,15 +1519,17 @@ class _Action extends StatelessWidget {
           enabled: !disabled,
           child: InkWell(
             onTap: disabled ? null : onTap,
-            borderRadius: BorderRadius.circular(KvRadius.panel),
+            borderRadius: BorderRadius.circular(KvRadius.control),
             child: Container(
               height: KvSpace.control,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 // Teal fills exactly one thing on this screen: the single
                 // primary action (BG-2).
-                color: primary && !disabled ? KvColor.primary : KvColor.chip,
-                borderRadius: BorderRadius.circular(KvRadius.panel),
+                // Teal fills exactly one thing per screen: the single primary
+                // action (BG-2). Everything else recedes to `control`.
+                color: primary && !disabled ? KvColor.primary : KvColor.control,
+                borderRadius: BorderRadius.circular(KvRadius.control),
                 border: primary && !disabled
                     ? null
                     : Border.all(color: KvColor.edgeHi),
@@ -3212,8 +3215,8 @@ class _AddressField extends StatelessWidget {
       constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
       decoration: BoxDecoration(
         // Entry is sunken (§1.1), and a blocked field is amber — never red.
-        color: KvColor.well,
-        borderRadius: BorderRadius.circular(KvRadius.key),
+        color: KvColor.control,
+        borderRadius: BorderRadius.circular(KvRadius.control),
         border: Border.all(color: invalid ? KvColor.warn : KvColor.hairline),
       ),
       child: Row(
@@ -3222,9 +3225,15 @@ class _AddressField extends StatelessWidget {
           const SizedBox(width: KvSpace.sm),
           Expanded(
             child: Text(
-              address.isEmpty ? 'Paste or scan a Kaspa address' : address,
+              address.isEmpty
+                  ? 'Paste or scan a Kaspa address'
+                  : compactAddress(address),
               maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+              // Never ellipsis on an address: a tail cut spends the prefix on
+              // the scheme and throws away the last eight payload characters,
+              // which is the exact `kaspa:q…` shape BG-15 forbids.
+              overflow: TextOverflow.clip,
+              softWrap: false,
               style: TextStyle(
                 fontFamily: KvFont.mono,
                 fontSize: 13,
@@ -3233,18 +3242,33 @@ class _AddressField extends StatelessWidget {
               ),
             ),
           ),
-          if (address.isNotEmpty) ...[
-            const SizedBox(width: KvSpace.s),
-            const Text(
-              'Clear',
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: KvColor.primaryMuted,
+          if (address.isNotEmpty)
+            // It was styled as an action with no target and no semantics —
+            // a control that looks pressable and is not (BG-12).
+            Semantics(
+              button: true,
+              label: 'Clear the destination address',
+              child: InkWell(
+                onTap: () {},
+                borderRadius: BorderRadius.circular(KvRadius.control),
+                child: Container(
+                  constraints: const BoxConstraints(
+                    minHeight: KvSpace.touchTarget,
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'Clear',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: KvColor.primaryMuted,
+                    ),
+                  ),
+                ),
               ),
             ),
-          ],
           const SizedBox(width: KvSpace.sm),
           const _FieldAction(_Glyph.scan, 'Scan a QR code'),
         ],
@@ -3270,8 +3294,10 @@ class _RuledLabel extends StatelessWidget {
   );
 }
 
-/// An icon inside the address field. 20dp of glyph in a 48dp target — the
-/// smaller visual is declared, per BG-12.
+/// An icon inside the address field: **20dp of glyph in a 48×48 target**, which
+/// is what the code below actually builds. The first version of this comment
+/// claimed 48 while the code shipped 28 wide — L117 by the same hand that wrote
+/// L117, which is why item 0 exists.
 class _FieldAction extends StatelessWidget {
   const _FieldAction(this.glyph, this.label);
 
@@ -3287,7 +3313,7 @@ class _FieldAction extends StatelessWidget {
         onTap: () {},
         borderRadius: BorderRadius.circular(KvRadius.chip),
         child: SizedBox(
-          width: 28,
+          width: KvSpace.touchTarget,
           height: KvSpace.touchTarget,
           child: Center(
             child: SizedBox(
@@ -3329,14 +3355,15 @@ class _MaxChip extends StatelessWidget {
       label: 'Send the maximum, leaving only the fee',
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(KvRadius.chip),
+        borderRadius: BorderRadius.circular(KvRadius.control),
         child: Container(
-          constraints: const BoxConstraints(minHeight: KvSpace.xl),
-          padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+          // 48, not 32. Re-skinning a control is the moment to re-measure it.
+          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: KvColor.chip,
-            borderRadius: BorderRadius.circular(KvRadius.chip),
+            color: KvColor.control,
+            borderRadius: BorderRadius.circular(KvRadius.control),
             border: Border.all(color: KvColor.edgeHi),
           ),
           child: const Text(
@@ -3353,6 +3380,20 @@ class _MaxChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// **The compact form, computed here rather than trusted from the caller**
+/// (BG-15): scheme + first 8 + last 8 of the PAYLOAD. Truncation that counts
+/// from the front spends its whole budget on `kaspa:q`, which carries near-zero
+/// distinguishing bits and is a gift to address poisoning.
+String compactAddress(String full) {
+  final colon = full.indexOf(':');
+  if (colon < 0) return full;
+  final scheme = full.substring(0, colon + 1);
+  final payload = full.substring(colon + 1);
+  if (payload.length <= 18) return full;
+  return '$scheme${payload.substring(0, 8)}…'
+      '${payload.substring(payload.length - 8)}';
 }
 
 /// Amber, with the exact number. "Too small" is a shrug; "you are 0.00001994
@@ -3730,8 +3771,8 @@ class _HoldToSign extends StatelessWidget {
           return Container(
             height: 64,
             decoration: BoxDecoration(
-              color: KvColor.chip,
-              borderRadius: BorderRadius.circular(KvRadius.pill),
+              color: KvColor.control,
+              borderRadius: BorderRadius.circular(KvRadius.control),
               border: Border.all(
                 color: t > 0 ? KvColor.primaryMuted : KvColor.edgeHi,
               ),
@@ -3785,7 +3826,11 @@ class _RingPainter extends CustomPainter {
     // The arrow of the thing this control does, sitting inside the ring it
     // fills. Teal, because the sign ring is one of exactly three things in the
     // app that emit (BG-2) — and this is the same emission, not a second one.
-    final k = size.width / 24;
+    // Smaller than the ring it sits in: the ring is the mechanism, the arrow is
+    // only its label. At full size it competed with the fill it annotates.
+    final k = (size.width * 0.56) / 24;
+    canvas.save();
+    canvas.translate(size.width * 0.22, size.height * 0.22);
     final arrow = Paint()
       ..color = KvColor.primary
       ..style = PaintingStyle.stroke
@@ -3799,6 +3844,7 @@ class _RingPainter extends CustomPainter {
       ..lineTo(12 * k, 7 * k)
       ..lineTo(16 * k, 11 * k);
     canvas.drawPath(a, arrow);
+    canvas.restore();
 
     if (t <= 0) return;
     // The filling ring. Fat enough to read as a gauge closing rather than a

@@ -42,6 +42,14 @@ abstract final class KvColor {
   /// A recessed alert/notice plate. Edge [noticeEdge].
   static const Color notice = Color(0xFF060606);
 
+  /// **Every control that is not the one primary action.** Secondary buttons,
+  /// input fields, chips — all of them sit at this one tone, deeper than the
+  /// ground's plates rather than raised above them. A control that is not the
+  /// primary action should read as a *recess you press into*, not as another
+  /// plate competing with the surface it sits on; the primary action is the
+  /// only thing on a screen that comes forward (D-194).
+  static const Color control = notice;
+
   /// Chips, pills, activity rows, secondary controls. Edge [plateDivider] or
   /// [edgeHi].
   static const Color chip = Color(0xFF0A0A0A);
@@ -285,6 +293,13 @@ abstract final class KvRadius {
   /// bubble of a run, which is the third way direction is carried.
   static const double bubble = 8;
   static const double bubbleTail = 3;
+
+  /// **Controls are pills; surfaces are machined.** A radius this large would
+  /// be wrong on a plate — a rounded panel reads as soft, and the form language
+  /// is milled. On a *control* it does the opposite: it separates the things
+  /// you press from the things you read, at a glance and without a second
+  /// colour. Buttons, chips and input fields take this; plates never do (D-194).
+  static const double control = pill;
 
   /// Legacy aliases.
   static const double card = panel;
