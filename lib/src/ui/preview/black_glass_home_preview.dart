@@ -1626,6 +1626,8 @@ enum _Glyph {
   lock,
   paste,
   scan,
+  history,
+  kebab,
 }
 
 /// Every glyph is 1–3 strokes on a 24dp grid at 1.75dp with square caps — the
@@ -1804,6 +1806,26 @@ class _GlyphPainter extends CustomPainter {
           ]),
           p,
         );
+      case _Glyph.history:
+        canvas.drawPath(
+          path([
+            [12, 7, 12, 12, 16, 14],
+            [4, 8, 4, 4, 8, 8],
+          ]),
+          p,
+        );
+        canvas.drawArc(
+          Rect.fromCircle(center: Offset(12 * s, 12 * s), radius: 8 * s),
+          -2.5,
+          5.4,
+          false,
+          p,
+        );
+      case _Glyph.kebab:
+        final d = Paint()..color = tone;
+        for (final y in const [6.5, 12.0, 17.5]) {
+          canvas.drawCircle(Offset(12 * s, y * s), 1.7 * s, d);
+        }
       case _Glyph.chevron:
         canvas.drawPath(
           path([
@@ -2215,10 +2237,15 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
 }
 
 class _DetailRail extends StatelessWidget {
-  const _DetailRail({required this.onBack, this.title = 'Transaction'});
+  const _DetailRail({
+    required this.onBack,
+    this.title = 'Transaction',
+    this.actions = const <Widget>[],
+  });
 
   final VoidCallback onBack;
   final String title;
+  final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
@@ -2261,8 +2288,42 @@ class _DetailRail extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          const SizedBox(width: KvSpace.touchTarget),
+          if (actions.isEmpty)
+            const SizedBox(width: KvSpace.touchTarget)
+          else
+            ...actions,
         ],
+      ),
+    );
+  }
+}
+
+/// A rail action: 24dp of glyph in a 48dp target.
+class _RailAction extends StatelessWidget {
+  const _RailAction(this.glyph, this.label, {required this.onTap});
+
+  final _Glyph glyph;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+        child: SizedBox(
+          width: KvSpace.touchTarget,
+          height: KvSpace.touchTarget,
+          child: Center(
+            child: CustomPaint(
+              size: const Size(22, 22),
+              painter: _GlyphPainter(glyph, tone: KvColor.inkNav),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -2720,7 +2781,18 @@ class _PanelBody extends StatelessWidget {
             const SizedBox(height: KvSpace.l),
             Container(height: 1, color: KvColor.plateDivider),
             const SizedBox(height: KvSpace.sm),
-            _PanelAction(_Glyph.settings, 'Settings', onTap: () {}, wide: true),
+            Builder(
+              builder: (context) => _PanelAction(
+                _Glyph.lock,
+                'Secret surfaces',
+                wide: true,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const _SecretPreview(),
+                  ),
+                ),
+              ),
+            ),
             const SizedBox(height: KvSpace.s),
             const Text(
               'The panel does not survive a lock.',
@@ -4124,23 +4196,14 @@ class _ReceivePreviewState extends State<_ReceivePreview> {
                     const _AddressPending(),
                   const SizedBox(height: KvSpace.m),
 
-                  Row(
-                    children: [
-                      const _Lamp(KvColor.ok),
-                      const SizedBox(width: KvSpace.sm),
-                      const Expanded(
-                        child: Text(
-                          'Sharing this is safe. It says where to pay you and '
-                          'nothing else — deriving it never touches your keys.',
-                          style: TextStyle(
-                            fontFamily: KvFont.ui,
-                            fontSize: 13,
-                            height: 19 / 13,
-                            color: KvColor.inkDim,
-                          ),
-                        ),
-                      ),
-                    ],
+                  const Text(
+                    'Scan to send KAS to this wallet',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 13,
+                      height: 19 / 13,
+                      color: KvColor.inkMeta,
+                    ),
                   ),
                   const SizedBox(height: KvSpace.l),
                 ],
@@ -4153,28 +4216,14 @@ class _ReceivePreviewState extends State<_ReceivePreview> {
                 KvSpace.gutter,
                 KvSpace.m,
               ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _Action(
-                      label: 'Share',
-                      primary: false,
-                      onTap: () {},
-                    ),
-                  ),
-                  const SizedBox(width: KvSpace.sm),
-                  Expanded(
-                    child: _Action(
-                      label: 'Copy address',
-                      primary: _state == ReceiveState.ready,
-                      // BG-12: a disabled control always says why.
-                      disabledReason: _state == ReceiveState.ready
-                          ? null
-                          : 'No address yet',
-                      onTap: () {},
-                    ),
-                  ),
-                ],
+              child: _Action(
+                label: 'Copy address',
+                primary: _state == ReceiveState.ready,
+                // BG-12: a disabled control always says why.
+                disabledReason: _state == ReceiveState.ready
+                    ? null
+                    : 'No address yet',
+                onTap: () {},
               ),
             ),
             _Switcher(
@@ -4219,11 +4268,16 @@ class _Tile extends StatelessWidget {
       child: state == ReceiveState.deriving
           ? const Column(
               mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                _Cadence(running: true),
+                SizedBox(
+                  height: 14,
+                  child: Center(child: _Cadence(running: true)),
+                ),
                 SizedBox(height: KvSpace.sm),
                 Text(
-                  'Deriving your address',
+                  'Loading your address',
                   style: TextStyle(
                     fontFamily: KvFont.ui,
                     fontSize: 13,
@@ -4240,25 +4294,13 @@ class _Tile extends StatelessWidget {
                   _Lamp(KvColor.warn),
                   SizedBox(height: KvSpace.sm),
                   Text(
-                    'The vault did not answer',
+                    'Could not load the receive address.',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontFamily: KvFont.ui,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: KvColor.ink,
-                    ),
-                  ),
-                  SizedBox(height: 4),
-                  Text(
-                    'Your funds are safe — deriving an address is read-only '
-                    'and moves nothing.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 12,
-                      height: 17 / 12,
-                      color: KvColor.inkMeta,
+                      fontSize: 14,
+                      height: 20 / 14,
+                      color: KvColor.inkDim,
                     ),
                   ),
                 ],
@@ -4346,6 +4388,57 @@ class _MessagesPreview extends StatefulWidget {
 class _MessagesPreviewState extends State<_MessagesPreview> {
   int _lane = 0;
 
+  /// The overflow, on the shipped app's own strings. Destruction sits last and
+  /// alone, in risk red, outside the reach of a mis-tap.
+  void _showMore(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: KvColor.summoned,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(KvRadius.panel),
+        ),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            KvSpace.gutter,
+            KvSpace.m,
+            KvSpace.gutter,
+            KvSpace.m,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _RuledLabel('Messages'),
+              const SizedBox(height: KvSpace.sm),
+              _MoreRow(
+                'History & backup',
+                'Parks your conversation list on Kaspa, sealed to your own key',
+                onTap: () => Navigator.of(context).pop(),
+              ),
+              const _RowRule(),
+              _MoreRow(
+                'Add contact',
+                'Carries a 0.2 KAS bond — the network norm',
+                onTap: () => Navigator.of(context).pop(),
+              ),
+              const _RowRule(),
+              _MoreRow(
+                'Delete all messages',
+                'Every conversation, on this device',
+                tone: KvColor.risk,
+                onTap: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -4358,6 +4451,17 @@ class _MessagesPreviewState extends State<_MessagesPreview> {
             _DetailRail(
               onBack: () => Navigator.of(context).pop(),
               title: 'Messages',
+              // Where the shipped app puts them: a history icon and an
+              // overflow, top right. A full-width button for a rarely-used
+              // backup surface was spending the thumb arc on the wrong thing.
+              actions: [
+                _RailAction(_Glyph.history, 'History & backup', onTap: () {}),
+                _RailAction(
+                  _Glyph.kebab,
+                  'More',
+                  onTap: () => _showMore(context),
+                ),
+              ],
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(
@@ -4394,25 +4498,7 @@ class _MessagesPreviewState extends State<_MessagesPreview> {
                 KvSpace.gutter,
                 KvSpace.m,
               ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _Action(
-                      label: 'History & backup',
-                      primary: false,
-                      onTap: () {},
-                    ),
-                  ),
-                  const SizedBox(width: KvSpace.sm),
-                  Expanded(
-                    child: _Action(
-                      label: 'Add contact',
-                      primary: true,
-                      onTap: () {},
-                    ),
-                  ),
-                ],
-              ),
+              child: _Action(label: 'Add contact', primary: true, onTap: () {}),
             ),
           ],
         ),
@@ -4941,6 +5027,580 @@ class _Composer extends StatelessWidget {
                   ],
                 ),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MoreRow extends StatelessWidget {
+  const _MoreRow(
+    this.title,
+    this.sub, {
+    required this.onTap,
+    this.tone = KvColor.ink,
+  });
+
+  final String title;
+  final String sub;
+  final VoidCallback onTap;
+  final Color tone;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+        padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 20 / 15,
+                fontWeight: FontWeight.w600,
+                color: tone,
+              ),
+            ),
+            const SizedBox(height: 1),
+            Text(
+              sub,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                height: 16 / 12,
+                color: KvColor.inkMeta,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Secret surfaces.
+//
+// BG-10: assume a watched screen. Reveal on hold, fixed-width masks (a variable
+// mask leaks length), no copy path anywhere in the codebase, screenshots and the
+// recents thumbnail blocked, typed only on the in-app keypad, shown once.
+//
+// Copy is the shipped app's. These five are the FLAG_SECURE list locked at
+// P1 §0.6 — nothing here is a place to be clever.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SecretScreen { passphrase, reveal, verify, verifyWrong, locked, lockout }
+
+extension on SecretScreen {
+  String get label => switch (this) {
+    SecretScreen.passphrase => 'passphrase',
+    SecretScreen.reveal => 'reveal',
+    SecretScreen.verify => 'verify',
+    SecretScreen.verifyWrong => 'wrong',
+    SecretScreen.locked => 'locked',
+    SecretScreen.lockout => 'lockout',
+  };
+}
+
+/// Deliberately non-derivable. No screenshot of this document is worth
+/// anything, and that is a shipping rule for marketing assets too.
+const _words = <String>[
+  'anchor',
+  'gravity',
+  'orbit',
+  'ripple',
+  'fossil',
+  'cousin',
+  'ladder',
+  'engine',
+  'saddle',
+  'canyon',
+  'velvet',
+  'maple',
+];
+
+class _SecretPreview extends StatefulWidget {
+  const _SecretPreview();
+
+  @override
+  State<_SecretPreview> createState() => _SecretPreviewState();
+}
+
+class _SecretPreviewState extends State<_SecretPreview> {
+  SecretScreen _screen = SecretScreen.passphrase;
+  bool _revealed = false;
+  int _filled = 3;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: switch (_screen) {
+                SecretScreen.passphrase => 'Create wallet',
+                SecretScreen.reveal ||
+                SecretScreen.verify ||
+                SecretScreen.verifyWrong => 'Your recovery words',
+                _ => 'Vault locked',
+              },
+            ),
+            Expanded(child: _body()),
+            _Switcher(
+              values: SecretScreen.values,
+              value: _screen,
+              label: (v) => v.label,
+              onChanged: (v) => setState(() {
+                _screen = v;
+                _revealed = false;
+              }),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _body() => switch (_screen) {
+    SecretScreen.passphrase => _Passphrase(filled: _filled, onKey: _key),
+    SecretScreen.reveal => _Reveal(
+      revealed: _revealed,
+      onHold: (v) => setState(() => _revealed = v),
+    ),
+    SecretScreen.verify => const _Verify(wrong: false),
+    SecretScreen.verifyWrong => const _Verify(wrong: true),
+    SecretScreen.locked => const _Gate(lockout: false),
+    SecretScreen.lockout => const _Gate(lockout: true),
+  };
+
+  void _key(bool add) => setState(
+    () => _filled = add ? (_filled + 1).clamp(0, 6) : (_filled - 1).clamp(0, 6),
+  );
+}
+
+/// Six FIXED wells. A well per typed character would leak the length of the
+/// passphrase to anyone watching the screen, which is the whole reason the
+/// masked skin exists.
+class _Passphrase extends StatelessWidget {
+  const _Passphrase({required this.filled, required this.onKey});
+
+  final int filled;
+  final void Function(bool add) onKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      children: [
+        const SizedBox(height: KvSpace.m),
+        const Text(
+          'Set an unlock passphrase',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 22,
+            height: 28 / 22,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.2,
+            color: KvColor.ink,
+          ),
+        ),
+        const SizedBox(height: KvSpace.s),
+        const Text(
+          'Your 12 recovery words are the wallet. The passphrase only unlocks '
+          'this phone.',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            height: 19 / 13,
+            color: KvColor.inkMeta,
+          ),
+        ),
+        const SizedBox(height: KvSpace.xl),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            for (var i = 0; i < 6; i++)
+              Container(
+                width: 40,
+                height: 48,
+                margin: const EdgeInsets.symmetric(horizontal: 5),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: KvColor.well,
+                  borderRadius: BorderRadius.circular(KvRadius.key),
+                  border: Border.all(
+                    color: i < filled ? KvColor.edgeHi : KvColor.hairline,
+                  ),
+                ),
+                child: i < filled
+                    ? Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: KvColor.ink,
+                        ),
+                      )
+                    : null,
+              ),
+          ],
+        ),
+        const SizedBox(height: KvSpace.xl),
+        _SecureKeypad(onKey: onKey),
+        const SizedBox(height: KvSpace.l),
+      ],
+    );
+  }
+}
+
+/// The same primitive as the amount pad, in its masked skin. One muscle memory,
+/// one codepath to audit — and the system keyboard, with its cloud dictionary,
+/// never sees a character of this.
+class _SecureKeypad extends StatelessWidget {
+  const _SecureKeypad({required this.onKey});
+
+  final void Function(bool add) onKey;
+
+  static const _keys = [
+    '1', '2', '3', //
+    '4', '5', '6', //
+    '7', '8', '9', //
+    'ABC', '0', '⌫', //
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.count(
+      crossAxisCount: 3,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      mainAxisSpacing: KvSpace.s,
+      crossAxisSpacing: KvSpace.s,
+      childAspectRatio: 2.1,
+      children: [
+        for (final k in _keys)
+          Material(
+            color: KvColor.key,
+            borderRadius: BorderRadius.circular(KvRadius.key),
+            child: InkWell(
+              onTap: () => onKey(k != '⌫' && k != 'ABC'),
+              borderRadius: BorderRadius.circular(KvRadius.key),
+              child: Container(
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(KvRadius.key),
+                  border: Border.all(color: KvColor.keyEdge),
+                ),
+                child: Text(
+                  k,
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: k == 'ABC' ? 13 : 20,
+                    fontWeight: FontWeight.w500,
+                    color: (k == '⌫' || k == 'ABC')
+                        ? KvColor.inkMeta
+                        : KvColor.ink,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// **Reveal on hold, never a toggle**, and the veil is a fixed four-dot mask
+/// rather than a blur — a blur of a real word leaks its length and its shape.
+/// No copy affordance exists, here or anywhere in the codebase.
+class _Reveal extends StatelessWidget {
+  const _Reveal({required this.revealed, required this.onHold});
+
+  final bool revealed;
+  final ValueChanged<bool> onHold;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      children: [
+        const SizedBox(height: KvSpace.m),
+        const Text(
+          'Your twelve recovery words',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 22,
+            height: 28 / 22,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.2,
+            color: KvColor.ink,
+          ),
+        ),
+        const SizedBox(height: KvSpace.s),
+        const Text(
+          'Shown once. Write them down — anyone with these words has the '
+          'wallet.',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            height: 19 / 13,
+            color: KvColor.inkMeta,
+          ),
+        ),
+        const SizedBox(height: KvSpace.l),
+        GridView.count(
+          crossAxisCount: 3,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: KvSpace.s,
+          crossAxisSpacing: KvSpace.s,
+          childAspectRatio: 2.6,
+          children: [
+            for (var i = 0; i < _words.length; i++)
+              Container(
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: KvColor.key,
+                  borderRadius: BorderRadius.circular(KvRadius.key),
+                  border: Border.all(color: KvColor.keyEdge),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      '${i + 1}'.padLeft(2, '0'),
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 11,
+                        color: KvColor.inkMetaLow,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      // Fixed width whether hidden or shown: the mask must not
+                      // report how long the word is.
+                      revealed ? _words[i] : '••••',
+                      style: TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: revealed ? KvColor.ink : KvColor.inkMeta,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: KvSpace.l),
+        GestureDetector(
+          onTapDown: (_) => onHold(true),
+          onTapUp: (_) => onHold(false),
+          onTapCancel: () => onHold(false),
+          child: Container(
+            height: KvSpace.control,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: revealed ? KvColor.keyPressed : KvColor.control,
+              borderRadius: BorderRadius.circular(KvRadius.control),
+              border: Border.all(
+                color: revealed ? KvColor.primaryMuted : KvColor.edgeHi,
+              ),
+            ),
+            child: Text(
+              revealed ? 'Release to hide' : 'Hold to show your words',
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: KvColor.ink,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: KvSpace.l),
+      ],
+    );
+  }
+}
+
+/// Recall beats recognition, and the decoys make a lucky guess worthless. A
+/// wrong answer is **amber, not red** — a practice quiz cannot lose funds, and
+/// red stays rationed to money.
+class _Verify extends StatelessWidget {
+  const _Verify({required this.wrong});
+
+  final bool wrong;
+
+  static const _pool = [
+    'ladder',
+    'maple',
+    'anchor',
+    'velvet',
+    'engine',
+    'orbit',
+    'marble',
+    'ripple',
+    'fossil',
+    'gravity',
+    'saddle',
+    'timber',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      children: [
+        const SizedBox(height: KvSpace.m),
+        const Text(
+          'Prove you saved them',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 22,
+            height: 28 / 22,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.2,
+            color: KvColor.ink,
+          ),
+        ),
+        const SizedBox(height: KvSpace.s),
+        const Text(
+          'Tap word 4.',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            height: 19 / 13,
+            color: KvColor.inkMeta,
+          ),
+        ),
+        if (wrong) ...[
+          const SizedBox(height: KvSpace.m),
+          const _Notice('Not quite. Check your list and try again.'),
+        ],
+        const SizedBox(height: KvSpace.l),
+        Wrap(
+          spacing: KvSpace.s,
+          runSpacing: KvSpace.s,
+          children: [
+            for (final w in _pool)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: KvSpace.m,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: KvColor.control,
+                  borderRadius: BorderRadius.circular(KvRadius.control),
+                  border: Border.all(
+                    color: wrong && w == 'marble'
+                        ? KvColor.warn
+                        : KvColor.edgeHi,
+                  ),
+                ),
+                child: Text(
+                  w,
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 13,
+                    color: KvColor.ink,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: KvSpace.l),
+      ],
+    );
+  }
+}
+
+/// The gate. Deliberately empty of everything, especially money — nothing
+/// stale waits behind a lock (BG-13).
+class _Gate extends StatelessWidget {
+  const _Gate({required this.lockout});
+
+  final bool lockout;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const CustomPaint(
+            size: Size(KvGlyph.grid, KvGlyph.grid),
+            painter: _GlyphPainter(_Glyph.lock, tone: KvColor.inkNav),
+          ),
+          const SizedBox(height: KvSpace.m),
+          const Text(
+            'Vault locked',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 22,
+              height: 28 / 22,
+              fontWeight: FontWeight.w600,
+              letterSpacing: -0.2,
+              color: KvColor.ink,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            lockout
+                ? 'Too many attempts. Wait a moment, then try again — your '
+                      'funds are safe.'
+                : 'Unlock to see your wallet.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 13,
+              height: 19 / 13,
+              color: lockout ? KvColor.warn : KvColor.inkMeta,
+            ),
+          ),
+          const SizedBox(height: KvSpace.l),
+          if (lockout)
+            const Text(
+              '00:47',
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 32,
+                fontWeight: FontWeight.w500,
+                color: KvColor.warn,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            )
+          else
+            SizedBox(
+              width: double.infinity,
+              child: _Action(
+                label: 'Unlock vault',
+                primary: true,
+                onTap: () {},
+              ),
+            ),
+          const SizedBox(height: KvSpace.m),
+          const Text(
+            'Use passphrase instead',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: KvColor.primaryMuted,
             ),
           ),
         ],
