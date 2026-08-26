@@ -50,12 +50,6 @@ enum HeroVariant { plated, engraved, instrument }
 
 extension on HeroVariant {
   bool get instrumentRegister => this == HeroVariant.instrument;
-
-  String get label => switch (this) {
-    HeroVariant.plated => 'A plated',
-    HeroVariant.engraved => 'B engraved',
-    HeroVariant.instrument => 'C instrument',
-  };
 }
 
 extension on MoneyState {
@@ -111,7 +105,8 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
     reverseDuration: KvMotion.calm,
   );
   MoneyState _state = MoneyState.live;
-  HeroVariant _variant = HeroVariant.plated;
+  final HeroVariant _variant = HeroVariant.plated;
+  PanelStyle _panel = PanelStyle.panel;
 
   /// **The extent is measured, not stated.** A `SliverPersistentHeader` demands
   /// a height it cannot work out for itself, and the first version of this
@@ -152,7 +147,7 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
           // BG-13: the panel is mortal. It never survives a lock, and it is
           // summoned rather than resident — there is no rail and no tab bar
           // holding a permanent claim on the screen.
-          _NavPanel(controller: _nav),
+          _NavPanel(controller: _nav, style: _panel),
         ],
       ),
     );
@@ -242,10 +237,13 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
           onChanged: (s) => setState(() => _state = s),
         ),
         _Switcher(
-          values: HeroVariant.values,
-          value: _variant,
+          values: PanelStyle.values,
+          value: _panel,
           label: (v) => v.label,
-          onChanged: (v) => setState(() => _variant = v),
+          onChanged: (v) => setState(() {
+            _panel = v;
+            _nav.forward();
+          }),
         ),
       ],
     );
@@ -299,27 +297,7 @@ class _TopRail extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(KvSpace.m, 0, KvSpace.m, 0),
       child: Row(
         children: [
-          Semantics(
-            button: true,
-            label: 'Open navigation',
-            child: InkWell(
-              onTap: onNav,
-              borderRadius: BorderRadius.circular(KvRadius.pill),
-              // A 24dp mark inside a 48dp target — the smaller visual is
-              // permitted only because the code says so (BG-12).
-              child: const SizedBox(
-                width: KvSpace.touchTarget,
-                height: KvSpace.touchTarget,
-                child: Center(
-                  child: CustomPaint(
-                    size: Size(KvGlyph.grid, KvGlyph.grid),
-                    painter: _GlyphPainter(_Glyph.navDots),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const Spacer(),
+          const SizedBox(width: KvSpace.s),
           // The wordmark, engraved rather than set: mono caps, wide tracking,
           // sitting at the same optical weight as a silk-screened panel label.
           if (variant.instrumentRegister)
@@ -346,7 +324,29 @@ class _TopRail extends StatelessWidget {
                 color: KvColor.inkNav,
               ),
             ),
-          const SizedBox(width: KvSpace.s),
+          const Spacer(),
+          // The trigger sits with the panel it opens: right-anchored, so the
+          // hand that reaches for it is already there (BG-12's thumb arc).
+          Semantics(
+            button: true,
+            label: 'Open navigation',
+            child: InkWell(
+              onTap: onNav,
+              borderRadius: BorderRadius.circular(KvRadius.pill),
+              // A 24dp mark inside a 48dp target — the smaller visual is
+              // permitted only because the code says so (BG-12).
+              child: const SizedBox(
+                width: KvSpace.touchTarget,
+                height: KvSpace.touchTarget,
+                child: Center(
+                  child: CustomPaint(
+                    size: Size(KvGlyph.grid, KvGlyph.grid),
+                    painter: _GlyphPainter(_Glyph.navDots),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -2380,6 +2380,38 @@ class _GaugePainter extends CustomPainter {
 // four dead buttons do not sit at the same rank as two live ones.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Three readings of the same panel. The founder's two notes were **anchor it
+/// right** and **it is too wide** — 322dp on a 393dp screen is 82% of the
+/// display, which is a drawer swallowing the app rather than a panel summoned
+/// over it.
+///
+/// The trigger moves to the top-right with it. A right-anchored panel opened
+/// from a left-corner button makes the hand cross the whole screen and then
+/// come back; pairing them is what makes it one-handed, and it puts the
+/// wordmark where a wordmark goes.
+enum PanelStyle { panel, card, compact }
+
+extension on PanelStyle {
+  double get width => switch (this) {
+    PanelStyle.panel => 288,
+    PanelStyle.card => 268,
+    PanelStyle.compact => 244,
+  };
+
+  /// The card floats clear of the edges, so it reads as an object laid over the
+  /// screen rather than a drawer glued to its side.
+  bool get floating => this == PanelStyle.card;
+
+  /// Compact drops the one-line blurbs: names and tags only.
+  bool get terse => this == PanelStyle.compact;
+
+  String get label => switch (this) {
+    PanelStyle.panel => 'A panel 288',
+    PanelStyle.card => 'B card 268',
+    PanelStyle.compact => 'C compact 244',
+  };
+}
+
 class _Destination {
   const _Destination(this.glyph, this.name, this.blurb, {this.count});
 
@@ -2407,11 +2439,10 @@ const _planned = <_Destination>[
 ];
 
 class _NavPanel extends StatelessWidget {
-  const _NavPanel({required this.controller});
+  const _NavPanel({required this.controller, required this.style});
 
   final AnimationController controller;
-
-  static const double width = 322;
+  final PanelStyle style;
 
   @override
   Widget build(BuildContext context) {
@@ -2440,14 +2471,18 @@ class _NavPanel extends StatelessWidget {
               ),
             ),
             Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              // Rise and fade, decelerating — never a slide race from off
+              right: style.floating ? KvSpace.sm : 0,
+              top: style.floating ? KvSpace.sm : 0,
+              bottom: style.floating ? KvSpace.sm : 0,
+              // Slides in from the right and settles — a short travel, fading
+              // as it arrives, decelerating. Never a full-width race from off
               // screen, which reads as a drawer being yanked (BG-9).
               child: Transform.translate(
-                offset: Offset(0, 16 * (1 - t)),
-                child: Opacity(opacity: t, child: const _PanelBody()),
+                offset: Offset(28 * (1 - t), 0),
+                child: Opacity(
+                  opacity: t,
+                  child: _PanelBody(style: style),
+                ),
               ),
             ),
           ],
@@ -2458,23 +2493,33 @@ class _NavPanel extends StatelessWidget {
 }
 
 class _PanelBody extends StatelessWidget {
-  const _PanelBody();
+  const _PanelBody({required this.style});
+
+  final PanelStyle style;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: _NavPanel.width,
-      decoration: const BoxDecoration(
+      width: style.width,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
         color: KvColor.key,
-        border: Border(right: BorderSide(color: KvColor.edgeHi)),
+        borderRadius: style.floating
+            ? BorderRadius.circular(KvRadius.panel)
+            : null,
+        border: style.floating
+            ? Border.all(color: KvColor.edgeHi)
+            : const Border(left: BorderSide(color: KvColor.edgeHi)),
       ),
       child: SafeArea(
         top: false,
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(
-            KvSpace.m,
-            KvSpace.statusBarReserve + KvSpace.sm,
-            KvSpace.m,
+          padding: EdgeInsets.fromLTRB(
+            KvSpace.sm,
+            style.floating
+                ? KvSpace.statusBarReserve
+                : KvSpace.statusBarReserve + KvSpace.sm,
+            KvSpace.sm,
             KvSpace.m,
           ),
           children: [
@@ -2498,9 +2543,14 @@ class _PanelBody extends StatelessWidget {
 
             // Money — taller, one tone lighter, teal down its edge. The one
             // teal emission this panel spends (BG-2).
-            _DestinationPlate(_built[0], tall: true, current: true),
+            _DestinationPlate(
+              _built[0],
+              tall: true,
+              current: true,
+              terse: style.terse,
+            ),
             const SizedBox(height: KvSpace.s),
-            _DestinationPlate(_built[1]),
+            _DestinationPlate(_built[1], terse: style.terse),
 
             const SizedBox(height: KvSpace.l),
             const Row(
@@ -2534,7 +2584,7 @@ class _PanelBody extends StatelessWidget {
                   for (var i = 0; i < _planned.length; i++) ...[
                     if (i > 0)
                       Container(height: 1, color: KvColor.plateDivider),
-                    _PlannedRow(_planned[i]),
+                    _PlannedRow(_planned[i], terse: style.terse),
                   ],
                 ],
               ),
@@ -2565,11 +2615,17 @@ class _PanelBody extends StatelessWidget {
 /// saying what it is for. The socket is what makes the panel read as a designed
 /// object rather than a drawer of text.
 class _DestinationPlate extends StatelessWidget {
-  const _DestinationPlate(this.dest, {this.tall = false, this.current = false});
+  const _DestinationPlate(
+    this.dest, {
+    this.tall = false,
+    this.current = false,
+    this.terse = false,
+  });
 
   final _Destination dest;
   final bool tall;
   final bool current;
+  final bool terse;
 
   @override
   Widget build(BuildContext context) {
@@ -2622,16 +2678,18 @@ class _DestinationPlate extends StatelessWidget {
                         color: KvColor.ink,
                       ),
                     ),
-                    const SizedBox(height: 1),
-                    Text(
-                      dest.blurb,
-                      style: const TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 11,
-                        height: 15 / 11,
-                        color: KvColor.inkMeta,
+                    if (!terse) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        dest.blurb,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 11,
+                          height: 15 / 11,
+                          color: KvColor.inkMeta,
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -2667,9 +2725,10 @@ class _DestinationPlate extends StatelessWidget {
 }
 
 class _PlannedRow extends StatelessWidget {
-  const _PlannedRow(this.dest);
+  const _PlannedRow(this.dest, {this.terse = false});
 
   final _Destination dest;
+  final bool terse;
 
   @override
   Widget build(BuildContext context) {
@@ -2693,15 +2752,16 @@ class _PlannedRow extends StatelessWidget {
                     color: KvColor.inkNav,
                   ),
                 ),
-                Text(
-                  dest.blurb,
-                  style: const TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 11,
-                    height: 15 / 11,
-                    color: KvColor.inkMeta,
+                if (!terse)
+                  Text(
+                    dest.blurb,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 11,
+                      height: 15 / 11,
+                      color: KvColor.inkMeta,
+                    ),
                   ),
-                ),
               ],
             ),
           ),
