@@ -1295,7 +1295,14 @@ class _Feed extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: KvSpace.s),
-        for (final e in _entries) _Row(entry: e, stale: state.stale),
+        for (var i = 0; i < _entries.length; i++) ...[
+          if (i > 0)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+              child: _RowRule(),
+            ),
+          _Row(entry: _entries[i], stale: state.stale),
+        ],
       ],
     );
   }
@@ -2660,7 +2667,17 @@ class _PanelBody extends StatelessWidget {
               terse: style.terse,
             ),
             const SizedBox(height: KvSpace.s),
-            _DestinationPlate(_built[1], terse: style.terse),
+            Builder(
+              builder: (context) => _DestinationPlate(
+                _built[1],
+                terse: style.terse,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const _MessagesPreview(),
+                  ),
+                ),
+              ),
+            ),
 
             const SizedBox(height: KvSpace.l),
             const Row(
@@ -2730,12 +2747,14 @@ class _DestinationPlate extends StatelessWidget {
     this.tall = false,
     this.current = false,
     this.terse = false,
+    this.onTap,
   });
 
   final _Destination dest;
   final bool tall;
   final bool current;
   final bool terse;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -2743,7 +2762,7 @@ class _DestinationPlate extends StatelessWidget {
       button: true,
       selected: current,
       child: InkWell(
-        onTap: () {},
+        onTap: onTap ?? () {},
         borderRadius: BorderRadius.circular(KvRadius.panel),
         child: Container(
           padding: EdgeInsets.fromLTRB(
@@ -4271,6 +4290,660 @@ class _AddressPending extends StatelessWidget {
           height: 20 / 13,
           color: KvColor.inkMeta,
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Messages.
+//
+// Copy is taken from the shipped screens, not invented. Two lanes: people
+// already talking, and strangers asking to start. The request count is a
+// number, never a dot — each request asks the user to spend, and a dot begs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _Chat {
+  const _Chat(this.who, this.sub, this.last, this.time, {this.unread});
+
+  final String who;
+  final String? sub;
+  final String last;
+  final String time;
+  final String? unread;
+}
+
+const _chats = <_Chat>[
+  _Chat('Ana', null, 'Settled — thank you again', '2 m', unread: '2'),
+  _Chat('Marco', null, 'You: sending the file now', '1 h'),
+  _Chat(
+    'kaspa:qr7mzv4d…q7lgfx9t',
+    'no local name set',
+    'Invitation accepted',
+    'Tue',
+  ),
+];
+
+class _Request {
+  const _Request(this.who, this.note);
+
+  final String who;
+  final String note;
+}
+
+const _requests = <_Request>[
+  _Request('kaspa:qz9t2mvw…e4kaxh2w', '“Dana here — from the reading group”'),
+  _Request('kaspa:qp0s3jnp…mua7lgfx', 'no note attached'),
+];
+
+class _MessagesPreview extends StatefulWidget {
+  const _MessagesPreview();
+
+  @override
+  State<_MessagesPreview> createState() => _MessagesPreviewState();
+}
+
+class _MessagesPreviewState extends State<_MessagesPreview> {
+  int _lane = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: 'Messages',
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                KvSpace.sm,
+                KvSpace.gutter,
+                KvSpace.sm,
+              ),
+              child: Row(
+                children: [
+                  _Lane(
+                    label: 'Messages',
+                    selected: _lane == 0,
+                    onTap: () => setState(() => _lane = 0),
+                  ),
+                  const SizedBox(width: KvSpace.s),
+                  _Lane(
+                    label: 'Requests',
+                    // A number in a quiet chip. Information, not alarm.
+                    count: '${_requests.length}',
+                    selected: _lane == 1,
+                    onTap: () => setState(() => _lane = 1),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _lane == 0 ? const _ChatLane() : const _RequestLane(),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                0,
+                KvSpace.gutter,
+                KvSpace.m,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _Action(
+                      label: 'History & backup',
+                      primary: false,
+                      onTap: () {},
+                    ),
+                  ),
+                  const SizedBox(width: KvSpace.sm),
+                  Expanded(
+                    child: _Action(
+                      label: 'Add contact',
+                      primary: true,
+                      onTap: () {},
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Lane extends StatelessWidget {
+  const _Lane({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.count,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final String? count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+        child: Container(
+          height: KvSpace.touchTarget,
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected ? KvColor.keyPressed : KvColor.control,
+            borderRadius: BorderRadius.circular(KvRadius.control),
+            border: Border.all(
+              color: selected ? KvColor.edgeHi : KvColor.hairline,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? KvColor.ink : KvColor.inkDim,
+                ),
+              ),
+              if (count != null) ...[
+                const SizedBox(width: 6),
+                Text(
+                  count!,
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 12,
+                    color: KvColor.inkMeta,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ChatLane extends StatelessWidget {
+  const _ChatLane();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      children: [
+        for (var i = 0; i < _chats.length; i++) ...[
+          if (i > 0) const _RowRule(),
+          _ChatRow(_chats[i]),
+        ],
+      ],
+    );
+  }
+}
+
+class _ChatRow extends StatelessWidget {
+  const _ChatRow(this.chat);
+
+  final _Chat chat;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => _ThreadPreview(chat: chat)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    chat.who,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 15,
+                      height: 20 / 15,
+                      fontWeight: FontWeight.w600,
+                      color: KvColor.ink,
+                    ),
+                  ),
+                  if (chat.sub != null)
+                    Text(
+                      chat.sub!,
+                      style: const TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 11,
+                        height: 15 / 11,
+                        color: KvColor.etch,
+                      ),
+                    ),
+                  const SizedBox(height: 2),
+                  Text(
+                    chat.last,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: KvSpace.sm),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  chat.time,
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 11,
+                    color: KvColor.inkMetaLow,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+                if (chat.unread != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: KvColor.keyPressed,
+                      borderRadius: BorderRadius.circular(KvRadius.control),
+                      border: Border.all(color: KvColor.edgeHi),
+                    ),
+                    child: Text(
+                      chat.unread!,
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 11,
+                        color: KvColor.ink,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RequestLane extends StatelessWidget {
+  const _RequestLane();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      children: [
+        for (final r in _requests) ...[
+          Container(
+            margin: const EdgeInsets.only(bottom: KvSpace.sm),
+            padding: const EdgeInsets.all(KvSpace.m),
+            decoration: BoxDecoration(
+              color: KvColor.plate,
+              borderRadius: BorderRadius.circular(KvRadius.panel),
+              border: Border.all(color: KvColor.plateEdge),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  r.who,
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 13,
+                    height: 18 / 13,
+                    color: KvColor.ink,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  r.note,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 13,
+                    height: 18 / 13,
+                    color: KvColor.inkMeta,
+                  ),
+                ),
+                const SizedBox(height: KvSpace.sm),
+                const Text(
+                  'Carries a 0.2 KAS bond — the network norm. It comes back '
+                  'when they accept.',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 11,
+                    height: 16 / 11,
+                    color: KvColor.etch,
+                  ),
+                ),
+                const SizedBox(height: KvSpace.sm),
+                Row(
+                  children: [
+                    // Accept ends in an ellipsis: a ceremony follows, and it
+                    // spends 0.2 KAS. Ignore costs nothing and says so by
+                    // costing no ink.
+                    _SmallAction('Accept…', onTap: () {}),
+                    const SizedBox(width: KvSpace.sm),
+                    const Text(
+                      'Ignore',
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 13,
+                        color: KvColor.inkMeta,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _SmallAction extends StatelessWidget {
+  const _SmallAction(this.label, {required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(KvRadius.control),
+      child: Container(
+        height: 36,
+        padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: KvColor.control,
+          borderRadius: BorderRadius.circular(KvRadius.control),
+          border: Border.all(color: KvColor.edgeHi),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: KvColor.ink,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── The thread ───────────────────────────────────────────────────────────────
+
+class _Msg {
+  const _Msg(this.out, this.text, this.status, this.time, {this.ghost = false});
+
+  final bool out;
+  final String text;
+  final String status;
+  final String time;
+  final bool ghost;
+}
+
+const _thread = <_Msg>[
+  _Msg(false, 'Did the payment land?', 'final ✓', '09:41'),
+  _Msg(
+    true,
+    'Yes — 24 KAS, already buried 214 blocks deep.',
+    'final ✓ · fee 0.00021',
+    '09:42',
+  ),
+  _Msg(true, 'Sending the invoice file now.', 'settling 3/10', '09:44'),
+  _Msg(
+    true,
+    'And the follow-up for February.',
+    'undone by a chain reorganisation — resending',
+    '09:45',
+    ghost: true,
+  ),
+  _Msg(
+    true,
+    'Ping me when it clears.',
+    'failed — never left this device',
+    '09:46',
+  ),
+];
+
+class _ThreadPreview extends StatelessWidget {
+  const _ThreadPreview({required this.chat});
+
+  final _Chat chat;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: chat.who,
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(
+                  KvSpace.gutter,
+                  KvSpace.m,
+                  KvSpace.gutter,
+                  KvSpace.m,
+                ),
+                children: [for (final m in _thread) _Bubble(m)],
+              ),
+            ),
+            const _Composer(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Direction rides three ways: side, hue, and the tail corner. Status sits
+/// UNDER the plate in mono — never inside it, where it would compete with the
+/// words someone wrote.
+class _Bubble extends StatelessWidget {
+  const _Bubble(this.msg);
+
+  final _Msg msg;
+
+  @override
+  Widget build(BuildContext context) {
+    final settling = msg.status.startsWith('settling') || msg.ghost;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: KvSpace.sm),
+      child: Column(
+        crossAxisAlignment: msg.out
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
+        children: [
+          Container(
+            constraints: const BoxConstraints(maxWidth: 280),
+            padding: const EdgeInsets.symmetric(
+              horizontal: KvSpace.sm,
+              vertical: KvSpace.s,
+            ),
+            decoration: BoxDecoration(
+              color: msg.out ? KvColor.messageMine : KvColor.messageTheirs,
+              borderRadius: BorderRadius.only(
+                topLeft: const Radius.circular(KvRadius.bubble),
+                topRight: const Radius.circular(KvRadius.bubble),
+                bottomLeft: Radius.circular(
+                  msg.out ? KvRadius.bubble : KvRadius.bubbleTail,
+                ),
+                bottomRight: Radius.circular(
+                  msg.out ? KvRadius.bubbleTail : KvRadius.bubble,
+                ),
+              ),
+              border: Border.all(
+                color: msg.ghost
+                    ? KvColor.warn
+                    : msg.out
+                    ? KvColor.messageMineEdge
+                    : KvColor.messageTheirsEdge,
+              ),
+            ),
+            child: Text(
+              msg.text,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 21 / 15,
+                color: KvColor.ink,
+              ),
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            '${msg.time} · ${msg.status}',
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: 11,
+              height: 15 / 11,
+              color: settling ? KvColor.warn : KvColor.inkMetaLow,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// **One action, with the exact cost printed on the control that fires it.**
+/// Founder directive; the carve-out is bound to `SignableKind::SelfSendFrame`,
+/// so a message fires on a tap and a bond or a wager never does.
+class _Composer extends StatelessWidget {
+  const _Composer();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        KvSpace.gutter,
+        0,
+        KvSpace.gutter,
+        KvSpace.m,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+              padding: const EdgeInsets.symmetric(
+                horizontal: KvSpace.m,
+                vertical: KvSpace.sm,
+              ),
+              decoration: BoxDecoration(
+                color: KvColor.control,
+                borderRadius: BorderRadius.circular(KvRadius.control),
+                border: Border.all(color: KvColor.hairline),
+              ),
+              child: const Text(
+                'Encrypted message…',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 15,
+                  height: 21 / 15,
+                  color: KvColor.inkMeta,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: KvSpace.s),
+          Semantics(
+            button: true,
+            label: 'Send, fee 0.00021 KAS',
+            child: InkWell(
+              onTap: () {},
+              borderRadius: BorderRadius.circular(KvRadius.control),
+              child: Container(
+                height: KvSpace.touchTarget,
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+                decoration: BoxDecoration(
+                  color: KvColor.primary,
+                  borderRadius: BorderRadius.circular(KvRadius.control),
+                ),
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'Send',
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 14,
+                        height: 18 / 14,
+                        fontWeight: FontWeight.w600,
+                        color: KvColor.onPrimary,
+                      ),
+                    ),
+                    // The exact fee, on the control that spends it. 11dp is
+                    // the floor for anything a user must read (§2) — the
+                    // export printed this at 8.
+                    Text(
+                      '0.00021 KAS',
+                      style: TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 11,
+                        height: 14 / 11,
+                        fontWeight: FontWeight.w500,
+                        color: KvColor.onPrimaryDim,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
