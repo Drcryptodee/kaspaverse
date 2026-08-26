@@ -172,9 +172,15 @@ abstract final class KvColor {
   // position and a quiet outline glyph. There is no informational blue and no
   // fourth accent (founder directive, 2026-08-25).
 
-  /// Money **arriving**, and things confirmed or final. 11.72:1 on [abyss].
-  /// Narrowed from the 2026-07-11 "confirmed OR healthy/active" widening: the
-  /// health job now belongs to the cadence and the connection line (D-185).
+  /// Money **arriving**, things confirmed or final, **and a control that is
+  /// switched on**. 11.72:1 on [abyss].
+  ///
+  /// The active half was widened by founder directive 2026-07-11, narrowed away
+  /// at D-185 when the cadence took over reporting *link* health, and restored
+  /// at **D-200** — because those are two different claims. A cadence reports
+  /// whether the chain is answering, which changes without the user. **A toggle
+  /// reports a state the user set and that is TRUE**, which is the same family
+  /// as confirmed. Teal stays excluded: teal is light, never a status.
   static const Color ok = Color(0xFF7DD584);
 
   /// **Not yet certain** — stale, syncing, settling, degraded, and any block

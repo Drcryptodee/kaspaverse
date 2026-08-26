@@ -260,9 +260,10 @@ ThemeData kvDarkTheme() {
     splashColor: KvColor.glow,
     highlightColor: KvColor.glow,
     iconTheme: const IconThemeData(color: KvColor.inkDim),
-    // A toggle is state the user owns, not a value the chain reports, so it
-    // spends no hue at all (BG-7): "on" is carried by a bright neutral track.
-    // Teal would cost an emission per switch and blow the per-screen budget.
+    // Active = `ok` GREEN (founder directive 2026-07-11, restored at D-200):
+    // a toggle reports a state that is TRUE, which is the same family as
+    // confirmed. Teal stays out — teal is light, never a status, and one
+    // emission per switch would blow the per-screen budget on its own.
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.selected)
@@ -271,11 +272,11 @@ ThemeData kvDarkTheme() {
       ),
       trackColor: WidgetStateProperty.resolveWith(
         (states) =>
-            states.contains(WidgetState.selected) ? KvColor.ink : KvColor.key,
+            states.contains(WidgetState.selected) ? KvColor.ok : KvColor.key,
       ),
       trackOutlineColor: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? KvColor.ink
+            ? KvColor.ok
             : KvColor.keyEdge,
       ),
     ),

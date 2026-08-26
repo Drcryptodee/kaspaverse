@@ -2792,6 +2792,19 @@ class _PanelBody extends StatelessWidget {
             const SizedBox(height: KvSpace.sm),
             Builder(
               builder: (context) => _PanelAction(
+                _Glyph.settings,
+                'Splash & onboarding',
+                wide: true,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const _SweepPreview(),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: KvSpace.s),
+            Builder(
+              builder: (context) => _PanelAction(
                 _Glyph.lock,
                 'Secret surfaces',
                 wide: true,
@@ -5825,17 +5838,18 @@ class _Toggle extends StatelessWidget {
               ),
             ),
             const SizedBox(width: KvSpace.sm),
-            // "On" is a bright neutral, not teal and not green: a toggle is
-            // state the user owns, not a value the chain reports (BG-7).
+            // "On" is `ok` green (founder directive, restored at D-200): a
+            // toggle reports a state that is TRUE, which is the same family as
+            // confirmed. Teal stays out — teal is light, never a status.
             Container(
               width: 44,
               height: 26,
               padding: const EdgeInsets.all(3),
               alignment: on ? Alignment.centerRight : Alignment.centerLeft,
               decoration: BoxDecoration(
-                color: on ? KvColor.ink : KvColor.control,
+                color: on ? KvColor.ok : KvColor.control,
                 borderRadius: BorderRadius.circular(KvRadius.control),
-                border: Border.all(color: on ? KvColor.ink : KvColor.edgeHi),
+                border: Border.all(color: on ? KvColor.ok : KvColor.edgeHi),
               ),
               child: Container(
                 width: 20,
@@ -5891,6 +5905,231 @@ class _Pick extends StatelessWidget {
               color: selected ? KvColor.ink : KvColor.inkMeta,
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The sweep: splash, the onboarding fork, and the stake surface.
+//
+// Copy from the shipped screens. The stake surface has no shipped copy — it is
+// the extensibility proof, and it is marked as placeholder.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SweepScreen { splash, fork }
+
+extension on SweepScreen {
+  String get label => switch (this) {
+    SweepScreen.splash => 'splash',
+    SweepScreen.fork => 'fork',
+  };
+}
+
+class _SweepPreview extends StatefulWidget {
+  const _SweepPreview();
+
+  @override
+  State<_SweepPreview> createState() => _SweepPreviewState();
+}
+
+class _SweepPreviewState extends State<_SweepPreview> {
+  SweepScreen _screen = SweepScreen.fork;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            if (_screen != SweepScreen.splash)
+              _DetailRail(
+                onBack: () => Navigator.of(context).pop(),
+                title: 'Your sovereign vault',
+              ),
+            Expanded(child: _body()),
+            _Switcher(
+              values: SweepScreen.values,
+              value: _screen,
+              label: (v) => v.label,
+              onChanged: (v) => setState(() => _screen = v),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _body() => switch (_screen) {
+    SweepScreen.splash => const _Splash(),
+    SweepScreen.fork => const _Fork(),
+  };
+}
+
+/// One breathing bar, no spinner. A splash that spins is telling the user
+/// something is wrong before anything has happened.
+class _Splash extends StatelessWidget {
+  const _Splash();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'KaspaVerse',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 26,
+              height: 32 / 26,
+              fontWeight: FontWeight.w600,
+              letterSpacing: -0.3,
+              color: KvColor.ink,
+            ),
+          ),
+          SizedBox(height: KvSpace.s),
+          Text(
+            'Your sovereign vault',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 13,
+              height: 18 / 13,
+              color: KvColor.inkMeta,
+            ),
+          ),
+          SizedBox(height: KvSpace.xl),
+          _Cadence(running: true),
+        ],
+      ),
+    );
+  }
+}
+
+/// Two earned panels, weighted by likelihood. Most people arriving here are
+/// creating, so create is the one that comes forward.
+class _Fork extends StatelessWidget {
+  const _Fork();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      children: [
+        const SizedBox(height: KvSpace.l),
+        const Text(
+          'Hold your own keys on Kaspa. Set up a new wallet, or restore one '
+          'you already own.',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 15,
+            height: 22 / 15,
+            color: KvColor.inkDim,
+          ),
+        ),
+        const SizedBox(height: KvSpace.xl),
+        const _ForkPanel(
+          title: 'Create new wallet',
+          sub: 'Twelve words, generated on this phone and shown once.',
+          primary: true,
+        ),
+        const SizedBox(height: KvSpace.sm),
+        const _ForkPanel(
+          title: 'Restore existing wallet',
+          sub: 'Type the words you already have.',
+          primary: false,
+        ),
+        const SizedBox(height: KvSpace.xl),
+        Row(
+          children: [
+            const _Lamp(KvColor.ok),
+            const SizedBox(width: KvSpace.sm),
+            const Expanded(
+              child: Text(
+                'Keys never leave this device, and never leave Rust.',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 12,
+                  height: 17 / 12,
+                  color: KvColor.inkMeta,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _ForkPanel extends StatelessWidget {
+  const _ForkPanel({
+    required this.title,
+    required this.sub,
+    required this.primary,
+  });
+
+  final String title;
+  final String sub;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () {},
+      borderRadius: BorderRadius.circular(KvRadius.panel),
+      child: Container(
+        padding: const EdgeInsets.all(KvSpace.m),
+        decoration: BoxDecoration(
+          color: primary ? KvColor.summoned : KvColor.plate,
+          borderRadius: BorderRadius.circular(KvRadius.panel),
+          border: Border.all(
+            color: primary ? KvColor.summonedEdge : KvColor.plateEdge,
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: primary ? 17 : 15,
+                      height: 22 / 17,
+                      fontWeight: FontWeight.w600,
+                      color: KvColor.ink,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    sub,
+                    style: const TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      height: 17 / 12,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: KvSpace.sm),
+            // The fork's single teal moment, on the path most people take.
+            CustomPaint(
+              size: const Size(20, 20),
+              painter: _GlyphPainter(
+                _Glyph.chevron,
+                tone: primary ? KvColor.primary : KvColor.inkMeta,
+              ),
+            ),
+          ],
         ),
       ),
     );
