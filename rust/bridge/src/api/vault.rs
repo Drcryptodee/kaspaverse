@@ -270,7 +270,18 @@ pub(crate) fn set_lock_grace_secs(secs: u32) -> Result<(), AppError> {
 /// the resolver is already an untrusted accelerator; remembering its last
 /// answer adds nothing).
 pub(crate) fn endpoint_cache_path() -> Result<PathBuf, AppError> {
-    Ok(vault_dir()?.join("wallet").join("endpoint.cache"))
+    Ok(node_config_dir()?.join("endpoint.cache"))
+}
+
+/// Where the link's view of "which node" is persisted: the resolver's
+/// last-good memory (`endpoint.cache` + `endpoint.health`) and, since D-187,
+/// the user's own pin (`node.config`). Deliberately ONE directory — the two
+/// are adjacent in meaning and easy to confuse, and keeping them side by side
+/// makes the distinction visible (see `chain::node_config` module docs) rather
+/// than hiding it across trees. Public data either way: a `wss://` URL
+/// (INV-3), never key material.
+pub(crate) fn node_config_dir() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet"))
 }
 
 /// App-private dir for the P2.3 transport stores (conversations + messages).

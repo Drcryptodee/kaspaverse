@@ -903,6 +903,82 @@ pub fn candidate_url_is_clean(url: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || c == '\u{7f}')
 }
 
+/// The longest node URL we will persist or dial. A wRPC endpoint is a host
+/// plus the fixed `/kaspa/<net>/wrpc/borsh` tail; anything past this is not a
+/// typo, and an unbounded string reaches both the ledger writer and the log.
+pub const MAX_NODE_URL_LEN: usize = 512;
+
+/// Validate a **user-supplied** node URL before it is persisted or dialled.
+///
+/// The user is not the adversary here — a typo is — but the value lands in the
+/// same three places a resolver candidate does (the ws dial, the TSV health
+/// ledger key, the evidence lane), so it earns the same intake guard rather
+/// than a second, weaker one: [`candidate_url_is_clean`] is the shared rule and
+/// this is its user-facing doorway (whitespace smuggles failure-phrase text
+/// past `scrub_urls`; a `\t`/`\n` forges rows in [`EndpointHealth::save`]).
+///
+/// On top of that it pins the scheme. `ws://`/`wss://` only, matching what
+/// `DagMonitor::read_cached_endpoint` will accept back off the disk: an
+/// `https://` node URL is the single most likely honest mistake (it is what
+/// the node's own docs show for the REST port), and it fails deep inside the
+/// ws client with an opaque message an hour later. Rejecting it here, in Rust,
+/// is why this is not a Dart-side regex.
+///
+/// Returns the trimmed URL to store — never the raw input.
+pub fn validate_node_url(raw: &str) -> Result<String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err(ChainError::Message(
+            "node URL is empty — leave it unset to use public node discovery".into(),
+        ));
+    }
+    if url.len() > MAX_NODE_URL_LEN {
+        return Err(ChainError::Message(format!(
+            "node URL is longer than {MAX_NODE_URL_LEN} bytes"
+        )));
+    }
+    if !candidate_url_is_clean(url) {
+        return Err(ChainError::Message(
+            "node URL contains whitespace or control characters".into(),
+        ));
+    }
+    if !(url.starts_with("wss://") || url.starts_with("ws://")) {
+        return Err(ChainError::Message(
+            "node URL must start with wss:// or ws:// (a Kaspa node's wRPC port, not its REST port)"
+                .into(),
+        ));
+    }
+    let host = endpoint_host(url);
+    // A scheme with nothing after it is not a host, and the ws client's own
+    // failure for it is opaque.
+    if host.is_empty() {
+        return Err(ChainError::Message("node URL has no host".into()));
+    }
+    // NO userinfo (ffi-leak audit, D-187). `wss://user:pass@node/…` is a real
+    // thing a user with an authenticated reverse proxy in front of their node
+    // would type — and this string is logged IN FULL at the bind
+    // (`install_bind`) and at the run-ended line, becomes a key in the TSV
+    // health ledger, and crosses the FFI as `DagStatusDto.pinned_node` to sit
+    // in an unzeroable Dart `String`. That is a credential in logcat by four
+    // routes. INV-3 says the endpoint lane carries public data only; refusing
+    // the shape here is what makes that sentence true rather than merely
+    // asserted. We do not support authenticated nodes, so say so plainly
+    // instead of silently stripping the userinfo and failing to connect.
+    // …and no query or fragment either. `endpoint_host` stops at the first
+    // `/`, so the `@` test above cannot see `wss://node/…/borsh?token=hunter2`
+    // — the same credential, in the same four places, from the same user
+    // fronting their node with a token-auth reverse proxy (wallet-security
+    // audit). A wRPC endpoint is `scheme://host[:port]/kaspa/<net>/wrpc/borsh`;
+    // neither character is ever legitimate in one.
+    if host.contains('@') || url.contains('?') || url.contains('#') {
+        return Err(ChainError::Message(
+            "credentials in a node URL are not supported — use an unauthenticated wRPC endpoint"
+                .into(),
+        ));
+    }
+    Ok(url.to_string())
+}
+
 /// The ONE bounded doorway to `Resolver::get_node` (D-089 bounded-await law,
 /// C1): every resolver fetch in this crate goes through here, never raw —
 /// the raw call has no deadline at any layer beneath it (see
@@ -1672,6 +1748,71 @@ mod tests {
     }
 
     /// The race-intake guard (R3 wallet-security): a resolver URL carrying
+    /// The user-facing intake guard, tested directly rather than only through
+    /// its callers (consensus audit). Every rejected shape here is one D-187
+    /// makes a claim about, so a future edit that re-opens one fails a test
+    /// that names it instead of passing quietly.
+    #[test]
+    fn validate_node_url_accepts_dialable_endpoints_and_refuses_the_rest() {
+        // Accepted: the real shapes a node operator actually has.
+        for good in [
+            "wss://nora.kaspa.stream/kaspa/mainnet/wrpc/borsh",
+            "ws://127.0.0.1:17110/borsh",
+            "wss://node.example:17110/kaspa/mainnet/wrpc/borsh",
+            "  wss://trimmed.example/borsh  ", // trimmed, not refused
+        ] {
+            assert!(validate_node_url(good).is_ok(), "{good:?} must be accepted");
+        }
+        assert_eq!(
+            validate_node_url("  wss://trimmed.example/borsh  ").unwrap(),
+            "wss://trimmed.example/borsh",
+            "the STORED value is the trimmed one, never the raw input"
+        );
+
+        for bad in [
+            "",
+            "   ",
+            "https://node.example", // REST port — the likely typo
+            "http://node.example",
+            "node.example/borsh",        // no scheme
+            "wss://",                    // scheme, no host
+            "wss://node.example/ borsh", // whitespace (ledger-row forgery)
+            "wss://node.example/\tborsh",
+            "wss://node.example/\nwss://victim",
+            "wss://node.example/\u{7f}x",
+            "wss://user:pw@node.example/borsh", // userinfo credential
+            "wss://node.example/borsh?token=hunter2", // query credential
+            "wss://node.example/borsh#hunter2", // fragment credential
+        ] {
+            assert!(validate_node_url(bad).is_err(), "{bad:?} must be refused");
+        }
+
+        // The length bound, at its edges (bytes, as the message now says).
+        let host = "wss://n.example/";
+        let pad = MAX_NODE_URL_LEN - host.len();
+        let at_cap = format!("{host}{}", "a".repeat(pad));
+        assert_eq!(at_cap.len(), MAX_NODE_URL_LEN);
+        assert!(
+            validate_node_url(&at_cap).is_ok(),
+            "exactly at the cap is fine"
+        );
+        let over_cap = format!("{at_cap}a");
+        assert!(
+            validate_node_url(&over_cap).is_err(),
+            "one byte over is not"
+        );
+
+        // No rejection message ever echoes the input — a credential-bearing
+        // URL must not be reflected back into an AppError and thence a Dart
+        // String (wallet-security item 11).
+        let secret = "wss://node.example/borsh?token=hunter2";
+        let message = validate_node_url(secret).unwrap_err().to_string();
+        assert!(
+            !message.contains("hunter2") && !message.contains("node.example"),
+            "the error named the input: {message}"
+        );
+    }
+
     /// whitespace or control bytes is never dialable — but a space smuggles
     /// failure-phrase text past `scrub_urls` into the classifier, and a
     /// tab/newline forges rows in the health TSV. Reject at the door.

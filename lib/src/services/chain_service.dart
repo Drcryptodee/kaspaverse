@@ -56,6 +56,15 @@ class ChainService with WidgetsBindingObserver {
   static Future<void> Function(bool available) networkChangedBridge =
       (available) => dagNetworkChanged(available: available);
 
+  /// D-187 node-pin seams: read the user's node choice, and set or clear it.
+  /// Rust owns validation and the live re-link — Dart never parses a URL and
+  /// never decides what a pin means.
+  @visibleForTesting
+  static Future<NodeConfigDto> Function() nodeConfigFn = dagNodeConfig;
+  @visibleForTesting
+  static Future<void> Function(String? url) setNodeConfigFn = (url) =>
+      dagSetNodeConfig(url: url);
+
   /// V1 observability seam: the Rust span-marker pull (hardening V1, findings
   /// item 6). NOTE the build-flavor-proof `kv-span` lane is Rust's own
   /// twin-emit through liblog (D-076/L53) — the [_dumpNewSpans] debugPrint
@@ -134,6 +143,22 @@ class ChainService with WidgetsBindingObserver {
   /// churn hold: a ≤2 s blip must not flip the glass (register item 16).
   final ValueNotifier<DateTime?> disconnectedAt = ValueNotifier(null);
 
+  /// The node the user pinned, or null for public node discovery (D-187).
+  ///
+  /// The glass needs this to tell two states apart that look identical from
+  /// [connected] alone: *we are hunting for a node* and *your node is not
+  /// answering, and by your instruction nothing else will be tried*. It rides
+  /// the [_linkTick] status pull — the poll that only runs while we are dark,
+  /// which is exactly when the distinction matters — so keeping it fresh
+  /// costs no extra bridge call.
+  final ValueNotifier<String?> pinnedNode = ValueNotifier(null);
+
+  /// A pin WAS stored and this boot refused it (corrupt/truncated file), so
+  /// the wallet is on public discovery without the user having chosen that.
+  /// Distinct from [pinnedNode] being null, which is the honest never-pinned
+  /// state: a *lost* pin must be as nameable as a *down* one (D-187).
+  final ValueNotifier<bool> pinDropped = ValueNotifier(false);
+
   StreamSubscription<DagSnapshot>? _subscription;
   Timer? _graceTimer;
   bool _droppedByGrace = false;
@@ -193,6 +218,40 @@ class ChainService with WidgetsBindingObserver {
     if (connected.value && !reconnecting.value) return;
     searching.value = status.searching;
     osOffline.value = status.osOffline;
+    pinnedNode.value = status.pinnedNode;
+    pinDropped.value = status.pinDropped;
+  }
+
+  /// Read the node choice from Rust (file-backed). Also refreshes
+  /// [pinnedNode], so a surface can open cold and paint the truth.
+  Future<NodeConfigDto?> refreshNodeConfig() async {
+    try {
+      final config = await nodeConfigFn();
+      pinnedNode.value = config.url;
+      pinDropped.value = config.dropped;
+      return config;
+    } catch (_) {
+      return null; // a failed pull leaves the last-known state
+    }
+  }
+
+  /// Pin the wallet to one node, or clear the pin with null (D-187).
+  ///
+  /// Rust validates, persists and re-links — this is a relay plus a refresh.
+  /// It deliberately does NOT swallow the error: a rejected URL is the one
+  /// thing the user must see, and Rust's message names the reason (wrong
+  /// scheme, whitespace, no host).
+  Future<void> setPinnedNode(String? url) async {
+    // Refresh on BOTH arms (ffi-leak audit): a throw here does NOT mean
+    // nothing changed. Rust persists and applies the pin before its first
+    // dial, so an error means the dial failed while the pin went live — and
+    // a notifier left showing the OLD node would be the one lie this whole
+    // feature exists to prevent.
+    try {
+      await setNodeConfigFn(url);
+    } finally {
+      await refreshNodeConfig();
+    }
   }
 
   /// Foreground liveness check (P3/D-068): pull the honest block-age; if the
@@ -375,5 +434,7 @@ class ChainService with WidgetsBindingObserver {
     searching.value = false;
     osOffline.value = false;
     disconnectedAt.value = null;
+    pinnedNode.value = null;
+    pinDropped.value = false;
   }
 }

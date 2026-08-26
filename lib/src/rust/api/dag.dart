@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `escalation_task`, `fold`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `tracker_handle`
+// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `escalation_task`, `fold`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `tracker_handle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
@@ -36,11 +36,21 @@ Future<NodeConfigDto> dagNodeConfig() =>
 
 /// Pin the wallet to one node, or clear the pin with `None`.
 ///
-/// Persist-then-apply, in that order and both or neither: the URL is validated
-/// in Rust (`chain::validate_node_url` — the same intake guard a resolver
-/// candidate passes, never a second weaker one in Dart), then written, then
-/// applied to the live link. A monitor that does not exist yet needs no apply
-/// step — it reads the file when it starts.
+/// Persist-then-apply, in that order: the URL is validated in Rust
+/// (`chain::validate_node_url` — the same intake guard a resolver candidate
+/// passes, never a second weaker one in Dart), then written, then applied to
+/// the live link. A monitor that does not exist yet needs no apply step — it
+/// reads the file when it starts.
+///
+/// **Not atomic, deliberately.** A validated URL is persisted and applied
+/// before the first dial is attempted, so an `Err` from this function means
+/// *the first dial failed*, never *the pin was rejected* — the pin IS live and
+/// its Retry loop keeps working, which is exactly the D-187 ruling (a pinned
+/// node that is down stays pinned). Callers must therefore re-read the config
+/// on BOTH arms rather than assuming failure means nothing changed; the Dart
+/// seam refreshes in a `finally` for this reason. Rejection is the earlier,
+/// cheaper failure: it happens in `save`, before anything is written or torn
+/// down.
 ///
 /// Applying it live rather than at next launch is deliberate: the case that
 /// matters most is a user whose pinned node just died, and telling them to
@@ -173,6 +183,13 @@ class DagStatusDto {
   /// Public data: a `wss://` URL the user typed (INV-3).
   final String? pinnedNode;
 
+  /// A pin **was** stored and this boot refused it (corrupt or truncated
+  /// file), so the wallet is on public discovery without the user choosing
+  /// that. Distinct from `pinned_node == None`, which is the honest
+  /// never-pinned state — D-187 Decision 2 requires a *lost* pin to be as
+  /// nameable as a *down* one, and silence here is the failure it forbids.
+  final bool pinDropped;
+
   const DagStatusDto({
     required this.connected,
     this.endpoint,
@@ -181,6 +198,7 @@ class DagStatusDto {
     required this.searching,
     required this.osOffline,
     this.pinnedNode,
+    required this.pinDropped,
   });
 
   static Future<DagStatusDto> default_() =>
@@ -194,7 +212,8 @@ class DagStatusDto {
       virtualDaaScore.hashCode ^
       searching.hashCode ^
       osOffline.hashCode ^
-      pinnedNode.hashCode;
+      pinnedNode.hashCode ^
+      pinDropped.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -207,7 +226,8 @@ class DagStatusDto {
           virtualDaaScore == other.virtualDaaScore &&
           searching == other.searching &&
           osOffline == other.osOffline &&
-          pinnedNode == other.pinnedNode;
+          pinnedNode == other.pinnedNode &&
+          pinDropped == other.pinDropped;
 }
 
 /// The user's node choice (D-187) — the INV-8 escape hatch made reachable.
@@ -224,13 +244,16 @@ class NodeConfigDto {
   /// The endpoint the socket is bound to, or `None` while dark.
   final String? activeUrl;
 
-  const NodeConfigDto({this.url, this.activeUrl});
+  /// A stored pin was refused on load — see `DagStatusDto::pin_dropped`.
+  final bool dropped;
+
+  const NodeConfigDto({this.url, this.activeUrl, required this.dropped});
 
   static Future<NodeConfigDto> default_() =>
       RustLib.instance.api.crateApiDagNodeConfigDtoDefault();
 
   @override
-  int get hashCode => url.hashCode ^ activeUrl.hashCode;
+  int get hashCode => url.hashCode ^ activeUrl.hashCode ^ dropped.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -238,7 +261,8 @@ class NodeConfigDto {
       other is NodeConfigDto &&
           runtimeType == other.runtimeType &&
           url == other.url &&
-          activeUrl == other.activeUrl;
+          activeUrl == other.activeUrl &&
+          dropped == other.dropped;
 }
 
 /// One span marker crossing the FFI (V1 observability — findings-register

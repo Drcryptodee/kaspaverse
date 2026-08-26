@@ -14,11 +14,15 @@ DagStatusDto status({
   int? blockAgeSecs,
   bool searching = false,
   bool osOffline = false,
+  String? pinnedNode,
+  bool pinDropped = false,
 }) => DagStatusDto(
   connected: connected,
   lastBlockAgeSecs: blockAgeSecs == null ? null : BigInt.from(blockAgeSecs),
   searching: searching,
   osOffline: osOffline,
+  pinnedNode: pinnedNode,
+  pinDropped: pinDropped,
 );
 
 void main() {
@@ -389,5 +393,80 @@ void main() {
         expect(service.reconnecting.value, isFalse);
       },
     );
+  });
+
+  // ── D-187: the node pin reaches the glass ──────────────────────────────
+
+  test(
+    'the pinned node rides the link poll, so a dark wallet can name it',
+    () async {
+      ChainService.linkPollPeriod = const Duration(milliseconds: 10);
+      statusValue = status(
+        connected: false,
+        searching: false,
+        pinnedNode: 'wss://mine.example/borsh',
+      );
+      final service = ChainService.instance..start();
+      controller.add(DagSnapshot(connected: false));
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      // The distinction the surface is built on: not connected AND not
+      // searching AND a pin — "your node is not answering", never "we are
+      // hunting". A wallet that only knew `connected` could not say which.
+      expect(service.pinnedNode.value, 'wss://mine.example/borsh');
+      expect(service.connected.value, isFalse);
+      expect(service.searching.value, isFalse);
+    },
+  );
+
+  test('setting and clearing the pin relays to Rust and refreshes', () async {
+    final sets = <String?>[];
+    String? stored;
+    ChainService.setNodeConfigFn = (url) async {
+      sets.add(url);
+      stored = url;
+    };
+    ChainService.nodeConfigFn = () async =>
+        NodeConfigDto(url: stored, dropped: false);
+
+    // start() attaches the stream subscription the shared tearDown needs in
+    // order to close its single-subscription controller.
+    final service = ChainService.instance..start();
+    await service.setPinnedNode('wss://mine.example/borsh');
+    expect(sets, ['wss://mine.example/borsh']);
+    expect(service.pinnedNode.value, 'wss://mine.example/borsh');
+
+    await service.setPinnedNode(null);
+    expect(sets, ['wss://mine.example/borsh', null]);
+    expect(service.pinnedNode.value, isNull);
+  });
+
+  test(
+    'a rejected URL surfaces to the caller and never silently succeeds',
+    () async {
+      ChainService.setNodeConfigFn = (url) async => throw const AppError(
+        message: 'node URL must start with wss:// or ws://',
+      );
+      // Rust owns validation; Dart must not swallow it — the user typing an
+      // https:// node URL has to SEE why nothing happened.
+      final service = ChainService.instance..start();
+      await expectLater(
+        service.setPinnedNode('https://mine.example'),
+        throwsA(isA<AppError>()),
+      );
+    },
+  );
+
+  test('a dropped pin is nameable, and is not "never pinned"', () async {
+    ChainService.linkPollPeriod = const Duration(milliseconds: 10);
+    statusValue = status(connected: false, pinDropped: true);
+    final service = ChainService.instance..start();
+    controller.add(DagSnapshot(connected: false));
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+
+    // Both are true at once and they mean different things: there is no pin
+    // to name, AND that is not because the user never set one.
+    expect(service.pinnedNode.value, isNull);
+    expect(service.pinDropped.value, isTrue);
   });
 }

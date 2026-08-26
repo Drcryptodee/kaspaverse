@@ -2762,8 +2762,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DagStatusDto dco_decode_dag_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return DagStatusDto(
       connected: dco_decode_bool(arr[0]),
       endpoint: dco_decode_opt_String(arr[1]),
@@ -2772,6 +2772,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       searching: dco_decode_bool(arr[4]),
       osOffline: dco_decode_bool(arr[5]),
       pinnedNode: dco_decode_opt_String(arr[6]),
+      pinDropped: dco_decode_bool(arr[7]),
     );
   }
 
@@ -2928,11 +2929,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   NodeConfigDto dco_decode_node_config_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return NodeConfigDto(
       url: dco_decode_opt_String(arr[0]),
       activeUrl: dco_decode_opt_String(arr[1]),
+      dropped: dco_decode_bool(arr[2]),
     );
   }
 
@@ -3488,6 +3490,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_searching = sse_decode_bool(deserializer);
     var var_osOffline = sse_decode_bool(deserializer);
     var var_pinnedNode = sse_decode_opt_String(deserializer);
+    var var_pinDropped = sse_decode_bool(deserializer);
     return DagStatusDto(
       connected: var_connected,
       endpoint: var_endpoint,
@@ -3496,6 +3499,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       searching: var_searching,
       osOffline: var_osOffline,
       pinnedNode: var_pinnedNode,
+      pinDropped: var_pinDropped,
     );
   }
 
@@ -3708,7 +3712,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_url = sse_decode_opt_String(deserializer);
     var var_activeUrl = sse_decode_opt_String(deserializer);
-    return NodeConfigDto(url: var_url, activeUrl: var_activeUrl);
+    var var_dropped = sse_decode_bool(deserializer);
+    return NodeConfigDto(
+      url: var_url,
+      activeUrl: var_activeUrl,
+      dropped: var_dropped,
+    );
   }
 
   @protected
@@ -4390,6 +4399,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.searching, serializer);
     sse_encode_bool(self.osOffline, serializer);
     sse_encode_opt_String(self.pinnedNode, serializer);
+    sse_encode_bool(self.pinDropped, serializer);
   }
 
   @protected
@@ -4577,6 +4587,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_opt_String(self.url, serializer);
     sse_encode_opt_String(self.activeUrl, serializer);
+    sse_encode_bool(self.dropped, serializer);
   }
 
   @protected

@@ -2872,6 +2872,7 @@ impl SseDecode for crate::api::dag::DagStatusDto {
         let mut var_searching = <bool>::sse_decode(deserializer);
         let mut var_osOffline = <bool>::sse_decode(deserializer);
         let mut var_pinnedNode = <Option<String>>::sse_decode(deserializer);
+        let mut var_pinDropped = <bool>::sse_decode(deserializer);
         return crate::api::dag::DagStatusDto {
             connected: var_connected,
             endpoint: var_endpoint,
@@ -2880,6 +2881,7 @@ impl SseDecode for crate::api::dag::DagStatusDto {
             searching: var_searching,
             os_offline: var_osOffline,
             pinned_node: var_pinnedNode,
+            pin_dropped: var_pinDropped,
         };
     }
 }
@@ -3108,9 +3110,11 @@ impl SseDecode for crate::api::dag::NodeConfigDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_url = <Option<String>>::sse_decode(deserializer);
         let mut var_activeUrl = <Option<String>>::sse_decode(deserializer);
+        let mut var_dropped = <bool>::sse_decode(deserializer);
         return crate::api::dag::NodeConfigDto {
             url: var_url,
             active_url: var_activeUrl,
+            dropped: var_dropped,
         };
     }
 }
@@ -3986,6 +3990,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::dag::DagStatusDto {
             self.searching.into_into_dart().into_dart(),
             self.os_offline.into_into_dart().into_dart(),
             self.pinned_node.into_into_dart().into_dart(),
+            self.pin_dropped.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4184,6 +4189,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::dag::NodeConfigDto {
         [
             self.url.into_into_dart().into_dart(),
             self.active_url.into_into_dart().into_dart(),
+            self.dropped.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4720,6 +4726,7 @@ impl SseEncode for crate::api::dag::DagStatusDto {
         <bool>::sse_encode(self.searching, serializer);
         <bool>::sse_encode(self.os_offline, serializer);
         <Option<String>>::sse_encode(self.pinned_node, serializer);
+        <bool>::sse_encode(self.pin_dropped, serializer);
     }
 }
 
@@ -4897,6 +4904,7 @@ impl SseEncode for crate::api::dag::NodeConfigDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Option<String>>::sse_encode(self.url, serializer);
         <Option<String>>::sse_encode(self.active_url, serializer);
+        <bool>::sse_encode(self.dropped, serializer);
     }
 }
 

@@ -296,10 +296,26 @@ struct Inner {
     /// Gates the Connected-time demotion refusal so the advisory bind isn't
     /// bounced by our own enforcement.
     hygiene_advisory: AtomicBool,
-    /// `try_new(url = Some(..))` pins a node explicitly (dev/tests): the race
-    /// and demotion machinery stand down and the ws client's own Retry loop
-    /// keeps the pinned URL alive — loyalty is CORRECT for a pinned node.
-    direct_url: Option<String>,
+    /// The node the wallet is pinned to, or `None` for resolver discovery.
+    ///
+    /// `Some(..)` stands the race and demotion machinery down and lets the ws
+    /// client's own Retry loop keep the pinned URL alive — loyalty is CORRECT
+    /// for a pinned node, and since D-187 it is also the whole POINT: a pinned
+    /// node NEVER silently falls back to the resolver, because a sovereignty
+    /// setting that quietly stops being true exactly when it matters is worse
+    /// than not offering it.
+    ///
+    /// **Mutable since D-187** (it was construction-only while pinning was a
+    /// dev/test affordance). Every read goes through [`DagMonitor::pinned_url`]
+    /// / [`DagMonitor::is_pinned`], and the ONE writer is
+    /// [`DagMonitor::set_pinned_node`], which swaps it with nothing bound and
+    /// no race able to bind — see that method for why the window is closed.
+    direct_url: Mutex<Option<String>>,
+    /// Bumped by every [`DagMonitor::pause`]. [`DagMonitor::set_pinned_node`]
+    /// compares it across its teardown await: the `paused` FLAG cannot answer
+    /// "did a background pause land while I was tearing down?", because the
+    /// repin set that same flag itself one line earlier. A generation can.
+    pause_gen: AtomicU64,
     /// True between [`DagMonitor::pause`] and [`DagMonitor::resume`] — a
     /// deliberate grace-drop also emits `Disconnected`, and the rotation-restore
     /// logic must not treat it as a dead node and dial right back.
@@ -385,7 +401,8 @@ impl DagMonitor {
                 phone_fault_round_at: AtomicU64::new(0),
                 pending_strike: Mutex::new(None),
                 hygiene_advisory: AtomicBool::new(false),
-                direct_url: url,
+                pause_gen: AtomicU64::new(0),
+                direct_url: Mutex::new(url),
                 paused: AtomicBool::new(false),
                 transport_cursor: Mutex::new(None),
                 transport_cursor_written: AtomicU64::new(0),
@@ -824,7 +841,15 @@ impl DagMonitor {
     }
 
     pub fn mainnet() -> Result<Self> {
-        Self::try_new(NetworkId::new(NetworkType::Mainnet), None)
+        Self::mainnet_with_node(None)
+    }
+
+    /// Mainnet, against the node the user pinned — or public node discovery
+    /// when they have not chosen one (D-187). The one constructor the bridge
+    /// calls, so the pin is read BEFORE the first connect rather than applied
+    /// to a link that already reached a stranger.
+    pub fn mainnet_with_node(url: Option<String>) -> Result<Self> {
+        Self::try_new(NetworkId::new(NetworkType::Mainnet), url)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -885,29 +910,176 @@ impl DagMonitor {
         Rpc::new(self.inner.link_rpc.clone(), self.inner.monitor_ctl.clone())
     }
 
-    /// Initiates the first connect. Resolver mode starts the race task
-    /// (non-blocking, D-081 — the app is the one reconnect authority); an
-    /// explicitly pinned URL keeps the ws client's own Retry loop (loyalty is
-    /// correct for a pinned node).
-    ///
-    /// Must be called from within a tokio runtime.
+    /// Initiates the first connect. Must be called from within a tokio runtime.
     pub async fn start(&self) -> Result<()> {
-        if let Some(url) = self.inner.direct_url.clone() {
-            // Pinned mode installs ONE bind for the process: the pin's Retry
-            // loop redials this same client, so the identity is stable and its
-            // task services every reconnect.
-            let bind = self.install_bind(url.clone()).await?;
-            let options = ConnectOptions {
-                url: Some(url),
-                block_async_connect: false,
-                strategy: ConnectStrategy::Retry,
-                ..Default::default()
-            };
-            bind.client.connect(Some(options)).await?;
-        } else {
-            self.spawn_race();
-        }
+        self.relink("start").await
+    }
+
+    /// The node this monitor is pinned to, if any (D-187). `None` = resolver
+    /// discovery, which is the default and today's behaviour.
+    pub fn pinned_url(&self) -> Option<String> {
+        self.inner
+            .direct_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// May a race bind the socket right now? Checked at the race loop's head
+    /// AND again immediately before it installs a winner, because both facts
+    /// can change while a round is in flight (a round takes up to
+    /// `PROBE_TIMEOUT`).
+    ///
+    /// The pinned term is the D-187 guarantee made STRUCTURAL. It is not
+    /// enough that a pinned monitor never *spawns* a race: [`set_pinned_node`]
+    /// can pin while a race spawned moments earlier is still probing, and that
+    /// round would otherwise come back and bind a resolver endpoint over the
+    /// user's node — the exact silent fallback the pin exists to forbid, and
+    /// the hardest kind to notice, because the wallet looks connected. A
+    /// timing argument would be enough to close it today; this is enough
+    /// forever.
+    fn may_bind_from_race(&self) -> bool {
+        !self.inner.paused.load(Ordering::SeqCst) && !self.is_connected() && !self.is_pinned()
+    }
+
+    /// Is a user-chosen node pinned? The one predicate the race, the demotion
+    /// ledger and the disconnect path branch on.
+    fn is_pinned(&self) -> bool {
+        self.inner
+            .direct_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// **The one doorway back onto the link**, in whatever mode is configured
+    /// right now (D-187). Every recovery gesture routes through here.
+    ///
+    /// Before D-187 the recovery paths — [`resume`], [`reconnect`], the
+    /// watchdog kick, the OS network-available signal — all called
+    /// [`spawn_or_kick_race`] directly, which is a **no-op in pinned mode**.
+    /// That was harmless while a pin was a dev/test affordance (nothing called
+    /// pause or reconnect in those runs, and the ws Retry loop owned the link).
+    /// The moment a USER can pin, each of those became a way to darken the
+    /// wallet permanently: background the app for 30 s and the grace-drop
+    /// retires the bind, then foreground it and `resume` races — except a
+    /// pinned monitor must not race, so nothing dialled at all. Routing both
+    /// modes through one function is what stops that class returning: a future
+    /// recovery path cannot forget the pinned arm, because there is only one
+    /// arm to call.
+    ///
+    /// Pinned mode installs a bind whose own Retry loop redials that same
+    /// client, so an ordinary drop is serviced by its existing task and
+    /// [`on_disconnected`] keeps the bind rather than retiring it. A *recovery
+    /// gesture* still lands here and installs a fresh one — `install_bind`
+    /// retires the incumbent first, so there is never more than one.
+    async fn relink(&self, source: &str) -> Result<()> {
+        let Some(url) = self.pinned_url() else {
+            self.spawn_or_kick_race(source);
+            return Ok(());
+        };
+        log::info!("link: relink to the pinned node ({source})");
+        // The evidence lane names the HOST, never the URL (INV-3): a
+        // path-segment token survives `validate_node_url` and this lane is
+        // build-flavor-proof, so it must not be the place a credential lands.
+        spans::mark_with("pinned_relink", link::endpoint_host(&url));
+        let bind = self.install_bind(url.clone()).await?;
+        let options = ConnectOptions {
+            url: Some(url),
+            block_async_connect: false,
+            strategy: ConnectStrategy::Retry,
+            ..Default::default()
+        };
+        // UNBOUNDED BY CONSTRUCTION, proven at the pin rather than fenced with
+        // a timeout (the D-089/L64 law is bounded OR proven; the race path
+        // takes the other branch and envelope-bounds its own connect). Before
+        // D-187 this ran once per process from `start()`; it now sits on
+        // resume, reconnect, the watchdog kick and network-available, so the
+        // proof is written down instead of re-derived:
+        //   1. `install_bind` allocates a FRESH `KaspaRpcClient`, so
+        //      `connect`'s leading `self.disconnect()` is a no-op —
+        //      `workflow-websocket-0.18.0 client/native.rs:388-411` guards
+        //      `close()` on `is_connected`, and `client.rs:416-424` guards
+        //      `stop()` on `background_services_running`.
+        //   2. `connect_guard` is uncontended on a client nobody else holds.
+        //   3. `block_async_connect: false` returns `Ok(Some(listener))`
+        //      immediately after the spawn (`native.rs:253-256`) — there is no
+        //      `Fallback` error arm here to take `disconnect_guard`.
+        // A future FRB/wRPC bump re-opens this: re-run the trace or bound it.
+        bind.client.connect(Some(options)).await?;
         Ok(())
+    }
+
+    /// Pin the wallet to `url`, or clear the pin with `None` (D-187).
+    ///
+    /// **Why this is safe to do live**, rather than only at construction: the
+    /// swap happens with nothing bound and no race able to bind, using
+    /// doorways that already carry the scars.
+    ///
+    /// 1. `paused = true` stands the race loop down. It checks that flag at
+    ///    its loop head AND once more immediately before binding a winner, so
+    ///    a round already in flight drains its probes and returns without
+    ///    installing anything — that second check is the pre-existing
+    ///    never-bind-over-a-live-socket guard, and it is what makes this
+    ///    cheap instead of a new synchronisation problem.
+    /// 2. [`retire_bind`] is the ONE way a socket leaves (R4 D2): it
+    ///    invalidates the identity under the publish lock, so the retired
+    ///    socket's trailing `Disconnected` lands on a dead generation and the
+    ///    gate discards it.
+    /// 3. The swap itself, with the link down.
+    /// 4. [`relink`] brings it back up in the NEW mode.
+    ///
+    /// Step 1's flag is then restored rather than cleared: a repin while the
+    /// app is backgrounded must not drag the socket back up and burn battery
+    /// — `resume` will apply the new mode when the user returns.
+    ///
+    /// The URL is validated BEFORE any teardown, so a typo costs the user
+    /// nothing: the link they had keeps running.
+    pub async fn set_pinned_node(&self, url: Option<String>) -> Result<()> {
+        let url = url.as_deref().map(link::validate_node_url).transpose()?;
+        // `retire_bind` awaits up to DISCONNECT_WAIT_TIMEOUT, and the app can
+        // background inside that window (wallet-security audit). Re-reading
+        // the `paused` FLAG afterwards cannot detect that — the line below
+        // sets it — so compare the pause GENERATION across the await instead.
+        let pause_gen = self.inner.pause_gen.load(Ordering::SeqCst);
+        let was_paused = self.inner.paused.swap(true, Ordering::SeqCst);
+        self.retire_bind("repin").await;
+        let paused_mid_repin = self.inner.pause_gen.load(Ordering::SeqCst) != pause_gen;
+        *self
+            .inner
+            .direct_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = url.clone();
+        match &url {
+            Some(url) => {
+                log::info!("link: node pinned to {}", link::endpoint_host(url));
+                spans::mark_with("node_pinned", link::endpoint_host(url));
+            }
+            None => {
+                log::info!("link: node pin cleared — public node discovery");
+                spans::mark("node_pin_cleared");
+            }
+        }
+        if !was_paused && !paused_mid_repin {
+            self.inner.paused.store(false, Ordering::SeqCst);
+        }
+        // Decide from the flag as it stands NOW, after the swap — never from
+        // the pre-await snapshot (consensus audit). `pause_gen` sees a pause
+        // land mid-teardown but is blind to a **resume**, which does not bump
+        // it; a background→foreground bounce inside the ~7 s teardown window
+        // would then take the "applies on resume" branch *after* resume had
+        // already relinked in the OLD mode — leaving the wallet bound to the
+        // previous node (or to a resolver-chosen one) while `pinned_url`
+        // reported the new pin. Connected and lying, until the socket dropped.
+        //
+        // Reading the live flag here converges on every interleaving, because
+        // the swap above already happened: any relink from this point on —
+        // ours, or a resume racing us — dials the NEW node.
+        if self.inner.paused.load(Ordering::SeqCst) {
+            log::info!("link: repin while paused — the new mode applies on resume");
+            return Ok(());
+        }
+        self.relink("repin").await
     }
 
     /// Spawn the race task unless one is already running (single-flight —
@@ -916,7 +1088,7 @@ impl DagMonitor {
     /// old silent return here was half of the dead-Reconnect symptom) and
     /// callers holding a user gesture escalate it to a [`Self::kick_race`].
     fn spawn_race(&self) -> bool {
-        if self.inner.direct_url.is_some() {
+        if self.is_pinned() {
             return false; // pinned mode: the ws Retry loop owns the link
         }
         if self.inner.race_running.swap(true, Ordering::SeqCst) {
@@ -945,7 +1117,7 @@ impl DagMonitor {
     /// retry pause otherwise. Pinned mode does neither (the ws Retry loop
     /// owns a pinned link).
     fn spawn_or_kick_race(&self, source: &str) {
-        if !self.spawn_race() && self.inner.direct_url.is_none() {
+        if !self.spawn_race() && !self.is_pinned() {
             self.kick_race(source);
         }
     }
@@ -1206,7 +1378,7 @@ impl DagMonitor {
         spans::mark("connect_start");
         let mut empty_rounds = 0u32;
         loop {
-            if self.inner.paused.load(Ordering::SeqCst) || self.is_connected() {
+            if !self.may_bind_from_race() {
                 return;
             }
             let now = Self::now_unix();
@@ -1331,8 +1503,9 @@ impl DagMonitor {
 
             // Someone else (a ws-level phantom redial) may have connected
             // while the race ran; the Connected-time demotion check has
-            // already judged them. Never bind over a live socket.
-            if self.inner.paused.load(Ordering::SeqCst) || self.is_connected() {
+            // already judged them. Never bind over a live socket — and since
+            // D-187, never over a node the user pinned mid-round either.
+            if !self.may_bind_from_race() {
                 return;
             }
 
@@ -1460,6 +1633,7 @@ impl DagMonitor {
     /// subscriber attached. The wallet processor pauses with the shared ctl and
     /// resyncs in lockstep on [`Self::resume`] (§0.8 / D-005).
     pub async fn pause(&self) -> Result<()> {
+        self.inner.pause_gen.fetch_add(1, Ordering::SeqCst);
         self.inner.paused.store(true, Ordering::SeqCst);
         // R4 D2: a grace-drop is a socket death like any other and now leaves
         // its lifecycle line. The soak's 13:57 socket vanished without one and
@@ -1468,18 +1642,18 @@ impl DagMonitor {
         Ok(())
     }
 
-    /// Foreground resume after a grace-drop: re-race (the cached last-good
-    /// endpoint, persisted at most 30 s + grace ago, is candidate 0 and wins
-    /// every tie). No-op while already connected (never bounce a healthy
-    /// socket); a race already hunting gets kicked instead of ignored (C4).
+    /// Foreground resume after a grace-drop: relink in the configured mode —
+    /// re-race (the cached last-good endpoint, persisted at most 30 s + grace
+    /// ago, is candidate 0 and wins every tie), or redial the pinned node.
+    /// No-op while already connected (never bounce a healthy socket); a race
+    /// already hunting gets kicked instead of ignored (C4).
     pub async fn resume(&self) -> Result<()> {
         spans::mark("resume_start");
         self.inner.paused.store(false, Ordering::SeqCst);
         if self.is_connected() {
             return Ok(());
         }
-        self.spawn_or_kick_race("resume");
-        Ok(())
+        self.relink("resume").await
     }
 
     /// Force a fresh connection — the P3 honest-liveness Reconnect control,
@@ -1531,9 +1705,8 @@ impl DagMonitor {
                 StallVerdict::Hunting => {
                     // There is no defendant, but the claim still means the
                     // wallet is dark — keep C4's promise and kick the hunt.
-                    log::info!("link: watchdog stall claim while hunting — kicking the race");
-                    self.spawn_or_kick_race("watchdog-kick");
-                    return Ok(());
+                    log::info!("link: watchdog stall claim while hunting — kicking the hunt");
+                    return self.relink("watchdog-kick").await;
                 }
             }
         }
@@ -1548,11 +1721,13 @@ impl DagMonitor {
         // now structural: the teardown's `Disconnected` arrives on a retired
         // identity, and the gate discards it.
         self.retire_bind("manual-reconnect").await;
-        // Spawn-or-kick (C4): the tap always acts. The old path silently
-        // no-opped here whenever a wedged race loop still held the
-        // single-flight flag — the dead-Reconnect symptom's second half.
-        self.spawn_or_kick_race("reconnect");
-        Ok(())
+        // The tap always acts (C4). Unpinned that is spawn-or-kick — the old
+        // path silently no-opped here whenever a wedged race loop still held
+        // the single-flight flag (the dead-Reconnect symptom's second half).
+        // Pinned it redials the user's node, which before D-187 this path
+        // could not do at all: it retired the bind and then asked a race that
+        // pinned mode refuses to run, so Reconnect KILLED a pinned link.
+        self.relink("reconnect").await
     }
 
     /// OS default-network transition (C5/D-089 ruling 4), relayed from
@@ -1565,7 +1740,7 @@ impl DagMonitor {
     /// own death drives recovery; more aggression only if the soak proves
     /// the watchdog gap hurts). Paused (backgrounded) → observe, never dial:
     /// the battery posture owns the socket then, and resume() re-races.
-    pub fn network_changed(&self, available: bool) {
+    pub async fn network_changed(&self, available: bool) {
         // Record it for the glass (C7) before deciding what to DO about it:
         // the honest-states surface needs the OS's word even on the paths that
         // deliberately take no action.
@@ -1592,8 +1767,13 @@ impl DagMonitor {
                 "link: OS network available while connected — no action (watchdog owns staleness)"
             );
         } else {
-            log::info!("link: OS network available while disconnected — racing now");
-            self.spawn_or_kick_race("network_available");
+            log::info!("link: OS network available while disconnected — dialling now");
+            // Pinned or not: before D-187 this raced, and a race is a no-op
+            // while pinned — so a pinned wallet that lost Wi-Fi stayed dark
+            // until the process restarted.
+            if let Err(e) = self.relink("network_available").await {
+                log::warn!("link: network-available relink failed: {e}");
+            }
         }
     }
 
@@ -1789,7 +1969,7 @@ impl DagMonitor {
         // — a demoted endpoint that sneaks back in (a ws-level phantom redial,
         // a poisoned cache) is refused and re-raced, UNLESS the race itself
         // bound it knowingly (hygiene advisory: nothing healthier exists).
-        if self.inner.direct_url.is_none()
+        if !self.is_pinned()
             && !self.inner.hygiene_advisory.load(Ordering::SeqCst)
             && !self.inner.paused.load(Ordering::SeqCst)
             && self
@@ -1903,7 +2083,7 @@ impl DagMonitor {
         // Pinned mode (dev/tests): the pin's own Retry loop owns this client
         // and brings the SAME socket object back up, so the bind is kept and
         // only the connection state is stood down.
-        if self.inner.direct_url.is_some() {
+        if self.is_pinned() {
             self.inner.is_connected.store(false, Ordering::SeqCst);
             let listener_id = bind
                 .listener_id
@@ -2102,6 +2282,193 @@ impl DagMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── D-187: a pinned node is the user's, and nothing may take it away ──
+
+    /// The ruling in one assertion: **a pinned node never silently falls back
+    /// to the resolver.** Every mechanism that could substitute a different
+    /// node stands down while pinned, and this test fails if any of them is
+    /// ever re-enabled — which is the point. A wallet that quietly re-races to
+    /// a stranger when the user's node dies is worse than one that has no such
+    /// setting, because the setting is then a lie told exactly when it counts.
+    #[test]
+    fn a_pinned_node_never_falls_back_to_the_resolver() {
+        let pinned = DagMonitor::try_new(
+            NetworkId::new(NetworkType::Mainnet),
+            Some("wss://mine.example/kaspa/mainnet/wrpc/borsh".into()),
+        )
+        .expect("construct");
+
+        assert!(pinned.is_pinned());
+        // No race is ever spawned...
+        assert!(!pinned.spawn_race(), "pinned mode must never spawn a race");
+        // ...and no race already in flight may bind, either. This is the
+        // stronger guarantee: `set_pinned_node` can pin while a round spawned
+        // moments earlier is still probing, and that round's winner arm asks
+        // exactly this question before installing anything.
+        assert!(
+            !pinned.may_bind_from_race(),
+            "a race in flight must not bind over the user's node"
+        );
+
+        // The control: an unpinned monitor DOES race, so the assertions above
+        // are measuring the pin rather than some unrelated stood-down state.
+        let discovering = DagMonitor::mainnet().expect("construct");
+        assert!(!discovering.is_pinned());
+        assert!(discovering.may_bind_from_race(), "control: discovery races");
+    }
+
+    /// `None` must reproduce today's behaviour EXACTLY — same resolver path,
+    /// same race, same demotion. The pin is opt-in; a user who never opens the
+    /// setting must not be able to tell this landed.
+    #[tokio::test]
+    async fn discovery_mode_is_unchanged_by_the_pin_machinery() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        assert_eq!(monitor.pinned_url(), None);
+        assert!(monitor.may_bind_from_race());
+        // The demotion ledger is live (the `!is_pinned()` arm in on_connected).
+        assert!(!monitor.is_pinned());
+        // And the race is genuinely spawnable — single-flight, so the second
+        // ask is refused by the flag rather than by the pin.
+        assert!(monitor.spawn_race(), "discovery must spawn its race");
+        assert!(!monitor.spawn_race(), "single-flight (D-081), not the pin");
+        // Stand the detached hunt down (offline unit test — no node to find).
+        monitor.inner.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Pinning is reversible without a restart, and the endpoint cache — the
+    /// resolver's *performance* memory — is neither read by the pin nor wiped
+    /// by clearing it. Different fields, different lifetimes (node_config docs).
+    #[tokio::test]
+    async fn a_pin_can_be_set_and_cleared_and_never_touches_the_endpoint_cache() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let dir = std::env::temp_dir().join(format!("kv-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("endpoint.cache");
+        monitor.set_endpoint_cache(cache.clone());
+        monitor.persist_endpoint("wss://remembered.example/kaspa/mainnet/wrpc/borsh");
+
+        monitor
+            .set_pinned_node(Some("wss://mine.example/borsh".into()))
+            .await
+            .expect("pin accepted");
+        assert_eq!(
+            monitor.pinned_url().as_deref(),
+            Some("wss://mine.example/borsh")
+        );
+        // The pin did not consult the cache, and did not overwrite it.
+        assert_eq!(
+            monitor.read_cached_endpoint().as_deref(),
+            Some("wss://remembered.example/kaspa/mainnet/wrpc/borsh"),
+            "pinning must not disturb the resolver's last-good memory"
+        );
+
+        monitor.set_pinned_node(None).await.expect("clear accepted");
+        assert_eq!(monitor.pinned_url(), None);
+        assert!(monitor.may_bind_from_race(), "cleared → discovery resumes");
+        assert_eq!(
+            monitor.read_cached_endpoint().as_deref(),
+            Some("wss://remembered.example/kaspa/mainnet/wrpc/borsh"),
+            "clearing the pin must not wipe the cache"
+        );
+
+        // Stand the link down: the repins above left a real Retry loop
+        // dialling an example host (offline unit test — nothing to reach).
+        monitor.inner.paused.store(true, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A typo costs the user nothing: validation happens before any teardown,
+    /// so the link they had is still the link they have.
+    #[tokio::test]
+    async fn a_rejected_url_leaves_the_live_pin_standing() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor
+            .set_pinned_node(Some("wss://good.example/borsh".into()))
+            .await
+            .expect("pin accepted");
+        for bad in ["https://good.example", "wss://good.example/ x", ""] {
+            assert!(
+                monitor.set_pinned_node(Some(bad.into())).await.is_err(),
+                "{bad:?} must be refused"
+            );
+            assert_eq!(
+                monitor.pinned_url().as_deref(),
+                Some("wss://good.example/borsh"),
+                "a refused repin must not disturb the standing pin"
+            );
+        }
+        monitor.inner.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// The generation the mid-repin guard rests on actually moves. Without
+    /// this, `paused_mid_repin` is a comparison that can never be true and the
+    /// guard is decoration.
+    #[tokio::test]
+    async fn every_pause_bumps_the_generation() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let before = monitor.inner.pause_gen.load(Ordering::SeqCst);
+        monitor.pause().await.expect("pause");
+        let after = monitor.inner.pause_gen.load(Ordering::SeqCst);
+        assert_ne!(before, after, "a pause must be observable across an await");
+        // And a repin does NOT bump it — only a real pause does, or the guard
+        // would fire on every repin and no pin would ever apply live.
+        monitor
+            .set_pinned_node(Some("wss://mine.example/borsh".into()))
+            .await
+            .expect("pin accepted");
+        assert_eq!(monitor.inner.pause_gen.load(Ordering::SeqCst), after);
+    }
+
+    /// The mirror of the case above: a **resume** landing inside the repin's
+    /// teardown window. `pause_gen` cannot see one (resume does not bump it),
+    /// which is why the decision reads the live flag after the swap. Asserted
+    /// as an invariant rather than an interleaving, so it holds however the
+    /// two futures happen to schedule.
+    #[tokio::test]
+    async fn a_repin_racing_a_resume_converges_on_the_new_node() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.pause().await.expect("pause");
+        let racing = monitor.clone();
+        let (repin, resumed) = tokio::join!(
+            monitor.set_pinned_node(Some("wss://new.example/borsh".into())),
+            async move { racing.resume().await }
+        );
+        repin.expect("pin accepted");
+        resumed.expect("resume ok");
+        // Whatever the order: the pin the caller asked for is the pin the
+        // monitor reports — never the pre-repin one — and no race may bind
+        // over it. The failure this guards is "connected to the old node
+        // while the glass names the new one".
+        assert_eq!(
+            monitor.pinned_url().as_deref(),
+            Some("wss://new.example/borsh")
+        );
+        assert!(!monitor.may_bind_from_race(), "pinned: no race may bind");
+        monitor.inner.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// A repin while the app is backgrounded must not drag the socket back up
+    /// (battery posture) — but it must still take effect, on resume.
+    #[tokio::test]
+    async fn a_repin_while_paused_stays_paused() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.pause().await.expect("pause");
+        assert!(monitor.inner.paused.load(Ordering::SeqCst));
+        monitor
+            .set_pinned_node(Some("wss://mine.example/borsh".into()))
+            .await
+            .expect("pin accepted");
+        assert_eq!(
+            monitor.pinned_url().as_deref(),
+            Some("wss://mine.example/borsh")
+        );
+        assert!(
+            monitor.inner.paused.load(Ordering::SeqCst),
+            "a repin must not resume a backgrounded app"
+        );
+    }
 
     #[test]
     fn maps_daa_and_blue_score_notifications() {
@@ -2386,13 +2753,13 @@ mod tests {
         assert!(!monitor.os_offline(), "never offline before the OS says so");
         assert!(!monitor.is_searching());
 
-        monitor.network_changed(false);
+        monitor.network_changed(false).await;
         assert!(monitor.os_offline(), "onLost must be visible to the glass");
         // Ruling 4 holds: lost is passive — nothing was dialed, so the
         // single-flight race flag is untouched.
         assert!(!monitor.is_searching(), "network_lost must not dial");
 
-        monitor.network_changed(true);
+        monitor.network_changed(true).await;
         assert!(!monitor.os_offline(), "onAvailable clears the accusation");
         // available && !connected DOES race (C5) — that flag is now the
         // searching truth the beacon renders.

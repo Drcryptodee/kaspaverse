@@ -18,6 +18,7 @@ pub mod history_fill;
 mod kvlog;
 pub mod link;
 mod link_rpc;
+pub mod node_config;
 mod send;
 pub mod spans;
 mod spend_policy;
@@ -31,7 +32,8 @@ pub use acceptance::{
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
 pub use dag_monitor::{DagEvent, DagMonitor};
 pub use error::{ChainError, Result};
-pub use link::{sanitize_node_text, EscalationOutcome, SignedTxRetention};
+pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};
+pub use node_config::NodeConfig;
 // The signed-tx DTO the retention/escalation path carries (a broadcast public
 // tx — no key material). Named here so the bridge never imports rpc-core.
 pub use kaspa_wrpc_client::prelude::RpcTransaction;

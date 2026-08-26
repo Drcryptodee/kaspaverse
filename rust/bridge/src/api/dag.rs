@@ -36,6 +36,38 @@ static SNAPSHOTS: tokio::sync::OnceCell<broadcast::Sender<DagSnapshot>> =
 /// next on-chain tick.
 static LATEST: Mutex<Option<DagSnapshot>> = Mutex::new(None);
 
+/// The stored node pin, cached (`(url, dropped)`).
+///
+/// [`dag_status`] must answer `pinned_node` **before** `MONITOR` exists — it
+/// is a `OnceCell` initialised on first stream attach, and the Dart link poll
+/// runs in exactly that cold window. Without this it returned `None` there and
+/// clobbered a settings surface that had just painted the real pin, reading
+/// "public node discovery" while a pin sat on disk (wallet-security audit) —
+/// the precise lie `pinned_node` exists to prevent.
+///
+/// Cached because `dag_status` is a poll documented to take no I/O in its
+/// steady state: one small read per process, re-read only after a write.
+static STORED_PIN: Mutex<Option<(Option<String>, bool)>> = Mutex::new(None);
+
+/// `(pinned url, dropped)` from disk — see [`STORED_PIN`].
+fn stored_pin() -> (Option<String>, bool) {
+    let mut slot = STORED_PIN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cached) = slot.as_ref() {
+        return cached.clone();
+    }
+    let read = match super::vault::node_config_dir() {
+        Ok(dir) => {
+            let (config, dropped) = kaspaverse_chain::NodeConfig::load_reporting(&dir);
+            (config.url, dropped)
+        }
+        Err(_) => (None, false),
+    };
+    *slot = Some(read.clone());
+    read
+}
+
 /// The one shared DagMonitor — a single wRPC client for both DAG status and
 /// wallet sync (P1 §0.8 / D-005). Created + started exactly once; both
 /// [`subscribe_dag_updates`] (here) and the wallet engine (via
@@ -47,7 +79,29 @@ static MONITOR: tokio::sync::OnceCell<DagMonitor> = tokio::sync::OnceCell::const
 pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
     MONITOR
         .get_or_try_init(|| async {
-            let monitor = DagMonitor::mainnet().map_err(AppError::chain)?;
+            // D-187: the user's pin is read BEFORE the first connect, so a
+            // pinned wallet never touches the resolver — not even once at
+            // boot. A miss (no vault dir yet) reads as discovery, which is
+            // the default and the safe degradation.
+            // Never drop a pin in silence (ffi-leak audit): everything else
+            // here goes to structural lengths to make substitution impossible,
+            // so the arms that CAN substitute must at least say so. The vault
+            // miss is reachable only for a wallet with no keys and no funds,
+            // which is why it degrades rather than refusing to start.
+            if let Err(e) = super::vault::node_config_dir() {
+                log::warn!(
+                    "dag: no vault dir ({}) — cannot read the node pin; using node discovery",
+                    e.message
+                );
+            }
+            let (pinned, dropped) = stored_pin();
+            if dropped {
+                log::warn!("dag: the stored node pin was unreadable and has been dropped");
+            }
+            if pinned.is_some() {
+                log::info!("dag: starting against the user's pinned node");
+            }
+            let monitor = DagMonitor::mainnet_with_node(pinned).map_err(AppError::chain)?;
             // Last-good-endpoint memory (P1.5 re-audit): main.dart initialises
             // the vault dir before the chain stream attaches, so the path is
             // available here. A miss (tests, exotic boot orders) just means the
@@ -259,6 +313,22 @@ pub struct DagStatusDto {
     /// (INV-1/3 untouched — no new FFI *function* either, just two more bits
     /// on the existing pull).
     pub os_offline: bool,
+    /// The node the user pinned, or `None` for public node discovery (D-187).
+    ///
+    /// This is what makes a pinned failure VISIBLE. `endpoint` only speaks
+    /// once something has connected, so a pinned node that is down leaves it
+    /// `None` forever and the glass could only say "not connected" — which
+    /// reads as *the network is down* when the truth is *your node is not
+    /// answering, and by your instruction nothing else will be tried*. Those
+    /// are different sentences and only one of them tells the user what to do.
+    /// Public data: a `wss://` URL the user typed (INV-3).
+    pub pinned_node: Option<String>,
+    /// A pin **was** stored and this boot refused it (corrupt or truncated
+    /// file), so the wallet is on public discovery without the user choosing
+    /// that. Distinct from `pinned_node == None`, which is the honest
+    /// never-pinned state — D-187 Decision 2 requires a *lost* pin to be as
+    /// nameable as a *down* one, and silence here is the failure it forbids.
+    pub pin_dropped: bool,
 }
 
 /// Read the current connection health (see [`DagStatusDto`]). Endpoint + DAA
@@ -289,7 +359,89 @@ pub fn dag_status() -> DagStatusDto {
         virtual_daa_score: latest.virtual_daa_score,
         searching,
         os_offline,
+        // The MONITOR is the truth once it exists (it reflects live repins);
+        // before it does, the file is — that cold window is exactly when a
+        // settings surface paints.
+        pinned_node: match MONITOR.get() {
+            Some(monitor) => monitor.pinned_url(),
+            None => stored_pin().0,
+        },
+        pin_dropped: stored_pin().1,
     }
+}
+
+/// The user's node choice (D-187) — the INV-8 escape hatch made reachable.
+///
+/// `url` is what they chose; `active_url` is what the link is actually bound
+/// to right now. When a node is pinned those agree or the second is `None`
+/// (down) — they can never name DIFFERENT nodes, because a pinned monitor
+/// refuses to bind anything else, and showing both is how a user verifies
+/// that rather than taking our word for it.
+#[derive(Clone, Default)]
+pub struct NodeConfigDto {
+    /// The pinned node, or `None` for public node discovery (the default).
+    pub url: Option<String>,
+    /// The endpoint the socket is bound to, or `None` while dark.
+    pub active_url: Option<String>,
+    /// A stored pin was refused on load — see `DagStatusDto::pin_dropped`.
+    pub dropped: bool,
+}
+
+/// Read the node choice (file-backed; defaults to discovery).
+pub fn dag_node_config() -> Result<NodeConfigDto, AppError> {
+    let (url, dropped) = stored_pin();
+    Ok(NodeConfigDto {
+        url,
+        active_url: current_endpoint_url(),
+        dropped,
+    })
+}
+
+/// Pin the wallet to one node, or clear the pin with `None`.
+///
+/// Persist-then-apply, in that order: the URL is validated in Rust
+/// (`chain::validate_node_url` — the same intake guard a resolver candidate
+/// passes, never a second weaker one in Dart), then written, then applied to
+/// the live link. A monitor that does not exist yet needs no apply step — it
+/// reads the file when it starts.
+///
+/// **Not atomic, deliberately.** A validated URL is persisted and applied
+/// before the first dial is attempted, so an `Err` from this function means
+/// *the first dial failed*, never *the pin was rejected* — the pin IS live and
+/// its Retry loop keeps working, which is exactly the D-187 ruling (a pinned
+/// node that is down stays pinned). Callers must therefore re-read the config
+/// on BOTH arms rather than assuming failure means nothing changed; the Dart
+/// seam refreshes in a `finally` for this reason. Rejection is the earlier,
+/// cheaper failure: it happens in `save`, before anything is written or torn
+/// down.
+///
+/// Applying it live rather than at next launch is deliberate: the case that
+/// matters most is a user whose pinned node just died, and telling them to
+/// restart the app to escape a setting they can see on screen is the kind of
+/// dead end that makes people give up on running their own node.
+pub async fn dag_set_node_config(url: Option<String>) -> Result<(), AppError> {
+    let dir = super::vault::node_config_dir()?;
+    let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    let config = kaspaverse_chain::NodeConfig { url: url.clone() };
+    // Validates on the way in; a rejected save leaves the previous config —
+    // and the live link — untouched.
+    config.save(&dir).map_err(AppError::chain)?;
+    *STORED_PIN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    // `shared_monitor()`, not `MONITOR.get()` (consensus audit): a `get` that
+    // lands while the monitor is mid-`get_or_try_init` returns `None`, so the
+    // apply would be skipped and the init would finish carrying the value it
+    // read BEFORE this save — leaving `dag_status` (monitor) and
+    // `dag_node_config` (file) disagreeing for the rest of the process, with
+    // two Dart writers to one notifier watching them oscillate. Awaiting the
+    // init instead makes the two readers agree by construction.
+    shared_monitor()
+        .await?
+        .set_pinned_node(url)
+        .await
+        .map_err(AppError::chain)?;
+    Ok(())
 }
 
 /// Force a fresh wRPC connection — the Reconnect button and the watchdog's
@@ -320,7 +472,7 @@ pub async fn dag_reconnect(stalled: bool) -> Result<(), AppError> {
 /// first connect races on its own).
 pub async fn dag_network_changed(available: bool) -> Result<(), AppError> {
     if let Some(monitor) = MONITOR.get() {
-        monitor.network_changed(available);
+        monitor.network_changed(available).await;
     }
     Ok(())
 }
