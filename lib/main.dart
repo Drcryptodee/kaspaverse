@@ -17,6 +17,7 @@ import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/network_sheet.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
+import 'package:kaspaverse/src/ui/preview/black_glass_home_preview.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
@@ -180,17 +181,33 @@ class _DevPanelLink extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return TextButton.icon(
-      onPressed: () => Navigator.of(
-        context,
-      ).push(KvPageRoute<void>(builder: (_) => const DevVaultPanel())),
-      icon: const Icon(Icons.build_outlined),
-      label: const Text('Dev vault panel'),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TextButton.icon(
+          onPressed: () => Navigator.of(
+            context,
+          ).push(KvPageRoute<void>(builder: (_) => const DevVaultPanel())),
+          icon: const Icon(Icons.build_outlined),
+          label: const Text('Dev vault panel'),
+        ),
+        // Reachable from the gate on purpose: the feel test renders no real
+        // money and reads no vault state, so it can be looked at without
+        // unlocking anything.
+        TextButton.icon(
+          onPressed: () => Navigator.of(context).push(
+            KvPageRoute<void>(builder: (_) => const BlackGlassHomePreview()),
+          ),
+          icon: const Icon(Icons.contrast_outlined),
+          label: const Text('Black Glass preview'),
+        ),
+      ],
     );
   }
 }
 
-/// The debug FAB stack on home: vault panel (P1.2) + transport panel (P2.1).
+/// The debug FAB stack on home: vault panel (P1.2) + transport panel (P2.1)
+/// + the Black Glass feel test (Pre-P3.1 UX-0 — a prototype, not the build).
 /// Distinct heroTags — two FABs on one route must never share the default tag.
 class _DevFabs extends StatelessWidget {
   const _DevFabs();
@@ -200,6 +217,15 @@ class _DevFabs extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        FloatingActionButton.small(
+          heroTag: 'dev-blackglass',
+          tooltip: 'DEV Black Glass home preview',
+          onPressed: () => Navigator.of(context).push(
+            KvPageRoute<void>(builder: (_) => const BlackGlassHomePreview()),
+          ),
+          child: const Icon(Icons.contrast_outlined),
+        ),
+        const SizedBox(height: 8),
         FloatingActionButton.small(
           heroTag: 'dev-transport',
           tooltip: 'DEV transport panel',
