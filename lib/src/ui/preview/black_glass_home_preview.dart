@@ -30,6 +30,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
+import '../receive/qr_tile.dart';
 import '../theme/tokens.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1475,7 +1476,15 @@ class _ThumbActions extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: _Action(label: 'Receive', primary: empty, onTap: () {}),
+            child: _Action(
+              label: 'Receive',
+              primary: empty,
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const _ReceivePreview(),
+                ),
+              ),
+            ),
           ),
           const SizedBox(width: KvSpace.sm),
           Expanded(
@@ -3680,28 +3689,25 @@ class _ConfirmPreviewState extends State<_ConfirmPreview>
 /// address-poisoning attack buys a prefix and a suffix that LOOK right; the
 /// weighting puts the eye exactly where the attack has to succeed.
 class _ChunkedAddress extends StatelessWidget {
-  const _ChunkedAddress();
+  const _ChunkedAddress({this.full = _confirmAddress});
 
-  static const _groups = [
-    'qpzt',
-    '3vw8',
-    'mn4k',
-    'a7ep',
-    '0lxh',
-    '2wnf',
-    'scjg',
-    '8y5u',
-    '3e6v',
-    'ddwm',
-    '0s3j',
-    'np4k',
-    'hce2',
-    'mua7',
-    'x2mne4ka',
-  ];
+  final String full;
+
+  static const _confirmAddress =
+      'kaspa:qpzt3vw8mn4ka7ep0lxh2wnfscjg8y5u3e6vddwm0s3jnp4khce2mua7x2mne4ka';
+
+  List<String> get _groups {
+    final payload = full.substring(full.indexOf(':') + 1);
+    final out = <String>[];
+    for (var i = 0; i < payload.length; i += 4) {
+      out.add(payload.substring(i, math.min(i + 4, payload.length)));
+    }
+    return out;
+  }
 
   @override
   Widget build(BuildContext context) {
+    final groups = _groups;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(KvSpace.m),
@@ -3723,17 +3729,20 @@ class _ChunkedAddress extends StatelessWidget {
               color: KvColor.inkMeta,
             ),
           ),
-          for (var i = 0; i < _groups.length; i++)
+          for (var i = 0; i < groups.length; i++)
             Text(
-              _groups[i],
+              groups[i],
               style: TextStyle(
                 fontFamily: KvFont.mono,
                 fontSize: 13,
                 height: 20 / 13,
-                fontWeight: (i == 0 || i == _groups.length - 1)
+                // First and last groups weighted: an address-poisoning attack
+                // buys a prefix and a suffix that LOOK right, so the eye is put
+                // exactly where the attack has to succeed.
+                fontWeight: (i == 0 || i == groups.length - 1)
                     ? FontWeight.w600
                     : FontWeight.w400,
-                color: (i == 0 || i == _groups.length - 1)
+                color: (i == 0 || i == groups.length - 1)
                     ? KvColor.ink
                     : KvColor.inkDim,
               ),
@@ -4008,6 +4017,260 @@ class _Outcome extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Receive — the one light object in the app.
+//
+// Scannability is the function, so the tile is dark-on-light regardless of the
+// theme and always will be: a dark QR defeats scanners, and a code that does
+// not scan is decoration defeating purpose. It is framed like a paper token
+// deliberately laid on the glass — not an apology for breaking the theme.
+//
+// Two forms of the same address, for two different jobs: the COMPACT form for a
+// glance, and the CHUNKED form for reading character by character against
+// whatever the other party is showing you. Copy always copies all 67.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ReceiveState { ready, deriving, error }
+
+extension on ReceiveState {
+  String get label => switch (this) {
+    ReceiveState.ready => 'ready',
+    ReceiveState.deriving => 'deriving',
+    ReceiveState.error => 'error',
+  };
+}
+
+const _receiveAddress =
+    'kaspa:qr7mzv4dka9tep0lxh2wnfscjg8y5u3e6vddwm0s3jnp4khce2muaq7lgfx9t';
+
+class _ReceivePreview extends StatefulWidget {
+  const _ReceivePreview();
+
+  @override
+  State<_ReceivePreview> createState() => _ReceivePreviewState();
+}
+
+class _ReceivePreviewState extends State<_ReceivePreview> {
+  ReceiveState _state = ReceiveState.ready;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            _DetailRail(
+              onBack: () => Navigator.of(context).pop(),
+              title: 'Receive',
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                children: [
+                  const SizedBox(height: KvSpace.m),
+                  Center(child: _Tile(state: _state)),
+                  const SizedBox(height: KvSpace.m),
+
+                  // The glance form. Never `kaspa:q…` — a truncation that
+                  // counts from the front spends its whole budget on the
+                  // scheme and hands an attacker the rest (BG-15).
+                  Center(
+                    child: Text(
+                      _state == ReceiveState.ready
+                          ? compactAddress(_receiveAddress)
+                          : '—',
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 15,
+                        height: 22 / 15,
+                        color: KvColor.ink,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.l),
+
+                  const _RuledLabel('Your address'),
+                  const SizedBox(height: 6),
+                  if (_state == ReceiveState.ready)
+                    const _ChunkedAddress(full: _receiveAddress)
+                  else
+                    const _AddressPending(),
+                  const SizedBox(height: KvSpace.m),
+
+                  Row(
+                    children: [
+                      const _Lamp(KvColor.ok),
+                      const SizedBox(width: KvSpace.sm),
+                      const Expanded(
+                        child: Text(
+                          'Sharing this is safe. It says where to pay you and '
+                          'nothing else — deriving it never touches your keys.',
+                          style: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 13,
+                            height: 19 / 13,
+                            color: KvColor.inkDim,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: KvSpace.l),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                0,
+                KvSpace.gutter,
+                KvSpace.m,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _Action(
+                      label: 'Share',
+                      primary: false,
+                      onTap: () {},
+                    ),
+                  ),
+                  const SizedBox(width: KvSpace.sm),
+                  Expanded(
+                    child: _Action(
+                      label: 'Copy address',
+                      primary: _state == ReceiveState.ready,
+                      // BG-12: a disabled control always says why.
+                      disabledReason: _state == ReceiveState.ready
+                          ? null
+                          : 'No address yet',
+                      onTap: () {},
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            _Switcher(
+              values: ReceiveState.values,
+              value: _state,
+              label: (v) => v.label,
+              onChanged: (v) => setState(() => _state = v),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// **Every state keeps the tile's footprint**, so the layout never jumps under
+/// a hand already reaching for it. Loading puts the cadence inside the same
+/// square; error dashes the same square. A screen that reflows while the user
+/// is aiming at it is a screen that makes them miss.
+class _Tile extends StatelessWidget {
+  const _Tile({required this.state});
+
+  final ReceiveState state;
+
+  static const double side = 248;
+
+  @override
+  Widget build(BuildContext context) {
+    if (state == ReceiveState.ready) {
+      return const QrTile(data: _receiveAddress, size: side);
+    }
+    return Container(
+      width: side,
+      height: side,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(KvRadius.panel),
+        border: Border.all(
+          color: state == ReceiveState.error ? KvColor.warn : KvColor.hairline,
+        ),
+      ),
+      child: state == ReceiveState.deriving
+          ? const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _Cadence(running: true),
+                SizedBox(height: KvSpace.sm),
+                Text(
+                  'Deriving your address',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 13,
+                    color: KvColor.inkMeta,
+                  ),
+                ),
+              ],
+            )
+          : const Padding(
+              padding: EdgeInsets.all(KvSpace.l),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _Lamp(KvColor.warn),
+                  SizedBox(height: KvSpace.sm),
+                  Text(
+                    'The vault did not answer',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: KvColor.ink,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'Your funds are safe — deriving an address is read-only '
+                    'and moves nothing.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      height: 17 / 12,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+    );
+  }
+}
+
+class _AddressPending extends StatelessWidget {
+  const _AddressPending();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(KvSpace.m),
+      decoration: BoxDecoration(
+        color: KvColor.well,
+        borderRadius: BorderRadius.circular(KvRadius.plate),
+        border: Border.all(color: KvColor.hairline),
+      ),
+      // BG-5: unknown renders `—`, never a placeholder shaped like an address.
+      child: const Text(
+        '—',
+        style: TextStyle(
+          fontFamily: KvFont.mono,
+          fontSize: 13,
+          height: 20 / 13,
+          color: KvColor.inkMeta,
+        ),
       ),
     );
   }
