@@ -157,7 +157,7 @@ Future<SendOutcomeDto?> runConfirmSend(
 /// follows carries its own timeout.
 ///
 /// **No cancel, deliberately** (ux ruling, this session). Nothing is signed,
-/// broadcast or at risk during the wait, so DS-3's friction-tracks-
+/// broadcast or at risk during the wait, so BG-6's friction-tracks-
 /// irreversibility rule does not demand an exit. The proposed cancel would set
 /// a flag and call `transport_abandon()` when the prepare resolved — and that
 /// call is NOT nonce-guarded, so cancelling one send could clear a LATER send's

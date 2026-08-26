@@ -706,7 +706,7 @@ class _DaySeparator extends StatelessWidget {
 /// screenshots stay the user's choice". A screenshot leaks strictly more than
 /// a clipboard entry.
 ///
-/// The clipboard law that DOES bind is DS-7, and it forbids exactly one thing:
+/// The clipboard law that DOES bind is BG-10, and it forbids exactly one thing:
 /// seed material to the clipboard. Untouched — this copies a message, and only
 /// a readable one, because an unreadable row is a txid and no words.
 Future<void> _copyMessage(BuildContext context, String text) async {
@@ -807,7 +807,7 @@ class _MessageRow extends StatelessWidget {
   final TxChipState chip;
 
   /// V2 reorg ghost: the accepting block was displaced and hasn't returned —
-  /// the row dims to the DS-1 stale opacity with an honest line, and lifts
+  /// the row dims to the BG-8 stale opacity with an honest line, and lifts
   /// again if the network re-accepts it (reversible by construction).
   final bool ghost;
 
@@ -1065,7 +1065,7 @@ class _MessageRow extends StatelessWidget {
                     // `warning`, not tertiary chrome: this says our view of
                     // the thread above the line may be wrong, and an
                     // authenticity marker must not be quieter than the content
-                    // it qualifies (DS-1).
+                    // it qualifies (BG-8).
                     const Icon(
                       Icons.inventory_2_outlined,
                       size: 12,

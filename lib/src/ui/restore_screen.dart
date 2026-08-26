@@ -298,7 +298,7 @@ class _RestoreScreenState extends State<RestoreScreen>
   @override
   Widget build(BuildContext context) {
     // OUTSIDE the guard. The enrol step runs after the wallet is committed and
-    // holds no secret, and DS-7's FLAG_SECURE + accessibility-refusal list is
+    // holds no secret, and BG-10's FLAG_SECURE + accessibility-refusal list is
     // locked at five screens (D-028) — extending it to a sixth would exclude
     // screen-reader users from a step that has nothing to hide. Its mirror in
     // `create_screen` is outside too, and the two ceremonies must not disagree
@@ -804,7 +804,7 @@ class _RestoreScreenState extends State<RestoreScreen>
     );
   }
 
-  /// DS-8: a confirm surface shows the FULL address, chunked in groups of 4.
+  /// BG-15: a confirm surface shows the FULL address, chunked in groups of 4.
   String _chunkAddress(String addr) {
     final parts = addr.split(':');
     final prefix = parts.length > 1 ? '${parts.first}:' : '';

@@ -11,7 +11,7 @@ import 'widgets/entrance.dart';
 /// two onboarding paths: create a new wallet, or restore an existing one. Both
 /// are fully wired: create runs the two-step ceremony (native FLAG_SECURE word
 /// reveal + verify, D-037/D-039) then seals; restore uses the in-app word picker.
-/// Vault-calm (DS-5): a steady invitation, no celebration.
+/// Vault-calm (BG-9): a steady invitation, no celebration.
 class OnboardingSurface extends StatelessWidget {
   const OnboardingSurface({super.key, this.debugFooter});
 

@@ -15,7 +15,7 @@ import 'theme/tokens.dart';
 /// [SecretByteBuffer] (never a Dart `String`, INV-3) typed on the no-IME
 /// [SecretKeyboard] (§0.7), handed to the existing `VaultService` lane as a
 /// throwaway `Uint8List` wiped in `finally` (INV-1 sentence two). Vault-calm
-/// throughout (DS-5) — a wrong passphrase is a quiet retry, not an alarm.
+/// throughout (BG-9) — a wrong passphrase is a quiet retry, not an alarm.
 ///
 /// On success the status stream flips to unlocked and the shell swaps to home,
 /// so this pops itself; failures show a neutral, lockout-aware line.

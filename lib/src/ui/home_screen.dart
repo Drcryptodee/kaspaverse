@@ -15,11 +15,11 @@ import 'widgets/status_beacon.dart';
 import 'widgets/tx_status_chip.dart';
 
 /// The wallet home — the glass cockpit (design_system §1). One instrument
-/// panel: the balance with its freshness truth (DS-1), the link state worn as
+/// panel: the balance with its freshness truth (BG-8), the link state worn as
 /// a compact beacon chip (endpoint detail behind a tap, §12), the two money
 /// actions in the thumb zone, and the activity feed. State is injected as
 /// listenables so widget tests run without the native library; a 1 s clock
-/// notifier advances the freshness age (DS-1) so the beacon goes stale and
+/// notifier advances the freshness age (BG-8) so the beacon goes stale and
 /// the balance dims even when no new snapshot arrives.
 ///
 /// V4 scoping: each region listens only to what it renders (derived,
@@ -108,7 +108,7 @@ class ChainScope {
   final ValueListenable<BigInt?> virtualDaaScore;
   final ValueListenable<String?> error;
 
-  /// Time of the last fresh node snapshot — the link freshness clock (DS-1).
+  /// Time of the last fresh node snapshot — the link freshness clock (BG-8).
   final ValueListenable<DateTime?> lastUpdate;
 
   /// True while a reconnect is in flight (P3) — the sheet's honest indicator.
@@ -215,7 +215,7 @@ class _Derived<T> extends ValueNotifier<T> {
 class _HomeScreenState extends State<HomeScreen> {
   Timer? _ticker;
 
-  /// The freshness clock (DS-1) — ticked once per second. Regions that render
+  /// The freshness clock (BG-8) — ticked once per second. Regions that render
   /// time listen to THIS, so the tick never lands as a whole-screen setState.
   late final ValueNotifier<DateTime> _now;
 
@@ -245,7 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (widget.chain.reconnecting != null) widget.chain.reconnecting!,
       _now,
     ], _computeLink);
-    // DS-1 dimming is "not live", not "stale" specifically: since C7 a dark
+    // BG-8 dimming is "not live", not "stale" specifically: since C7 a dark
     // link can read *finding a node…* or *phone offline* instead of stale, and
     // last-known data must never sit at full brightness through any of them.
     _dimmed = _Derived([
@@ -279,7 +279,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _now,
     ]);
     // Re-evaluate freshness every second so the stale state and "as of N ago"
-    // line advance without a new snapshot (DS-1).
+    // line advance without a new snapshot (BG-8).
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) _now.value = widget.clock();
     });
@@ -693,7 +693,7 @@ class _BalancePanel extends StatelessWidget {
           ),
           const SizedBox(height: KvSpace.m),
           // The chain clock — quiet proof the cockpit is live, dimmed with
-          // the link (DS-1).
+          // the link (BG-8).
           AnimatedOpacity(
             opacity: stale ? KvFreshness.opacityStale : 1.0,
             duration: KvMotion.instant,
@@ -713,7 +713,7 @@ class _BalancePanel extends StatelessWidget {
   }
 }
 
-/// The unconfirmed (pending) balance line, dimmed with the link (DS-1).
+/// The unconfirmed (pending) balance line, dimmed with the link (BG-8).
 class _PendingLine extends StatelessWidget {
   const _PendingLine({required this.pending, required this.stale});
 
@@ -827,7 +827,7 @@ class _StatusCaption extends StatelessWidget {
       // branches yet", and a pass can fail in milliseconds against a socket
       // that is live but still dialling — so the first wording, "haven't
       // reached a node yet", could sit under a beacon reading *live*: two
-      // truths on one screen, which is the disagreement DS-1 and C7 both
+      // truths on one screen, which is the disagreement BG-8 and C7 both
       // forbid (ux-auditor, Track 2).
       //
       // Says what is true and what it means for the number above it — never
@@ -879,7 +879,7 @@ class _ActivityFeed extends StatelessWidget {
   final List<ActivityRecord> records;
   final DateTime now;
 
-  /// DS-1: a stale link must not stream a frozen counter at full presence —
+  /// BG-8: a stale link must not stream a frozen counter at full presence —
   /// counters fall back to their static words until the link is live again
   /// (ux-audit counter finding 1; the P0.3 scar class).
   final bool stale;
@@ -978,7 +978,7 @@ class _ActivityFeed extends StatelessWidget {
   /// The chip's streaming counter for one row — a DAA-distance depth, node-read
   /// and cosmetic (it dies with wallet-core's own maturity truth; the depth
   /// gate quiets it once deep). `null` ⇒ static label. A stale link never
-  /// counts (a frozen last-known DAA must not read live — DS-1).
+  /// counts (a frozen last-known DAA must not read live — BG-8).
   ///
   /// A SEND counts from the DAG-ACCEPTANCE DAA (`acceptedDaaScore`) — the honest
   /// anchor. Its `blockDaaScore` is only submit time and would overstate the
@@ -1115,7 +1115,7 @@ class _ActivityRow extends StatelessWidget {
     );
   }
 
-  /// "2 m ago" / "just now" — floors, never overstates (DS-1).
+  /// "2 m ago" / "just now" — floors, never overstates (BG-8).
   static String _relativeAge(DateTime now, BigInt unixtimeMsec) {
     final at = DateTime.fromMillisecondsSinceEpoch(unixtimeMsec.toInt());
     final age = now.difference(at);

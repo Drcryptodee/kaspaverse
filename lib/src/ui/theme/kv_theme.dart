@@ -3,10 +3,11 @@ import 'package:flutter/material.dart';
 import 'tokens.dart';
 
 /// Assembles the KaspaVerse [ThemeData] and [TextTheme] from [KvColor] /
-/// [KvFont] tokens. design_system.md §3 (colour) + §4 (type) is the law.
+/// [KvFont] tokens. design_system.md §1 (colour) + §2 (type) is the law.
 ///
 /// No raw colour hex lives here — only token references — so the P1.3
-/// zero-freestyle-hex grep passes. Bioluminescent Vault, dark-only (P1).
+/// zero-freestyle-hex grep passes. Black Glass · Machined Instrument,
+/// dark-only (D-185).
 
 /// One TextTheme slot. Variable fonts carry the weight on the `wght` axis;
 /// [FontVariation] pins it precisely while [FontWeight] stays the semantic
@@ -26,91 +27,112 @@ TextStyle _slot({
     fontVariations: [FontVariation('wght', weight.toDouble())],
     height: heightRatio,
     letterSpacing: letterSpacing,
-    // Monospace data never lets its digits jiggle as values tick (DS-2/§4).
+    // Monospace data never lets its digits jiggle as values tick (BG-5/§2).
     fontFeatures: mono ? const [FontFeature.tabularFigures()] : null,
   );
 }
 
-/// §4 — Roles → Material 3 TextTheme (dp, not rem). Headlines tighten to −2%
-/// and ride a 1.15 line; body breathes at 1.5; mono data widens +0.02em.
-/// Colour is intentionally absent — it inherits `onSurface` (= `text-primary`)
-/// so hierarchy reads through weight, not colour (§4 rule).
+/// §2 — Roles → Material 3 `TextTheme` (dp, not rem). Two faces and no third.
+/// Every amount, address, hash, timestamp and counter is mono with tabular
+/// figures. Colour is intentionally absent — it inherits `onSurface` (= [ink])
+/// so hierarchy reads through weight and scale, never colour (BG-7).
 TextTheme kvTextTheme() {
   return TextTheme(
-    // Balance hero — the home number.
+    // balanceHero — the home number. 46/52, and its fraction is subordinate by
+    // scale and tone, not by a different family.
     displayMedium: _slot(
       family: KvFont.mono,
-      size: 45,
-      weight: 600,
-      heightRatio: 1.15,
-      letterSpacing: -0.90, // −2%
+      size: 46,
+      weight: 500,
+      heightRatio: 52 / 46,
+      letterSpacing: -0.5,
       mono: true,
     ),
-    // Score / screen-level amount (shipped: DAA + sink blue scores).
+    // amountScreen — a screen-level amount. At signing this carries all eight
+    // decimals (BG-6).
     displaySmall: _slot(
       family: KvFont.mono,
-      size: 36,
-      weight: 600,
-      heightRatio: 1.15,
-      letterSpacing: -0.72, // −2%
+      size: 32,
+      weight: 500,
+      heightRatio: 38 / 32,
+      letterSpacing: 0,
       mono: true,
     ),
-    // Screen title.
+    // screenTitle.
     headlineSmall: _slot(
       family: KvFont.ui,
-      size: 24,
-      weight: 700,
-      heightRatio: 1.15,
-      letterSpacing: -0.48, // −2%
+      size: 22,
+      weight: 600,
+      heightRatio: 28 / 22,
+      letterSpacing: -0.2,
     ),
-    // Section / card title.
+    // button — names the action and its object (BG-11). Also the app bar.
     titleMedium: _slot(
       family: KvFont.ui,
-      size: 16,
+      size: 15,
       weight: 600,
-      heightRatio: 1.5,
+      heightRatio: 20 / 15,
       letterSpacing: 0,
     ),
-    // Amount in a list row.
-    bodyLarge: _slot(
-      family: KvFont.mono,
-      size: 16,
-      weight: 500,
-      heightRatio: 1.5,
-      letterSpacing: 0.32, // +0.02em
-      mono: true,
-    ),
-    // Body copy.
-    bodyMedium: _slot(
+    // The `button` role again, for TabBar's unselected label — same metrics as
+    // titleMedium so a tab's two states differ by colour alone. Pinned because
+    // "neither pinned nor unused" is how L115 happens.
+    titleSmall: _slot(
       family: KvFont.ui,
-      size: 14,
-      weight: 400,
-      heightRatio: 1.5,
+      size: 15,
+      weight: 600,
+      heightRatio: 20 / 15,
       letterSpacing: 0,
     ),
-    // Address / hash / data.
-    bodySmall: _slot(
-      family: KvFont.mono,
-      size: 12,
-      weight: 400,
-      heightRatio: 1.5,
-      letterSpacing: 0.24, // +0.02em
-      mono: true,
-    ),
-    // Label / meta / timestamp.
-    labelSmall: _slot(
+    // sectionTitle — engraved, caps applied at the call site.
+    labelLarge: _slot(
       family: KvFont.ui,
       size: 11,
+      weight: 600,
+      heightRatio: 16 / 11,
+      letterSpacing: 1.6,
+    ),
+    // rowAmount — an amount in a list row. Direction sets the weight at the
+    // call site: incoming 600, outgoing 400, internal unsigned 400 (BG-7).
+    bodyLarge: _slot(
+      family: KvFont.mono,
+      size: 15,
       weight: 400,
-      heightRatio: 1.5,
+      heightRatio: 20 / 15,
+      letterSpacing: 0,
+      mono: true,
+    ),
+    // body copy.
+    bodyMedium: _slot(
+      family: KvFont.ui,
+      size: 15,
+      weight: 400,
+      heightRatio: 22 / 15,
+      letterSpacing: 0,
+    ),
+    // address / hash / data.
+    bodySmall: _slot(
+      family: KvFont.mono,
+      size: 13,
+      weight: 400,
+      heightRatio: 22 / 13,
+      letterSpacing: 0,
+      mono: true,
+    ),
+    // meta — labels and timestamps.
+    labelSmall: _slot(
+      family: KvFont.ui,
+      size: 12,
+      weight: 500,
+      heightRatio: 16 / 12,
       letterSpacing: 0,
     ),
   );
 }
 
-/// Screen transitions in the vault register (§6): fade + a small decelerating
+/// Screen transitions (BG-9/§3): fade + a small decelerating
 /// rise — no zoom, no overshoot, spatial and calm. Honors reduced motion by
-/// dropping the translation (opacity-only, §6 rule).
+/// dropping the translation (opacity-only — never the hold, BG-9).
 class KvPageTransitionsBuilder extends PageTransitionsBuilder {
   const KvPageTransitionsBuilder();
 
@@ -138,35 +160,90 @@ class KvPageTransitionsBuilder extends PageTransitionsBuilder {
 /// The app theme. Seeded from the real `primary` (this is where the D-027
 /// `0xFF00E5C7` drift dies), then the design's exact tokens are pinned over the
 /// generated tonal roles. Elevation is lightness + hairline border, never a
-/// drop shadow (§3), so surface tint and shadows are zeroed.
+/// drop shadow (BG-4), so surface tint and shadows are zeroed.
 ///
 /// Component themes carry the system so screens stay free of styling: buttons
-/// (§9 heights, §9 radii), inputs (filled `surface-alt`, `primary` focus — §3
-/// interactive-boundary rule), sheets/snackbars/dividers, and the §6 page
+/// (§3 heights and radii), inputs (sunk to `well`, with an **ink** focus ring —
+/// teal would spend an emission, BG-2), sheets/snackbars/dividers, and the §3 page
 /// transition. Hierarchy: filled = primary action, tonal = secondary money
-/// action, outlined = tertiary path, text = link (`primary-muted`, §3).
+/// action, outlined = a plain plate, text = link (`primaryMuted`, §1.5).
 ThemeData kvDarkTheme() {
-  final scheme =
-      ColorScheme.fromSeed(
-        seedColor: KvColor.primary,
-        brightness: Brightness.dark,
-      ).copyWith(
-        primary: KvColor.primary,
-        onPrimary: KvColor.abyss,
-        secondary: KvColor.primaryMuted,
-        onSecondary: KvColor.abyss,
-        // FilledButton.tonal reads these — the secondary money action.
-        secondaryContainer: KvColor.surfaceAlt,
-        onSecondaryContainer: KvColor.textPrimary,
-        surface: KvColor.surface,
-        onSurface: KvColor.textPrimary,
-        surfaceContainerHighest: KvColor.surfaceAlt,
-        onSurfaceVariant: KvColor.textSecondary,
-        outline: KvColor.border,
-        outlineVariant: KvColor.border,
-        error: KvColor.error,
-        onError: KvColor.abyss,
-      );
+  final scheme = const ColorScheme(
+    // EXPLICIT, never `fromSeed`. A seeded scheme generates ~30 roles and
+    // every generated one is teal-cast — `primaryContainer` #005144 under a
+    // FAB, `surfaceContainer` #1B211F under a menu. Those hexes exist in no
+    // token file, so they evade the zero-freestyle-hex grep by being made at
+    // runtime, and they falsify §1.6's claim that the four named exceptions
+    // are the only tinted surfaces in the system (BG-3). Overriding a subset
+    // is not enough: the roles nobody names are exactly the ones that bite.
+    // Every role below is a ramp token, so an unnamed role cannot exist.
+    brightness: Brightness.dark,
+
+    // The light, and the one fill it is allowed (BG-2).
+    primary: KvColor.primary,
+    onPrimary: KvColor.onPrimary,
+    // A *container* is a plate, not an emission — teal never fills one.
+    primaryContainer: KvColor.chip,
+    onPrimaryContainer: KvColor.ink,
+    primaryFixed: KvColor.chip,
+    primaryFixedDim: KvColor.key,
+    onPrimaryFixed: KvColor.ink,
+    onPrimaryFixedVariant: KvColor.inkDim,
+
+    secondary: KvColor.primaryMuted,
+    onSecondary: KvColor.onPrimary,
+    secondaryContainer: KvColor.chip,
+    onSecondaryContainer: KvColor.ink,
+    secondaryFixed: KvColor.chip,
+    secondaryFixedDim: KvColor.key,
+    onSecondaryFixed: KvColor.ink,
+    onSecondaryFixedVariant: KvColor.inkDim,
+
+    // There is no third brand hue (BG-3), so the tertiary family is neutral
+    // all the way down rather than left for the framework to invent one.
+    tertiary: KvColor.inkDim,
+    onTertiary: KvColor.onPrimary,
+    tertiaryContainer: KvColor.chip,
+    onTertiaryContainer: KvColor.ink,
+    tertiaryFixed: KvColor.chip,
+    tertiaryFixedDim: KvColor.key,
+    onTertiaryFixed: KvColor.ink,
+    onTertiaryFixedVariant: KvColor.inkDim,
+
+    // The plate stays plain; the hue rides the words (BG-7/§1.5).
+    error: KvColor.risk,
+    onError: KvColor.onPrimary,
+    errorContainer: KvColor.notice,
+    onErrorContainer: KvColor.risk,
+
+    // The surface ramp, in the order M3 expects: lowest is deepest.
+    surface: KvColor.plate,
+    onSurface: KvColor.ink,
+    surfaceDim: KvColor.abyss,
+    surfaceBright: KvColor.summoned,
+    surfaceContainerLowest: KvColor.well,
+    surfaceContainerLow: KvColor.chip,
+    surfaceContainer: KvColor.plate,
+    surfaceContainerHigh: KvColor.key,
+    surfaceContainerHighest: KvColor.summoned,
+    onSurfaceVariant: KvColor.inkDim,
+
+    outline: KvColor.keyEdge,
+    outlineVariant: KvColor.hairline,
+
+    // Depth is tone plus one edge — never a shadow (BG-4). A scrim is the
+    // one legitimate use of black-over-content, under a summoned layer.
+    shadow: KvColor.abyss,
+    scrim: KvColor.abyss,
+
+    inverseSurface: KvColor.ink,
+    onInverseSurface: KvColor.abyss,
+    inversePrimary: KvColor.primary,
+
+    // M3 tints elevated surfaces with this. Elevation does not exist here.
+    surfaceTint: Colors.transparent,
+  );
+
   final text = kvTextTheme();
   final buttonShape = RoundedRectangleBorder(
     borderRadius: BorderRadius.circular(KvRadius.button),
@@ -182,25 +259,24 @@ ThemeData kvDarkTheme() {
     textTheme: text,
     splashColor: KvColor.glow,
     highlightColor: KvColor.glow,
-    iconTheme: const IconThemeData(color: KvColor.textSecondary),
-    // Toggles read as health/state, not brand: active = success GREEN
-    // (founder directive 2026-07-11 — "green, not kaspa teal"; the widened
-    // success law in tokens.dart).
+    iconTheme: const IconThemeData(color: KvColor.inkDim),
+    // A toggle is state the user owns, not a value the chain reports, so it
+    // spends no hue at all (BG-7): "on" is carried by a bright neutral track.
+    // Teal would cost an emission per switch and blow the per-screen budget.
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.selected)
             ? KvColor.abyss
-            : KvColor.textSecondary,
+            : KvColor.inkDim,
       ),
       trackColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? KvColor.success
-            : KvColor.surfaceAlt,
+        (states) =>
+            states.contains(WidgetState.selected) ? KvColor.ink : KvColor.key,
       ),
       trackOutlineColor: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.selected)
-            ? KvColor.success
-            : KvColor.border,
+            ? KvColor.ink
+            : KvColor.keyEdge,
       ),
     ),
     appBarTheme: AppBarTheme(
@@ -209,9 +285,9 @@ ThemeData kvDarkTheme() {
       elevation: 0,
       scrolledUnderElevation: 0,
       centerTitle: false,
-      iconTheme: const IconThemeData(color: KvColor.textPrimary),
-      // §4 section-title role, not M3's default titleLarge.
-      titleTextStyle: text.titleMedium?.copyWith(color: KvColor.textPrimary),
+      iconTheme: const IconThemeData(color: KvColor.ink),
+      // The §2 `button` role (`titleMedium`), not M3's default titleLarge.
+      titleTextStyle: text.titleMedium?.copyWith(color: KvColor.ink),
     ),
     pageTransitionsTheme: PageTransitionsTheme(
       builders: {
@@ -220,7 +296,7 @@ ThemeData kvDarkTheme() {
       },
     ),
     // Colours flow from the scheme (so filled stays primary and tonal stays
-    // surface-alt); shape/size/type are pinned here once for both variants.
+    // the chip plate); shape/size/type are pinned here once for both variants.
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
         minimumSize: const Size(KvSpace.touchTarget, KvSpace.control),
@@ -228,64 +304,125 @@ ThemeData kvDarkTheme() {
         textStyle: text.titleMedium,
       ),
     ),
+    // The tenth `labelLarge` consumer, found by the third audit pass. Only the
+    // debug-gated dev panels use it today; pinned anyway, because the cost is
+    // one line and the failure mode is silent (L115).
+    elevatedButtonTheme: ElevatedButtonThemeData(
+      style: ElevatedButton.styleFrom(textStyle: text.titleMedium),
+    ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
         minimumSize: const Size(KvSpace.touchTarget, KvSpace.control),
         shape: buttonShape,
         textStyle: text.titleMedium,
-        foregroundColor: KvColor.textPrimary,
-        // An outlined button's border IS its affordance — it must read (≥3:1,
-        // §3), so it rides `primary-muted`, never the decorative hairline.
-        side: const BorderSide(color: KvColor.primaryMuted),
+        foregroundColor: KvColor.ink,
+        backgroundColor: KvColor.chip,
+        // The secondary action is identified by its label (16.91:1 on `chip`),
+        // not by its edge — teal there would spend an emission the screen has
+        // already allocated to the one primary action (BG-2).
+        side: const BorderSide(color: KvColor.edgeHi),
       ),
     ),
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
         minimumSize: const Size(KvSpace.touchTarget, KvSpace.touchTarget),
         shape: buttonShape,
-        foregroundColor: KvColor.primaryMuted, // links are muted teal (§3)
+        // PIN THIS. M3 defaults a TextButton's label to `labelLarge`, which in
+        // this ramp is `sectionTitle` — 11dp engraved caps. An action label is
+        // the §2 `button` role, and every button theme must say so explicitly.
+        textStyle: text.titleMedium,
+        foregroundColor: KvColor.primaryMuted, // links are muted teal (§1.5)
       ),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: KvColor.surfaceAlt,
-      hintStyle: const TextStyle(color: KvColor.textTertiary),
-      suffixIconColor: KvColor.textSecondary,
-      suffixStyle: text.bodyLarge?.copyWith(color: KvColor.textSecondary),
+      fillColor: KvColor.well,
+      hintStyle: const TextStyle(color: KvColor.inkMeta),
+      suffixIconColor: KvColor.inkDim,
+      suffixStyle: text.bodyLarge?.copyWith(color: KvColor.inkDim),
+      // The border is amber, so the words must be too — M3 would resolve this
+      // from `colorScheme.error` and print risk-red inside an amber field.
+      errorStyle: text.bodySmall?.copyWith(color: KvColor.warn),
+      // Colour only — the focused label would otherwise go teal. Which FACE
+      // these resolve is UX-6's call; it was mono before this diff too.
+      labelStyle: const TextStyle(color: KvColor.inkMeta),
+      floatingLabelStyle: const TextStyle(color: KvColor.inkDim),
       contentPadding: const EdgeInsets.symmetric(
         horizontal: KvSpace.m,
         vertical: KvSpace.m,
       ),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(KvRadius.button),
-        borderSide: const BorderSide(color: KvColor.border),
+        borderRadius: BorderRadius.circular(KvRadius.key),
+        borderSide: const BorderSide(color: KvColor.hairline),
       ),
-      // Focus carries meaning → `primary`, ≥3:1 (§3 hard rule).
+      // A focus ring must clear 3:1 against what surrounds it (WCAG 1.4.11).
+      // The export's `hairlineHi` does not, and teal would spend an emission,
+      // so focus rides bright neutral ink — 16.71:1 on a plate.
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(KvRadius.button),
-        borderSide: const BorderSide(color: KvColor.primary, width: 1.5),
+        borderRadius: BorderRadius.circular(KvRadius.key),
+        borderSide: const BorderSide(color: KvColor.ink, width: 1.5),
       ),
+      // A blocked field is AMBER, never red: red claims money is at risk, and
+      // a validation nit puts nothing at risk (BG-7).
       errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(KvRadius.button),
-        borderSide: const BorderSide(color: KvColor.error),
+        borderRadius: BorderRadius.circular(KvRadius.key),
+        borderSide: const BorderSide(color: KvColor.warn),
       ),
       focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(KvRadius.button),
-        borderSide: const BorderSide(color: KvColor.error, width: 1.5),
+        borderRadius: BorderRadius.circular(KvRadius.key),
+        borderSide: const BorderSide(color: KvColor.warn, width: 1.5),
       ),
       border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(KvRadius.button),
-        borderSide: const BorderSide(color: KvColor.border),
+        borderRadius: BorderRadius.circular(KvRadius.key),
+        borderSide: const BorderSide(color: KvColor.hairline),
       ),
     ),
+    // ── The layer after the role sweep ──────────────────────────────────────
+    // `primary` MUST stay teal, so these four cannot be fixed by pinning a role:
+    // the component theme is the only place to say "not here". Each of these
+    // was painting teal from a framework default that no call-site grep sees.
+
+    // TabBar takes its label AND its indicator from `primary` (tabs.dart:2742,
+    // :2745) — a teal fill marking a selection state, which BG-2 forbids.
+    tabBarTheme: const TabBarThemeData(
+      labelColor: KvColor.ink,
+      unselectedLabelColor: KvColor.inkDim,
+      indicatorColor: KvColor.edgeHi,
+      dividerColor: KvColor.hairline,
+    ),
+    // The cursor, the selection and the focused label all resolve `primary`
+    // (text_field.dart:1628/1630, input_decorator.dart:6043/6067). The focus
+    // ring above already refused teal for costing an emission; these are the
+    // unmade half of that same decision.
+    textSelectionTheme: const TextSelectionThemeData(
+      cursorColor: KvColor.ink,
+      selectionColor: KvColor.edgeHi,
+      selectionHandleColor: KvColor.ink,
+    ),
+    // A FAB defaults to elevation 6 and a 16dp radius (floating_action_button
+    // .dart:778, :817) — a shadow BG-4 forbids, on a radius off the machined
+    // 4/5/6/8 ramp.
+    floatingActionButtonTheme: FloatingActionButtonThemeData(
+      backgroundColor: KvColor.chip,
+      foregroundColor: KvColor.ink,
+      elevation: 0,
+      focusElevation: 0,
+      hoverElevation: 0,
+      highlightElevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(KvRadius.panel),
+        side: const BorderSide(color: KvColor.edgeHi),
+      ),
+    ),
+
     dividerTheme: const DividerThemeData(
-      color: KvColor.border,
+      color: KvColor.hairline,
       thickness: 1,
       space: 1,
     ),
     snackBarTheme: SnackBarThemeData(
-      backgroundColor: KvColor.surfaceAlt,
-      contentTextStyle: text.bodyMedium?.copyWith(color: KvColor.textPrimary),
+      backgroundColor: KvColor.summoned,
+      contentTextStyle: text.bodyMedium?.copyWith(color: KvColor.ink),
       behavior: SnackBarBehavior.floating,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(KvRadius.button),
@@ -293,39 +430,50 @@ ThemeData kvDarkTheme() {
       actionTextColor: KvColor.primary,
     ),
     bottomSheetTheme: const BottomSheetThemeData(
-      backgroundColor: KvColor.surface,
-      modalBackgroundColor: KvColor.surface,
+      backgroundColor: KvColor.summoned,
+      modalBackgroundColor: KvColor.summoned,
       surfaceTintColor: Colors.transparent,
-      dragHandleColor: KvColor.border,
+      dragHandleColor: KvColor.edgeHi,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(
-          top: Radius.circular(KvRadius.card),
+          top: Radius.circular(KvRadius.panel),
         ),
       ),
     ),
-    listTileTheme: const ListTileThemeData(
-      iconColor: KvColor.textSecondary,
-      textColor: KvColor.textPrimary,
+    // PIN THIS. ListTile resolves its title from `bodyLarge` and its subtitle
+    // from `bodyMedium` by default (`list_tile.dart:1785/:1788`), and the D-185
+    // ramp moved those two toward each other until they met at 15dp/w400 — so
+    // the hierarchy on the destructive-actions menu collapsed to nothing. And
+    // `textColor` is deliberately ABSENT: `list_tile.dart:935-937` stamps the
+    // tile's effective colour over the subtitle's own, which would make a
+    // dimmed `subtitleTextStyle` a silent no-op. Disabled tiles still grey both
+    // lines through `theme.disabledColor` (`:880-886`).
+    listTileTheme: ListTileThemeData(
+      iconColor: KvColor.inkDim,
+      titleTextStyle: text.titleMedium?.copyWith(color: KvColor.ink),
+      subtitleTextStyle: text.labelSmall?.copyWith(color: KvColor.inkDim),
     ),
     progressIndicatorTheme: const ProgressIndicatorThemeData(
       color: KvColor.primaryMuted,
-      linearTrackColor: KvColor.surfaceAlt,
+      linearTrackColor: KvColor.key,
     ),
     chipTheme: ChipThemeData(
-      backgroundColor: KvColor.surfaceAlt,
-      side: const BorderSide(color: KvColor.border),
-      labelStyle: text.bodyMedium?.copyWith(color: KvColor.textPrimary),
+      backgroundColor: KvColor.chip,
+      side: const BorderSide(color: KvColor.edgeHi),
+      labelStyle: text.labelSmall?.copyWith(color: KvColor.ink),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(KvRadius.data),
+        borderRadius: BorderRadius.circular(KvRadius.chip),
       ),
     ),
     segmentedButtonTheme: SegmentedButtonThemeData(
       style: SegmentedButton.styleFrom(
-        selectedBackgroundColor: KvColor.glow,
-        selectedForegroundColor: KvColor.primary,
-        foregroundColor: KvColor.textSecondary,
-        side: const BorderSide(color: KvColor.border),
+        // Same M3 `labelLarge` default as TextButton — pinned for the same reason.
+        textStyle: text.titleMedium,
+        selectedBackgroundColor: KvColor.keyPressed,
+        selectedForegroundColor: KvColor.ink,
+        foregroundColor: KvColor.inkDim,
+        side: const BorderSide(color: KvColor.keyEdge),
       ),
     ),
   );

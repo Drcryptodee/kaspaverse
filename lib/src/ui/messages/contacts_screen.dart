@@ -780,7 +780,7 @@ class _ConversationTabs extends StatelessWidget {
       child: Column(
         children: [
           TabBar(
-            labelStyle: theme.textTheme.labelLarge,
+            labelStyle: theme.textTheme.titleMedium,
             tabs: [
               const Tab(text: 'Chats'),
               Tab(
@@ -798,13 +798,14 @@ class _ConversationTabs extends StatelessWidget {
                           vertical: 1,
                         ),
                         decoration: BoxDecoration(
-                          color: KvColor.info.withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(KvRadius.data),
+                          color: KvColor.chip,
+                          border: Border.all(color: KvColor.edgeHi),
+                          borderRadius: BorderRadius.circular(KvRadius.chip),
                         ),
                         child: Text(
                           '$requestCount',
                           style: theme.textTheme.labelSmall?.copyWith(
-                            color: KvColor.info,
+                            color: KvColor.ink,
                             fontFamily: KvFont.ui,
                           ),
                         ),
@@ -873,12 +874,12 @@ class _ConversationCard extends StatelessWidget {
     final (String statusLine, Color statusColor) = expired
         ? ('Invitation expired', KvColor.textTertiary)
         : pendingIn
-        ? ('Wants to connect', KvColor.info)
+        ? ('Wants to connect', KvColor.textSecondary)
         : replaced
         ? ('Replaced', KvColor.textTertiary)
         : pendingOut
         ? ('Awaiting their accept', KvColor.textTertiary)
-        : ('Active', KvColor.primaryMuted);
+        : ('Active', KvColor.inkDim); // teal is never a status (BG-2/BG-7)
 
     return Material(
       color: KvColor.surface,

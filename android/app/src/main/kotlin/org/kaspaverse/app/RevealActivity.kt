@@ -39,18 +39,23 @@ class RevealActivity : Activity() {
 
     // Design tokens mirrored 1:1 from lib/src/ui/theme/tokens.dart (KvColor). A
     // native surface can't import the Dart tokens; kept in lockstep by hand.
-    private val cAbyss = Color.parseColor("#0A0A0B")
-    private val cSurfaceAlt = Color.parseColor("#1A1A1E")
-    private val cBorder = Color.parseColor("#2A2A2F")
-    private val cPrimary = Color.parseColor("#49EACB")
-    private val cTextPrimary = Color.parseColor("#F0F0F2")
-    private val cTextSecondary = Color.parseColor("#8A8A95")
-    // Mirrored from KvColor.warning. tokens.dart reserves error red for fund
-    // risk and destruction ONLY (§13), and none of this screen's three red
-    // moments qualify: "hold to reveal first" is guidance, "not quite" is a
-    // wrong answer, and the bounce notice is a redirection. The native file had
-    // no warning token because it was never mirrored (ux-auditor, this wave).
-    private val cWarning = Color.parseColor("#FBBF24")
+    //
+    // NO GATE LANE CHECKS THIS FILE AGAINST tokens.dart. If you change the
+    // palette there, change it here in the same commit, or the app's most
+    // security-critical screen silently keeps the previous design system.
+    // Black Glass values (D-185).
+    private val cAbyss = Color.parseColor("#000000")      // KvColor.abyss
+    private val cSurfaceAlt = Color.parseColor("#111111") // KvColor.key
+    private val cBorder = Color.parseColor("#262626")     // KvColor.keyEdge
+    private val cPrimary = Color.parseColor("#49EACB")    // KvColor.primary
+    private val cTextPrimary = Color.parseColor("#EDEDED")   // KvColor.ink
+    private val cTextSecondary = Color.parseColor("#9E9E9E") // KvColor.inkDim
+    // Mirrored from KvColor.warn. tokens.dart reserves risk red for fund risk
+    // and destruction ONLY, and none of this screen's three amber moments
+    // qualify: "hold to reveal first" is guidance, "not quite" is a wrong
+    // answer, and the bounce notice is a redirection. Amber is exactly the
+    // "not yet certain / needs checking" meaning the law assigns it (BG-7).
+    private val cWarning = Color.parseColor("#E0B15C")    // KvColor.warn
 
     companion object {
         /**
@@ -304,7 +309,7 @@ class RevealActivity : Activity() {
     private fun armContinue(cont: Button, hint: TextView) {
         cont.setTextColor(cAbyss)
         cont.background = GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat()
+            cornerRadius = dp(8).toFloat()
             setColor(cPrimary)
         }
         hint.text = ""
@@ -503,7 +508,7 @@ class RevealActivity : Activity() {
             chip.isEnabled = false
             chip.setTextColor(cAbyss)
             chip.background = GradientDrawable().apply {
-                cornerRadius = dp(12).toFloat()
+                cornerRadius = dp(8).toFloat()
                 setColor(cPrimary)
             }
             quizProgress++
@@ -528,13 +533,13 @@ class RevealActivity : Activity() {
                 )
                 return
             }
-            // Reset the sequence; a slip costs only the re-tap (DS-3).
+            // Reset the sequence; a slip costs only the re-tap (BG-6).
             quizProgress = 0
             for (c in quizChips) {
                 c.isEnabled = true
                 c.setTextColor(cTextPrimary)
                 c.background = GradientDrawable().apply {
-                    cornerRadius = dp(12).toFloat()
+                    cornerRadius = dp(8).toFloat()
                     setColor(cSurfaceAlt)
                     setStroke(dp(1), cBorder)
                 }
@@ -618,7 +623,7 @@ class RevealActivity : Activity() {
 
     private fun styledButton(text: String, fill: Int, textColor: Int, stroke: Int? = null): Button {
         val bg = GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat()
+            cornerRadius = dp(8).toFloat()
             setColor(fill)
             if (stroke != null) setStroke(dp(1), stroke)
         }

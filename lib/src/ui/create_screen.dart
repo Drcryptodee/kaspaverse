@@ -194,7 +194,7 @@ class _CreateScreenState extends State<CreateScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ctx = _messageKey.currentContext;
       if (!mounted || ctx == null) return;
-      // Decelerate, no overshoot — a custody surface (DS-5).
+      // Decelerate, no overshoot — a custody surface (BG-9).
       Scrollable.ensureVisible(
         ctx,
         duration: KvMotion.fast,
@@ -247,7 +247,7 @@ class _CreateScreenState extends State<CreateScreen> {
       // with no extra word while their paper record says there is one — a
       // mismatch they could not detect and could not test, since there is no
       // delete path and the vault refuses to seal over an existing blob
-      // (ux-auditor, DS-3).
+      // (ux-auditor, BG-6).
       _say(
         "Those didn't match. Enter the extra word again, then confirm it — or "
         'tap Skip to create your wallet with no extra word, and cross it off '
@@ -575,7 +575,7 @@ class _CreateScreenState extends State<CreateScreen> {
                         // the enroll-overflow fix further down this file.
                         // Moving it here also lands "Enter a passphrase first."
                         // and "or tap Skip", which had the same problem
-                        // (ux-auditor, DS-3/§12).
+                        // (ux-auditor, BG-6/§12).
                         if (_message != null) ...[
                           const SizedBox(height: KvSpace.m),
                           Text(

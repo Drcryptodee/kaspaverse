@@ -115,7 +115,7 @@ class ChainService with WidgetsBindingObserver {
   final ValueNotifier<String?> error = ValueNotifier(null);
 
   /// Wall-clock of the last *fresh* snapshot (connected + a real score). Drives
-  /// the StatusBeacon stale state (DS-1); null until the first fresh tip.
+  /// the StatusBeacon stale state (BG-8); null until the first fresh tip.
   final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
 
   /// True while a reconnect is in flight (watchdog-triggered OR the manual
@@ -333,7 +333,7 @@ class ChainService with WidgetsBindingObserver {
     connected.value = snapshot.connected;
     endpoint.value = snapshot.endpoint;
     // Retain last-known scores when a snapshot carries none — a dropped link
-    // emits nulls, and DS-1 dims last-known data with its age rather than
+    // emits nulls, and BG-8 dims last-known data with its age rather than
     // blanking it to unknown ("—"). A genuine first-connect simply has no
     // prior value to retain, so it still reads "—".
     if (snapshot.virtualDaaScore != null) {

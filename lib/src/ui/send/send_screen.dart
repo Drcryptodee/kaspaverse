@@ -9,7 +9,7 @@ import '../theme/tokens.dart';
 import '../widgets/kv_loader.dart';
 import 'confirm_send_sheet.dart';
 
-/// Send entry (P1.6 · T3): amount (DS-2 floor) + destination (DS-8 paste →
+/// Send entry (P1.6 · T3): amount (BG-5 floor) + destination (BG-15 paste →
 /// full-form review). "Review" builds the transaction(s) in Rust and opens the
 /// anti-blind-signing confirm ([ConfirmSendSheet]) — the amount/fee the user
 /// approves are Rust's decode of the actual txs, never this form's echo (B7).
@@ -95,7 +95,7 @@ class _SendScreenState extends State<SendScreen> {
   BigInt? get _amountSompi => sompiFromKas(_amount.text);
 
   /// Light shape check for enabling Review — the real validation (checksum,
-  /// network) is Rust's, surfaced on Review (DS-8: reject before signing).
+  /// network) is Rust's, surfaced on Review (BG-15: reject before signing).
   bool get _addressLooksValid {
     final a = _address.text.trim();
     return a.startsWith('kaspa:') && a.length > 'kaspa:'.length + 10;
@@ -195,7 +195,7 @@ class _SendScreenState extends State<SendScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Text('Amount', style: theme.textTheme.labelLarge),
+                      Text('AMOUNT', style: theme.textTheme.labelLarge),
                       const SizedBox(height: KvSpace.s),
                       TextField(
                         controller: _amount,
@@ -203,7 +203,7 @@ class _SendScreenState extends State<SendScreen> {
                           decimal: true,
                         ),
                         // The amount is the screen's subject — screen-level
-                        // mono role (§4), tabular so digits never jiggle (DS-2).
+                        // mono role (§4), tabular so digits never jiggle (BG-5).
                         style: theme.textTheme.displaySmall,
                         decoration: const InputDecoration(
                           hintText: '0.00000000',
@@ -217,7 +217,7 @@ class _SendScreenState extends State<SendScreen> {
                         _MinimumLine(minSompi: _minSompi!),
                       ],
                       const SizedBox(height: KvSpace.xl),
-                      Text('To', style: theme.textTheme.labelLarge),
+                      Text('TO', style: theme.textTheme.labelLarge),
                       const SizedBox(height: KvSpace.s),
                       TextField(
                         controller: _address,
@@ -323,7 +323,7 @@ class _MinimumLine extends StatelessWidget {
   }
 }
 
-/// The pasted address chunked in fours for a full-form review (DS-8) before it
+/// The pasted address chunked in fours for a full-form review (BG-15) before it
 /// is ever signed — the user can read it back against the source.
 class _AddressReview extends StatelessWidget {
   const _AddressReview({required this.address});

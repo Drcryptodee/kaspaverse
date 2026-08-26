@@ -21,7 +21,7 @@ import '../widgets/kv_loader.dart';
 ///
 /// Fail-closed: if the a11y query cannot be answered (only the host-test
 /// no-channel case on a real build), the screen REFUSES rather than risk showing
-/// a secret to an unverified screen — DS-7, "assume a hostile screen".
+/// a secret to an unverified screen — BG-10, "assume a hostile screen".
 class SecretScreenGuard extends StatefulWidget {
   const SecretScreenGuard({
     super.key,

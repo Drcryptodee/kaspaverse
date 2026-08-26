@@ -14,9 +14,9 @@ import '../widgets/kv_loader.dart';
 /// it will sign — never the form's echo of the user's intent. That includes
 /// the MODE: the self-send rendering (D-069) derives from the summary's
 /// Rust-set [SignableKind], never a caller flag, and the payload facts line
-/// renders the DTO's own built-tx decode. The hold-to-sign ceremony (DS-3) is
+/// renders the DTO's own built-tx decode. The hold-to-sign ceremony (BG-6) is
 /// decelerate-only with no double-tap path to broadcast, and every amount on
-/// this surface is exact to all 8 decimals (DS-2: the full truth at the
+/// this surface is exact to all 8 decimals (BG-5: the full truth at the
 /// moment of commitment).
 ///
 /// Dismissing before the hold completes calls [abandon] (drops the Rust
@@ -62,7 +62,7 @@ String _defaultTitle(SignableKind kind) => switch (kind) {
   SignableKind.consolidate => 'Confirm merge',
 };
 
-/// Inline KAS figure for sentence copy — full 8 decimals (DS-2 applies to
+/// Inline KAS figure for sentence copy — full 8 decimals (BG-5 applies to
 /// every number on a signing surface, prose included).
 String _kas(BigInt sompi) {
   final parts = kasParts(sompi);
@@ -140,7 +140,7 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
     }
     // Scrolls only when the viewport can't fit the whole ceremony (small
     // screens / large text scale): every fact stays reachable — content is
-    // never clipped on a signing surface (DS-2 spirit).
+    // never clipped on a signing surface (BG-5 spirit).
     return SingleChildScrollView(child: _confirm(context));
   }
 
@@ -278,7 +278,7 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         const SizedBox(height: KvSpace.m),
         // The exact costs — never "≈ free" (the relay floor prices compute +
         // transient bytes; a payload is never free, and KIP-9 storage gates
-        // what BUILDS); all 8 decimals on a signing surface (DS-2). For a
+        // what BUILDS); all 8 decimals on a signing surface (BG-5). For a
         // self-send the "Total" is replaced by the returning value, stated as
         // a return, not a cost.
         Container(
@@ -337,8 +337,10 @@ class _ConfirmSendSheetState extends State<ConfirmSendSheet> {
         ),
         const SizedBox(height: KvSpace.s),
         Text(
-          // Irreversibility, said once, plainly, at signing (§12).
-          'Kaspa transactions confirm in about a second and cannot be reversed.',
+          // Irreversibility, said once, plainly, at signing (BG-11). The old
+          // "about a second" was optimistic by 1.3-3.8x against the measured
+          // submit->accepted range; UX-4 adds the staged wait behind it.
+          'Once this is signed it cannot be reversed.',
           textAlign: TextAlign.center,
           style: theme.textTheme.labelSmall?.copyWith(
             color: KvColor.textTertiary,
@@ -375,7 +377,7 @@ class _Field extends StatelessWidget {
   }
 }
 
-/// One exact cost line: label left, all-8-decimals amount right (DS-2).
+/// One exact cost line: label left, all-8-decimals amount right (BG-5).
 class _CostRow extends StatelessWidget {
   const _CostRow({required this.label, required this.sompi});
 
@@ -510,7 +512,7 @@ class _ResultView extends StatelessWidget {
   }
 }
 
-/// DS-3 hold-to-sign: press and hold; a decelerate-only fill advances over
+/// BG-6 hold-to-sign: press and hold; a decelerate-only fill advances over
 /// [KvMotion.deliberate]; only completing the hold fires [onComplete] (no
 /// double-tap path to broadcast). Releasing early reverses — nothing happens.
 /// The threshold lands with `mediumImpact` (§7).
@@ -589,85 +591,81 @@ class _HoldToSignState extends State<_HoldToSign>
         onTapDown: _down,
         onTapUp: _release,
         onTapCancel: _release,
-        child: Container(
-          // Glow is rationed to primary actions (§3) — this is THE primary
-          // action; the shadow sits outside the clip so it can breathe.
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(KvRadius.button),
-            boxShadow: const [
-              BoxShadow(color: KvColor.glow, blurRadius: 24, spreadRadius: 2),
-            ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(KvRadius.button),
-            child: Container(
-              height: KvSpace.control,
-              // Dual teal (token semantics): muted = ambient base, primary = the
-              // "activated" charge sweeping over it. Dark text reads on both.
-              color: KvColor.primaryMuted,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  // Decelerate-only fill (DS-5 vault register; never
-                  // overshoot). Under reduced motion the progress renders as an
-                  // opacity ramp over the whole button instead of a width sweep
-                  // (§6/§11) — the 800ms hold itself is safety friction and
-                  // never shortens. That second half is not free: it holds only
-                  // because the controller above is built with
-                  // `AnimationBehavior.preserve`. Guarded by 'a hold under reduced
-                  // animations still takes the full deliberate duration' in
-                  // test/send_flow_test.dart.
-                  Positioned.fill(
-                    child: AnimatedBuilder(
-                      animation: _controller,
-                      builder: (context, _) {
-                        final progress = KvMotion.out.transform(
-                          _controller.value,
+        // No bloom here. BG-2: emission is never elevation, and §1.5 permits
+        // exactly one bloom shape — a 6dp lamp under an 8dp blur with no
+        // spread. A 24dp/spread-2 halo behind a 56dp control is elevation
+        // wearing the light's clothes.
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(KvRadius.button),
+          child: Container(
+            height: KvSpace.control,
+            // Dual teal (token semantics): muted = ambient base, primary = the
+            // "activated" charge sweeping over it. Dark text reads on both.
+            color: KvColor.primaryMuted,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                // Decelerate-only fill (BG-9 vault register; never
+                // overshoot). Under reduced motion the progress renders as an
+                // opacity ramp over the whole button instead of a width sweep
+                // (§6/§11) — the 800ms hold itself is safety friction and
+                // never shortens. That second half is not free: it holds only
+                // because the controller above is built with
+                // `AnimationBehavior.preserve`. Guarded by 'a hold under reduced
+                // animations still takes the full deliberate duration' in
+                // test/send_flow_test.dart.
+                Positioned.fill(
+                  child: AnimatedBuilder(
+                    animation: _controller,
+                    builder: (context, _) {
+                      final progress = KvMotion.out.transform(
+                        _controller.value,
+                      );
+                      if (MediaQuery.of(context).disableAnimations) {
+                        return Opacity(
+                          opacity: progress,
+                          child: Container(color: KvColor.primary),
                         );
-                        if (MediaQuery.of(context).disableAnimations) {
-                          return Opacity(
-                            opacity: progress,
-                            child: Container(color: KvColor.primary),
-                          );
-                        }
-                        return Align(
-                          alignment: Alignment.centerLeft,
-                          child: FractionallySizedBox(
-                            widthFactor: progress,
-                            child: Container(color: KvColor.primary),
-                          ),
-                        );
-                      },
-                    ),
+                      }
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: FractionallySizedBox(
+                          widthFactor: progress,
+                          child: Container(color: KvColor.primary),
+                        ),
+                      );
+                    },
                   ),
-                  // Scale the full-precision label down rather than ever clip or
-                  // ellipsize an amount (DS-2), incl. at large text scale.
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.lock_outline,
-                            size: 18,
+                ),
+                // Scale the full-precision label down rather than ever clip or
+                // ellipsize an amount (BG-5), incl. at large text scale.
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.lock_outline,
+                          size: 18,
+                          color: KvColor.abyss,
+                        ),
+                        const SizedBox(width: KvSpace.s),
+                        Text(
+                          widget.label,
+                          // The `button` role (§2), never `labelLarge` —
+                          // that slot is `sectionTitle` at 11dp, and this is
+                          // the most safety-critical string in the app.
+                          style: theme.textTheme.titleMedium?.copyWith(
                             color: KvColor.abyss,
                           ),
-                          const SizedBox(width: KvSpace.s),
-                          Text(
-                            widget.label,
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              color: KvColor.abyss,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

@@ -19,7 +19,7 @@ class KvBreath extends StatefulWidget {
 
   final Widget child;
 
-  /// The honesty gate (DS-1): breathe only while the state the dot reports
+  /// The honesty gate (BG-8): breathe only while the state the dot reports
   /// is genuinely live/pending — a resolved state stops the motion.
   final bool active;
 

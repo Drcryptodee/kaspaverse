@@ -157,10 +157,15 @@ class HistoryNoticeBanner extends StatelessWidget {
                     0,
                   ),
                   child: Material(
-                    color: KvColor.info.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(KvRadius.card),
+                    // A recessed notice plate, with the edge §1.1 gives it —
+                    // a container without its boundary is not earned (BG-1/4).
+                    color: KvColor.notice,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(KvRadius.plate),
+                      side: const BorderSide(color: KvColor.noticeEdge),
+                    ),
                     child: InkWell(
-                      borderRadius: BorderRadius.circular(KvRadius.card),
+                      borderRadius: BorderRadius.circular(KvRadius.plate),
                       onTap: () {
                         KvHaptic.selection();
                         showHistoryFillSheet(
@@ -179,7 +184,7 @@ class HistoryNoticeBanner extends StatelessWidget {
                             const Icon(
                               Icons.history,
                               size: 18,
-                              color: KvColor.info,
+                              color: KvColor.inkMeta,
                             ),
                             const SizedBox(width: KvSpace.s),
                             Expanded(

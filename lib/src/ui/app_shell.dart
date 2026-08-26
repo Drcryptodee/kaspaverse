@@ -90,7 +90,7 @@ class _AppShellState extends State<AppShell> {
       valueListenable: widget.status,
       builder: (context, s, _) {
         final key = AppShell.routeKey(s);
-        // Vault-calm cross-fade between states — decelerate, no slide (DS-5/§6).
+        // Vault-calm cross-fade between states — decelerate, no slide (BG-9/§6).
         return AnimatedSwitcher(
           duration: KvMotion.normal,
           switchInCurve: KvMotion.out,

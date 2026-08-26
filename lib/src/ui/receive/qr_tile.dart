@@ -3,7 +3,7 @@ import 'package:qr/qr.dart';
 
 import '../theme/tokens.dart';
 
-/// A scannable QR tile for a Kaspa address (DS-8 / design_system §8).
+/// A scannable QR tile for a Kaspa address (BG-15 / design_system §8).
 ///
 /// **Always dark modules on a light tile, regardless of app theme** — a
 /// dark-themed QR defeats scanners, and scanability is the entire function
@@ -60,7 +60,7 @@ class _QrTileState extends State<QrTile> {
       child: Container(
         width: widget.size,
         height: widget.size,
-        padding: const EdgeInsets.all(KvSpace.m), // 16dp quiet zone (DS-8)
+        padding: const EdgeInsets.all(KvSpace.m), // 16dp quiet zone (BG-15)
         decoration: BoxDecoration(
           color: KvColor.qrTile,
           borderRadius: BorderRadius.circular(KvRadius.card),

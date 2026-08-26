@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/tokens.dart';
 import 'kv_breath.dart';
 
-/// The honest states of a chain link (DS-1, design_system §8). Colour is
+/// The honest states of a chain link (BG-8, design_system §8). Colour is
 /// never the only signal — every state pairs a dot colour with a text label
 /// (§11). [offline] is C7's addition (D-089 ruling 6): when the OS says the
 /// phone has no network, the glass names the phone instead of blaming a node.
@@ -83,7 +83,7 @@ String formatAge(Duration age) {
 /// states keep their honest lines verbatim.
 ///
 /// The live dot breathes via [KvBreath] (§8 v2.2) — a self-animated sine,
-/// honest under DS-1: it stops the moment the link stops being live, and
+/// honest under BG-8: it stops the moment the link stops being live, and
 /// freezes to a static dot under reduced motion. The beacon itself stays
 /// value-driven and stateless so widget tests drive it directly.
 class StatusBeacon extends StatelessWidget {
@@ -123,10 +123,10 @@ class StatusBeacon extends StatelessWidget {
       // The age WITHOUT the "as of" framing, and that is a layout invariant,
       // not a copy preference (ux-auditor, 2026-08-24 fix wave). Once the
       // header made this pill yield so the Settings gear could survive a
-      // squeeze (F5), the pill is the child that gets ellipsized — and DS-1
+      // squeeze (F5), the pill is the child that gets ellipsized — and BG-8
       // requires stale to be dimming PLUS a visible age. At 320 dp / textScale
       // 1.30 the old 14-character label was cut to `as of…`, losing the one
-      // thing DS-1 asks for; the 8-character form fits every geometry the F5
+      // thing BG-8 asks for; the 8-character form fits every geometry the F5
       // table covers. `NetworkSheet` keeps the fuller phrasing — it is the
       // detail surface and has the room.
       BeaconState.stale => (

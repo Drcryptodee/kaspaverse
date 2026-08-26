@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/tokens.dart';
 
 /// The quiet emblem of a custody surface (onboarding, locked, enroll): an
-/// icon on a dim `primary-muted` disc. Vault-calm by construction (DS-5) — a
+/// icon on a dim `primary-muted` disc. Vault-calm by construction (BG-9) — a
 /// tinted disc, not a glow effect (§3 rations glow to primary actions and
 /// live data). Decorative: excluded from semantics; the heading beside it
 /// carries the meaning.

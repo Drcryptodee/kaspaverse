@@ -32,7 +32,7 @@ final BigInt _sompiPerKas = BigInt.from(100000000);
 /// Split a non-negative `sompi` balance into KAS display parts: a
 /// thousands-grouped integer and the 8-digit fractional remainder.
 ///
-/// **Floors toward zero — never rounds a balance up** (DS-2): a user must never
+/// **Floors toward zero — never rounds a balance up** (BG-5): a user must never
 /// see more spendable than they hold. e.g. `199999999` → `("1", "99999999")`,
 /// `0` → `("0", "00000000")`.
 ({String integer, String fraction}) kasParts(BigInt sompi) {
@@ -44,7 +44,7 @@ final BigInt _sompiPerKas = BigInt.from(100000000);
 /// Trim trailing zeros from an 8-digit KAS fraction, keeping at least [min]
 /// digits — the §5 feeds/lists rule (`"50000000"` → `"50"`, `"00000000"` →
 /// `"00"`). **Never** used on a signing surface: there the full 8 digits are
-/// the truth at the moment of commitment (DS-2/DS-3).
+/// the truth at the moment of commitment (BG-5/BG-6).
 String trimFraction(String fraction, {int min = 2}) {
   var end = fraction.length;
   while (end > min && fraction[end - 1] == '0') {
@@ -54,7 +54,7 @@ String trimFraction(String fraction, {int min = 2}) {
 }
 
 /// Parse a user-typed KAS amount into sompi (`BigInt`) — the inverse of
-/// [kasParts], for the send screen (DS-2). **String math only, never a
+/// [kasParts], for the send screen (BG-5). **String math only, never a
 /// `double`** (custody: a float can't represent 8-decimal sompi exactly).
 ///
 /// Returns `null` for anything not a clean non-negative amount: empty, signs,
@@ -78,7 +78,7 @@ BigInt? sompiFromKas(String input) {
   return whole * _sompiPerKas + frac;
 }
 
-/// Group an address payload in fours for a full-form review (DS-8): keep the
+/// Group an address payload in fours for a full-form review (BG-15): keep the
 /// `kaspa:` prefix intact (never spend the review budget on it), space the
 /// payload every 4 chars so it can be read/compared aloud. Full address — no
 /// truncation (this is the confirm-the-recipient surface).
@@ -94,7 +94,7 @@ String chunkAddress(String address) {
   return buffer.toString();
 }
 
-/// Compact, payload-aware address form for non-actionable contexts (DS-8): keep
+/// Compact, payload-aware address form for non-actionable contexts (BG-15): keep
 /// the `kaspa:` scheme intact, then first 8 + `…` + last 8 of the *payload*. The
 /// distinguishing entropy lives in the payload, so we spend the truncation
 /// budget there and never on `kaspa:q…` — eliding the scheme would leave

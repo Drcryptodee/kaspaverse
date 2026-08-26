@@ -82,7 +82,7 @@ class SettingsStatus {
   const SettingsStatus(this.text, {this.tone = SettingsTone.active})
     : address = null;
 
-  /// A Kaspa address, rendered through [AddressText] — the DS-8 compact form
+  /// A Kaspa address, rendered through [AddressText] — the BG-15 compact form
   /// (scheme tertiary, payload mono) with the §11 spoken label. Identity is
   /// mono-for-trust (§4) and must not be hand-formatted in a row.
   const SettingsStatus.address(String this.address)
@@ -488,7 +488,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   // ── row actions ──────────────────────────────────────────────────────────
 
   /// Merge coins: prepare in Rust, then hand the summary to the ONE signing
-  /// surface — the same anti-blind-signing sheet every send uses (B7, DS-3).
+  /// surface — the same anti-blind-signing sheet every send uses (B7, BG-6).
   /// A refusal ("nothing to merge", dust beneath the fee) lands as the row's
   /// own status line, in Rust's honest words.
   Future<void> _runMergeCoins() async {
@@ -704,7 +704,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     // The whole fingerprint, in the form `apksigner verify --print-certs`
     // prints, so a user comparing an install against a published value is
     // comparing like with like. Public data — selecting and copying is fine
-    // here (the no-clipboard law is DS-7, and it is about seeds).
+    // here (the no-clipboard law is BG-10, and it is about seeds).
     final full = _fullSignature;
     _showSheet(
       title: 'App signature',
@@ -943,7 +943,7 @@ class _Row extends StatelessWidget {
                         valueListenable: row.status!,
                         builder: (context, value, _) {
                           // Nothing rendered until there IS something. A `—`
-                          // means *unknown datum* (DS-1); an action row that has
+                          // means *unknown datum* (BG-8); an action row that has
                           // simply not been run yet has no datum to be unknown
                           // about (ux-auditor, Track 2).
                           if (value == null) return const SizedBox.shrink();
@@ -952,7 +952,7 @@ class _Row extends StatelessWidget {
                             padding: const EdgeInsets.only(top: KvSpace.xs),
                             child: address != null
                                 // Identity goes through the DS widget: compact
-                                // DS-8 form, mono payload, §11 spoken label.
+                                // BG-15 form, mono payload, §11 spoken label.
                                 ? AddressText(
                                     address,
                                     style: theme.textTheme.labelSmall,

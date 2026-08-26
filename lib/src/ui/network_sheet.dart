@@ -64,7 +64,7 @@ class NetworkSheet extends StatefulWidget {
       // Without this the height is capped at 9/16 of the screen, and this sheet
       // overflowed by 15 px at default text scale on a 411×731 phone — at 1.3×
       // the Reconnect button laid out below the screen edge (deleting C4's
-      // manual kick) and the DS-6 sovereignty line rendered entirely off it.
+      // manual kick) and the BG-16 sovereignty line rendered entirely off it.
       //
       // The defect predates the extraction and travelled with the file, which is
       // the lesson: moving a private surface into a shared one gives its unfixed

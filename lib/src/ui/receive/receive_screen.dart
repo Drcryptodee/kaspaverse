@@ -51,7 +51,7 @@ class _ReceiveBody extends StatelessWidget {
   final String address;
 
   Future<void> _copy(BuildContext context) async {
-    // Copy the FULL string (DS-8) — never the truncated compact form. The
+    // Copy the FULL string (BG-15) — never the truncated compact form. The
     // confirmation stays neutral (§3: success is rationed to chain events).
     KvHaptic.selection();
     await Clipboard.setData(ClipboardData(text: address));
@@ -90,9 +90,9 @@ class _ReceiveBody extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('Your address', style: theme.textTheme.labelLarge),
+                Text('YOUR ADDRESS', style: theme.textTheme.labelLarge),
                 const SizedBox(height: KvSpace.s),
-                // Glanceable identity (DS-8 compact); the full form below is
+                // Glanceable identity (BG-15 compact); the full form below is
                 // the character-by-character verification surface.
                 Center(
                   child: AddressText(address, style: theme.textTheme.bodyLarge),
@@ -117,7 +117,7 @@ class _ReceiveBody extends StatelessWidget {
   }
 }
 
-/// The full address chunked in fours (DS-8 confirm form), selectable so it can
+/// The full address chunked in fours (BG-15 confirm form), selectable so it can
 /// also be copied by hand and compared against the source.
 class _FullAddress extends StatelessWidget {
   const _FullAddress({required this.address});

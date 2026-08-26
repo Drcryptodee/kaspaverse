@@ -15,7 +15,7 @@ import 'widgets/kv_loader.dart';
 /// it is not one of the §0.6 FLAG_SECURE secret screens; the passphrase
 /// ceremony (with its FLAG_SECURE + a11y refusal) is P1.4.
 ///
-/// Vault-calm throughout (DS-5): decelerate motion, no celebration, no
+/// Vault-calm throughout (BG-9): decelerate motion, no celebration, no
 /// exclamation. The unlock callbacks are injected so the surface tests without
 /// a platform channel.
 class UnlockSurface extends StatefulWidget {

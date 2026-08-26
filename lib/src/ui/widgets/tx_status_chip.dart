@@ -66,15 +66,15 @@ TxChipState chipStateOfAcceptance(TxStatusKind? kind) {
 ///
 /// - **pending** — quiet `textTertiary`, dot breathing via [KvBreath] (§8
 ///   v2.2 — self-animated sine; the breath stops the instant the state
-///   resolves — DS-1-honest attention guidance).
+///   resolves — BG-8-honest attention guidance).
 /// - **accepted** — `success` (the chain accepted it; on Kaspa this IS the
-///   user-meaningful confirmation, DS-3).
+///   user-meaningful confirmation, BG-6).
 /// - **stalled** — `warning`, steady: degraded is not "in progress". Amber is
 ///   re-rationed here from the old Pending label (semantic scarcity, §3).
 /// - **none** — the chip dissolves; a settled row stays quiet.
 ///
 /// State changes crossfade at `fast`; the dissolve to quiet takes `normal`.
-/// Vault register throughout: decelerate-only, no celebration (DS-5).
+/// Vault register throughout: decelerate-only, no celebration (BG-9).
 class TxStatusChip extends StatelessWidget {
   const TxStatusChip({super.key, required this.state, this.confirmations});
 

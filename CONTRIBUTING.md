@@ -75,7 +75,7 @@ reviewers. The tier of a change is the highest tier of anything it touches.
 | T3 | keys, vault, FFI surface, contracts, deps | FFI-leak + wallet-security + consensus + dependency-steward |
 
 Reviews issue **PASS / CONCERNS / BLOCK** verdicts citing invariant (`INV-`) and
-design-system (`DS-`) numbers — run against five internal domain-audit checklists
+design-law (`BG-`) numbers — run against five internal domain-audit checklists
 (consensus, wallet-security, FFI-leak, dependency-steward, UX). An absent mandated verdict
 blocks the merge.
 

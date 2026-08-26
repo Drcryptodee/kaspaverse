@@ -126,7 +126,7 @@ String unlockFailureCopy(String code) => switch (code) {
 
 /// The trailing label for a biometric row: on, off, or the reason it cannot be.
 ///
-/// The unknown arm is an em dash, not "Unavailable". DS-1 gives three honest
+/// The unknown arm is an em dash, not "Unavailable". BG-8 gives three honest
 /// states and *unknown* is one of them — asserting "Unavailable" would state a
 /// platform fact the app has just admitted it cannot determine, and would
 /// contradict [biometricUnavailableCopy], which says "the wallet can't tell" for
@@ -159,7 +159,7 @@ bool biometricStateIsDegraded(String status) =>
 /// The app could not determine whether Path A is available.
 const String biometricUnknown = 'unknown';
 
-/// An unknown status is neither healthy nor degraded — it is DS-1's third state,
+/// An unknown status is neither healthy nor degraded — it is BG-8's third state,
 /// and rendering its `—` in the healthy-active teal would give it the same voice
 /// as "On" (ux-auditor, Track 2).
 bool biometricStateIsUnknown(String status) => status == biometricUnknown;

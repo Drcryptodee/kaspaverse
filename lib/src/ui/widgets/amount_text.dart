@@ -9,21 +9,21 @@ import '../theme/tokens.dart';
 /// (`bodyLarge`). All three slots are mono + tabular already.
 enum AmountRole { hero, screen, row }
 
-/// DS-2 money anatomy: the integer part at full role size in `text-primary`,
+/// BG-5 money anatomy: the integer part at full role size in `text-primary`,
 /// the fraction + `" KAS"` at ~70% in `text-secondary`, sharing the baseline.
 /// Mono + tabular figures (from the theme) so digits never jiggle as a value
 /// ticks.
 ///
-/// - `null` sompi renders the DS-1 **unknown** `—` (never a fake `0`).
+/// - `null` sompi renders the BG-8 **unknown** `—` (never a fake `0`).
 /// - A real value — including `0` — renders a live zero (a synced empty
 ///   wallet is `0.00…`, never unknown).
 /// - **Precision** (§5): rows trim trailing zeros to ≥2 decimals (feeds rule);
 ///   hero/screen show all 8. `exact: true` forces the full 8 anywhere — every
-///   signing surface uses it (DS-2: the full truth at commitment).
+///   signing surface uses it (BG-5: the full truth at commitment).
 /// - **Floors toward zero** (via [kasParts]) — never rounds a balance up.
 /// - [prefix] renders a direction sign (`+`/`−`) inside the amount so the
 ///   semantics label speaks it too; direction is never colour-only (§11).
-/// - `stale` dims to `opacity-stale` (DS-1; the freshness age lives on the
+/// - `stale` dims to `opacity-stale` (BG-8; the freshness age lives on the
 ///   beacon, as with the shipped scores).
 class AmountText extends StatelessWidget {
   const AmountText(
@@ -64,7 +64,7 @@ class AmountText extends StatelessWidget {
 
     final Widget content;
     if (sompi == null) {
-      // DS-1 unknown — never a fabricated zero.
+      // BG-8 unknown — never a fabricated zero.
       content = Text(
         '—',
         maxLines: 1,
@@ -91,7 +91,7 @@ class AmountText extends StatelessWidget {
     }
 
     // Hero/screen amounts never wrap or ellipsize — they scale down to fit
-    // (DS-2; the shipped score-tile pattern). Rows stay at their fixed size.
+    // (BG-5; the shipped score-tile pattern). Rows stay at their fixed size.
     final laidOut = role == AmountRole.row
         ? content
         : FittedBox(

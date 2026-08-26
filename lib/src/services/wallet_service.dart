@@ -39,7 +39,7 @@ class WalletService {
   /// sibling of [utxoIndexMissing] — same honest-degrade job, different cause.
   final ValueNotifier<bool> discoveryIncomplete = ValueNotifier(false);
 
-  /// Balances in sompi ([BigInt], L3). `null` until the first sync (DS-1
+  /// Balances in sompi ([BigInt], L3). `null` until the first sync (BG-8
   /// unknown `—`); then a real value — `BigInt.zero` for an empty wallet is a
   /// live zero, never unknown.
   final ValueNotifier<BigInt?> mature = ValueNotifier(null);
@@ -52,7 +52,7 @@ class WalletService {
   /// Last bridge/stream error message, null while healthy.
   final ValueNotifier<String?> error = ValueNotifier(null);
 
-  /// Wall-clock of the last synced balance — the freshness clock (DS-1); null
+  /// Wall-clock of the last synced balance — the freshness clock (BG-8); null
   /// until the first balance.
   final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
 
