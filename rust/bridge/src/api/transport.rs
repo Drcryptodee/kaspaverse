@@ -4023,7 +4023,7 @@ async fn prepare_transport_send(
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
 
-    let priority_len = priority.len();
+    let priority_len = confinement_ceiling(&priority);
     let priority = match pin {
         PinPolicy::Default => priority,
         // Sort input[0] toward what the indexer can attribute (see `PinPolicy`).
@@ -4116,6 +4116,20 @@ async fn prepare_transport_send(
         .unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
 
     Ok(project_signable(nonce, kind, &summary, Some(payload_kind)))
+}
+
+/// The SOURCE-CONFINEMENT ceiling: how many of the caller's pinned coins can
+/// actually PIN. `prepare_send_pinned` withholds covenant-bound coins before
+/// building (D-211's `pinned_priority_or_refuse`), so a ceiling taken on the
+/// raw set would be inflated by covenant dust on the bound address and let a
+/// draw BEYOND the pin — a neighbour conversation's coin — pass as confined
+/// (closure-audit F-1, wallet-security re-dispatch; L129: measure on the same
+/// side of a filter as the thing the measurement governs).
+fn confinement_ceiling(priority: &[UtxoEntryReference]) -> usize {
+    priority
+        .iter()
+        .filter(|entry| !kaspaverse_chain::is_covenant_bound(entry))
+        .count()
 }
 
 /// The flow mode a stashed intent describes — RUST's knowledge, carried on
@@ -6427,6 +6441,24 @@ fn to_dto(event: TransportEvent) -> TransportEventDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The confinement ceiling counts only coins that can actually PIN
+    /// (closure-audit F-1 / L129): covenant dust on the bound address must
+    /// never raise the ceiling the built chain is judged against, or a draw
+    /// beyond the pin passes as confined.
+    #[test]
+    fn confinement_ceiling_ignores_covenant_dust() {
+        let free = UtxoEntryReference::simulated(1_000);
+        let mut cov_utxo = (*UtxoEntryReference::simulated(5_000).utxo).clone();
+        cov_utxo.covenant_id = Some(cov_utxo.outpoint.transaction_id());
+        let cov = UtxoEntryReference::from(cov_utxo);
+        assert_eq!(confinement_ceiling(std::slice::from_ref(&free)), 1);
+        assert_eq!(
+            confinement_ceiling(&[free, cov]),
+            1,
+            "covenant dust never raises the confinement ceiling"
+        );
+    }
 
     /// FLOOR BEFORE BUMP. This ordering BLOCKED twice in one sitting and was
     /// argued in four paragraphs of prose with nothing asserting it.

@@ -1327,6 +1327,14 @@ impl WalletEngine {
             // Name the real cause when a withholding line is what emptied the
             // offer (counts only, never an address) — and never mislabel a
             // contract coin as a conversation's.
+            // The tail clause states what the rest actually IS — a lone coin
+            // or nothing at all (closure-audit F-5: "the rest is already one
+            // coin" was false at an empty offer).
+            let rest = if included.is_empty() {
+                "and nothing else is spendable"
+            } else {
+                "and the rest is already one coin"
+            };
             return Err(ChainError::Message(
                 match (excluded_count, covenant_count) {
                     (0, 0) => {
@@ -1334,16 +1342,15 @@ impl WalletEngine {
                     }
                     (r, 0) => format!(
                         "nothing to merge — {r} coin(s) stay reserved \
-                     for your conversations, and the rest is already one coin"
+                     for your conversations, {rest}"
                     ),
                     (0, c) => format!(
                         "nothing to merge — {c} coin(s) are locked in contracts and \
-                     move only through their own paths, and the rest is already one coin"
+                     move only through their own paths, {rest}"
                     ),
                     (r, c) => format!(
                         "nothing to merge — {r} coin(s) stay reserved for your \
-                     conversations and {c} are locked in contracts, and the rest \
-                     is already one coin"
+                     conversations and {c} are locked in contracts, {rest}"
                     ),
                 },
             ));
@@ -2051,13 +2058,8 @@ fn probe_context(
     loop {
         match generator.generate_transaction() {
             Ok(Some(tx)) => {
-                // A probe that could only build by drawing a covenant-bound
-                // coin is advertising an amount the fenced real send refuses
-                // (D-211, consensus-audit CONCERNS-1): classify it TooLarge —
-                // the free coins ran out, which is exactly what that outcome
-                // means.
-                if covenant_fence(std::slice::from_ref(&tx)).is_err() {
-                    return Ok(ProbeOutcome::TooLarge);
+                if let Some(outcome) = probe_classify(&tx) {
+                    return Ok(outcome);
                 }
                 continue;
             }
@@ -2065,6 +2067,18 @@ fn probe_context(
             Err(e) => return probe_error(e),
         }
     }
+}
+
+/// A probe that could only build by drawing a covenant-bound coin is
+/// advertising an amount the fenced real send refuses (D-211,
+/// consensus-audit CONCERNS-1): classify it TooLarge — the free coins ran
+/// out, which is exactly what that outcome means. `None` = keep probing.
+/// Pinned by test (closure-audit F-4).
+fn probe_classify(tx: &PendingTransaction) -> Option<ProbeOutcome> {
+    if covenant_fence(std::slice::from_ref(tx)).is_err() {
+        return Some(ProbeOutcome::TooLarge);
+    }
+    None
 }
 
 /// Map a generation error onto a probe outcome (or a real failure).
@@ -2612,6 +2626,36 @@ mod tests {
             }
             other => panic!("expected CovenantBoundInput, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn free_balance_never_counts_covenant_coins() {
+        // Closure-audit F-4: the advertised bound and the fenced send must
+        // agree — a maximum that counts covenant value is a number the real
+        // send refuses.
+        let entries = vec![
+            UtxoEntryReference::simulated(kaspa_to_sompi(5.0)),
+            covenant_entry(9.0),
+        ];
+        assert_eq!(free_balance(&entries, &[]), kaspa_to_sompi(5.0));
+    }
+
+    #[test]
+    fn a_probe_chain_that_drew_a_covenant_coin_classifies_too_large() {
+        // Closure-audit F-4: pin the probe arm. Same leak shape as the fence
+        // test — priority covenant-free, free coins insufficient, the
+        // covenant coin drawn from the iterator — and the probe must report
+        // TooLarge, never Builds.
+        let pool = vec![
+            covenant_entry(100.0),
+            UtxoEntryReference::simulated(kaspa_to_sompi(0.2)),
+        ];
+        let order = crate::spend_policy::select_spend_priority(&pool, &[], 0, &[]);
+        let generator = offline_generator_over(&pool, order, 50.0, addr(CHANGE));
+        let pending = drain(&generator);
+        assert!(pending
+            .iter()
+            .any(|tx| matches!(probe_classify(tx), Some(ProbeOutcome::TooLarge))));
     }
 
     /// The complement: a clean chain passes the fence untouched.

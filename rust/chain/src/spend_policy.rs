@@ -127,7 +127,7 @@ pub(crate) fn is_reserved(entry: &UtxoEntryReference, exclude: &[Address]) -> bo
 /// layer (`send.rs`'s `covenant_fence`) refuses any BUILT chain that drew one
 /// through the context iterator behind the priority list, which the order
 /// alone cannot prevent (generator.rs:588-614 @ `cfafeb4`).
-pub(crate) fn is_covenant_bound(entry: &UtxoEntryReference) -> bool {
+pub fn is_covenant_bound(entry: &UtxoEntryReference) -> bool {
     entry.utxo.covenant_id.is_some()
 }
 
