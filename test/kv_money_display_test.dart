@@ -41,13 +41,26 @@ TextStyle _styleOf(WidgetTester tester, String text) =>
 void main() {
   group('KvAmount — BG-5 money', () {
     testWidgets('unknown is `—`, never a fabricated zero', (tester) async {
+      final semantics = tester.ensureSemantics();
       await tester.pumpWidget(_host(const KvAmount(null)));
       expect(find.text('—'), findsOneWidget);
       expect(_styleOf(tester, '—').color, KvColor.inkDim);
-      expect(
-        tester.widget<Text>(find.text('—')).semanticsLabel,
-        'amount unknown',
+      // **The unit stays.** A bare dash at hero size is a small glyph adrift in
+      // a 48dp line box, and on glass it read as a rendering glitch rather than
+      // as an unknown balance (founder, device sitting). `— KAS` is a value
+      // nobody has yet; `—` alone is a mark.
+      expect(find.text('KAS'), findsOneWidget);
+      expect(find.bySemanticsLabel('balance unknown'), findsOneWidget);
+      semantics.dispose();
+
+      // A row carries no unit — the column it sits in does — so the dash is
+      // alone there and that is correct.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        _host(const KvAmount(null, role: KvAmountRole.row)),
       );
+      expect(find.text('—'), findsOneWidget);
+      expect(find.text('KAS'), findsNothing);
     });
 
     testWidgets('a real zero is a real zero', (tester) async {
@@ -80,6 +93,31 @@ void main() {
         expect(find.text('.5027'), findsOneWidget);
       },
     );
+
+    testWidgets('the floor never erases a balance that exists', (tester) async {
+      // 5,000 sompi. Floored to four decimals this is `0.0000` — the exact
+      // glyphs a real zero gets, so a wallet holding dust would read as a
+      // wallet holding nothing. Reachable at the pin only through a legacy
+      // pre-KIP-9 UTXO or a coinbase (`STORAGE_MASS_PARAMETER` puts any
+      // post-Crescendo output above it), which is narrow — and "narrow" is not
+      // one of BG-5's exemptions (`consensus-auditor`, UX-2).
+      await tester.pumpWidget(_host(KvAmount(BigInt.from(5000))));
+      expect(find.text('0'), findsOneWidget);
+      expect(find.text('.00005'), findsOneWidget);
+      expect(find.text('.0000'), findsNothing);
+
+      // The boundary: one sompi over the floor keeps the floor, because four
+      // decimals still carry the money.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(_host(KvAmount(BigInt.from(10001))));
+      expect(find.text('.0001'), findsOneWidget);
+
+      // And a real zero is still a real zero — the lift is for balances that
+      // EXIST, never a licence to pad one that does not.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(_host(KvAmount(BigInt.zero)));
+      expect(find.text('.0000'), findsOneWidget);
+    });
 
     testWidgets('a row trims to two, a signing surface shows all eight', (
       tester,

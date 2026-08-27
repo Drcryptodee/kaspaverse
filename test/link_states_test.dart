@@ -5,16 +5,50 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
+import 'package:kaspaverse/src/ui/network_sheet.dart';
+import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
-import 'package:kaspaverse/src/ui/widgets/status_beacon.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
 /// C7 (D-091 ruling 1) — the honest link states, ON GLASS.
 ///
 /// [evaluateBeacon]'s truth table is unit-tested in `status_beacon_test.dart`;
-/// this file proves the three states are actually *distinguishable to a user*
-/// and that a Reconnect tap is acknowledged in the frame after the tap.
+/// this file proves the states are actually *distinguishable to a user* and
+/// that a Reconnect tap is acknowledged in the frame after the tap.
+///
+/// **UX-2 moved the surfaces these assertions ride on, and nothing else.** The
+/// home beacon is retired: its green-for-healthy was the call site BG-7 took
+/// away (§9.3 register item 2). The link now speaks through the money plate's
+/// **trust line** — which is silent when the link is live, because a standing
+/// "fine" beside a permanently animating meter reports that nothing changed,
+/// twice (D-192) — and through the **network chip's lamp**, which carries the
+/// good news on its own. The Reconnect action moved with the chip's
+/// destination, onto the node surface. The C7/C4 bars are unchanged; only
+/// where you look for them is.
 void main() {
+  NodeScope nodeScope({
+    required ValueListenable<bool> connected,
+    required ValueListenable<DateTime?> lastUpdate,
+    ValueListenable<bool>? searching,
+    ValueListenable<bool>? osOffline,
+    ValueListenable<bool>? reconnecting,
+    Future<void> Function()? onReconnect,
+  }) => NodeScope(
+    connected: connected,
+    activeEndpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
+    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
+    pinnedNode: ValueNotifier<String?>(null),
+    pinDropped: ValueNotifier<bool>(false),
+    setPinnedNode: (_) async {},
+    lastUpdate: lastUpdate,
+    searching: searching,
+    osOffline: osOffline,
+    reconnecting: reconnecting,
+    onReconnect: onReconnect,
+  );
+
   Widget host({
     required ValueListenable<bool> connected,
     required ValueListenable<DateTime?> lastUpdate,
@@ -24,12 +58,12 @@ void main() {
     ValueListenable<DateTime?>? disconnectedAt,
     ValueListenable<bool>? reconnecting,
     Future<void> Function()? onReconnect,
+    bool withNode = true,
   }) => MaterialApp(
     theme: kvDarkTheme(),
     home: HomeScreen(
       chain: ChainScope(
         connected: connected,
-        endpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
         virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
         error: ValueNotifier<String?>(null),
         lastUpdate: lastUpdate,
@@ -37,7 +71,16 @@ void main() {
         osOffline: osOffline,
         disconnectedAt: disconnectedAt,
         reconnecting: reconnecting,
-        onReconnect: onReconnect,
+        node: withNode
+            ? nodeScope(
+                connected: connected,
+                lastUpdate: lastUpdate,
+                searching: searching,
+                osOffline: osOffline,
+                reconnecting: reconnecting,
+                onReconnect: onReconnect,
+              )
+            : null,
       ),
       wallet: WalletScope(
         mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
@@ -50,32 +93,63 @@ void main() {
     ),
   );
 
-  group('StatusBeacon — three distinguishable truths (C7)', () {
-    Future<void> pumpBeacon(WidgetTester tester, BeaconState state) =>
-        tester.pumpWidget(
-          MaterialApp(
-            theme: kvDarkTheme(),
-            home: Scaffold(
-              body: StatusBeacon(state: state, error: null, age: null),
-            ),
-          ),
-        );
+  /// **The chip's lamp is the standing link indicator** (founder call,
+  /// 2026-08-27, amending BG-7's D-200 narrowing — see `_NetworkChip`'s doc).
+  ///
+  /// Read from the FIRST lamp on the screen, which is the chip's: it is
+  /// rendered before the trust line's. Asserting the tone rather than a
+  /// presence is what catches the P0.3 shape — a lamp that reads live beside
+  /// words that say the link is gone.
+  bool linkReadsLive(WidgetTester tester) =>
+      tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone ==
+      KvLampTone.ok;
 
-    testWidgets('each state wears its own words', (tester) async {
-      await pumpBeacon(tester, BeaconState.offline);
-      expect(find.text('phone offline'), findsOneWidget);
+  group('the money plate — distinguishable truths (C7)', () {
+    testWidgets('each state wears its own words, and health is silent', (
+      tester,
+    ) async {
+      final now = DateTime(2026, 7, 30, 0, 53);
+      final connected = ValueNotifier<bool>(true);
+      final searching = ValueNotifier<bool>(false);
+      final osOffline = ValueNotifier<bool>(false);
 
-      await pumpBeacon(tester, BeaconState.connecting);
-      expect(find.text('finding a node…'), findsOneWidget);
+      await tester.pumpWidget(
+        host(
+          connected: connected,
+          lastUpdate: ValueNotifier<DateTime?>(now),
+          searching: searching,
+          osOffline: osOffline,
+          clock: () => now,
+        ),
+      );
 
-      await pumpBeacon(tester, BeaconState.connected);
+      // Live: the trust line says NOTHING. Silence is the healthy state
+      // (D-192) — the chip's lamp is the whole report.
+      expect(find.textContaining('finding a node…'), findsNothing);
+      expect(find.textContaining('phone offline'), findsNothing);
+      expect(linkReadsLive(tester), isTrue);
       expect(find.text('Mainnet'), findsOneWidget);
 
-      // No two states share a label — colour is never the only signal (§11),
-      // and here the words alone carry the whole truth.
-      await pumpBeacon(tester, BeaconState.offline);
-      expect(find.text('finding a node…'), findsNothing);
-      expect(find.text('Mainnet'), findsNothing);
+      connected.value = false;
+      searching.value = true;
+      await tester.pump();
+      expect(find.textContaining('finding a node…'), findsOneWidget);
+      expect(linkReadsLive(tester), isFalse);
+
+      osOffline.value = true;
+      await tester.pump();
+      expect(find.textContaining('phone offline — no network'), findsOneWidget);
+      // No two states share a label — colour is never the only signal, and
+      // here the words alone carry the whole truth.
+      expect(find.textContaining('finding a node…'), findsNothing);
+      expect(linkReadsLive(tester), isFalse);
+
+      // The network's NAME is not its health. The chip says Mainnet through
+      // every one of these and reports none of them — it is a door, and the
+      // trust line is the indicator.
+      expect(find.text('Mainnet'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
     });
   });
 
@@ -103,15 +177,21 @@ void main() {
         ),
       );
 
-      expect(find.text('finding a node…'), findsOneWidget);
-      // The stale phrasing, in the form the CHIP now uses — the beacon dropped
-      // the "as of" framing so the age survives a narrow header (ux-auditor,
-      // 2026-08-24). Asserting the old string here would have quietly become
-      // vacuous: nothing renders it any more, so it could never be found.
-      expect(find.text('20 s ago'), findsNothing);
-      expect(find.textContaining('ago'), findsNothing);
+      // C7's ruling, kept exactly: the hunt is what the sentence SAYS, and the
+      // age is a clause under it. A bare "as of 20 s ago" reads as *connected,
+      // data slightly stale* — the opposite of the truth — and that is the
+      // defect this test was written for. The age still has to be there, or a
+      // balance dimmed to 45% has no age beside it at all (BG-8).
+      final said = tester
+          .widget<Text>(find.textContaining('finding a node…'))
+          .data!;
+      expect(said, startsWith('finding a node…'));
+      expect(said, contains('last update 20 s ago'));
+      // Motion means something is happening, and a hunt IS something
+      // happening — the meter is the tell that separates searching from dead.
+      expect(tester.widget<KvCadence>(find.byType(KvCadence)).running, isTrue);
 
-      await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
+      await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('the OS-offline truth names the phone', (tester) async {
@@ -130,8 +210,8 @@ void main() {
         ),
       );
 
-      expect(find.text('phone offline'), findsOneWidget);
-      expect(find.text('finding a node…'), findsNothing);
+      expect(find.textContaining('phone offline — no network'), findsOneWidget);
+      expect(find.textContaining('finding a node…'), findsNothing);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -154,7 +234,7 @@ void main() {
           clock: () => now,
         ),
       );
-      expect(find.text('Mainnet'), findsOneWidget);
+      expect(linkReadsLive(tester), isTrue);
 
       // The socket blips: dropped, and the race is already hunting.
       connected.value = false;
@@ -163,47 +243,88 @@ void main() {
       now = now.add(const Duration(seconds: 1));
       await tester.pump(const Duration(seconds: 1)); // the freshness ticker
       expect(
-        find.text('Mainnet'),
-        findsOneWidget,
+        linkReadsLive(tester),
+        isTrue,
         reason: 'sub-2 s churn is noise, not information (item 16)',
       );
+      expect(find.textContaining('finding a node…'), findsNothing);
 
       // It stays down: honesty takes over once the hold expires.
       now = now.add(const Duration(seconds: 2));
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text('finding a node…'), findsOneWidget);
-      expect(find.text('Mainnet'), findsNothing);
+      expect(find.textContaining('finding a node…'), findsOneWidget);
+      expect(linkReadsLive(tester), isFalse);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a stale link wears its age, and the meter freezes', (
+      tester,
+    ) async {
+      // BG-8's whole demand in one frame: dimmed cached truth, a VISIBLE age,
+      // and a meter that is not pretending to work. A frozen cadence beside a
+      // dimmed number is what "the link died" looks like; a running one would
+      // say a hunt is under way, which would be a lie here.
+      var now = DateTime(2026, 7, 30, 0, 53);
+      final connected = ValueNotifier<bool>(false);
+
+      await tester.pumpWidget(
+        host(
+          connected: connected,
+          lastUpdate: ValueNotifier<DateTime?>(
+            now.subtract(const Duration(seconds: 20)),
+          ),
+          searching: ValueNotifier<bool>(false),
+          disconnectedAt: ValueNotifier<DateTime?>(
+            now.subtract(const Duration(seconds: 20)),
+          ),
+          clock: () => now,
+        ),
+      );
+      now = now.add(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('as of 21 s ago'), findsOneWidget);
+      expect(
+        tester.widget<KvCadence>(find.byType(KvCadence)).running,
+        isFalse,
+        reason: 'nothing is happening, so nothing may look like it is',
+      );
 
       await tester.pumpWidget(const SizedBox());
     });
   });
 
-  group('the network sheet acknowledges the tap (C7, ≤200 ms bar)', () {
+  group('the node surface acknowledges the tap (C7, ≤200 ms bar)', () {
     // Roomy surface, deliberately: widget tests render in a fallback font
     // whose glyphs are square em-boxes, so every label measures far wider
     // than on a device. Real phone geometry is proven on the device, not
-    // here; this window just keeps the sheet's button inside the hit-test
-    // area so the ACK — the thing under test — is what gets measured.
+    // here; this window just keeps the button inside the hit-test area so the
+    // ACK — the thing under test — is what gets measured.
     void roomySurface(WidgetTester tester) {
       tester.view.physicalSize = const Size(2000, 1400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
     }
 
-    // Never pumpAndSettle in this group: the freshness ticker and KvBreath are
-    // deliberately never-ending, so "settled" never arrives. Two pumps — the
-    // first starts the route's ticker (elapsed 0), the second carries it past
-    // the 250 ms entrance.
-    Future<void> openSheet(WidgetTester tester, String beaconLabel) async {
-      // The beacon is the only way in — the power-user detail lives behind it
-      // (§12). No new entry point was added for C7 (INV-12).
-      await tester.tap(find.text(beaconLabel));
+    // Never pumpAndSettle in this group: the freshness ticker and a hunting
+    // cadence are deliberately never-ending, so "settled" never arrives.
+    Future<void> openNode(WidgetTester tester) async {
+      // One frame for the pinned plate to report its measured extent. Before
+      // it does, the header is the 1dp bootstrap and the chip is not where a
+      // finger would find it — invisible to a user behind the entrance fade,
+      // but a tap dispatched inside that frame would miss.
+      await tester.pump();
+      // The network chip is the money screen's only door to the node surface
+      // (D-191/D-206) — asserted end to end rather than assumed, because a
+      // surface nobody can reach is the defect this whole line exists to fix.
+      await tester.tap(find.text('Mainnet'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Network'), findsOneWidget);
+      expect(find.text('Node & connection'), findsOneWidget);
     }
 
-    testWidgets('one frame after the tap the sheet is visibly busy', (
+    testWidgets('one frame after the tap the surface is visibly busy', (
       tester,
     ) async {
       roomySurface(tester);
@@ -228,13 +349,8 @@ void main() {
         ),
       );
 
-      await openSheet(tester, 'Mainnet');
+      await openNode(tester);
       expect(find.text('Reconnect'), findsOneWidget);
-      expect(
-        find.text('waiting for first block…'),
-        findsOneWidget,
-        reason: 'link up, no status yet — the honest pre-first-block line',
-      );
 
       await tester.tap(find.text('Reconnect'));
       await tester.pump(); // exactly ONE frame after the tap
@@ -243,22 +359,19 @@ void main() {
         findsOneWidget,
         reason: 'the tap is acknowledged in the next frame, backend or not',
       );
-      expect(find.byType(KvLoader), findsWidgets);
 
       tapped.complete();
       await tester.pump();
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('mid-hunt the button reads busy AND stays kickable', (
+    testWidgets('mid-hunt the button reads busy, and the words agree', (
       tester,
     ) async {
       // The R1 sheet drove the busy label off `reconnecting` alone, which
       // clears the instant the race is spawned — so a real 14–28 s hunt
       // rendered a button reading "Reconnect", idle-looking, for its whole
-      // duration. The busy state must last as long as the search does; the
-      // button must nonetheless stay tappable, because a tap mid-hunt IS
-      // C4's kick.
+      // duration. The busy state must last as long as the search does.
       roomySurface(tester);
       final now = DateTime(2026, 7, 30, 0, 53);
       var kicks = 0;
@@ -278,11 +391,13 @@ void main() {
         ),
       );
 
-      await openSheet(tester, 'finding a node…');
+      expect(find.textContaining('finding a node…'), findsOneWidget);
+      await openNode(tester);
       expect(
-        find.text('finding a node…'),
-        findsWidgets,
-        reason: 'the sheet must not disagree with the chip',
+        find.text('Looking for a node…'),
+        findsOneWidget,
+        reason:
+            'the node surface must not disagree with the plate it came from',
       );
       expect(
         find.text('Searching…'),
@@ -290,19 +405,84 @@ void main() {
         reason: 'the hunt owns the busy label, not the millisecond dispatch',
       );
       expect(find.text('Reconnect'), findsNothing);
-      // The link is down, so the scan line may not claim liveness — its own
-      // 2 s poll would otherwise contradict the Status row beside it.
+      expect(kicks, 0);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('the network sheet keeps its own truths until UX-3', () {
+    // The sheet is still Settings' door to the link (D-206), and its scan line
+    // is the one place the block-age heartbeat is rendered. Driven directly
+    // now that home no longer opens it — the coverage outlives the entry
+    // point, which is the whole reason it is moved rather than deleted.
+    Future<void> pumpSheet(
+      WidgetTester tester, {
+      required bool connected,
+      required bool searching,
+      required DateTime now,
+      required Duration since,
+    }) async {
+      tester.view.physicalSize = const Size(2000, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: kvDarkTheme(),
+          home: Scaffold(
+            backgroundColor: KvColor.abyss,
+            body: NetworkSheet(
+              connected: ValueNotifier<bool>(connected),
+              endpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
+              virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
+              error: ValueNotifier<String?>(null),
+              lastUpdate: ValueNotifier<DateTime?>(now.subtract(since)),
+              searching: ValueNotifier<bool>(searching),
+              reconnecting: ValueNotifier<bool>(false),
+              onReconnect: () async {},
+              clock: () => now,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('a live link with no status yet says so', (tester) async {
+      final now = DateTime(2026, 7, 30, 0, 53);
+      await pumpSheet(
+        tester,
+        connected: true,
+        searching: false,
+        now: now,
+        // Fresh: a 20 s-old snapshot is STALE under `staleAfter`, and a
+        // stale link may not claim the scan is live either.
+        since: Duration.zero,
+      );
+      expect(find.text('Network'), findsOneWidget);
+      expect(
+        find.text('waiting for first block…'),
+        findsOneWidget,
+        reason: 'link up, no status yet — the honest pre-first-block line',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a dark link may not claim the scan is live', (tester) async {
+      final now = DateTime(2026, 7, 30, 0, 53);
+      await pumpSheet(
+        tester,
+        connected: false,
+        searching: true,
+        now: now,
+        since: const Duration(seconds: 20),
+      );
+      // The link decides whether the scan may claim liveness; the age only
+      // refines the claim. Otherwise a 2 s poll could read "live — scanning
+      // every block" beside a Status row saying the opposite.
       expect(find.text('not scanning — no link'), findsOneWidget);
       expect(find.text('live — scanning every block'), findsNothing);
-
-      await tester.tap(find.text('Searching…'));
-      await tester.pump();
-      expect(
-        kicks,
-        1,
-        reason: 'a busy-looking button that cannot be tapped deletes C4',
-      );
-
+      expect(find.text('Searching…'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
   });

@@ -125,6 +125,10 @@ class TxStatusChip extends StatelessWidget {
       label = '$n confirmation${n == 1 ? '' : 's'}';
     }
 
+    // A 6dp dot with **no bloom**, and the absence is the point: §1.5 defines
+    // a lamp as a dot under an 8dp blur, so this is a coloured mark rather
+    // than one of BG-2's three emitting kinds. That is why a feed of pending
+    // rows does not spend the screen's emission budget one row at a time.
     final dot = Container(
       width: 6,
       height: 6,
@@ -135,15 +139,37 @@ class TxStatusChip extends StatelessWidget {
       children: [
         // The breath rides the dot only (the label stays legible); KvBreath
         // freezes it to a static full-opacity dot under reduced motion — the
-        // StatusBeacon contract, exactly (§6/§11).
+        // same contract `KvCadence` keeps, and the reason a frozen meter can
+        // never be mistaken for a running one (BG-8).
         KvBreath(active: state == TxChipState.pending, child: dot),
         const SizedBox(width: KvSpace.xs),
-        Text(
-          label,
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: color,
-            // The count ticks ~10×/s on Kaspa — digits must not jiggle (§4).
-            fontFeatures: const [FontFeature.tabularFigures()],
+        // Bounded, so the longest label in the set — `Not accepted yet` —
+        // cannot push a ledger row past its own width at 320dp / 1.3x. Every
+        // caller places this inside a bounded box (the money screen's `Wrap`,
+        // the thread's `Align`), so the flex always has something to divide.
+        //
+        // Ellipsis rather than wrap, and only here: this chip is the row's
+        // FOURTH signal, behind the word, the sign and the colour, so a
+        // squeeze that shortens it costs no meaning. BG-5's never-ellipsize
+        // law is about amounts, and the amount is a different widget.
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              // **The dot carries the hue; the words do not.** §1.5 is
+              // explicit that a fault reads as an indicator coming on rather
+              // than as coloured text, and `KvStatusChip` holds its words at
+              // `inkDim` for exactly that reason — this chip was the last
+              // place in the system where a status tinted its own sentence
+              // (`ux-auditor`, UX-2). Contrast was never the problem (`ok`
+              // 11.72, `warn` 10.61 on `abyss`); the voice was.
+              color: KvColor.inkDim,
+              // The count ticks ~10×/s on Kaspa — digits must not jiggle
+              // (§4).
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
         ),
       ],

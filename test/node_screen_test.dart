@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
@@ -33,6 +35,19 @@ class _FakeSeam {
 
   final List<String?> calls = <String?>[];
   int refreshes = 0;
+  int kicks = 0;
+
+  /// Mirrors `ChainService.reconnect`, which flips `reconnecting`
+  /// synchronously before its first await (proven in `chain_service_test`) —
+  /// so a test that watches the label measures the RENDER, not the fake.
+  Future<void> reconnect() async {
+    kicks++;
+    reconnecting.value = true;
+  }
+
+  /// Holds `setPinnedNode` open, so a test can measure the BUSY frame rather
+  /// than the settled one after it.
+  Completer<void>? hold;
 
   /// When set, `setPinnedNode` throws it. [pinsAnyway] models the seam's real
   /// behaviour: a validated URL is persisted and applied BEFORE the first dial,
@@ -42,6 +57,7 @@ class _FakeSeam {
 
   Future<void> setPinnedNode(String? url) async {
     calls.add(url);
+    if (hold != null) await hold!.future;
     if (throws != null) {
       if (pinsAnyway) pinnedNode.value = url;
       throw throws!;
@@ -68,6 +84,7 @@ class _FakeSeam {
     searching: searching,
     osOffline: osOffline,
     reconnecting: reconnecting,
+    onReconnect: reconnect,
     lastUpdate: lastUpdate,
     refreshConfig: refresh,
   );
@@ -420,6 +437,146 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('Reconnect is the user\'s own try-now, and it says so', (
+      tester,
+    ) async {
+      // The control had NO test at all when it landed: `_FakeSeam.scope` never
+      // wired `onReconnect`, so nothing in this file rendered it — on the
+      // INV-8 escape-hatch surface, which is the one place a user goes when
+      // the link is dead (`ux-auditor`, UX-2).
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam);
+      expect(find.text('Reconnect'), findsOneWidget);
+      expect(find.text('Searching…'), findsNothing);
+
+      await tester.tap(find.text('Reconnect'));
+      await tester.pump();
+      expect(seam.kicks, 1);
+      // The busy state rides the HUNT, not the dispatch — and the label swap
+      // IS the signal, because BG-2 will not pay for a second meter on a
+      // screen whose serving plate already runs one.
+      expect(find.text('Searching…'), findsOneWidget);
+      expect(find.text('Reconnect'), findsNothing);
+      expect(
+        tester.widgetList<KvCadence>(find.byType(KvCadence)).length,
+        lessThanOrEqualTo(1),
+        reason: 'the serving plate owns the only meter on this screen',
+      );
+
+      // A second press while the hunt is live is swallowed, not queued.
+      await tester.tap(find.text('Searching…'), warnIfMissed: false);
+      await tester.pump();
+      expect(seam.kicks, 1);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('no state on this screen spends more than three emissions', (
+      tester,
+    ) async {
+      // BG-2 counts emitting objects. Measured at UX-2: a hunting link with a
+      // dropped pin and the field open ran to FOUR, and a failed apply to
+      // five, because `_Reconnect` had grown a meter of its own beside the
+      // serving plate's.
+      int emissions(WidgetTester t) =>
+          find.byType(KvCadence).evaluate().length +
+          find.byType(KvLamp).evaluate().length;
+
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam);
+      expect(emissions(tester), lessThanOrEqualTo(3), reason: 'settled');
+
+      seam.connected.value = false;
+      seam.searching.value = true;
+      seam.pinDropped.value = true;
+      await tester.pump();
+      expect(emissions(tester), lessThanOrEqualTo(3), reason: 'hunting');
+      await tester.pumpWidget(const SizedBox());
+
+      // The compound failure — a pin refused at boot AND a failed apply,
+      // while the link hunts. Measured at FIVE before this sitting: the
+      // serving plate's meter and lamp, a meter on Apply, a meter on
+      // Reconnect, and two amber notices saying the pin is not working.
+      final failing = _FakeSeam(
+        throws: 'node url must start with ws:// or wss://',
+      );
+      // A pin refused at boot: the wallet fell back to public nodes and says
+      // so. The user then types a bad address and it is refused too.
+      failing.pinDropped.value = true;
+      await _pumpScreen(tester, failing);
+      await tester.tap(find.text('Pin a node I run'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'http://nope');
+      await tester.pumpAndSettle();
+      // The boot-refusal notice pushes the control down a `ListView`, and a
+      // tap dispatched at an off-screen centre silently misses — which is how
+      // the first draft of this test measured a state it never reached.
+      await tester.ensureVisible(find.text('Use this node'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use this node'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('was not accepted'), findsOneWidget);
+      failing.connected.value = false;
+      failing.searching.value = true;
+      await tester.pump();
+      expect(
+        emissions(tester),
+        lessThanOrEqualTo(3),
+        reason: 'a pin refused at boot, a failed apply, and a live hunt',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('nor does the frame while a pin is being written', (
+      tester,
+    ) async {
+      // The settled measurement cannot see this one: `_busy` is false again by
+      // the time `pumpAndSettle` returns, so a meter that only lives during
+      // the write would slip straight past it. Held open deliberately.
+      //
+      // A FRESH mount, too — `_pumpScreen` over a live screen reuses the
+      // element, so `initState` does not re-run and `_wantPin` carries over
+      // from the case before it.
+      int emissions(WidgetTester t) =>
+          find.byType(KvCadence).evaluate().length +
+          find.byType(KvLamp).evaluate().length;
+
+      final busy = _FakeSeam();
+      busy.hold = Completer<void>();
+      // With a boot refusal already on the glass, so the frame under test is
+      // the compound one. A busy apply on an otherwise clean screen sits at
+      // three either way, and would have measured nothing.
+      busy.pinDropped.value = true;
+      await _pumpScreen(tester, busy);
+      await tester.tap(find.text('Pin a node I run'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'ws://mine.example:17110');
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Use this node'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use this node'));
+      await tester.pump();
+      // The control is disabled while the write is in flight and says why in
+      // words — the shipped string, which is why no busy LABEL was invented to
+      // replace the meter that went. Twice, because the toggle above it is
+      // disabled by the same operation and BG-12 asks each control to state
+      // its own reason.
+      expect(find.text('Setting the node…'), findsWidgets);
+      busy.connected.value = false;
+      busy.searching.value = true;
+      await tester.pump();
+      expect(
+        emissions(tester),
+        lessThanOrEqualTo(3),
+        reason: 'a pin being written while the link hunts',
+      );
+      // Never `pumpAndSettle` past here: the serving plate's cadence is
+      // running by design, so "settled" never arrives.
+      busy.hold!.complete();
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('back goes back', (tester) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
@@ -432,7 +589,7 @@ void main() {
     // seam gate-green with **no way for a user to reach any of it**. A surface
     // that exists and cannot be opened is the same defect wearing a screen, so
     // the path is asserted end to end rather than assumed from the wiring.
-    testWidgets('home beacon → network sheet → node picker', (tester) async {
+    testWidgets('home network chip → node picker', (tester) async {
       // Roomy, for the same reason link_states_test is: the fallback test font
       // measures every label far wider than a device does.
       tester.view.physicalSize = const Size(2000, 1400);
@@ -441,83 +598,68 @@ void main() {
 
       final seam = _FakeSeam();
       final now = DateTime(2026, 8, 27, 12);
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: kvDarkTheme(),
-          home: HomeScreen(
-            chain: ChainScope(
-              connected: ValueNotifier<bool>(true),
-              endpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
-              virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
-              error: ValueNotifier<String?>(null),
-              lastUpdate: ValueNotifier<DateTime?>(now),
-              node: seam.scope,
-            ),
-            wallet: WalletScope(
-              mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
-              pending: ValueNotifier<BigInt?>(null),
-              activity: ValueNotifier<List<ActivityRecord>>(const []),
-              syncing: ValueNotifier<bool>(false),
-              utxoIndexMissing: ValueNotifier<bool>(false),
-            ),
-            clock: () => now,
-          ),
-        ),
-      );
+      await tester.pumpWidget(_home(node: seam.scope, now: now));
 
       // Never pumpAndSettle here: the home screen's freshness ticker never
       // ends, so "settled" never arrives.
-      await tester.tap(find.text('Mainnet'));
+      //
+      // UX-2 shortened this path by one surface. The chip on the money plate
+      // IS the door (D-191); the network sheet keeps its own door from
+      // Settings until UX-3 collapses the two.
+      //
+      // One frame first: the plate's pinned extent is MEASURED, so it is right
+      // from the second frame and a tap inside the bootstrap frame would land
+      // on a 1dp header.
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Network'), findsOneWidget);
-
-      await tester.tap(find.text('Use my own node'));
+      await tester.tap(find.text('Mainnet'));
       await tester.pump();
       await tester.pump(KvMotion.slow);
       expect(find.byType(NodeScreen), findsOneWidget);
       expect(find.text('Node & connection'), findsOneWidget);
-      // The sheet closed behind it: a full page stacked under a modal is a
-      // back button that goes somewhere nobody asked for.
-      expect(find.text('Network'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('without the seam the sheet offers no dead control', (
+    testWidgets('without the seam the chip is a reading, not a dead control', (
       tester,
     ) async {
       tester.view.physicalSize = const Size(2000, 1400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final now = DateTime(2026, 8, 27, 12);
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: kvDarkTheme(),
-          home: HomeScreen(
-            chain: ChainScope(
-              connected: ValueNotifier<bool>(true),
-              endpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
-              virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
-              error: ValueNotifier<String?>(null),
-              lastUpdate: ValueNotifier<DateTime?>(now),
-            ),
-            wallet: WalletScope(
-              mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
-              pending: ValueNotifier<BigInt?>(null),
-              activity: ValueNotifier<List<ActivityRecord>>(const []),
-              syncing: ValueNotifier<bool>(false),
-              utxoIndexMissing: ValueNotifier<bool>(false),
-            ),
-            clock: () => now,
-          ),
-        ),
-      );
+      await tester.pumpWidget(_home(node: null, now: now));
+
+      // BG-12 forbids a disabled control with no stated reason, and "the seam
+      // is absent" is not a reason a user can act on. So the chip stops being
+      // a control at all: a name and nothing else, no chevron, no route.
+      await tester.pump();
+      expect(find.text('Mainnet'), findsOneWidget);
       await tester.tap(find.text('Mainnet'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Network'), findsOneWidget);
-      expect(find.text('Use my own node'), findsNothing);
+      await tester.pump(KvMotion.slow);
+      expect(find.byType(NodeScreen), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });
 }
+
+/// The money screen, wired to nothing but the notifiers under test.
+Widget _home({required NodeScope? node, required DateTime now}) => MaterialApp(
+  theme: kvDarkTheme(),
+  home: HomeScreen(
+    chain: ChainScope(
+      connected: ValueNotifier<bool>(true),
+      virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
+      error: ValueNotifier<String?>(null),
+      lastUpdate: ValueNotifier<DateTime?>(now),
+      node: node,
+    ),
+    wallet: WalletScope(
+      mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
+      pending: ValueNotifier<BigInt?>(null),
+      activity: ValueNotifier<List<ActivityRecord>>(const []),
+      syncing: ValueNotifier<bool>(false),
+      utxoIndexMissing: ValueNotifier<bool>(false),
+    ),
+    clock: () => now,
+  ),
+);

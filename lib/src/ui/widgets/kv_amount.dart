@@ -9,7 +9,8 @@ import '../theme/tokens.dart';
 enum KvAmountRole {
   /// The home balance. Mono 46/52 at weight 500, and it **floors at four
   /// decimals** — 46dp of mono cannot wear eight with dignity, so the other
-  /// four live one tap away and always at signing (§2).
+  /// four live one tap away and always at signing (§2). The one exception is
+  /// a balance the floor would erase entirely; see the class doc.
   hero,
 
   /// A screen-level amount: the confirm sheet's headline, a detail's value.
@@ -40,7 +41,15 @@ enum KvMoneyDirection {
 ///
 ///  * **floors toward zero**, never rounds a balance up (via [kasParts]);
 ///  * **`—` when unknown** — never a fabricated zero;
-///  * **`0.00000000` for a real zero** — a synced empty wallet is not unknown;
+///  * **`0.00000000` for a real zero** at [KvAmountRole.screen], and a real
+///    zero at every role — a synced empty wallet is not unknown;
+///  * **a non-zero balance never renders as zero.** The hero floors at four
+///    decimals (§2), which would print `0.0000` for anything under 10,000
+///    sompi — so a wallet holding dust would read exactly like a wallet
+///    holding nothing. Where the floored fraction would erase the whole
+///    figure the floor is lifted, and the digits that carry the money are
+///    shown: the floor is a concession to 46dp of mono, not a licence to say
+///    "you have nothing" to someone who does not (`consensus-auditor`, UX-2);
 ///  * **scales down before it clips** — it never wraps, never ellipsizes and
 ///    never truncates a digit, at any text scale;
 ///  * mono and tabular, so a value that ticks does not jiggle;
@@ -159,22 +168,64 @@ class KvAmount extends StatelessWidget {
 
     final Widget content;
     if (sompi == null) {
-      content = Text(
-        '—',
-        maxLines: 1,
-        semanticsLabel: 'amount unknown',
-        style: TextStyle(
-          fontFamily: KvFont.mono,
-          fontSize: base,
-          height: 1.14,
-          fontWeight: _weight,
-          color: KvColor.inkDim,
+      // **An unknown amount is still an amount OF something.** A bare `—` at
+      // hero size is a small glyph adrift in a 48dp line box — on glass it
+      // reads as a rendering glitch rather than as "we do not know your
+      // balance yet" (founder, device sitting 2026-08-27). Keeping the unit
+      // beside it makes the dash a value rather than a mark, and costs
+      // nothing: BG-5 asks for `—`, not for `—` alone.
+      content = Semantics(
+        label: 'balance unknown',
+        excludeSemantics: true,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Text(
+              '—',
+              maxLines: 1,
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: base,
+                height: 1.14,
+                fontWeight: _weight,
+                color: KvColor.inkDim,
+              ),
+            ),
+            if (_unit) ...[
+              const SizedBox(width: KvSpace.s),
+              Text(
+                'KAS',
+                maxLines: 1,
+                style: TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: unitSize,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.6,
+                  color: KvColor.primaryMuted,
+                ),
+              ),
+            ],
+          ],
         ),
       );
     } else {
       final parts = kasParts(sompi!);
-      final digits = _digits;
-      // A substring FLOORS the fraction — it can never round a balance up.
+      var digits = _digits;
+      // A truncation FLOORS the fraction — it can never round a balance up.
+      // But flooring a dust balance to four decimals prints `0.0000`, which is
+      // the same glyphs a real zero gets: the figure would have erased the
+      // money rather than abbreviated it. So the floor yields whenever it
+      // would leave nothing at all.
+      if (digits != null &&
+          sompi! > BigInt.zero &&
+          parts.integer == '0' &&
+          !parts.fraction
+              .substring(0, math.min(digits, parts.fraction.length))
+              .contains(RegExp(r'[1-9]'))) {
+        digits = null;
+      }
       final fraction = digits == null
           ? trimFraction(parts.fraction)
           : parts.fraction.substring(

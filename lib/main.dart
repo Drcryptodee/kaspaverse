@@ -73,6 +73,7 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
   searching: chain.searching,
   osOffline: chain.osOffline,
   reconnecting: chain.reconnecting,
+  onReconnect: chain.reconnect,
   refreshConfig: () => chain.refreshNodeConfig(),
 );
 
@@ -110,12 +111,10 @@ class KaspaVerseApp extends StatelessWidget {
           // seam law; scope objects themselves may rebuild freely).
           chain: ChainScope(
             connected: chain.connected,
-            endpoint: chain.endpoint,
             virtualDaaScore: chain.virtualDaaScore,
             error: chain.error,
             lastUpdate: chain.lastUpdate,
             reconnecting: chain.reconnecting,
-            onReconnect: chain.reconnect,
             searching: chain.searching,
             osOffline: chain.osOffline,
             disconnectedAt: chain.disconnectedAt,

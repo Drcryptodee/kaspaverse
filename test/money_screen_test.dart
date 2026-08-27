@@ -1,0 +1,849 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/rust/api/wallet.dart';
+import 'package:kaspaverse/src/ui/home_screen.dart';
+import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
+
+/// **UX-2 — the money surface**, in the five states it has to hold
+/// (SCREEN_INVENTORY 7a–7e): first-run empty · live · syncing · in flight ·
+/// degraded.
+///
+/// The primitives are pinned by `kv_*_test.dart`; this file pins the
+/// **composition** — what appears, what stays silent, and what a squeeze does
+/// to it.
+/// The bundled faces, so a width measured here is a width about Inter and
+/// JetBrains Mono rather than about the test fallback — whose glyphs are square
+/// em-boxes and overstate every label by roughly a factor of two. A 320dp /
+/// 1.3x claim measured in Ahem is a claim about Ahem.
+///
+/// Called from `setUpAll`, NEVER from inside `testWidgets`: the test body runs
+/// in a fake-async zone where real file I/O never completes (settings_screen_
+/// test.dart records the 2m57s hang that taught this).
+Future<void> loadBundledFonts() async {
+  for (final font in const {
+    'Inter': 'assets/fonts/Inter-Variable.ttf',
+    'JetBrainsMono': 'assets/fonts/JetBrainsMono-Variable.ttf',
+  }.entries) {
+    final bytes = await File(font.value).readAsBytes();
+    await (FontLoader(
+      font.key,
+    )..addFont(Future.value(ByteData.view(bytes.buffer)))).load();
+  }
+}
+
+void main() {
+  setUpAll(loadBundledFonts);
+
+  final t0 = DateTime(2026, 8, 27, 14, 2, 41);
+
+  ActivityRecord received({
+    required BigInt sompi,
+    required DateTime at,
+    MaturityState maturity = MaturityState.confirmed,
+  }) => ActivityRecord(
+    txid: 'a' * 64,
+    valueSompi: sompi,
+    unixtimeMsec: BigInt.from(at.millisecondsSinceEpoch),
+    blockDaaScore: BigInt.from(1000),
+    direction: ActivityDirection.incoming,
+    isCoinbase: false,
+    maturity: maturity,
+    stalled: false,
+  );
+
+  ActivityRecord sent({
+    required BigInt sompi,
+    required DateTime at,
+    bool stalled = false,
+  }) => ActivityRecord(
+    txid: 'b' * 64,
+    valueSompi: sompi,
+    unixtimeMsec: BigInt.from(at.millisecondsSinceEpoch),
+    blockDaaScore: BigInt.from(1000),
+    acceptedDaaScore: stalled ? null : BigInt.from(1000),
+    direction: ActivityDirection.outgoing,
+    isCoinbase: false,
+    maturity: stalled ? MaturityState.pending : MaturityState.confirmed,
+    stalled: stalled,
+  );
+
+  ActivityRecord merged({required BigInt sompi, required DateTime at}) =>
+      ActivityRecord(
+        txid: 'c' * 64,
+        valueSompi: sompi,
+        unixtimeMsec: BigInt.from(at.millisecondsSinceEpoch),
+        blockDaaScore: BigInt.from(1000),
+        direction: ActivityDirection.change,
+        isCoinbase: false,
+        maturity: MaturityState.confirmed,
+        stalled: false,
+      );
+
+  Widget money({
+    BigInt? mature,
+    BigInt? pending,
+    BigInt? outgoing,
+    bool connected = true,
+    bool syncing = false,
+    bool utxoIndexMissing = false,
+    bool discoveryIncomplete = false,
+    DateTime? lastUpdate,
+    DateTime? now,
+    List<ActivityRecord> activity = const [],
+    Future<void> Function()? onRefresh,
+    bool actions = true,
+  }) => MaterialApp(
+    theme: kvDarkTheme(),
+    home: HomeScreen(
+      chain: ChainScope(
+        connected: ValueNotifier(connected),
+        virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(2000)),
+        error: ValueNotifier<String?>(null),
+        lastUpdate: ValueNotifier<DateTime?>(lastUpdate ?? t0),
+      ),
+      wallet: WalletScope(
+        mature: ValueNotifier<BigInt?>(mature),
+        pending: ValueNotifier<BigInt?>(pending),
+        outgoing: ValueNotifier<BigInt?>(outgoing),
+        activity: ValueNotifier<List<ActivityRecord>>(activity),
+        syncing: ValueNotifier(syncing),
+        utxoIndexMissing: ValueNotifier(utxoIndexMissing),
+        discoveryIncomplete: ValueNotifier(discoveryIncomplete),
+        onRefreshActivity: onRefresh,
+      ),
+      clock: () => now ?? t0,
+      sendRoute: actions ? (_) => const Placeholder() : null,
+      receiveRoute: actions ? (_) => const Placeholder() : null,
+    ),
+  );
+
+  /// Two frames: one to build, one for the pinned plate to adopt its MEASURED
+  /// extent. Never `pumpAndSettle` — the freshness ticker never ends.
+  Future<void> pump(
+    WidgetTester tester,
+    Widget app, {
+    double width = 393,
+    double height = 850,
+    double textScale = 1,
+  }) async {
+    tester.view.devicePixelRatio = 3.0;
+    tester.view.physicalSize = Size(width * 3.0, height * 3.0);
+    tester.platformDispatcher.textScaleFactorTestValue = textScale;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      tester.platformDispatcher.clearTextScaleFactorTestValue();
+    });
+    // A fresh mount every time. `HomeScreen` asserts its injected notifiers
+    // stay identical for the life of the state (the V4 seam law), so pumping a
+    // second fixture over a live one trips that assert rather than the thing
+    // under test.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(app);
+    await tester.pump();
+  }
+
+  TextStyle styleOf(WidgetTester tester, String text) =>
+      tester.renderObject<RenderParagraph>(find.text(text)).text.style!;
+
+  group('the five states', () {
+    testWidgets('first run: the one empty state, and Receive takes the light', (
+      tester,
+    ) async {
+      await pump(tester, money(mature: BigInt.zero));
+
+      // Etched glyph · one truth · one nudge — and the SHIPPED copy, because
+      // the redesign is a change of form, not of voice (D-196).
+      expect(find.text('No recent activity'), findsOneWidget);
+      expect(
+        find.text('Payments you send and receive appear here.'),
+        findsOneWidget,
+      );
+      // The section rule does not promise a ledger there is none of.
+      expect(find.text('Recent activity'), findsNothing);
+
+      // The brightest thing on screen is the most sensible next act, and the
+      // control that cannot fire says why, in words (BG-12).
+      expect(find.text('Nothing to send yet'), findsOneWidget);
+      final receive = tester.widget<Container>(
+        find
+            .ancestor(
+              of: find.text('Receive'),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      expect(
+        (receive.decoration! as BoxDecoration).color,
+        KvColor.primary,
+        reason: 'on an empty wallet the light flips to Receive',
+      );
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an UNKNOWN balance is not an empty one', (tester) async {
+      // The trap the empty state sits next to: `mature == null` means we do
+      // not know, and telling that user they have nothing to send is a claim
+      // we cannot make (BG-5/BG-8).
+      await pump(tester, money(mature: null, connected: false));
+      expect(find.text('—'), findsOneWidget);
+      expect(find.text('Nothing to send yet'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an UNPROVEN zero is not an empty one either', (tester) async {
+      // A zero the wallet cannot vouch for is not a zero. `discoveryIncomplete`
+      // means the balance was computed over a window that may be SHORT, and
+      // `utxoIndexMissing` means the node cannot see this wallet's coins at
+      // all — so the plate was saying "this may not be your whole balance" and
+      // "Nothing to send yet" in the same frame, and closing the money door on
+      // a wallet that may hold funds (`consensus-auditor`, UX-2).
+      for (final label in const ['discovery', 'utxo index']) {
+        await pump(
+          tester,
+          money(
+            mature: BigInt.zero,
+            discoveryIncomplete: label == 'discovery',
+            utxoIndexMissing: label == 'utxo index',
+          ),
+        );
+        expect(find.text('Nothing to send yet'), findsNothing, reason: label);
+      }
+      // The control: a zero nothing disputes really does close the door.
+      await pump(tester, money(mature: BigInt.zero));
+      expect(find.text('Nothing to send yet'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('live: a settled screen is a STILL and SILENT one', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        money(
+          mature: BigInt.parse('128450270000'),
+          activity: [
+            received(
+              sompi: BigInt.from(2400000000),
+              at: t0.subtract(const Duration(seconds: 12)),
+            ),
+          ],
+        ),
+      );
+
+      // **Silence is the healthy state** (D-192). A standing "Node responding"
+      // beside a permanently animating meter reports that nothing changed,
+      // twice, and becomes wallpaper.
+      expect(find.byType(KvCadence), findsNothing);
+      expect(find.textContaining('as of'), findsNothing);
+      expect(find.text('syncing…'), findsNothing);
+      // The chip's lamp is the screen's standing link indicator (founder call,
+      // 2026-08-27, amending BG-7 — see `_NetworkChip`'s doc). It is the ONLY
+      // lamp on a healthy screen: the trust line stays silent, so a second one
+      // never appears beside it.
+      expect(find.text('Mainnet'), findsOneWidget);
+      expect(find.byType(KvLamp), findsOneWidget);
+      expect(
+        tester.widget<KvLamp>(find.byType(KvLamp)).tone,
+        KvLampTone.ok,
+        reason: 'a live link reads live on the chip',
+      );
+
+      // The figure: sentence-case label, unit WITH the number, hero floored at
+      // four decimals (§2 — all eight live one tap away and always at signing).
+      expect(find.text('Available balance'), findsOneWidget);
+      expect(find.text('1,284'), findsOneWidget);
+      expect(find.text('.5027'), findsOneWidget);
+      expect(find.text('KAS'), findsWidgets);
+      expect(styleOf(tester, 'KAS').color, KvColor.primaryMuted);
+
+      // The chain clock, and the fiat slot rendering the honest unknown.
+      expect(find.text('DAA 2,000'), findsOneWidget);
+      expect(find.text('≈ —'), findsOneWidget);
+      expect(find.text('no rate yet'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('syncing: the trust line speaks and the meter runs', (
+      tester,
+    ) async {
+      await pump(tester, money(mature: BigInt.zero, syncing: true));
+      expect(find.text('syncing…'), findsOneWidget);
+      expect(
+        tester.widget<KvCadence>(find.byType(KvCadence)).running,
+        isTrue,
+        reason: 'a first scan IS something happening',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('in flight: a memo beside the number, never a second sign', (
+      tester,
+    ) async {
+      // 100 KAS held, 30 of it already spent and travelling. At the pin the
+      // hero is ALREADY net of the send, so a `−` here would invite 70 − 30.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(7000000000),
+          outgoing: BigInt.from(3000000000),
+        ),
+      );
+      expect(find.text('in flight'), findsOneWidget);
+      expect(find.text('70'), findsOneWidget);
+      expect(find.text('30'), findsOneWidget);
+      expect(
+        find.textContaining('− '),
+        findsNothing,
+        reason: 'the hero has already had it subtracted',
+      );
+      // Unsigned AND colourless: `risk` would say this money is at risk, and
+      // on a self-send frame it is travelling straight back to this wallet.
+      expect(styleOf(tester, '30').color, KvColor.ink);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('pending is money ARRIVING — signed, green, and additive', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        money(mature: BigInt.from(7000000000), pending: BigInt.from(50000000)),
+      );
+      expect(find.text('pending'), findsOneWidget);
+      // `pending` is a set DISJOINT from `mature`, so unlike the in-flight
+      // memo it really is a term the hero does not yet contain.
+      expect(find.text('+ 0'), findsOneWidget);
+      expect(styleOf(tester, '+ 0').color, KvColor.ok);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('degraded: dimmed, aged, frozen — and no counter streams', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        money(
+          mature: BigInt.parse('128450270000'),
+          connected: false,
+          lastUpdate: t0.subtract(const Duration(minutes: 3)),
+          activity: [
+            received(
+              sompi: BigInt.from(2400000000),
+              at: t0.subtract(const Duration(seconds: 12)),
+              maturity: MaturityState.pending,
+            ),
+          ],
+        ),
+      );
+
+      // BG-8's whole demand: dimmed cached truth WITH a visible age.
+      expect(find.text('as of 3 m ago'), findsOneWidget);
+      expect(
+        tester.widget<KvCadence>(find.byType(KvCadence)).running,
+        isFalse,
+        reason: 'nothing is happening, so nothing may look like it is',
+      );
+      expect(find.text('1,284'), findsOneWidget); // retained, never blanked
+      expect(
+        tester
+            .widgetList<Opacity>(
+              find.ancestor(
+                of: find.text('Received'),
+                matching: find.byType(Opacity),
+              ),
+            )
+            .map((o) => o.opacity),
+        contains(KvFreshness.opacityStale),
+      );
+      // A frozen last-known DAA must not tick at full presence.
+      expect(find.textContaining('confirmations'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('one indicator, however many facts — most consequential first', (
+      tester,
+    ) async {
+      // Two truths, two subjects: the completeness of the NUMBER, and the age
+      // of the LINK. Neither may hide the other — but they were two stacked
+      // amber lamps on one plate, which spends BG-2's cap saying "something is
+      // amber" twice. One lamp now; the sentences queue under it, the one that
+      // changes what the user believes they own first.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(1000),
+          utxoIndexMissing: true,
+          connected: false,
+          lastUpdate: t0.subtract(const Duration(minutes: 3)),
+        ),
+      );
+      expect(
+        find.text(
+          'node has no UTXO index — retrying another node\nas of 3 m ago',
+        ),
+        findsOneWidget,
+      );
+      // Two lamps and no more: the chip's standing indicator, and the trust
+      // line's one lamp carrying however many sentences it has. The caption
+      // and the link never light separately.
+      expect(find.byType(KvLamp), findsNWidgets(2));
+
+      // The other ordering: a live link has nothing to add, so the number's
+      // caption stands alone.
+      await pump(
+        tester,
+        money(mature: BigInt.from(1000), discoveryIncomplete: true),
+      );
+      expect(
+        find.text(
+          'still checking your addresses — this may not be your whole balance',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byType(KvLamp), findsNWidgets(2));
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('the ledger', () {
+    testWidgets('direction rides four ways at once (BG-7)', (tester) async {
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(1000),
+          activity: [
+            received(
+              sompi: BigInt.from(2400000000),
+              at: t0.subtract(const Duration(seconds: 12)),
+            ),
+            sent(
+              sompi: BigInt.from(1240000000),
+              at: t0.subtract(const Duration(minutes: 1)),
+            ),
+          ],
+        ),
+      );
+
+      // 1 · the word, 2 · the sign, 3 · the colour, 4 · the weight. Every one
+      // of them survives greyscale, colour-blindness and a screen reader.
+      expect(find.text('Received'), findsOneWidget);
+      expect(find.text('+ 24'), findsOneWidget);
+      expect(styleOf(tester, '+ 24').color, KvColor.ok);
+      expect(styleOf(tester, '+ 24').fontWeight, FontWeight.w600);
+
+      expect(find.text('Sent'), findsOneWidget);
+      expect(find.text('− 12'), findsOneWidget);
+      expect(styleOf(tester, '− 12').color, KvColor.risk);
+      expect(styleOf(tester, '− 12').fontWeight, FontWeight.w400);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('the pinned plate', () {
+    /// The property the measured extent exists for: **the plate never sits on
+    /// top of the ledger.** Asserted rather than the number itself, because a
+    /// number is exactly the claim `L121` says goes stale.
+    void expectNoOverlap(WidgetTester tester) {
+      final plateBottom = tester.getRect(find.text('DAA 2,000')).bottom;
+      final rowTop = tester.getRect(find.text('Received')).top;
+      expect(
+        plateBottom,
+        lessThanOrEqualTo(rowTop),
+        reason: 'the pinned header is shorter than the plate inside it',
+      );
+    }
+
+    testWidgets('its extent TRACKS the plate, at every state and scale', (
+      tester,
+    ) async {
+      // The bug this is written against: a stated extent is right on the day
+      // it is written and wrong the first time the plate grows a line. So the
+      // same screen is grown twice — by content, then by text scale — and the
+      // header has to keep up both times.
+      final rows = [
+        received(
+          sompi: BigInt.from(2400000000),
+          at: t0.subtract(const Duration(seconds: 12)),
+        ),
+      ];
+      await pump(tester, money(mature: BigInt.from(1000), activity: rows));
+      expectNoOverlap(tester);
+      final lean = tester.getRect(find.text('Received')).top;
+
+      // Grow it by content: a pending line, an in-flight line and a caption
+      // the settled plate never draws.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(1000),
+          pending: BigInt.from(50000000),
+          outgoing: BigInt.from(3000000000),
+          discoveryIncomplete: true,
+          connected: false,
+          lastUpdate: t0.subtract(const Duration(minutes: 3)),
+          activity: rows,
+        ),
+      );
+      expectNoOverlap(tester);
+      expect(
+        tester.getRect(find.text('Received')).top,
+        greaterThan(lean),
+        reason: 'a taller plate must actually push the ledger down',
+      );
+
+      // Grow it by text scale, at the narrowest phone the app supports.
+      await pump(
+        tester,
+        money(mature: BigInt.from(1000), activity: rows),
+        width: 320,
+        textScale: 1.3,
+      );
+      expectNoOverlap(tester);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('it never swallows the viewport, however tall it grows', (
+      tester,
+    ) async {
+      // The failure this is written against, measured: at 320x568 with 1.3x
+      // text in the degraded state the plate is 446.8dp against a 406.0dp
+      // viewport. With `minExtent` set to the measured height and nothing
+      // else, the header pinned at the FULL viewport at every scroll offset —
+      // the ledger was laid out beneath it, painted over by its opaque ground
+      // and un-hit-testable behind it. 360x640 at 1.3x measured 437.6 against
+      // 478.0, one caption line from the same failure on the founder's own
+      // device (`ux-auditor`, this sitting).
+      //
+      // Every state test before this one ran at 850dp tall, so none of them
+      // could see it. Height is an input now.
+      // 320x568 and 360x640 are real phones (the second is the founder's own
+      // bucket); 320x400 is a phone in split-screen, which Android supports and
+      // which is where the clamp actually has to bind.
+      //
+      // The third column is whether the honesty line is PROMISED to fit inside
+      // the band. It is, at every phone the app claims to support. It is not
+      // at 320x400 — a 240dp viewport cannot hold a 280dp essential block, and
+      // at that size something has to give; the whole plate stays one
+      // scroll-to-top away. Recorded as a bounded promise rather than dropped,
+      // because a promise that quietly excludes the tight cases is the kind
+      // this audit has already caught twice.
+      for (final (w, h, clamped, fits) in const [
+        (320.0, 568.0, false, true),
+        (360.0, 640.0, false, true),
+        (320.0, 400.0, true, false),
+      ]) {
+        await pump(
+          tester,
+          money(
+            mature: BigInt.parse('128450270000'),
+            pending: BigInt.parse('128450270000'),
+            outgoing: BigInt.parse('128450270000'),
+            connected: false,
+            utxoIndexMissing: true,
+            lastUpdate: t0.subtract(const Duration(minutes: 3)),
+            activity: [
+              received(
+                sompi: BigInt.from(2400000000),
+                at: t0.subtract(const Duration(seconds: 12)),
+              ),
+            ],
+          ),
+          width: w,
+          height: h,
+          textScale: 1.3,
+        );
+
+        final viewport = tester.getRect(find.byType(CustomScrollView));
+        await tester.drag(find.byType(CustomScrollView), const Offset(0, -600));
+        await tester.pump();
+
+        final header = tester
+            .renderObjectList<RenderSliverPersistentHeader>(
+              find.byType(SliverPersistentHeader),
+            )
+            .first;
+        final pinned = header.geometry!.paintExtent;
+        final where = '${w.toInt()}x${h.toInt()}';
+        if (clamped) {
+          expect(
+            pinned,
+            lessThanOrEqualTo(viewport.height / 2 + 0.5),
+            reason:
+                '$where: the plate is taller than the viewport can spare, '
+                'so it must yield to half — unclamped it pins at the full '
+                'viewport and the ledger becomes unreachable',
+          );
+        }
+        // **What the plate KEEPS is the argued half of this.** The header
+        // sheds its bottom, so the order of the plate decides what a squeeze
+        // takes — and it must never take the sentence that says the number
+        // above it may be wrong. The fiat line and the chain clock sit below
+        // the rule for exactly this reason; the honesty line sits above it and
+        // is asserted inside the surviving band.
+        //
+        // **Asserted as a FIT inside the band, not as a widget ordering.** The
+        // first version of this compared `trust.bottom <= fiat.top <= daa.top`
+        // — which is true by construction from the `Column` and so could not
+        // fail while the widget order stood, exactly the property that was
+        // failing. What the band keeps is the thing to measure: at 320x568 and
+        // 360x640 at 1.3x the honesty line was 72 of 77dp and 21 of 52dp
+        // outside it, clipped rather than dimmed, while a full-brightness
+        // figure stayed pinned above (`ux-auditor`, measured).
+        final trust = tester.getRect(
+          find.textContaining('node has no UTXO index'),
+        );
+        // **The honesty line is no longer promised inside the band**, and that
+        // is a deliberate, recorded cost. The founder moved the fiat line above
+        // the rule and the trust line below it (2026-08-27, on glass), which
+        // puts the honesty back in the shed zone at the geometries where the
+        // plate cannot fit. What makes it tolerable is the other half of that
+        // change: the plate now sheds ONLY under pressure, so on every screen
+        // where the plate fits, nothing is shed and the sentence is always
+        // there. See the A3 risk note in `2026-08-27_UI-UX_…TODO.md`.
+        if (fits) {
+          expect(
+            find.textContaining('node has no UTXO index'),
+            findsOneWidget,
+            reason: '$where: the sentence must at least still be rendered',
+          );
+        }
+        // The order the founder set on glass, pinned so a later edit cannot
+        // shuffle it back: the money above the rule, the instrument below it.
+        // Figure -> fiat -> [rule] -> chain clock -> the link's sentence.
+        final fiat = tester.getRect(find.text('≈ —'));
+        final daa = tester.getRect(find.textContaining('DAA '));
+        expect(
+          fiat.bottom,
+          lessThanOrEqualTo(daa.top + 0.5),
+          reason: '$where: the fiat restatement belongs with the figure',
+        );
+        expect(
+          daa.bottom,
+          lessThanOrEqualTo(trust.top + 0.5),
+          reason: '$where: the chain clock sits above the link sentence',
+        );
+
+        // The paint half cannot be observed off-golden: an `OverflowBox`
+        // overflowing by design throws nothing, and `getRect` reports the
+        // unclipped box either way. This is the structural stand-in — the
+        // clip's absence is what let the plate paint its trust line and its
+        // chain clock straight over the ledger rows at both geometries above.
+        expect(
+          find.descendant(
+            of: find.byType(SliverPersistentHeader).first,
+            matching: find.byType(ClipRect),
+          ),
+          findsWidgets,
+          reason: '$where: the pinned header paints unbounded',
+        );
+
+        // The property that actually matters to a user, at every size: a row
+        // is on the glass, BELOW the plate, not behind it. An over-tall pinned
+        // header lays the rows out and then paints its own opaque ground over
+        // them, which no `findsOneWidget` can see.
+        final row = tester.getRect(find.text('Received'));
+        expect(row.top, greaterThanOrEqualTo(viewport.top), reason: where);
+        expect(
+          row.bottom,
+          lessThanOrEqualTo(viewport.bottom + 0.5),
+          reason: where,
+        );
+        expect(
+          row.top,
+          greaterThanOrEqualTo(viewport.top + pinned - 1),
+          reason: '$where: the row is painted behind the pinned plate',
+        );
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('pull-to-refresh works FROM the balance (D-194)', (
+      tester,
+    ) async {
+      // The gesture is hosted by the whole scroll view rather than by the
+      // list, so it works where a hand reaches for it first. A plate laid out
+      // above the viewport would emit no scroll notification and the drag
+      // would die on it.
+      var pulls = 0;
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(1000),
+          onRefresh: () async => pulls++,
+          activity: [
+            received(
+              sompi: BigInt.from(2400000000),
+              at: t0.subtract(const Duration(seconds: 12)),
+            ),
+          ],
+        ),
+      );
+
+      await tester.drag(find.text('Available balance'), const Offset(0, 320));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(pulls, 1, reason: 'the drag started ON the balance');
+
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('the laws that outrank the composition', () {
+    /// BG-2 counts **emitting objects**, not hexes: the five-bar cadence is
+    /// one, not five, and `primaryMuted` is ambient and free (§1.5).
+    ///
+    /// **The cap counts TEAL emitters**, which is what the law it comes from
+    /// actually says: BG-2 is titled *"Teal is light, not paint"* and §1.5
+    /// spells it out — *"`primary` is light: it emits, it is capped at three
+    /// per screen"*. A lamp is `ok`/`warn`/`risk` and never `primary`, so it
+    /// is not what the teal budget is rationing.
+    ///
+    /// This is a **narrowing recorded on 2026-08-27**, not an accident. An
+    /// earlier pass in this sitting counted lamps too and, on that reading, the
+    /// money plate's compound states ran to four — which is what removed the
+    /// network chip's lamp. The founder restored the lamp on glass, and the
+    /// honest way to hold both is to say which budget governs which object:
+    /// teal is rationed by count, and lamps are rationed by **not being
+    /// redundant** — asserted separately below.
+    ///
+    /// `TxStatusChip`'s dots are outside both: §1.5 defines a lamp as a 6dp dot
+    /// **under an 8dp blur**, and that dot has no `boxShadow`.
+    int tealEmissions(WidgetTester tester) {
+      var n = find.byType(KvCadence).evaluate().length;
+      for (final c in tester.widgetList<Container>(find.byType(Container))) {
+        final d = c.decoration;
+        if (d is BoxDecoration && d.color == KvColor.primary) n++;
+      }
+      return n;
+    }
+
+    testWidgets('teal never exceeds three emissions, in any state', (
+      tester,
+    ) async {
+      for (final (label, app) in <(String, Widget)>[
+        ('empty', money(mature: BigInt.zero)),
+        (
+          'live',
+          money(
+            mature: BigInt.parse('128450270000'),
+            activity: [received(sompi: BigInt.from(1), at: t0)],
+          ),
+        ),
+        ('syncing', money(mature: BigInt.zero, syncing: true)),
+        (
+          'in flight',
+          money(
+            mature: BigInt.from(7000000000),
+            outgoing: BigInt.from(3000000000),
+          ),
+        ),
+        (
+          'degraded',
+          money(
+            mature: BigInt.from(1000),
+            connected: false,
+            lastUpdate: t0.subtract(const Duration(minutes: 3)),
+          ),
+        ),
+        // The two flags that used to add a third lamp — the worst case, and
+        // the one the old counter could not see.
+        (
+          'degraded + no UTXO index',
+          money(
+            mature: BigInt.from(1000),
+            connected: false,
+            utxoIndexMissing: true,
+            lastUpdate: t0.subtract(const Duration(minutes: 3)),
+          ),
+        ),
+        (
+          'syncing + discovery incomplete',
+          money(mature: BigInt.zero, syncing: true, discoveryIncomplete: true),
+        ),
+      ]) {
+        await pump(tester, app);
+        expect(tealEmissions(tester), lessThanOrEqualTo(3), reason: label);
+        // Lamps are rationed by non-redundancy rather than by count: at most
+        // the chip's standing indicator plus ONE trust lamp carrying however
+        // many sentences it has. Three would mean two lamps saying the same
+        // thing, which is the P0.3 shape.
+        expect(
+          find.byType(KvLamp).evaluate().length,
+          lessThanOrEqualTo(2),
+          reason: '$label: a third lamp is a second opinion',
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('every state survives 1.3x text scale at 320dp (BG-14)', (
+      tester,
+    ) async {
+      // The widest row the ledger can produce: the longest title
+      // (`Consolidated`), the longest lifecycle label (`Not accepted yet`) and
+      // an eight-decimal four-figure amount, all at once.
+      final rows = [
+        received(
+          sompi: BigInt.parse('128450270000'),
+          at: t0.subtract(const Duration(seconds: 12)),
+          maturity: MaturityState.pending,
+        ),
+        sent(
+          sompi: BigInt.parse('128450270000'),
+          at: t0.subtract(const Duration(minutes: 1)),
+          stalled: true,
+        ),
+        merged(
+          sompi: BigInt.parse('128450270000'),
+          at: t0.subtract(const Duration(hours: 2)),
+        ),
+      ];
+      for (final (label, app) in <(String, Widget)>[
+        ('empty', money(mature: BigInt.zero)),
+        ('live', money(mature: BigInt.parse('128450270000'), activity: rows)),
+        ('syncing', money(mature: BigInt.zero, syncing: true, activity: rows)),
+        (
+          'in flight',
+          money(
+            mature: BigInt.parse('128450270000'),
+            pending: BigInt.parse('128450270000'),
+            outgoing: BigInt.parse('128450270000'),
+            activity: rows,
+          ),
+        ),
+        (
+          'degraded',
+          money(
+            mature: BigInt.parse('128450270000'),
+            connected: false,
+            utxoIndexMissing: true,
+            lastUpdate: t0.subtract(const Duration(minutes: 3)),
+            activity: rows,
+          ),
+        ),
+      ]) {
+        await pump(tester, app, width: 320, textScale: 1.3);
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: '$label overflowed at 320dp / 1.3x',
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+  });
+}

@@ -116,31 +116,11 @@ void main() {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: HomeScreen(
-            chain: ChainScope(
-              connected: ValueNotifier(true),
-              endpoint: ValueNotifier('wss://node.example'),
-              virtualDaaScore: ValueNotifier(BigInt.from(1)),
-              error: ValueNotifier(null),
-              lastUpdate: ValueNotifier(DateTime(2026, 8, 12)),
-            ),
-            wallet: WalletScope(
-              mature: ValueNotifier(BigInt.zero),
-              pending: ValueNotifier(BigInt.zero),
-              activity: ValueNotifier(const []),
-              syncing: ValueNotifier(false),
-              utxoIndexMissing: ValueNotifier(false),
-            ),
-            clock: () => DateTime(2026, 8, 12),
-            settingsRoute: (_) => screen(),
-          ),
-        ),
-      );
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(_home(settings: screen()));
       await tester.pump();
 
-      await tester.tap(find.byTooltip('Settings'));
+      await tester.tap(find.bySemanticsLabel('Settings'));
       await tester.pumpAndSettle();
 
       expect(find.text('Settings'), findsWidgets);
@@ -148,10 +128,11 @@ void main() {
       for (final section in ['Security', 'Wallet', 'Network', 'About']) {
         expect(find.text(section), findsOneWidget, reason: section);
       }
+      semantics.dispose();
     },
   );
 
-  // ── F5 (product-audit run 3): the gear must survive the header squeeze ──
+  // ── F5 (product-audit run 3), re-aimed at the UX-2 rail ──
   //
   // The test above proves Settings is REACHABLE. It proves it at
   // `physicalSize = Size(1000, 2400)`, `devicePixelRatio = 1.0` — a 1000 dp-wide
@@ -159,33 +140,12 @@ void main() {
   // that width nothing can be squeezed out, so the property it guards is
   // "the route is wired", not "the door is on the glass".
   //
-  // These run at real phone geometry with the real bundled fonts, in the state
-  // the header actually spends 14-28 s in at every cold launch and every
-  // reconnect hunt: `finding a node…`, the longest label the beacon can wear.
-
-  /// Home in the cold-launch hunt: never connected, no snapshot ever, so the
-  /// beacon reads `finding a node…` (status_beacon.dart:119).
-  Widget coldLaunchHome() => MaterialApp(
-    theme: kvDarkTheme(),
-    home: HomeScreen(
-      chain: ChainScope(
-        connected: ValueNotifier(false),
-        endpoint: ValueNotifier(null),
-        virtualDaaScore: ValueNotifier(BigInt.zero),
-        error: ValueNotifier(null),
-        lastUpdate: ValueNotifier(null),
-      ),
-      wallet: WalletScope(
-        mature: ValueNotifier(BigInt.zero),
-        pending: ValueNotifier(BigInt.zero),
-        activity: ValueNotifier(const []),
-        syncing: ValueNotifier(false),
-        utxoIndexMissing: ValueNotifier(false),
-      ),
-      clock: () => DateTime(2026, 8, 24),
-      settingsRoute: (_) => screen(),
-    ),
-  );
+  // These run at real phone geometry with the real bundled fonts. The squeeze
+  // has a different shape since UX-2 — the beacon pill is gone and the link's
+  // words moved into the money plate — but the property is identical and it is
+  // the one that actually cost a founder his settings screen: **a custody door
+  // never yields.** The rail now has two of them, so the test walks both.
+  Widget coldLaunchHome() => _home(settings: screen(), messages: screen());
 
   /// dp -> physical pixels at dpr 3.0, the density of the reference device.
   Future<void> pumpPhone(
@@ -210,95 +170,88 @@ void main() {
   // case. 360 dp is the LG V60's bucket — the founder's own device, which at
   // "Largest" lost the gear during every launch hunt. 320 dp is the narrowest
   // phone the app claims to support.
+  // 2.0 is beyond BG-14's 1.3 floor on purpose: it is Android 14's "Largest"
+  // font size, and it is the geometry where the rail's mechanism is actually
+  // load-bearing. At 1.3 the wordmark and the two doors fit on a 320dp phone
+  // with room to spare, so a test that stopped there would pass whether the
+  // wordmark yields or not — which is exactly the vacuous guard F5 was.
   for (final geometry in const [
     (320.0, 1.30),
     (320.0, 1.15),
     (360.0, 1.30),
     (393.0, 1.30),
+    (320.0, 2.00),
   ]) {
-    testWidgets('the Settings gear is still tappable at '
+    testWidgets('both rail doors are still tappable at '
         '${geometry.$1.toInt()} dp / textScale ${geometry.$2}', (tester) async {
+      final semantics = tester.ensureSemantics();
       await pumpPhone(tester, widthDp: geometry.$1, textScale: geometry.$2);
 
-      // The precondition: this really is the long-label state. If the beacon
-      // ever stops saying this, the squeeze it creates is gone and these
-      // tests would pass while measuring nothing.
+      // Nothing may be pushed past the Row's own edge. Measured, not eyeballed:
+      // at 320dp / 2.0 the wordmark wants 172.5dp against a 168dp budget, so
+      // the push a non-yielding wordmark produces is **4.5dp** — which a
+      // centre-of-the-target assertion is far too loose to see. The right EDGE
+      // is the line that matters, and it is the viewport minus the gutter.
       expect(
-        find.text('finding a node…'),
-        findsOneWidget,
-        reason: 'the cold-launch hunt state is what squeezes the header',
+        tester.takeException(),
+        isNull,
+        reason: 'the rail overflowed instead of the wordmark yielding',
       );
+      for (final door in const ['Messages', 'Settings']) {
+        final finder = find.bySemanticsLabel(door);
+        expect(finder, findsOneWidget, reason: door);
+        expect(
+          tester.getRect(finder).right,
+          lessThanOrEqualTo(geometry.$1 - KvSpace.gutter + 0.5),
+          reason:
+              '$door is outside the rail Row clip — pushed out by the '
+              'wordmark taking its intrinsic width',
+        );
+        // A 48dp target is a promise, and a 48dp target that has been
+        // compressed by a Row is a promise the geometry broke.
+        expect(
+          tester.getSize(finder).width,
+          greaterThanOrEqualTo(KvSpace.touchTarget),
+          reason: '$door yielded its target instead of the wordmark yielding',
+        );
+      }
 
-      // The geometric half — the gear dies when its CENTRE crosses the Row's
-      // own clip, which is the viewport minus the gutter, not the viewport.
-      final gear = find.byTooltip('Settings');
-      final centre = tester.getCenter(gear);
-      expect(
-        centre.dx,
-        lessThan(geometry.$1 - KvSpace.gutter),
-        reason:
-            'the gear centre is outside the header Row clip — pushed out '
-            'by the beacon taking its intrinsic width',
-      );
-
-      // The behavioural half — a hit test that actually reaches the button,
+      // The behavioural half — a hit test that actually reaches the control,
       // and a door that actually opens. `tap` alone can dispatch into empty
       // space; opening Settings is the property the user has.
-      await tester.tap(gear);
+      await tester.tap(find.bySemanticsLabel('Settings'));
       await tester.pumpAndSettle();
       expect(find.text('Settings'), findsWidgets);
+      semantics.dispose();
     });
   }
 
   /// Home with a live-but-stale link: connected, last snapshot 12 s old, so the
-  /// beacon wears its warning colour and its age.
-  Widget staleHome() => MaterialApp(
-    theme: kvDarkTheme(),
-    home: HomeScreen(
-      chain: ChainScope(
-        connected: ValueNotifier(true),
-        endpoint: ValueNotifier('wss://node.example/borsh'),
-        virtualDaaScore: ValueNotifier(BigInt.from(2000)),
-        error: ValueNotifier(null),
-        lastUpdate: ValueNotifier(DateTime(2026, 8, 24, 12, 0, 0)),
-      ),
-      wallet: WalletScope(
-        mature: ValueNotifier(BigInt.from(1000)),
-        pending: ValueNotifier(BigInt.zero),
-        activity: ValueNotifier(const []),
-        syncing: ValueNotifier(false),
-        utxoIndexMissing: ValueNotifier(false),
-      ),
-      clock: () => DateTime(2026, 8, 24, 12, 0, 12),
-      settingsRoute: (_) => screen(),
-    ),
+  /// plate's trust line speaks and wears its age.
+  Widget staleHome() => _home(
+    settings: screen(),
+    connected: true,
+    lastUpdate: DateTime(2026, 8, 24, 12),
+    now: DateTime(2026, 8, 24, 12, 0, 12),
+    mature: BigInt.from(1000),
   );
 
-  // DS-1: a stale link is dimming PLUS a visible age. Making the beacon yield so
-  // the gear survives (F5) made the beacon the child that gets ellipsized — so
-  // the age became the thing that CAN be cut, and DS-1 is what says it must not
-  // be (ux-auditor, this sitting). The chip's label was shortened from
-  // 'as of 12 s ago' to '12 s ago' for exactly this.
+  // BG-8: a stale link is dimming PLUS a visible age.
   //
-  // Measured, with the bundled fonts at dpr 3.0, in the stale state:
+  // The old header made the beacon the child that yields, which made the AGE
+  // the thing that could be cut — and at 320 dp / 1.30 it was, by 14.7 dp. The
+  // label was shortened from 'as of 12 s ago' to '12 s ago' to buy that back.
   //
-  //   320 dp / 1.00  box 51.6  needs 51.6  — fits
-  //   320 dp / 1.15  box 59.0  needs 59.0  — fits
-  //   320 dp / 1.30  box 51.7  needs 66.4  — 14.7 dp short, ellipsized
-  //   360 dp / 1.30  box 66.4  needs 66.4  — fits
-  //   393 dp / 1.30  box 66.4  needs 66.4  — fits
-  //
-  // So one geometry — the narrowest phone at AOSP's stock maximum font size —
-  // still cannot show the whole label, and the honest guard is the invariant
-  // itself rather than "never ellipsizes": **the AGE survives; only 'ago' is
-  // cut.** That is what DS-1 asks for, and it is what these assert. The
-  // fully-fits check runs everywhere it can, so a regression that pushed a
-  // second geometry over the edge is still caught.
+  // UX-2 gave the age a plate instead of a pill, so the fuller phrasing fits
+  // again and the line wraps to a second line before it ellipsizes anything.
+  // The invariant does not change with the room: **whatever is cut, the age is
+  // not.** Asserted against the width '12 s' alone needs in the same style and
+  // scale, so it tracks the token rather than a hardcoded number.
   for (final geometry in const [
-    (320.0, 1.0, true),
-    (320.0, 1.15, true),
-    (320.0, 1.30, false), // 14.7 dp short — the age must still survive
-    (360.0, 1.30, true),
+    (320.0, 1.0),
+    (320.0, 1.15),
+    (320.0, 1.30),
+    (360.0, 1.30),
   ]) {
     testWidgets('a stale link keeps its AGE readable at '
         '${geometry.$1.toInt()} dp / textScale ${geometry.$2}', (tester) async {
@@ -313,13 +266,9 @@ void main() {
       await tester.pumpWidget(staleHome());
       await tester.pump();
 
-      final label = find.text('12 s ago');
+      final label = find.text('as of 12 s ago');
       expect(label, findsOneWidget, reason: 'the stale state renders its age');
       final paragraph = tester.renderObject<RenderParagraph>(label);
-
-      // The DS-1 invariant, at every geometry: whatever is cut, the age is
-      // not. Measured against the width '12 s' alone needs in the same style
-      // and scale, so it tracks the token rather than a hardcoded number.
       final age = TextPainter(
         text: TextSpan(text: '12 s', style: paragraph.text.style),
         textDirection: TextDirection.ltr,
@@ -329,39 +278,37 @@ void main() {
         paragraph.size.width,
         greaterThanOrEqualTo(age.width),
         reason:
-            'the age itself was ellipsized away — DS-1 requires a stale link '
+            'the age itself was ellipsized away — BG-8 requires a stale link '
             'to show dimming AND a visible age',
       );
-
-      if (geometry.$3) {
-        expect(
-          paragraph.didExceedMaxLines,
-          isFalse,
-          reason: 'this geometry has room for the whole label and lost it',
-        );
-      }
+      expect(
+        paragraph.didExceedMaxLines,
+        isFalse,
+        reason: 'the plate has room for the whole phrase and lost it',
+      );
       await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
     });
   }
 
   testWidgets(
-    'and the beacon label does NOT ellipsize when there is room (393 dp / 1.0)',
+    'the wordmark does NOT ellipsize when there is room (393 dp / 1.0)',
     (tester) async {
-      // The other half of the acceptance bar. Making the beacon yield is only
-      // correct if it yields when squeezed and NOT otherwise — wrapping it in a
-      // `Flexible` beside the `Spacer()` would make it a second flex child at
-      // flex 1, taking half the free space and ellipsizing on a wide screen
-      // with room to spare. That is a new defect wearing the fix's clothes, and
-      // this is the test that tells the two apart.
+      // The other half of the acceptance bar. Making the wordmark yield is
+      // only correct if it yields when squeezed and NOT otherwise — wrapping
+      // it in a `Flexible` beside a `Spacer()` would make it a second flex
+      // child at flex 1, taking half the free space and ellipsizing on a wide
+      // screen with room to spare. That is a new defect wearing the fix's
+      // clothes, and this is the test that tells the two apart.
       await pumpPhone(tester, widthDp: 393.0, textScale: 1.0);
       final paragraph = tester.renderObject<RenderParagraph>(
-        find.text('finding a node…'),
+        find.text('KaspaVerse'),
       );
       expect(
         paragraph.didExceedMaxLines,
         isFalse,
-        reason: 'the label is truncated on a 393 dp phone at default text size',
+        reason: 'the wordmark is truncated on a 393 dp phone at default size',
       );
+      await tester.pumpWidget(const SizedBox());
     },
   );
 
@@ -659,4 +606,37 @@ void main() {
       );
     });
   });
+}
+
+/// The money screen, wired to nothing but the doors under test.
+Widget _home({
+  required Widget settings,
+  Widget? messages,
+  bool connected = true,
+  DateTime? lastUpdate,
+  DateTime? now,
+  BigInt? mature,
+}) {
+  final clock = now ?? DateTime(2026, 8, 24);
+  return MaterialApp(
+    theme: kvDarkTheme(),
+    home: HomeScreen(
+      chain: ChainScope(
+        connected: ValueNotifier(connected),
+        virtualDaaScore: ValueNotifier(BigInt.from(2000)),
+        error: ValueNotifier(null),
+        lastUpdate: ValueNotifier(lastUpdate),
+      ),
+      wallet: WalletScope(
+        mature: ValueNotifier(mature ?? BigInt.zero),
+        pending: ValueNotifier(BigInt.zero),
+        activity: ValueNotifier(const []),
+        syncing: ValueNotifier(false),
+        utxoIndexMissing: ValueNotifier(false),
+      ),
+      clock: () => clock,
+      settingsRoute: (_) => settings,
+      messagesRoute: messages == null ? null : (_) => messages,
+    ),
+  );
 }

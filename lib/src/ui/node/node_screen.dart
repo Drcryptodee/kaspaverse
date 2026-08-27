@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -26,6 +28,7 @@ class NodeScope {
     this.searching,
     this.osOffline,
     this.reconnecting,
+    this.onReconnect,
     this.refreshConfig,
   });
 
@@ -69,6 +72,17 @@ class NodeScope {
   /// see because the fixtures all pass it. Required makes the omission a
   /// compile error instead of a caption.
   final ValueListenable<DateTime?> lastUpdate;
+
+  /// Drop the socket and hunt again — the user's own "try now".
+  ///
+  /// **It lands here because the money screen's only node door is this
+  /// screen.** UX-2 replaced the home beacon with the plate's network chip,
+  /// which opens this surface; the network sheet still carries the same action
+  /// from Settings until UX-3 collapses the two. Leaving it only on the sheet
+  /// would have put the escape hatch three taps from the screen where a dead
+  /// link is actually noticed. The watchdog reconnects on its own either way —
+  /// this is agency, not the only path.
+  final Future<void> Function()? onReconnect;
 
   /// Re-read the node choice from Rust so the surface can open cold and paint
   /// the truth rather than the last thing the app happened to see.
@@ -226,6 +240,7 @@ class _NodeScreenState extends State<NodeScreen> {
                   const _RuledLabel('Serving you'),
                   const SizedBox(height: KvSpace.s),
                   _servingPlate(),
+                  _reconnect(),
                   const SizedBox(height: KvSpace.l),
                   const _RuledLabel('Use my own node'),
                   const SizedBox(height: KvSpace.s),
@@ -328,6 +343,36 @@ class _NodeScreenState extends State<NodeScreen> {
     );
   }
 
+  /// The user's own "try now", under the plate that says who is answering.
+  ///
+  /// Absent when the seam is not wired, rather than present and dead: BG-12
+  /// forbids a disabled control with no stated reason, and "no callback" is
+  /// not a reason anyone can act on.
+  Widget _reconnect() {
+    final s = widget.scope;
+    final tap = s.onReconnect;
+    if (tap == null) return const SizedBox.shrink();
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        if (s.searching != null) s.searching!,
+        if (s.reconnecting != null) s.reconnecting!,
+      ]),
+      builder: (context, _) {
+        // The busy state rides the HUNT, not the dispatch: `reconnecting`
+        // clears the instant the race is spawned (tens of ms, by design since
+        // R0), and a label that lives less than a frame is a label nobody
+        // reads. `searching` lasts as long as the search actually does — the
+        // same bit the money plate's cadence renders.
+        final hunting =
+            (s.searching?.value ?? false) || (s.reconnecting?.value ?? false);
+        return Padding(
+          padding: const EdgeInsets.only(top: KvSpace.sm),
+          child: _Reconnect(hunting: hunting, onTap: () => unawaited(tap())),
+        );
+      },
+    );
+  }
+
   Widget _picker() {
     final s = widget.scope;
     return AnimatedBuilder(
@@ -368,7 +413,11 @@ class _NodeScreenState extends State<NodeScreen> {
                       }
                     },
             ),
-            if (dropped) ...[
+            // The startup refusal yields to a FRESHER answer: once the user
+            // has acted and been told what happened, restating the boot-time
+            // notice beside it is the same fact twice, in two amber plates,
+            // spending an emission to say nothing new (D-192 / BG-2).
+            if (dropped && _problem == null) ...[
               const SizedBox(height: KvSpace.sm),
               const KvStatusChip(
                 tone: KvLampTone.warn,
@@ -390,7 +439,6 @@ class _NodeScreenState extends State<NodeScreen> {
               ),
               const SizedBox(height: KvSpace.s),
               _Apply(
-                busy: _busy,
                 enabled: canApply,
                 // BG-12: a disabled control always says why, in words.
                 reason: _busy
@@ -644,17 +692,66 @@ class _UrlField extends StatelessWidget {
   }
 }
 
+/// Drop the link and hunt again. The copy is the network sheet's, verbatim
+/// (D-196) — the two surfaces answer the same question until UX-3 collapses
+/// them, and inventing a second phrasing for one action is how they start
+/// disagreeing.
+class _Reconnect extends StatelessWidget {
+  const _Reconnect({required this.hunting, required this.onTap});
+
+  final bool hunting;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    // "Searching…", not "Reconnecting…": the hunt is just as often the FIRST
+    // connection of a session, and a second press while one is in flight is
+    // swallowed by the service's own guard.
+    final label = hunting ? 'Searching…' : 'Reconnect';
+    return Semantics(
+      button: true,
+      enabled: !hunting,
+      label: label,
+      child: ExcludeSemantics(
+        child: InkWell(
+          onTap: hunting ? null : onTap,
+          borderRadius: BorderRadius.circular(KvRadius.control),
+          child: KvSurface.control(
+            width: double.infinity,
+            height: KvSpace.control,
+            alignment: Alignment.center,
+            // **No meter here.** The serving plate twelve lines above already
+            // runs a cadence for this exact fact, and BG-2 counts emitting
+            // objects: with one on the plate, one on the pin field's failure
+            // state and a lamp, a second here took the screen to four against
+            // a cap of three (`ux-auditor`, measured). The label swapping to
+            // `Searching…` is the signal, and it says more than a meter can.
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 20 / 15,
+                fontWeight: FontWeight.w600,
+                color: hunting ? KvColor.inkMeta : KvColor.inkBright,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Names the action and its object (BG-11), and says why it cannot be pressed
 /// when it cannot be pressed (BG-12).
 class _Apply extends StatelessWidget {
   const _Apply({
-    required this.busy,
     required this.enabled,
     required this.reason,
     required this.onTap,
   });
 
-  final bool busy;
   final bool enabled;
   final String reason;
   final VoidCallback onTap;
@@ -675,23 +772,26 @@ class _Apply extends StatelessWidget {
               width: double.infinity,
               height: KvSpace.control,
               alignment: Alignment.center,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (busy) ...[
-                    const KvCadence(running: true),
-                    const SizedBox(width: KvSpace.s),
-                  ],
-                  Text(
-                    'Use this node',
-                    style: TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: enabled ? KvColor.inkBright : KvColor.inkMeta,
-                    ),
-                  ),
-                ],
+              // No meter, for the reason `_Reconnect` has none: applying a
+              // pin re-links, and the serving plate above is already running
+              // a cadence for exactly that. BG-2 counts emitting objects, and
+              // this screen's compound failure state was measured at five.
+              //
+              // Nothing replaces it, because nothing had to: `canApply` is
+              // false while the write is in flight, so the control is already
+              // disabled and already states why — *"Setting the node…"*, the
+              // shipped string. A second busy label beside it would have been
+              // one invented string saying what a working one already said
+              // (D-196).
+              child: Text(
+                'Use this node',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 15,
+                  height: 20 / 15,
+                  fontWeight: FontWeight.w600,
+                  color: enabled ? KvColor.inkBright : KvColor.inkMeta,
+                ),
               ),
             ),
           ),

@@ -12,7 +12,6 @@ import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 /// hand-built [ValueNotifier]s (the no-native-library seam, V4 law).
 HomeScreen homeScreen({
   required ValueListenable<bool> connected,
-  required ValueListenable<String?> endpoint,
   required ValueListenable<BigInt?> virtualDaaScore,
   required ValueListenable<String?> error,
   required ValueListenable<DateTime?> lastUpdate,
@@ -25,7 +24,6 @@ HomeScreen homeScreen({
 }) => HomeScreen(
   chain: ChainScope(
     connected: connected,
-    endpoint: endpoint,
     virtualDaaScore: virtualDaaScore,
     error: error,
     lastUpdate: lastUpdate,
@@ -40,12 +38,30 @@ HomeScreen homeScreen({
   clock: clock,
 );
 
+/// The runs [KvAmount] actually paints.
+///
+/// The figure is split into integer, fraction and unit so the fraction can be
+/// subordinate **by scale** rather than by a second family (§2) — so
+/// `find.textContaining('1,234.5678 KAS')` looks for a string no widget in the
+/// tree ever produces. Asserting the runs is asserting what is on the glass.
+///
+/// **The hero floors at four decimals** (§2): 46dp of mono cannot wear eight
+/// with dignity, and all eight live one tap away on Send and always at
+/// signing (BG-6). A row trims trailing zeros to two instead.
+void expectFigure(String integer, String fraction) {
+  expect(find.text(integer), findsWidgets, reason: 'integer "$integer"');
+  expect(
+    find.text('.$fraction'),
+    findsWidgets,
+    reason: 'fraction ".$fraction"',
+  );
+}
+
 void main() {
   testWidgets('wallet home: connecting → live empty zero → funds → stale', (
     tester,
   ) async {
     final connected = ValueNotifier<bool>(false);
-    final endpoint = ValueNotifier<String?>(null);
     final daa = ValueNotifier<BigInt?>(null);
     final error = ValueNotifier<String?>(null);
     final lastUpdate = ValueNotifier<DateTime?>(null);
@@ -61,7 +77,6 @@ void main() {
         theme: kvDarkTheme(),
         home: homeScreen(
           connected: connected,
-          endpoint: endpoint,
           virtualDaaScore: daa,
           error: error,
           lastUpdate: lastUpdate,
@@ -84,13 +99,12 @@ void main() {
 
     // A live, EMPTY synced wallet: a real 0.00000000 KAS, never `—`/skeleton.
     connected.value = true;
-    endpoint.value = 'wss://node.example/borsh';
     daa.value = BigInt.parse('458174109');
     mature.value = BigInt.zero;
     pending.value = BigInt.zero;
     lastUpdate.value = now;
     await tester.pump();
-    expect(find.textContaining('0.00000000 KAS'), findsOneWidget);
+    expectFigure('0', '0000');
     expect(find.text('—'), findsNothing);
     expect(find.text('DAA 458,174,109'), findsOneWidget);
 
@@ -110,11 +124,13 @@ void main() {
       ),
     ];
     await tester.pump();
-    expect(find.textContaining('1,234.56789012 KAS'), findsOneWidget);
+    expectFigure('1,234', '5678');
     expect(find.text('No recent activity'), findsNothing);
     // V2 counter (founder request): an immature deposit streams its DAA
     // distance instead of a static "Pending".
-    expect(find.text('50 confirmations'), findsOneWidget);
+    // The burial mark: under 100 the number IS the word (founder, on glass).
+    expect(find.text('50'), findsOneWidget);
+    expect(find.textContaining('confirmations'), findsNothing);
 
     // V2 chip walk: acceptance lands (V1 overlay) → 'Accepted'; a settled
     // (confirmed) row goes quiet — no permanent label (founder-nodded).
@@ -151,10 +167,19 @@ void main() {
       ),
     ];
     await tester.pump(const Duration(milliseconds: 400)); // chip crossfade
-    expect(find.text('Accepted'), findsOneWidget);
+    // **The burial vocabulary replaced the lifecycle words** (founder, on
+    // glass): a row now reads its DEPTH under 100, `Confirmed` from 100, and
+    // `final` from 1,000. `Accepted` is retired, and a terminal row is no
+    // longer silent — it says which side of the thresholds it is on.
+    expect(find.text('Accepted'), findsNothing);
     expect(find.text('Not accepted yet'), findsOneWidget); // stalled, honest
-    expect(find.text('Pending'), findsNothing);
-    expect(find.text('Confirmed'), findsNothing); // terminal = quiet
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is Text && (w.data == 'Confirmed' || w.data == 'final'),
+      ),
+      findsWidgets,
+      reason: 'a settled row states its burial rather than going quiet',
+    );
 
     // Back to the pending-deposit shape for the staleness beat below.
     activity.value = [
@@ -175,15 +200,14 @@ void main() {
     // (the balance dims — opacity is unit-tested in amount_text_test).
     now = now.add(const Duration(seconds: 12));
     await tester.pump(const Duration(seconds: 1)); // the 1 s ticker fires
-    expect(find.text('12 s ago'), findsOneWidget);
+    // The plate has the room the 320dp header did not, so the trust line
+    // wears the network sheet's fuller phrasing (D-196: shipped strings).
+    expect(find.text('as of 12 s ago'), findsOneWidget);
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
     expect(find.textContaining('confirmations'), findsNothing);
     expect(find.text('Pending'), findsOneWidget);
-    expect(
-      find.textContaining('1,234.56789012 KAS'),
-      findsOneWidget,
-    ); // retained
+    expectFigure('1,234', '5678'); // retained, dimmed — never blanked
 
     await tester.pumpWidget(const SizedBox()); // cancel the ticker
   });
@@ -196,7 +220,6 @@ void main() {
         theme: kvDarkTheme(),
         home: homeScreen(
           connected: ValueNotifier(true),
-          endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),
           error: ValueNotifier(null),
           lastUpdate: ValueNotifier(DateTime(2026, 6, 14, 12)),
@@ -240,7 +263,6 @@ void main() {
         theme: kvDarkTheme(),
         home: homeScreen(
           connected: ValueNotifier(true),
-          endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),
           error: ValueNotifier(null),
           lastUpdate: ValueNotifier(now),
@@ -263,7 +285,7 @@ void main() {
     await tester.pump();
 
     // The panel repainted (new number), the feed did not (old age line).
-    expect(find.textContaining('3.00000000 KAS'), findsOneWidget);
+    expectFigure('3', '0000');
     expect(find.text('2 m ago'), findsOneWidget);
     expect(find.text('3 m ago'), findsNothing);
     await tester.pumpWidget(const SizedBox());
@@ -296,7 +318,6 @@ void main() {
           theme: kvDarkTheme(),
           home: homeScreen(
             connected: ValueNotifier(true),
-            endpoint: ValueNotifier('wss://node.example/borsh'),
             virtualDaaScore: daa,
             error: ValueNotifier(null),
             lastUpdate: ValueNotifier(now),
@@ -311,7 +332,7 @@ void main() {
       );
       // Accepted 7 DAA ago (1000 − 993) → streams "7 confirmations", NOT the
       // 500 the submit-time blockDaaScore would have given.
-      expect(find.text('7 confirmations'), findsOneWidget);
+      expect(find.text('7'), findsOneWidget);
 
       // Deep past the ceiling (200 > 100) → the chip dissolves (Rams #5). The
       // AnimatedSwitcher out-transition takes `normal`; pump past it (a
@@ -335,7 +356,6 @@ void main() {
       // the assert ever compares scope-object identity, or if a refactor
       // swaps the notifier instances mid-life.
       final connected = ValueNotifier<bool>(true);
-      final endpoint = ValueNotifier<String?>('wss://node.example/borsh');
       final daa = ValueNotifier<BigInt?>(BigInt.one);
       final error = ValueNotifier<String?>(null);
       final lastUpdate = ValueNotifier<DateTime?>(DateTime(2026, 7, 14, 12));
@@ -355,7 +375,6 @@ void main() {
               // FRESH scope objects on every build — deliberately.
               chain: ChainScope(
                 connected: connected,
-                endpoint: endpoint,
                 virtualDaaScore: daa,
                 error: error,
                 lastUpdate: lastUpdate,
@@ -383,7 +402,7 @@ void main() {
       // And the screen still renders from the SAME notifiers.
       mature.value = BigInt.from(300000000);
       await tester.pump();
-      expect(find.textContaining('3.00000000 KAS'), findsOneWidget);
+      expectFigure('3', '0000');
       await tester.pumpWidget(const SizedBox());
     },
   );
@@ -462,7 +481,6 @@ void main() {
         theme: kvDarkTheme(),
         home: homeScreen(
           connected: ValueNotifier(true),
-          endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: daa,
           error: ValueNotifier(null),
           lastUpdate: ValueNotifier(now),
@@ -502,7 +520,6 @@ void main() {
         home: HomeScreen(
           chain: ChainScope(
             connected: ValueNotifier(true),
-            endpoint: ValueNotifier('wss://node.example/borsh'),
             virtualDaaScore: ValueNotifier(BigInt.from(2000)),
             error: ValueNotifier(null),
             lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
@@ -522,8 +539,9 @@ void main() {
     await tester.pump();
 
     // Before: a normal wallet, nothing in flight, no settling line.
-    expect(find.textContaining('16.36694716 KAS'), findsOneWidget);
-    expect(find.text('  in flight'), findsNothing);
+    // The HERO floors at four (§2); the in-flight row below keeps all eight.
+    expectFigure('16', '3669');
+    expect(find.text('in flight'), findsNothing);
 
     // The send lands. mature collapses to a real zero and the value moves into
     // the outgoing bucket.
@@ -531,19 +549,19 @@ void main() {
     outgoing.value = BigInt.parse('1636694716');
     await tester.pump();
 
+    expectFigure('0', '0000');
     expect(
-      find.textContaining('0.00000000 KAS'),
-      findsOneWidget,
-      reason: 'the spendable balance really is zero — that stays honest',
-    );
-    expect(
-      find.text('  in flight'),
+      find.text('in flight'),
       findsOneWidget,
       reason:
           'but a wallet with value in flight must say so — a bare 0 here reads '
           'as "your money is gone" (F4)',
     );
-    expect(find.textContaining('16.36694716'), findsWidgets);
+    expect(
+      find.text('.36694716'),
+      findsOneWidget,
+      reason: 'the in-flight amount keeps every digit — it is money',
+    );
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -566,7 +584,6 @@ void main() {
         home: HomeScreen(
           chain: ChainScope(
             connected: ValueNotifier(true),
-            endpoint: ValueNotifier('wss://node.example/borsh'),
             virtualDaaScore: ValueNotifier(BigInt.from(2000)),
             error: ValueNotifier(null),
             lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
@@ -586,8 +603,8 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.textContaining('70.00000000 KAS'), findsOneWidget);
-    expect(find.text('  in flight'), findsOneWidget);
+    expectFigure('70', '0000');
+    expect(find.text('in flight'), findsOneWidget);
     expect(
       find.textContaining('− '),
       findsNothing,
@@ -620,7 +637,6 @@ void main() {
         theme: kvDarkTheme(),
         home: homeScreen(
           connected: ValueNotifier(true),
-          endpoint: ValueNotifier('wss://node.example/borsh'),
           virtualDaaScore: ValueNotifier(BigInt.from(2000)),
           error: ValueNotifier(null),
           lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
@@ -644,7 +660,7 @@ void main() {
     // the bound saw a flat 'Activity' header and no hint at all — the feed's
     // honesty depended on nobody ever reaching it.
     await pumpFeed(tester, kActivityFeedCap);
-    expect(find.text('Recent activity'), findsOneWidget);
+    expect(find.text('Activity'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Showing the $kActivityFeedCap most recent.'),
       300,
@@ -661,7 +677,7 @@ void main() {
     // overwhelming majority of wallets, and would state a bound the user has
     // not met. It appears only where it is true of them.
     await pumpFeed(tester, 3);
-    expect(find.text('Recent activity'), findsOneWidget);
+    expect(find.text('Activity'), findsOneWidget);
     expect(find.textContaining('most recent.'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });

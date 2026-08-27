@@ -30,11 +30,17 @@ import '../theme/tokens.dart';
 /// Decorative to a screen reader: the words beside it carry the meaning (BG-7),
 /// and a meter that announced itself would announce it on every rebuild.
 class KvCadence extends StatefulWidget {
-  const KvCadence({super.key, required this.running});
+  const KvCadence({super.key, required this.running, this.scale = 1});
 
   /// True only while something is genuinely happening — a hunt, a sync, a
   /// pending broadcast.
   final bool running;
+
+  /// Uniform size multiplier. The bar RATIO is the meter's identity, so this
+  /// scales the whole figure rather than letting a caller pick heights — a
+  /// meter with different proportions would be a second meter (§4: there is
+  /// one loading indicator).
+  final double scale;
 
   /// Bar heights, in logical pixels, left to right.
   static const List<double> barHeights = <double>[6, 10, 14, 10, 6];
@@ -48,6 +54,11 @@ class KvCadence extends StatefulWidget {
   static double get height => barHeights.reduce((a, b) => a > b ? a : b);
   static double get width =>
       barHeights.length * barWidth + (barHeights.length - 1) * barGap;
+
+  /// The same two numbers at a given [scale], so a caller never multiplies
+  /// them by hand and drifts.
+  static double heightAt(double scale) => height * scale;
+  static double widthAt(double scale) => width * scale;
 
   /// The dimmest a running bar goes at the bottom of its cycle. Above zero so
   /// the meter reads as five bars breathing rather than as bars appearing.
@@ -114,8 +125,8 @@ class _KvCadenceState extends State<KvCadence>
   Widget build(BuildContext context) {
     return ExcludeSemantics(
       child: SizedBox(
-        height: KvCadence.height,
-        width: KvCadence.width,
+        height: KvCadence.heightAt(widget.scale),
+        width: KvCadence.widthAt(widget.scale),
         child: AnimatedBuilder(
           animation: _c,
           builder: (context, _) => Row(
@@ -123,10 +134,10 @@ class _KvCadenceState extends State<KvCadence>
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               for (var i = 0; i < KvCadence.barHeights.length; i++) ...[
-                if (i > 0) const SizedBox(width: KvCadence.barGap),
+                if (i > 0) SizedBox(width: KvCadence.barGap * widget.scale),
                 Container(
-                  width: KvCadence.barWidth,
-                  height: KvCadence.barHeights[i],
+                  width: KvCadence.barWidth * widget.scale,
+                  height: KvCadence.barHeights[i] * widget.scale,
                   color: KvColor.primary.withValues(alpha: _alphaAt(i)),
                 ),
               ],

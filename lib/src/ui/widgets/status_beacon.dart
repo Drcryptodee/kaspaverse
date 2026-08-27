@@ -1,7 +1,4 @@
-import 'package:flutter/material.dart';
-
 import '../theme/tokens.dart';
-import 'kv_breath.dart';
 
 /// The honest states of a chain link (BG-8, design_system §8). Colour is
 /// never the only signal — every state pairs a dot colour with a text label
@@ -77,132 +74,18 @@ String formatAge(Duration age) {
   return '${age.inHours} h';
 }
 
-/// Dot + label, never colour alone (§11), worn as a compact chip. Connected
-/// reads the plain-English network name (§12 — the endpoint URL is power-user
-/// detail and lives behind [onTap], the network details sheet); the other
-/// states keep their honest lines verbatim.
-///
-/// The live dot breathes via [KvBreath] (§8 v2.2) — a self-animated sine,
-/// honest under BG-8: it stops the moment the link stops being live, and
-/// freezes to a static dot under reduced motion. The beacon itself stays
-/// value-driven and stateless so widget tests drive it directly.
-class StatusBeacon extends StatelessWidget {
-  const StatusBeacon({
-    super.key,
-    required this.state,
-    required this.error,
-    required this.age,
-    this.onTap,
-  });
-
-  final BeaconState state;
-  final String? error;
-
-  /// Consumed only by the stale label ("as of N ago") — a connected beacon
-  /// may pass null so its subtree stays rebuild-free between state changes.
-  final Duration? age;
-
-  /// Opens the network details (endpoint, DAA, age) — plain chip if null.
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (Color color, String label) = switch (state) {
-      BeaconState.error => (KvColor.error, error ?? 'connection error'),
-      // The phone's own network, stated plainly — tertiary, not warning:
-      // warning means exactly "stale link" (§3), and this is not a link fault
-      // at all. Nothing for the user to distrust, something for them to fix.
-      BeaconState.offline => (KvColor.textTertiary, 'phone offline'),
-      // C7 copy (D-089 ruling 6): what the engine is ACTUALLY doing. "finding
-      // a node" is the truth for both the first connect and every later hunt;
-      // "connecting to mainnet" implied a single destination we were already
-      // talking to.
-      BeaconState.connecting => (KvColor.textTertiary, 'finding a node…'),
-      // Degraded link = warning (§3: warning means exactly "stale link").
-      // The age WITHOUT the "as of" framing, and that is a layout invariant,
-      // not a copy preference (ux-auditor, 2026-08-24 fix wave). Once the
-      // header made this pill yield so the Settings gear could survive a
-      // squeeze (F5), the pill is the child that gets ellipsized — and BG-8
-      // requires stale to be dimming PLUS a visible age. At 320 dp / textScale
-      // 1.30 the old 14-character label was cut to `as of…`, losing the one
-      // thing BG-8 asks for; the 8-character form fits every geometry the F5
-      // table covers. `NetworkSheet` keeps the fuller phrasing — it is the
-      // detail surface and has the room.
-      BeaconState.stale => (
-        KvColor.warning,
-        age == null ? 'no recent update' : '${formatAge(age!)} ago',
-      ),
-      // Live mainnet = success GREEN (founder directive 2026-07-11, V2b wrap:
-      // "green, not kaspa teal" — a healthy link reads as the universal
-      // all-good colour; teal stays the brand/CTA voice).
-      BeaconState.connected => (KvColor.success, 'Mainnet'),
-    };
-
-    final live = state == BeaconState.connected;
-    // The breath means "something is happening", so a hunt breathes too (C7:
-    // *finding a node…* must read as visible search activity, not as a frozen
-    // label) — reusing the existing component rather than inventing a spinner
-    // for the chip (D-064: no new visual language). The GLOW stays rationed to
-    // live data below, so a hunt never looks like a healthy link.
-    final animate = live || state == BeaconState.connecting;
-    final dot = KvBreath(
-      active: animate,
-      child: Container(
-        width: KvSpace.s,
-        height: KvSpace.s,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: color,
-          // Glow is rationed to live-data emphasis (§3) — a live link only;
-          // tinted to match the live dot (green since the founder call).
-          boxShadow: live
-              ? const [BoxShadow(color: KvColor.successGlow, blurRadius: 8)]
-              : null,
-        ),
-      ),
-    );
-
-    // The pill is visually compact but the tap area honours the 48 dp law
-    // (§9): the InkWell spans the full target height, the pill centres in it.
-    return Semantics(
-      button: onTap != null,
-      child: InkWell(
-        onTap: onTap,
-        customBorder: const StadiumBorder(),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
-          alignment: Alignment.center,
-          child: Container(
-            decoration: const ShapeDecoration(
-              color: KvColor.surfaceAlt,
-              shape: StadiumBorder(side: BorderSide(color: KvColor.border)),
-            ),
-            padding: const EdgeInsets.symmetric(
-              horizontal: KvSpace.sm,
-              vertical: KvSpace.s,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ExcludeSemantics(child: dot),
-                const SizedBox(width: KvSpace.s),
-                Flexible(
-                  child: Text(
-                    label,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: KvColor.textSecondary,
-                      fontFamily: KvFont.ui,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+// **The `StatusBeacon` widget was retired at UX-2** (register item 2). It
+// rendered a healthy link in `success` GREEN with a green glow, which BG-7
+// narrowed away from: green is money **arriving**, things **confirmed**, and
+// a control the **user switched on** — never "healthy", because a link
+// changes without the user. Its replacements are shipped and composed on the
+// money plate: `KvStatusChip` carries the words and the lamp, and `KvCadence`
+// carries liveness. **The network chip carries no lamp at all** — green is
+// forbidden here by the same law, and an amber one would duplicate the trust
+// line directly beneath it, so health is carried by the trust line staying
+// silent (D-192).
+//
+// What survives is this file's pure derivation — [BeaconState],
+// [evaluateBeacon] and [formatAge] — which the money plate, the network
+// sheet, the node surface and the history sheet all read. The scar the
+// ordering encodes is worth more than the chip that used to draw it.

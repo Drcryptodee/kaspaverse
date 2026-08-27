@@ -56,12 +56,19 @@ class SettingsRow {
   final bool destructive;
 }
 
-/// How a row's value should read. §3 rations colour, so a failure must not wear
-/// the same ambient teal as a healthy "On" — and colour is never the only
-/// carrier: the words say it too (§11).
+/// How a row's value should read. BG-7 rations colour, so a failure must not
+/// wear the same tone as a working "On" — and colour is never the only
+/// carrier: the words say it too.
 enum SettingsTone {
-  /// A live, healthy value — the brand teal.
-  active,
+  /// **Green, narrowed** (UX-2 sweep, register item 2). BG-7 gives `ok` to
+  /// money **arriving**, things **confirmed or final**, and a control the
+  /// **user switched on** (D-200) — and to nothing else. It was named `active`
+  /// and documented as "a live, healthy value", which is the green-as-healthy
+  /// reading BG-7 took away: health changes without the user, so it belongs to
+  /// the cadence and the lamp, not to a value's hue.
+  ///
+  /// A setting's *value* is information, and information is colourless.
+  ok,
 
   /// Quiet supporting data (a version string, a build number).
   neutral,
@@ -79,7 +86,14 @@ enum SettingsTone {
 /// failures (ux-auditor, Track 2).
 @immutable
 class SettingsStatus {
-  const SettingsStatus(this.text, {this.tone = SettingsTone.active})
+  /// **Neutral is the default, deliberately.** The rename from `active` closed
+  /// the word but not the habit: green was still what a row got for saying
+  /// nothing in particular, so `'Scanning…'`, `'Nothing new found'` and a
+  /// lock-grace duration all wore the tone BG-7 reserves for money arriving,
+  /// things confirmed, and a control the user switched on. Information is
+  /// colourless; `ok` is now something a call site has to ask for
+  /// (`ux-auditor`, UX-2).
+  const SettingsStatus(this.text, {this.tone = SettingsTone.neutral})
     : address = null;
 
   /// A Kaspa address, rendered through [AddressText] — the BG-15 compact form
@@ -87,7 +101,7 @@ class SettingsStatus {
   /// mono-for-trust (§4) and must not be hand-formatted in a row.
   const SettingsStatus.address(String this.address)
     : text = '',
-      tone = SettingsTone.active;
+      tone = SettingsTone.neutral;
 
   final String text;
   final String? address;
@@ -244,7 +258,10 @@ class _SettingsScreenState extends State<SettingsScreen>
   void initState() {
     super.initState();
     _grace = ValueNotifier(
-      SettingsStatus(_graceLabel(widget.security.lockGraceSecs.value)),
+      SettingsStatus(
+        _graceLabel(widget.security.lockGraceSecs.value),
+        tone: SettingsTone.neutral,
+      ),
     );
     widget.security.lockGraceSecs.addListener(_onGraceChanged);
     WidgetsBinding.instance.addObserver(this);
@@ -282,7 +299,11 @@ class _SettingsScreenState extends State<SettingsScreen>
   }
 
   void _onGraceChanged() => _grace.value = SettingsStatus(
+    // A duration the user chose is information, not an `ok`: BG-7 gives green
+    // to arriving, confirmed, and switched-on, and "30 seconds" is none of
+    // the three.
     _graceLabel(widget.security.lockGraceSecs.value),
+    tone: SettingsTone.neutral,
   );
 
   // ── live values ──────────────────────────────────────────────────────────
@@ -315,7 +336,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         // quiet neutral of "Off" — a row cannot wear the calm voice of a
         // deliberate choice for a state the user did not choose (§3).
         _ when state == pathAInvalidated => SettingsTone.degraded,
-        _ => enrolled ? SettingsTone.active : SettingsTone.neutral,
+        _ => enrolled ? SettingsTone.ok : SettingsTone.neutral,
       },
     );
   }
@@ -521,7 +542,14 @@ class _SettingsScreenState extends State<SettingsScreen>
       if (outcome != null && !outcome.partial && outcome.error == null) {
         // The new single coin arrives via the live sync; this line only
         // reports that the merge was broadcast.
-        _merge.value = const SettingsStatus('Merged — balance updating');
+        _merge.value = const SettingsStatus(
+          'Merged — balance updating',
+          // **Amber, not green.** The line reports that the merge was
+          // BROADCAST, and its own copy says *updating* — BG-7 gives `ok` to
+          // things confirmed and amber to "not yet certain: stale, syncing,
+          // settling". Broadcast-and-settling is the second (`ux-auditor`).
+          tone: SettingsTone.degraded,
+        );
       }
     } catch (e) {
       if (!mounted) return;
@@ -544,7 +572,9 @@ class _SettingsScreenState extends State<SettingsScreen>
   Future<void> _runDeepScan() async {
     if (_busyRow != null) return;
     setState(() => _busyRow = 'deep-scan');
-    _scan.value = const SettingsStatus('Scanning…');
+    // In progress is "not yet certain", never green: the outcome below is what
+    // earns `ok`, and this is the beat before it (BG-7).
+    _scan.value = const SettingsStatus('Scanning…', tone: SettingsTone.neutral);
     try {
       final report = await widget.wallet.deepScan();
       // The scan is bounded at 180 s Rust-side, which is ample time to navigate
@@ -554,9 +584,19 @@ class _SettingsScreenState extends State<SettingsScreen>
       // "Nothing new" is a SUCCESSFUL outcome and must not read like a failure —
       // most taps will land here, on a wallet that was already complete.
       _scan.value = SettingsStatus(
-        report.widened
-            ? 'Found more — your balance is updating'
-            : 'Nothing new found',
+        report.widened ? 'Found more addresses' : 'Nothing new found',
+        // The scan finished, and "nothing new" is the wallet in its BEST
+        // state. Both are outcomes, not progress — the beat above stays
+        // neutral because it is still running.
+        //
+        // **The copy stops claiming the balance is updating.** It used to read
+        // *"Found more — your balance is updating"*, which made the same
+        // not-yet-certain claim that just moved `'Merged — balance updating'`
+        // to amber — two strings sharing a clause and wearing opposite hues
+        // (`ux-auditor`). What the scan actually finished is the discovery;
+        // the balance settling afterwards is the money plate's trust line to
+        // report, and reporting it is already its job.
+        tone: SettingsTone.ok,
       );
     } catch (_) {
       if (!mounted) return;
@@ -961,11 +1001,10 @@ class _Row extends StatelessWidget {
                                     value.text,
                                     style: theme.textTheme.labelSmall?.copyWith(
                                       color: switch (value.tone) {
-                                        SettingsTone.active => KvColor.success,
+                                        SettingsTone.ok => KvColor.ok,
                                         SettingsTone.neutral =>
                                           KvColor.textSecondary,
-                                        SettingsTone.degraded =>
-                                          KvColor.warning,
+                                        SettingsTone.degraded => KvColor.warn,
                                       },
                                       fontFamily: KvFont.ui,
                                     ),

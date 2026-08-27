@@ -33,69 +33,20 @@ import 'package:flutter/material.dart';
 import '../receive/qr_tile.dart';
 import '../theme/tokens.dart';
 import '../widgets/kv_cadence.dart';
-import '../widgets/kv_datum.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_toggle.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The states the money surface has to hold (SCREEN_INVENTORY 7a–7e).
-// ─────────────────────────────────────────────────────────────────────────────
-
-enum MoneyState { empty, live, syncing, inFlight, degraded }
-
-/// **Plated is the ratified reading** (founder call, 2026-08-26): the balance
-/// earns a container, the trust statement sits inside it beside the number it
-/// vouches for, and the label is sentence case. The instrument register — tracked
-/// mono caps, a graduated datum, the unit engraved beneath a scale — read as
-/// telemetry on glass, and money is owned rather than measured.
+/// The prototype's index.
 ///
-/// **The graduated datum was not discarded; it was relocated.** It now draws the
-/// confirmation gauge on the transaction-detail surface, where there genuinely is
-/// a scale and a reading.
-enum HeroVariant { plated, engraved, instrument }
-
-extension on HeroVariant {
-  bool get instrumentRegister => this == HeroVariant.instrument;
-}
-
-extension on MoneyState {
-  /// **Silence is the healthy state.** A permanent "Node responding" beside a
-  /// permanently animating meter says nothing changed, twice — and the Mainnet
-  /// chip in the plate already carries a lit lamp, so a healthy screen was
-  /// wearing two liveness indicators that agreed with each other. The trust
-  /// line now EARNS its place by appearing: it shows up when the link is not
-  /// live, and the chip carries the good news on its own.
-  ///
-  /// This tightens BG-8 rather than loosening it. The law requires that a
-  /// chain-derived value wire live · stale · unknown — it never required a
-  /// standing badge for "fine". The age line under the figure already reports
-  /// freshness; what was redundant was the reassurance.
-  bool get trustLineSpeaks =>
-      this == MoneyState.syncing || this == MoneyState.degraded;
-
-  /// **Motion means something is happening.** The cadence rides the trust line,
-  /// so it is the app's loading indicator and its link-lost tell — never ambient
-  /// decoration on a settled screen. Stillness is what "nothing to worry about"
-  /// looks like.
-
-  String get label => switch (this) {
-    MoneyState.empty => 'empty',
-    MoneyState.live => 'live',
-    MoneyState.syncing => 'syncing',
-    MoneyState.inFlight => 'in flight',
-    MoneyState.degraded => 'degraded',
-  };
-
-  /// Chain-derived values dim to 45% with a visible age when the link is not
-  /// live (BG-8). Buttons never dim — they are the user's, not the chain's.
-  bool get stale => this == MoneyState.degraded;
-
-  bool get cadenceRunning =>
-      this == MoneyState.live ||
-      this == MoneyState.syncing ||
-      this == MoneyState.inFlight;
-}
-
+/// **The money surface that used to live here was deleted at UX-2**, because
+/// it shipped: `ui/home_screen.dart` is the plated balance, the pinned plate,
+/// the network chip, the ledger and all five states, composed from the tested
+/// primitives in `ui/widgets/`. A prototype of a screen that exists is not a
+/// feel test any more — it is a second design, drifting, with nothing to stop
+/// a reader taking its copy for the product's (register item 11).
+///
+/// What remains is the screens whose own sub-phases have not run yet. Each one
+/// is deleted the same way, by the session that ships it.
 class BlackGlassHomePreview extends StatefulWidget {
   const BlackGlassHomePreview({super.key});
 
@@ -110,34 +61,6 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
     duration: KvMotion.enter,
     reverseDuration: KvMotion.calm,
   );
-  MoneyState _state = MoneyState.live;
-  final HeroVariant _variant = HeroVariant.plated;
-  // C compact, founder-chosen 2026-08-26. The switcher stays for now:
-  // "feels kinda modern but not quite yet" is not a closed decision.
-  PanelStyle _panel = PanelStyle.compact;
-  double _dragX = 0;
-
-  /// **The extent is measured, not stated.** A `SliverPersistentHeader` demands
-  /// a height it cannot work out for itself, and the first version of this
-  /// carried a hand-guessed number under a comment claiming it had been
-  /// measured — which overflowed the plate by 19dp the moment the padding
-  /// changed. A stated extent is a claim that goes stale on the next edit.
-  ///
-  /// So a zero-height measuring copy of the plate lays out beside the real one,
-  /// reports its natural height, and the header adopts it. It cannot be wrong,
-  /// and it cannot drift: change the plate and the number follows.
-  double _plateExtent = 240;
-
-  final GlobalKey _measureKey = GlobalKey();
-
-  void _syncExtent() {
-    final box = _measureKey.currentContext?.findRenderObject() as RenderBox?;
-    if (box == null || !box.hasSize) return;
-    final h = box.size.height + KvSpace.sm + KvSpace.m;
-    if ((h - _plateExtent).abs() > 0.5) {
-      setState(() => _plateExtent = h);
-    }
-  }
 
   @override
   void dispose() {
@@ -147,739 +70,108 @@ class _BlackGlassHomePreviewState extends State<BlackGlassHomePreview>
 
   @override
   Widget build(BuildContext context) {
-    WidgetsBinding.instance.addPostFrameCallback((_) => _syncExtent());
+    final screens = <(String, String, WidgetBuilder?)>[
+      (
+        'Transaction detail',
+        'UX-5 — the burial gauge',
+        (_) => _TransactionDetailPreview(entry: _entries.first),
+      ),
+      ('Navigation panel', 'UX-3 — withdrawn at D-190', null),
+      ('Send', 'UX-4', (_) => const _SendPreview()),
+      ('Signing ceremony', 'UX-4', (_) => const _ConfirmPreview()),
+      ('Receive', 'UX-5', (_) => const _ReceivePreview()),
+      ('Messages', 'UX-6', (_) => const _MessagesPreview()),
+      ('Secret surfaces', 'UX-7', (_) => const _SecretPreview()),
+      ('Node & connection', 'shipped — kept for comparison', null),
+      ('Splash & the fork', 'UX-8', (_) => const _SweepPreview()),
+    ];
     return Scaffold(
       backgroundColor: KvColor.abyss,
       body: Stack(
         children: [
-          // A left swipe pulls the panel in from the right edge it lives on.
-          // The gesture and the geometry agree, which is what makes it
-          // learnable without being told.
-          GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            // Accumulated travel, not end velocity. A flick's velocity is only
-            // read once the recogniser has already won the arena, and against
-            // a scroll view full of tappable rows that is not reliable —
-            // measured on device, the velocity form never fired.
-            onHorizontalDragStart: (_) => _dragX = 0,
-            onHorizontalDragUpdate: (d) {
-              _dragX += d.delta.dx;
-              if (_dragX < -48 && _nav.status == AnimationStatus.dismissed) {
-                _nav.forward();
-              }
-            },
-            child: SafeArea(top: false, child: _body(context)),
+          SafeArea(
+            child: ListView(
+              padding: const EdgeInsets.symmetric(
+                horizontal: KvSpace.gutter,
+                vertical: KvSpace.l,
+              ),
+              children: [
+                const _MicroLabel('PROTOTYPE'),
+                const SizedBox(height: KvSpace.s),
+                const Text(
+                  'Debug only. Not the build.',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 22 / 15,
+                    color: KvColor.inkDim,
+                  ),
+                ),
+                const SizedBox(height: KvSpace.l),
+                for (final (name, owner, builder) in screens) ...[
+                  _IndexRow(
+                    name: name,
+                    owner: owner,
+                    onTap: builder == null
+                        ? (name == 'Navigation panel' ? _nav.forward : null)
+                        : () => Navigator.of(
+                            context,
+                          ).push(MaterialPageRoute<void>(builder: builder)),
+                  ),
+                  const _RowRule(),
+                ],
+              ],
+            ),
           ),
-          // BG-13: the panel is mortal. It never survives a lock, and it is
-          // summoned rather than resident — there is no rail and no tab bar
-          // holding a permanent claim on the screen.
-          _NavPanel(controller: _nav, style: _panel, onDismiss: _nav.reverse),
+          _NavPanel(
+            controller: _nav,
+            style: PanelStyle.compact,
+            onDismiss: _nav.reverse,
+          ),
         ],
       ),
     );
   }
-
-  Widget _body(BuildContext context) {
-    return Column(
-      children: [
-        // BG-14: the top 52dp belongs to the real status bar. Nothing is
-        // painted there and no status bar is ever drawn.
-        const SizedBox(height: KvSpace.statusBarReserve),
-        _TopRail(variant: _variant, onNav: _nav.forward),
-        Expanded(
-          // The balance is PINNED and the ledger scrolls under it: what you
-          // own is not something you should have to scroll back up to see.
-          // Pull-to-refresh is hosted by the whole scroll view rather than
-          // by the list, so the gesture works from the balance as well —
-          // which is where a user reaches for it first.
-          child: RefreshIndicator(
-            onRefresh: () async {
-              await Future<void>.delayed(const Duration(milliseconds: 900));
-            },
-            // Not teal: a refresh is a mechanism, not the one primary
-            // action, and teal is rationed to three emissions (BG-2).
-            color: KvColor.ink,
-            backgroundColor: KvColor.key,
-            strokeWidth: 2,
-            child: CustomScrollView(
-              // Always scrollable, so the pull gesture exists even when the
-              // ledger is short or empty.
-              physics: const AlwaysScrollableScrollPhysics(),
-              slivers: [
-                SliverPersistentHeader(
-                  pinned: true,
-                  delegate: _PlateHeader(
-                    extent: _plateExtent,
-                    child: _Hero(state: _state, variant: _variant),
-                  ),
-                ),
-                if (_state == MoneyState.degraded)
-                  const SliverToBoxAdapter(
-                    child: Padding(
-                      padding: EdgeInsets.only(bottom: KvSpace.m),
-                      child: _DegradedNotice(),
-                    ),
-                  ),
-                if (_state != MoneyState.empty)
-                  SliverPersistentHeader(
-                    pinned: true,
-                    delegate: _SectionHeader(state: _state, variant: _variant),
-                  ),
-                SliverToBoxAdapter(
-                  child: _Feed(state: _state, variant: _variant),
-                ),
-                const SliverToBoxAdapter(child: SizedBox(height: KvSpace.l)),
-              ],
-            ),
-          ),
-        ),
-        _ThumbActions(state: _state),
-        // The measuring copy. Zero height, laid out with an unbounded
-        // vertical constraint so it reports its NATURAL size, invisible and
-        // untouchable. This is what makes the pinned extent a fact.
-        SizedBox(
-          height: 0,
-          child: OverflowBox(
-            alignment: Alignment.topLeft,
-            minHeight: 0,
-            maxHeight: double.infinity,
-            child: IgnorePointer(
-              child: ExcludeSemantics(
-                child: Opacity(
-                  opacity: 0,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: KvSpace.gutter,
-                    ),
-                    child: KeyedSubtree(
-                      key: _measureKey,
-                      child: _Hero(state: _state, variant: _variant),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-        _Switcher(
-          values: MoneyState.values,
-          value: _state,
-          label: (s) => s.label,
-          onChanged: (s) => setState(() => _state = s),
-        ),
-        _Switcher(
-          values: PanelStyle.values,
-          value: _panel,
-          label: (v) => v.label,
-          onChanged: (v) => setState(() {
-            _panel = v;
-            _nav.forward();
-          }),
-        ),
-      ],
-    );
-  }
 }
 
-/// Pins the balance while the ledger scrolls beneath it. It paints the ground
-/// itself, so rows passing underneath never show through — a transparent pinned
-/// header is how a sticky plate ends up with text sliding across it.
-class _PlateHeader extends SliverPersistentHeaderDelegate {
-  const _PlateHeader({required this.extent, required this.child});
+class _IndexRow extends StatelessWidget {
+  const _IndexRow({required this.name, required this.owner, this.onTap});
 
-  final double extent;
-  final Widget child;
+  final String name;
+  final String owner;
+  final VoidCallback? onTap;
 
   @override
-  double get minExtent => extent;
-
-  @override
-  double get maxExtent => extent;
-
-  @override
-  Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
-    return Container(
-      color: KvColor.abyss,
-      alignment: Alignment.topCenter,
-      padding: const EdgeInsets.only(top: KvSpace.sm, bottom: KvSpace.m),
-      child: child,
-    );
-  }
-
-  @override
-  bool shouldRebuild(_PlateHeader old) =>
-      old.extent != extent || old.child != child;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Top rail — the nav trigger and nothing else. A 44dp glyph inside a 48dp
-// target, stated here because BG-12 requires the smaller visual to be declared.
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _TopRail extends StatelessWidget {
-  const _TopRail({required this.variant, required this.onNav});
-
-  final HeroVariant variant;
-  final VoidCallback onNav;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(KvSpace.m, 0, KvSpace.m, 0),
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
       child: Row(
         children: [
-          const SizedBox(width: KvSpace.s),
-          // The wordmark, engraved rather than set: mono caps, wide tracking,
-          // sitting at the same optical weight as a silk-screened panel label.
-          if (variant.instrumentRegister)
-            const Text(
-              'KASPAVERSE',
-              style: TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: 11,
-                height: 16 / 11,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 2.4,
-                color: KvColor.inkMeta,
-              ),
-            )
-          else
-            const Text(
-              'KaspaVerse',
+          Expanded(
+            child: Text(
+              name,
               style: TextStyle(
                 fontFamily: KvFont.ui,
                 fontSize: 15,
                 height: 20 / 15,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -0.1,
-                color: KvColor.inkNav,
-              ),
-            ),
-          const Spacer(),
-          // The trigger sits with the panel it opens: right-anchored, so the
-          // hand that reaches for it is already there (BG-12's thumb arc).
-          Semantics(
-            button: true,
-            label: 'Open navigation',
-            child: InkWell(
-              onTap: onNav,
-              borderRadius: BorderRadius.circular(KvRadius.pill),
-              // A 24dp mark inside a 48dp target — the smaller visual is
-              // permitted only because the code says so (BG-12).
-              child: const SizedBox(
-                width: KvSpace.touchTarget,
-                height: KvSpace.touchTarget,
-                child: Center(
-                  child: CustomPaint(
-                    size: Size(KvGlyph.grid, KvGlyph.grid),
-                    painter: _GlyphPainter(_Glyph.navDots),
-                  ),
-                ),
+                color: onTap == null ? KvColor.inkMeta : KvColor.ink,
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The hero — the instrument face.
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _Hero extends StatelessWidget {
-  const _Hero({required this.state, required this.variant});
-
-  final MoneyState state;
-  final HeroVariant variant;
-
-  static const _integer = '1,284';
-  static const _fraction = '5027';
-
-  @override
-  Widget build(BuildContext context) {
-    final empty = state == MoneyState.empty;
-    // BG-5: a real zero renders as a real zero; it is never a skeleton and
-    // never a fabricated number standing in for an unknown one.
-    final integer = empty ? '0' : _integer;
-    final fraction = empty ? '0000' : _fraction;
-
-    final body = switch (variant) {
-      HeroVariant.plated => _Plated(
-        state: state,
-        integer: integer,
-        fraction: fraction,
-      ),
-      HeroVariant.engraved => _Engraved(
-        state: state,
-        integer: integer,
-        fraction: fraction,
-      ),
-      HeroVariant.instrument => _Instrument(
-        state: state,
-        integer: integer,
-        fraction: fraction,
-      ),
-    };
-
-    return Opacity(
-      opacity: state.stale ? KvFreshness.opacityStale : 1,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Semantics(
-              label: empty ? 'Balance zero KAS' : 'Balance 1,284.5027 KAS',
-              child: ExcludeSemantics(child: body),
-            ),
-            if (state == MoneyState.inFlight) ...[
-              const SizedBox(height: KvSpace.sm),
-              const _InFlightLine(),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// The number itself. Same in all three variants — what changes around it is
-/// how much technical furniture it wears.
-class _Figure extends StatelessWidget {
-  const _Figure({required this.integer, required this.fraction});
-
-  final String integer;
-  final String fraction;
-
-  /// The plated and engraved variants both read at 42 — one step down from the
-  /// instrument's 46, because the unit now sits beside the number instead of
-  /// being engraved under it, and the line has to hold both.
-  static const double size = 42;
-
-  @override
-  Widget build(BuildContext context) {
-    // A number scales down before it ever truncates (BG-5), which is also what
-    // carries it through 1.3x text scale at 320dp.
-    return FittedBox(
-      fit: BoxFit.scaleDown,
-      alignment: Alignment.centerLeft,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.baseline,
-        textBaseline: TextBaseline.alphabetic,
-        children: [
           Text(
-            integer,
-            style: TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: size,
-              height: 1.14,
-              fontWeight: FontWeight.w500,
-              letterSpacing: -0.5,
-              color: KvColor.ink,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-          Text(
-            '.$fraction',
-            style: TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: size * 0.48,
-              fontWeight: FontWeight.w400,
-              color: KvColor.inkDim,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-          const SizedBox(width: KvSpace.s),
-          // The unit sits WITH the number, the way a price is written — not
-          // engraved beneath it as a scale label. This is most of what makes
-          // the plated and engraved variants read as money.
-          Text(
-            'KAS',
-            style: TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: size * 0.33,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0.6,
-              // The one word on this screen that IS the brand. `primaryMuted`
-              // is ambient teal, not an emission, so it costs nothing against
-              // BG-2's cap of three — see §1.5.
-              color: KvColor.primaryMuted,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// **A · Plated.** The balance earns a container, and the trust statement lives
-/// inside it beside the number it vouches for. Sentence case throughout; the
-/// only rule is a hairline separating the figure from its provenance. Warmest
-/// of the three, and the closest to something a person reads as their money.
-class _Plated extends StatelessWidget {
-  const _Plated({
-    required this.state,
-    required this.integer,
-    required this.fraction,
-  });
-
-  final MoneyState state;
-  final String integer;
-  final String fraction;
-
-  @override
-  Widget build(BuildContext context) {
-    final (Color lamp, String words) = _trust(state);
-    return Container(
-      width: double.infinity,
-      // The plate is TALL rather than compressed: the money is the reason the
-      // screen exists, so it gets the room, and the chrome above it gets less.
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.l,
-        KvSpace.l,
-        KvSpace.l,
-        KvSpace.m,
-      ),
-      decoration: BoxDecoration(
-        color: KvColor.plate,
-        borderRadius: BorderRadius.circular(KvRadius.panel),
-        border: Border.all(color: KvColor.plateEdge),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const _SoftLabel('Total balance'),
-              const Spacer(),
-              // Tapping the network opens the node surface — who serves you,
-              // how freshly, and the standing offer to serve yourself. The
-              // sovereign-node session owns what lives behind it.
-              _NetworkChip(state: state),
-            ],
-          ),
-          const SizedBox(height: KvSpace.sm),
-          _Figure(integer: integer, fraction: fraction),
-          const SizedBox(height: KvSpace.s),
-          _ValueLine(
-            empty: integer == '0',
-            rate: 0.0752,
-            // Fresh says nothing; stale says how old. BG-8 requires the age to
-            // be VISIBLE when a reading is dimmed — the retired variant carried
-            // it and the ratified one had lost it.
-            ageLabel: state.stale ? 'as of 14:02:41 · 3 m ago' : '',
-          ),
-          const SizedBox(height: KvSpace.m),
-          Container(height: 1, color: KvColor.plateDivider),
-          const SizedBox(height: KvSpace.sm),
-          if (state.trustLineSpeaks) ...[
-            Row(
-              children: [
-                _Lamp(lamp),
-                const SizedBox(width: KvSpace.s),
-                Expanded(
-                  child: Text(
-                    words,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 13,
-                      height: 18 / 13,
-                      color: KvColor.inkDim,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: KvSpace.s),
-                _Cadence(running: state.cadenceRunning),
-              ],
-            ),
-            const SizedBox(height: 6),
-          ],
-          // The chain clock, where an instrument puts its reading: small,
-          // mono, tabular, and never competing with the money above it.
-          Text(
-            'DAA 523,216,421',
-            style: const TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: 11,
-              height: 15 / 11,
-              color: KvColor.inkMetaLow,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// **B · Engraved.** No container — the figure still floats in void, but the
-/// telemetry furniture is gone: sentence case, the unit with the number, and a
-/// datum that is a clean rule with end stops rather than a graduated scale.
-class _Engraved extends StatelessWidget {
-  const _Engraved({
-    required this.state,
-    required this.integer,
-    required this.fraction,
-  });
-
-  final MoneyState state;
-  final String integer;
-  final String fraction;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _SoftLabel('Total balance'),
-        const SizedBox(height: KvSpace.s),
-        _Figure(integer: integer, fraction: fraction),
-        const SizedBox(height: KvSpace.sm),
-        const SizedBox(
-          height: 5,
-          width: double.infinity,
-          child: CustomPaint(painter: _DatumPainter(graduated: false)),
-        ),
-        const SizedBox(height: KvSpace.s),
-        Text(
-          switch (state) {
-            MoneyState.degraded => 'As of 14:02:41 · 3 m ago',
-            MoneyState.syncing => 'Still counting',
-            _ => 'Updated just now',
-          },
-          style: TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 12,
-            height: 16 / 12,
-            color: state.stale ? KvColor.warn : KvColor.inkMetaLow,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// **C · Instrument.** The export's own reading, kept for comparison: tracked
-/// mono caps, a graduated datum, the unit and the reading time engraved beneath
-/// the scale. Precise, and on glass it reads as telemetry rather than money.
-class _Instrument extends StatelessWidget {
-  const _Instrument({
-    required this.state,
-    required this.integer,
-    required this.fraction,
-  });
-
-  final MoneyState state;
-  final String integer;
-  final String fraction;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _MicroLabel('TOTAL BALANCE'),
-        const SizedBox(height: KvSpace.sm),
-        FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.centerLeft,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                integer,
-                style: const TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: 46,
-                  height: 52 / 46,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: -0.5,
-                  color: KvColor.ink,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-              Text(
-                '.$fraction',
-                style: const TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w400,
-                  color: KvColor.inkDim,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: KvSpace.s),
-        const SizedBox(
-          height: 7,
-          width: double.infinity,
-          child: CustomPaint(painter: _DatumPainter(graduated: true)),
-        ),
-        const SizedBox(height: KvSpace.s),
-        Row(
-          children: [
-            const _MicroLabel('KAS'),
-            const Spacer(),
-            _MicroLabel(switch (state) {
-              MoneyState.degraded => 'AS OF 14:02:41 · 3 M AGO',
-              MoneyState.syncing => 'STILL COUNTING',
-              _ => 'UPDATED JUST NOW',
-            }, tone: state.stale ? KvColor.warn : KvColor.inkMetaLow),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-(Color, String) _trust(MoneyState state) => switch (state) {
-  MoneyState.degraded => (KvColor.warn, 'Link lost — showing last known'),
-  MoneyState.syncing => (KvColor.warn, 'Counting your coins'),
-  _ => (KvColor.ok, 'Node responding'),
-};
-
-/// The network, as a control rather than a caption. A lamp, the network name,
-/// and a chevron that says it goes somewhere — 48dp of target around a 28dp
-/// visual (BG-12 requires the smaller visual to be declared).
-class _NetworkChip extends StatelessWidget {
-  const _NetworkChip({required this.state});
-
-  final MoneyState state;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: 'Mainnet. Open network and node settings',
-      child: Builder(
-        builder: (context) => InkWell(
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const _NetworkPreview()),
-          ),
-          borderRadius: BorderRadius.circular(KvRadius.control),
-          // A 28dp visual inside a 48dp target. It sits beside a 42dp balance
-          // and was competing with it; a network chip is a way OUT of this
-          // screen, not a thing on it. The smaller visual is declared (BG-12).
-          child: SizedBox(
-            height: KvSpace.touchTarget,
-            child: Center(
-              child: Container(
-                height: 28,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  color: KvColor.control,
-                  borderRadius: BorderRadius.circular(KvRadius.control),
-                  border: Border.all(color: KvColor.edgeHi),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // NOT const. A lamp that can only be green is not an
-                    // indicator, and this one sat beside an amber "Link lost"
-                    // on the same plate (BG-8, the P0.3 scar).
-                    _Lamp(state.trustLineSpeaks ? KvColor.warn : KvColor.ok),
-                    const SizedBox(width: 6),
-                    const Text(
-                      'Mainnet',
-                      style: TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 11,
-                        height: 15 / 11,
-                        fontWeight: FontWeight.w500,
-                        color: KvColor.inkDim,
-                      ),
-                    ),
-                    const SizedBox(width: 3),
-                    CustomPaint(
-                      size: const Size(11, 11),
-                      painter: const _GlyphPainter(
-                        _Glyph.chevron,
-                        tone: KvColor.inkMeta,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// What the balance is worth, in fiat.
-///
-/// **Founder call, 2026-08-26 (D-191): fiat exists.** The rate comes from
-/// `api.kaspa.org`, a named and user-replaceable endpoint, and the whole feature
-/// is disable-able. A price is the one claim in this app that consensus cannot
-/// re-verify — no node, no chain and no proof can check it — so INV-8's
-/// carve-out carries conditions, and this widget is where three of them live:
-///
-///   * it is **subordinate by scale and tone**, and prefixed `≈`, because KAS is
-///     the unit of account and this is a convenience beside it;
-///   * it **wears its age** at the point of display, like every other reading
-///     the wallet did not derive itself (BG-8) — the SOURCE is disclosed where
-///     the source is chosen (the network surface and Settings), not shouted on
-///     the money screen, because a hostname beside a balance is clutter that
-///     stops being read on day two;
-///   * unknown renders **`—`**, never a fabricated number (BG-5).
-///
-/// The fourth condition is enforced by its absence: this widget appears on no
-/// signing surface. What you sign is denominated in the thing that moves.
-class _ValueLine extends StatelessWidget {
-  const _ValueLine({required this.empty, this.rate, required this.ageLabel});
-
-  final bool empty;
-
-  /// Null when no rate has been fetched, or when the user switched it off.
-  final double? rate;
-  final String ageLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    if (empty) return const SizedBox.shrink();
-    final r = rate;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.baseline,
-      textBaseline: TextBaseline.alphabetic,
-      children: [
-        Text(
-          r == null ? '≈ —' : '≈ ${(1284.5027 * r).toStringAsFixed(2)} USD',
-          style: const TextStyle(
-            fontFamily: KvFont.mono,
-            fontSize: 13,
-            height: 18 / 13,
-            color: KvColor.inkMeta,
-            fontFeatures: [FontFeature.tabularFigures()],
-          ),
-        ),
-        // BG-8, as amended at D-192: a fresh reading says nothing. The age
-        // appears only when the rate has gone stale enough to mislead, which
-        // is the same rule the trust line follows.
-        if (r == null || ageLabel.isNotEmpty) ...[
-          const SizedBox(width: KvSpace.s),
-          Text(
-            r == null ? 'no rate yet' : ageLabel,
+            owner,
             style: const TextStyle(
               fontFamily: KvFont.ui,
               fontSize: 11,
               height: 15 / 11,
-              // The carve-out that permits fiat requires this to be readable.
               color: KvColor.inkMetaLow,
             ),
           ),
         ],
-      ],
-    );
-  }
+      ),
+    ),
+  );
 }
 
 /// Sentence case, Inter, no tracking — a label a person reads, not one an
@@ -899,60 +191,6 @@ class _SoftLabel extends StatelessWidget {
       color: KvColor.inkDim,
     ),
   );
-}
-
-/// Extracted to `widgets/kv_datum.dart` at UX-1, and aliased here so the
-/// prototype and the primitive cannot disagree. The default flipped in the
-/// move — plain, not graduated — because end stops turn a line into a scale
-/// and most rules in this app are not scales (D-195); the two call sites here
-/// name what they want.
-typedef _DatumPainter = KvDatumPainter;
-
-class _InFlightLine extends StatelessWidget {
-  const _InFlightLine();
-
-  @override
-  Widget build(BuildContext context) {
-    // BG-8: money in flight lives on a surface that stays until it settles.
-    // Never a toast.
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: KvSpace.m,
-        vertical: KvSpace.sm,
-      ),
-      decoration: BoxDecoration(
-        color: KvColor.chip,
-        borderRadius: BorderRadius.circular(KvRadius.plate),
-        border: Border.all(color: KvColor.plateDivider),
-      ),
-      child: Row(
-        children: [
-          const _Lamp(KvColor.warn),
-          const SizedBox(width: KvSpace.sm),
-          const Expanded(
-            child: Text(
-              'Leaving now',
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: KvColor.inkDim,
-              ),
-            ),
-          ),
-          Text(
-            '− 12.40000000',
-            style: const TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: 13,
-              color: KvColor.risk,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -994,48 +232,6 @@ class _Lamp extends StatelessWidget {
 /// which rendered a RUNNING cadence identically to a frozen one — the exact
 /// lie BG-8 exists to forbid. The primitive holds the bars bright instead.
 typedef _Cadence = KvCadence;
-
-class _DegradedNotice extends StatelessWidget {
-  const _DegradedNotice();
-
-  @override
-  Widget build(BuildContext context) {
-    // Amber, because the truth is incomplete — not red, which would claim
-    // money is at risk when none is (BG-7).
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: KvSpace.m,
-          vertical: KvSpace.sm,
-        ),
-        decoration: BoxDecoration(
-          color: KvColor.noticeWarnFill,
-          borderRadius: BorderRadius.circular(KvRadius.plate),
-          border: Border.all(color: KvColor.noticeWarnEdge),
-        ),
-        child: Row(
-          children: [
-            const _Lamp(KvColor.warn),
-            const SizedBox(width: KvSpace.sm),
-            const Expanded(
-              child: Text(
-                'Your money is safe. This is the last balance the network '
-                'confirmed — it may have moved since.',
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 13,
-                  height: 19 / 13,
-                  color: KvColor.inkDim,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The feed — a ledger, not cards. Rhythm from spacing (BG-1).
@@ -1112,65 +308,6 @@ const _entries = <_Entry>[
   ),
 ];
 
-/// The section header pins under the plate: scrolling a ledger should never
-/// leave you unsure which ledger you are in.
-class _SectionHeader extends SliverPersistentHeaderDelegate {
-  const _SectionHeader({required this.state, required this.variant});
-
-  final MoneyState state;
-  final HeroVariant variant;
-
-  @override
-  double get minExtent => 40;
-
-  @override
-  double get maxExtent => 40;
-
-  @override
-  Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
-    return Container(
-      color: KvColor.abyss,
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-      alignment: Alignment.centerLeft,
-      child: Row(
-        children: [
-          if (variant.instrumentRegister) ...[
-            Container(width: 2, height: 10, color: KvColor.primaryMuted),
-            const SizedBox(width: KvSpace.s),
-            const _MicroLabel('ACTIVITY'),
-          ] else
-            const Text(
-              'Activity',
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 15,
-                height: 20 / 15,
-                fontWeight: FontWeight.w600,
-                color: KvColor.ink,
-              ),
-            ),
-          if (state == MoneyState.degraded) ...[
-            const Spacer(),
-            const Text(
-              'Complete to 14:02',
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 12,
-                height: 16 / 12,
-                color: KvColor.warn,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  @override
-  bool shouldRebuild(_SectionHeader old) =>
-      old.state != state || old.variant != variant;
-}
-
 /// A hairline between two facts.
 class _RowRule extends StatelessWidget {
   const _RowRule();
@@ -1178,240 +315,6 @@ class _RowRule extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Container(height: 1, color: KvColor.plateDivider);
-}
-
-class _Feed extends StatelessWidget {
-  const _Feed({required this.state, required this.variant});
-
-  final MoneyState state;
-  final HeroVariant variant;
-
-  @override
-  Widget build(BuildContext context) {
-    if (state == MoneyState.empty) return const _EmptyState();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(height: KvSpace.s),
-        for (var i = 0; i < _entries.length; i++) ...[
-          if (i > 0)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-              child: _RowRule(),
-            ),
-          _Row(entry: _entries[i], stale: state.stale),
-        ],
-      ],
-    );
-  }
-}
-
-class _Row extends StatelessWidget {
-  const _Row({required this.entry, required this.stale});
-
-  final _Entry entry;
-  final bool stale;
-
-  @override
-  Widget build(BuildContext context) {
-    return Opacity(
-      opacity: stale ? KvFreshness.opacityStale : 1,
-      child: InkWell(
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => _TransactionDetailPreview(entry: entry),
-          ),
-        ),
-        child: Padding(
-          // 20dp rhythm, no dividers in motion — the ledger reads by spacing.
-          padding: const EdgeInsets.fromLTRB(
-            KvSpace.gutter,
-            10,
-            KvSpace.gutter,
-            10,
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: CustomPaint(
-                  size: const Size(KvGlyph.grid, KvGlyph.grid),
-                  painter: _GlyphPainter(entry.glyph, tone: entry.tone),
-                ),
-              ),
-              const SizedBox(width: KvSpace.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      entry.title,
-                      style: const TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 15,
-                        height: 20 / 15,
-                        fontWeight: FontWeight.w500,
-                        color: KvColor.ink,
-                      ),
-                    ),
-                    const SizedBox(height: 1),
-                    // Full width, so the compact form is never truncated twice.
-                    Text(
-                      entry.peer,
-                      maxLines: 1,
-                      // Clip, never ellipsis: a tail cut on an address throws
-                      // away the last eight payload characters and leaves the
-                      // `kaspa:q…` shape BG-15 forbids. At 320dp / 1.3x this
-                      // row is ~50dp short — which no 412dp device shows.
-                      overflow: TextOverflow.clip,
-                      softWrap: false,
-                      style: const TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 12,
-                        height: 16 / 12,
-                        color: KvColor.inkMeta,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _Lamp(entry.statusLamp),
-                        const SizedBox(width: 5),
-                        Text(
-                          '${entry.status} · ${entry.age}',
-                          style: const TextStyle(
-                            fontFamily: KvFont.mono,
-                            fontSize: 11,
-                            height: 15 / 11,
-                            color: KvColor.inkMetaLow,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: KvSpace.sm),
-              // Direction rides four ways at once — word, sign, colour and
-              // weight — so the row survives greyscale, colour-blindness and a
-              // screen reader (BG-7).
-              Text(
-                entry.amount,
-                style: TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: 15,
-                  height: 20 / 15,
-                  fontWeight: entry.weight,
-                  color: entry.tone,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The one empty-state pattern: etched glyph, one truth, one nudge. Emptiness
-/// is a real state of a real wallet — never an apology, never an illustration.
-class _EmptyState extends StatelessWidget {
-  const _EmptyState();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.gutter,
-        KvSpace.xl,
-        KvSpace.gutter,
-        0,
-      ),
-      child: Column(
-        children: [
-          const CustomPaint(
-            size: Size(KvGlyph.grid, KvGlyph.grid),
-            painter: _GlyphPainter(_Glyph.diamond, tone: KvColor.etch),
-          ),
-          const SizedBox(height: KvSpace.m),
-          const Text(
-            'Nothing has moved yet',
-            style: TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 15,
-              height: 22 / 15,
-              color: KvColor.inkDim,
-            ),
-          ),
-          const SizedBox(height: KvSpace.xs),
-          const Text(
-            'Your address is ready to receive.',
-            style: TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 13,
-              height: 19 / 13,
-              color: KvColor.inkMetaLow,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Thumb arc — Send and Receive. On an empty wallet the light flips to Receive,
-// because the brightest thing on screen is always the most sensible next act.
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _ThumbActions extends StatelessWidget {
-  const _ThumbActions({required this.state});
-
-  final MoneyState state;
-
-  @override
-  Widget build(BuildContext context) {
-    final empty = state == MoneyState.empty;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.gutter,
-        KvSpace.sm,
-        KvSpace.gutter,
-        KvSpace.m,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _Action(
-              label: 'Receive',
-              primary: empty,
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const _ReceivePreview(),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: KvSpace.sm),
-          Expanded(
-            child: _Action(
-              label: 'Send',
-              primary: !empty,
-              // BG-12: a disabled control always says why, in words.
-              disabledReason: empty ? 'Nothing to send yet' : null,
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(builder: (_) => const _SendPreview()),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _Action extends StatelessWidget {
@@ -1493,10 +396,10 @@ class _Action extends StatelessWidget {
 /// Silk-screened panel labelling: mono caps, wide tracking, smallest tone that
 /// still clears AA on every surface it can land on.
 class _MicroLabel extends StatelessWidget {
-  const _MicroLabel(this.text, {this.tone = KvColor.inkMetaLow});
+  const _MicroLabel(this.text);
 
   final String text;
-  final Color tone;
+  static const Color tone = KvColor.inkMetaLow;
 
   @override
   Widget build(BuildContext context) => Text(
@@ -2258,12 +1161,6 @@ extension on PanelStyle {
 
   /// Compact drops the one-line blurbs: names and tags only.
   bool get terse => this == PanelStyle.compact;
-
-  String get label => switch (this) {
-    PanelStyle.panel => 'A panel 288',
-    PanelStyle.card => 'B card 268',
-    PanelStyle.compact => 'C compact 244',
-  };
 }
 
 class _Destination {
