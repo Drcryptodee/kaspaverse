@@ -463,10 +463,20 @@ void main() {
         reason: 'the serving plate owns the only meter on this screen',
       );
 
-      // A second press while the hunt is live is swallowed, not queued.
+      // **A tap mid-hunt still reaches the seam — that IS C4's kick.** The
+      // first version of this test asserted the opposite and passed, because
+      // the control had been given `onTap: hunting ? null : onTap` when the
+      // action moved off the network sheet. The engine's own hunt keeps
+      // `searching` true, so that made the button dead from the moment the
+      // screen opened, and the test locked it in. Repeat taps are harmless:
+      // `ChainService.reconnect()` returns early while a dispatch is in flight.
       await tester.tap(find.text('Searching…'), warnIfMissed: false);
       await tester.pump();
-      expect(seam.kicks, 1);
+      expect(
+        seam.kicks,
+        2,
+        reason: 'a busy-looking button that cannot be tapped deletes C4',
+      );
       await tester.pumpWidget(const SizedBox());
     });
 

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../format.dart';
 import '../theme/tokens.dart';
+import '../widgets/haptics.dart';
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_status_chip.dart';
@@ -710,11 +711,24 @@ class _Reconnect extends StatelessWidget {
     final label = hunting ? 'Searching…' : 'Reconnect';
     return Semantics(
       button: true,
-      enabled: !hunting,
       label: label,
       child: ExcludeSemantics(
         child: InkWell(
-          onTap: hunting ? null : onTap,
+          // **Never disabled while hunting** — a tap mid-search IS C4's kick,
+          // and greying the control out deletes that affordance exactly when
+          // the user most wants it. Repeat taps are already harmless:
+          // `ChainService.reconnect()` returns early while a dispatch is in
+          // flight.
+          //
+          // This shipped correctly on the network sheet, with that reasoning
+          // written beside it, and UX-2 dropped it when the action moved here
+          // — the engine's own hunt keeps `searching` true, so the button was
+          // dead from the moment the screen opened. Found on glass; the test
+          // that "proved" the swallow had codified the regression.
+          onTap: () {
+            KvHaptic.selection();
+            onTap();
+          },
           borderRadius: BorderRadius.circular(KvRadius.control),
           child: KvSurface.control(
             width: double.infinity,
