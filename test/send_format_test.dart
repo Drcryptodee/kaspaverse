@@ -52,6 +52,26 @@ void main() {
     });
   });
 
+  group('trimTrailingZeros (the precision law on a unit that is not KAS)', () {
+    test('every significant digit, and no padding', () {
+      // D-210 is written against **the unit's own precision**, deliberately, so
+      // a figure denominated in something other than KAS inherits the rule
+      // instead of needing a second one.
+      expect(trimTrailingZeros(0.02864504), '0.02864504');
+      expect(trimTrailingZeros(0.0712), '0.0712');
+      expect(trimTrailingZeros(1.5), '1.5');
+      expect(trimTrailingZeros(1), '1', reason: 'no lone trailing dot');
+      expect(trimTrailingZeros(12.34, max: 2), '12.34');
+    });
+
+    test('a value finer than the unit floors, never rounds up', () {
+      // The one edge where the answer is lossy, and it is bounded elsewhere:
+      // Rust refuses a price ≤ 0 or above a believable ceiling before it ever
+      // reaches a screen (`prefs::check_price`).
+      expect(trimTrailingZeros(0.000000001), '0');
+    });
+  });
+
   group('chunkAddress (DS-8 full-form review)', () {
     test('keeps the kaspa: prefix and groups the payload in fours', () {
       expect(chunkAddress('kaspa:qz7ulu4c25dh'), 'kaspa:qz7u lu4c 25dh');

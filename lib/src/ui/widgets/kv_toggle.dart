@@ -9,15 +9,17 @@ import '../theme/tokens.dart';
 /// confirmed. Teal stays out — teal is light, never a status (BG-2), and one
 /// emission per switch would spend the whole per-screen budget on chrome.
 ///
-/// **Why this is drawn rather than a Material `Switch`.** `kv_theme.dart` pins
-/// a `SwitchThemeData` in exactly these colours, and using it would be one
-/// fewer rendering of one decision. It cannot: `Switch` animates its thumb
-/// through `AnimationController`s that consult no `disableAnimations`
+/// **Why this is drawn rather than a Material `Switch`.** `Switch` animates its
+/// thumb through `AnimationController`s that consult no `disableAnimations`
 /// anywhere in the pinned SDK, so a framework switch **slides under reduced
-/// motion** and BG-9 says everything collapses to opacity. The tokens are the
-/// same tokens, so this is the same decision rendered twice rather than two
-/// decisions — and the second copy is `SwitchThemeData`, which UX-3 retires
-/// when Settings adopts this (D-206).
+/// motion** while BG-9 says everything collapses to opacity.
+///
+/// `kv_theme.dart` used to pin a `SwitchThemeData` in exactly these colours —
+/// the same decision rendered twice. **UX-3 retired it** (D-206) once this was
+/// the app's only switch, and the removal is safe in the direction that
+/// matters: an unthemed `Switch` would resolve its selected track to
+/// `colorScheme.primary` and paint teal as a status (BG-2), so a future one
+/// arrives visibly wrong rather than quietly plausible.
 ///
 /// The **whole row is the target** and clears 48dp on its own; the 44×26
 /// switch is the visual inside it, which BG-12 permits and requires the code

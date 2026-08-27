@@ -1,6 +1,7 @@
 pub mod app;
 pub mod dag;
 pub mod error;
+pub mod prefs;
 pub mod send;
 pub mod transport;
 pub mod vault;

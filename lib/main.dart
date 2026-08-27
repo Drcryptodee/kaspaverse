@@ -7,6 +7,7 @@ import 'package:kaspaverse/src/rust/api/wallet.dart' show deepScan;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
+import 'package:kaspaverse/src/services/rate_service.dart';
 import 'package:kaspaverse/src/services/transport_service.dart';
 import 'package:kaspaverse/src/services/vault_service.dart';
 import 'package:kaspaverse/src/services/wallet_service.dart';
@@ -15,10 +16,12 @@ import 'package:kaspaverse/src/ui/dev_transport_panel.dart';
 import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
-import 'package:kaspaverse/src/ui/network_sheet.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/preview/black_glass_home_preview.dart';
+import 'package:kaspaverse/src/rust/api/dag.dart' show dagStatus;
+import 'package:kaspaverse/src/rust/api/prefs.dart'
+    show prefsExplorerConfig, prefsSetExplorerConfig;
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
@@ -75,7 +78,55 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
   reconnecting: chain.reconnecting,
   onReconnect: chain.reconnect,
   refreshConfig: () => chain.refreshNodeConfig(),
+  // The scan line the retired network sheet uniquely rendered, carried across
+  // (UX-3). `dagStatus` is a poll that takes no I/O in its steady state.
+  blockAgeSecs: () async => (await dagStatus()).lastBlockAgeSecs?.toInt(),
 );
+
+/// The explorer choice, mapped off the bridge DTO. Dart moves strings; Rust
+/// validates them and builds every URL (INV-9's reasoning: a second, weaker
+/// guard on this side is the thing to avoid).
+ExplorerScope _explorerScope() => ExplorerScope(
+  read: () async {
+    final config = await prefsExplorerConfig();
+    return ExplorerChoice(
+      txTemplate: config.txTemplate,
+      addressTemplate: config.addressTemplate,
+      defaults: [
+        for (final d in config.defaults)
+          ExplorerOption(
+            name: d.name,
+            txTemplate: d.txTemplate,
+            addressTemplate: d.addressTemplate,
+          ),
+      ],
+    );
+  },
+  write: (tx, address) =>
+      prefsSetExplorerConfig(txTemplate: tx, addressTemplate: address),
+);
+
+/// The price source, over the ONE service that owns the fetch.
+RateScope _rateScope(RateService rate) => RateScope(
+  enabled: rate.enabled,
+  endpoint: rate.endpoint,
+  defaultEndpoint: rate.defaultEndpoint,
+  quote: rate.quote,
+  error: rate.error,
+  setConfig: rate.setConfig,
+  load: rate.loadConfig,
+);
+
+/// **The** node surface, built once and reached from two doors: the money
+/// plate's network chip and the Settings row. One builder is what keeps them
+/// from becoming two screens answering the same question — the C7 defect the
+/// retired network sheet actually had.
+WidgetBuilder _nodeRoute(ChainService chain) =>
+    (_) => NodeScreen(
+      scope: _nodeScope(chain),
+      explorer: _explorerScope(),
+      rate: _rateScope(RateService.instance),
+    );
 
 /// The app: Bioluminescent Vault theme (tokens, P1.3) wrapping the navigation
 /// shell. The D-027 freestyle seed-colour drift dies here — the theme is built
@@ -118,7 +169,6 @@ class KaspaVerseApp extends StatelessWidget {
             searching: chain.searching,
             osOffline: chain.osOffline,
             disconnectedAt: chain.disconnectedAt,
-            node: _nodeScope(chain),
           ),
           wallet: WalletScope(
             mature: wallet.mature,
@@ -147,6 +197,16 @@ class KaspaVerseApp extends StatelessWidget {
             prepareSweep: wallet.prepareSweep,
           ),
           messagesRoute: (_) => const ContactsScreen(),
+          nodeRoute: _nodeRoute(chain),
+          // Read-only on this surface by construction: the plate shows a
+          // price, and the place a price is chosen is the place it can be
+          // switched off (D-193).
+          fiat: FiatScope(
+            enabled: RateService.instance.enabled,
+            quote: RateService.instance.quote,
+            attach: RateService.instance.attach,
+            detach: RateService.instance.detach,
+          ),
           // Track 2: the app's settings surface, and the only door to biometric
           // enrolment outside the create flow. Every seam is wired here so the
           // screen itself imports no service (the V5 scope law).
@@ -168,21 +228,15 @@ class KaspaVerseApp extends StatelessWidget {
               abandonSend: wallet.abandonSend,
             ),
             about: AboutScope(packageInfo: VaultService.instance.packageInfo),
-            // The SAME sheet the home beacon opens, over the same notifiers —
-            // never a second rendering of one link state (C7).
-            networkSheet: () => NetworkSheet(
-              connected: chain.connected,
-              endpoint: chain.endpoint,
-              virtualDaaScore: chain.virtualDaaScore,
-              error: chain.error,
-              lastUpdate: chain.lastUpdate,
-              clock: DateTime.now,
-              reconnecting: chain.reconnecting,
-              onReconnect: chain.reconnect,
-              searching: chain.searching,
-              osOffline: chain.osOffline,
-              disconnectedAt: chain.disconnectedAt,
-              node: _nodeScope(chain),
+            // The SAME screen the money plate's chip opens, from the same
+            // builder — never a second rendering of one truth (C7). The
+            // summary beside the row reports the CHOICE (whose node, fiat on
+            // or off), never the link's health, which changes without the
+            // user and belongs to the screen behind it.
+            network: NetworkSettingsScope(
+              route: _nodeRoute(chain),
+              pinnedNode: chain.pinnedNode,
+              rateEnabled: RateService.instance.enabled,
             ),
           ),
           floatingActionButton: kDebugMode ? const _DevFabs() : null,

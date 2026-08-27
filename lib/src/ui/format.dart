@@ -7,9 +7,10 @@ library;
 /// "458,174,109". Scores arrive as [BigInt] (L3); formatted only here, at
 /// render.
 ///
-/// Lives here rather than on the home screen because the network sheet renders
-/// the same value and now has its own file — a formatter that two surfaces
-/// share belongs with the other formatters, not inside one of its callers.
+/// Lives here rather than on the home screen because two surfaces render the
+/// same value — the money plate's chain clock and the node surface's DAA
+/// reading — and a formatter two surfaces share belongs with the other
+/// formatters, not inside one of its callers.
 String formatScore(BigInt? value) =>
     value == null ? '—' : groupThousands(value.toString());
 
@@ -76,6 +77,31 @@ BigInt? sompiFromKas(String input) {
   final whole = intPart.isEmpty ? BigInt.zero : BigInt.parse(intPart);
   final frac = BigInt.parse(fracPart.padRight(8, '0')); // '' → '00000000' → 0
   return whole * _sompiPerKas + frac;
+}
+
+/// Trim trailing zeros from a **fiat** figure — the precision law (D-210)
+/// applied to a unit that is not KAS: every significant digit, no padding,
+/// up to the unit's own precision.
+///
+/// **This is the one formatter here that takes a `double`, and the exception
+/// is narrow.** The file's rule — *no floating point ever touches money* —
+/// is about value that settles: a balance, an amount, a fee, all `BigInt`
+/// sompi from Rust to paint. A fiat restatement settles nothing. It is a
+/// convenience beside the unit of account (BG-5 as amended, D-191), it never
+/// prices a fee or sizes a spend, and INV-8's carve-out permits it precisely
+/// because nothing depends on it. A `BigInt` here would be false rigour on a
+/// number a vendor made up.
+///
+/// `0.0712` → `"0.0712"`; `0.02864504` → `"0.02864504"`; `1.0` → `"1"`.
+/// [max] is the unit's precision, not KAS's: a source that answers more digits
+/// than that is reporting noise. A value finer than [max] floors to `"0"` —
+/// bounded upstream rather than here, where `prefs::check_price` refuses a
+/// price that is not positive and believable before one can reach a screen.
+String trimTrailingZeros(double value, {int max = 8}) {
+  var text = value.toStringAsFixed(max);
+  if (!text.contains('.')) return text;
+  text = text.replaceFirst(RegExp(r'0+$'), '');
+  return text.endsWith('.') ? text.substring(0, text.length - 1) : text;
 }
 
 /// Group an address payload in fours for a full-form review (BG-15): keep the

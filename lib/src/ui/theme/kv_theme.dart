@@ -261,26 +261,28 @@ ThemeData kvDarkTheme() {
     splashColor: KvColor.glow,
     highlightColor: KvColor.glow,
     iconTheme: const IconThemeData(color: KvColor.inkDim),
-    // Active = `ok` GREEN (founder directive 2026-07-11, restored at D-200):
-    // a toggle reports a state that is TRUE, which is the same family as
-    // confirmed. Teal stays out — teal is light, never a status, and one
-    // emission per switch would blow the per-screen budget on its own.
-    switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? KvColor.abyss
-            : KvColor.inkDim,
-      ),
-      trackColor: WidgetStateProperty.resolveWith(
-        (states) =>
-            states.contains(WidgetState.selected) ? KvColor.ok : KvColor.key,
-      ),
-      trackOutlineColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? KvColor.ok
-            : KvColor.keyEdge,
-      ),
-    ),
+    // **No `switchTheme`, and its absence is the decision** (D-206, retired
+    // here at UX-3). It pinned a Material `Switch` in exactly `KvToggle`'s
+    // colours — the same decision rendered twice, and the copy nothing could
+    // ever use: `Switch` animates its thumb through `AnimationController`s
+    // that consult no `disableAnimations` anywhere in the pinned SDK, so a
+    // framework switch slides under reduced motion while BG-9 says everything
+    // collapses to opacity. `KvToggle` is the app's only switch.
+    //
+    // Removing a component theme is the inverse of L115's trap and needs the
+    // same proof: L115 is about a slot NO theme pins, so the framework picks.
+    // Here nothing resolves this one — and the first version of this comment
+    // claimed that on a `grep -rn 'Switch('` which **misses
+    // `SwitchListTile(`**, while `history_fill_sheet.dart` was rendering one
+    // in a release build (`ux-auditor`, this sitting: L121 again, and it is
+    // why the pattern is now spelled out). The proof is
+    // `grep -rnE 'Switch(List)?Tile?\(' lib/ test/`, and it returns only
+    // `KvToggle`'s own call sites.
+    //
+    // The removal is also safe in the direction that matters: an unthemed
+    // `Switch` resolves its selected track to `colorScheme.primary` — teal as
+    // a status, which BG-2 forbids — so the next one to land arrives visibly
+    // wrong rather than quietly correct.
     appBarTheme: AppBarTheme(
       backgroundColor: KvColor.abyss,
       surfaceTintColor: Colors.transparent,

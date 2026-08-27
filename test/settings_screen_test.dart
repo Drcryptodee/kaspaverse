@@ -62,6 +62,9 @@ void main() {
     Future<String> Function()? receiveAddress,
     Future<Map<String, String>> Function()? packageInfo,
     Future<SignableSummaryDto> Function()? consolidate,
+    ValueNotifier<String?>? pinnedNode,
+    ValueNotifier<bool>? rateEnabled,
+    bool withNetwork = true,
   }) => SettingsScreen(
     security: SecurityScope(
       biometricStatus: biometricStatus ?? () async => 'ready',
@@ -87,6 +90,16 @@ void main() {
             ),
       abandonSend: consolidate == null ? null : () async {},
     ),
+    network: withNetwork
+        ? NetworkSettingsScope(
+            // The row's destination is the SAME screen the money plate's chip
+            // opens; `main.dart` owns the one builder. Here it only has to be
+            // a route, so the row's reachability is what is under test.
+            route: (_) => const Scaffold(body: Text('Node & connection')),
+            pinnedNode: pinnedNode ?? ValueNotifier<String?>(null),
+            rateEnabled: rateEnabled ?? ValueNotifier<bool>(true),
+          )
+        : null,
     about: AboutScope(
       packageInfo:
           packageInfo ??
@@ -334,9 +347,10 @@ void main() {
         'lock-grace',
         'receive-address',
         'deep-scan',
-        'network-sheet',
+        'node-connection',
         'version',
         'signature',
+        'roadmap',
       ]),
     );
     for (final title in [
@@ -347,9 +361,69 @@ void main() {
       'Node & connection',
       'Version',
       'App signature',
+      "What's coming",
     ]) {
       expect(find.text(title), findsOneWidget, reason: title);
     }
+  });
+
+  testWidgets('the Network row summarises the CHOICE, not the health', (
+    tester,
+  ) async {
+    // A summary of the link's health here would be a second rendering of a
+    // truth the screen behind the row already tells — the C7 disagreement the
+    // retired network sheet actually caused. Whose node and whether a price is
+    // fetched are both things the USER chose, so they cannot contradict it.
+    final pinned = ValueNotifier<String?>(null);
+    final rateOn = ValueNotifier<bool>(true);
+    await pump(tester, screen(pinnedNode: pinned, rateEnabled: rateOn));
+    expect(find.text('Public community nodes · fiat value on'), findsOneWidget);
+
+    // Both halves are live, and both propositions are asserted — a summary
+    // that only ever renders one branch is a summary nobody has checked
+    // (`L126`).
+    pinned.value = 'wss://mine.example/borsh';
+    rateOn.value = false;
+    await tester.pump();
+    expect(find.text('Your own node · fiat value off'), findsOneWidget);
+
+    // Nothing about liveness, ever: that word belongs to the surface behind
+    // the row.
+    expect(find.textContaining('Connected'), findsNothing);
+    expect(find.textContaining('Answering'), findsNothing);
+  });
+
+  testWidgets('with no network seam the section is absent, not dead', (
+    tester,
+  ) async {
+    await pump(tester, screen(withNetwork: false));
+    expect(find.text('Network'), findsNothing);
+    expect(find.text('Node & connection'), findsNothing);
+    // The custody domains are untouched by the absence.
+    expect(find.text('Security'), findsOneWidget);
+    expect(find.text('About'), findsOneWidget);
+  });
+
+  testWidgets("what a PLANNED destination says, when tapped", (tester) async {
+    // The compact nav dropped the one-line blurbs (D-193, with a recorded
+    // dissent), the panel was then withdrawn entirely (D-190), and the
+    // explanation had nowhere to live. It lives here now — on a surface no
+    // navigation shape can delete.
+    await pump(tester, screen());
+    await tester.tap(find.text("What's coming"));
+    await tester.pumpAndSettle();
+
+    for (final name in const ['Games', 'Contracts', 'Finance', 'Assets']) {
+      expect(find.text(name), findsOneWidget, reason: name);
+    }
+    // The dissent's own example, verbatim: the entire pitch of Contracts to
+    // someone who has never heard of a covenant.
+    expect(find.textContaining('Agreements with no admin key'), findsOneWidget);
+    // Engraved tags, one per destination — "not yet" as information rather
+    // than as damage (D-190).
+    expect(find.text('PLANNED'), findsNWidgets(4));
+    // And it promises nothing before it names anything.
+    expect(find.textContaining('None of these exist yet'), findsOneWidget);
   });
 
   // The defect in three assertions: collapsed to a bool, "this phone has no

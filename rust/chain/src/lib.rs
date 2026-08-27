@@ -19,6 +19,7 @@ mod kvlog;
 pub mod link;
 mod link_rpc;
 pub mod node_config;
+pub mod prefs;
 mod send;
 pub mod spans;
 mod spend_policy;

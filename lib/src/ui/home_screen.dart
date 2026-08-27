@@ -6,8 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 import '../rust/api/wallet.dart';
+import '../services/rate_service.dart' show KvRateQuote, RateService;
 import 'format.dart';
-import 'node/node_screen.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/entrance.dart';
@@ -60,6 +60,8 @@ class HomeScreen extends StatefulWidget {
     this.sendRoute,
     this.messagesRoute,
     this.settingsRoute,
+    this.nodeRoute,
+    this.fiat,
     this.clock = DateTime.now,
     this.floatingActionButton,
   });
@@ -99,6 +101,20 @@ class HomeScreen extends StatefulWidget {
   /// restore.
   final WidgetBuilder? settingsRoute;
 
+  /// Builds **the** node surface — who serves you, the explorer choice and the
+  /// price source (`null` ⇒ the network chip is a plain reading rather than a
+  /// control). Built once in `main.dart` and reached from two places: this
+  /// chip and the Settings row.
+  final WidgetBuilder? nodeRoute;
+
+  /// The fiat restatement under the balance (`null` ⇒ no restatement line).
+  ///
+  /// Its lifecycle is this screen's: [FiatScope.attach] on mount and
+  /// [FiatScope.detach] on dispose, so a price is fetched only while a surface
+  /// that renders one is alive. A locked wallet discards this screen at 0ms
+  /// (BG-13) and stops talking to the price source with it.
+  final FiatScope? fiat;
+
   /// Test seam for "now" (default wall-clock).
   final DateTime Function() clock;
 
@@ -126,7 +142,6 @@ class ChainScope {
     this.searching,
     this.osOffline,
     this.disconnectedAt,
-    this.node,
   });
 
   final ValueListenable<bool> connected;
@@ -147,13 +162,30 @@ class ChainScope {
   final ValueListenable<bool>? searching;
   final ValueListenable<bool>? osOffline;
   final ValueListenable<DateTime?>? disconnectedAt;
+}
 
-  /// The node-pin seam (D-187), forwarded to [NodeScreen] — which the money
-  /// plate's network chip opens (D-191/D-206). Optional in the same way
-  /// [searching] is: absent means the chip is a plain reading rather than a
-  /// control, and a widget test that does not exercise the node surface can
-  /// omit it.
-  final NodeScope? node;
+/// The fiat restatement's wiring: what to show, whether to show it, and the
+/// two lifecycle hooks that keep the fetch tied to a mounted surface.
+///
+/// Deliberately NOT the node surface's `RateScope`: this one cannot change the
+/// setting. The money plate reads a price; the place a price is chosen is the
+/// place it can be switched off (D-193), and a read-only seam is how that stays
+/// true by construction rather than by discipline.
+class FiatScope {
+  const FiatScope({
+    required this.enabled,
+    required this.quote,
+    this.attach,
+    this.detach,
+  });
+
+  /// `null` until the stored posture has been read — rendered as nothing,
+  /// never as an optimistic `≈ —` (`wallet-security-auditor`).
+  final ValueListenable<bool?> enabled;
+  final ValueListenable<KvRateQuote?> quote;
+
+  final VoidCallback? attach;
+  final VoidCallback? detach;
 }
 
 /// The wallet-facing wiring [HomeScreen] consumes — same law as [ChainScope].
@@ -288,10 +320,18 @@ class _HomeScreenState extends State<HomeScreen> {
   double _plateExtent = 1;
   double _ruleExtent = 1;
 
-  /// The height of the plate's **sheddable tail** — the rule, the fiat line
-  /// and the chain clock. Subtracted from the plate to get the block that must
-  /// survive a squeeze, so the pinned floor is a measurement rather than a
-  /// fraction somebody liked the look of.
+  /// The height of the plate's **sheddable tail** — the rule, the chain clock
+  /// and the link's own sentence. Subtracted from the plate to get the block
+  /// that must survive a squeeze, so the pinned floor is a measurement rather
+  /// than a fraction somebody liked the look of.
+  ///
+  /// **The fiat line is NOT in it**, and both halves of that matter. It
+  /// renders inside `_Figure`, above the measured block, so it survives a
+  /// squeeze — which is the cost D-193's shed order recorded when the founder
+  /// moved it up beside the figure on glass. Two comments here said otherwise
+  /// while it was a placeholder; UX-3 gave it a real height, at which point a
+  /// stale comment about which things shed becomes a wrong claim about a
+  /// measurement (`ux-auditor`, L121).
   double _tailExtent = 0;
 
   @override
@@ -300,6 +340,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // Start the wallet sync engine now that the vault is unlocked (the shell
     // only mounts this screen when unlocked). Idempotent in the service.
     widget.onReady?.call();
+    // The price clock runs while a surface that renders a price is mounted,
+    // and not one moment longer (L5's ref-counted attach/detach).
+    widget.fiat?.attach?.call();
     _now = ValueNotifier(widget.clock());
     _link = _Derived([
       widget.chain.connected,
@@ -390,6 +433,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _ticker?.cancel();
+    widget.fiat?.detach?.call();
     // Chained deriveds unhook in reverse dependency order.
     _balance.dispose();
     _trust.dispose();
@@ -520,17 +564,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// The network chip's destination: **who is serving you, how fresh it is,
-  /// and the standing offer to serve yourself** (D-187/D-206). The chip is the
-  /// second door to it; the first is the network sheet, which Settings still
-  /// opens until UX-3 collapses the two.
+  /// where a link out of the wallet goes, and whether a price is fetched**.
+  ///
+  /// It is a builder rather than a scope this screen assembles, because UX-3
+  /// gave that screen two more sections and Settings a door to the same
+  /// screen. Two construction sites would have been two chances to forget one
+  /// — and a Settings door that opened a node surface with no explorer on it
+  /// is precisely the C7 disagreement the retired network sheet caused. One
+  /// builder, in `main.dart`; two callers.
   void _openNode() {
-    final scope = widget.chain.node;
-    if (scope == null) return;
-    Navigator.of(context).push(
-      KvPageRoute<void>(
-        builder: (_) => NodeScreen(scope: scope, clock: widget.clock),
-      ),
-    );
+    final builder = widget.nodeRoute;
+    if (builder == null) return;
+    Navigator.of(context).push(KvPageRoute<void>(builder: builder));
   }
 
   @override
@@ -551,7 +596,9 @@ class _HomeScreenState extends State<HomeScreen> {
         trust: _trust,
         dimmed: _dimmed,
         daa: widget.chain.virtualDaaScore,
-        onNetwork: widget.chain.node == null ? null : _openNode,
+        fiat: widget.fiat,
+        now: _now,
+        onNetwork: widget.nodeRoute == null ? null : _openNode,
         onTailMeasured: (h) {
           if (_tailExtent != h) setState(() => _tailExtent = h);
         },
@@ -618,7 +665,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // the founder's own device.
     //
     // The floor is **measured, not chosen**: the plate reports the height of
-    // its sheddable tail — the rule, the fiat line and the chain clock — and
+    // its sheddable tail — the rule, the chain clock and the trust line — and
     // what is left is the part that must survive a squeeze, which is the
     // number and the sentence that vouches for it. The order of the plate was
     // rebuilt around that, because shedding bottom-first previously shed the
@@ -951,6 +998,8 @@ class _MoneyPlate extends StatelessWidget {
     required this.daa,
     required this.onNetwork,
     required this.onTailMeasured,
+    required this.fiat,
+    required this.now,
   });
 
   final ValueListenable<_BalanceView> balance;
@@ -958,6 +1007,12 @@ class _MoneyPlate extends StatelessWidget {
   final ValueListenable<bool> dimmed;
   final ValueListenable<BigInt?> daa;
   final VoidCallback? onNetwork;
+
+  /// The fiat seam. Null ⇒ the restatement line does not render at all.
+  final FiatScope? fiat;
+
+  /// The screen's freshness clock (BG-8), forwarded to the restatement.
+  final ValueListenable<DateTime> now;
 
   /// Reports the height of everything below the rule, so the pinned floor can
   /// be the measured remainder rather than a fraction.
@@ -1018,7 +1073,7 @@ class _MoneyPlate extends StatelessWidget {
           // discovered later (`2026-08-27_UI-UX_…TODO.md`, risk note on A3).
           ValueListenableBuilder<_BalanceView>(
             valueListenable: balance,
-            builder: (context, b, _) => _Figure(view: b),
+            builder: (context, b, _) => _Figure(view: b, fiat: fiat, now: now),
           ),
           _MeasuredHeight(
             onMeasured: onTailMeasured,
@@ -1084,9 +1139,17 @@ class _MoneyPlate extends StatelessWidget {
 
 /// The number, its fiat restatement, and the two lines that qualify it.
 class _Figure extends StatelessWidget {
-  const _Figure({required this.view});
+  const _Figure({required this.view, required this.fiat, required this.now});
 
   final _BalanceView view;
+
+  /// The fiat seam, forwarded from the screen. Null ⇒ no line (a build or a
+  /// test with no rate wired).
+  final FiatScope? fiat;
+
+  /// The screen's 1 s freshness clock, forwarded so the restatement's age can
+  /// advance without a new quote.
+  final ValueListenable<DateTime> now;
 
   /// One step down from §2's `balanceHero` 46, because the unit now sits
   /// **beside** the figure instead of being engraved under it and the line has
@@ -1104,10 +1167,11 @@ class _Figure extends StatelessWidget {
         KvAmount(view.mature, size: heroSize, stale: view.stale),
         // The fiat restatement sits with the figure it restates, above the
         // rule (founder, on glass) — it is the same number in another unit,
-        // not an instrument reading.
-        const Padding(
-          padding: EdgeInsets.only(top: KvSpace.xs),
-          child: _FiatLine(),
+        // not an instrument reading. It restates `mature`, the same BigInt
+        // the hero above renders, so the two cannot drift.
+        Padding(
+          padding: const EdgeInsets.only(top: KvSpace.xs),
+          child: _FiatLine(fiat: fiat, sompi: view.mature, now: now),
         ),
         if (pending != null && pending > BigInt.zero) ...[
           const SizedBox(height: KvSpace.s),
@@ -1221,59 +1285,121 @@ class _Qualifier extends StatelessWidget {
   }
 }
 
-/// What the balance is worth, in fiat — **and there is no rate service, so it
-/// renders `—` and says so.**
+/// What the balance is worth, in fiat — the app's one unverifiable claim.
 ///
-/// D-191 permits fiat from `api.kaspa.org` under conditions, and D-192 narrowed
-/// them twice: the figure is subordinate and `≈`-prefixed, its **source is
-/// disclosed where the source is chosen** — the node surface and Settings — its
-/// age appears only when age matters, and it reaches no signing surface. Two of
-/// those conditions have nowhere to live yet: the rate's source control is
-/// **UX-3's** (D-199), and INV-8's carve-out is what permits the network call at
-/// all. Shipping a fetch before its disclosure and its off switch exist would
-/// spend the carve-out without paying for it.
+/// D-191 permits it from a named, replaceable, disable-able source, and D-192
+/// then narrowed the disclosure twice: the figure is subordinate and
+/// `≈`-prefixed, its **source is disclosed where the source is chosen** (the
+/// node surface), its **age appears only when age matters** (D-189), and it
+/// reaches no signing surface. UX-3 built the source control, which is what
+/// let this stop rendering an honest placeholder and start rendering an honest
+/// number.
 ///
-/// So this renders the honest unknown BG-5 asks for. It is a placeholder for a
-/// feature, not a fabricated number: `—` is what the law says an unknown rate
-/// looks like, and nobody has to vouch for it.
+/// **Three states, and the third is the point.** A price: `≈ $12.34`. No
+/// usable price: `≈ —`, which is what BG-5 says an unknown renders as — never
+/// a stale figure at full confidence and never a fabricated one. Switched
+/// off: **nothing at all**, because a user who turned fiat off did not ask for
+/// a row explaining that they turned fiat off.
 class _FiatLine extends StatelessWidget {
-  const _FiatLine();
+  const _FiatLine({required this.fiat, required this.sompi, required this.now});
+
+  /// Null ⇒ the rate seam is not wired at all (a widget test, a build without
+  /// it): the line renders nothing, exactly as if the user had switched it off.
+  final FiatScope? fiat;
+
+  /// What to restate — the hero's own number, so the two can never disagree.
+  /// Null is the hero's `—`, and it restates as `≈ —` rather than as `$0.00`:
+  /// an unknown balance has an unknown value, and a confident zero beside a
+  /// dash is the kind of true-looking lie BG-8 exists to stop.
+  final BigInt? sompi;
+
+  /// **The screen's freshness clock, not a `clock()` call** (BG-8).
+  ///
+  /// The age below is the one branch that must appear WITHOUT a new value
+  /// arriving — a vendor that goes down stops delivering quotes, which is
+  /// exactly when the figure starts being able to mislead. Computed from a
+  /// bare `clock()` it was unreachable in practice: the only thing that
+  /// rebuilt this line was a fresh quote, and a fresh quote resets the age to
+  /// zero. So a dead source rendered a confident `≈ \$36.79`, ageless, forever
+  /// (`consensus-auditor`, this sitting — `L126` in its purest form: the
+  /// degraded branch was tested by constructing it already-degraded, which
+  /// proves the rendering and not the transition).
+  final ValueListenable<DateTime> now;
 
   @override
   Widget build(BuildContext context) {
-    return Semantics(
-      label: 'Value in your own currency: no exchange rate yet',
-      excludeSemantics: true,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.baseline,
-        textBaseline: TextBaseline.alphabetic,
-        children: [
-          const Text(
-            '≈ —',
-            style: TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: 13,
-              height: 18 / 13,
-              color: KvColor.inkMeta,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
+    final scope = fiat;
+    if (scope == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<bool?>(
+      valueListenable: scope.enabled,
+      builder: (context, on, _) {
+        // Off, or not yet known: both render nothing. A line that appears one
+        // frame after launch is better than one that appears and then leaves.
+        if (on != true) return const SizedBox.shrink();
+        return ValueListenableBuilder<KvRateQuote?>(
+          valueListenable: scope.quote,
+          builder: (context, quote, _) => ValueListenableBuilder<DateTime>(
+            valueListenable: now,
+            builder: (context, at, _) {
+              final value = sompi == null ? null : quote?.usdFor(sompi!);
+              final figure = value == null
+                  ? '≈ —'
+                  : '≈ \$${value.toStringAsFixed(2)}';
+              // Silence is the healthy state (D-189/D-192): a fresh rate says
+              // nothing about its age, and the age appears at the point where it
+              // could start to mislead.
+              final since = quote == null
+                  ? null
+                  : at.difference(quote.fetchedAt);
+              final age = since == null
+                  ? 'no rate yet'
+                  : since >= RateService.staleAfter
+                  ? '${formatAge(since)} old'
+                  : null;
+              return Semantics(
+                label: value == null
+                    ? 'Value in dollars: no exchange rate yet'
+                    : 'Approximately ${value.toStringAsFixed(2)} US dollars',
+                excludeSemantics: true,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      figure,
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 13,
+                        height: 18 / 13,
+                        // Subordinate by scale AND tone (BG-5): KAS is the unit
+                        // of account and this sits beside it, never instead.
+                        color: KvColor.inkMeta,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    if (age != null) ...[
+                      const SizedBox(width: KvSpace.s),
+                      Flexible(
+                        child: Text(
+                          age,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 11,
+                            height: 15 / 11,
+                            color: KvColor.inkMetaLow,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            },
           ),
-          const SizedBox(width: KvSpace.s),
-          Flexible(
-            child: Text(
-              'no rate yet',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 11,
-                height: 15 / 11,
-                color: KvColor.inkMetaLow,
-              ),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

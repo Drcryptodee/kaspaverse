@@ -5,10 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
-import 'package:kaspaverse/src/ui/network_sheet.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
-import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
@@ -35,6 +33,7 @@ void main() {
     ValueListenable<bool>? osOffline,
     ValueListenable<bool>? reconnecting,
     Future<void> Function()? onReconnect,
+    Future<int?> Function()? blockAgeSecs,
   }) => NodeScope(
     connected: connected,
     activeEndpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
@@ -47,6 +46,7 @@ void main() {
     osOffline: osOffline,
     reconnecting: reconnecting,
     onReconnect: onReconnect,
+    blockAgeSecs: blockAgeSecs,
   );
 
   Widget host({
@@ -62,6 +62,18 @@ void main() {
   }) => MaterialApp(
     theme: kvDarkTheme(),
     home: HomeScreen(
+      nodeRoute: withNode
+          ? (_) => NodeScreen(
+              scope: nodeScope(
+                connected: connected,
+                lastUpdate: lastUpdate,
+                searching: searching,
+                osOffline: osOffline,
+                reconnecting: reconnecting,
+                onReconnect: onReconnect,
+              ),
+            )
+          : null,
       chain: ChainScope(
         connected: connected,
         virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
@@ -71,16 +83,6 @@ void main() {
         osOffline: osOffline,
         disconnectedAt: disconnectedAt,
         reconnecting: reconnecting,
-        node: withNode
-            ? nodeScope(
-                connected: connected,
-                lastUpdate: lastUpdate,
-                searching: searching,
-                osOffline: osOffline,
-                reconnecting: reconnecting,
-                onReconnect: onReconnect,
-              )
-            : null,
       ),
       wallet: WalletScope(
         mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
@@ -411,17 +413,18 @@ void main() {
     });
   });
 
-  group('the network sheet keeps its own truths until UX-3', () {
-    // The sheet is still Settings' door to the link (D-206), and its scan line
-    // is the one place the block-age heartbeat is rendered. Driven directly
-    // now that home no longer opens it — the coverage outlives the entry
-    // point, which is the whole reason it is moved rather than deleted.
-    Future<void> pumpSheet(
+  group('the scan line survives the collapse into the node surface', () {
+    // The sheet is gone (UX-3) and `NodeScreen` renders its scan line now. The
+    // coverage moves with the feature rather than dying with the surface:
+    // **the sovereign path is never the degraded path** (D-207 clause c), and
+    // a line that quietly stopped being rendered would be exactly that.
+    Future<void> pumpNode(
       WidgetTester tester, {
       required bool connected,
       required bool searching,
       required DateTime now,
       required Duration since,
+      required Future<int?> Function()? blockAge,
     }) async {
       tester.view.physicalSize = const Size(2000, 1400);
       tester.view.devicePixelRatio = 1.0;
@@ -429,18 +432,16 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: kvDarkTheme(),
-          home: Scaffold(
-            backgroundColor: KvColor.abyss,
-            body: NetworkSheet(
+          home: NodeScreen(
+            clock: () => now,
+            scope: nodeScope(
               connected: ValueNotifier<bool>(connected),
-              endpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
-              virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(499524873)),
-              error: ValueNotifier<String?>(null),
               lastUpdate: ValueNotifier<DateTime?>(now.subtract(since)),
               searching: ValueNotifier<bool>(searching),
+              osOffline: ValueNotifier<bool>(false),
               reconnecting: ValueNotifier<bool>(false),
               onReconnect: () async {},
-              clock: () => now,
+              blockAgeSecs: blockAge,
             ),
           ),
         ),
@@ -448,41 +449,116 @@ void main() {
       await tester.pump();
     }
 
-    testWidgets('a live link with no status yet says so', (tester) async {
+    testWidgets('a live link with no block yet says so', (tester) async {
       final now = DateTime(2026, 7, 30, 0, 53);
-      await pumpSheet(
+      await pumpNode(
         tester,
         connected: true,
         searching: false,
         now: now,
-        // Fresh: a 20 s-old snapshot is STALE under `staleAfter`, and a
-        // stale link may not claim the scan is live either.
         since: Duration.zero,
+        blockAge: () async => null,
       );
-      expect(find.text('Network'), findsOneWidget);
       expect(
         find.text('waiting for first block…'),
         findsOneWidget,
-        reason: 'link up, no status yet — the honest pre-first-block line',
+        reason: 'link up, no block seen yet — the honest pre-first-block line',
       );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a live link with a fresh block claims the scan', (
+      tester,
+    ) async {
+      // **The no-trigger half** (`L126`): every assertion below used to drive
+      // the degraded branch, and a line that only ever renders its fallback
+      // passes a suite while being wrong on every screen.
+      final now = DateTime(2026, 7, 30, 0, 53);
+      await pumpNode(
+        tester,
+        connected: true,
+        searching: false,
+        now: now,
+        since: Duration.zero,
+        blockAge: () async => 1,
+      );
+      await tester.pump();
+      expect(find.text('live — scanning every block'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a slow chain reports the gap rather than claiming life', (
+      tester,
+    ) async {
+      final now = DateTime(2026, 7, 30, 0, 53);
+      await pumpNode(
+        tester,
+        connected: true,
+        searching: false,
+        now: now,
+        since: Duration.zero,
+        blockAge: () async => 42,
+      );
+      await tester.pump();
+      expect(find.text('42 s since last block'), findsOneWidget);
+      expect(find.text('live — scanning every block'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('a dark link may not claim the scan is live', (tester) async {
       final now = DateTime(2026, 7, 30, 0, 53);
-      await pumpSheet(
+      await pumpNode(
         tester,
         connected: false,
         searching: true,
         now: now,
         since: const Duration(seconds: 20),
+        blockAge: () async => null,
       );
       // The link decides whether the scan may claim liveness; the age only
       // refines the claim. Otherwise a 2 s poll could read "live — scanning
-      // every block" beside a Status row saying the opposite.
+      // every block" beside a status chip saying the opposite.
       expect(find.text('not scanning — no link'), findsOneWidget);
       expect(find.text('live — scanning every block'), findsNothing);
       expect(find.text('Searching…'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a link that is up but hunting does not claim it either', (
+      tester,
+    ) async {
+      // The nastiest of the four: `connected` is true in the snapshot while a
+      // race bounces the socket underneath, and a scan line that read only
+      // `connected` would print "live" beside a plate saying "Looking for a
+      // node…" — the C7 split the serving plate's own ordering exists to stop.
+      final now = DateTime(2026, 7, 30, 0, 53);
+      await pumpNode(
+        tester,
+        connected: true,
+        searching: true,
+        now: now,
+        since: Duration.zero,
+        blockAge: () async => 1,
+      );
+      await tester.pump();
+      expect(find.text('live — scanning every block'), findsNothing);
+      expect(find.text('1 s since last block'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('no seam, no line — never a fabricated age', (tester) async {
+      final now = DateTime(2026, 7, 30, 0, 53);
+      await pumpNode(
+        tester,
+        connected: true,
+        searching: false,
+        now: now,
+        since: Duration.zero,
+        blockAge: null,
+      );
+      await tester.pump();
+      expect(find.text('Transport scan'), findsNothing);
+      expect(find.textContaining('since last block'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });

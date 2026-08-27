@@ -11,6 +11,7 @@ import 'package:kaspaverse/src/ui/error_text.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
 ConversationDto conversation(
   String id, {
@@ -649,7 +650,7 @@ void main() {
       // The sheet: title, toggle, and the disclosure's two load-bearing
       // claims — what the operator LEARNS and what they can NEVER do.
       expect(find.text('History & backup'), findsOneWidget);
-      expect(find.byType(SwitchListTile), findsOneWidget);
+      expect(find.byType(KvToggle), findsOneWidget);
       expect(find.textContaining('operator learns'), findsOneWidget);
       expect(find.textContaining('never'), findsWidgets);
 
@@ -666,7 +667,7 @@ void main() {
         newRows: 2,
         atUnixMs: BigInt.one,
       );
-      await tester.tap(find.byType(SwitchListTile));
+      await tester.tap(find.byType(KvToggle));
       await tester.pumpAndSettle();
       expect(find.textContaining('2 recovered messages'), findsOneWidget);
       // The endpoint surface appears with the enabled state (configurable —

@@ -6,6 +6,7 @@ import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_loader.dart';
+import '../widgets/kv_toggle.dart';
 import '../widgets/status_beacon.dart' show formatAge;
 
 /// V2b history fill surfaces (D-074): the honest gap notice, and the settings
@@ -472,13 +473,27 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
               ),
             ),
             const SizedBox(height: KvSpace.m),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(
-                'Recover missed messages from an archive',
-                style: theme.textTheme.bodyMedium,
-              ),
-              value: _enabled,
+            // **`KvToggle`, not `SwitchListTile`** (D-206, landed at UX-3).
+            // This was the app's last Material switch, and it was the one
+            // thing standing between `SwitchThemeData` and retirement: the
+            // theme existed only to paint it, and a framework `Switch` slides
+            // its thumb under reduced motion, which BG-9 forbids. Two other
+            // laws move with it — an unthemed `Switch` resolves its selected
+            // track to `colorScheme.primary`, i.e. teal as a status (BG-2),
+            // and its unselected state to `outline` on
+            // `surfaceContainerHighest`, measured at 1.20:1 against WCAG
+            // 1.4.11's 3:1 (`ux-auditor`, this sitting). The surface itself
+            // is still UX-6's to rewrite; this is the one widget swap that
+            // makes the theme's removal true.
+            KvToggle(
+              on: _enabled,
+              title: 'Recover missed messages from an archive',
+              sub: _enabled
+                  ? 'The archive below is asked for messages your node no '
+                        'longer holds.'
+                  : 'Nothing is fetched. Only what your own node still holds '
+                        'is recovered.',
+              disabledReason: 'Saving…',
               onChanged: _busy ? null : (on) => _apply(enabled: on),
             ),
             const SizedBox(height: KvSpace.s),

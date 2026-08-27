@@ -8,6 +8,7 @@
 
 import 'api/dag.dart';
 import 'api/error.dart';
+import 'api/prefs.dart';
 import 'api/send.dart';
 import 'api/transport.dart';
 import 'api/vault.dart';
@@ -87,6 +88,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GapAgeDto dco_decode_box_autoadd_gap_age_dto(dynamic raw);
 
   @protected
+  RateQuoteDto dco_decode_box_autoadd_rate_quote_dto(dynamic raw);
+
+  @protected
   TxStatusDto dco_decode_box_autoadd_tx_status_dto(dynamic raw);
 
   @protected
@@ -117,6 +121,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeepScanReport dco_decode_deep_scan_report(dynamic raw);
 
   @protected
+  ExplorerConfigDto dco_decode_explorer_config_dto(dynamic raw);
+
+  @protected
+  ExplorerDefaultDto dco_decode_explorer_default_dto(dynamic raw);
+
+  @protected
+  double dco_decode_f_64(dynamic raw);
+
+  @protected
   FeeStrategyKind dco_decode_fee_strategy_kind(dynamic raw);
 
   @protected
@@ -142,6 +155,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ConversationDto> dco_decode_list_conversation_dto(dynamic raw);
+
+  @protected
+  List<ExplorerDefaultDto> dco_decode_list_explorer_default_dto(dynamic raw);
 
   @protected
   List<MessageStatusDto> dco_decode_list_message_status_dto(dynamic raw);
@@ -186,6 +202,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GapAgeDto? dco_decode_opt_box_autoadd_gap_age_dto(dynamic raw);
 
   @protected
+  RateQuoteDto? dco_decode_opt_box_autoadd_rate_quote_dto(dynamic raw);
+
+  @protected
   TxStatusDto? dco_decode_opt_box_autoadd_tx_status_dto(dynamic raw);
 
   @protected
@@ -196,6 +215,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WalletSnapshot? dco_decode_opt_box_autoadd_wallet_snapshot(dynamic raw);
+
+  @protected
+  RateConfigDto dco_decode_rate_config_dto(dynamic raw);
+
+  @protected
+  RateQuoteDto dco_decode_rate_quote_dto(dynamic raw);
 
   @protected
   SendOutcomeDto dco_decode_send_outcome_dto(dynamic raw);
@@ -323,6 +348,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GapAgeDto sse_decode_box_autoadd_gap_age_dto(SseDeserializer deserializer);
 
   @protected
+  RateQuoteDto sse_decode_box_autoadd_rate_quote_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   TxStatusDto sse_decode_box_autoadd_tx_status_dto(
     SseDeserializer deserializer,
   );
@@ -359,6 +389,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DeepScanReport sse_decode_deep_scan_report(SseDeserializer deserializer);
 
   @protected
+  ExplorerConfigDto sse_decode_explorer_config_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ExplorerDefaultDto sse_decode_explorer_default_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
   FeeStrategyKind sse_decode_fee_strategy_kind(SseDeserializer deserializer);
 
   @protected
@@ -386,6 +429,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ConversationDto> sse_decode_list_conversation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ExplorerDefaultDto> sse_decode_list_explorer_default_dto(
     SseDeserializer deserializer,
   );
 
@@ -446,6 +494,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RateQuoteDto? sse_decode_opt_box_autoadd_rate_quote_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   TxStatusDto? sse_decode_opt_box_autoadd_tx_status_dto(
     SseDeserializer deserializer,
   );
@@ -460,6 +513,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WalletSnapshot? sse_decode_opt_box_autoadd_wallet_snapshot(
     SseDeserializer deserializer,
   );
+
+  @protected
+  RateConfigDto sse_decode_rate_config_dto(SseDeserializer deserializer);
+
+  @protected
+  RateQuoteDto sse_decode_rate_quote_dto(SseDeserializer deserializer);
 
   @protected
   SendOutcomeDto sse_decode_send_outcome_dto(SseDeserializer deserializer);
@@ -616,6 +675,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_rate_quote_dto(
+    RateQuoteDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_tx_status_dto(
     TxStatusDto self,
     SseSerializer serializer,
@@ -664,6 +729,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_explorer_config_dto(
+    ExplorerConfigDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_explorer_default_dto(
+    ExplorerDefaultDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
   void sse_encode_fee_strategy_kind(
     FeeStrategyKind self,
     SseSerializer serializer,
@@ -696,6 +776,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_conversation_dto(
     List<ConversationDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_explorer_default_dto(
+    List<ExplorerDefaultDto> self,
     SseSerializer serializer,
   );
 
@@ -772,6 +858,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_rate_quote_dto(
+    RateQuoteDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_tx_status_dto(
     TxStatusDto? self,
     SseSerializer serializer,
@@ -788,6 +880,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     WalletSnapshot? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_rate_config_dto(RateConfigDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_rate_quote_dto(RateQuoteDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_send_outcome_dto(

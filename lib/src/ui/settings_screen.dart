@@ -7,12 +7,14 @@ import '../rust/api/wallet.dart' show DeepScanReport;
 import 'address_text.dart';
 import 'biometric_copy.dart';
 import 'error_text.dart';
-import 'network_sheet.dart';
+import 'roadmap_screen.dart';
 import 'send/confirm_send_sheet.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/glass_panel.dart';
 import 'widgets/haptics.dart';
+import 'widgets/kv_chrome.dart';
+import 'widgets/kv_glyph.dart';
 import 'widgets/kv_loader.dart';
 
 /// One row of the settings registry.
@@ -23,11 +25,18 @@ import 'widgets/kv_loader.dart';
 /// ground when rows are allowed to invent their own shapes, so anything that
 /// needs more than a title, a support line and a trailing value pushes its own
 /// surface (as Network does) instead of growing this one.
+///
+/// **A row carries no glyph** (UX-3). It used to open with an `Icons.*`
+/// pictogram, which was ten of the 50 framework icons the glyph sweep is
+/// retiring (D-205) — and drawing ten replacements would have been the wrong
+/// answer to the right question. A machined instrument silk-screens its
+/// labels; it does not illustrate them. The section label groups, the title
+/// names, the support line explains, and none of that was ever being done by
+/// a 20dp fingerprint.
 @immutable
 class SettingsRow {
   const SettingsRow({
     required this.id,
-    required this.icon,
     required this.title,
     this.subtitle,
     this.status,
@@ -39,7 +48,6 @@ class SettingsRow {
   /// to this so a wording change can never silently delete their subject.
   final String id;
 
-  final IconData icon;
   final String title;
 
   /// Static support copy. Say what the row DOES, not that it exists.
@@ -186,6 +194,36 @@ class WalletSettingsScope {
   final Future<void> Function()? abandonSend;
 }
 
+/// The Network section: one door, and a summary of what is behind it.
+///
+/// **The summary reports the CHOICE, never the health.** "A public community
+/// node" is a setting; "connected" is a state that changes without the user,
+/// and putting that here would be a second rendering of the link — the C7
+/// disagreement the retired network sheet actually caused. Which node serves
+/// you and whether a price is fetched are both things the user chose, so a
+/// summary of them cannot contradict the surface it opens.
+@immutable
+class NetworkSettingsScope {
+  const NetworkSettingsScope({
+    required this.route,
+    required this.pinnedNode,
+    this.rateEnabled,
+  });
+
+  /// Builds **the** node surface — never a copy of it. UX-3 collapsed the
+  /// network sheet into `NodeScreen`, so this row and the money plate's
+  /// network chip now open one screen rather than two surfaces answering the
+  /// same question in different words (C7).
+  final WidgetBuilder route;
+
+  final ValueListenable<String?> pinnedNode;
+
+  /// Null when the rate seam is not wired — and the notifier's own value is
+  /// null until the stored posture has been read. The summary says nothing
+  /// about a price in either case rather than guessing at one.
+  final ValueListenable<bool?>? rateEnabled;
+}
+
 /// The About section's public build identity.
 @immutable
 class AboutScope {
@@ -209,17 +247,17 @@ class SettingsScreen extends StatefulWidget {
     required this.security,
     required this.wallet,
     required this.about,
-    this.networkSheet,
+    this.network,
   });
 
   final SecurityScope security;
   final WalletSettingsScope wallet;
   final AboutScope about;
 
-  /// Builds the SAME sheet the home beacon opens (never a copy of it). The row
-  /// deliberately shows no live status of its own: two renderings of one link
-  /// state are two places to disagree, which is exactly what C7 forbids.
-  final NetworkSheet Function()? networkSheet;
+  /// Absent ⇒ the Network section does not render. A door with nothing behind
+  /// it is worse than no door: it teaches the user that a control on this
+  /// screen might do nothing.
+  final NetworkSettingsScope? network;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -233,6 +271,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   final ValueNotifier<SettingsStatus?> _merge = ValueNotifier(null);
   final ValueNotifier<SettingsStatus?> _version = ValueNotifier(null);
   final ValueNotifier<SettingsStatus?> _signature = ValueNotifier(null);
+  final ValueNotifier<SettingsStatus?> _network = ValueNotifier(null);
   late final ValueNotifier<SettingsStatus?> _grace;
 
   /// Raw biometric status, kept so the action sheet can offer the right verbs.
@@ -264,6 +303,12 @@ class _SettingsScreenState extends State<SettingsScreen>
       ),
     );
     widget.security.lockGraceSecs.addListener(_onGraceChanged);
+    final network = widget.network;
+    if (network != null) {
+      network.pinnedNode.addListener(_onNetworkChanged);
+      network.rateEnabled?.addListener(_onNetworkChanged);
+      _onNetworkChanged();
+    }
     WidgetsBinding.instance.addObserver(this);
     _refreshBiometric();
     _refreshAddress();
@@ -288,12 +333,18 @@ class _SettingsScreenState extends State<SettingsScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     widget.security.lockGraceSecs.removeListener(_onGraceChanged);
+    final network = widget.network;
+    if (network != null) {
+      network.pinnedNode.removeListener(_onNetworkChanged);
+      network.rateEnabled?.removeListener(_onNetworkChanged);
+    }
     _biometric.dispose();
     _address.dispose();
     _scan.dispose();
     _merge.dispose();
     _version.dispose();
     _signature.dispose();
+    _network.dispose();
     _grace.dispose();
     super.dispose();
   }
@@ -305,6 +356,23 @@ class _SettingsScreenState extends State<SettingsScreen>
     _graceLabel(widget.security.lockGraceSecs.value),
     tone: SettingsTone.neutral,
   );
+
+  /// The Network row's live summary — both halves are the user's own choice,
+  /// so neither can disagree with the screen behind the row.
+  void _onNetworkChanged() {
+    final network = widget.network;
+    if (network == null) return;
+    final node = network.pinnedNode.value == null
+        ? 'Public community nodes'
+        : 'Your own node';
+    // Null twice over — no seam wired, or a posture not yet read — and both
+    // say nothing about a price rather than guessing at one.
+    final rate = network.rateEnabled?.value;
+    _network.value = SettingsStatus(
+      rate == null ? node : '$node · fiat value ${rate ? 'on' : 'off'}',
+      tone: SettingsTone.neutral,
+    );
+  }
 
   // ── live values ──────────────────────────────────────────────────────────
 
@@ -404,7 +472,6 @@ class _SettingsScreenState extends State<SettingsScreen>
       rows: [
         SettingsRow(
           id: 'biometric',
-          icon: Icons.fingerprint,
           title: 'Fingerprint unlock',
           subtitle: 'Unlock quickly. Your passphrase always still works.',
           status: _biometric,
@@ -412,7 +479,6 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
         SettingsRow(
           id: 'lock-grace',
-          icon: Icons.lock_clock,
           title: 'Lock when I leave',
           subtitle: 'How long the wallet stays open after you switch away.',
           status: _grace,
@@ -426,7 +492,6 @@ class _SettingsScreenState extends State<SettingsScreen>
       rows: [
         SettingsRow(
           id: 'receive-address',
-          icon: Icons.south_west,
           title: 'Receive address',
           subtitle: 'Where payments to you arrive.',
           status: _address,
@@ -438,7 +503,6 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
         SettingsRow(
           id: 'deep-scan',
-          icon: Icons.travel_explore,
           title: 'Scan for more addresses',
           subtitle:
               'Look deeper for funds held at addresses another wallet app '
@@ -451,7 +515,6 @@ class _SettingsScreenState extends State<SettingsScreen>
             widget.wallet.abandonSend != null)
           SettingsRow(
             id: 'merge-coins',
-            icon: Icons.join_full_outlined,
             title: 'Merge coins',
             // No fee COUNT and no "all your coins": a pile too big for one
             // transaction merges in bounded passes, each paying its own fee
@@ -467,40 +530,47 @@ class _SettingsScreenState extends State<SettingsScreen>
           ),
       ],
     ),
-    SettingsSection(
-      id: 'network',
-      title: 'Network',
-      rows: [
-        SettingsRow(
-          id: 'network-sheet',
-          icon: Icons.hub_outlined,
-          title: 'Node & connection',
-          subtitle:
-              'Which public node you are talking to, and how fresh it is.',
-          onTap: widget.networkSheet == null
-              ? null
-              : () => NetworkSheet.show(context, widget.networkSheet!()),
-        ),
-      ],
-    ),
+    if (widget.network != null)
+      SettingsSection(
+        id: 'network',
+        title: 'Network',
+        rows: [
+          SettingsRow(
+            id: 'node-connection',
+            title: 'Node & connection',
+            // The row now names all three things behind it, because UX-3 put
+            // all three there: who serves you, where a link out of the wallet
+            // goes, and whether a price is fetched at all.
+            subtitle:
+                'Which node serves you, where explorer links go, and whether '
+                'a price is fetched.',
+            status: _network,
+            onTap: () => Navigator.of(
+              context,
+            ).push(KvPageRoute<void>(builder: widget.network!.route)),
+          ),
+        ],
+      ),
     SettingsSection(
       id: 'about',
       title: 'About',
       rows: [
-        SettingsRow(
-          id: 'version',
-          icon: Icons.info_outline,
-          title: 'Version',
-          status: _version,
-        ),
+        SettingsRow(id: 'version', title: 'Version', status: _version),
         SettingsRow(
           id: 'signature',
-          icon: Icons.verified_outlined,
           title: 'App signature',
           subtitle:
               'Check this against the published fingerprint for a release.',
           status: _signature,
           onTap: _openSignatureSheet,
+        ),
+        SettingsRow(
+          id: 'roadmap',
+          title: "What's coming",
+          subtitle: 'The parts of this wallet that are not built yet.',
+          onTap: () => Navigator.of(
+            context,
+          ).push(KvPageRoute<void>(builder: (_) => const RoadmapScreen())),
         ),
       ],
     ),
@@ -761,7 +831,6 @@ class _SettingsScreenState extends State<SettingsScreen>
     List<_SheetAction> actions = const [],
     String? monospace,
   }) {
-    final theme = Theme.of(context);
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -786,13 +855,24 @@ class _SettingsScreenState extends State<SettingsScreen>
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: theme.textTheme.titleMedium),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    color: KvColor.ink,
+                  ),
+                ),
                 const SizedBox(height: KvSpace.s),
                 Text(
                   body,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: KvColor.textSecondary,
+                  style: const TextStyle(
                     fontFamily: KvFont.ui,
+                    fontSize: 13,
+                    height: 19 / 13,
+                    color: KvColor.inkDim,
                   ),
                 ),
                 if (monospace != null) ...[
@@ -801,49 +881,29 @@ class _SettingsScreenState extends State<SettingsScreen>
                     width: double.infinity,
                     padding: const EdgeInsets.all(KvSpace.sm),
                     decoration: BoxDecoration(
-                      color: KvColor.surfaceAlt,
+                      color: KvColor.well,
                       borderRadius: BorderRadius.circular(KvRadius.data),
+                      border: Border.all(color: KvColor.hairline),
                     ),
                     child: SelectableText(
                       monospace,
-                      style: theme.textTheme.bodySmall,
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 13,
+                        height: 20 / 13,
+                        color: KvColor.ink,
+                      ),
                     ),
                   ),
                 ],
                 for (final action in actions) ...[
                   const SizedBox(height: KvSpace.s),
-                  SizedBox(
-                    width: double.infinity,
-                    child: TextButton(
-                      onPressed: () {
-                        Navigator.of(sheetContext).pop();
-                        action.onTap();
-                      },
-                      style: action.destructive
-                          ? TextButton.styleFrom(foregroundColor: KvColor.error)
-                          : null,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          if (action.selected) ...[
-                            const Icon(Icons.check, size: 16),
-                            const SizedBox(width: KvSpace.s),
-                          ],
-                          // Wraps rather than clipping. "Enable fingerprint
-                          // unlock" is the longest label the app has and it
-                          // reaches the button's content box around 1.8× —
-                          // past §4's 1.3× bar, but a truncated verb+object
-                          // (§12) on the only door to enabling biometric
-                          // unlock is not a thing to leave to the margin.
-                          Flexible(
-                            child: Text(
-                              action.label,
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                  _SheetButton(
+                    action: action,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      action.onTap();
+                    },
                   ),
                 ],
               ],
@@ -858,43 +918,58 @@ class _SettingsScreenState extends State<SettingsScreen>
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final sections = registry();
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      backgroundColor: KvColor.abyss,
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(
-            KvSpace.gutter,
-            KvSpace.m,
-            KvSpace.gutter,
-            KvSpace.xl,
-          ),
+        top: false,
+        child: Column(
           children: [
-            for (final section in sections) ...[
-              Padding(
-                padding: const EdgeInsets.only(
-                  left: KvSpace.xs,
-                  bottom: KvSpace.s,
+            // BG-14: the top 52dp belongs to the real system status bar.
+            const SizedBox(height: KvSpace.statusBarReserve),
+            KvRail(
+              title: 'Settings',
+              onBack: () => Navigator.of(context).maybePop(),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(
+                  KvSpace.gutter,
+                  KvSpace.m,
+                  KvSpace.gutter,
+                  KvSpace.xxl,
                 ),
-                child: Text(section.title, style: theme.textTheme.titleMedium),
-              ),
-              GlassPanel(
-                padding: EdgeInsets.zero,
-                child: Column(
-                  children: [
-                    for (var i = 0; i < section.rows.length; i++) ...[
-                      if (i > 0) const Divider(height: 1, indent: KvSpace.xxl),
-                      _Row(
-                        row: section.rows[i],
-                        busy: _busyRow == section.rows[i].id,
+                children: [
+                  for (final section in sections) ...[
+                    KvRuledLabel(section.title),
+                    const SizedBox(height: KvSpace.s),
+                    // One earned container per domain (BG-1): the plate exists
+                    // because these rows belong together, and the section
+                    // label above it says why.
+                    Container(
+                      decoration: BoxDecoration(
+                        color: KvColor.plate,
+                        borderRadius: BorderRadius.circular(KvRadius.panel),
+                        border: Border.all(color: KvColor.plateEdge),
                       ),
-                    ],
+                      child: Column(
+                        children: [
+                          for (var i = 0; i < section.rows.length; i++) ...[
+                            if (i > 0)
+                              Container(height: 1, color: KvColor.plateDivider),
+                            _Row(
+                              row: section.rows[i],
+                              busy: _busyRow == section.rows[i].id,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: KvSpace.l),
                   ],
-                ),
+                ],
               ),
-              const SizedBox(height: KvSpace.l),
-            ],
+            ),
           ],
         ),
       ),
@@ -918,6 +993,77 @@ class _SheetAction {
   final bool selected;
 }
 
+/// A sheet's action, as a machined control rather than a Material text button.
+///
+/// The label **wraps rather than clipping**: "Enable fingerprint unlock" is the
+/// longest label the app has and it reaches the control's content box around
+/// 1.8× — past §4's 1.3× bar, but a truncated verb+object on the only door to
+/// enabling biometric unlock is not a thing to leave to the margin.
+class _SheetButton extends StatelessWidget {
+  const _SheetButton({required this.action, required this.onTap});
+
+  final _SheetAction action;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = action.destructive ? KvColor.risk : KvColor.inkBright;
+    return Semantics(
+      button: true,
+      selected: action.selected,
+      label: action.label,
+      child: ExcludeSemantics(
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(KvRadius.control),
+          child: Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(minHeight: KvSpace.control),
+            padding: const EdgeInsets.symmetric(
+              horizontal: KvSpace.m,
+              vertical: KvSpace.sm,
+            ),
+            decoration: BoxDecoration(
+              color: KvColor.control,
+              borderRadius: BorderRadius.circular(KvRadius.control),
+              border: Border.all(color: KvColor.edgeHi),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (action.selected) ...[
+                  // The chosen option is marked by a glyph, not by a hue: a
+                  // selected lock-grace is information, and information is
+                  // colourless (BG-7).
+                  const KvGlyphIcon(
+                    KvMark.diamond,
+                    size: 12,
+                    tone: KvColor.inkBright,
+                  ),
+                  const SizedBox(width: KvSpace.s),
+                ],
+                Flexible(
+                  child: Text(
+                    action.label,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 15,
+                      height: 20 / 15,
+                      fontWeight: FontWeight.w600,
+                      color: tint,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// The ONE row renderer. Every setting in the app is drawn by this widget, which
 /// is what keeps the registry a registry: a row cannot quietly grow a bespoke
 /// layout, so a new setting has to fit the contract or justify its own screen.
@@ -929,9 +1075,7 @@ class _Row extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tint = row.destructive ? KvColor.error : KvColor.textSecondary;
-    // The ink needs a Material of its own: `GlassPanel`'s fill is an opaque
+    // The ink needs a Material of its own: the plate's fill is an opaque
     // Container, so without this the splash paints on the Scaffold's Material
     // UNDERNEATH the panel and the rows have no visible press feedback at all
     // (§6). Every other tappable row in the app already does this
@@ -953,8 +1097,6 @@ class _Row extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Icon(row.icon, size: 20, color: tint),
-              const SizedBox(width: KvSpace.sm),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -962,19 +1104,23 @@ class _Row extends StatelessWidget {
                   children: [
                     Text(
                       row.title,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: row.destructive
-                            ? KvColor.error
-                            : KvColor.textPrimary,
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 15,
+                        height: 20 / 15,
+                        fontWeight: FontWeight.w600,
+                        color: row.destructive ? KvColor.risk : KvColor.ink,
                       ),
                     ),
                     if (row.subtitle != null) ...[
                       const SizedBox(height: KvSpace.xs),
                       Text(
                         row.subtitle!,
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: KvColor.textTertiary,
+                        style: const TextStyle(
                           fontFamily: KvFont.ui,
+                          fontSize: 12,
+                          height: 17 / 12,
+                          color: KvColor.inkMeta,
                         ),
                       ),
                     ],
@@ -993,20 +1139,18 @@ class _Row extends StatelessWidget {
                             child: address != null
                                 // Identity goes through the DS widget: compact
                                 // BG-15 form, mono payload, §11 spoken label.
-                                ? AddressText(
-                                    address,
-                                    style: theme.textTheme.labelSmall,
-                                  )
+                                ? AddressText(address)
                                 : Text(
                                     value.text,
-                                    style: theme.textTheme.labelSmall?.copyWith(
+                                    style: TextStyle(
+                                      fontFamily: KvFont.ui,
+                                      fontSize: 12,
+                                      height: 17 / 12,
                                       color: switch (value.tone) {
                                         SettingsTone.ok => KvColor.ok,
-                                        SettingsTone.neutral =>
-                                          KvColor.textSecondary,
+                                        SettingsTone.neutral => KvColor.inkDim,
                                         SettingsTone.degraded => KvColor.warn,
                                       },
-                                      fontFamily: KvFont.ui,
                                     ),
                                   ),
                           );
@@ -1019,10 +1163,10 @@ class _Row extends StatelessWidget {
               if (busy)
                 const KvLoader.inline()
               else if (row.onTap != null)
-                const Icon(
-                  Icons.chevron_right,
-                  size: 20,
-                  color: KvColor.textTertiary,
+                const KvGlyphIcon(
+                  KvMark.chevron,
+                  size: 16,
+                  tone: KvColor.inkMeta,
                 ),
             ],
           ),

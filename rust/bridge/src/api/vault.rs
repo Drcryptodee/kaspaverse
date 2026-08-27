@@ -292,6 +292,18 @@ pub(crate) fn transport_store_dir() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("transport"))
 }
 
+/// App-private dir for the user's own preferences that reach the network —
+/// the explorer templates and the price source (`explorer.config`,
+/// `rate.config`). Its own directory rather than a corner of `wallet/`,
+/// because these are neither custody state nor chain state: nothing in here
+/// affects a balance, a signature or a dial, and a reader looking for what
+/// this app can be pointed at should find both files in one place (the INV-8
+/// census, D-207 clause a). Public strings only — a URL template and an
+/// `https://` endpoint (INV-3).
+pub(crate) fn prefs_dir() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("prefs"))
+}
+
 /// App-private dir for the V1 acceptance tracker (`acceptance.kvlog` +
 /// `vcc.cursor`). Public chain data only — txids, block hashes, timestamps
 /// (INV-3); node-only reads (INV-8). Sibling of `wallet/` and `transport/`;

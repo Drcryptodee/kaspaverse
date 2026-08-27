@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
+import 'package:kaspaverse/src/services/rate_service.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
@@ -100,6 +101,15 @@ void main() {
     List<ActivityRecord> activity = const [],
     Future<void> Function()? onRefresh,
     bool actions = true,
+    // The fiat restatement, wired ON with no quote by default — which is the
+    // state a wallet is in for the first seconds of every launch, and the one
+    // BG-5 answers with `≈ —`.
+    // `null` is a real third value here: the posture has not been read yet.
+    bool? rateOn = true,
+    KvRateQuote? quote,
+    // A clock that can be MOVED, for the one assertion about a value that
+    // changes because time passed rather than because data arrived.
+    DateTime Function()? clock,
   }) => MaterialApp(
     theme: kvDarkTheme(),
     home: HomeScreen(
@@ -119,7 +129,11 @@ void main() {
         discoveryIncomplete: ValueNotifier(discoveryIncomplete),
         onRefreshActivity: onRefresh,
       ),
-      clock: () => now ?? t0,
+      clock: clock ?? () => now ?? t0,
+      fiat: FiatScope(
+        enabled: ValueNotifier<bool?>(rateOn),
+        quote: ValueNotifier<KvRateQuote?>(quote),
+      ),
       sendRoute: actions ? (_) => const Placeholder() : null,
       receiveRoute: actions ? (_) => const Placeholder() : null,
     ),
@@ -271,6 +285,150 @@ void main() {
       expect(find.text('≈ —'), findsOneWidget);
       expect(find.text('no rate yet'), findsOneWidget);
 
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a price renders beside the figure, and says nothing else', (
+      tester,
+    ) async {
+      // UX-3 built the source control, which is what let this stop rendering
+      // a placeholder. The disclosure conditions were narrowed twice (D-193,
+      // D-189): the source is named where the source is CHOSEN, and the age
+      // appears only when age matters — so a fresh price is a bare figure.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(128450270000),
+          quote: KvRateQuote(
+            usdPerKas: 0.02864504,
+            fetchedAt: t0,
+            source: 'https://api.kaspa.org/info/price',
+          ),
+          now: t0,
+        ),
+      );
+      expect(find.text('≈ \$36.79'), findsOneWidget);
+      expect(find.text('≈ —'), findsNothing);
+      expect(find.text('no rate yet'), findsNothing);
+      expect(
+        find.textContaining('api.kaspa.org'),
+        findsNothing,
+        reason: 'a hostname beside a balance is disclosure nobody reads',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a price old enough to mislead wears its age', (tester) async {
+      // The other half of `L126`: the test above drives the fresh branch, this
+      // one drives the degraded branch, and neither alone would catch an age
+      // that renders always or never.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(128450270000),
+          quote: KvRateQuote(
+            usdPerKas: 0.02864504,
+            fetchedAt: t0.subtract(RateService.staleAfter),
+            source: 'https://api.kaspa.org/info/price',
+          ),
+          now: t0,
+        ),
+      );
+      expect(find.text('≈ \$36.79'), findsOneWidget);
+      expect(find.textContaining('old'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the age APPEARS as the price ages, with no new quote', (
+      tester,
+    ) async {
+      // The transition, not the rendering. Every other assertion here builds a
+      // widget that is already stale under a frozen clock, which proves the
+      // branch paints and says nothing about whether it can ever be reached —
+      // and it could not: the only thing that rebuilt this line was a fresh
+      // quote, and a fresh quote resets the age to zero, so a vendor that went
+      // down rendered a confident figure, ageless, forever
+      // (`consensus-auditor`; `L126` in its purest form).
+      var wall = t0;
+      await pump(
+        tester,
+        money(
+          mature: BigInt.from(128450270000),
+          quote: KvRateQuote(
+            usdPerKas: 0.02864504,
+            fetchedAt: t0,
+            source: 'https://api.kaspa.org/info/price',
+          ),
+          now: t0,
+          clock: () => wall,
+        ),
+      );
+      expect(find.text('≈ \$36.79'), findsOneWidget);
+      expect(
+        find.textContaining('old'),
+        findsNothing,
+        reason: 'a fresh rate says nothing about its age',
+      );
+
+      // Nothing new arrives. Only time passes, on the screen's own 1 s clock.
+      wall = t0.add(RateService.staleAfter);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('≈ \$36.79'), findsOneWidget);
+      expect(
+        find.textContaining('old'),
+        findsOneWidget,
+        reason: 'a price old enough to mislead says how old, unprompted',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('switched off, the line is GONE — not a dash', (tester) async {
+      // A user who turned fiat off did not ask for a row explaining that they
+      // turned fiat off. `—` means *unknown datum* (BG-8), and a setting the
+      // user chose is not an unknown.
+      await pump(
+        tester,
+        money(mature: BigInt.from(128450270000), rateOn: false),
+      );
+      expect(find.text('≈ —'), findsNothing);
+      expect(find.textContaining('≈'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('before the posture is read, the line is absent entirely', (
+      tester,
+    ) async {
+      // Not `≈ —`: a dash means *unknown datum* (BG-8), and at this moment the
+      // unknown is our own setting, not the price. A user who had switched
+      // fiat off would otherwise watch a fiat line appear and leave on every
+      // launch (`wallet-security-auditor`).
+      await pump(
+        tester,
+        money(mature: BigInt.from(128450270000), rateOn: null),
+      );
+      expect(find.textContaining('≈'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an unknown balance restates as an unknown value', (
+      tester,
+    ) async {
+      // Never `≈ \$0.00` under a hero reading `—`: a confident zero beside a
+      // dash is a true-looking lie, which is the class BG-8 exists to stop.
+      await pump(
+        tester,
+        money(
+          mature: null,
+          quote: KvRateQuote(
+            usdPerKas: 0.02864504,
+            fetchedAt: t0,
+            source: 'https://api.kaspa.org/info/price',
+          ),
+          now: t0,
+        ),
+      );
+      expect(find.text('≈ —'), findsOneWidget);
+      expect(find.textContaining('0.00'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
