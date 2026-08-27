@@ -474,11 +474,7 @@ impl WalletEngine {
         payload: Option<Vec<u8>>,
         exclude: &[Address],
     ) -> Result<PreparedSend> {
-        if priority.is_empty() {
-            return Err(ChainError::Message(
-                "source address has no spendable UTXO to pin input[0]".into(),
-            ));
-        }
+        let priority = pinned_priority_or_refuse(priority)?;
         // Change returns to `source` (not a fresh change address): the discipline
         // is input[0] AND change on the bound address so it self-funds.
         self.prepare_send_inner(
@@ -494,7 +490,8 @@ impl WalletEngine {
         .await
     }
 
-    /// Shared build core for [`prepare_send`] and [`prepare_send_pinned`]:
+    /// Shared build core for [`prepare_send`] and [`prepare_send_pinned`] —
+    /// see [`pinned_priority_or_refuse`] for the pinned path's covenant guard.
     /// register the change address, run the pinned Generator over the live
     /// context in the spend-policy order, iterate the whole (possibly chained)
     /// tx set unsigned, and project the B7 summary from the BUILT txs.
@@ -746,8 +743,63 @@ fn generate_chain(
             Err(e) => return Err(map_generate_error(e)),
         }
     }
+    covenant_fence(&pending)?;
     let summary = generator.summary();
     Ok((pending, summary))
+}
+
+/// The covenant fence (D-211): no covenant-bound coin ever funds a plain
+/// send, sweep, or merge. The policy layer WITHHOLDS these coins from the
+/// priority order (`spend_policy::is_covenant_bound`), but a coin the order
+/// omits still flows through the context iterator behind it (generator.rs:
+/// 588-614 @ `cfafeb4`) — policy alone is a demotion in disguise. So the
+/// fence judges the BUILT chain, the same station [`verify_drain`] judges:
+/// a covenant-bound input is a refusal, never a broadcast.
+///
+/// Why refuse, precisely (wallet-security audit, pin-verified): a plain
+/// spend of a covenant-labeled coin is consensus-VALID — enforcement is
+/// script-side, and an input followed by no covenant outputs is simply a
+/// terminated lineage (`crypto/txscript/src/covenants.rs::from_tx` @
+/// `cfafeb4`). That is worse, not better: a plain payment would DESTROY the
+/// covenant's state machine, and any stake riding it, as a side effect — and
+/// unlike a stranded conversation (the reservation's demote-only argument),
+/// a destroyed lineage is not recoverable.
+fn pinned_priority_or_refuse(priority: Vec<UtxoEntryReference>) -> Result<Vec<UtxoEntryReference>> {
+    // Covenant-bound coins cannot pin input[0] — the policy layer would
+    // silently drop them from the pinned block, and a pinned send whose
+    // whole pin evaporated is the silent identity change the empty-pin guard
+    // exists to stop (D-211, wallet-security finding 1). Filter FIRST, so an
+    // all-covenant pin hits the honest refusal instead of proceeding with
+    // the wrong input[0].
+    let priority: Vec<UtxoEntryReference> = priority
+        .into_iter()
+        .filter(|entry| !spend_policy::is_covenant_bound(entry))
+        .collect();
+    if priority.is_empty() {
+        return Err(ChainError::Message(
+            "source address has no spendable UTXO to pin input[0]".into(),
+        ));
+    }
+    Ok(priority)
+}
+
+fn covenant_fence(pending: &[PendingTransaction]) -> Result<()> {
+    for tx in pending {
+        if let Some(entry) = tx
+            .utxo_entries()
+            .values()
+            .find(|entry| spend_policy::is_covenant_bound(entry))
+        {
+            return Err(ChainError::CovenantBoundInput {
+                outpoint: format!(
+                    "{}:{}",
+                    entry.utxo.outpoint.transaction_id(),
+                    entry.utxo.outpoint.index()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The wallet's OWN coins a built chain consumes, by outpoint, with their
@@ -985,23 +1037,34 @@ enum DrainArm {
     Drain,
 }
 
-/// Split the mature snapshot into (offered, excluded_count) for a drain.
-/// Address-matched, and under an exclusion list it FAILS CLOSED on the corner
-/// the pin's types leave open: a coin whose `utxo.address` is `None` cannot be
-/// matched to an exclusion, so offering it would bypass the one custody check
-/// `verify_drain` enforces — it is counted excluded instead. (Unreachable for
-/// coins this context scanned — they arrive via address registration — but
-/// the type says Option, so the code refuses to guess.) With no exclusions
-/// (a sweep — the total exit) everything is offered.
+/// Split the mature snapshot into (offered, reserved_count, covenant_count)
+/// for a drain. Address-matched, and under an exclusion list it FAILS CLOSED
+/// on the corner the pin's types leave open: a coin whose `utxo.address` is
+/// `None` cannot be matched to an exclusion, so offering it would bypass the
+/// one custody check `verify_drain` enforces — it is counted reserved
+/// instead. (Unreachable for coins this context scanned — they arrive via
+/// address registration — but the type says Option, so the code refuses to
+/// guess.) With no exclusions (a sweep — the total exit) everything
+/// *spendable* is offered — covenant-bound coins are withheld even then
+/// (D-211), because their exit is their contract's, not this sweep's.
 fn drain_included(
     mature: Vec<UtxoEntryReference>,
     exclude: &[Address],
-) -> (Vec<UtxoEntryReference>, usize) {
+) -> (Vec<UtxoEntryReference>, usize, usize) {
+    // Covenant-bound coins are withheld from EVERY drain, the total sweep
+    // included (D-211): they move only through their covenant's own paths,
+    // and a swept covenant coin is not recoverable. Counted separately from
+    // the reservation so the refusal copy never mislabels a contract coin as
+    // a conversation's.
+    let (spendable, covenant): (Vec<UtxoEntryReference>, Vec<UtxoEntryReference>) = mature
+        .into_iter()
+        .partition(|entry| !spend_policy::is_covenant_bound(entry));
+    let covenant_count = covenant.len();
     if exclude.is_empty() {
-        return (mature, 0);
+        return (spendable, 0, covenant_count);
     }
-    let total = mature.len();
-    let included: Vec<UtxoEntryReference> = mature
+    let total = spendable.len();
+    let included: Vec<UtxoEntryReference> = spendable
         .into_iter()
         .filter(|entry| {
             entry
@@ -1011,8 +1074,8 @@ fn drain_included(
                 .is_some_and(|address| !exclude.contains(address))
         })
         .collect();
-    let excluded_count = total - included.len();
-    (included, excluded_count)
+    let reserved_count = total - included.len();
+    (included, reserved_count, covenant_count)
 }
 
 /// Pick the Generator mode for a drain over `included` coins. Pure; the
@@ -1251,26 +1314,53 @@ impl WalletEngine {
             .into_iter()
             .map(Into::into)
             .collect();
-        let has_exclusions = !exclude.is_empty();
-        let (included, excluded_count) = drain_included(mature, exclude);
-        let included_for_verify = has_exclusions.then(|| included.clone());
+        let (included, excluded_count, covenant_count) = drain_included(mature, exclude);
+        // Covenant withholding is an exclusion in every mechanical sense: it
+        // forces the priority arm (which draws exactly the offered set, so the
+        // withheld coins behind the context iterator are never reached) and it
+        // arms `verify_drain`'s input-set check on the built chain (D-211).
+        let has_withheld = !exclude.is_empty() || covenant_count > 0;
+        let included_for_verify = has_withheld.then(|| included.clone());
 
         if !is_exit && included.len() < 2 {
             // One coin in, one coin out is a pure fee burn — nothing merges.
-            // Name the real cause when the exclusion line is what emptied the
-            // offer (counts only, never an address).
-            return Err(ChainError::Message(if excluded_count > 0 {
-                format!(
-                    "nothing to merge — {excluded_count} coin(s) stay reserved \
+            // Name the real cause when a withholding line is what emptied the
+            // offer (counts only, never an address) — and never mislabel a
+            // contract coin as a conversation's.
+            return Err(ChainError::Message(
+                match (excluded_count, covenant_count) {
+                    (0, 0) => {
+                        "nothing to merge — your spendable coins are already consolidated".into()
+                    }
+                    (r, 0) => format!(
+                        "nothing to merge — {r} coin(s) stay reserved \
                      for your conversations, and the rest is already one coin"
-                )
-            } else {
-                "nothing to merge — your spendable coins are already consolidated".into()
-            }));
+                    ),
+                    (0, c) => format!(
+                        "nothing to merge — {c} coin(s) are locked in contracts and \
+                     move only through their own paths, and the rest is already one coin"
+                    ),
+                    (r, c) => format!(
+                        "nothing to merge — {r} coin(s) stay reserved for your \
+                     conversations and {c} are locked in contracts, and the rest \
+                     is already one coin"
+                    ),
+                },
+            ));
         }
 
+        // The one user guaranteed to be confused — sweeping a wallet that
+        // visibly holds funds, all of them contract-locked — gets the real
+        // reason, not plan_drain's generic empty-offer line (D-211,
+        // consensus-audit CONCERNS-3).
+        if included.is_empty() && covenant_count > 0 {
+            return Err(ChainError::Message(format!(
+                "nothing spendable to move — {covenant_count} coin(s) are locked \
+                 in contracts and move only through their own paths"
+            )));
+        }
         let offered_count = included.len();
-        let arm = plan_drain(included, has_exclusions)?;
+        let arm = plan_drain(included, has_withheld)?;
         let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
         // The diagnosis lane for every "sweep won't work" report. Counts and
         // state words ONLY — never an amount, never an address (INV-3; the
@@ -1279,7 +1369,8 @@ impl WalletEngine {
         // The arm is chosen from data no screen shows, and the 2026-08-23
         // device sitting had to reason about a drain refusal from screenshots.
         log::info!(
-            "drain: {} planning the {} arm over {offered_count} coin(s), {excluded_count} reserved",
+            "drain: {} planning the {} arm over {offered_count} coin(s), \
+             {excluded_count} reserved, {covenant_count} contract-locked",
             drain_kind(is_exit),
             drain_arm_name(&arm)
         );
@@ -1959,7 +2050,17 @@ fn probe_context(
     };
     loop {
         match generator.generate_transaction() {
-            Ok(Some(_)) => continue,
+            Ok(Some(tx)) => {
+                // A probe that could only build by drawing a covenant-bound
+                // coin is advertising an amount the fenced real send refuses
+                // (D-211, consensus-audit CONCERNS-1): classify it TooLarge —
+                // the free coins ran out, which is exactly what that outcome
+                // means.
+                if covenant_fence(std::slice::from_ref(&tx)).is_err() {
+                    return Ok(ProbeOutcome::TooLarge);
+                }
+                continue;
+            }
             Ok(None) => return Ok(ProbeOutcome::Builds),
             Err(e) => return probe_error(e),
         }
@@ -2318,12 +2419,15 @@ impl WalletEngine {
 /// to point at.
 ///
 /// Mirrors `select_spend_priority`'s own short-circuit: with no reservations
-/// nothing is reserved, so the whole mature set counts. Saturating, because a
-/// wrapped total would hand the climb a nonsense bound (a balance that
-/// overflows u64 is impossible on this network).
+/// nothing is reserved, so the whole mature set counts — minus covenant-bound
+/// coins, which are withheld from every plain spend (D-211): a bound that
+/// counted them would advertise an amount the fenced real send refuses.
+/// Saturating, because a wrapped total would hand the climb a nonsense bound
+/// (a balance that overflows u64 is impossible on this network).
 fn free_balance(mature: &[UtxoEntryReference], exclude: &[Address]) -> u64 {
     mature
         .iter()
+        .filter(|entry| !spend_policy::is_covenant_bound(entry))
         .filter(|entry| exclude.is_empty() || !spend_policy::is_reserved(entry, exclude))
         .fold(0u64, |acc, entry| acc.saturating_add(entry.amount()))
 }
@@ -2466,6 +2570,120 @@ mod tests {
         )
         .unwrap();
         Generator::try_new(settings, None, None).unwrap()
+    }
+
+    /// A covenant-bound simulated coin — `covenant_id` stamped on the pin's
+    /// own entry type, the shape `populate_genesis_covenants` produces when a
+    /// covenant output pays one of our derived addresses.
+    fn covenant_entry(kas: f64) -> UtxoEntryReference {
+        let mut utxo = (*UtxoEntryReference::simulated(kaspa_to_sompi(kas)).utxo).clone();
+        utxo.covenant_id = Some(kaspa_consensus_core::tx::TransactionId::from_bytes(
+            [0xCC; 32],
+        ));
+        UtxoEntryReference::from(utxo)
+    }
+
+    /// The fence (D-211), end to end in the production shape: the policy
+    /// order WITHHOLDS the covenant coin (`select_spend_priority`), the free
+    /// coins cannot cover the send, the Generator draws the covenant coin
+    /// from the context iterator BEHIND the priority order — the exact leak
+    /// the policy layer cannot prevent — and the fence refuses the built
+    /// chain with the typed error.
+    #[test]
+    fn covenant_fence_refuses_a_chain_that_drew_a_covenant_coin() {
+        let pool = vec![
+            covenant_entry(100.0),
+            UtxoEntryReference::simulated(kaspa_to_sompi(0.2)),
+        ];
+        let order = crate::spend_policy::select_spend_priority(&pool, &[], 0, &[]);
+        assert!(
+            order.iter().all(|e| e.utxo.covenant_id.is_none()),
+            "policy withholds the covenant coin from the order"
+        );
+        let generator = offline_generator_over(&pool, order, 50.0, addr(CHANGE));
+        let pending = drain(&generator);
+        assert!(!pending.is_empty(), "the Generator built a chain");
+        match covenant_fence(&pending) {
+            Err(ChainError::CovenantBoundInput { outpoint }) => {
+                assert!(
+                    outpoint.contains(':'),
+                    "outpoint is txid:index, got {outpoint}"
+                );
+            }
+            other => panic!("expected CovenantBoundInput, got {other:?}"),
+        }
+    }
+
+    /// The complement: a clean chain passes the fence untouched.
+    #[test]
+    fn covenant_fence_passes_a_clean_chain() {
+        let generator = offline_generator(&[100.0, 0.2], 50.0, addr(CHANGE));
+        let pending = drain(&generator);
+        assert!(!pending.is_empty());
+        covenant_fence(&pending).expect("no covenant-bound inputs — the fence stays silent");
+    }
+
+    /// The liveness half of D-211 (consensus-audit CONCERNS-2, pinned): an
+    /// EXIT over a pool containing a covenant coin still sweeps everything
+    /// spendable in one built chain — the ReceiverPays arm's amount is the
+    /// offered sum, so the Generator stops at the end of the priority list,
+    /// the fence stays silent, and the covenant coin is untouched. INV-6 in
+    /// spirit: the sweep is never blocked by coins that have their own
+    /// contract exits.
+    #[test]
+    fn an_exit_sweeps_everything_spendable_and_leaves_the_covenant_coin() {
+        let cov = covenant_entry(9.0);
+        let pool = vec![
+            UtxoEntryReference::simulated(kaspa_to_sompi(5.0)),
+            UtxoEntryReference::simulated(kaspa_to_sompi(3.0)),
+            cov.clone(),
+        ];
+        let (pending, _summary) = run_drain_offline(&pool, &[], &addr(DEST), &addr(CHANGE), true)
+            .expect("the exit sweeps the spendable coins");
+        covenant_fence(&pending).expect("fence silent — no covenant coin drawn");
+        let consumed: Vec<UtxoEntryReference> = pending
+            .iter()
+            .flat_map(|tx| tx.utxo_entries().values().cloned().collect::<Vec<_>>())
+            .collect();
+        assert_eq!(consumed.len(), 2, "both free coins swept, nothing else");
+        assert!(
+            consumed.iter().all(|entry| {
+                entry.utxo.outpoint.transaction_id() != cov.utxo.outpoint.transaction_id()
+            }),
+            "the covenant coin is untouched by the sweep"
+        );
+    }
+
+    /// The silent-identity-change guard (wallet-security finding 1): an
+    /// all-covenant pin REFUSES — it never proceeds with the wrong input[0] —
+    /// and a mixed pin proceeds with only its spendable part.
+    #[test]
+    fn an_all_covenant_pin_is_refused_a_mixed_pin_loses_only_the_covenant_part() {
+        let refusal = pinned_priority_or_refuse(vec![covenant_entry(7.0)]);
+        assert!(
+            matches!(refusal, Err(ChainError::Message(ref m)) if m.contains("no spendable UTXO to pin")),
+            "an all-covenant pin hits the honest refusal, got {refusal:?}"
+        );
+
+        let free = UtxoEntryReference::simulated(kaspa_to_sompi(3.0));
+        let kept = pinned_priority_or_refuse(vec![covenant_entry(7.0), free.clone()])
+            .expect("a mixed pin proceeds");
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].utxo.covenant_id.is_none());
+    }
+
+    /// Drains withhold covenant coins even from a total sweep, counted apart
+    /// from the conversation reservation so the refusal copy never mislabels
+    /// a contract coin as a conversation's (D-211).
+    #[test]
+    fn drain_withholds_covenant_coins_even_from_a_sweep() {
+        let entries = vec![
+            UtxoEntryReference::simulated(kaspa_to_sompi(5.0)),
+            covenant_entry(9.0),
+        ];
+        let (included, reserved, covenant) = drain_included(entries, &[]);
+        assert_eq!((included.len(), reserved, covenant), (1, 0, 1));
+        assert!(included.iter().all(|e| e.utxo.covenant_id.is_none()));
     }
 
     fn drain(generator: &Generator) -> Vec<Pt> {
@@ -3509,10 +3727,12 @@ mod tests {
         change_home: &Address,
         is_exit: bool,
     ) -> Result<(Vec<Pt>, SendSummary)> {
-        let has_exclusions = !exclude.is_empty();
-        let (included, _) = drain_included(entries.to_vec(), exclude);
-        let included_for_verify = has_exclusions.then(|| included.clone());
-        let arm = plan_drain(included, has_exclusions)?;
+        let (included, _, covenant_count) = drain_included(entries.to_vec(), exclude);
+        // Mirrors production: covenant withholding arms the priority arm and
+        // the verify input-set check exactly like an exclusion list (D-211).
+        let has_withheld = !exclude.is_empty() || covenant_count > 0;
+        let included_for_verify = has_withheld.then(|| included.clone());
+        let arm = plan_drain(included, has_withheld)?;
         let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
         let (order, payment, fees): (Vec<UtxoEntryReference>, PaymentDestination, Fees) = match arm
         {
@@ -3948,7 +4168,7 @@ mod tests {
         entries.push(mystery.clone());
 
         // Under exclusions: the address-less coin is excluded (fails closed).
-        let (included, excluded_count) =
+        let (included, excluded_count, _) =
             drain_included(entries.clone(), std::slice::from_ref(&bound));
         assert_eq!(included.len(), 2);
         assert_eq!(excluded_count, 1, "the None-address coin counts excluded");
@@ -3959,9 +4179,9 @@ mod tests {
             "a coin that cannot be matched to the exclusion list is not offered"
         );
 
-        // With no exclusions (a sweep): everything is offered.
-        let (included, excluded_count) = drain_included(entries, &[]);
-        assert_eq!((included.len(), excluded_count), (3, 0));
+        // With no exclusions (a sweep): everything spendable is offered.
+        let (included, excluded_count, covenant_count) = drain_included(entries, &[]);
+        assert_eq!((included.len(), excluded_count, covenant_count), (3, 0, 0));
     }
 
     /// A big consolidation to SELF chains through the Generator's canonical

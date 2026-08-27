@@ -25,6 +25,15 @@ pub enum ChainError {
     /// too large (the Generator's `GeneratorTransactionIsTooHeavy`). Typed so
     /// the P2.3 compose path can say "message too large" honestly (§4).
     TransactionTooHeavy,
+    /// A covenant-bound coin (KIP-20 `covenant_id` present) reached a BUILT
+    /// transaction on the plain-send path (D-211). The policy layer withholds
+    /// these coins from the offered order; this variant is the fence behind
+    /// it. A plain spend of a covenant-labeled coin is consensus-VALID at the
+    /// pin (script-side enforcement; no covenant outputs = a terminated
+    /// lineage) — which is exactly why it must be refused: the payment would
+    /// DESTROY the covenant's state machine, and any stake riding it, as a
+    /// side effect. Not recoverable — a withholding, never a demotion.
+    CovenantBoundInput { outpoint: String },
     /// A chain-layer message with no upstream source.
     Message(String),
 }
@@ -44,6 +53,11 @@ impl fmt::Display for ChainError {
             ChainError::TransactionTooHeavy => {
                 f.write_str("transaction exceeds the per-tx mass ceiling (payload too large)")
             }
+            ChainError::CovenantBoundInput { outpoint } => write!(
+                f,
+                "coin {outpoint} is locked in a contract and moves only through \
+                 the contract's own paths — nothing was sent"
+            ),
             ChainError::Message(m) => f.write_str(m),
         }
     }
@@ -58,6 +72,7 @@ impl std::error::Error for ChainError {
             ChainError::InsufficientFunds { .. }
             | ChainError::StorageMassExceeded { .. }
             | ChainError::TransactionTooHeavy
+            | ChainError::CovenantBoundInput { .. }
             | ChainError::Message(_) => None,
         }
     }

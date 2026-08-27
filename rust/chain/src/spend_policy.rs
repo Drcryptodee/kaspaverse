@@ -107,6 +107,30 @@ pub(crate) fn is_reserved(entry: &UtxoEntryReference, exclude: &[Address]) -> bo
         .is_none_or(|address| exclude.contains(address))
 }
 
+/// Is this coin COVENANT-BOUND — carrying a KIP-20 `covenant_id`?
+///
+/// The one definition of the covenant test, mirroring [`is_reserved`]'s
+/// one-definition discipline. A covenant-bound output can pay one of the
+/// wallet's own derived addresses (`populate_genesis_covenants` binds outputs
+/// by INDEX with no script inspection — `consensus/core/src/tx.rs:335` @
+/// `cfafeb4`), so it registers as ordinary wallet funds and would sort
+/// largest-first. A plain spend of it is consensus-VALID at the pin
+/// (enforcement is script-side; an input with no covenant outputs is a
+/// terminated lineage) — which is precisely the harm: a plain payment would
+/// DESTROY the covenant's state machine, and any stake riding it, as a side
+/// effect.
+///
+/// Unlike the chat reservation this is a **WITHHOLDING, never a demotion**
+/// (D-211): the D-169 argument — a stranded conversation is recoverable —
+/// does not transfer, because a swept covenant coin is not. The policy layer
+/// (this module) keeps these coins out of the offered order; the custody
+/// layer (`send.rs`'s `covenant_fence`) refuses any BUILT chain that drew one
+/// through the context iterator behind the priority list, which the order
+/// alone cannot prevent (generator.rs:588-614 @ `cfafeb4`).
+pub(crate) fn is_covenant_bound(entry: &UtxoEntryReference) -> bool {
+    entry.utxo.covenant_id.is_some()
+}
+
 /// The complete spend order for one send, expressed as the Generator's
 /// priority-entry list: `pinned` (largest-first among itself, wholly first —
 /// input[0] identity, D-067) ++ up to `riders` smallest FREE coins (smallest
@@ -163,9 +187,15 @@ pub(crate) fn select_spend_priority(
         pinned.len(),
         "pinned entries must be unique by outpoint"
     );
+    // Covenant-bound coins are WITHHELD — from the pool, from the riders it
+    // feeds, and from the pinned block below — never merely demoted. (They
+    // still exist in the live context iterator behind this order; the
+    // `covenant_fence` on the built chain closes that residual — see
+    // `is_covenant_bound`.)
     let mut pool: Vec<UtxoEntryReference> = mature
         .iter()
         .filter(|entry| !pinned_outpoints.contains(entry))
+        .filter(|entry| !is_covenant_bound(entry))
         .cloned()
         .collect();
     // Descending; ties keep snapshot order (stable sort ⇒ deterministic).
@@ -181,7 +211,11 @@ pub(crate) fn select_spend_priority(
                 .partition(|entry| !is_reserved(entry, exclude))
         };
 
-    let mut order: Vec<UtxoEntryReference> = pinned.to_vec();
+    let mut order: Vec<UtxoEntryReference> = pinned
+        .iter()
+        .filter(|entry| !is_covenant_bound(entry))
+        .cloned()
+        .collect();
     order.sort_by_key(|entry| std::cmp::Reverse(entry.amount()));
 
     // Riders: the FREE pool's tail (its smallest), reversed so the very
@@ -226,6 +260,49 @@ mod tests {
         let mature: Vec<_> = [5.0, 0.5, 200.0, 2.0, 10.0].map(entry).into();
         let order = select_spend_priority(&mature, &[], 0, &[]);
         assert_eq!(amounts(&order), kas(&[200.0, 10.0, 5.0, 2.0, 0.5]));
+    }
+
+    /// A covenant-bound coin with a `covenant_id` stamped on the pin's own
+    /// entry type — the shape `populate_genesis_covenants` produces when a
+    /// covenant output pays one of our derived addresses.
+    fn covenant_entry(kas: f64) -> UtxoEntryReference {
+        let mut utxo = (*entry(kas).utxo).clone();
+        utxo.covenant_id = Some(kaspa_consensus_core::tx::TransactionId::from_bytes(
+            [0xCC; 32],
+        ));
+        UtxoEntryReference::from(utxo)
+    }
+
+    /// Covenant-bound coins never enter the order — not as the lead (largest),
+    /// not as a rider (smallest), not at the tail. WITHHELD, not demoted: the
+    /// reserved tail exists precisely because reserved coins may still fund a
+    /// send of last resort; a covenant coin may not.
+    #[test]
+    fn covenant_bound_coins_are_withheld_from_the_order_entirely() {
+        let mature = vec![
+            covenant_entry(500.0), // would lead largest-first
+            entry(5.0),
+            covenant_entry(0.1), // would be drawn first as a rider
+            entry(2.0),
+        ];
+        let order = select_spend_priority(&mature, &[], RIDER_LIMIT, &[]);
+        assert_eq!(amounts(&order), kas(&[2.0, 5.0]));
+        assert!(order.iter().all(|e| !is_covenant_bound(e)));
+    }
+
+    /// Even a PINNED covenant coin is withheld — a caller cannot force one
+    /// into the priority block (input[0] identity included). At the policy
+    /// layer a mixed pin proceeds without the covenant part; the ENGINE
+    /// refuses an all-covenant pin outright (`send.rs::
+    /// pinned_priority_or_refuse` — the silent-identity-change guard), and
+    /// the built-chain fence guards the iterator path.
+    #[test]
+    fn a_pinned_covenant_coin_is_withheld_not_prioritized() {
+        let cov = covenant_entry(7.0);
+        let mut mature: Vec<_> = [5.0].map(entry).into();
+        mature.push(cov.clone());
+        let order = select_spend_priority(&mature, &[cov], 0, &[]);
+        assert_eq!(amounts(&order), kas(&[5.0]));
     }
 
     #[test]
