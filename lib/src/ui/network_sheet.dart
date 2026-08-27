@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../rust/api/dag.dart';
 import 'format.dart';
+import 'node/node_screen.dart';
+import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/glass_panel.dart';
 import 'widgets/haptics.dart';
@@ -35,6 +37,7 @@ class NetworkSheet extends StatefulWidget {
     this.searching,
     this.osOffline,
     this.disconnectedAt,
+    this.node,
   });
 
   final ValueListenable<bool> connected;
@@ -53,6 +56,14 @@ class NetworkSheet extends StatefulWidget {
   final ValueListenable<bool>? searching;
   final ValueListenable<bool>? osOffline;
   final ValueListenable<DateTime?>? disconnectedAt;
+
+  /// The node-pin seam (D-187). When present the sheet grows one control that
+  /// opens [NodeScreen] — the sovereignty surface the sovereign-node line
+  /// shipped with no way in. It lives here rather than beside the Settings row
+  /// so that BOTH entry points to this sheet reach it: a control that appeared
+  /// on one path and not the other would be two renderings of one truth, which
+  /// is the disagreement C7 exists to forbid.
+  final NodeScope? node;
 
   /// Show this sheet over [context] — the one presentation path, so the home
   /// beacon tap and the Settings row can never drift in how it is presented.
@@ -225,6 +236,30 @@ class _NetworkSheetState extends State<NetworkSheet> {
                         label: Text(hunting ? 'Searching…' : 'Reconnect'),
                       ),
                     ),
+                  if (widget.node != null) ...[
+                    const SizedBox(height: KvSpace.s),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        // The sheet is a route on this navigator, so it closes
+                        // itself before the screen arrives — a full page
+                        // stacked behind a modal is a back button that goes
+                        // somewhere nobody asked for.
+                        onPressed: () {
+                          KvHaptic.selection();
+                          final nav = Navigator.of(context);
+                          final scope = widget.node!;
+                          nav.pop();
+                          nav.push(
+                            KvPageRoute<void>(
+                              builder: (_) => NodeScreen(scope: scope),
+                            ),
+                          );
+                        },
+                        child: const Text('Use my own node'),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: KvSpace.m),
                   Text(
                     'KaspaVerse talks to public Kaspa nodes directly — '

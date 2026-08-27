@@ -16,6 +16,7 @@ import 'package:kaspaverse/src/ui/dev_vault_panel.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/network_sheet.dart';
+import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/preview/black_glass_home_preview.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
@@ -57,6 +58,23 @@ Future<void> main() async {
     KaspaVerseApp(chain: ChainService.instance, wallet: WalletService.instance),
   );
 }
+
+/// One mapping from the chain service onto the node surface, used by both
+/// paths into the network sheet. Written once so the two can never disagree
+/// about which notifiers the picker is reading (C7).
+NodeScope _nodeScope(ChainService chain) => NodeScope(
+  connected: chain.connected,
+  activeEndpoint: chain.endpoint,
+  virtualDaaScore: chain.virtualDaaScore,
+  pinnedNode: chain.pinnedNode,
+  pinDropped: chain.pinDropped,
+  setPinnedNode: chain.setPinnedNode,
+  lastUpdate: chain.lastUpdate,
+  searching: chain.searching,
+  osOffline: chain.osOffline,
+  reconnecting: chain.reconnecting,
+  refreshConfig: () => chain.refreshNodeConfig(),
+);
 
 /// The app: Bioluminescent Vault theme (tokens, P1.3) wrapping the navigation
 /// shell. The D-027 freestyle seed-colour drift dies here — the theme is built
@@ -101,6 +119,7 @@ class KaspaVerseApp extends StatelessWidget {
             searching: chain.searching,
             osOffline: chain.osOffline,
             disconnectedAt: chain.disconnectedAt,
+            node: _nodeScope(chain),
           ),
           wallet: WalletScope(
             mature: wallet.mature,
@@ -164,6 +183,7 @@ class KaspaVerseApp extends StatelessWidget {
               searching: chain.searching,
               osOffline: chain.osOffline,
               disconnectedAt: chain.disconnectedAt,
+              node: _nodeScope(chain),
             ),
           ),
           floatingActionButton: kDebugMode ? const _DevFabs() : null,

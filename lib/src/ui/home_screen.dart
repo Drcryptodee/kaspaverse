@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../rust/api/wallet.dart';
 import 'format.dart';
 import 'network_sheet.dart';
+import 'node/node_screen.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/amount_text.dart';
@@ -101,6 +102,7 @@ class ChainScope {
     this.searching,
     this.osOffline,
     this.disconnectedAt,
+    this.node,
   });
 
   final ValueListenable<bool> connected;
@@ -125,6 +127,12 @@ class ChainScope {
   final ValueListenable<bool>? searching;
   final ValueListenable<bool>? osOffline;
   final ValueListenable<DateTime?>? disconnectedAt;
+
+  /// The node-pin seam (D-187), forwarded to the network sheet so the picker
+  /// is reachable from the home beacon as well as from Settings. Optional in
+  /// the same way [searching] is: absent means the sheet shows no picker, and
+  /// a widget test that does not exercise the pin can omit it.
+  final NodeScope? node;
 }
 
 /// The wallet-facing wiring [HomeScreen] consumes — same law as [ChainScope].
@@ -409,6 +417,7 @@ class _HomeScreenState extends State<HomeScreen> {
         searching: widget.chain.searching,
         osOffline: widget.chain.osOffline,
         disconnectedAt: widget.chain.disconnectedAt,
+        node: widget.chain.node,
       ),
     );
   }

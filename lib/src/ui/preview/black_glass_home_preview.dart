@@ -32,6 +32,10 @@ import 'package:flutter/material.dart';
 
 import '../receive/qr_tile.dart';
 import '../theme/tokens.dart';
+import '../widgets/kv_cadence.dart';
+import '../widgets/kv_datum.dart';
+import '../widgets/kv_glyph.dart';
+import '../widgets/kv_toggle.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The states the money surface has to hold (SCREEN_INVENTORY 7a–7e).
@@ -716,7 +720,7 @@ class _Instrument extends StatelessWidget {
         const SizedBox(
           height: 7,
           width: double.infinity,
-          child: CustomPaint(painter: _DatumPainter()),
+          child: CustomPaint(painter: _DatumPainter(graduated: true)),
         ),
         const SizedBox(height: KvSpace.s),
         Row(
@@ -897,56 +901,12 @@ class _SoftLabel extends StatelessWidget {
   );
 }
 
-/// The graduated datum. Long risers mark the ends, a taller notch marks the
-/// decimal, and short graduations run between — a gauge's zero mark, at the
-/// one place in the app a number needs to read as an instrument reading.
-class _DatumPainter extends CustomPainter {
-  const _DatumPainter({this.graduated = true});
-
-  /// A graduated datum reads as a measuring scale. Ungraduated, it is simply
-  /// the rule the figure stands on — which is what a balance actually wants.
-  final bool graduated;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rule = Paint()
-      ..color = KvColor.datum
-      ..strokeWidth = 1
-      ..isAntiAlias = false;
-    canvas.drawLine(Offset(0, 0.5), Offset(size.width, 0.5), rule);
-
-    // Ungraduated: just the rule. End stops turn a line into a SCALE, and an
-    // amount being typed is not being measured against anything.
-    if (!graduated) return;
-
-    // Graduations every 12dp, taller every fifth — the rhythm of a scale.
-    final tick = Paint()
-      ..color = KvColor.datum
-      ..strokeWidth = 1
-      ..isAntiAlias = false;
-    var i = 0;
-    for (double x = 0; x <= size.width; x += 12, i++) {
-      final h = i % 5 == 0 ? 4.0 : 2.0;
-      canvas.drawLine(Offset(x + 0.5, 1), Offset(x + 0.5, 1 + h), tick);
-    }
-
-    // The end stops, in ambient teal: a calibration mark, structural rather
-    // than decorative, and the brand sitting on the instrument itself.
-    final stop = Paint()
-      ..color = KvColor.primaryMuted
-      ..strokeWidth = 1
-      ..isAntiAlias = false;
-    canvas.drawLine(const Offset(0.5, 0), const Offset(0.5, 7), stop);
-    canvas.drawLine(
-      Offset(size.width - 0.5, 0),
-      Offset(size.width - 0.5, 7),
-      stop,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_DatumPainter old) => old.graduated != graduated;
-}
+/// Extracted to `widgets/kv_datum.dart` at UX-1, and aliased here so the
+/// prototype and the primitive cannot disagree. The default flipped in the
+/// move — plain, not graduated — because end stops turn a line into a scale
+/// and most rules in this app are not scales (D-195); the two call sites here
+/// name what they want.
+typedef _DatumPainter = KvDatumPainter;
 
 class _InFlightLine extends StatelessWidget {
   const _InFlightLine();
@@ -1028,98 +988,12 @@ class _Lamp extends StatelessWidget {
   }
 }
 
-/// The cadence — five bars breathing at block rhythm. It is the app's ONE
-/// loading indicator and its liveness signal at once, and it **freezes** the
-/// instant the link dies, which is what makes "live" a felt thing rather than
-/// a claimed one (BG-8).
-class _Cadence extends StatefulWidget {
-  const _Cadence({required this.running});
-
-  final bool running;
-
-  @override
-  State<_Cadence> createState() => _CadenceState();
-}
-
-class _CadenceState extends State<_Cadence>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: KvMotion.breath,
-  );
-
-  static const _heights = <double>[6, 10, 14, 10, 6];
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.running) _c.repeat();
-  }
-
-  /// BG-9: reduced motion collapses everything to opacity except the hold.
-  /// `kv_breath.dart`, which this replaces, honours it — so its successor must.
-  void _sync(bool reduced) {
-    if (widget.running && !reduced && !_c.isAnimating) {
-      _c.repeat();
-    } else if ((!widget.running || reduced) && _c.isAnimating) {
-      _c.stop();
-    }
-  }
-
-  @override
-  void didUpdateWidget(_Cadence old) {
-    super.didUpdateWidget(old);
-    _sync(MediaQuery.disableAnimationsOf(context));
-  }
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    _sync(MediaQuery.disableAnimationsOf(context));
-    final stagger =
-        KvMotion.cadenceStagger.inMilliseconds / KvMotion.breath.inMilliseconds;
-    return ExcludeSemantics(
-      child: SizedBox(
-        height: 14,
-        child: AnimatedBuilder(
-          animation: _c,
-          builder: (context, _) => Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              for (var i = 0; i < _heights.length; i++) ...[
-                if (i > 0) const SizedBox(width: 3),
-                Container(
-                  width: 3,
-                  height: _heights[i],
-                  color: KvColor.primary.withValues(
-                    alpha: widget.running
-                        ? 0.15 +
-                              0.85 *
-                                  (0.5 -
-                                          0.5 *
-                                              math.cos(
-                                                2 *
-                                                    math.pi *
-                                                    ((_c.value - i * stagger) %
-                                                        1.0),
-                                              ))
-                                      .clamp(0.0, 1.0)
-                        : KvFreshness.opacityStale,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
+/// Extracted to `widgets/kv_cadence.dart` at UX-1, and aliased here so the
+/// prototype and the primitive cannot disagree. The move fixed one thing on
+/// the way: under reduced motion the private copy stopped the controller,
+/// which rendered a RUNNING cadence identically to a frozen one — the exact
+/// lie BG-8 exists to forbid. The primitive holds the bars bright instead.
+typedef _Cadence = KvCadence;
 
 class _DegradedNotice extends StatelessWidget {
   const _DegradedNotice();
@@ -1638,247 +1512,12 @@ class _MicroLabel extends StatelessWidget {
   );
 }
 
-enum _Glyph {
-  arrowIn,
-  arrowOut,
-  selfSend,
-  navDots,
-  diamond,
-  chevron,
-  money,
-  chat,
-  games,
-  contracts,
-  finance,
-  assets,
-  settings,
-  lock,
-  paste,
-  scan,
-  history,
-  kebab,
-}
-
-/// Every glyph is 1–3 strokes on a 24dp grid at 1.75dp with square caps — the
-/// icon set is drawn, not imported, which is a supply-chain decision (INV-7)
-/// as much as a visual one. This is also where most of the machined character
-/// actually lives, so the stroke discipline is not negotiable.
-class _GlyphPainter extends CustomPainter {
-  const _GlyphPainter(this.glyph, {this.tone = KvColor.inkMeta});
-
-  final _Glyph glyph;
-  final Color tone;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final s = size.width / KvGlyph.grid;
-    final p = Paint()
-      ..color = tone
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = KvGlyph.stroke * s
-      ..strokeCap = KvGlyph.cap
-      ..strokeJoin = StrokeJoin.miter;
-
-    Path path(List<List<double>> pts) {
-      final path = Path();
-      for (final seg in pts) {
-        path.moveTo(seg[0] * s, seg[1] * s);
-        for (var i = 2; i < seg.length; i += 2) {
-          path.lineTo(seg[i] * s, seg[i + 1] * s);
-        }
-      }
-      return path;
-    }
-
-    switch (glyph) {
-      case _Glyph.arrowIn:
-        canvas.drawPath(
-          path([
-            [12, 4, 12, 15],
-            [7, 10, 12, 15, 17, 10],
-            [5, 20, 19, 20],
-          ]),
-          p,
-        );
-      case _Glyph.arrowOut:
-        canvas.drawPath(
-          path([
-            [12, 20, 12, 9],
-            [7, 14, 12, 9, 17, 14],
-            [5, 4, 19, 4],
-          ]),
-          p,
-        );
-      case _Glyph.selfSend:
-        canvas.drawPath(
-          path([
-            [5, 8, 16, 8],
-            [13, 5, 16, 8, 13, 11],
-            [19, 16, 8, 16],
-            [11, 19, 8, 16, 11, 13],
-          ]),
-          p,
-        );
-      case _Glyph.navDots:
-        // Honours `tone` like every other glyph. It did not — and UX-1 extracts
-        // this set, so a dimmed nav mark would have rendered at full brightness
-        // with no error anywhere.
-        final dot = Paint()..color = tone;
-        for (final c in const [
-          Offset(7.5, 7.5),
-          Offset(16.5, 7.5),
-          Offset(7.5, 16.5),
-          Offset(16.5, 16.5),
-        ]) {
-          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.5 * s, dot);
-        }
-      case _Glyph.money:
-        // A note, not a coin: a circle with strokes through it reads as a
-        // symbol to be decoded, and a glyph you decode has already failed.
-        canvas.drawPath(
-          path([
-            [3.5, 6.5, 20.5, 6.5, 20.5, 17.5, 3.5, 17.5, 3.5, 6.5],
-          ]),
-          p,
-        );
-        canvas.drawCircle(Offset(12 * s, 12 * s), 2.6 * s, p);
-      case _Glyph.chat:
-        canvas.drawPath(
-          path([
-            [4.5, 5.5, 19.5, 5.5, 19.5, 15.5, 9.5, 15.5, 5.5, 19.5, 5.5, 5.5],
-          ]),
-          p,
-        );
-      case _Glyph.games:
-        canvas.drawPath(
-          path([
-            [5, 5, 19, 5, 19, 19, 5, 19, 5, 5],
-          ]),
-          p,
-        );
-        final dot = Paint()..color = tone;
-        for (final c in const [
-          Offset(9, 9),
-          Offset(15, 9),
-          Offset(9, 15),
-          Offset(15, 15),
-        ]) {
-          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 1.4 * s, dot);
-        }
-      case _Glyph.contracts:
-        canvas.drawPath(
-          path([
-            [7, 4, 17, 4, 17, 20, 7, 20, 7, 4],
-            [10, 9, 14, 9],
-            [10, 13, 14, 13],
-          ]),
-          p,
-        );
-      case _Glyph.finance:
-        // A trend on a baseline. The export's three-bar mark read as "++".
-        canvas.drawPath(
-          path([
-            [4, 19, 20, 19],
-            [5, 15, 9.5, 10.5, 13.5, 13.5, 19, 7],
-            [15, 7, 19, 7, 19, 11],
-          ]),
-          p,
-        );
-      case _Glyph.assets:
-        canvas.drawPath(
-          path([
-            [12, 4, 20, 8.5, 20, 15.5, 12, 20, 4, 15.5, 4, 8.5, 12, 4],
-          ]),
-          p,
-        );
-      case _Glyph.settings:
-        // Sliders. A cross-haired dot is a target, not a setting.
-        canvas.drawPath(
-          path([
-            [4, 7, 20, 7],
-            [4, 12, 20, 12],
-            [4, 17, 20, 17],
-          ]),
-          p,
-        );
-        final knob = Paint()..color = tone;
-        for (final c in const [Offset(9, 7), Offset(15, 12), Offset(11, 17)]) {
-          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.1 * s, knob);
-        }
-      case _Glyph.lock:
-        canvas.drawPath(
-          path([
-            [6, 11, 18, 11, 18, 20, 6, 20, 6, 11],
-          ]),
-          p,
-        );
-        final shackle = Path()
-          ..addArc(
-            Rect.fromCircle(center: Offset(12 * s, 11 * s), radius: 4 * s),
-            math.pi,
-            math.pi,
-          );
-        canvas.drawPath(shackle, p);
-      case _Glyph.paste:
-        canvas.drawPath(
-          path([
-            [6, 6, 18, 6, 18, 20, 6, 20, 6, 6],
-            [9.5, 3.5, 14.5, 3.5, 14.5, 7.5, 9.5, 7.5, 9.5, 3.5],
-          ]),
-          p,
-        );
-      case _Glyph.scan:
-        // A viewfinder: four corners and nothing between them.
-        canvas.drawPath(
-          path([
-            [4, 9, 4, 4, 9, 4],
-            [15, 4, 20, 4, 20, 9],
-            [20, 15, 20, 20, 15, 20],
-            [9, 20, 4, 20, 4, 15],
-          ]),
-          p,
-        );
-      case _Glyph.history:
-        canvas.drawPath(
-          path([
-            [12, 7, 12, 12, 16, 14],
-            [4, 8, 4, 4, 8, 8],
-          ]),
-          p,
-        );
-        canvas.drawArc(
-          Rect.fromCircle(center: Offset(12 * s, 12 * s), radius: 8 * s),
-          -2.5,
-          5.4,
-          false,
-          p,
-        );
-      case _Glyph.kebab:
-        final d = Paint()..color = tone;
-        for (final y in const [6.5, 12.0, 17.5]) {
-          canvas.drawCircle(Offset(12 * s, y * s), 1.7 * s, d);
-        }
-      case _Glyph.chevron:
-        canvas.drawPath(
-          path([
-            [9, 5, 16, 12, 9, 19],
-          ]),
-          p,
-        );
-      case _Glyph.diamond:
-        canvas.drawPath(
-          path([
-            [12, 4, 20, 12, 12, 20, 4, 12, 12, 4],
-          ]),
-          p,
-        );
-    }
-  }
-
-  @override
-  bool shouldRepaint(_GlyphPainter old) =>
-      old.glyph != glyph || old.tone != tone;
-}
+/// The prototype drew this set privately; UX-1 extracted it to
+/// `widgets/kv_glyph.dart` with tests. Aliased rather than re-declared so the
+/// two cannot drift while the remaining preview screens are still standing —
+/// a second copy of a component is two places to disagree about one design.
+typedef _Glyph = KvMark;
+typedef _GlyphPainter = KvGlyphPainter;
 
 /// Debug-only. Not part of the design — it exists so every state and every
 /// balance treatment can be compared in one sitting instead of five builds.
@@ -3840,12 +3479,17 @@ class _ChunkedAddress extends StatelessWidget {
   final String full;
 
   /// 67 characters — `kaspa:` + a 61-char payload, which is what the network
-  /// actually produces. The first version was 70, so the ceremony was judged on
-  /// a layout that chunks evenly into 16 groups; a real payload yields 15 plus
-  /// a **one-character weighted last group**, which is exactly where BG-15 puts
+  /// actually produces. A real payload yields 15 groups of four plus a
+  /// **one-character weighted last group**, which is exactly where BG-15 puts
   /// the eye.
+  ///
+  /// **Taken from the Rust transport-store fixtures, not typed** (L125). The
+  /// version this replaces was 68 characters under this same comment, so it
+  /// chunked to a TWO-character last group and the ceremony was device-judged
+  /// at the wrong width — the comment's reasoning was right and its data was
+  /// not. `KvAddress`'s tests now assert the length.
   static const _confirmAddress =
-      'kaspa:qpzt3vw8mn4ka7ep0lxh2wnfscjg8y5u3e6vddwm0s3jnp4khce2mua7x2mne4';
+      'kaspa:qp408svlz585vyvj50yaljm8xdxrkcmmed8vxlx0wf0cl5wpt3vzyh74xs46e';
 
   List<String> get _groups {
     final payload = full.substring(full.indexOf(':') + 1);
@@ -5710,10 +5354,11 @@ class _Gate extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Network & connection.
 //
-// This is where four open threads land, so it is built before the rest of the
-// sweep: the node picker the sovereign-node session shipped with no surface,
-// the explorer choice (D-192), the fiat rate's source (D-193), and the
-// selectable ground when UX-3 adds it.
+// **The node picker half of this is SHIPPED** — `ui/node/node_screen.dart`,
+// wired to the real seam and reachable from the network sheet (UX-1). What is
+// still only drawn here is the rest of the surface: the explorer choice
+// (D-192), the fiat rate's source (D-193), and the selectable ground when
+// UX-3 adds it. Keep this until those land; it is the reference for them.
 //
 // A sovereignty statement wearing a diagnostic's precision: who serves you,
 // how freshly, and the standing offer to serve yourself.
@@ -5793,14 +5438,14 @@ class _NetworkPreviewState extends State<_NetworkPreview> {
                   // bridge and service layer for, with no way to reach it.
                   const _RuledLabel('Use my own node'),
                   const SizedBox(height: KvSpace.s),
-                  _Toggle(
+                  KvToggle(
                     on: _ownNode,
                     title: 'Pin a node I run',
                     sub: _ownNode
                         ? 'A pinned node never silently falls back.'
                         : 'The wallet reaches Kaspa through public community '
                               'nodes.',
-                    onTap: () => setState(() => _ownNode = !_ownNode),
+                    onChanged: (next) => setState(() => _ownNode = next),
                   ),
                   if (_ownNode) ...[
                     const SizedBox(height: KvSpace.sm),
@@ -5840,100 +5485,19 @@ class _NetworkPreviewState extends State<_NetworkPreview> {
 
                   const _RuledLabel('Rate'),
                   const SizedBox(height: KvSpace.s),
-                  const _Toggle(
+                  const KvToggle(
                     on: true,
                     title: 'Show a fiat value',
                     sub:
                         'api.kaspa.org · a price is the one thing here '
                         'consensus cannot check.',
-                    onTap: null,
+                    onChanged: null,
+                    disabledReason:
+                        'The rate source is not built yet — this is a '
+                        'drawing of where it lands.',
                   ),
                   const SizedBox(height: KvSpace.l),
                 ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Toggle extends StatelessWidget {
-  const _Toggle({
-    required this.on,
-    required this.title,
-    required this.sub,
-    required this.onTap,
-  });
-
-  final bool on;
-  final String title;
-  final String sub;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(KvRadius.panel),
-      child: Container(
-        padding: const EdgeInsets.all(KvSpace.m),
-        decoration: BoxDecoration(
-          color: KvColor.plate,
-          borderRadius: BorderRadius.circular(KvRadius.panel),
-          border: Border.all(color: KvColor.plateEdge),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 15,
-                      height: 20 / 15,
-                      fontWeight: FontWeight.w600,
-                      color: KvColor.ink,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    sub,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 12,
-                      height: 17 / 12,
-                      color: KvColor.inkMeta,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: KvSpace.sm),
-            // "On" is `ok` green (founder directive, restored at D-200): a
-            // toggle reports a state that is TRUE, which is the same family as
-            // confirmed. Teal stays out — teal is light, never a status.
-            Container(
-              width: 44,
-              height: 26,
-              padding: const EdgeInsets.all(3),
-              alignment: on ? Alignment.centerRight : Alignment.centerLeft,
-              decoration: BoxDecoration(
-                color: on ? KvColor.ok : KvColor.control,
-                borderRadius: BorderRadius.circular(KvRadius.control),
-                border: Border.all(color: on ? KvColor.ok : KvColor.edgeHi),
-              ),
-              child: Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: on ? KvColor.abyss : KvColor.inkMeta,
-                ),
               ),
             ),
           ],
