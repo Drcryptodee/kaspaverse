@@ -1732,12 +1732,18 @@ class _ActivityRow extends StatelessWidget {
 /// How deeply a row is buried, in the vocabulary D-192 settled for the
 /// transaction-detail gauge: **100 is safe, 1,000 is final.**
 ///
-/// The founder's reading, on glass 2026-08-27: under a hundred the row shows an
-/// amber dot and *the streaming number alone* — the word "Pending" says less
-/// than the count does, and the count is already live. At a hundred the dot
-/// turns green and the row says `Confirmed`. At a thousand the dot goes away
-/// entirely and the row says `final`, because a mark that never changes again
-/// is not an indicator.
+/// **The vocabulary is `Seen` -> `Confirmed` -> `final`** (founder, 2026-08-27).
+/// Not "pending": pending describes what the WALLET is doing about a
+/// transaction, and what the user needs is what the NETWORK has done with it.
+/// The network has seen it, then confirmed it, then buried it past reversal —
+/// three facts about the chain, in the chain's order.
+///
+/// Under a hundred the row shows an amber dot and *the streaming number alone*
+/// — a live count says more than any word, so the word steps aside and `Seen`
+/// appears only when the depth cannot be computed. At a hundred the dot turns
+/// green and the row says `Confirmed`. At a thousand the dot goes away entirely
+/// and the row says `final`, because a mark that never changes again is not an
+/// indicator.
 ///
 /// **It will not claim `final` from a maturity flag.** A confirmed row whose
 /// depth cannot be computed — a stale link, a cold start, a row the live DAA
@@ -1768,7 +1774,7 @@ class _BurialMark extends StatelessWidget {
     final n = confirmations;
     if (n == null) {
       if (maturity == MaturityState.pending) {
-        return const _Mark(tone: KvLampTone.warn, words: 'Pending');
+        return const _Mark(tone: KvLampTone.warn, words: 'Seen');
       }
       return const _Mark(tone: KvLampTone.ok, words: 'Confirmed');
     }

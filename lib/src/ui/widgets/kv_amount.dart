@@ -7,10 +7,8 @@ import '../theme/tokens.dart';
 
 /// Where an amount sits on the §2 ramp.
 enum KvAmountRole {
-  /// The home balance. Mono 46/52 at weight 500, and it **floors at four
-  /// decimals** — 46dp of mono cannot wear eight with dignity, so the other
-  /// four live one tap away and always at signing (§2). The one exception is
-  /// a balance the floor would erase entirely; see the class doc.
+  /// The home balance. Mono 46/52 at weight 500. **Every significant decimal,
+  /// trailing zeros trimmed** — see the precision law in the class doc.
   hero,
 
   /// A screen-level amount: the confirm sheet's headline, a detail's value.
@@ -43,13 +41,25 @@ enum KvMoneyDirection {
 ///  * **`—` when unknown** — never a fabricated zero;
 ///  * **`0.00000000` for a real zero** at [KvAmountRole.screen], and a real
 ///    zero at every role — a synced empty wallet is not unknown;
-///  * **a non-zero balance never renders as zero.** The hero floors at four
-///    decimals (§2), which would print `0.0000` for anything under 10,000
-///    sompi — so a wallet holding dust would read exactly like a wallet
-///    holding nothing. Where the floored fraction would erase the whole
-///    figure the floor is lifted, and the digits that carry the money are
-///    shown: the floor is a concession to 46dp of mono, not a licence to say
-///    "you have nothing" to someone who does not (`consensus-auditor`, UX-2);
+///  * **every significant decimal, and not one more** — the precision law
+///    (founder, 2026-08-27). A balance shows each digit that carries value and
+///    stops: `21.12345678` reads in full because the last digit is a digit;
+///    `21.12345600` reads `21.123456`; `21.12340000` reads `21.1234`. Trailing
+///    zeros are noise a user has to read past to find where the number ends,
+///    and a truncation at a fixed width is worse — it hides value the wallet
+///    holds.
+///
+///    **The ceiling is the UNIT's, not this widget's.** KAS carries eight
+///    decimals, so eight is where KAS stops; a token that carries six stops at
+///    six. The rule is "significant digits up to the unit's precision", which
+///    is why it survives the token surface unchanged rather than needing a
+///    second law written for it. A signing surface is the one exception and
+///    keeps its fixed eight: BG-6 restates what was BUILT, and a trimmed
+///    figure is a different string from the one that was signed;
+///  * **a non-zero balance never renders as zero.** Where a caller pins a
+///    fixed width that would erase the whole figure, the pin is lifted — a
+///    concession to type size is not a licence to tell someone holding dust
+///    that they hold nothing (`consensus-auditor`, UX-2);
 ///  * **scales down before it clips** — it never wraps, never ellipsizes and
 ///    never truncates a digit, at any text scale;
 ///  * mono and tabular, so a value that ticks does not jiggle;
@@ -150,7 +160,8 @@ class KvAmount extends StatelessWidget {
   int? get _digits =>
       fractionDigits ??
       switch (role) {
-        KvAmountRole.hero => 4,
+        // Null means "trim": show every digit that carries value and stop.
+        KvAmountRole.hero => null,
         KvAmountRole.screen => 8,
         KvAmountRole.row => null,
       };

@@ -84,15 +84,33 @@ void main() {
       expect(find.text('.99999999'), findsOneWidget);
     });
 
-    testWidgets(
-      'the hero floors at four decimals, and truncates never rounds',
-      (tester) async {
-        // 1284.50279999 → ".5027", not ".5028".
-        await tester.pumpWidget(_host(KvAmount(BigInt.from(128450279999))));
-        expect(find.text('1,284'), findsOneWidget);
-        expect(find.text('.5027'), findsOneWidget);
-      },
-    );
+    testWidgets('the hero shows every significant decimal, and no more', (
+      tester,
+    ) async {
+      // D-210, the precision law. Each digit that carries value is shown; a
+      // trailing zero is noise the eye reads past to find where the number
+      // ends, and a fixed-width truncation is worse — it hides value held.
+      for (final (sompi, integer, fraction) in const [
+        // 21.12345678 — the last digit is a digit, so all eight stay.
+        ('2112345678', '21', '.12345678'),
+        // 21.12345600 — the zeros carry nothing.
+        ('2112345600', '21', '.123456'),
+        ('2112340000', '21', '.1234'),
+        // A whole balance stops at the two-decimal minimum money keeps.
+        ('2100000000', '21', '.00'),
+      ]) {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(_host(KvAmount(BigInt.parse(sompi))));
+        expect(find.text(integer), findsOneWidget, reason: sompi);
+        expect(find.text(fraction), findsOneWidget, reason: sompi);
+      }
+
+      // And it still FLOORS: 1284.50279999 never becomes .5028.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(_host(KvAmount(BigInt.from(128450279999))));
+      expect(find.text('1,284'), findsOneWidget);
+      expect(find.text('.50279999'), findsOneWidget);
+    });
 
     testWidgets('the floor never erases a balance that exists', (tester) async {
       // 5,000 sompi. Floored to four decimals this is `0.0000` — the exact
@@ -106,17 +124,11 @@ void main() {
       expect(find.text('.00005'), findsOneWidget);
       expect(find.text('.0000'), findsNothing);
 
-      // The boundary: one sompi over the floor keeps the floor, because four
-      // decimals still carry the money.
-      await tester.pumpWidget(const SizedBox());
-      await tester.pumpWidget(_host(KvAmount(BigInt.from(10001))));
-      expect(find.text('.0001'), findsOneWidget);
-
-      // And a real zero is still a real zero — the lift is for balances that
-      // EXIST, never a licence to pad one that does not.
+      // A real zero is still a real zero: the significant-digit rule shows
+      // what is there, and what is there is nothing.
       await tester.pumpWidget(const SizedBox());
       await tester.pumpWidget(_host(KvAmount(BigInt.zero)));
-      expect(find.text('.0000'), findsOneWidget);
+      expect(find.text('.00'), findsOneWidget);
     });
 
     testWidgets('a row trims to two, a signing surface shows all eight', (
@@ -186,11 +198,13 @@ void main() {
 
     testWidgets('it speaks the number, not the padding (§4)', (tester) async {
       final handle = tester.ensureSemantics();
-      // 12.4 KAS. The hero SHOWS ".4000" so a column of digits lines up; read
-      // aloud those zeros are noise, and §4's example is "1,284.5 KAS".
+      // 12.4 KAS. Under the precision law (D-210) the hero shows `.40` — money
+      // keeps two decimals as its floor even when the second carries nothing,
+      // so a column of figures still lines up. Read aloud even that zero is
+      // noise, and §4's example is "1,284.5 KAS".
       await tester.pumpWidget(_host(KvAmount(BigInt.from(1240000000))));
       expect(find.bySemanticsLabel('12.4 KAS'), findsOneWidget);
-      expect(find.text('.4000'), findsOneWidget);
+      expect(find.text('.40'), findsOneWidget);
 
       // A signing surface is the exception: BG-6 restates the built
       // transaction in full, spoken included.

@@ -48,6 +48,8 @@ HomeScreen homeScreen({
 /// **The hero floors at four decimals** (§2): 46dp of mono cannot wear eight
 /// with dignity, and all eight live one tap away on Send and always at
 /// signing (BG-6). A row trims trailing zeros to two instead.
+/// **The hero trims** (D-210): every significant decimal, no trailing zeros.
+/// A whole balance therefore reads `.00`, not `.0000` and not `.00000000`.
 void expectFigure(String integer, String fraction) {
   expect(find.text(integer), findsWidgets, reason: 'integer "$integer"');
   expect(
@@ -104,7 +106,7 @@ void main() {
     pending.value = BigInt.zero;
     lastUpdate.value = now;
     await tester.pump();
-    expectFigure('0', '0000');
+    expectFigure('0', '00');
     expect(find.text('—'), findsNothing);
     expect(find.text('DAA 458,174,109'), findsOneWidget);
 
@@ -124,7 +126,7 @@ void main() {
       ),
     ];
     await tester.pump();
-    expectFigure('1,234', '5678');
+    expectFigure('1,234', '56789012');
     expect(find.text('No recent activity'), findsNothing);
     // V2 counter (founder request): an immature deposit streams its DAA
     // distance instead of a static "Pending".
@@ -206,8 +208,8 @@ void main() {
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
     expect(find.textContaining('confirmations'), findsNothing);
-    expect(find.text('Pending'), findsOneWidget);
-    expectFigure('1,234', '5678'); // retained, dimmed — never blanked
+    expect(find.text('Seen'), findsOneWidget);
+    expectFigure('1,234', '56789012'); // retained, dimmed — never blanked
 
     await tester.pumpWidget(const SizedBox()); // cancel the ticker
   });
@@ -285,7 +287,7 @@ void main() {
     await tester.pump();
 
     // The panel repainted (new number), the feed did not (old age line).
-    expectFigure('3', '0000');
+    expectFigure('3', '00');
     expect(find.text('2 m ago'), findsOneWidget);
     expect(find.text('3 m ago'), findsNothing);
     await tester.pumpWidget(const SizedBox());
@@ -402,7 +404,7 @@ void main() {
       // And the screen still renders from the SAME notifiers.
       mature.value = BigInt.from(300000000);
       await tester.pump();
-      expectFigure('3', '0000');
+      expectFigure('3', '00');
       await tester.pumpWidget(const SizedBox());
     },
   );
@@ -496,7 +498,7 @@ void main() {
 
     // Neither old row wears ANY chip: no streamed counter, no static word.
     expect(find.textContaining('confirmations'), findsNothing);
-    expect(find.text('Pending'), findsNothing);
+    expect(find.text('Seen'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
   // ── F4 / F20: money in flight is not an empty wallet ──
@@ -539,8 +541,9 @@ void main() {
     await tester.pump();
 
     // Before: a normal wallet, nothing in flight, no settling line.
-    // The HERO floors at four (§2); the in-flight row below keeps all eight.
-    expectFigure('16', '3669');
+    // The hero shows every significant decimal now (D-210), so it and the
+    // in-flight row below agree digit for digit.
+    expectFigure('16', '36694716');
     expect(find.text('in flight'), findsNothing);
 
     // The send lands. mature collapses to a real zero and the value moves into
@@ -549,7 +552,7 @@ void main() {
     outgoing.value = BigInt.parse('1636694716');
     await tester.pump();
 
-    expectFigure('0', '0000');
+    expectFigure('0', '00');
     expect(
       find.text('in flight'),
       findsOneWidget,
@@ -603,7 +606,7 @@ void main() {
     );
     await tester.pump();
 
-    expectFigure('70', '0000');
+    expectFigure('70', '00');
     expect(find.text('in flight'), findsOneWidget);
     expect(
       find.textContaining('− '),
