@@ -352,9 +352,11 @@ void main() {
       );
 
       await openNode(tester);
-      expect(find.text('Reconnect'), findsOneWidget);
+      // Connected and unpinned, so the label is P0b's: the tap looks for a
+      // different node rather than dropping this one.
+      expect(find.text('Find a different node'), findsOneWidget);
 
-      await tester.tap(find.text('Reconnect'));
+      await tester.tap(find.text('Find a different node'));
       await tester.pump(); // exactly ONE frame after the tap
       expect(
         find.text('Searching…'),

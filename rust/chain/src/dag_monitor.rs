@@ -7,6 +7,7 @@
 //! connection — they are lost on disconnect, so every `RpcState::Connected`
 //! event must re-register the listener and its scopes.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,6 +56,100 @@ const BIND_ENVELOPE_TIMEOUT: Duration = Duration::from_secs(10);
 /// unreachable) — the app-owned replacement for the abandoned ws-level
 /// `ConnectStrategy::Retry` loop (D-081).
 const RACE_RETRY_DELAY: Duration = Duration::from_secs(3);
+
+/// Empty rounds a SWAP hunt spends before giving up and keeping the incumbent
+/// (P0b). A cold hunt is unbounded — the wallet is dark and there is nothing
+/// to preserve — but a swap runs *behind a working link*, so it must be a
+/// bounded errand rather than a second search authority that never ends.
+/// Three rounds is ~24 s on a link where nothing answers, and one round on a
+/// link where something does.
+const SWAP_HUNT_ROUNDS: u32 = 3;
+
+/// What a race loop is FOR — and the only thing that decides whether it may
+/// bind over a live socket (P0b, tracker row 2026-08-28).
+///
+/// Before this, every race was a [`RaceMode::Cold`] one and the sequence was
+/// **drop, then hunt**: `reconnect` retired the bind and *then* asked for a
+/// search. Measured on the founder's Starlink link that cost a healthy
+/// 275-second link and did not get one back inside five minutes — one tap,
+/// on exactly the network where a user reaches for that control most.
+///
+/// The shape is now **find, then swap**: the live bind stays up for the whole
+/// hunt, the incumbent is excluded from the candidate set so a winner is
+/// always a genuinely different node, and the teardown happens inside
+/// `install_bind` at the moment a replacement is armed — never for a race
+/// that produces nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RaceMode {
+    /// Nothing is bound (first connect, a socket death, resume, the OS
+    /// signalling a new network). Unbounded rounds: the wallet is dark and
+    /// only a node fixes that.
+    Cold,
+    /// A live bind is up and the user asked for a different node. Bounded by
+    /// [`SWAP_HUNT_ROUNDS`]; `from` is the incumbent, excluded from every
+    /// round's candidate set.
+    Swap { from: String },
+}
+
+/// A swap that no longer has an incumbent is no longer a swap.
+///
+/// The socket it was preserving can vanish under it — its own death, a pause
+/// that lost it, a hard pull-heal — and at that instant the wallet is dark and
+/// the errand becomes the ordinary hunt: unbounded, and with nothing left to
+/// exclude. Without this the loop would keep the swap's three-round bound and
+/// give up on a DARK wallet, which is the failure the bound exists to prevent,
+/// inverted. Pure so the law is provable without a network.
+fn degrade_lost_swap(mode: RaceMode, connected: bool) -> RaceMode {
+    match mode {
+        RaceMode::Swap { .. } if !connected => RaceMode::Cold,
+        other => other,
+    }
+}
+
+/// The candidate URLs one round may NOT dial.
+///
+/// The incumbent of a swap is added AFTER the caller has already decided
+/// whether hygiene demotions apply this round, and that order is the point:
+/// "connectivity beats hygiene" is an argument about *demoted* nodes, and it
+/// must never re-admit the one node the user just asked to leave. A swap that
+/// could win by re-selecting the incumbent would report a successful swap and
+/// change nothing.
+fn round_exclusions(demoted: HashSet<String>, mode: &RaceMode) -> HashSet<String> {
+    let mut excluded = demoted;
+    if let RaceMode::Swap { from } = mode {
+        excluded.insert(from.clone());
+    }
+    excluded
+}
+
+/// Has a swap hunt spent its budget **and does it still have something to
+/// spend it on**? Cold hunts never have a budget — the wallet is dark and only
+/// a node fixes that, so they run until they are bound, paused or shut down.
+///
+/// `incumbent_alive` is re-read at the call site rather than inherited from the
+/// round's opening `mode`, which may be ~9 s stale by the time this is asked
+/// (`consensus-auditor`, CONCERNS-1). A swap whose incumbent died mid-round has
+/// nothing left to preserve, so spending its budget would end the hunt on a
+/// dark wallet — with `on_disconnected`'s own `spawn_race` already refused,
+/// because the loop asking this question still holds the single-flight flag.
+fn swap_hunt_exhausted(mode: &RaceMode, empty_rounds: u32, incumbent_alive: bool) -> bool {
+    incumbent_alive && matches!(mode, RaceMode::Swap { .. }) && empty_rounds >= SWAP_HUNT_ROUNDS
+}
+
+/// May this round drop the demotion ledger to keep the wallet dialing?
+///
+/// The floor exists so two barren rounds cannot leave a **dark** wallet with
+/// nothing to dial — connectivity beats hygiene. A swap wallet is connected and
+/// working, so that precondition is simply false for it, and with the bound at
+/// [`SWAP_HUNT_ROUNDS`] an un-scoped rule fired on the last round of **every**
+/// swap: a tap could trade a healthy incumbent for a node the ledger had
+/// convicted, and then set `hygiene_advisory`, which suppresses the
+/// Connected-time refusal that would have bounced it (`consensus-auditor`,
+/// CONCERNS-2 — the L129 shape: a policy carried into a mode whose precondition
+/// it no longer has).
+fn hygiene_may_degrade(mode: &RaceMode, empty_rounds: u32) -> bool {
+    empty_rounds >= 2 && matches!(mode, RaceMode::Cold)
+}
 
 /// Throttle for the catch-up cursor write in the hot BlockAdded path: at most
 /// one tiny hash write this often. A killed app loses at most this much scan
@@ -865,6 +960,13 @@ impl DagMonitor {
     /// happens inside that one await. So a 14–28 s weak-link hunt (the
     /// 2026-07-30 field capture) reads `true` end to end; it can never blink
     /// off between rounds and let the glass claim connected or offline.
+    ///
+    /// Since P0b this can be true **while connected**, and that pair is not a
+    /// contradiction — it is the swap hunt, and it is the only state in which
+    /// both are true for longer than a moment. The glass reads the pair, not
+    /// either bit alone: connected + searching is *"answering, and looking for
+    /// a different node"*, and it is the honest rendering of a link that is
+    /// working while a bounded errand runs behind it.
     pub fn is_searching(&self) -> bool {
         self.inner.race_running.load(Ordering::SeqCst)
     }
@@ -938,8 +1040,25 @@ impl DagMonitor {
     /// the hardest kind to notice, because the wallet looks connected. A
     /// timing argument would be enough to close it today; this is enough
     /// forever.
-    fn may_bind_from_race(&self) -> bool {
-        !self.inner.paused.load(Ordering::SeqCst) && !self.is_connected() && !self.is_pinned()
+    ///
+    /// The live-socket term is **mode-scoped** since P0b. A [`RaceMode::Cold`]
+    /// race still may never bind over a live socket: it exists only because
+    /// there is no socket, so a socket appearing under it (a ws-level phantom
+    /// redial) means its job is already done. A [`RaceMode::Swap`] race is the
+    /// exact opposite — binding over the live socket IS its job, it runs only
+    /// because the user asked for a different node, and it excludes the
+    /// incumbent from every round, so the thing it binds is never the thing it
+    /// replaced. The `paused` and `pinned` terms are untouched, which is what
+    /// keeps [`Self::set_pinned_node`]'s safety argument intact: that function
+    /// stands the race down with `paused`, not with the socket.
+    fn may_bind_from_race(&self, mode: &RaceMode) -> bool {
+        if self.inner.paused.load(Ordering::SeqCst) || self.is_pinned() {
+            return false;
+        }
+        match mode {
+            RaceMode::Cold => !self.is_connected(),
+            RaceMode::Swap { .. } => true,
+        }
     }
 
     /// Is a user-chosen node pinned? The one predicate the race, the demotion
@@ -1088,6 +1207,14 @@ impl DagMonitor {
     /// old silent return here was half of the dead-Reconnect symptom) and
     /// callers holding a user gesture escalate it to a [`Self::kick_race`].
     fn spawn_race(&self) -> bool {
+        self.spawn_race_with(RaceMode::Cold)
+    }
+
+    /// [`Self::spawn_race`], for a named [`RaceMode`]. Single-flight is per
+    /// MONITOR, not per mode: there is exactly one search authority (D-081),
+    /// so a swap hunt never runs beside a cold one — whichever is already
+    /// hunting keeps the flag and the caller's gesture becomes a kick.
+    fn spawn_race_with(&self, mode: RaceMode) -> bool {
         if self.is_pinned() {
             return false; // pinned mode: the ws Retry loop owns the link
         }
@@ -1097,7 +1224,7 @@ impl DagMonitor {
         }
         let monitor = self.clone();
         tokio::spawn(async move {
-            monitor.race_loop().await;
+            monitor.race_loop(mode).await;
             monitor.inner.race_running.store(false, Ordering::SeqCst);
         });
         true
@@ -1373,16 +1500,51 @@ impl DagMonitor {
     /// probe wins and the shared socket binds to it. Loops (bounded pause)
     /// until bound, paused, or shut down — the replacement for the ws-level
     /// endless Retry.
-    async fn race_loop(&self) {
-        // V1 span: cold-connect measures from here to `wss_connected`.
-        spans::mark("connect_start");
+    async fn race_loop(&self, mode: RaceMode) {
+        // The V1 cold-connect span measures `connect_start` → `wss_connected`.
+        // A swap hunt must NOT open one: it runs behind a live socket, so
+        // folding it into that span would report a "cold connect" for a
+        // wallet that was never cold and corrupt the only number the P0 fix
+        // is measured by. It gets its own marker instead.
+        let mut mode = mode;
+        match &mode {
+            RaceMode::Cold => spans::mark("connect_start"),
+            RaceMode::Swap { from } => spans::mark_with("swap_start", link::endpoint_host(from)),
+        }
         let mut empty_rounds = 0u32;
         loop {
-            if !self.may_bind_from_race() {
+            let degraded = degrade_lost_swap(mode.clone(), self.is_connected());
+            if degraded != mode {
+                if let RaceMode::Swap { from } = &mode {
+                    log::info!(
+                        "link: the swap hunt lost its incumbent ({}) — continuing as an \
+                         ordinary hunt",
+                        link::endpoint_host(from)
+                    );
+                }
+                mode = degraded;
+                // The wallet is dark from here, so the cold-connect span opens
+                // now and the swap's round budget is discarded with the mode
+                // that owned it.
+                empty_rounds = 0;
+                spans::mark("connect_start");
+            }
+            if !self.may_bind_from_race(&mode) {
                 return;
             }
             let now = Self::now_unix();
-            let advisory = empty_rounds >= 2;
+            // **Hygiene degrades only for a wallet that is actually stranded**
+            // (`consensus-auditor`, CONCERNS-2). The degradation's whole
+            // justification, stated below, is "never strand the wallet" — and a
+            // swap wallet is by definition not stranded, it is connected and
+            // working. Left un-scoped, round 3 of EVERY swap hunt (the bound is
+            // 3) emptied the demoted set and told `race_pantry` to ignore
+            // demotions, so a tap could trade a healthy incumbent for a node
+            // the ledger had convicted — and then set `hygiene_advisory`, which
+            // suppresses the Connected-time refusal that would have bounced it.
+            // Same shape as L129: a policy carried into a mode whose
+            // precondition it no longer has.
+            let advisory = hygiene_may_degrade(&mode, empty_rounds);
             let cached = self.read_cached_endpoint();
             let (demoted, pantry) = {
                 let health = self
@@ -1409,12 +1571,19 @@ impl DagMonitor {
                     health.race_pantry(cached.as_deref(), now, link::PANTRY_DIALS, advisory);
                 (demoted, pantry)
             };
+            // The incumbent never enters its own replacement race (P0b). It
+            // rides the same set the demotion ledger uses, which is what makes
+            // the exclusion total for free: `link::race` filters the cached
+            // endpoint, every pantry dial AND every resolver answer against
+            // it, so there is no lane left where the node we are already on
+            // could win and be "swapped" onto itself.
+            let excluded = round_exclusions(demoted, &mode);
             let outcome = link::race(
                 &self.inner.resolver,
                 self.inner.network_id,
                 cached,
                 pantry,
-                &demoted,
+                &excluded,
                 RACE_FETCHES,
                 PROBE_TIMEOUT,
             )
@@ -1432,7 +1601,17 @@ impl DagMonitor {
                 // prover proved the phone's network works, and stamping it
                 // would let one stray unreachable candidate nullify the very
                 // control-group conviction that round earned.
-                if phone_fault {
+                //
+                // **And only while we are DARK** (`consensus-auditor`,
+                // CONCERNS-4). A swap round runs behind a socket delivering
+                // ~10 blocks/s, which is direct positive proof the phone's
+                // network works — so "every candidate failed phone-side" is no
+                // longer the only witness available, and stamping a blackout
+                // anyway would make `judge_admissibility` withhold strikes
+                // from genuinely dead endpoints on the word of a round that
+                // had a live prover the whole time. Lenient direction, but it
+                // is the prover-vs-subject rule inverted.
+                if phone_fault && !self.is_connected() {
                     self.inner.phone_fault_round_at.store(now, Ordering::SeqCst);
                     log::info!(
                         "link: round failed phone-side across {}+ distinct hosts \
@@ -1457,6 +1636,37 @@ impl DagMonitor {
                     link::summarize_losses(&outcome.notes),
                     RACE_RETRY_DELAY
                 );
+                // **Never tear down for a race that produced nothing** (P0b).
+                // A swap is an errand behind a working link, so its failure
+                // mode is to end quietly and leave the user exactly where
+                // they were — on the node they already had. Nothing is
+                // retired here, because a swap only ever retires inside
+                // `install_bind`, and `install_bind` only runs on a winner.
+                //
+                // **The liveness term is re-read HERE, not inherited from the
+                // top of the loop** (`consensus-auditor`, CONCERNS-1). `mode`
+                // was decided up to ~9 s ago, and the likeliest moment for the
+                // incumbent to die is inside the round the user tapped about.
+                // Without this the last round's exhaustion would fire against a
+                // stale `Swap`, return, and clear `race_running` — on a wallet
+                // that had just gone dark, with `on_disconnected`'s own
+                // `spawn_race` already refused because THIS loop still held the
+                // single-flight flag. That is the exact inversion
+                // `degrade_lost_swap` exists to prevent, reached by the one
+                // placement its top-of-loop check cannot see. Falling through
+                // instead costs one retry pause and the next iteration
+                // degrades to an unbounded Cold hunt.
+                if swap_hunt_exhausted(&mode, empty_rounds, self.is_connected()) {
+                    if let RaceMode::Swap { from } = &mode {
+                        log::info!(
+                            "link: swap hunt found nothing better in {SWAP_HUNT_ROUNDS} \
+                             round(s) — keeping {}",
+                            link::endpoint_host(from)
+                        );
+                        spans::mark_with("swap_kept", link::endpoint_host(from));
+                    }
+                    return;
+                }
                 // Kickable pause (C4): a Reconnect tap / resume / OS
                 // network-available signal skips the wait and races NOW.
                 // Kicks interrupt the SLEEP only — in-flight probes were
@@ -1504,8 +1714,11 @@ impl DagMonitor {
             // Someone else (a ws-level phantom redial) may have connected
             // while the race ran; the Connected-time demotion check has
             // already judged them. Never bind over a live socket — and since
-            // D-187, never over a node the user pinned mid-round either.
-            if !self.may_bind_from_race() {
+            // D-187, never over a node the user pinned mid-round either. A
+            // SWAP passes this deliberately: the live socket it binds over is
+            // the one the user asked to leave, and it is never the winner
+            // (excluded above).
+            if !self.may_bind_from_race(&mode) {
                 return;
             }
 
@@ -1656,17 +1869,25 @@ impl DagMonitor {
         self.relink("resume").await
     }
 
-    /// Force a fresh connection — the P3 honest-liveness Reconnect control,
-    /// the foreground watchdog's recovery (D-068) and the V3 pull-heal resync.
-    /// Unlike [`resume`], it does NOT short-circuit on `is_connected()`: a
-    /// silently dead wRPC socket can still report connected, so recovering it
-    /// needs a hard disconnect + re-race.
+    /// The user's own "try now" — the P3 honest-liveness Reconnect control and
+    /// the foreground watchdog's recovery (D-068). Unlike [`resume`], it does
+    /// NOT short-circuit on `is_connected()`: a silently dead wRPC socket can
+    /// still report connected, so recovering it needs a real gesture.
     ///
     /// `stalled = true` means the caller HAS failure evidence against the
     /// current endpoint (the watchdog's 30 s block silence) — it enters the
     /// race as a pending strike, committed only if the race finds a healthy
     /// node (control-group rule). A manual Reconnect passes `false`: bouncing
     /// a healthy node must never demote it.
+    ///
+    /// **What a tap costs depends on what it can preserve** (P0b):
+    ///
+    /// | state | what happens |
+    /// |:--|:--|
+    /// | connected, unpinned | bounded swap hunt behind the live link; the incumbent is dropped only when a replacement is armed |
+    /// | connected, pinned | [`Self::hard_reconnect`] — there is no other node to find, so a tap can only mean "redial mine" |
+    /// | dark / hunting | the C4 kick, unchanged |
+    /// | `stalled = true` | the confirmed-stall execution above, then the hard path — the socket is proven silent |
     pub async fn reconnect(&self, stalled: bool) -> Result<()> {
         self.inner.paused.store(false, Ordering::SeqCst);
         if stalled {
@@ -1710,11 +1931,62 @@ impl DagMonitor {
                 }
             }
         }
-        // Retire whatever is installed (the stalled arm above already did, so
-        // this is the manual/pull-heal path). A deliberate reconnect must
-        // never park a strike against the healthy endpoint it is bouncing
-        // (caught live at the V3 sitting: a swipe-to-refresh demoted the
-        // innocent incumbent) — retirement records the run and judges nothing.
+        // **Find, then swap** (P0b). A tap on a CONNECTED, unpinned wallet is
+        // a request for a *different* node, not a request to be disconnected
+        // — and the old order made those the same thing. Measured on the
+        // founder's link, 2026-08-28: `run ended run=275s
+        // cause=manual-reconnect`, then a fresh race that had not landed
+        // five minutes later. The wallet the user was trying to improve was
+        // the price of asking.
+        //
+        // So the live bind stays up and a bounded [`RaceMode::Swap`] hunt
+        // looks for a replacement behind it. The teardown moves to the only
+        // place it can now happen — `install_bind`, on a winner — so a hunt
+        // that finds nothing costs the user nothing at all.
+        //
+        // Pinned is deliberately NOT swapped: there is no different node to
+        // find, so a tap can only mean "redial mine", which is the hard path
+        // below. `paused` likewise — the battery posture owns the socket
+        // then, and dialing behind it is exactly what pausing forbids.
+        if !stalled
+            && self.is_connected()
+            && !self.is_pinned()
+            && !self.inner.paused.load(Ordering::SeqCst)
+        {
+            if let Some(bind) = self.current_bind() {
+                let from = bind.url.clone();
+                // L127 holds unchanged: the tap ALWAYS acts. A hunt already
+                // running takes the kick — never a second search authority
+                // (D-081), and never a silent no-op.
+                if !self.spawn_race_with(RaceMode::Swap { from: from.clone() }) {
+                    self.kick_race("swap-tap");
+                } else {
+                    log::info!(
+                        "link: swap hunt started — {} stays up until something better answers",
+                        link::endpoint_host(&from)
+                    );
+                }
+                return Ok(());
+            }
+        }
+        self.hard_reconnect().await
+    }
+
+    /// **Drop, then hunt** — the teardown path, for the gestures that mean it.
+    ///
+    /// Two callers, both of which have already concluded the socket is no
+    /// good: the watchdog's confirmed stall (above), and the hard pull-heal
+    /// (`dag_resync`), which is reached only after the socket failed a real
+    /// round-trip or read unhealthy. Those want a NEW socket and a rescan on
+    /// its `Connected`; keeping a suspected-deaf incumbent because nothing
+    /// better answered would make the gesture a no-op and its `true` return a
+    /// lie. The user's own tap does not come here while it has a live link to
+    /// preserve — see [`Self::reconnect`].
+    pub async fn hard_reconnect(&self) -> Result<()> {
+        // A deliberate reconnect must never park a strike against the healthy
+        // endpoint it is bouncing (caught live at the V3 sitting: a
+        // swipe-to-refresh demoted the innocent incumbent) — retirement
+        // records the run and judges nothing.
         //
         // Before R4 this arm pre-cleared `is_connected` so the ctl arm's
         // swap-once guard would skip judging our own teardown. That guard is
@@ -2306,16 +2578,28 @@ mod tests {
         // stronger guarantee: `set_pinned_node` can pin while a round spawned
         // moments earlier is still probing, and that round's winner arm asks
         // exactly this question before installing anything.
+        // Both modes, because P0b added one that is ALLOWED to bind over a
+        // live socket: the pin must outrank that permission, or "find a
+        // different node" becomes the silent fallback D-187 exists to forbid.
         assert!(
-            !pinned.may_bind_from_race(),
+            !pinned.may_bind_from_race(&RaceMode::Cold),
             "a race in flight must not bind over the user's node"
+        );
+        assert!(
+            !pinned.may_bind_from_race(&RaceMode::Swap {
+                from: "wss://whatever.example/borsh".to_string()
+            }),
+            "not even a swap hunt may bind over the user's node"
         );
 
         // The control: an unpinned monitor DOES race, so the assertions above
         // are measuring the pin rather than some unrelated stood-down state.
         let discovering = DagMonitor::mainnet().expect("construct");
         assert!(!discovering.is_pinned());
-        assert!(discovering.may_bind_from_race(), "control: discovery races");
+        assert!(
+            discovering.may_bind_from_race(&RaceMode::Cold),
+            "control: discovery races"
+        );
     }
 
     /// `None` must reproduce today's behaviour EXACTLY — same resolver path,
@@ -2325,7 +2609,7 @@ mod tests {
     async fn discovery_mode_is_unchanged_by_the_pin_machinery() {
         let monitor = DagMonitor::mainnet().expect("construct");
         assert_eq!(monitor.pinned_url(), None);
-        assert!(monitor.may_bind_from_race());
+        assert!(monitor.may_bind_from_race(&RaceMode::Cold));
         // The demotion ledger is live (the `!is_pinned()` arm in on_connected).
         assert!(!monitor.is_pinned());
         // And the race is genuinely spawnable — single-flight, so the second
@@ -2366,7 +2650,10 @@ mod tests {
 
         monitor.set_pinned_node(None).await.expect("clear accepted");
         assert_eq!(monitor.pinned_url(), None);
-        assert!(monitor.may_bind_from_race(), "cleared → discovery resumes");
+        assert!(
+            monitor.may_bind_from_race(&RaceMode::Cold),
+            "cleared → discovery resumes"
+        );
         assert_eq!(
             monitor.read_cached_endpoint().as_deref(),
             Some("wss://remembered.example/kaspa/mainnet/wrpc/borsh"),
@@ -2445,7 +2732,10 @@ mod tests {
             monitor.pinned_url().as_deref(),
             Some("wss://new.example/borsh")
         );
-        assert!(!monitor.may_bind_from_race(), "pinned: no race may bind");
+        assert!(
+            !monitor.may_bind_from_race(&RaceMode::Cold),
+            "pinned: no race may bind"
+        );
         monitor.inner.paused.store(true, Ordering::SeqCst);
     }
 
@@ -2699,6 +2989,209 @@ mod tests {
         assert_eq!(DagMonitor::read_transport_cursor(&path), None);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// **P0b — the tap that cost five minutes.**
+    ///
+    /// Measured on the founder's Starlink link, 2026-08-28: one tap on a
+    /// CONNECTED wallet logged `run ended url=wss://tess.kaspa.red/… run=275s
+    /// cause=manual-reconnect`, and 77 race rounds later the link had still
+    /// not come back. The sequence was drop-then-hunt; it is now
+    /// find-then-swap, and the property that makes that true is this one: the
+    /// tap must leave the live bind exactly where it found it.
+    ///
+    /// Deterministic seam, the same one C4's tests use: the single-flight flag
+    /// is held so the tap becomes a kick instead of spawning a loop that would
+    /// dial the real network. Either arm is covered by the assertion — the
+    /// retirement the fix removed lived in `reconnect` itself, before any race
+    /// was asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tap_on_a_connected_wallet_never_costs_the_link() {
+        const URL: &str = "wss://incumbent.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        mark_accepted(&monitor, &bind, 275);
+        let gen = bind.gen;
+
+        monitor.reconnect(false).await.expect("tap");
+
+        assert!(
+            monitor.is_connected(),
+            "the tap must not disconnect a working wallet"
+        );
+        assert!(
+            monitor.is_current_bind(gen),
+            "the live bind must survive the tap — it is only replaced by a winner"
+        );
+        assert_eq!(monitor.current_url().as_deref(), Some(URL));
+        // A run in the ledger is the signature of a teardown. There must be
+        // none: nothing died, so nothing is recorded as having died.
+        assert_eq!(
+            last_run(&monitor, URL),
+            None,
+            "a tap that tore nothing down must record no socket run"
+        );
+
+        // The control: the HARD path still tears down, because the gestures
+        // that mean it (a confirmed stall, the hard pull-heal) still need a
+        // new socket. Without this the assertions above would also pass on a
+        // build where reconnect simply stopped working.
+        monitor.hard_reconnect().await.expect("hard reconnect");
+        assert!(!monitor.is_connected(), "control: the hard path drops it");
+        assert!(
+            last_run(&monitor, URL).is_some(),
+            "control: the hard path records the run it ended"
+        );
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// P0b, the three round-level laws, proven without a network.
+    ///
+    /// 1. A swap never dials the node it is replacing — otherwise "find a
+    ///    different node" could succeed by re-selecting the same one.
+    /// 2. The exclusion outranks the advisory degradation: `demoted` may empty
+    ///    out when connectivity beats hygiene, and the incumbent must still
+    ///    not be re-admitted by it.
+    /// 3. A swap is bounded and a cold hunt is not — and a swap that loses its
+    ///    incumbent becomes a cold hunt, so it can never give up on a wallet
+    ///    that has gone dark.
+    #[test]
+    fn a_swap_hunt_excludes_its_incumbent_and_is_bounded() {
+        const INCUMBENT: &str = "wss://incumbent.example/borsh";
+        const DEMOTED: &str = "wss://demoted.example/borsh";
+        let swap = RaceMode::Swap {
+            from: INCUMBENT.to_string(),
+        };
+
+        let demoted: HashSet<String> = [DEMOTED.to_string()].into_iter().collect();
+        let excluded = round_exclusions(demoted.clone(), &swap);
+        assert!(
+            excluded.contains(INCUMBENT),
+            "the incumbent never re-enters"
+        );
+        assert!(excluded.contains(DEMOTED), "hygiene still applies");
+        // The advisory round: hygiene degrades to an empty set, the incumbent
+        // does not.
+        let advisory = round_exclusions(HashSet::new(), &swap);
+        assert_eq!(
+            advisory,
+            [INCUMBENT.to_string()].into_iter().collect::<HashSet<_>>(),
+            "connectivity beating hygiene must never re-admit the incumbent"
+        );
+        // A cold hunt excludes nothing but what the ledger demoted.
+        assert_eq!(round_exclusions(demoted, &RaceMode::Cold).len(), 1);
+
+        // Bounded, but only while it has something to preserve.
+        assert!(!swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS - 1, true));
+        assert!(swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true));
+        assert!(
+            !swap_hunt_exhausted(&RaceMode::Cold, SWAP_HUNT_ROUNDS * 100, true),
+            "a dark wallet is never given up on"
+        );
+
+        // Losing the incumbent turns the errand back into the ordinary hunt —
+        // the inversion that would otherwise abandon a dark wallet after
+        // three rounds.
+        assert_eq!(degrade_lost_swap(swap.clone(), false), RaceMode::Cold);
+        assert_eq!(degrade_lost_swap(swap.clone(), true), swap);
+        assert_eq!(degrade_lost_swap(RaceMode::Cold, true), RaceMode::Cold);
+    }
+
+    /// **`consensus-auditor` CONCERNS-1 — the placement the top-of-loop degrade
+    /// cannot see.** `mode` is decided at the head of a round that then takes up
+    /// to ~9 s, and the likeliest moment for the incumbent to die is inside the
+    /// round the user tapped about. If the exhaustion check reads that stale
+    /// `Swap`, the loop returns and clears the single-flight flag on a wallet
+    /// that has just gone dark — while `on_disconnected`'s own `spawn_race` has
+    /// already been refused, because this loop still held the flag. Recovery
+    /// would fall to the 30 s Dart watchdog: ~30–40 s dark, where the
+    /// pre-P0b path re-raced within about a second.
+    ///
+    /// Drives `swap_hunt_exhausted` itself — the predicate the loop calls, not
+    /// a copy of it — with the liveness term the loop passes.
+    #[test]
+    fn an_exhausted_swap_that_lost_its_incumbent_never_gives_up() {
+        let swap = RaceMode::Swap {
+            from: "wss://incumbent.example/borsh".to_string(),
+        };
+
+        // Still connected on the last round: keeping the incumbent is right.
+        assert!(
+            swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true),
+            "a swap that still has its incumbent stops and keeps it"
+        );
+
+        // The incumbent died inside the final round. The budget is spent, but
+        // there is nothing left to preserve — so the loop must NOT return.
+        assert!(
+            !swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, false),
+            "a swap whose incumbent died must keep hunting — returning here \
+             leaves the wallet dark with no search authority running, because \
+             on_disconnected's own spawn_race was already refused by this loop"
+        );
+        // ...and the next iteration's degrade is what makes that unbounded.
+        assert_eq!(degrade_lost_swap(swap, false), RaceMode::Cold);
+    }
+
+    /// **`consensus-auditor` CONCERNS-2 — hygiene degrades only for a wallet
+    /// that is actually stranded.** The advisory rule exists so two barren
+    /// rounds cannot leave a DARK wallet with nothing to dial. A swap wallet is
+    /// connected and working, so its precondition is false — and with the bound
+    /// at three rounds, an un-scoped rule would fire on the last round of every
+    /// single swap, letting a tap trade a healthy incumbent for a node the
+    /// ledger had convicted, then set `hygiene_advisory` and suppress the
+    /// Connected-time refusal that would have bounced it.
+    #[test]
+    fn a_swap_round_never_degrades_hygiene() {
+        let swap = RaceMode::Swap {
+            from: "wss://incumbent.example/borsh".to_string(),
+        };
+        for rounds in 0..=(SWAP_HUNT_ROUNDS + 2) {
+            assert!(
+                !hygiene_may_degrade(&swap, rounds),
+                "round {rounds} of a swap must keep the demotion ledger in force"
+            );
+        }
+        // The control: a dark wallet still gets the floor it was built for, so
+        // this is measuring the mode scoping and not a rule that stopped
+        // working in both modes at once.
+        assert!(!hygiene_may_degrade(&RaceMode::Cold, 1));
+        assert!(hygiene_may_degrade(&RaceMode::Cold, 2));
+    }
+
+    /// P0b: the permission to bind over a live socket is granted to the swap
+    /// and to nothing else. The cold hunt's refusal is what keeps a ws-level
+    /// phantom redial from being bounced by the race that was looking for it.
+    #[tokio::test]
+    async fn only_a_swap_may_bind_over_a_live_socket() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let swap = RaceMode::Swap {
+            from: "wss://incumbent.example/borsh".to_string(),
+        };
+        assert!(
+            monitor.may_bind_from_race(&RaceMode::Cold),
+            "dark: cold may"
+        );
+        assert!(monitor.may_bind_from_race(&swap));
+
+        monitor.inner.is_connected.store(true, Ordering::SeqCst);
+        assert!(
+            !monitor.may_bind_from_race(&RaceMode::Cold),
+            "a cold race must never bind over a live socket"
+        );
+        assert!(
+            monitor.may_bind_from_race(&swap),
+            "the swap's whole job is to bind over the live socket"
+        );
+
+        // Pause outranks both: the battery posture owns the socket, and
+        // dialing behind it is exactly what pausing forbids.
+        monitor.inner.paused.store(true, Ordering::SeqCst);
+        assert!(!monitor.may_bind_from_race(&swap));
     }
 
     /// C4 (D-089): a Reconnect while a race already holds the single-flight
@@ -3036,7 +3529,11 @@ mod tests {
             match case {
                 "paused" => monitor.pause().await.expect("pause"),
                 "stopped" => monitor.stop().await.expect("stop"),
-                "manual-reconnect" => monitor.reconnect(false).await.expect("reconnect"),
+                // The HARD path is where the manual teardown lives since P0b:
+                // the user's tap no longer retires a live bind, so asking
+                // `reconnect` for a teardown here would be asking it for the
+                // behaviour the fix removed.
+                "manual-reconnect" => monitor.hard_reconnect().await.expect("hard reconnect"),
                 // Installing over a live bind must not leak it.
                 _ => {
                     monitor
@@ -3239,5 +3736,129 @@ mod tests {
         println!("daa={got_daa:?} blue={got_blue:?}");
         assert!(got_daa.is_some(), "no VirtualDaaScore within {deadline:?}");
         assert!(got_blue.is_some(), "no SinkBlueScore within {deadline:?}");
+    }
+
+    /// **P0b end to end, against real nodes** — run manually:
+    /// `cargo test -p kaspaverse-chain find_then_swap -- --ignored --nocapture`
+    ///
+    /// The unit tests above prove the laws in isolation with the single-flight
+    /// flag held, which is deterministic but means no real race ever runs. This
+    /// one drives the actual gesture on a real link: connect, note the socket,
+    /// tap, and watch. The properties it can prove that the seams cannot:
+    ///
+    /// 1. The link is down for **at most one bounded cut-over window**, and is
+    ///    back up before the deadline. Polled continuously, not sampled at the
+    ///    ends, because a drop-and-recover inside one sleep is exactly the old
+    ///    defect and would pass a two-point check.
+    /// 2. Whatever the wallet ends up on, it is a **different node**, or the
+    ///    same one because the hunt found nothing better and kept it — never a
+    ///    four-minute outage.
+    ///
+    /// **Property 1 says "bounded", not "never", and the distinction is the
+    /// honest one** (`consensus-auditor`, CONCERNS-3). A swap that *wins* does
+    /// briefly drop: `install_bind` retires the incumbent before it dials the
+    /// winner, so the cut-over costs up to `DISCONNECT_WAIT_TIMEOUT` +
+    /// `BIND_ENVELOPE_TIMEOUT`. As first written this test asserted the link was
+    /// never down at all, which meant it could only pass on the *found nothing*
+    /// outcome — it could not bless the outcome it exists to bless, and whoever
+    /// ran it first would have read a winning swap as the fix being broken. The
+    /// claim the fix actually makes is that a tap costs a bounded cut-over paid
+    /// only against a node that has already answered a probe, instead of an
+    /// unbounded hunt paid up front.
+    ///
+    /// The on-device proof is the founder's tap; this is what the gate can
+    /// re-run. The gesture is engine-side and has no Android-specific
+    /// behaviour, so the device adds a witness rather than a different subject.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires network; manual proof for P0b (find-then-swap)"]
+    async fn live_find_then_swap_never_drops_the_link() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.start().await.expect("start");
+        // Deliberately generous, and the reason is the P0 in the next row of
+        // the same tracker: on a link whose IPv6 blackholes, the FIRST connect
+        // is the 4 m 34 s one. This test is about the tap, not the dial — so
+        // it waits out the dial rather than pretending the dial is fast.
+        let connect_deadline = std::time::Instant::now() + Duration::from_secs(360);
+        while !monitor.is_connected() {
+            assert!(
+                std::time::Instant::now() < connect_deadline,
+                "no first connection in 6 min — this test needs a link that comes up; \
+                 on a broken-IPv6 link that is the P0, not this"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let before = monitor.current_url().expect("a bound socket");
+        println!("connected to {before}");
+
+        // The tap.
+        monitor.reconnect(false).await.expect("tap");
+
+        // Property 1: at most ONE contiguous down-window, bounded by the
+        // cut-over budget. Polled every 20 ms — a two-point check would sleep
+        // straight through the outage this test exists to detect.
+        let cutover_budget = link::DISCONNECT_WAIT_TIMEOUT + BIND_ENVELOPE_TIMEOUT;
+        let deadline =
+            std::time::Instant::now() + (RACE_RETRY_DELAY + PROBE_TIMEOUT) * (SWAP_HUNT_ROUNDS + 1);
+        let mut saw_searching = false;
+        let mut polls = 0u32;
+        let mut down_windows = 0u32;
+        let mut down_since: Option<std::time::Instant> = None;
+        let mut worst_down = Duration::ZERO;
+        while std::time::Instant::now() < deadline {
+            match (monitor.is_connected(), down_since) {
+                (false, None) => {
+                    down_windows += 1;
+                    down_since = Some(std::time::Instant::now());
+                }
+                (false, Some(since)) => {
+                    let down = since.elapsed();
+                    worst_down = worst_down.max(down);
+                    assert!(
+                        down < cutover_budget,
+                        "the link has been down {down:?}, past the {cutover_budget:?} \
+                         cut-over budget — a swap must never become an open-ended outage, \
+                         which is the P0b defect"
+                    );
+                }
+                (true, Some(since)) => {
+                    worst_down = worst_down.max(since.elapsed());
+                    down_since = None;
+                }
+                (true, None) => {}
+            }
+            saw_searching |= monitor.is_searching();
+            polls += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            monitor.is_connected(),
+            "the wallet must be bound when the swap budget expires — either the \
+             replacement or the incumbent it was told to keep"
+        );
+        assert!(
+            down_windows <= 1,
+            "a swap is ONE cut-over at most; {down_windows} down-windows means the \
+             hunt is bouncing the socket, not swapping it"
+        );
+
+        let after = monitor.current_url().expect("still bound");
+        println!(
+            "after the tap: {after} (searching seen: {saw_searching}, {polls} polls, \
+             {down_windows} cut-over(s), worst down {worst_down:?})"
+        );
+        // Property 2: a swap landed somewhere else, or nothing better answered
+        // and the incumbent was kept. Both are correct; an open-ended outage is
+        // not, and property 1 already ruled that out.
+        if after == before {
+            println!("kept the incumbent — nothing better answered inside the bound");
+        } else {
+            println!("swapped {before} -> {after}");
+        }
+        assert!(
+            saw_searching,
+            "the tap must actually hunt — a swap that never searched is a no-op \
+             wearing the fix's name"
+        );
+        monitor.stop().await.expect("stop");
     }
 }

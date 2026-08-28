@@ -349,19 +349,61 @@ void main() {
       expect(pulls, 0, reason: 'the grace-drop owns the socket while dark');
     });
 
-    test('a connect clears the hunt bits and the drop clock', () async {
-      statusValue = status(connected: false, searching: true, osOffline: true);
+    test('a connect clears the OFFLINE claim and the drop clock', () async {
+      statusValue = status(connected: false, searching: false, osOffline: true);
       final service = ChainService.instance..start();
       await Future<void>.delayed(const Duration(milliseconds: 40));
-      expect(service.searching.value, isTrue);
       expect(service.osOffline.value, isTrue);
 
       controller.add(const DagSnapshot(connected: true));
       await Future<void>.delayed(Duration.zero);
-      expect(service.searching.value, isFalse);
+      // A live socket proves the phone has a network — that argument survives
+      // P0b untouched. What it no longer proves is that nothing is hunting.
       expect(service.osOffline.value, isFalse);
       expect(service.disconnectedAt.value, isNull);
     });
+
+    test(
+      'P0b: a swap hunt is VISIBLE — connected and searching at once',
+      () async {
+        // **The test that catches the wiring, not the widget.** `NodeScreen`
+        // renders "Answering — and looking for a different node" off exactly
+        // this pair, and the widget tests drive the notifiers directly, so they
+        // stay green whether or not the service can ever produce it. Before this
+        // fix the service asserted "a live socket is neither hunting nor
+        // offline" in three places, and a DAG snapshot arrives about once a
+        // second while connected — so the flag would have been stamped out
+        // faster than the poll could set it, and the whole swap would have been
+        // invisible with a green suite.
+        statusValue = status(connected: true, searching: true);
+        final service = ChainService.instance..start();
+        controller.add(const DagSnapshot(connected: true));
+        // The tap is what bootstraps it, exactly as on glass: a connected, idle
+        // link costs no bridge call, so something has to ask. `reconnect`'s own
+        // tick is that something.
+        await service.reconnect();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+
+        expect(service.connected.value, isTrue);
+        expect(
+          service.searching.value,
+          isTrue,
+          reason: 'the swap hunt must survive both the snapshot and the poll',
+        );
+
+        // A second snapshot must not stamp it out either — this is the one that
+        // arrives every second while the link is up.
+        controller.add(const DagSnapshot(connected: true));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(service.searching.value, isTrue);
+
+        // And it clears from Rust's own flag when the hunt ends, in the same
+        // lane — never by inference from the socket being alive.
+        statusValue = status(connected: true, searching: false);
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(service.searching.value, isFalse);
+      },
+    );
 
     test(
       'the drop clock starts when the link dies (churn hold input)',

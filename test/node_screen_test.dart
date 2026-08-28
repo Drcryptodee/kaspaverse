@@ -282,7 +282,36 @@ void main() {
       seam.searching.value = true;
       await tester.pump();
       expect(_cadenceRunning(tester), isTrue);
+      // **P0b: connected AND searching is the swap hunt, not a dark wallet.**
+      // Since find-then-swap the engine holds the live link for the whole
+      // search, so the old *Looking for a node…* here would understate a
+      // wallet that can spend right now — and understating the link is the
+      // same C7 split as overstating it, pointed the other way.
+      expect(
+        find.text(
+          'Answering — and looking for a different node. This one keeps '
+          'working until another answers.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Looking for a node…'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a DARK hunt still says it is looking for a node', (
+      tester,
+    ) async {
+      // The control for the assertion above: with no link to preserve the
+      // words are the pre-P0b ones, so that test is measuring the swap rather
+      // than a copy change that swallowed the dark state too.
+      final seam = _FakeSeam(connected: false);
+      seam.searching.value = true;
+      // `settle: false` — the cadence is meant to be running here, so
+      // pumpAndSettle would wait on an animation whose whole point is not to
+      // stop.
+      await _pumpScreen(tester, seam, settle: false);
       expect(find.text('Looking for a node…'), findsOneWidget);
+      expect(_cadenceRunning(tester), isTrue);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -581,17 +610,21 @@ void main() {
       // the link is dead (`ux-auditor`, UX-2).
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      expect(find.text('Reconnect'), findsOneWidget);
+      // **P0b: the label names what the tap DOES.** On a connected, unpinned
+      // wallet it no longer reconnects this node — the engine holds the live
+      // link and hunts for a different one behind it, so "Reconnect" was
+      // naming an action the code had stopped taking.
+      expect(find.text('Find a different node'), findsOneWidget);
       expect(find.text('Searching…'), findsNothing);
 
-      await tester.tap(find.text('Reconnect'));
+      await tester.tap(find.text('Find a different node'));
       await tester.pump();
       expect(seam.kicks, 1);
       // The busy state rides the HUNT, not the dispatch — and the label swap
       // IS the signal, because BG-2 will not pay for a second meter on a
       // screen whose serving plate already runs one.
       expect(find.text('Searching…'), findsOneWidget);
-      expect(find.text('Reconnect'), findsNothing);
+      expect(find.text('Find a different node'), findsNothing);
       expect(
         tester.widgetList<KvCadence>(find.byType(KvCadence)).length,
         lessThanOrEqualTo(1),
@@ -612,6 +645,41 @@ void main() {
         2,
         reason: 'a busy-looking button that cannot be tapped deletes C4',
       );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the tap states its cost only where a cost is still paid', (
+      tester,
+    ) async {
+      // **P0b, the residual case.** Find-then-swap makes a tap free on a
+      // connected, unpinned wallet — there is nothing to warn about, and a
+      // warning there would be false. Pinned is the case the mechanism cannot
+      // fix: there is no different node to find, so a tap can only redial the
+      // user's own, and that still drops the link first. The founder found
+      // this defect by paying that cost without being told; the copy is where
+      // it gets told.
+      final pinned = _FakeSeam(pinned: 'ws://mine.local:17110');
+      await _pumpScreen(tester, pinned);
+      expect(find.text('Redial your node'), findsOneWidget);
+      expect(
+        find.text('Drops the link you have and dials your node again.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox());
+
+      // Unpinned and connected: no warning, because nothing is dropped.
+      final unpinned = _FakeSeam();
+      await _pumpScreen(tester, unpinned);
+      expect(find.text('Find a different node'), findsOneWidget);
+      expect(find.textContaining('Drops the link'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+
+      // Dark: the label is the pre-P0b one, because there is no link to keep
+      // and "reconnect" is exactly what the tap does.
+      final dark = _FakeSeam(connected: false);
+      await _pumpScreen(tester, dark, settle: false);
+      expect(find.text('Reconnect'), findsOneWidget);
+      expect(find.textContaining('Drops the link'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 

@@ -1119,17 +1119,26 @@ pub struct RaceOutcome {
 /// (aborting would leak ws loops). The common reconnect therefore does ZERO
 /// HTTP before dialing a node it trusted recently.
 ///
-/// `demoted` URLs never enter the race — UNLESS the cached endpoint, the
-/// pantry and every fetched node are all demoted and the race would be
-/// empty; connectivity always beats hygiene, so demotion filtering degrades
-/// to advisory when it would otherwise strand the wallet (the ledger heals
-/// as cooldowns lapse).
+/// `excluded` URLs never enter the race, in EITHER lane — the immediate dials
+/// are filtered against it and every resolver answer is checked against it, so
+/// a caller that puts a URL in this set is guaranteed the race cannot return
+/// it. The caller composes the set; `race` does not ask why a member is in it.
+/// Two things put URLs there today:
+///
+/// - **Hygiene demotions** ([`EndpointHealth::demoted_set`]) — UNLESS the
+///   cached endpoint, the pantry and every fetched node are all demoted and
+///   the race would be empty; connectivity always beats hygiene, so the
+///   caller degrades demotion filtering to advisory when it would otherwise
+///   strand the wallet (the ledger heals as cooldowns lapse).
+/// - **The incumbent of a swap hunt** (P0b) — the node the user asked to
+///   leave. That one is never degraded: "find me a different node" cannot be
+///   satisfied by the node they are already on.
 pub async fn race(
     resolver: &Resolver,
     network_id: NetworkId,
     cached: Option<String>,
     pantry: Vec<String>,
-    demoted: &HashSet<String>,
+    excluded: &HashSet<String>,
     fetches: usize,
     probe_timeout: Duration,
 ) -> RaceOutcome {
@@ -1146,7 +1155,7 @@ pub async fn race(
     let immediate = cached
         .into_iter()
         .chain(pantry)
-        .filter(|url| !demoted.contains(url));
+        .filter(|url| !excluded.contains(url));
     for url in immediate {
         if !entered.insert(url.clone()) {
             continue;
@@ -1177,7 +1186,7 @@ pub async fn race(
     let seen = std::sync::Arc::new(Mutex::new(entered));
     for _ in 0..fetches {
         let resolver = resolver.clone();
-        let demoted = demoted.clone();
+        let excluded = excluded.clone();
         let seen = seen.clone();
         tasks.spawn(async move {
             // Bounded doorway (C1): the raw get_node has no deadline at any
@@ -1201,12 +1210,12 @@ pub async fn race(
                     )),
                 ));
             }
-            if demoted.contains(&url) {
+            if excluded.contains(&url) {
                 return Err((
                     None,
                     Some((
                         sanitize_node_text(endpoint_host(&url)),
-                        "skipped: demoted".to_string(),
+                        "skipped: excluded".to_string(),
                     )),
                 ));
             }

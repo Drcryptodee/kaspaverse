@@ -583,7 +583,13 @@ pub async fn dag_resync() -> Result<bool, AppError> {
     LAST_HARD.store(now, Ordering::Relaxed);
     log::info!("dag: pull-heal resync — forcing reconnect + rescan");
     kaspaverse_chain::spans::mark_with("pull_resync", "hard");
-    monitor.reconnect(false).await.map_err(AppError::chain)?;
+    // The HARD path, deliberately — not the user's find-then-swap tap (P0b).
+    // This line is only reached once the socket has read unhealthy or failed
+    // a real round-trip, and what it owes the caller is a NEW socket whose
+    // `Connected` drives the rescan. A swap that kept a suspected-deaf
+    // incumbent because nothing better answered would do neither, and the
+    // `Ok(true)` below ("the node was actually re-asked") would be a lie.
+    monitor.hard_reconnect().await.map_err(AppError::chain)?;
     Ok(true)
 }
 

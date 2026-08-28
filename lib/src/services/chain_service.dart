@@ -194,15 +194,23 @@ class ChainService with WidgetsBindingObserver {
     _linkTimer ??= Timer.periodic(linkPollPeriod, (_) => _linkTick());
   }
 
-  /// C7: keep the honest link state current while we are dark. A connected,
-  /// idle link short-circuits with no bridge call — the bits are known from
-  /// the stream (a live socket is neither hunting nor offline). While a
-  /// reconnect is in flight we DO poll even if the last snapshot said
-  /// connected: the socket is being bounced under us.
+  /// C7: keep the honest link state current. A connected, idle link
+  /// short-circuits with no bridge call — but "idle" is now a real condition
+  /// rather than a synonym for "connected".
+  ///
+  /// **P0b retired the law that a live socket is never hunting.** It was true
+  /// while the only race was a cold one (which refuses to run over a live
+  /// socket), and find-then-swap makes it false: a swap hunt is *defined* as a
+  /// search running behind a working link. This function used to assert the
+  /// old law twice — clearing `searching` on the short-circuit and discarding
+  /// any poll that landed while connected — which would have made the whole
+  /// swap invisible on the glass, with the widget tests still green because
+  /// they drive the notifiers directly. The offline claim keeps its
+  /// suppression: a live socket really does prove the phone has a network,
+  /// and that argument is untouched.
   Future<void> _linkTick() async {
     if (!_foreground || _droppedByGrace) return;
-    if (connected.value && !reconnecting.value) {
-      searching.value = false;
+    if (connected.value && !reconnecting.value && !searching.value) {
       osOffline.value = false;
       return;
     }
@@ -212,11 +220,23 @@ class ChainService with WidgetsBindingObserver {
     } catch (_) {
       return; // a failed pull leaves the last-known state; never invent one
     }
-    // The link may have come UP while this pull was in flight. A landed
-    // connect is the newer truth, so the older answer must not re-assert a
-    // hunt (or an offline claim) over a live socket.
-    if (connected.value && !reconnecting.value) return;
+    // Rust's own `race_running` flag is the authority on whether a hunt is
+    // alive, and it is re-read every tick — so a stale `true` costs one poll
+    // period and self-corrects, where suppressing it costs the feature.
     searching.value = status.searching;
+    // The link may have come UP while this pull was in flight. A landed
+    // connect is still the newer truth for the OFFLINE claim, so the older
+    // answer must not re-assert it over a live socket — and the PIN notifiers
+    // keep the same suppression they have always had (`consensus-auditor`,
+    // CONCERNS-5). The old code discarded this whole poll while connected, so
+    // widening it to let `searching` through must not quietly widen it for
+    // `pinnedNode` too: D-187's whole point is that the glass never names the
+    // node the user just replaced, and `refreshNodeConfig`'s own `finally`
+    // owns those two in the path that changes them.
+    if (connected.value && !reconnecting.value) {
+      osOffline.value = false;
+      return;
+    }
     osOffline.value = status.osOffline;
     pinnedNode.value = status.pinnedNode;
     pinDropped.value = status.pinDropped;
@@ -329,11 +349,19 @@ class ChainService with WidgetsBindingObserver {
     } catch (e) {
       error.value = e.toString();
     } finally {
-      reconnecting.value = false;
       // The tap handed off to a hunt — show that immediately rather than
       // waiting up to a poll period with the glass reading whatever it read
       // before.
+      //
+      // **Ordered before the flag clears, and that is load-bearing** (P0b).
+      // `_linkTick` decides synchronously, before its first await, whether to
+      // short-circuit — and a connected, not-reconnecting, not-yet-searching
+      // link short-circuits with no bridge call. Clearing `reconnecting`
+      // first therefore made this the one tick that could never see the hunt
+      // it was called to reveal, and a swap behind a live link would have
+      // stayed invisible until something else happened to set the bit.
       unawaited(_linkTick());
+      reconnecting.value = false;
     }
   }
 
@@ -379,14 +407,19 @@ class ChainService with WidgetsBindingObserver {
 
   void _apply(DagSnapshot snapshot) {
     // C7: remember the moment the link died — the beacon's churn hold reads it
-    // (a ≤2 s blip must not flip the glass), and a fresh connect clears both
-    // the timestamp and the hunt bits: a live socket is neither hunting nor
-    // offline, whatever the last poll or a flapping OS callback said.
+    // (a ≤2 s blip must not flip the glass), and a fresh connect clears the
+    // timestamp and the OFFLINE claim: a live socket proves the phone has a
+    // network, whatever a flapping OS callback said.
+    //
+    // It no longer clears the HUNT bit (P0b). A DAG snapshot arrives about
+    // once a second while connected, so doing so would have stamped out a
+    // swap hunt's `searching` flag faster than `_linkTick` could set it — the
+    // fix would have worked in the engine and been invisible on the glass.
+    // `_linkTick` owns that bit now, from Rust's own flag, in both directions.
     if (connected.value && !snapshot.connected) {
       disconnectedAt.value = DateTime.now();
     } else if (snapshot.connected) {
       disconnectedAt.value = null;
-      searching.value = false;
       osOffline.value = false;
     }
     connected.value = snapshot.connected;

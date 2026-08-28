@@ -537,8 +537,20 @@ class _NodeScreenState extends State<NodeScreen> {
         // "Answering" beside a meter that is visibly searching — the words and
         // the cadence disagreeing about one link, which is the exact split C7
         // forbids and the P0.3 scar cost.
+        //
+        // Connected AND hunting is no longer that contradiction, though: since
+        // P0b it is the swap hunt, where the link genuinely IS working while a
+        // bounded errand looks for a different node behind it. Rendering that
+        // as *Looking for a node…* would understate a wallet that can spend
+        // right now — so it gets its own arm, ABOVE the dark-hunt one, and
+        // says both halves of the truth.
         final (KvLampTone tone, String words) = switch (true) {
           _ when offline => (KvLampTone.warn, 'Your phone has no network.'),
+          _ when connected && hunting => (
+            KvLampTone.ok,
+            'Answering — and looking for a different node. This one keeps '
+                'working until another answers.',
+          ),
           _ when hunting => (KvLampTone.warn, 'Looking for a node…'),
           // **The directory is named where it acts** (D-207 census; founder
           // call 2026-08-27). "A public community node" said which KIND of
@@ -606,6 +618,15 @@ class _NodeScreenState extends State<NodeScreen> {
               if (s.blockAgeSecs != null)
                 _Reading(
                   label: 'Transport scan',
+                  // The `!hunting` term SURVIVES find-then-swap (P0b), on
+                  // purpose. A swap hunt genuinely is scanning while it runs,
+                  // so this line understates it — but the moment a winner
+                  // lands, `install_bind` retires the incumbent and Dart's
+                  // snapshot can still read `connected` for up to one poll.
+                  // *live — scanning every block* is the strongest claim on
+                  // this screen; understating it for a few seconds costs the
+                  // user nothing, and overstating it across a cut-over is the
+                  // P0.3 scar. The lamp above carries the swap's good news.
                   value: _scanLine(
                     connected: connected && !hunting && !offline,
                   ),
@@ -631,6 +652,8 @@ class _NodeScreenState extends State<NodeScreen> {
     if (tap == null) return const SizedBox.shrink();
     return AnimatedBuilder(
       animation: Listenable.merge([
+        s.connected,
+        s.pinnedNode,
         if (s.searching != null) s.searching!,
         if (s.reconnecting != null) s.reconnecting!,
       ]),
@@ -644,7 +667,12 @@ class _NodeScreenState extends State<NodeScreen> {
             (s.searching?.value ?? false) || (s.reconnecting?.value ?? false);
         return Padding(
           padding: const EdgeInsets.only(top: KvSpace.sm),
-          child: _Reconnect(hunting: hunting, onTap: () => unawaited(tap())),
+          child: _Reconnect(
+            hunting: hunting,
+            connected: s.connected.value,
+            pinned: s.pinnedNode.value != null,
+            onTap: () => unawaited(tap()),
+          ),
         );
       },
     );
@@ -1332,17 +1360,65 @@ class _Pick extends StatelessWidget {
 /// them, and inventing a second phrasing for one action is how they start
 /// disagreeing.
 class _Reconnect extends StatelessWidget {
-  const _Reconnect({required this.hunting, required this.onTap});
+  const _Reconnect({
+    required this.hunting,
+    required this.connected,
+    required this.pinned,
+    required this.onTap,
+  });
 
   final bool hunting;
+  final bool connected;
+  final bool pinned;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    // "Searching…", not "Reconnecting…": the hunt is just as often the FIRST
-    // connection of a session, and a second press while one is in flight is
-    // swallowed by the service's own guard.
-    final label = hunting ? 'Searching…' : 'Reconnect';
+    // **One control, three states, and until P0b the copy was identical in
+    // all of them** — including the one where a tap was the only input in the
+    // app that could turn a working wallet into a five-minute outage.
+    //
+    // - Hunting: "Searching…", not "Reconnecting…" — the hunt is just as often
+    //   the FIRST connection of a session, and a second press while one is in
+    //   flight is swallowed by the service's own guard.
+    // - Connected, unpinned: the engine now holds the live link while it looks
+    //   (find-then-swap), so the honest verb is what the tap actually does —
+    //   it finds a different node, it does not reconnect this one.
+    // - Connected, pinned: there IS no different node to find, so a tap can
+    //   only mean "redial mine", and that one still drops the link first. It
+    //   says so underneath rather than leaving the user to discover it, which
+    //   is how this defect was found in the first place.
+    // - Dark: "Reconnect", unchanged.
+    final label = switch (true) {
+      _ when hunting => 'Searching…',
+      _ when connected && pinned => 'Redial your node',
+      _ when connected => 'Find a different node',
+      _ => 'Reconnect',
+    };
+    final caption = !hunting && connected && pinned
+        ? 'Drops the link you have and dials your node again.'
+        : null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _button(label),
+        if (caption != null) ...[
+          const SizedBox(height: KvSpace.xs),
+          Text(
+            caption,
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 12,
+              height: 17 / 12,
+              color: KvColor.inkMeta,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _button(String label) {
     return Semantics(
       button: true,
       label: label,
