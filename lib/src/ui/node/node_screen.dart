@@ -1292,7 +1292,6 @@ class _Pick extends StatelessWidget {
             // (BG-12 permits the smaller visual and requires this to say so).
             height: KvSpace.touchTarget,
             padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
-            alignment: Alignment.center,
             decoration: BoxDecoration(
               color: selected ? KvColor.keyPressed : KvColor.control,
               borderRadius: BorderRadius.circular(KvRadius.control),
@@ -1300,14 +1299,26 @@ class _Pick extends StatelessWidget {
                 color: selected ? KvColor.edgeHi : KvColor.hairline,
               ),
             ),
-            child: Text(
-              label,
-              style: TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: 12,
-                height: 17 / 12,
-                color: selected ? KvColor.ink : KvColor.inkDim,
-              ),
+            // **A `Row` at `MainAxisSize.min`, NOT `alignment: Alignment.center`
+            // on the Container.** Setting `alignment` makes a `Container`
+            // expand to its maximum constraint, so inside the `Wrap` each pick
+            // took a whole line and the two-way choice rendered as two
+            // full-width buttons stacked down an already-long screen (found on
+            // glass, 2026-08-28 device pass). The Row sizes to its child and
+            // still centres it vertically in the 48dp target.
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 12,
+                    height: 17 / 12,
+                    color: selected ? KvColor.ink : KvColor.inkDim,
+                  ),
+                ),
+              ],
             ),
           ),
         ),

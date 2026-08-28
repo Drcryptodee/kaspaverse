@@ -903,6 +903,39 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('the two defaults are a CHIP ROW, not two stacked buttons', (
+      tester,
+    ) async {
+      // Found on glass, not by the suite (2026-08-28 device pass): `_Pick` set
+      // `alignment: Alignment.center` on its `Container`, which makes a
+      // Container expand to its maximum constraint — so inside the `Wrap` each
+      // pick took a whole line. Nothing overflowed, nothing threw, every
+      // `find.text` passed, and the two-way choice read as two full-width
+      // buttons down an already-long screen.
+      //
+      // The property is positional, so the assertion has to be: same row, and
+      // neither one owning the width.
+      final explorer = _FakeExplorer();
+      await _pumpScreen(tester, seamFor(), explorer: explorer, height: 2400);
+      await tester.pumpAndSettle();
+
+      final org = tester.getRect(find.text('explorer.kaspa.org'));
+      final stream = tester.getRect(find.text('kaspa.stream'));
+      expect(
+        org.center.dy,
+        moreOrLessEquals(stream.center.dy, epsilon: 1),
+        reason: 'both defaults sit on one line — it is a choice, not a stack',
+      );
+      // 393dp viewport minus the 24dp gutters; a pick that fills the row is the
+      // defect, whatever it is aligned to.
+      expect(
+        org.width,
+        lessThan(345 * 0.6),
+        reason: 'a pick sizes to its label, never to the space available',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('saving reaches the seam verbatim', (tester) async {
       final explorer = _FakeExplorer();
       await _pumpScreen(tester, seamFor(), explorer: explorer, height: 2400);
