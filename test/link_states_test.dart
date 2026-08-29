@@ -106,6 +106,13 @@ void main() {
       tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone ==
       KvLampTone.ok;
 
+  /// The TRUST line's own lamp — the LAST on the screen, where the network
+  /// chip's is the first. Both describe the same link, so a test that reads
+  /// only [linkReadsLive] structurally cannot see them disagree, which is the
+  /// half of the P0.3 shape that went unguarded.
+  KvLampTone trustLampTone(WidgetTester tester) =>
+      tester.widgetList<KvLamp>(find.byType(KvLamp)).last.tone;
+
   group('the money plate — distinguishable truths (C7)', () {
     testWidgets('each state wears its own words, and health is silent', (
       tester,
@@ -150,6 +157,85 @@ void main() {
       // every one of these and reports none of them — it is a door, and the
       // trust line is the indicator.
       expect(find.text('Mainnet'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
+    });
+
+    testWidgets('a swap hunt behind a live link explains its own motion', (
+      tester,
+    ) async {
+      // **P0b legalised connected-AND-searching.** A swap the user asked for
+      // should be nameable on the money surface, in the node surface's own
+      // vocabulary — and the sentence BRINGS the meter with it, since the
+      // trust chip is this plate's only `KvCadence` call site (silence had
+      // suppressed both, so no motion was going unexplained).
+      final now = DateTime(2026, 7, 30, 0, 53);
+      final connected = ValueNotifier<bool>(true);
+      final searching = ValueNotifier<bool>(false);
+
+      await tester.pumpWidget(
+        host(
+          connected: connected,
+          lastUpdate: ValueNotifier<DateTime?>(now),
+          searching: searching,
+          osOffline: ValueNotifier<bool>(false),
+          clock: () => now,
+        ),
+      );
+      expect(find.textContaining('looking for a different node'), findsNothing);
+
+      searching.value = true;
+      await tester.pump();
+      expect(
+        find.textContaining('looking for a different node…'),
+        findsOneWidget,
+      );
+      // The LINK is still healthy and still says so — this is a swap, not a
+      // dark hunt, and the dark hunt's words must not leak into it.
+      expect(linkReadsLive(tester), isTrue);
+      expect(find.textContaining('finding a node…'), findsNothing);
+      // **And the two lamps agree** (founder call, this sitting). The node
+      // surface renders this same pair `ok`, because amber would understate a
+      // wallet that can spend right now; a hardcoded amber here put a fault
+      // colour under the plate's own green network lamp — the P0.3 shape.
+      expect(trustLampTone(tester), KvLampTone.ok);
+
+      searching.value = false;
+      await tester.pump();
+      expect(find.textContaining('looking for a different node'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
+    });
+
+    testWidgets('a blip mid-hunt keeps the churn hold silent', (tester) async {
+      // **The churn hold must not learn to speak.** `evaluateBeacon` reports
+      // `connected` for up to `linkChurnGrace` after a drop — that IS the
+      // hold, and its whole contract is that a 2 s blip flips nothing. The
+      // swap arm above keys off that folded state, so reading it alone painted
+      // *"looking for a different node…"* over a wallet with NO node: on every
+      // brief Wi-Fi drop, and on every pinned redial, which drops the socket at
+      // once and can never swap. The arm asks the raw socket bit for exactly
+      // this reason.
+      final now = DateTime(2026, 7, 30, 0, 53);
+
+      await tester.pumpWidget(
+        host(
+          connected: ValueNotifier<bool>(false),
+          lastUpdate: ValueNotifier<DateTime?>(now),
+          searching: ValueNotifier<bool>(true),
+          osOffline: ValueNotifier<bool>(false),
+          disconnectedAt: ValueNotifier<DateTime?>(
+            now.subtract(const Duration(seconds: 1)),
+          ),
+          clock: () => now,
+        ),
+      );
+
+      // Inside the hold the glass has not flipped: it still reads live, and it
+      // says nothing at all — neither the swap's words nor the dark hunt's.
+      expect(linkReadsLive(tester), isTrue);
+      expect(find.textContaining('looking for a different node'), findsNothing);
+      expect(find.textContaining('finding a node…'), findsNothing);
 
       await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
     });

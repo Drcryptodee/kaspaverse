@@ -59,10 +59,17 @@ Future<NodeConfigDto> dagNodeConfig() =>
 Future<void> dagSetNodeConfig({String? url}) =>
     RustLib.instance.api.crateApiDagDagSetNodeConfig(url: url);
 
-/// Force a fresh wRPC connection — the Reconnect button and the watchdog's
-/// recovery (P3/D-068). Hard-drops even a socket the client believes is alive,
-/// then re-races (the cached endpoint is candidate 0 — the fast path). A no-op
-/// before the first connect exists (nothing to bounce).
+/// The user's "try now" — the Reconnect button and the watchdog's recovery
+/// (P3/D-068). A no-op before the first connect exists (nothing to bounce).
+///
+/// **It is no longer a teardown on the common path** (P0b/D-213). On a
+/// CONNECTED, unpinned wallet it starts a bounded find-then-swap hunt BEHIND
+/// the live bind and the incumbent is dropped only once a replacement is
+/// armed, so a tap that finds nothing costs the user nothing. Drop-then-hunt
+/// survives for the gestures that mean it: `stalled = true` after the stall
+/// verdict executes, a pinned wallet (there is no different node to find), and
+/// `dag_resync`'s hard pull-heal — all of which route through
+/// `DagMonitor::hard_reconnect`.
 ///
 /// `stalled = true` when the CALLER has failure evidence against the current
 /// endpoint (the watchdog's 30 s block silence): it becomes a pending strike
@@ -160,9 +167,13 @@ class DagStatusDto {
   final BigInt? virtualDaaScore;
 
   /// A connect race is hunting right now (C7's second truth) — held for the
-  /// whole multi-round hunt, so the glass can honestly read *finding a
-  /// node…* for the full 14–28 s a weak link takes instead of a staleness
-  /// phrase that reads as "connected, data slightly old".
+  /// whole multi-round hunt, so the glass can name it honestly instead of a
+  /// staleness phrase that reads as "connected, data slightly old".
+  ///
+  /// **Since P0b it is orthogonal to `connected`** (D-213): a find-then-swap
+  /// hunt runs behind a LIVE bind, so the pair `connected && searching` is
+  /// legal and reads *looking for a different node…*, while a DARK hunt
+  /// still reads *finding a node…* for the ~33 s a weak link takes.
   final bool searching;
 
   /// The OS says the default network is gone (C7's first truth) — the glass

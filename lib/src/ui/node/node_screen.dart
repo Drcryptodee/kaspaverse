@@ -77,14 +77,16 @@ class NodeScope {
   /// compile error instead of a caption.
   final ValueListenable<DateTime?> lastUpdate;
 
-  /// Drop the socket and hunt again — the user's own "try now".
+  /// The user's own "try now" — since P0b (D-213) a bounded find-then-swap
+  /// hunt behind the live bind rather than the drop-then-hunt it was named
+  /// for; [_Reconnect] carries which of the three things a tap actually does.
   ///
   /// **It lands here because the money screen's only node door is this
   /// screen.** UX-2 replaced the home beacon with the plate's network chip,
-  /// which opens this surface; the network sheet still carries the same action
-  /// from Settings until UX-3 collapses the two. Leaving it only on the sheet
-  /// would have put the escape hatch three taps from the screen where a dead
-  /// link is actually noticed. The watchdog reconnects on its own either way —
+  /// which opens this surface, and UX-3 then collapsed the network sheet into
+  /// it — so this is now the single site. Leaving it only on the sheet would
+  /// have put the escape hatch three taps from the screen where a dead link is
+  /// actually noticed. The watchdog reconnects on its own either way —
   /// this is agency, not the only path.
   final Future<void> Function()? onReconnect;
 
@@ -1355,10 +1357,12 @@ class _Pick extends StatelessWidget {
   }
 }
 
-/// Drop the link and hunt again. The copy is the network sheet's, verbatim
-/// (D-196) — the two surfaces answer the same question until UX-3 collapses
-/// them, and inventing a second phrasing for one action is how they start
-/// disagreeing.
+/// The user's own "try now" — and since P0b the label names which of the three
+/// things a tap actually does, because they stopped being the same action.
+///
+/// The copy was the retired network sheet's, verbatim (D-196), for as long as
+/// both surfaces existed; UX-3 collapsed the sheet into this screen, so this is
+/// now the single site and the phrasing answers to the engine instead.
 class _Reconnect extends StatelessWidget {
   const _Reconnect({
     required this.hunting,

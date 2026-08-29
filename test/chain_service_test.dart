@@ -364,6 +364,48 @@ void main() {
     });
 
     test(
+      'a landed connect ends the DARK hunt on the frame, not on the poll',
+      () async {
+        // **The half of the old law that survives P0b.** Legalising
+        // connected-and-searching removed the `_apply` clause wholesale, which
+        // left a landed cold connect to be noticed by a poll a whole
+        // `linkPollPeriod` behind — long enough for the node surface to render
+        // *"Answering — and looking for a different node"* over a wallet that
+        // had just settled, and to run the money plate's meter for the same
+        // second, on EVERY cold connect.
+        //
+        // The poll is deliberately blocked from here on: with it live this
+        // would pass a tick later for the wrong reason, and the tick IS the
+        // defect. What is left running is the snapshot lane — the only one
+        // that can be on time.
+        statusValue = status(connected: false, searching: true);
+        final service = ChainService.instance..start();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(service.searching.value, isTrue, reason: 'a dark hunt, polled');
+
+        final blocked = Completer<DagStatusDto>();
+        ChainService.statusFn = () => blocked.future;
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(service.searching.value, isTrue, reason: 'nothing cleared it');
+
+        controller.add(const DagSnapshot(connected: true));
+        await Future<void>.delayed(Duration.zero);
+        expect(service.connected.value, isTrue);
+        expect(
+          service.searching.value,
+          isFalse,
+          reason: 'a landed connect ends the hunt that found it, on the frame',
+        );
+
+        // A swap that finds NOTHING never crosses this edge — its link is up
+        // for the whole hunt, so the clause cannot reach it (the test below
+        // drives that pair). A swap that WINS does cross it, at the bounded
+        // cut-over, by which point the winner is bound and the hunt is over.
+        blocked.complete(status(connected: true, searching: true));
+      },
+    );
+
+    test(
       'P0b: a swap hunt is VISIBLE — connected and searching at once',
       () async {
         // **The test that catches the wiring, not the widget.** `NodeScreen`

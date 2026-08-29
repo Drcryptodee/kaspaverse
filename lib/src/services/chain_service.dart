@@ -88,14 +88,16 @@ class ChainService with WidgetsBindingObserver {
   @visibleForTesting
   static int watchdogStallSecs = 30;
 
-  /// C7 honest-states cadence: while the link is DOWN, pull the engine's
-  /// searching/offline bits this often so the glass animates the hunt instead
-  /// of freezing on a staleness phrase. Deliberately 1 s — half the churn-hold
-  /// window, so the honest state is always known before the hold expires and
-  /// the glass flips. Costs nothing in the steady state: a connected link takes
-  /// the early return below and makes NO bridge call at all (the battery
-  /// posture's "no invisible always-on work" rule), and a backgrounded app
-  /// makes none either.
+  /// C7 honest-states cadence: while the link is down — **or while a swap hunt
+  /// runs behind a live one** (P0b) — pull the engine's searching/offline bits
+  /// this often so the glass animates the hunt instead of freezing on a
+  /// staleness phrase. Deliberately 1 s — half the churn-hold window, so the
+  /// honest state is always known before the hold expires and the glass flips.
+  /// Costs nothing in the steady state: a connected and IDLE link takes the
+  /// early return below and makes NO bridge call at all (the battery posture's
+  /// "no invisible always-on work" rule), and a backgrounded app makes none
+  /// either. The hunt lane is the user's own errand and self-terminating — the
+  /// tick that reads `race_running` false is the one that stops the polling.
   @visibleForTesting
   static Duration linkPollPeriod = const Duration(seconds: 1);
 
@@ -330,9 +332,15 @@ class ChainService with WidgetsBindingObserver {
     }
   }
 
-  /// Force a fresh connection and surface the honest indicator while it runs —
-  /// the watchdog's recovery and the sheet's Reconnect button. Idempotent under
-  /// the [reconnecting] guard (a second press is ignored until the first ends).
+  /// The user's "try now", and the watchdog's recovery — the node surface's
+  /// Reconnect control (UX-3 collapsed the network sheet into that screen).
+  /// Surfaces the honest indicator while it runs; idempotent under the
+  /// [reconnecting] guard (a second press is ignored until the first ends).
+  ///
+  /// **Not a teardown on the common path since P0b** (D-213): on a connected,
+  /// unpinned wallet Rust runs a bounded find-then-swap hunt BEHIND the live
+  /// bind and drops the incumbent only once a replacement has answered a
+  /// probe, so a tap that finds nothing costs the link nothing.
   /// [stalled] = the caller holds failure evidence (watchdog only).
   Future<void> reconnect({bool stalled = false}) async {
     if (reconnecting.value) return;
@@ -411,14 +419,29 @@ class ChainService with WidgetsBindingObserver {
     // timestamp and the OFFLINE claim: a live socket proves the phone has a
     // network, whatever a flapping OS callback said.
     //
-    // It no longer clears the HUNT bit (P0b). A DAG snapshot arrives about
-    // once a second while connected, so doing so would have stamped out a
-    // swap hunt's `searching` flag faster than `_linkTick` could set it — the
-    // fix would have worked in the engine and been invisible on the glass.
-    // `_linkTick` owns that bit now, from Rust's own flag, in both directions.
+    // It no longer clears the HUNT bit on EVERY connected snapshot (P0b). A
+    // DAG snapshot arrives about once a second while connected, so doing so
+    // would have stamped out a swap hunt's `searching` flag faster than
+    // `_linkTick` could set it — the fix would have worked in the engine and
+    // been invisible on the glass.
+    //
+    // It still clears it on the dark→up **EDGE**, which is the half of the old
+    // law that survives P0b and the half `_linkTick` cannot cover in time. A
+    // landed connect ends the hunt that was looking for it, and the poll is a
+    // whole `linkPollPeriod` behind — so without this, every cold connect
+    // rendered *"Answering — and looking for a different node"* for up to a
+    // second on the node surface, and ran the money plate's meter for the same
+    // second, on a wallet that had just settled.
+    //
+    // A swap that finds NOTHING never crosses this edge — its link is up for
+    // the whole hunt, so the clause cannot reach it. A swap that WINS does
+    // cross it, at `install_bind`'s bounded cut-over, and clearing there is
+    // right rather than merely harmless: the winner is bound, so the hunt that
+    // was looking for it is over and `race_running` is already false.
     if (connected.value && !snapshot.connected) {
       disconnectedAt.value = DateTime.now();
     } else if (snapshot.connected) {
+      if (!connected.value) searching.value = false;
       disconnectedAt.value = null;
       osOffline.value = false;
     }

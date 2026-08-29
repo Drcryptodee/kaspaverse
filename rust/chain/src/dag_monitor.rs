@@ -61,8 +61,9 @@ const RACE_RETRY_DELAY: Duration = Duration::from_secs(3);
 /// (P0b). A cold hunt is unbounded — the wallet is dark and there is nothing
 /// to preserve — but a swap runs *behind a working link*, so it must be a
 /// bounded errand rather than a second search authority that never ends.
-/// Three rounds is ~24 s on a link where nothing answers, and one round on a
-/// link where something does.
+/// Three rounds is ~33 s on a link where nothing answers (a round is the
+/// resolver fetch plus the probe, 9 s, with `RACE_RETRY_DELAY` between them),
+/// and one round on a link where something does.
 const SWAP_HUNT_ROUNDS: u32 = 3;
 
 /// What a race loop is FOR — and the only thing that decides whether it may
@@ -1230,11 +1231,14 @@ impl DagMonitor {
         true
     }
 
-    /// The tap always acts (C4): when a race is already hunting, interrupt
-    /// its retry PAUSE — kicks never abort in-flight probes (the reaper
-    /// finding) and never spawn a second search authority (D-081, ruling 2).
+    /// Interrupt a live race's retry PAUSE — C4's "the tap always acts", and
+    /// since P0b the `ctl-drop` recovery too, which is a socket DEATH and not
+    /// a gesture: `source` is the only thing that tells them apart, so the
+    /// line names it rather than asserting a tap that may never have happened.
+    /// Kicks never abort in-flight probes (the reaper finding) and never spawn
+    /// a second search authority (D-081, ruling 2).
     fn kick_race(&self, source: &str) {
-        log::info!("link: reconnect tap — race already hunting; kicked the retry pause ({source})");
+        log::info!("link: race already hunting; kicked the retry pause ({source})");
         spans::mark_with("race_kick", source);
         self.inner.race_kick.notify_one();
     }
@@ -1731,6 +1735,19 @@ impl DagMonitor {
                 if advisory { " [hygiene advisory]" } else { "" }
             );
             spans::mark_with("race_winner", &winner.url);
+            // **A swap closes the span it opened** (P0b). `on_connected` marks
+            // `wss_connected` for this bind like any other, and a swap
+            // deliberately never opened a `connect_start` — so without a
+            // marker here the winning swap's `wss_connected` is the next thing
+            // after whatever `connect_start` came before it, and a
+            // cold-connect reading taken by pairing the two reports "time
+            // since the app opened". That is the same corruption
+            // `RaceMode::Swap`'s own span comment exists to prevent, displaced
+            // to the other end of the leg. `swap_start` → `swap_won` is also
+            // the only lane that can measure what the fix is FOR.
+            if matches!(mode, RaceMode::Swap { .. }) {
+                spans::mark_with("swap_won", link::endpoint_host(&winner.url));
+            }
             // Pantry stamp (C6): a probe win IS an observed-healthy moment.
             self.mark_endpoint_healthy(&winner.url);
             // An advisory bind to a still-demoted endpoint must not be
@@ -1946,8 +1963,16 @@ impl DagMonitor {
         //
         // Pinned is deliberately NOT swapped: there is no different node to
         // find, so a tap can only mean "redial mine", which is the hard path
-        // below. `paused` likewise — the battery posture owns the socket
-        // then, and dialing behind it is exactly what pausing forbids.
+        // below.
+        //
+        // The `paused` term is a DEFENSIVE re-read, not the route a paused
+        // wallet takes — say so, because the obvious reading is wrong: this
+        // function cleared that flag at its head, so on the `!stalled` path
+        // (no await in between) it can only be true again if another task
+        // paused us in this instant, and a paused wallet has no live bind for
+        // `current_bind()` to return anyway. Both facts point the same way —
+        // dialing behind the battery posture is exactly what pausing forbids —
+        // and the race loop refuses `paused` a third time before it binds.
         if !stalled
             && self.is_connected()
             && !self.is_pinned()
@@ -2408,7 +2433,19 @@ impl DagMonitor {
                 );
             }
         }
-        self.spawn_race();
+        // **Spawn-or-KICK, since P0b.** A bare `spawn_race` was complete while
+        // the flag could only be held by a hunt for a link we did not have:
+        // reaching here meant the socket had just died, so nothing was
+        // hunting, so the spawn always won. Find-then-swap made a race
+        // legal behind a LIVE socket — and this is the death of exactly that
+        // socket, so now the refusal is the common case, not the impossible
+        // one. Refused and silent, the wallet's recovery waited out the swap
+        // round in flight plus its retry pause (~9 s) before the loop's own
+        // top-of-loop degrade noticed the wallet had gone dark. The kick
+        // interrupts the pause and gets that degrade one round sooner; pinned
+        // already returned above, so this is spawn-or-kick with the pin arm
+        // spent.
+        self.spawn_or_kick_race("ctl-drop");
     }
 
     /// A notification from the installed socket. Everything here folds state
@@ -3796,9 +3833,28 @@ mod tests {
         // Property 1: at most ONE contiguous down-window, bounded by the
         // cut-over budget. Polled every 20 ms — a two-point check would sleep
         // straight through the outage this test exists to detect.
-        let cutover_budget = link::DISCONNECT_WAIT_TIMEOUT + BIND_ENVELOPE_TIMEOUT;
-        let deadline =
-            std::time::Instant::now() + (RACE_RETRY_DELAY + PROBE_TIMEOUT) * (SWAP_HUNT_ROUNDS + 1);
+        // Everything `install_bind` does with the socket dark. It retires the
+        // incumbent FIRST, and that teardown awaits the listener unregister
+        // before the bounded disconnect — so leaving the unregister leg out
+        // under-budgets the window by its whole 2 s.
+        let cutover_budget =
+            LISTENER_UNREGISTER_TIMEOUT + link::DISCONNECT_WAIT_TIMEOUT + BIND_ENVELOPE_TIMEOUT;
+        // The window must cover the WORST correct run, or the assertion below
+        // that the wallet is bound when it expires convicts a healthy build:
+        // the hunt can spend its whole budget AND then win on the last round,
+        // and that winner's cut-over is `cutover_budget` on its own.
+        //
+        // A round is the RESOLVER fetch plus the probe — `link::race` awaits
+        // `bounded_get_node(.., RESOLVER_FETCH_TIMEOUT)` before it probes
+        // anything — and `RACE_RETRY_DELAY` is the pause BETWEEN rounds, not a
+        // part of one. The first model spent the retry delay in place of the
+        // resolver leg (7 s where the code's ceiling is 9 s) and bought the
+        // shortfall back with a phantom `+ 1` round; both are dropped here for
+        // the constants the code actually waits on.
+        let round = link::RESOLVER_FETCH_TIMEOUT + PROBE_TIMEOUT;
+        let deadline = std::time::Instant::now()
+            + (round + RACE_RETRY_DELAY) * SWAP_HUNT_ROUNDS
+            + cutover_budget;
         let mut saw_searching = false;
         let mut polls = 0u32;
         let mut down_windows = 0u32;

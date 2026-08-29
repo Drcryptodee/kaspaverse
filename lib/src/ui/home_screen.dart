@@ -238,11 +238,16 @@ typedef _LinkView = ({
   String? error,
   Duration? age,
   bool hunting,
+
+  /// The SOCKET, not [state]. `evaluateBeacon` reports `connected` for up to
+  /// `linkChurnGrace` after a drop (the churn hold), so `state` cannot answer
+  /// "is there a node right now" — and one arm below has to ask exactly that.
+  bool live,
 });
 
 /// The trust line, as one value: `words == null` is **silence**, which is what
 /// a healthy screen looks like (D-192).
-typedef _TrustView = ({String? words, bool running});
+typedef _TrustView = ({String? words, bool running, KvLampTone tone});
 
 /// What the balance region renders (the DAA line is scoped separately inside
 /// the plate — the chain clock must not rebuild the money number).
@@ -486,6 +491,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ? null
           : Duration(seconds: age.inSeconds),
       hunting: hunting,
+      live: widget.chain.connected.value,
     );
   }
 
@@ -512,8 +518,29 @@ class _HomeScreenState extends State<HomeScreen> {
         link.age == null
             ? 'no recent update'
             : 'as of ${formatAge(link.age!)} ago',
-      // Silence is the healthy state. A live link says nothing at all.
-      BeaconState.connected => syncing ? 'syncing…' : null,
+      // Silence is the healthy state. A live link says nothing at all — with
+      // one exception since P0b: `searching` may now be true WHILE the socket
+      // is up (the find-then-swap hunt), and a swap the user asked for should
+      // be nameable on the money surface, in the node surface's vocabulary.
+      //
+      // It BRINGS the meter rather than explaining one: the trust chip is this
+      // plate's only `KvCadence` call site, so the state silence used to
+      // suppress rendered nothing at all — no motion was going unexplained.
+      //
+      // **Gated on the raw socket bit, not on `state`.** `evaluateBeacon`
+      // returns `connected` for up to `linkChurnGrace` while the socket is
+      // DOWN — the churn hold, whose whole contract is that a blip flips
+      // nothing — and `hunting` folds in `reconnecting`, which a tap sets on
+      // the frame it lands. Reading `state` alone therefore painted *"looking
+      // for a different node…"* over a wallet that had NO node: on every 2 s
+      // Wi-Fi blip, and on every PINNED redial — a wallet that by definition
+      // will never look for a different one.
+      BeaconState.connected =>
+        syncing
+            ? 'syncing…'
+            : (link.hunting && link.live
+                  ? 'looking for a different node…'
+                  : null),
     };
     // What is wrong with the NUMBER, as distinct from what is wrong with the
     // LINK. Most consequential first: a balance that may be short outranks a
@@ -549,12 +576,31 @@ class _HomeScreenState extends State<HomeScreen> {
     // "something is amber" twice and D-192's redundancy in miniature. The lamp
     // comes on once; the sentences queue under it, most consequential first.
     final said = <String>[?number, ?linkSaid];
+    // **A swap is not a fault, and this plate may not colour it as one**
+    // (founder call, this sitting). The node surface already ruled on this
+    // exact pair: `connected && hunting` renders `KvLampTone.ok` there, on the
+    // reasoning that amber "would understate a wallet that can spend right
+    // now". A hardcoded amber here made the money plate disagree with it — and
+    // with the plate's OWN network lamp, which is green on the same link
+    // twelve pixels above, the P0.3 scar `_NetworkChip` still carries a
+    // comment about.
+    //
+    // Green only when the swap sentence stands ALONE. A balance that may be
+    // short keeps the lamp, because that is the more consequential fact, and
+    // this arm must never launder it.
+    final swapOnly =
+        number == null &&
+        !syncing &&
+        link.state == BeaconState.connected &&
+        link.hunting &&
+        link.live;
     return (
       words: said.isEmpty ? null : said.join('\n'),
       // **Motion means something is happening.** A hunt and a first scan are
       // both happening; a dead or stale link is not, and the meter freezing is
       // exactly what makes "live" a felt thing rather than a claimed one.
       running: link.hunting || link.state == BeaconState.connecting || syncing,
+      tone: swapOnly ? KvLampTone.ok : KvLampTone.warn,
     );
   }
 
@@ -1116,7 +1162,10 @@ class _MoneyPlate extends StatelessWidget {
                     return Padding(
                       padding: const EdgeInsets.only(top: KvSpace.s),
                       child: KvStatusChip(
-                        tone: KvLampTone.warn,
+                        // Amber for everything the user should weigh, green
+                        // for a swap running behind a link that still works —
+                        // decided in `_computeTrust`, beside the sentences.
+                        tone: t.tone,
                         // One lamp; the sentences queue under it, most
                         // consequential first.
                         words: words,
