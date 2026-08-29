@@ -185,10 +185,27 @@ const CATCHUP_RETRY_DELAY: Duration = Duration::from_millis(1000);
 /// exits (R4). Its events are all stale by then — the window exists so the
 /// late teardown event that USED to kill the next socket (D-100: 1–5 ms after
 /// `connected`, 85 times) is seen, counted and logged as discarded instead of
-/// vanishing. Sized above [`link::DISCONNECT_WAIT_TIMEOUT`] so the pin's whole
-/// shutdown handshake lands inside it. Task lifecycle only — it gates no
-/// judgment and no dialing decision.
+/// vanishing. Task lifecycle only — it gates no judgment and no dialing
+/// decision.
+///
+/// **Sized above the WHOLE detached teardown, which is two legs since D-215,
+/// not one.** The disconnect no longer starts when the drain clock does: the
+/// unregister runs first inside the same spawned task, so the handshake this
+/// window exists to witness can begin up to [`LISTENER_UNREGISTER_TIMEOUT`]
+/// late. The old doc said "above `DISCONNECT_WAIT_TIMEOUT`", which was true
+/// when the unregister was awaited before the drain began and is a
+/// one-constant-bump away from silently false now — so the law is asserted
+/// rather than described.
 const RETIRED_DRAIN: Duration = Duration::from_secs(10);
+// Compared in MILLIS, not secs: `as_secs()` floors, so an 8500 ms disconnect
+// wait would compute 8 + 2 <= 10 and PASS while the real teardown runs 10.5 s
+// and outlives the window (`wallet-security-auditor`). An assert that rounds
+// its own inputs is the prose it replaced, in a shape that compiles.
+const _: () = assert!(
+    RETIRED_DRAIN.as_millis()
+        >= LISTENER_UNREGISTER_TIMEOUT.as_millis() + link::DISCONNECT_WAIT_TIMEOUT.as_millis(),
+    "RETIRED_DRAIN must outlast the whole detached teardown it exists to witness"
+);
 
 /// Bound on the best-effort listener unregister at a socket's end (R4).
 ///
@@ -1157,10 +1174,16 @@ impl DagMonitor {
     /// nothing: the link they had keeps running.
     pub async fn set_pinned_node(&self, url: Option<String>) -> Result<()> {
         let url = url.as_deref().map(link::validate_node_url).transpose()?;
-        // `retire_bind` awaits up to DISCONNECT_WAIT_TIMEOUT, and the app can
-        // background inside that window (wallet-security audit). Re-reading
-        // the `paused` FLAG afterwards cannot detect that — the line below
-        // sets it — so compare the pause GENERATION across the await instead.
+        // A concurrent `pause()` can land between the swap below and the read
+        // after it — on a multi-thread runtime that is another worker, and it
+        // no longer needs a long window to do it: D-215 detached the teardown,
+        // so `retire_bind` awaits nothing at all now. **The guard is still
+        // required, and the reason is the race, not the duration** — this
+        // comment used to cite the DISCONNECT_WAIT_TIMEOUT await as its whole
+        // justification, which would invite a reader who checked to delete a
+        // live guard on the backgrounding path. Re-reading the `paused` FLAG
+        // cannot detect it either, because the line below sets it — so compare
+        // the pause GENERATION across the call.
         let pause_gen = self.inner.pause_gen.load(Ordering::SeqCst);
         let was_paused = self.inner.paused.swap(true, Ordering::SeqCst);
         self.retire_bind("repin").await;
@@ -1456,11 +1479,10 @@ impl DagMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(id) = listener_id {
-            // Best-effort, and on ITS OWN client: unregistering through a
-            // shared handle is how a stale teardown could deafen a live socket.
-            Self::unregister_listener_bounded(&bind.client, id).await;
-        }
+        // **The evidence is recorded before we walk away**, not after. It is
+        // computed entirely from values already in hand, and it used to sit
+        // behind the listener-unregister wait — so a `run ended` line reached
+        // the log up to 2 s later than the death it describes.
         if ever_connected {
             self.record_socket_run(&bind.url, run_secs, cause);
         } else {
@@ -1479,16 +1501,68 @@ impl DagMonitor {
         {
             let _ = tx.send(());
         }
-        // Bound the wait on the teardown (C2 fix, the C1 class): the pin's
-        // `disconnect()` is a dispatcher handshake a blackholed socket can
-        // starve (`workflow-websocket 0.18.0 client/native.rs:322-334` —
-        // `ws_sender.send().await` inside a select arm body), and
-        // `KaspaRpcClient::disconnect` serializes callers on `disconnect_guard`
-        // (pin `client.rs:476-482`). The teardown is detached, never cancelled
-        // (the reaper rule) and MAY never complete; only our wait is bounded.
-        // Its late `Disconnected` now lands on a retired identity and is
-        // discarded — which is the whole point of R4.
-        link::bounded_disconnect((*bind.client).clone(), link::DISCONNECT_WAIT_TIMEOUT).await;
+        // **The goodbye is detached, because nothing may gate on it** (D-215).
+        //
+        // Both waits below belong to the socket being retired, and both sat on
+        // the critical path of whatever came next. `install_bind` retires
+        // before it constructs the replacement, so a swap that WINS paid the
+        // listener unregister (≤2 s) and the disconnect wait (≤5 s) with the
+        // wallet already dark, before one packet reached the node that had just
+        // answered a probe; `on_disconnected` paid the same before it could
+        // even ask for a new race. That is this file's own law inverted:
+        // `DISCONNECT_WAIT_TIMEOUT`'s doc says the teardown is detached, never
+        // awaited raw, and **nothing bounded may gate on its completion** — and
+        // a bounded path was gating on it, one level up.
+        //
+        // **Nothing about the socket's death changes.** `bounded_disconnect`
+        // already spawns the disconnect and bounds only the wait, and
+        // `unregister_listener_bounded` keeps its own timeout inside the task,
+        // so both stay exactly as bounded as they were; what is removed is US
+        // standing there. The retirement itself — the unbind, the generation
+        // bump, the published dark state — stays in the lock block above and is
+        // still synchronous, so one-identity-at-a-time (R4 D2) is untouched and
+        // connect-before-retire is still refused. A late `Disconnected` from
+        // this client lands on a retired identity and is discarded, which is
+        // the whole point of R4, and the successor carries its own
+        // `BIND_ENVELOPE_TIMEOUT` for the guard this teardown can hold.
+        //
+        // **What changes for callers**: none of them are told the goodbye is
+        // finished any more. The paths where that guarantee actually mattered
+        // are `pause()` (the Android background grace-drop), `set_pinned_node`
+        // and `hard_reconnect` — NOT `stop()`, which has no production caller
+        // at all (the FFI exposes pause/resume; every `stop()` in the tree is a
+        // test). On each of them the spawned task is polled on the next
+        // scheduler tick, long before Android freezes the process, and a
+        // starved socket never sent the close frame anyway — so what a healthy
+        // socket now does is what a starved one always did, stated rather than
+        // discovered.
+        //
+        // **It also raises the concurrency ceiling by design**: the await used
+        // to serialize teardowns one at a time, and now up to one per
+        // retirement can overlap, each holding its `Arc<KaspaRpcClient>` for at
+        // most the two bounds above. On the retry-pause-free bind-failure loop
+        // a few can coexist, and a `hard_reconnect` to the same URL briefly
+        // holds two sockets to one node. Each self-terminates and the disconnect
+        // was already detached inside `bounded_disconnect`, so this is a rate
+        // change, not a leak.
+        let client = bind.client.clone();
+        let gen = bind.gen;
+        let url = bind.url.clone();
+        tokio::spawn(async move {
+            if let Some(id) = listener_id {
+                // Best-effort, and on ITS OWN client: unregistering through a
+                // shared handle is how a stale teardown could deafen a live
+                // socket.
+                Self::unregister_listener_bounded(&client, id).await;
+            }
+            // The pin's `disconnect()` is a dispatcher handshake a blackholed
+            // socket can starve (`workflow-websocket 0.18.0
+            // client/native.rs:322-334` — `ws_sender.send().await` inside a
+            // select arm body), and `KaspaRpcClient::disconnect` serializes
+            // callers on `disconnect_guard` (pin `client.rs:476-482`).
+            link::bounded_disconnect((*client).clone(), link::DISCONNECT_WAIT_TIMEOUT).await;
+            log::info!("link: teardown of retired bind gen={gen} ({url}) finished");
+        });
         let task = bind
             .task
             .lock()
@@ -3794,8 +3868,11 @@ mod tests {
     /// **Property 1 says "bounded", not "never", and the distinction is the
     /// honest one** (`consensus-auditor`, CONCERNS-3). A swap that *wins* does
     /// briefly drop: `install_bind` retires the incumbent before it dials the
-    /// winner, so the cut-over costs up to `DISCONNECT_WAIT_TIMEOUT` +
-    /// `BIND_ENVELOPE_TIMEOUT`. As first written this test asserted the link was
+    /// winner, so the cut-over costs the DIAL plus the subscribe leg that runs
+    /// before `is_connected` publishes — see `cutover_budget` below, which is
+    /// the authority. It no longer costs `DISCONNECT_WAIT_TIMEOUT`: D-215 took
+    /// the retiring socket's goodbye off this path. As first written this test
+    /// asserted the link was
     /// never down at all, which meant it could only pass on the *found nothing*
     /// outcome — it could not bless the outcome it exists to bless, and whoever
     /// ran it first would have read a winning swap as the fix being broken. The
@@ -3833,12 +3910,31 @@ mod tests {
         // Property 1: at most ONE contiguous down-window, bounded by the
         // cut-over budget. Polled every 20 ms — a two-point check would sleep
         // straight through the outage this test exists to detect.
-        // Everything `install_bind` does with the socket dark. It retires the
-        // incumbent FIRST, and that teardown awaits the listener unregister
-        // before the bounded disconnect — so leaving the unregister leg out
-        // under-budgets the window by its whole 2 s.
-        let cutover_budget =
-            LISTENER_UNREGISTER_TIMEOUT + link::DISCONNECT_WAIT_TIMEOUT + BIND_ENVELOPE_TIMEOUT;
+        // What `install_bind` spends with the socket dark. D-215 took the
+        // retiring socket's goodbye off this path — the retirement is
+        // synchronous and the unregister (2 s) and disconnect wait (5 s) are
+        // detached — but it is NOT "the dial and nothing else", and saying so
+        // would be this sitting's own L134 in the file that earned it:
+        //
+        // - the DIAL, bounded by `BIND_ENVELOPE_TIMEOUT`; and
+        // - the SUBSCRIBE leg, which is not bounded at our boundary at all:
+        //   `is_connected` is published only after `handle_connect` returns,
+        //   and that is `register_new_listener` plus four SEQUENTIAL
+        //   `start_notify` round-trips. D-214 defers exactly this leg; the
+        //   allowance collapses to ~0 when it lands as a `try_join!` inside a
+        //   timeout. The old 17 s budget hid it inside the teardown's slack.
+        const SUBSCRIBE_ALLOWANCE: Duration = Duration::from_secs(4);
+        // And a WINNER THAT DIES BETWEEN PROBE AND BIND retires and re-races
+        // with no retry pause (that arm has none — the pause lives only in the
+        // empty-round branch), so one CONTIGUOUS dark window can legitimately
+        // carry a whole extra round before the next dial even starts. That path
+        // is correct, has its own no-strike rule, and a budget excluding it
+        // convicts a healthy build — the exact defect this deadline was widened
+        // for earlier in this same sitting.
+        let cutover_budget = BIND_ENVELOPE_TIMEOUT
+            + SUBSCRIBE_ALLOWANCE
+            + link::RESOLVER_FETCH_TIMEOUT
+            + PROBE_TIMEOUT;
         // The window must cover the WORST correct run, or the assertion below
         // that the wallet is bound when it expires convicts a healthy build:
         // the hunt can spend its whole budget AND then win on the last round,
@@ -3873,7 +3969,10 @@ mod tests {
                         down < cutover_budget,
                         "the link has been down {down:?}, past the {cutover_budget:?} \
                          cut-over budget — a swap must never become an open-ended outage, \
-                         which is the P0b defect"
+                         which is the P0b defect. Before reading this as a regression, \
+                         check the log: a `bind failed` or `exceeded BIND_ENVELOPE_TIMEOUT` \
+                         line means the winner died between probe and bind and re-raced \
+                         dark, which is a legitimate over-run of this budget"
                     );
                 }
                 (true, Some(since)) => {
