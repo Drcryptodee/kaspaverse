@@ -98,6 +98,27 @@ if [ -x tools/beacon_floor.sh ]; then
     echo "• beacon floor: ${BEACON_Y}/${BEACON_TOT} node-yielding, ${BEACON_B} hung, at ${BEACON_DATE} (${BEACON_AGE}d ago)${BEACON_NOTE}"
   fi
 fi
+# The standing link prober (D-220). It RETIRES ITSELF once its census is complete, but a
+# self-retiring cron job that nobody is told about is still a cron job nobody remembers —
+# so its state is printed here, where every session starts. Three things can be true and
+# all three matter: running (and how fresh), retired (and why), or armed-but-dead.
+PROBE_DIR="${KV_LINK_PROBE_DIR:-$HOME/kv-link-probe}"
+if [ -f "$PROBE_DIR/RETIRED.md" ]; then
+  echo "• link prober: RETIRED — $(sed -n 's/^\*\*Why it stopped:\*\* //p' "$PROBE_DIR/RETIRED.md" | cut -c1-90)"
+elif [ -s "$PROBE_DIR/link_probe.tsv" ]; then
+  PROBE_N=$(( $(wc -l < "$PROBE_DIR/link_probe.tsv") - 1 ))
+  PROBE_LAST=$(tail -1 "$PROBE_DIR/link_probe.tsv" | cut -f2)
+  PROBE_AGE=$(( ( $(date -u +%s) - ${PROBE_LAST:-0} ) / 60 ))
+  PROBE_FAULT=$(tail -n +2 "$PROBE_DIR/link_probe.tsv" | awk -F'\t' '
+    $13=="no-net"||$13=="lit4-down"||$13=="no-v6-iface"{next}
+    {seen++; if($13=="v6-hosts-dead"||$13=="v6-link-dead") bad++}
+    END{ if(seen) printf "%.0f%% faulted", 100*(bad+0)/seen }')
+  PROBE_NOTE=""
+  # Armed but not writing is the failure mode that looks exactly like "no fault today".
+  [ "$PROBE_AGE" -gt 30 ] && crontab -l 2>/dev/null | grep -q link_probe \
+    && PROBE_NOTE="  ← STALE (${PROBE_AGE}m): cron armed but not writing"
+  echo "• link prober: ${PROBE_N} rounds, ${PROBE_FAULT}, last ${PROBE_AGE}m ago (retires at 2016 rounds or 30d — tools/link_probe.sh --summary)${PROBE_NOTE}"
+fi
 echo "═══════════════════════════════════════════"
 if [ "$HAVE_DOCS" = 1 ]; then
   echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md" # gate-allow:internal-path

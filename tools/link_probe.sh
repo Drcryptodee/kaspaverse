@@ -25,6 +25,22 @@
 #   ./tools/link_probe.sh --install    # install the every-5-minutes cron entry
 #   ./tools/link_probe.sh --uninstall  # remove it
 #
+# IT RETIRES ITSELF. An instrument with no end condition is a cron job nobody remembers
+# and everybody eventually distrusts, so this one carries its own stopping rule and
+# executes it. After each round it asks whether the census is COMPLETE, and if it is, it
+# removes its own crontab line, writes `RETIRED.md` beside the data and stops. Complete
+# means BOTH of:
+#   - CENSUS_ROUNDS rounds recorded (7 days at the 5-minute cadence), and
+#   - both states actually observed — at least one `ok` round AND at least one fault
+#     round. A census that only ever saw one state has not measured a duty cycle, it has
+#     measured a constant, and stopping there would recreate the exact L137 hole this
+#     instrument exists to close.
+# Backstop: MAX_DAYS since the first row retires it regardless, and says in RETIRED.md
+# that it stopped on time rather than on evidence — a run that cannot finish its census
+# in a month is answering a different question than the one it was built for.
+# `tools/preflight.sh` prints its state at every session open, so neither the running nor
+# the retirement can go unnoticed. Retiring never deletes data.
+#
 # READING A ROW. The verdict column is the answer; the millisecond columns are the evidence.
 # `X` means the probe did not connect inside CONNECT_TIMEOUT. The row to look for before
 # taking a device measurement is `v6-hosts-dead` — that is the fault present, and it is D-216's
@@ -32,10 +48,14 @@
 # literal control refutes in the same row.
 set -uo pipefail
 
+SELF_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 OUT_DIR="${KV_LINK_PROBE_DIR:-$HOME/kv-link-probe}"
 TSV="$OUT_DIR/link_probe.tsv"
 CONNECT_TIMEOUT=5           # a healthy connect to these hosts is 0.17-0.40 s (D-219)
 MAX_TIME=8
+CENSUS_ROUNDS=2016          # 7 days at one round per 5 minutes
+MAX_DAYS=30                 # backstop, whatever the census says
+RETIRED="$OUT_DIR/RETIRED.md"
 
 # The three wRPC hosts are the EXACT hosts of D-219's table, so every row here is directly
 # comparable to the recorded baseline rather than to a new set nobody has a good-day reading
@@ -154,6 +174,44 @@ take_round() {
     "$L4" "$L6" "${H4[0]}" "${H6[0]}" "${H4[1]}" "${H6[1]}" "${H4[2]}" "${H6[2]}" \
     "$VERDICT" >> "$TSV"
   printf '%s  %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$VERDICT"
+  retire_if_done
+}
+
+# Has the census run its course? Called after every round. Retiring removes the cron
+# entry, writes the verdict beside the data, and leaves every row intact.
+retire_if_done() {
+  [ -s "$TSV" ] || return 0
+  local n first_epoch days ok_n bad_n reason=""
+  n=$(( $(wc -l < "$TSV") - 1 ))
+  first_epoch=$(sed -n '2p' "$TSV" | cut -f2)
+  days=$(( ( $(date -u '+%s') - ${first_epoch:-0} ) / 86400 ))
+  ok_n=$(tail -n +2 "$TSV"  | awk -F'\t' '$13 == "ok" { n++ } END { print n+0 }')
+  bad_n=$(tail -n +2 "$TSV" | awk -F'\t' '$13 == "v6-hosts-dead" || $13 == "v6-link-dead" { n++ } END { print n+0 }')
+
+  if [ "$n" -ge "$CENSUS_ROUNDS" ] && [ "$ok_n" -gt 0 ] && [ "$bad_n" -gt 0 ]; then
+    reason="census complete — ${n} rounds over ${days} day(s), and BOTH states were observed (${ok_n} clear, ${bad_n} faulted), so the duty cycle is measured rather than assumed"
+  elif [ "$days" -ge "$MAX_DAYS" ]; then
+    reason="backstop — ${days} days elapsed. The census did NOT complete on evidence: ${n} of ${CENSUS_ROUNDS} rounds, ${ok_n} clear, ${bad_n} faulted. Read the duty cycle below as provisional, and note WHICH state is missing if either count is zero: a run that only ever saw one state measured a constant, not a cycle"
+  else
+    return 0
+  fi
+
+  crontab -l 2>/dev/null | grep -vF "$SELF_PATH" | crontab - 2>/dev/null
+  {
+    echo "# link_probe — RETIRED $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo
+    echo "**Why it stopped:** $reason"
+    echo
+    echo "The cron entry has been removed. Nothing was deleted: \`link_probe.tsv\` holds every"
+    echo "round and \`--summary\` still reads it. Re-arm with \`--install\` if the question comes"
+    echo "back (delete this file first, or it will retire again on the next round)."
+    echo
+    echo '```'
+    summary
+    echo '```'
+  } > "$RETIRED"
+  echo "link probe: RETIRED — $reason"
+  echo "  wrote $RETIRED; cron entry removed; data kept."
 }
 
 summary() {
@@ -176,14 +234,18 @@ case "${1:-}" in
   --summary) summary ;;
   --selftest) selftest ;;
   --install)
-    SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    LINE="*/5 * * * * $SELF >> $OUT_DIR/cron.log 2>&1"
-    ( crontab -l 2>/dev/null | grep -vF "$SELF"; echo "$LINE" ) | crontab -
-    echo "link probe: installed — $LINE"; crontab -l | grep -F "$SELF" ;;
+    LINE="*/5 * * * * $SELF_PATH >> $OUT_DIR/cron.log 2>&1"
+    ( crontab -l 2>/dev/null | grep -vF "$SELF_PATH"; echo "$LINE" ) | crontab -
+    echo "link probe: installed — $LINE"; crontab -l | grep -F "$SELF_PATH" ;;
   --uninstall)
-    SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    crontab -l 2>/dev/null | grep -vF "$SELF" | crontab -
+    crontab -l 2>/dev/null | grep -vF "$SELF_PATH" | crontab -
     echo "link probe: removed" ;;
-  "") take_round ;;
+  "")
+    # Already retired: say so and do nothing. A retired instrument that quietly keeps
+    # recording is worse than one that never stopped, because its own verdict is stale.
+    if [ -f "$RETIRED" ]; then
+      head -3 "$RETIRED"; echo "  (delete $RETIRED and --install to re-arm)"; exit 0
+    fi
+    take_round ;;
   *) echo "usage: $0 [--summary|--selftest|--install|--uninstall]" >&2; exit 2 ;;
 esac
