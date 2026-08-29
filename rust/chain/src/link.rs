@@ -2643,4 +2643,71 @@ mod tests {
         );
         assert_eq!(sanitize_node_text(&"x".repeat(500)).len(), 200);
     }
+
+    /// LINK-P1 / D-217: the vendored dialer must still speak TLS correctly.
+    ///
+    /// The Happy Eyeballs patch replaced `TcpStream::connect` inside
+    /// `tokio-tungstenite`, one layer BELOW the TLS handshake. Every offline
+    /// test in that crate proves the race picks the right *socket* — none of
+    /// them can see whether the socket then gets a properly verified TLS
+    /// session, because they never speak TLS at all. Two ways to break this
+    /// invisibly, both of which pass the whole offline suite:
+    ///
+    /// 1. hand back a stream connected to an address the caller never
+    ///    resolved, so the certificate is checked against the wrong host;
+    /// 2. disturb `domain(&request)`, so SNI goes out empty or wrong and the
+    ///    server either refuses or serves a default certificate.
+    ///
+    /// A real `wss://` handshake against a real node closes both: the reply is
+    /// 101 only if rustls validated the chain for the name in the URL. It runs
+    /// against whatever node the pin's own resolver hands out, so it exercises
+    /// the production path rather than a hardcoded host.
+    ///
+    /// Run:
+    /// `cargo test -p kaspaverse-chain --lib live_wss_handshake -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires network; manual proof for LINK-P1 (vendored dialer TLS)"]
+    async fn live_wss_handshake_survives_the_vendored_dialer() {
+        // The URL normally comes from the pin's own resolver, so this exercises
+        // the production path. `KV_LIVE_WSS_URL` overrides it because the
+        // resolver has its OWN unrelated defect — the 16-seeder serial walk that
+        // eats the whole fetch budget (tracker P0, second row) — and a dial
+        // proof must not be blocked by a discovery bug. It is also what makes
+        // this test usable as a controlled A/B against one fixed endpoint.
+        let url = match std::env::var("KV_LIVE_WSS_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                let resolver = Resolver::default();
+                let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+                bounded_get_node(&resolver, network_id, Duration::from_secs(20))
+                    .await
+                    .expect("resolver must yield a node — without one this proves nothing")
+                    .url
+            }
+        };
+
+        assert!(
+            url.starts_with("wss://"),
+            "the point is TLS; {url} is not a TLS endpoint"
+        );
+
+        let started = std::time::Instant::now();
+        let (stream, response) = tokio_tungstenite::connect_async(url.as_str())
+            .await
+            .expect("TLS handshake through the patched dialer must complete");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            response.status().as_u16(),
+            101,
+            "a websocket upgrade is the only response that means the TLS session \
+             was established and validated"
+        );
+
+        // Just cleanup — the 101 above is the whole proof, and it is already
+        // conclusive: rustls will not surface an upgrade response for a chain it
+        // did not validate against the name in the URL.
+        drop(stream);
+        println!("live wss handshake OK in {elapsed:?} — url={url} (101 upgrade, chain validated)");
+    }
 }

@@ -89,6 +89,10 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
   expect_lane "cargo fmt";           expect_lane "cargo clippy"
   expect_lane "cargo test";          expect_lane "cargo deny (INV-7)"
   expect_lane "android cross-compile"
+  # Guarded on the vendored manifest, a TRACKED artifact — the lane must appear
+  # the day the vendored dialer does and vanish the day it is deleted (D-217's
+  # deletion trigger), never because a tool is missing.
+  [ -f "$ROOT/rust/vendor/tokio-tungstenite/Cargo.toml" ] && expect_lane "vendored dialer (D-217)"
 else
   expect_lane "rust workspace"
 fi
@@ -137,10 +141,115 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
   # slow machine, and it cannot fail to red a hang.
   cargo_tests() { timeout 600 cargo test --workspace; }
   run_check "cargo test"   cargo_tests
+  # ── The vendored dialer (D-217) ────────────────────────────────────────────
+  # It is deliberately NOT a workspace member (see rust/Cargo.toml's `exclude`),
+  # so EVERY other Rust lane is blind to it: `cargo test --workspace` does not run
+  # its tests and `clippy --workspace` does not read it. A patch to the one
+  # function the wallet's only path to consensus goes through cannot also be the
+  # one piece of code nothing checks.
+  #
+  # Runs AFTER `cargo deny` on purpose: the advisory tripwire below reads the
+  # RustSec database that cargo-deny fetches, so on a cold CI machine this lane
+  # must not be the one to look for it first.
+  #
+  # What it does NOT claim: this is not cargo-deny for the vendored crate.
+  # `cargo deny check advisories` cannot see a `[patch.crates-io]` path crate at
+  # all (measured — an identical crate at an identical version reports its
+  # advisories from the registry and reports `advisories ok` behind a path
+  # patch), so vendoring removed tokio-tungstenite from the advisory sweep. The
+  # tripwire is the compensation, and it is deliberately blunt: any advisory file
+  # for the crate reds the gate and a human checks it against 0.23.1.
+  #
+  # CARGO_TARGET_DIR is forced out of the vendored tree — a target/ directory
+  # nested there would be committed into the copy whose whole value is being
+  # verbatim (L24).
+  if [ -f "$ROOT/rust/vendor/tokio-tungstenite/Cargo.toml" ]; then
+    vendored_dialer() {
+      local dir="$ROOT/rust/vendor/tokio-tungstenite"
+      local rec="$ROOT/rust/vendor/PROVENANCE.md"
+      local rc=0 checked=0 want file marker got
+      # (a) every VERBATIM file still matches the published crate. Fail CLOSED: a
+      #     manifest that cannot be read, or reads short, is a finding (PB-029).
+      while read -r want file marker; do
+        [ -n "$marker" ] && continue   # the two files D-217 deliberately patched
+        got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d' ' -f1)"
+        if [ "$got" != "$want" ]; then
+          echo "   DRIFT: $file no longer matches the published crate"
+          rc=1
+        fi
+        checked=$((checked+1))
+      done < <(grep -E '^[0-9a-f]{64}  ' "$rec")
+      if [ "$checked" -ne 20 ]; then
+        echo "   PROVENANCE.md listed $checked verbatim files, expected 20 — the record moved"
+        rc=1
+      fi
+      # (b) our OWN two files still hash to what the record says they do.
+      while read -r _tag want file; do
+        got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d' ' -f1)"
+        if [ "$got" != "$want" ]; then
+          echo "   DRIFT: $file changed without its PROVENANCE.md anchor being updated"
+          rc=1
+        fi
+      done < <(grep -E '^PATCHED  [0-9a-f]{64}  ' "$rec")
+      # (c) NOTHING WAS ADDED. Hashing only what the record lists cannot see a new
+      #     file, and cargo auto-detects and EXECUTES a build.rs that upstream
+      #     0.23.1 does not have — so "verbatim" has to mean the file set too.
+      local listed actual
+      listed="$(awk '/^[0-9a-f]{64}  /{print $2}' "$rec" | sort)"
+      actual="$(cd "$dir" && find . -type f -not -path './target/*' | sed 's|^\./||' | sort)"
+      if [ "$listed" != "$actual" ]; then
+        echo "   FILE-SET DRIFT: the vendored tree is not the tarball's 22 files"
+        diff <(echo "$listed") <(echo "$actual") | sed 's/^/     /'
+        rc=1
+      fi
+      # (d) advisory tripwire, with a control — a zero from a lookup that cannot
+      #     look is not evidence of absence (L106).
+      local db
+      db="$(ls -d "$HOME"/.cargo/advisory-dbs/*/crates 2>/dev/null | head -1)"
+      if [ -z "$db" ]; then
+        echo "   advisory DB absent — cannot check the vendored crate; cargo-deny never ran"
+        rc=1
+      elif [ ! -d "$db/atty" ]; then
+        echo "   advisory DB present but the control crate (atty) is missing — lookup broken, not clean"
+        rc=1
+      elif [ -d "$db/tokio-tungstenite" ]; then
+        echo "   ADVISORY against the vendored crate: $(ls "$db/tokio-tungstenite" | tr '\n' ' ')"
+        echo "   cargo-deny cannot see path-patched crates — check it against 0.23.1 BY HAND"
+        rc=1
+      else
+        # A readable DB is not a CURRENT one, and "no advisory" from a stale DB is
+        # the same false comfort the control above exists to prevent. cargo-deny
+        # has a skip_check branch (not installed), and on that path nothing
+        # refreshes this — so freshness is asserted, not assumed from ordering.
+        # DERIVED from $db, never globbed independently: advisory-dbs/ holds one
+        # clone per DB URL, so two independent `head -1` picks can land on
+        # different clones and let a fresh sibling vouch for the stale DB that was
+        # actually queried — the very "lookup that cannot look" this lane's
+        # control exists to prevent.
+        local fh
+        fh="$(dirname "$db")/.git/FETCH_HEAD"
+        if [ ! -f "$fh" ]; then
+          echo "   advisory DB has no FETCH_HEAD — its freshness cannot be established"
+          rc=1
+        elif [ -n "$(find "$fh" -mtime +7 2>/dev/null)" ]; then
+          echo "   advisory DB last fetched $(date -r "$fh" '+%Y-%m-%d') — >7 days stale;"
+          echo "   its silence about tokio-tungstenite is not evidence. Run: cargo deny check advisories"
+          rc=1
+        fi
+      fi
+      [ "$rc" -eq 0 ] || return 1
+      CARGO_TARGET_DIR="$ROOT/rust/target/vendor-tests" \
+        timeout 300 cargo test --locked --lib --manifest-path "$dir/Cargo.toml"
+    }
+  fi
   if command -v cargo-deny >/dev/null 2>&1; then
     run_check "cargo deny (INV-7)" cargo deny check
   else
     skip_check "cargo deny (INV-7)" "cargo-deny not installed — REQUIRED from P0-D4"
+  fi
+  # Ordered after cargo deny: lane (d) reads the DB cargo-deny fetches.
+  if [ -f "$ROOT/rust/vendor/tokio-tungstenite/Cargo.toml" ]; then
+    run_check "vendored dialer (D-217)" vendored_dialer
   fi
   # cargo-ndk needs an NDK; discover a local install when the env var is unset.
   # Layout-agnostic on purpose. This list used to name two paths from one machine,

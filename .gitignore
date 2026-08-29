@@ -3,6 +3,12 @@
 /build/
 android/**/build/
 rust/target/
+# The vendored dialer builds standalone for its own test lane, and an anchored
+# `rust/target/` does not reach a target dir nested under `rust/vendor/` (L24 is
+# the same scar from the other direction). The lane sets CARGO_TARGET_DIR out of
+# the tree anyway; this is the belt to that braces, because a stray target/ here
+# would be committed INTO the verbatim vendored copy.
+rust/vendor/**/target/
 .dart_tool/
 .gradle/
 *.apk

@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["core", "chain", "bridge", "covenant"]
+# The vendored dialer (D-217, see [patch.crates-io] at the foot of this file) is
+# deliberately NOT a member. Membership would drag its dev-dependencies into our
+# lockfile and put verbatim upstream code — examples included — under
+# `clippy --workspace --all-targets -D warnings`, so keeping the tarball byte-exact
+# would start costing gate reds. Excluded, it still builds through the patch, and
+# its own tests run standalone (`tools/gate.sh` lane "vendored dialer (D-217)").
+exclude = ["vendor/tokio-tungstenite"]
 
 [workspace.package]
 version = "0.1.0"
@@ -103,3 +110,42 @@ workflow-log = "0.18.0"
 workflow-http = { version = "0.18.0", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# ── Vendored dependency (D-217, INV-7) ──────────────────────────────────────
+# `tokio-tungstenite 0.23.1`, the crates.io tarball VERBATIM save for one
+# function, redirected here for the whole graph — ours and the pinned tree's
+# (`workflow-websocket` → `workflow-rpc` → `kaspa-wrpc-client`), which is the
+# point: no call site anywhere has to know.
+#
+# WHY. `connect.rs`'s `TcpStream::connect("host:port")` walks the resolved
+# addresses SERIALLY and advances only on `Err` — and a blackholed SYN is not an
+# error inside any timeout a wallet can afford. On the founder's Wi-Fi that cost
+# 4 m 34 s to reach a node while the app's own HTTPS egress reached the same
+# hostnames in under a second, because hyper-util races the families (its
+# `happy_eyeballs_timeout` defaults to 300 ms). The one changed function is that
+# race, mirrored from hyper-util's `ConnectingTcp` — which is already compiled
+# into this binary.
+#
+# NOT A PIN MOVE, and not for want of trying: upstream HEAD of BOTH
+# `workflow-rs` and `snapview/tokio-tungstenite` still carries the same
+# `TcpStream::connect`, measured 2026-08-28. D-183 stays held; there is nothing
+# on the other side of it. `workflow-websocket` exposes no connector, dialer or
+# stream hook at any version, and `KaspaRpcClient::connect` rebuilds
+# `WebSocketConfig` from `Default` every connect — so the socket cannot be
+# supplied from the app either.
+#
+# INV-9 IS UNTOUCHED. This is a dialer, not protocol logic: the wRPC client, the
+# handshake, the framing and every consensus type still come from the pinned
+# crates, byte-identical. TLS is likewise untouched — the change sits BELOW it,
+# and SNI still comes from `domain(&request)`.
+#
+# PROVENANCE. Extracted from the crates.io `.crate` tarball whose sha256 equals
+# the `checksum` cargo recorded for this package in `rust/Cargo.lock`
+# (c6989540…631cd). Per-file manifest + the verify command:
+# `rust/vendor/PROVENANCE.md`.
+#
+# DELETION TRIGGER. The day a released `tokio-tungstenite` carries a concurrent
+# dial, delete this stanza and `rust/vendor/tokio-tungstenite/`; the build
+# returns to the registry crate. That is also the whole reversal.
+[patch.crates-io]
+tokio-tungstenite = { path = "vendor/tokio-tungstenite" }
