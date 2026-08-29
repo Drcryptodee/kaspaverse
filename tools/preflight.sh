@@ -119,6 +119,35 @@ elif [ -s "$PROBE_DIR/link_probe.tsv" ]; then
     && PROBE_NOTE="  ← STALE (${PROBE_AGE}m): cron armed but not writing"
   echo "• link prober: ${PROBE_N} rounds, ${PROBE_FAULT}, last ${PROBE_AGE}m ago (retires at 2016 rounds or 30d — tools/link_probe.sh --summary)${PROBE_NOTE}"
 fi
+# Disk headroom. Build caches here are pure REGENERABLE artifact — `rust/target` reached
+# 62 GB and `build/` 24 GB by 2026-08-29, and a full clean of both returned 86 GB in 11 s —
+# so running out of space is a self-inflicted wound, and it already cost one session
+# (`cargo` failing `No space left on device` mid-sitting). This WARNS; it never deletes.
+#
+# Deliberately not a cron job. A `cargo clean` on a timer eventually fires DURING a build
+# and corrupts it, and it taxes a random future session with a cold rebuild for no reason.
+# Session open is the one moment nothing is compiling, which is why the check lives here
+# and hands you the command instead of running it.
+#
+# The threshold is MEASURED (2026-08-29, from cold after the big clean): a fresh full build
+# of both trees is 12.2 G (`rust/target` 12 G + `build` 176 M), and `debug/incremental` was
+# separately observed at 19 G, so ~31 G is a legitimate working set rather than waste. 40 G
+# warns with ~9 G of slack — early enough to act unhurried, not at the cliff. For scale, the
+# cold gate that produced these numbers took 745 s while SHARING the machine with an
+# unrelated container build, so a rebuild is minutes, not an afternoon: this warning is
+# never a reason to postpone cleaning.
+DISK_FREE_G=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+if [ -n "$DISK_FREE_G" ]; then
+  if [ "$DISK_FREE_G" -lt 40 ]; then
+    echo "• disk: ${DISK_FREE_G}G free  ← LOW. Reclaim (regenerable, ~11 s to clean):"
+    echo "    flutter clean && cargo clean --manifest-path rust/Cargo.toml"
+    # Half this machine's disk is NOT the project — /var/lib/containerd held 61 G on
+    # 2026-08-29 — so say where to look before anyone cleans the wrong tree twice.
+    echo "    if that is not enough, look OUTSIDE the repo too: du -xh --max-depth=1 /var/lib"
+  else
+    echo "• disk: ${DISK_FREE_G}G free"
+  fi
+fi
 echo "═══════════════════════════════════════════"
 if [ "$HAVE_DOCS" = 1 ]; then
   echo "Next: diff against expected-state in docs/sessions/NEXT_SESSION.md" # gate-allow:internal-path
