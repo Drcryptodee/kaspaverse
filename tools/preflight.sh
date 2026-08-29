@@ -85,12 +85,14 @@ if [ -x tools/beacon_floor.sh ]; then
     BEACON_AGE=$(( ( $(date -u +%s) - $(date -u -d "$BEACON_DATE" +%s 2>/dev/null || echo 0) ) / 86400 ))
     BEACON_NOTE=""
     [ "$BEACON_AGE" -gt 30 ] && BEACON_NOTE="  ← STALE (>30d): run tools/beacon_floor.sh --record"
-    # Re-run the DERIVED test on the stamped numbers, offline: breach iff 10*b^3 > (y+b)^3.
+    # Re-run the DERIVED test on the stamped numbers, offline: breach iff 10*b^5 > (y+b)^5.
+    # The exponent is RACE_FETCHES (dag_monitor.rs), 5 since LINK-P2; it must track that
+    # constant and tools/beacon_floor.sh's copy of the same derivation.
     # Staleness alone is not the alarm — a fresh reading that is BELOW the floor would
     # otherwise print as current and unremarkable, which is the exact failure D-201 exists
     # to stop one layer down.
     BEACON_DEN=$((BEACON_Y + BEACON_B))
-    if [ "$BEACON_DEN" -gt 0 ] && [ $((10 * BEACON_B * BEACON_B * BEACON_B)) -gt $((BEACON_DEN * BEACON_DEN * BEACON_DEN)) ]; then
+    if [ "$BEACON_DEN" -gt 0 ] && [ $((10 * BEACON_B * BEACON_B * BEACON_B * BEACON_B * BEACON_B)) -gt $((BEACON_DEN * BEACON_DEN * BEACON_DEN * BEACON_DEN * BEACON_DEN)) ]; then
       BEACON_NOTE="${BEACON_NOTE}  ← BELOW FLOOR: D-183 trigger T-C has FIRED (re-run to confirm, then report)"
     fi
     echo "• beacon floor: ${BEACON_Y}/${BEACON_TOT} node-yielding, ${BEACON_B} hung, at ${BEACON_DATE} (${BEACON_AGE}d ago)${BEACON_NOTE}"

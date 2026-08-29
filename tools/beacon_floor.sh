@@ -31,17 +31,28 @@
 # RESOLVER_FETCH_TIMEOUT = 5 s on the WHOLE walk. A beacon that completes TLS and then never
 # answers consumes that entire budget by itself; a beacon that fails FAST costs almost
 # nothing. So one walk succeeds iff a node-yielding beacon precedes every HUNG beacon in the
-# shuffle -> P = y/(y+b), and a race round fires RACE_FETCHES = 3 independent shuffles ->
-# P(round) = 1 - (b/(y+b))^3. Requiring a cold start to resolve at least one candidate to
+# shuffle -> P = y/(y+b), and a race round fires RACE_FETCHES = 5 independent shuffles ->
+# P(round) = 1 - (b/(y+b))^5. Requiring a cold start to resolve at least one candidate to
 # probe, in ONE round, with >=90% probability gives the breach test used below:
 #
-#     breach  <=>  (b/(y+b))^3 > 0.10  <=>  10*b^3 > (y+b)^3      (integer, no bc)
+#     breach  <=>  (b/(y+b))^5 > 0.10  <=>  10*b^5 > (y+b)^5      (integer, no bc)
 #
-# At today's shape (2 fast failures, so y+b = 14) that threshold sits at y = 8, which is
+# THE EXPONENT IS RACE_FETCHES AND IT MOVED AT LINK-P2 (3 -> 5, dag_monitor.rs). It is the
+# only term in this derivation the app controls: the beacon list is frozen in the pinned crate
+# and the budget is what a USER waits, so fan-out is the one lever that buys robustness for
+# free. Keep this file's exponent equal to that constant — a floor computed from a stale
+# exponent is not conservative, it is simply wrong, and it is wrong in the silent direction
+# (too strict here, so it cries breach on a fleet that is fine). tools/preflight.sh carries
+# the same expression for its offline re-run and moves with it.
+#
+# At today's shape (2 fast failures, so y+b = 14) that threshold sits at y = 6, which is
 # where the headline FLOOR below comes from — but the COUNT is only a summary of the ratio.
-# Asserting the count alone is wrong in both directions: y=8 with b=8 is a real breach that
-# a count test passes (P = 0.875), and y=7 with b=2 is fine (P = 0.989) but a count test
-# fails it. The ratio is the thing that was derived, so the ratio is the thing asserted.
+# Asserting the count alone is wrong in both directions: y=6 with b=11 is a real breach that
+# a count test passes (10*11^5 = 1610510 > 17^5 = 1419857, P = 0.887), and y=5 with b=2 is
+# fine (P = 0.9981) but a count test fails it. The ratio is the thing that was derived, so
+# the ratio is the thing asserted. (Both examples are arithmetic under THIS file's exponent —
+# recompute them if it ever moves again; the previous pair was left behind by the 3 -> 5 move
+# and asserted a breach the tool does not call.)
 #
 # Scope: this governs the COLD start only. PANTRY_DIALS = 3 plus the cached endpoint make
 # the common warm reconnect resolver-free (link.rs:449-456) — the resolver is an
@@ -51,20 +62,25 @@
 # count suggests (9 beacons fronted 6 distinct nodes on 2026-08-26), so this is an upper
 # bound on the diversity actually available.
 #
-# THE FLEET IS AT THE FLOOR, NOT ABOVE IT. Four samples on 2026-08-26 read 9, 9, 9, 8:
-# mike.kaspa.red flaps between 200 and 500, so the count is 8 on a bad sample and 9 on a
-# good one. Treat a single sub-floor reading as noise and re-run; treat a sustained one as
-# the trigger.
+# THE FLEET SHAPE IS STABLE AND THE MARGIN IS NOW THREE, NOT ONE. Four samples on 2026-08-26
+# read 9, 9, 9, 8 (mike.kaspa.red flaps between 200 and 500, so the count is 8 on a bad sample
+# and 9 on a good one). An independent reading on 2026-08-29 reproduced the shape EXACTLY —
+# y=9, b=5, 2 fast-fail, same five hung hosts — so the fleet is not drifting, it is just thin.
+# What changed is our side: at RACE_FETCHES=3 the floor was y>=8 and D-201 recorded the
+# standing correction that "9 is ample" was wrong, the margin being one host on a good sample
+# and zero on a bad one. At 5 the floor is y>=6 and the margin is three. The fleet did not
+# improve; the wallet stopped depending on it so tightly.
+# Treat a single sub-floor reading as noise and re-run; treat a sustained one as the trigger.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 SELF="$ROOT/tools/beacon_floor.sh"
 
 # Headline floor: the value the ratio test resolves to at today's fleet shape. Documentation
 # and preflight's summary line — the assertion below is the ratio, not this number.
-FLOOR=8
+FLOOR=6
 # Last reading — update via --record. Read by tools/preflight.sh for the staleness nudge
 # and for its own offline re-run of the breach test.
-LAST_READING=2026-08-26
+LAST_READING=2026-08-29
 LAST_YIELDING=9
 LAST_HUNG=5
 LAST_TOTAL=16
@@ -109,10 +125,11 @@ if [ "$YIELD" = 0 ]; then
   exit 0
 fi
 
-# The derived test. Integer arithmetic only: breach iff 10*b^3 > (y+b)^3.
+# The derived test. Integer arithmetic only: breach iff 10*b^5 > (y+b)^5. The exponent is
+# RACE_FETCHES (dag_monitor.rs) — see the derivation above; 16^5*10 is far inside 64-bit.
 DEN=$((YIELD + HUNG))
 BREACH=0
-[ $((10 * HUNG * HUNG * HUNG)) -gt $((DEN * DEN * DEN)) ] && BREACH=1
+[ $((10 * HUNG * HUNG * HUNG * HUNG * HUNG)) -gt $((DEN * DEN * DEN * DEN * DEN)) ] && BREACH=1
 
 if [ "${1:-}" = "--record" ]; then
   TODAY=$(date -u '+%Y-%m-%d')

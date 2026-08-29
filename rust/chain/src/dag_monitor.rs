@@ -37,7 +37,47 @@ const BIND_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Parallel `Resolver::get_node` fetches per race round (the resolver API
 /// returns ONE node per fetch — spec verified against the pinned source).
-const RACE_FETCHES: usize = 3;
+///
+/// **This constant is an EXPONENT, not a count** (D-201's derivation, and the
+/// reason it moved from 3 to 5 at LINK-P2). `Resolver::fetch` shuffles all 16
+/// beacons and walks them SERIALLY with no per-URL timeout (pin
+/// `resolver.rs:155-167`), so one hung beacon consumes the whole
+/// `RESOLVER_FETCH_TIMEOUT` by itself and its walk yields nothing: a single
+/// walk succeeds iff a yielding beacon precedes every hung one, `P = y/(y+b)`.
+/// Each fetch re-shuffles independently, so a round of `RACE_FETCHES` walks
+/// fails with `(b/(y+b))^RACE_FETCHES` — the fan-out is the only lever that
+/// buys robustness WITHOUT making a user wait longer, which is why the budget
+/// was left alone (see [`link::RESOLVER_FETCH_TIMEOUT`]).
+///
+/// Measured 2026-08-29 on the build host, reproducing `tools/beacon_floor.sh`'s
+/// 2026-08-26 reading exactly: **y=9 yielding, b=5 hung, 2 fast-fail**. At 3
+/// walks a cold round found nothing 4.6 % of the time and the derived floor sat
+/// at y ≥ 8 — one host of margin on a good sample and zero on a bad one, which
+/// D-201 records as a standing correction. At 5 the same fleet gives 0.6 % and
+/// the floor drops to **y ≥ 6**. `tools/beacon_floor.sh` and `tools/preflight.sh`
+/// assert that floor and BOTH carry this exponent: changing it here without
+/// changing them there silently strands the only instrument watching the fleet
+/// (the L135 shape — a constant whose watcher is keyed to its old value).
+///
+/// Cost, and there are THREE items, not two. (1) Two more small HTTPS GETs per
+/// round. (2) A peak dial concurrency of 1 cached + `PANTRY_DIALS` +
+/// `RACE_FETCHES` = 9; the round ceiling does NOT move, staying
+/// `RESOLVER_FETCH_TIMEOUT + PROBE_TIMEOUT` = 9 s. (3) **The strike ledger.** A
+/// WINNING round strikes every probe failure in it, and `StrikeReason::
+/// DialTimeout` is not excused by `phone_fault_in_round` (which withholds only
+/// `DnsFailure`/`Unreachable`), so more candidates per round is also more
+/// CONVICTABLE candidates per round — and with `DEMOTE_AT_STRIKES` = 2 inside
+/// `STRIKE_WINDOW_SECS` = 600, over a fleet whose yielding beacons front only
+/// ~6 distinct nodes, that reaches a demotion sooner. A demoted node leaves
+/// `race_pantry`, the warm-reconnect fast path this very change exists to
+/// protect, so the failure mode would be self-defeating rather than merely
+/// noisy. Raised by `wallet-security-auditor` and NOT dismissed — it is
+/// unmeasured, not disproven. **What would falsify it:** an
+/// `endpoint_strike`/`endpoint_demoted` span-rate comparison across a device
+/// soak, before against after. Only if that shows spurious `DialTimeout`
+/// strikes does `phone_fault_in_round` need widening; do not pre-emptively
+/// loosen a conviction rule on a hypothesis.
+const RACE_FETCHES: usize = 5;
 
 /// Envelope bound for the WHOLE winner-bind call (consensus-audit BLOCK at
 /// R0): the dial itself is bounded by [`BIND_TIMEOUT`], but
@@ -616,12 +656,13 @@ impl DagMonitor {
                 // Recorded, never erased: the ledger must stay auditable for
                 // wrongful ACQUITTALS too, not only wrongful convictions.
                 log::info!(
-                    "link: strike ({}) on {url} WITHHELD as {} — not the node's fault \
+                    "link: strike ({}) on {host} WITHHELD as {} — not the node's fault \
                      ({withheld} withheld so far)",
                     reason.as_token(),
-                    why.as_token()
+                    why.as_token(),
+                    host = link::endpoint_host(url)
                 );
-                spans::mark_with("endpoint_strike_withheld", url);
+                spans::mark_with("endpoint_strike_withheld", link::endpoint_host(url));
                 return;
             }
         };
@@ -636,9 +677,10 @@ impl DagMonitor {
             demoted
         };
         log::info!(
-            "link: strike ({}) on {url}{}",
+            "link: strike ({}) on {host}{}",
             reason.as_token(),
-            if demoted { " — DEMOTED" } else { "" }
+            if demoted { " — DEMOTED" } else { "" },
+            host = link::endpoint_host(url)
         );
         spans::mark_with(
             if demoted {
@@ -646,7 +688,7 @@ impl DagMonitor {
             } else {
                 "endpoint_strike"
             },
-            url,
+            link::endpoint_host(url),
         );
     }
 
@@ -739,13 +781,17 @@ impl DagMonitor {
         if let Some((url, at, why)) = taken {
             if prover_url == Some(url.as_str()) {
                 log::info!(
-                    "link: pending strike on {url} refuted by its own reconnect — discarded"
+                    "link: pending strike on {host} refuted by its own reconnect — discarded",
+                    host = link::endpoint_host(&url)
                 );
             } else if Self::now_unix().saturating_sub(at) <= link::PENDING_STRIKE_TTL_SECS {
                 // `at` is when the socket DIED, not now — see commit_strike.
                 self.commit_strike(&url, why, at, false);
             } else {
-                log::info!("link: pending strike on {url} expired unproven — discarded");
+                log::info!(
+                    "link: pending strike on {host} expired unproven — discarded",
+                    host = link::endpoint_host(&url)
+                );
             }
         }
     }
@@ -1322,7 +1368,7 @@ impl DagMonitor {
             "link: stale ctl {state:?} from retired bind gen={} ({}) — DISCARDED \
              (current gen={}); the live socket keeps its life",
             bind.gen,
-            bind.url,
+            link::endpoint_host(&bind.url),
             self.inner.current_gen.load(Ordering::SeqCst)
         );
     }
@@ -1337,7 +1383,7 @@ impl DagMonitor {
                 "link: notification from retired bind gen={} ({}) — DISCARDED \
                  (further ones counted, not logged)",
                 bind.gen,
-                bind.url
+                link::endpoint_host(&bind.url)
             );
         }
     }
@@ -1414,7 +1460,19 @@ impl DagMonitor {
             .task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
-        log::info!("link: bind gen={} armed for {}", bind.gen, bind.url);
+        // HOST only, never the whole URL (§19 drain). `validate_node_url` already
+        // refuses `@`, `?` and `#`, so the userinfo and query routes for a
+        // credential are closed — but it does NOT refuse a PATH SEGMENT, and a
+        // user fronting their own node behind a token-auth reverse proxy writes
+        // exactly `wss://node/<token>/borsh`. That is a credential, and logcat is
+        // world-readable to anything holding READ_LOGS. `endpoint_host` stops at
+        // the first `/`, which is what makes INV-3's "the endpoint lane carries
+        // public data only" true here rather than merely asserted.
+        log::info!(
+            "link: bind gen={} armed for {}",
+            bind.gen,
+            link::endpoint_host(&bind.url)
+        );
         Ok(bind)
     }
 
@@ -1490,7 +1548,7 @@ impl DagMonitor {
                 "link: bind gen={} ({}) retired before it ever connected (cause={cause}) — \
                  no run to record",
                 bind.gen,
-                bind.url
+                link::endpoint_host(&bind.url)
             );
         }
         if let Some(tx) = bind
@@ -1561,7 +1619,10 @@ impl DagMonitor {
             // select arm body), and `KaspaRpcClient::disconnect` serializes
             // callers on `disconnect_guard` (pin `client.rs:476-482`).
             link::bounded_disconnect((*client).clone(), link::DISCONNECT_WAIT_TIMEOUT).await;
-            log::info!("link: teardown of retired bind gen={gen} ({url}) finished");
+            log::info!(
+                "link: teardown of retired bind gen={gen} ({host}) finished",
+                host = link::endpoint_host(&url)
+            );
         });
         let task = bind
             .task
@@ -1802,13 +1863,13 @@ impl DagMonitor {
 
             log::info!(
                 "link: race winner {} (server {}, rpc v{}, daa {}){}",
-                winner.url,
+                link::endpoint_host(&winner.url),
                 winner.server_version,
                 winner.rpc_api_version,
                 winner.virtual_daa_score,
                 if advisory { " [hygiene advisory]" } else { "" }
             );
-            spans::mark_with("race_winner", &winner.url);
+            spans::mark_with("race_winner", link::endpoint_host(&winner.url));
             // **A swap closes the span it opened** (P0b). `on_connected` marks
             // `wss_connected` for this bind like any other, and a swap
             // deliberately never opened a `connect_start` — so without a
@@ -1845,7 +1906,7 @@ impl DagMonitor {
                 Err(e) => {
                     log::warn!(
                         "link: could not arm a bind for {}: {}",
-                        winner.url,
+                        link::endpoint_host(&winner.url),
                         link::sanitize_node_text(&e.to_string())
                     );
                     continue;
@@ -1885,7 +1946,7 @@ impl DagMonitor {
                         log::info!(
                             "link: the bind to {} was retired while it was dialing — \
                              keeping the hunt alive",
-                            winner.url
+                            link::endpoint_host(&winner.url)
                         );
                         continue;
                     }
@@ -1896,7 +1957,7 @@ impl DagMonitor {
                     // alive: it just answered a probe elsewhere) and re-race.
                     log::warn!(
                         "link: bind to race winner {} failed: {}",
-                        winner.url,
+                        link::endpoint_host(&winner.url),
                         link::sanitize_node_text(&e.to_string())
                     );
                     // ...unless WE broke the dial by retiring the bind under
@@ -1913,7 +1974,7 @@ impl DagMonitor {
                     } else {
                         log::info!(
                             "link: bind to {} failed after we retired it — no strike (ours)",
-                            winner.url
+                            link::endpoint_host(&winner.url)
                         );
                     }
                     self.retire_bind("bind-failed").await;
@@ -1924,7 +1985,7 @@ impl DagMonitor {
                     log::warn!(
                         "link: bind to race winner {} exceeded {BIND_ENVELOPE_TIMEOUT:?} \
                          (teardown guard suspected) — re-racing, no strike",
-                        winner.url
+                        link::endpoint_host(&winner.url)
                     );
                     self.retire_bind("bind-timeout").await;
                 }
@@ -1996,8 +2057,9 @@ impl DagMonitor {
                     // by its own identity, not by a descriptor re-read now.
                     if let Some(url) = self.current_bind().map(|bind| bind.url.clone()) {
                         log::info!(
-                            "link: watchdog stall confirmed on {url} \
-                             (socket silent {silent_secs}s) — executing"
+                            "link: watchdog stall confirmed on {host} \
+                             (socket silent {silent_secs}s) — executing",
+                            host = link::endpoint_host(&url)
                         );
                         // Retirement records the run (cause=watchdog-stall).
                         self.retire_bind("watchdog-stall").await;
@@ -2166,7 +2228,16 @@ impl DagMonitor {
             health.record_run(url, run_secs);
             self.save_health(&health);
         }
-        log::info!("link: run ended url={url} run={run_secs}s cause={cause}");
+        // HOST only (§19 drain — same path-segment credential as `install_bind`).
+        // The `url=` KEY is deliberately kept: device forensics and every prior
+        // sitting grep this line by it (D-187 and the soak verdicts), so narrowing
+        // the VALUE is safe where changing the key would break the readers. The TSV
+        // health ledger still keys on the whole URL — that is on-device app-private
+        // storage, not the log lane.
+        log::info!(
+            "link: run ended url={} run={run_secs}s cause={cause}",
+            link::endpoint_host(url)
+        );
     }
 
     /// The stall verdict for a watchdog claim (R3 D-099), judged against OUR
@@ -2323,7 +2394,7 @@ impl DagMonitor {
                 "link: retired bind gen={} ({}) discarded {ctl} stale ctl event(s) and \
                  {notes} stale notification(s)",
                 bind.gen,
-                bind.url
+                link::endpoint_host(&bind.url)
             );
         }
     }
@@ -2352,7 +2423,7 @@ impl DagMonitor {
         {
             log::warn!(
                 "link: demoted endpoint reconnected — refusing {} and re-racing",
-                bind.url
+                link::endpoint_host(&bind.url)
             );
             self.retire_bind("demoted-refusal").await;
             self.spawn_race();
@@ -2394,7 +2465,7 @@ impl DagMonitor {
                             "link: bind gen={} ({}) was retired while it came up — \
                              not published; the hunt owns recovery",
                             bind.gen,
-                            bind.url
+                            link::endpoint_host(&bind.url)
                         );
                         return;
                     }
@@ -2429,7 +2500,7 @@ impl DagMonitor {
                 // `dag-monitor: connected to wss://` now.
                 log::info!(
                     "dag-monitor: connected to {} (bind gen={})",
-                    bind.url,
+                    link::endpoint_host(&bind.url),
                     bind.gen
                 );
                 // Remember the node that worked — it is candidate 0 (the fast
@@ -2526,7 +2597,7 @@ impl DagMonitor {
                 // its death says nothing about the endpoint.
                 log::info!(
                     "link: drop after {run_secs}s run on {} — churn noise, no strike",
-                    bind.url
+                    link::endpoint_host(&bind.url)
                 );
             }
         }

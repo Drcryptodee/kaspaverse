@@ -111,6 +111,7 @@ fi
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "gradle dependency verification (INV-7)"
 [ -f "$ROOT/flutter_rust_bridge.yaml" ] && expect_lane "codegen drift (lib/src/rust/ + frb_generated.rs)"
 expect_lane "contract spine"
+expect_lane "race fan-out exponent (L135)"
 # Mirrors this lane's own guard exactly. A roster entry that is stricter than the
 # lane it names is not extra rigour — it is a spurious RED in a scaffold tree, and
 # a spuriously red check is how a real check earns a `git rm` from the ledger.
@@ -730,6 +731,42 @@ contract_spine() {
 }
 # vectors execute inside `cargo test` (chain crate integration tests)
 run_check "contract spine" contract_spine
+
+# ── The race fan-out exponent (L135 shape — LINK-P2) ────────────────────────
+# `RACE_FETCHES` is not just a count, it is the EXPONENT in the PNN beacon-floor
+# derivation: a walk fails when a hung beacon precedes every yielding one, and a
+# round fires RACE_FETCHES independent shuffles, so P(round fails) =
+# (b/(y+b))^RACE_FETCHES. That derivation is hand-copied into two shell tools,
+# and the floor they assert is WRONG the moment the constant moves without them
+# — wrong in the silent direction, since a stale-low exponent cries breach on a
+# fleet that is fine and a stale-high one blesses one that is not.
+#
+# This is exactly L135's shape: a constant with watchers keyed to its old value.
+# The lesson there was that naming the drift in a comment is not a mechanism, so
+# this lane is the mechanism. It reads the constant from the Rust source and
+# asserts both shell copies raise `b` and `(y+b)` to that same power, by counting
+# the factors in the integer breach test each one actually evaluates.
+race_fan_out_exponent() {
+  local n rust_src bad=0 f got
+  rust_src="$ROOT/rust/chain/src/dag_monitor.rs"
+  [ -f "$rust_src" ] || { echo "   dag_monitor.rs missing — unverifiable, failing closed"; return 1; }
+  n="$(sed -n 's/^const RACE_FETCHES: usize = \([0-9]\+\);.*/\1/p' "$rust_src" | head -1)"
+  [ -n "$n" ] || { echo "   could not read RACE_FETCHES from dag_monitor.rs — failing closed"; return 1; }
+  for f in tools/beacon_floor.sh tools/preflight.sh; do
+    [ -f "$ROOT/$f" ] || continue
+    # Count the repetitions of the hung-count variable inside the `10 * b*b*…`
+    # product of that file's breach test — that IS the exponent it evaluates.
+    got="$(grep -oE '10 \* (HUNG|BEACON_B)( \* (HUNG|BEACON_B))*' "$ROOT/$f" | head -1 \
+           | grep -oE '(HUNG|BEACON_B)' | grep -c .)"
+    if [ "$got" != "$n" ]; then
+      echo "   $f evaluates the breach test at exponent ${got:-0}, but RACE_FETCHES is $n"
+      bad=1
+    fi
+  done
+  [ "$bad" = 0 ] && echo "   RACE_FETCHES=$n — both beacon-floor copies raise to the same power"
+  return $bad
+}
+run_check "race fan-out exponent (L135)" race_fan_out_exponent
 
 # ── Toolchain pins vs the pin files (D-131 / L84) ───────────────
 # `preflight.sh` PRINTS these versions; until 2026-08-12 nothing FAILED on drift,

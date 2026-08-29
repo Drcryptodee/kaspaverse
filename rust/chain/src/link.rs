@@ -90,6 +90,11 @@ pub const MIN_STRIKE_RUN_SECS: u64 = 10;
 /// 5 s is a walk that is not going to succeed; the race round's worst case
 /// becomes fetch 5 s + probe ~8 s and the loop CYCLES instead of wedging.
 pub const RESOLVER_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Independent resolver walks the ONE-SHOT escalation lane races (LINK-P2).
+/// The connect race already has this property from `RACE_FETCHES`; the stall
+/// escalation did not, and it is the site where a lost walk costs the most.
+pub const ESCALATION_WALKS: usize = 3;
 /// Deadline for AWAITING a client's teardown (probe/escalation/shared).
 /// `disconnect()` at the pin is a dispatcher handshake that a blackholed
 /// socket can starve (`workflow-websocket 0.18.0 client/native.rs:322-334`:
@@ -597,9 +602,10 @@ impl EndpointHealth {
         if record.strikes >= DEMOTE_AT_STRIKES {
             record.demoted_until_unix = now_unix + DEMOTION_COOLDOWN_SECS;
             log::warn!(
-                "link: endpoint demoted for {DEMOTION_COOLDOWN_SECS}s after {} strike(s) ({}): {url}",
+                "link: endpoint demoted for {DEMOTION_COOLDOWN_SECS}s after {} strike(s) ({}): {host}",
                 record.strikes,
-                reason.as_token()
+                reason.as_token(),
+                host = endpoint_host(url)
             );
             true
         } else {
@@ -1000,6 +1006,64 @@ pub async fn bounded_get_node(
         })
 }
 
+/// Independent resolver walks, raced (LINK-P2). The connect race gets this
+/// property for free from `RACE_FETCHES` parallel fetches;
+/// [`escalate_stalled_tx`] does not — it takes ONE walk, and by the time it
+/// runs its caller has already destructively `take`n the retained signed tx,
+/// so a walk that draws a hung beacon loses the stuck-payment rescue
+/// permanently with nothing left to retry from.
+///
+/// The pinned `Resolver::fetch` shuffles all 16 beacons and walks them
+/// SERIALLY with no per-URL timeout (`resolver.rs:155-167` @ cfafeb4;
+/// `reqwest::Client::new()` in `workflow-http` sets neither a request nor a
+/// read timeout). Measured 2026-08-29: five of the sixteen complete TCP *and*
+/// TLS in under 0.44 s and then never answer, and Cloudflare 522s them at
+/// **~20 s** — four times [`RESOLVER_FETCH_TIMEOUT`], and precisely the
+/// `resolver fetch: timeout after 20s` LINK-P1 witnessed. So one walk yields
+/// nothing whenever a hung beacon precedes every yielding one: `b/(y+b)` =
+/// 5/14 ≈ **36 %** at today's fleet (the ratio `tools/beacon_floor.sh`
+/// derives). `walks` independent walks — every `get_node` call re-shuffles —
+/// take that to `(b/(y+b))^walks`, ≈ 4.6 % at three.
+///
+/// Raising [`RESOLVER_FETCH_TIMEOUT`] instead was measured and refused: a walk
+/// only steps OVER a hung beacon once the budget clears Cloudflare's ~20 s
+/// origin timeout, so it would have to triple the round ceiling a user waits on
+/// to still fail ~11 % of the time. Fan-out costs nobody any waiting.
+///
+/// The wait does not multiply: the walks run concurrently, each under the same
+/// `timeout`, so the call as a whole is still bounded by `timeout`.
+///
+/// Losers are dropped rather than drained, and that is safe HERE for a reason
+/// that does NOT generalise to [`race`]: a loser there is a `KaspaRpcClient`
+/// whose ws loop holds its own `Arc` and loyal-redials its node unless
+/// `disconnect()` clears the reconnect flag, so aborting one leaks a detached
+/// dialer. A loser here is a `reqwest` GET inside `Resolver::get_node` — no
+/// client, no loop, nothing to leak.
+pub async fn bounded_get_node_raced(
+    resolver: &Resolver,
+    network_id: NetworkId,
+    timeout: Duration,
+    walks: usize,
+) -> Result<NodeDescriptor> {
+    if walks <= 1 {
+        return bounded_get_node(resolver, network_id, timeout).await;
+    }
+    let mut tasks: JoinSet<Result<NodeDescriptor>> = JoinSet::new();
+    for _ in 0..walks {
+        let resolver = resolver.clone();
+        tasks.spawn(async move { bounded_get_node(&resolver, network_id, timeout).await });
+    }
+    let mut last_err = None;
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(node)) => return Ok(node),
+            Ok(Err(e)) => last_err = Some(e),
+            Err(_) => {} // panicked walk — nothing to record
+        }
+    }
+    Err(last_err.unwrap_or_else(|| ChainError::Message("resolver fetch: no walk completed".into())))
+}
+
 /// Detach-and-bound a client's teardown (C2 fix, same class as C1): the
 /// teardown task is detached, never cancelled (aborting it would leak a
 /// detached ws loop — the reaper finding) and never awaited raw; it MAY
@@ -1387,11 +1451,30 @@ pub async fn escalate_stalled_tx(
     probe_timeout: Duration,
 ) -> Result<EscalationOutcome> {
     // Bounded doorway (C1): the same blackhole that wedged the race would
-    // otherwise wedge the stuck-payment rescue path silently.
-    let node = bounded_get_node(resolver, network_id, RESOLVER_FETCH_TIMEOUT)
-        .await
-        .map_err(|e| ChainError::Message(format!("escalation {e}")))?;
+    // otherwise wedge the stuck-payment rescue path silently. RACED (LINK-P2)
+    // because this lane is one-shot — the caller has already `take`n the
+    // retained signed tx, so a single walk drawing a hung beacon would drop the
+    // rescue for good, 36 % of the time at today's fleet.
+    let node = bounded_get_node_raced(
+        resolver,
+        network_id,
+        RESOLVER_FETCH_TIMEOUT,
+        ESCALATION_WALKS,
+    )
+    .await
+    .map_err(|e| ChainError::Message(format!("escalation {e}")))?;
     let url = node.url;
+    // The intake guard the race applies to every resolver answer, applied here
+    // too (LINK-P2). This lane dials a resolver-supplied URL directly, and the
+    // caller logs a failure's error string UNSANITIZED — so a whitespace- or
+    // control-character-bearing answer would reach the log lane through
+    // `format!("escalation dial {url}")`, which is the exact smuggling route
+    // `candidate_url_is_clean` exists to close.
+    if !candidate_url_is_clean(&url) {
+        return Err(ChainError::Message(
+            "escalation: resolver answered a malformed url".into(),
+        ));
+    }
     let client = KaspaRpcClient::new_with_args(
         WrpcEncoding::Borsh,
         Some(&url),
@@ -1409,13 +1492,15 @@ pub async fn escalate_stalled_tx(
     let result: Result<EscalationOutcome> = async {
         client.connect(Some(options)).await.map_err(|e| {
             ChainError::Message(format!(
-                "escalation dial {url}: {}",
+                "escalation dial {}: {}",
+                endpoint_host(&url),
                 sanitize_node_text(&e.to_string())
             ))
         })?;
         match tokio::time::timeout(probe_timeout, client.submit_transaction(tx, false)).await {
             Err(_) => Err(ChainError::Message(format!(
-                "escalation submit {url}: timeout"
+                "escalation submit {}: timeout",
+                endpoint_host(&url)
             ))),
             Ok(Ok(_)) => Ok(EscalationOutcome::Resubmitted { via: url.clone() }),
             Ok(Err(e)) => {
@@ -1429,7 +1514,8 @@ pub async fn escalate_stalled_tx(
                     })
                 } else {
                     Err(ChainError::Message(format!(
-                        "escalation submit {url} refused {txid}: {}",
+                        "escalation submit {} refused {txid}: {}",
+                        endpoint_host(&url),
                         sanitize_node_text(&message)
                     )))
                 }
@@ -1820,6 +1906,31 @@ mod tests {
             !message.contains("hunter2") && !message.contains("node.example"),
             "the error named the input: {message}"
         );
+    }
+
+    /// §19 drain (LINK-P2): the credential route `validate_node_url` does NOT
+    /// close, and the thing that closes it in the log lane.
+    ///
+    /// The fault has to be shown real before the fix means anything (L136).
+    /// `validate_node_url` refuses `@`, `?` and `#`, so userinfo and query
+    /// tokens never get this far — but a user fronting their own node behind a
+    /// token-auth reverse proxy writes the secret as a PATH SEGMENT, and that
+    /// is accepted, dialable and correct. What must never happen is that URL
+    /// reaching logcat, which is readable by anything holding READ_LOGS.
+    #[test]
+    fn a_path_segment_token_is_accepted_but_never_reaches_the_log_lane() {
+        let tokened = "wss://node.example/hunter2/kaspa/mainnet/wrpc/borsh";
+        // The fault is real: this is a VALID endpoint as far as the guard goes.
+        assert!(
+            validate_node_url(tokened).is_ok(),
+            "a path-segment token is not refused — which is exactly why the log \
+             lane has to narrow it"
+        );
+        // And this is the narrowing every log site now goes through.
+        assert_eq!(endpoint_host(tokened), "node.example");
+        // The routes that ARE refused stay refused (no regression in the guard).
+        assert!(validate_node_url("wss://user:pw@node.example/borsh").is_err());
+        assert!(validate_node_url("wss://node.example/borsh?token=hunter2").is_err());
     }
 
     /// whitespace or control bytes is never dialable — but a space smuggles
@@ -2441,6 +2552,128 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "errored, but not within the configured bound"
         );
+    }
+
+    /// A beacon that accepts, completes the handshake and then answers a real
+    /// `NodeDescriptor` — the positive control for the two tests below, so a
+    /// green result cannot come from nothing ever resolving (L106).
+    fn yielding_beacon() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // `NodeDescriptor` (pin `node.rs:13-20`) needs BOTH fields, and
+            // `workflow-http` requires `status.is_success()` AND a body serde
+            // accepts — a 204 or a partial body is a FAILURE to the resolver,
+            // which is exactly what `tools/beacon_floor.sh` counts.
+            let body =
+                r#"{"uid":"kv-test-uid","url":"wss://test.example/kaspa/mainnet/wrpc/borsh"}"#;
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = s.flush();
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// A beacon that accepts and then never answers — the shape five of the
+    /// pin's sixteen actually have (measured 2026-08-29). Counts its hits, so
+    /// a test can prove how many walks were really issued.
+    fn hung_beacon() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(s) = stream else { break };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(s); // hold it open, write nothing, ever
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// LINK-P2, the REGRESSION guard: [`bounded_get_node_raced`] must issue
+    /// `walks` INDEPENDENT walks, and must still return inside ONE budget.
+    ///
+    /// Asserted by counting connections rather than by outcome, deliberately.
+    /// An outcome assertion over a shuffled beacon list can only ever be
+    /// probabilistic, so a helper that quietly degenerated to a single walk
+    /// would fail it only some of the time — a guard that is red by luck is
+    /// not a guard (PB-031). The hit count is exact: collapse this back to one
+    /// walk and the count is 1 against an expected 3, every single run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raced_walks_are_independent_and_share_one_budget() {
+        let (url, hits) = hung_beacon();
+        let resolver = Resolver::new(Some(vec![std::sync::Arc::new(url)]), false);
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            bounded_get_node_raced(
+                &resolver,
+                network_id,
+                Duration::from_millis(400),
+                ESCALATION_WALKS,
+            ),
+        )
+        .await
+        .expect("raced walks must return within the bound — they hung");
+        assert!(result.is_err(), "every beacon hung, so no walk can yield");
+        // The whole point: N walks cost ONE budget, not N of them.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "raced walks multiplied the wait instead of sharing one budget: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            ESCALATION_WALKS,
+            "the beacon must have been walked once per requested walk"
+        );
+    }
+
+    /// LINK-P2, the CORRECTNESS claim: a hung beacon in the list no longer
+    /// decides the outcome. `Resolver::fetch` re-shuffles per call, so with one
+    /// hung and one yielding beacon a single walk is a coin flip — the 36 %
+    /// hostage the one-shot escalation lane used to be. Enough independent
+    /// walks and the yielding beacon is reached with certainty for practical
+    /// purposes (0.5^16 ≈ 1.5e-5).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_raced_walk_reaches_a_yielding_beacon_past_a_hung_one() {
+        let (hung, _hung_hits) = hung_beacon();
+        let (good, good_hits) = yielding_beacon();
+        let resolver = Resolver::new(
+            Some(vec![std::sync::Arc::new(hung), std::sync::Arc::new(good)]),
+            false,
+        );
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let node = tokio::time::timeout(
+            Duration::from_secs(10),
+            bounded_get_node_raced(&resolver, network_id, Duration::from_millis(600), 16),
+        )
+        .await
+        .expect("raced walks must return within the bound")
+        .expect("a yielding beacon is present, so the race must resolve a node");
+        assert_eq!(node.url, "wss://test.example/kaspa/mainnet/wrpc/borsh");
+        // The positive control actually served (L106): the green above is a
+        // resolution, not an accident of nothing being asked.
+        assert!(good_hits.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
     /// R0 addendum #1 (built at R1): a lost round reports itself in ONE line,

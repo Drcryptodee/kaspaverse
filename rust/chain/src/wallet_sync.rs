@@ -822,7 +822,8 @@ impl WalletEngine {
             Events::Disconnect { .. } => self.emit(WalletEvent::Disconnected),
             Events::UtxoIndexNotEnabled { url } => {
                 log::warn!(
-                    "wallet-sync: node has no UTXO index ({url:?}) — degrading honestly (INV-8)"
+                    "wallet-sync: node has no UTXO index ({host:?}) — degrading honestly (INV-8)",
+                    host = url.as_deref().map(crate::link::endpoint_host)
                 );
                 self.emit(WalletEvent::UtxoIndexMissing { url });
             }
@@ -910,15 +911,23 @@ impl WalletEngine {
             // endpoint, or the trigger cannot fire from a capture: the pin's
             // own error line carries neither endpoint nor bind.
             Events::UtxoProcError { message } => {
+                // HOST only (§19 drain). `RpcCtl::descriptor()` is the FULL wRPC
+                // URL — the pin sets it from `options.url` verbatim
+                // (`client.rs:243,443`) — so a token-auth path segment would
+                // land in logcat here too. The D-101 trigger greps for the
+                // endpoint being NAMED, which the host still does.
+                let endpoint = self
+                    .inner
+                    .processor
+                    .try_rpc_ctl()
+                    .and_then(|ctl| ctl.descriptor());
                 log::warn!(
                     "wallet-sync: processor connect negotiation failed on {} — \
                      the wallet lane is dark on this socket until it drops or the \
                      user reconnects (D-101 trigger)",
-                    self.inner
-                        .processor
-                        .try_rpc_ctl()
-                        .and_then(|ctl| ctl.descriptor())
-                        .unwrap_or_else(|| "<no endpoint>".to_string())
+                    endpoint
+                        .as_deref()
+                        .map_or("<no endpoint>", crate::link::endpoint_host)
                 );
                 self.emit(WalletEvent::Error(message))
             }

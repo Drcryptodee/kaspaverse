@@ -200,9 +200,16 @@ async fn escalation_task(mut events: broadcast::Receiver<AcceptanceEvent>, monit
                         // race's intake guard (this lane dials it directly) —
                         // sanitize before the log lane (PB-024; R3
                         // wallet-security delta nit).
+                        // HOST only (§19 drain): `sanitize_node_text` strips
+                        // control characters but NOT the URL itself, so this
+                        // line carried the whole resolver-supplied endpoint.
+                        // `via` is log-only — the strike below keys on
+                        // `submit_url`, which is untouched.
                         log::info!(
                             "escalation: {txid} via {} — {note}",
-                            kaspaverse_chain::link::sanitize_node_text(&via)
+                            kaspaverse_chain::link::sanitize_node_text(
+                                kaspaverse_chain::link::endpoint_host(&via)
+                            )
                         );
                         kaspaverse_chain::spans::mark_with("escalate_ok", &txid);
                         // The fresh node answered → network alive → the
