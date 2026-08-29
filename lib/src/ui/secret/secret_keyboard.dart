@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../theme/tokens.dart';
+import '../widgets/kv_keypad.dart';
 
 /// What set of keys the [SecretKeyboard] offers.
 enum SecretKeyboardMode {
@@ -13,11 +13,15 @@ enum SecretKeyboardMode {
   fullAscii,
 }
 
-/// A custom on-screen keyboard that drives a [SecretByteBuffer] WITHOUT the
-/// system IME (§0.7) and without ever forming a Dart `String` of the secret
-/// (INV-3). Each key tap emits a single character to [onChar]; the buffer turns
-/// it into bytes. No key ever reads back what was typed — the keyboard is
-/// write-only into the buffer.
+/// The secret skin of the one keypad (D-189): a custom on-screen keyboard that
+/// drives a [SecretByteBuffer] WITHOUT the system IME (§0.7) and without ever
+/// forming a Dart `String` of the secret (INV-3).
+///
+/// **This file owns the LAYOUT and nothing else.** The caps, the press feel,
+/// the haptic and the write-only emit path are [KvKeypad]'s, which the amount
+/// pad also renders through — one primitive, two skins, one codepath for a
+/// leak audit to read. Each key tap emits a single character to [onChar]; the
+/// buffer turns it into bytes. No key ever reads back what was typed.
 class SecretKeyboard extends StatefulWidget {
   const SecretKeyboard({
     super.key,
@@ -59,9 +63,12 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
 
   bool get _full => widget.mode == SecretKeyboardMode.fullAscii;
 
-  void _tapLetter(String lower) {
-    widget.onChar(_shift ? lower.toUpperCase() : lower);
-    if (_shift) setState(() => _shift = false); // sticky-once shift
+  /// Sticky-once shift. It lives here rather than in [KvKeypad] because it is
+  /// a property of THIS layout — the amount pad has no shift to hold, and a
+  /// primitive that carried one would be carrying a skin's state.
+  void _emit(String ch) {
+    widget.onChar(ch);
+    if (_shift) setState(() => _shift = false);
   }
 
   @override
@@ -70,111 +77,59 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
     final rows = showingSymbols
         ? SecretKeyboard._symbolPages[_symbolPage]
         : SecretKeyboard._letterRows;
-    return Container(
-      color: KvColor.surface,
-      padding: const EdgeInsets.symmetric(
-        horizontal: KvSpace.xs,
-        vertical: KvSpace.s,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final row in rows)
-            Padding(
-              padding: const EdgeInsets.only(bottom: KvSpace.xs),
-              child: Row(
-                children: [
-                  for (final ch in row.split(''))
-                    _Key(
-                      label: showingSymbols
-                          ? ch
-                          : (_shift ? ch.toUpperCase() : ch),
-                      onTap: () =>
-                          showingSymbols ? widget.onChar(ch) : _tapLetter(ch),
-                    ),
-                ],
+    return KvKeypad(
+      skin: KvKeypadSkin.secret,
+      onChar: showingSymbols ? widget.onChar : _emit,
+      rows: [
+        for (final row in rows)
+          [
+            for (final ch in row.split(''))
+              KvKey.char(
+                showingSymbols || !_shift ? ch : ch.toUpperCase(),
+                // The cap shows the case that will be typed; on a shifted
+                // letter row the emitted character IS the cap, so the two can
+                // never disagree.
               ),
-            ),
-          _controlRow(),
-        ],
-      ),
-    );
-  }
-
-  Widget _controlRow() {
-    return Row(
-      children: [
-        if (_full && !_symbols)
-          _Key(
-            label: '⇧',
-            flex: 3,
-            active: _shift,
-            onTap: () => setState(() => _shift = !_shift),
-          ),
-        if (_full && _symbols)
-          _Key(
-            label: _symbolPage == 0 ? '#+=' : '123',
-            flex: 3,
-            onTap: () => setState(() => _symbolPage = _symbolPage == 0 ? 1 : 0),
-          ),
-        if (_full)
-          _Key(
-            label: _symbols ? 'ABC' : '123',
-            flex: 3,
-            onTap: () => setState(() {
-              _symbols = !_symbols;
-              _symbolPage = 0; // always re-enter symbols on the first page
-            }),
-          ),
-        // Only on the full-ASCII keyboard: BIP39 words are single lowercase
-        // tokens, so a space in the word picker could only ever be a mistake.
-        if (_full)
-          _Key(label: 'space', flex: 6, onTap: () => widget.onChar(' ')),
-        _Key(label: '⌫', flex: 3, onTap: widget.onBackspace),
+          ],
+        _controlRow(),
       ],
     );
   }
-}
 
-class _Key extends StatelessWidget {
-  const _Key({
-    required this.label,
-    required this.onTap,
-    this.flex = 2,
-    this.active = false,
-  });
-
-  final String label;
-  final VoidCallback onTap;
-  final int flex;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Expanded(
-      flex: flex,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: KvSpace.xs / 2),
-        child: Material(
-          color: active ? KvColor.glow : KvColor.surfaceAlt,
-          borderRadius: BorderRadius.circular(KvRadius.data),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(KvRadius.data),
-            onTap: onTap,
-            child: Container(
-              height: KvSpace.touchTarget,
-              alignment: Alignment.center,
-              child: Text(
-                label,
-                style: theme.textTheme.titleMedium?.copyWith(
-                  color: active ? KvColor.primary : KvColor.textPrimary,
-                ),
-              ),
-            ),
-          ),
-        ),
+  List<KvKey> _controlRow() => [
+    if (_full && !_symbols)
+      KvKey.command(
+        '⇧',
+        flex: 3,
+        active: _shift,
+        semantics: 'Shift',
+        onTap: () => setState(() => _shift = !_shift),
       ),
-    );
-  }
+    if (_full && _symbols)
+      KvKey.command(
+        _symbolPage == 0 ? '#+=' : '123',
+        flex: 3,
+        semantics: 'More symbols',
+        onTap: () => setState(() => _symbolPage = _symbolPage == 0 ? 1 : 0),
+      ),
+    if (_full)
+      KvKey.command(
+        _symbols ? 'ABC' : '123',
+        flex: 3,
+        semantics: _symbols ? 'Letters' : 'Numbers and symbols',
+        onTap: () => setState(() {
+          _symbols = !_symbols;
+          _symbolPage = 0; // always re-enter symbols on the first page
+        }),
+      ),
+    // Only on the full-ASCII keyboard: BIP39 words are single lowercase
+    // tokens, so a space in the word picker could only ever be a mistake.
+    if (_full) KvKey.command('space', flex: 6, onTap: () => widget.onChar(' ')),
+    KvKey.command(
+      '⌫',
+      flex: 3,
+      semantics: 'Backspace',
+      onTap: widget.onBackspace,
+    ),
+  ];
 }

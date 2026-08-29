@@ -188,8 +188,9 @@ class KaspaVerseApp extends StatelessWidget {
             MessagingService.instance.start();
           },
           receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
-          sendRoute: (_) => SendScreen(
+          sendRoute: (_, balanceStale) => SendScreen(
             mature: wallet.mature,
+            balanceStale: balanceStale,
             prepare: wallet.prepareSend,
             commit: wallet.commitSend,
             abandon: wallet.abandonSend,

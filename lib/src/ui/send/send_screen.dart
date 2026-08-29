@@ -4,18 +4,37 @@ import 'package:flutter/services.dart';
 
 import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
+import '../error_text.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
-import '../widgets/kv_loader.dart';
-import 'confirm_send_sheet.dart';
+import '../widgets/kv_address.dart';
+import '../widgets/kv_amount.dart';
+import '../widgets/kv_chrome.dart';
+import '../widgets/kv_glyph.dart';
+import '../widgets/kv_keypad.dart';
+import '../widgets/kv_status_chip.dart';
+import '../widgets/kv_surface.dart';
+import 'signing_ceremony.dart';
 
-/// Send entry (P1.6 · T3): amount (BG-5 floor) + destination (BG-15 paste →
-/// full-form review). "Review" builds the transaction(s) in Rust and opens the
-/// anti-blind-signing confirm ([ConfirmSendSheet]) — the amount/fee the user
-/// approves are Rust's decode of the actual txs, never this form's echo (B7).
+/// Send — amount and destination. **NOTHING signs here.**
+///
+/// Entry is cheap and reversible, so the screen stays light: no ceremony, no
+/// warnings, no friction proportional to a risk that has not been taken yet
+/// (D-189). Every blocked state says why **in amber with the exact number** —
+/// *"you are 0.00001994 KAS short"*, never *"too small"*. Red would claim
+/// money is at risk when none is (BG-7), and a disabled control always says
+/// why (BG-12).
+///
+/// The amount pad is [KvKeypad] in its plain skin — the same primitive that
+/// takes a passphrase. One muscle memory, one codepath to audit, and the
+/// amount inherits the no-system-keyboard guarantee for free.
+///
+/// "Review" builds the transaction(s) in Rust and opens the anti-blind-signing
+/// [SigningCeremony] — the amount and fee the user approves are Rust's decode
+/// of the actual transactions, never this form's echo (B7).
 ///
 /// A pure consumer (injected fns + the live mature balance) so widget tests run
-/// without the native library; `main.dart` wires it to [WalletService].
+/// without the native library; `main.dart` wires it to `WalletService`.
 class SendScreen extends StatefulWidget {
   const SendScreen({
     super.key,
@@ -23,13 +42,30 @@ class SendScreen extends StatefulWidget {
     required this.prepare,
     required this.commit,
     required this.abandon,
+    this.balanceStale,
     this.minimumSendable,
     this.prepareSweep,
   });
 
-  /// Spendable (mature) balance, for the informational "available" line. The
-  /// authoritative check (incl. the KIP-9 fee) is Rust's `prepare`.
+  /// Spendable (mature) balance, for the informational "available" line and
+  /// the shortfall arithmetic. The authoritative check (incl. the KIP-9 fee)
+  /// is Rust's `prepare`.
   final ValueListenable<BigInt?> mature;
+
+  /// Whether [mature] is a **last-known** figure rather than a live one — the
+  /// money plate's own `_dimmed` bit, handed down rather than re-derived
+  /// (BG-8: every chain-derived value wires live · stale · unknown).
+  ///
+  /// It does two things, and the second matters more. The reading dims, and
+  /// the screen **stops quoting the balance back as a fact**: a shortfall
+  /// sentence built on a figure the wallet cannot currently vouch for is a
+  /// confident claim about someone's money, which is the P0.3 scar with a
+  /// number attached.
+  ///
+  /// Null means no freshness signal was wired, and the figure is then rendered
+  /// as given. BG-8's third state — `—` for unknown — rides [mature] being
+  /// null and is independent of this.
+  final ValueListenable<bool>? balanceStale;
 
   final Future<SignableSummaryDto> Function(
     String destination,
@@ -45,18 +81,53 @@ class SendScreen extends StatefulWidget {
   final Future<SignableSummaryDto> Function(String destination)? prepareSweep;
 
   /// The smallest currently-sendable amount (sompi), probed from the pinned
-  /// Generator over the live coin shape (D-054) — advisory display only; the
-  /// Generator on `prepare` stays the single authority. Null provider or null
-  /// result ⇒ no hint line.
+  /// Generator over the live coin shape (D-054). A null provider or a null
+  /// result means no floor is known, and then nothing is ever blocked by one —
+  /// the Generator on `prepare` stays the single authority either way.
   final Future<BigInt?> Function()? minimumSendable;
+
+  /// The tap target that hands focus back from the address field to the amount
+  /// pad. It has no text of its own, so a test needs a handle on it.
+  static const Key amountTarget = Key('send-amount-target');
 
   @override
   State<SendScreen> createState() => _SendScreenState();
 }
 
+/// The mainnet address lengths, derived from the pinned crate rather than
+/// remembered: `Version::public_key_len` is 32 bytes for `PubKey` and
+/// `ScriptHash` and 33 for `PubKeyECDSA` (`crypto/addresses/src/lib.rs:164` at
+/// `cfafeb4`); a version byte joins the payload, the whole is base32 at 5 bits
+/// a character, and an 8-character checksum follows — 53 + 8 and 55 + 8
+/// payload characters, plus `kaspa:`.
+///
+/// **This is a SHAPE check and never a checksum.** Dart validates nothing about
+/// an address's contents: `send_prepare` calls `validate_mainnet_address`,
+/// which is the pinned crate's own parse, and that verdict is the one that
+/// decides (INV-9 — consensus logic is never re-implemented here).
+const Set<int> _mainnetAddressLengths = {67, 69};
+
+/// What is wrong with the form right now: the sentence under Review when the
+/// control is disabled, and the amber notice when there is a number to give.
+///
+/// **One record, so the disable switch and the sentence can never disagree** —
+/// BG-12's "a disabled control always says why" holds by construction rather
+/// than by two fields being kept in step. A null [reason] with a notice is a
+/// WARNED state, not a blocked one; see [_SendScreenState._blockFor] for which
+/// is which and why.
+typedef _Block = ({String? reason, String? notice});
+
 class _SendScreenState extends State<SendScreen> {
-  final _amount = TextEditingController();
+  /// The typed amount, canonical and ungrouped — exactly what
+  /// [sompiFromKas] parses. Never a formatted string.
+  String _amount = '';
+
+  /// Never re-derived — see [SendScreen.balanceStale]. The fallback is a
+  /// constant `false`, not a second folding of the link state.
+  late final ValueListenable<bool> _stale =
+      widget.balanceStale ?? ValueNotifier<bool>(false);
   final _address = TextEditingController();
+  final _addressFocus = FocusNode();
   bool _building = false;
   String? _error;
   BigInt? _minSompi;
@@ -64,10 +135,11 @@ class _SendScreenState extends State<SendScreen> {
   @override
   void initState() {
     super.initState();
-    _amount.addListener(_onChanged);
     _address.addListener(_onChanged);
-    // Fetch the live floor once per screen-open. Advisory: failures (engine
-    // not ready, probe error) simply mean no hint — never a blocked send.
+    _addressFocus.addListener(_onChanged);
+    // Fetch the live floor once per screen-open. Advisory: a failure (engine
+    // not ready, probe error) simply means no floor is known, and a null floor
+    // blocks nothing.
     final probe = widget.minimumSendable;
     if (probe != null) {
       probe()
@@ -75,60 +147,169 @@ class _SendScreenState extends State<SendScreen> {
             if (mounted) setState(() => _minSompi = min);
           })
           .catchError((Object _) {
-            /* no hint — prepare stays authoritative */
+            /* no floor — prepare stays authoritative */
           });
     }
   }
 
   @override
+  void didUpdateWidget(SendScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // `_stale` is captured once at mount, so silently swapping the seam would
+    // leave this screen wired to the old notifier and quietly reading a
+    // freshness bit nobody updates. The same hazard `home_screen.dart` asserts
+    // for its own scopes, and the same fix: make it loud in debug rather than
+    // subtle in release.
+    assert(
+      identical(oldWidget.balanceStale, widget.balanceStale) &&
+          identical(oldWidget.mature, widget.mature),
+      'SendScreen: a balance seam was swapped after mount — the screen is '
+      'still listening to the old one (V4 seam law).',
+    );
+  }
+
+  @override
   void dispose() {
-    _amount.dispose();
     _address.dispose();
+    _addressFocus.dispose();
     super.dispose();
   }
 
-  void _onChanged() {
-    // Any edit rebuilds (Review enablement) and clears a prior error.
-    setState(() => _error = null);
+  /// Any edit rebuilds (Review enablement) and clears a prior error.
+  void _onChanged() => setState(() => _error = null);
+
+  BigInt? get _amountSompi => sompiFromKas(_amount);
+
+  String get _destination => _address.text.trim();
+
+  /// Shape only — see [_mainnetAddressLengths].
+  bool get _addressLooksValid =>
+      _destination.startsWith('kaspa:') &&
+      _mainnetAddressLengths.contains(_destination.length);
+
+  void _key(String ch) => setState(() {
+    _amount = amountKeyPress(_amount, ch);
+    _error = null;
+  });
+
+  void _backspace() => setState(() {
+    _amount = amountBackspace(_amount);
+    _error = null;
+  });
+
+  /// The one place a blocked or warned state is decided, in the order the user
+  /// would fix it: what is missing, then what the amount cannot be, then the
+  /// destination.
+  ///
+  /// **Every notice carries the exact figure**, because a number is something
+  /// the user can act on and "too small" is a shrug. Amber throughout: a
+  /// refusal to BUILD puts no money at risk, and red on this screen would say
+  /// it did (BG-7).
+  ///
+  /// **What DISABLES Review, and what only warns, is a deliberate split.**
+  ///
+  ///  * *Structural* — no amount, no destination, an address that is not the
+  ///    shape of a mainnet address: the form cannot be submitted, so it is not.
+  ///  * *Arithmetic against a number the wallet itself holds* — an amount above
+  ///    the mature balance. That is not a Generator judgement; the wallet's own
+  ///    spendable figure is the authority for "you do not have this much", and
+  ///    a null balance blocks nothing (BG-8).
+  ///  * *The probed KIP-9 floor* — **warns and never blocks.** The floor is a
+  ///    Generator judgement, and the Generator on `prepare` is the single
+  ///    authority for what can be built (D-054, pinned since the floor
+  ///    shipped). A probe that has gone stale HIGH while the screen was open
+  ///    would otherwise refuse a send Rust would have made, with no way past —
+  ///    a capability taken from exactly the dust-trapped user the floor exists
+  ///    to help. So the sentence appears with both figures and the control
+  ///    stays live.
+  _Block? _blockFor(BigInt? mature, {required bool stale}) {
+    final amount = _amountSompi;
+    final hasAmount = amount != null && amount > BigInt.zero;
+    final hasAddress = _destination.isNotEmpty;
+
+    if (!hasAmount && !hasAddress) {
+      return (reason: 'Enter an amount and a destination', notice: null);
+    }
+    if (!hasAmount) return (reason: 'Enter an amount', notice: null);
+
+    // The floor WARNS and never blocks — but it must not fall out of the
+    // function either. Returning here with a null reason handed a live Review
+    // to a form with no address at all, because every structural check below
+    // was skipped: an advisory branch had quietly become an early exit for the
+    // blocking ones (`consensus-auditor`, UX-4). It is CARRIED instead, and
+    // whatever blocks below keeps its own reason.
+    final min = _minSompi;
+    final floorNotice = min != null && amount < min
+        ? 'The network will not relay less than ${_trimmed(min)} KAS. You are '
+              '${_trimmed(min - amount)} KAS short.'
+        : null;
+
+    // BG-8: an unknown balance is never a block, and neither is a STALE one.
+    // `mature` is null until the first sync lands, and it is last-known while
+    // the link is down — refusing a send, and quoting a figure back as a fact,
+    // on a number the wallet cannot currently vouch for would be a fabricated
+    // certainty about someone's money.
+    if (!stale && mature != null && amount > mature) {
+      return (
+        reason: 'More than you can spend',
+        notice:
+            'You have ${_trimmed(mature)} KAS spendable. You are '
+            '${_trimmed(amount - mature)} KAS short.',
+      );
+    }
+
+    if (!hasAddress) {
+      return (reason: 'Enter a destination address', notice: floorNotice);
+    }
+    if (!_destination.startsWith('kaspa:')) {
+      return (
+        reason: 'Check the destination address',
+        notice: 'A mainnet Kaspa address starts with "kaspa:".',
+      );
+    }
+    if (!_mainnetAddressLengths.contains(_destination.length)) {
+      return (
+        reason: 'Check the destination address',
+        notice:
+            'That is ${_destination.length} characters. A mainnet address is '
+            '67 — or 69 for the rarer ECDSA form.',
+      );
+    }
+    // Nothing blocks. The floor's sentence still stands if it fired.
+    return floorNotice == null ? null : (reason: null, notice: floorNotice);
   }
-
-  BigInt? get _amountSompi => sompiFromKas(_amount.text);
-
-  /// Light shape check for enabling Review — the real validation (checksum,
-  /// network) is Rust's, surfaced on Review (BG-15: reject before signing).
-  bool get _addressLooksValid {
-    final a = _address.text.trim();
-    return a.startsWith('kaspa:') && a.length > 'kaspa:'.length + 10;
-  }
-
-  bool get _canReview =>
-      !_building &&
-      _amountSompi != null &&
-      _amountSompi! > BigInt.zero &&
-      _addressLooksValid;
 
   Future<void> _paste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text?.trim();
     if (text != null && text.isNotEmpty) {
       _address.text = text;
+      _addressFocus.unfocus();
     }
   }
 
   Future<void> _review() async {
     final amountSompi = _amountSompi;
     if (amountSompi == null || amountSompi <= BigInt.zero) return;
-    await _reviewWith(() => widget.prepare(_address.text.trim(), amountSompi));
+    await _reviewWith(() => widget.prepare(_destination, amountSompi));
   }
 
-  /// "Send everything": the sweep flow — same address field, same confirm
-  /// sheet, no amount (Rust solves it). The affordance stays TAPPABLE even
-  /// before an address is entered, and answers with words instead of a
-  /// silently greyed door (the dust-trapped user it exists for must never
-  /// meet a control that won't say what it needs).
+  /// "Send max": the sweep flow — same address field, same ceremony, no amount
+  /// (Rust solves it).
+  ///
+  /// **The chip stays TAPPABLE even before an address is entered**, and
+  /// answers with words instead of a silently greyed door. The dust-trapped
+  /// user it exists for must never meet a control that will not say what it
+  /// needs. That rule moved here with the affordance when D-190 put it beside
+  /// `available` — it belongs to the control, not to the corner it used to sit
+  /// in.
   Future<void> _reviewSweep() async {
     final prepareSweep = widget.prepareSweep;
-    if (prepareSweep == null) return;
+    // The chip is never greyed — see the doc above — so the busy guard lives
+    // here rather than on `onTap`. A control that looks pressable and is not
+    // is the thing BG-12 forbids, and this is the one control on the screen
+    // whose whole point is that it answers.
+    if (prepareSweep == null || _building) return;
     if (!_addressLooksValid) {
       setState(
         () => _error =
@@ -137,7 +318,7 @@ class _SendScreenState extends State<SendScreen> {
       );
       return;
     }
-    await _reviewWith(() => prepareSweep(_address.text.trim()));
+    await _reviewWith(() => prepareSweep(_destination));
   }
 
   Future<void> _reviewWith(
@@ -150,28 +331,37 @@ class _SendScreenState extends State<SendScreen> {
     try {
       final summary = await prepare();
       if (!mounted) return;
-      // The confirm renders Rust's decode (summary), not the form (B7).
-      final outcome = await showModalBottomSheet<SendOutcomeDto?>(
-        context: context,
-        backgroundColor: KvColor.surface,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (_) => ConfirmSendSheet(
-          summary: summary,
-          commit: widget.commit,
-          abandon: widget.abandon,
-        ),
+      // The ceremony renders Rust's decode (summary), not the form (B7).
+      var leftInFlight = false;
+      final outcome = await showSigningCeremony(
+        context,
+        summary: summary,
+        commit: widget.commit,
+        abandon: widget.abandon,
+        onLeftInFlight: () => leftInFlight = true,
       );
       if (!mounted) return;
       // A fully-broadcast send returns to home; the new balance + outgoing row
       // arrive via the live sync (no manual refresh).
-      if (outcome != null && !outcome.partial && outcome.error == null) {
+      //
+      // **So does a send the user walked away from mid-broadcast.** That exit
+      // returns `null` like a dismissal does, and leaving them here would
+      // restore a form still holding the amount and the address — one tap from
+      // a duplicate, right after the ceremony told them to go and check
+      // whether it landed. Home is where that activity is
+      // (`wallet-security-auditor`, UX-4).
+      if (leftInFlight ||
+          (outcome != null && !outcome.partial && outcome.error == null)) {
         Navigator.of(context).pop();
       }
     } on AppError catch (e) {
       if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      // `displayError`, never `e.toString()`: on an `AppError` that prints
+      // *"Instance of 'AppError'"* — the type name, in the body of a failed
+      // send (run 1, F8). The ceremony has always routed through it; this
+      // sibling had not.
+      if (mounted) setState(() => _error = displayError(e));
     } finally {
       if (mounted) setState(() => _building = false);
     }
@@ -179,98 +369,418 @@ class _SendScreenState extends State<SendScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    // The shortfall sentence is derived from the live balance, so the screen
+    // has to be a LISTENER of it and not a reader — a block computed once at
+    // build time would go on saying "you are 3 KAS short" after the coins that
+    // covered it settled (L132: a derived state whose producer nothing
+    // watches).
+    return ValueListenableBuilder<BigInt?>(
+      valueListenable: widget.mature,
+      builder: (context, mature, _) => ValueListenableBuilder<bool>(
+        valueListenable: _stale,
+        builder: (context, stale, _) =>
+            _body(context, _blockFor(mature, stale: stale)),
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context, _Block? block) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Send')),
+      backgroundColor: KvColor.abyss,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(KvSpace.gutter),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Scrollable so the keyboard never overflows the column; Review
-              // stays pinned below it.
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: KvSpace.statusBarReserve),
+            KvRail(title: 'Send', onBack: () => Navigator.of(context).pop()),
+            // **The amount block is FIXED and everything else scrolls.**
+            // The figure is the subject of this screen and it is being typed:
+            // a readout that scrolls out from under the hand typing it is
+            // worse than no readout, and at 320dp/1.3× the content is always
+            // taller than the viewport. Fixing it here also makes the layout
+            // overflow-proof — the scroll absorbs whatever is left, so no
+            // geometry can produce a RenderFlex that does not fit (measured:
+            // an earlier cut with the PAD pinned overflowed by 133dp at the
+            // floor).
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                KvSpace.m,
+                KvSpace.gutter,
+                0,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const KvRuledLabel('Amount'),
+                  const SizedBox(height: KvSpace.xs),
+                  // Tapping the figure takes focus back off the address field
+                  // and brings the pad back. Without it the pad is reachable
+                  // exactly once: the address field takes focus, our keypad
+                  // steps aside for the system IME, and nothing on the screen
+                  // gives it back — a control that disappears with no way to
+                  // recall it (BG-12's neighbour).
+                  Semantics(
+                    button: true,
+                    // **The phrase and the action are on ONE node**, and the
+                    // subtree under it is excluded.
+                    //
+                    // The figure and its unit are two `Text` nodes: left
+                    // alone a screen reader stops on each and reads the
+                    // GROUPED digits, then the unit, then the empty state as
+                    // a bare "0" with nothing marking it a placeholder. But
+                    // `excludeSemantics` drops the *entire* descendant
+                    // subtree, so a label pushed down into `_TypedAmount`
+                    // would be dead code — this node has to carry it.
+                    //
+                    // `onTap` matters as much: without it the one control
+                    // that gives the pad back after the address field takes
+                    // focus is inert under TalkBack. It moves focus and
+                    // signs nothing, so unlike the hold there is no friction
+                    // for an activation to collapse (contrast D-178).
+                    label: _amount.isEmpty
+                        ? 'Amount, none entered. Edit the amount'
+                        : 'Amount, $_amount KAS. Edit the amount',
+                    onTap: _addressFocus.unfocus,
+                    excludeSemantics: true,
+                    child: GestureDetector(
+                      key: SendScreen.amountTarget,
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _addressFocus.unfocus,
+                      child: _TypedAmount(typed: _amount),
+                    ),
+                  ),
+                  const SizedBox(height: KvSpace.sm),
+                  // The datum under a number being typed, with no end stops:
+                  // end stops turn a line into a SCALE, and an amount being
+                  // entered is not being measured against anything (D-190).
+                  Container(height: 1, color: KvColor.datum),
+                  const SizedBox(height: KvSpace.s),
+                  // **A `Wrap`, not a `Row`.** `available` and `Send max`
+                  // belong together — `available` is the number Send max
+                  // means (D-190) — but an `Expanded` makes that pairing cost
+                  // the figure its width, and a figure is the one thing that
+                  // may not reflow (BG-5) or shrink under the 11dp floor
+                  // (BG-14). At 320dp/1.3× the chip leaves 157dp against a
+                  // seven-figure balance needing 262dp, which a `FittedBox`
+                  // "solves" by rendering a 6.7dp reading. Wrapped, the chip
+                  // drops to its own run and the figure keeps the gutter.
+                  Wrap(
+                    spacing: KvSpace.s,
+                    runSpacing: KvSpace.s,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Text('AMOUNT', style: theme.textTheme.labelLarge),
-                      const SizedBox(height: KvSpace.s),
-                      TextField(
-                        controller: _amount,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        // The amount is the screen's subject — screen-level
-                        // mono role (§4), tabular so digits never jiggle (BG-5).
-                        style: theme.textTheme.displaySmall,
-                        decoration: const InputDecoration(
-                          hintText: '0.00000000',
-                          suffixText: 'KAS',
-                        ),
-                      ),
-                      const SizedBox(height: KvSpace.s),
-                      _AvailableLine(mature: widget.mature),
-                      if (_minSompi != null) ...[
-                        const SizedBox(height: KvSpace.xs),
-                        _MinimumLine(minSompi: _minSompi!),
-                      ],
-                      const SizedBox(height: KvSpace.xl),
-                      Text('TO', style: theme.textTheme.labelLarge),
-                      const SizedBox(height: KvSpace.s),
-                      TextField(
-                        controller: _address,
-                        minLines: 1,
-                        maxLines: 2,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontFamily: KvFont.mono,
-                        ),
-                        decoration: InputDecoration(
-                          hintText: 'kaspa:…',
-                          suffixIcon: IconButton(
-                            tooltip: 'Paste',
-                            icon: const Icon(Icons.content_paste, size: 18),
-                            onPressed: _paste,
-                          ),
-                        ),
-                      ),
-                      if (_address.text.trim().isNotEmpty) ...[
-                        const SizedBox(height: KvSpace.s),
-                        _AddressReview(address: _address.text.trim()),
-                      ],
-                      if (_error != null) ...[
-                        const SizedBox(height: KvSpace.m),
-                        Text(
-                          _error!,
-                          // `KvColor.error` is reserved for fund risk and
-                          // destruction (tokens.dart) — a refusal to BUILD is
-                          // neither, and red made a neutral sentence read as
-                          // blame (§13; same call as create_screen.dart).
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: KvColor.warning,
-                          ),
-                        ),
-                      ],
+                      _AvailableLine(mature: widget.mature, stale: _stale),
+                      if (widget.prepareSweep != null)
+                        _MaxChip(onTap: _reviewSweep),
                     ],
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                children: [
+                  const SizedBox(height: KvSpace.l),
+                  const KvRuledLabel('To'),
+                  const SizedBox(height: KvSpace.xs),
+                  _AddressField(
+                    controller: _address,
+                    focusNode: _addressFocus,
+                    onPaste: _paste,
+                    onClear: () {
+                      _address.clear();
+                      _addressFocus.unfocus();
+                    },
+                  ),
+                  if (_destination.isNotEmpty && _addressLooksValid) ...[
+                    const SizedBox(height: KvSpace.s),
+                    // The full-form review (BG-15): the user reads it back
+                    // against the source before anything is built.
+                    KvAddress(_destination, form: KvAddressForm.chunked),
+                  ],
+
+                  // **The notices live in the scroll, never in the pinned
+                  // footer.** A notice is a sentence of unbounded length at a
+                  // user's chosen text scale, and a pinned footer that can
+                  // grow without bound turns the layout into one that
+                  // overflows at some geometry — measured at 3dp over at
+                  // 320dp/1.3× before this moved. Everything pinned on this
+                  // screen is now deterministic in height; everything that is
+                  // not is inside the scroll that absorbs it.
+                  //
+                  // Nothing is lost by it: the disabled control states its own
+                  // reason (BG-12) whether or not the notice has been scrolled
+                  // to, and the notice sits directly under the field that
+                  // caused it.
+                  //
+                  // Amber throughout, including the build refusal: a send that
+                  // could not be BUILT put nothing at risk, and red made a
+                  // neutral sentence read as blame (§13).
+                  if (block?.notice != null) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    KvStatusChip(
+                      tone: KvLampTone.warn,
+                      words: block!.notice!,
+                      plated: true,
+                      maxLines: null,
+                    ),
+                  ],
+                  if (_error != null) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    KvStatusChip(
+                      tone: KvLampTone.warn,
+                      words: _error!,
+                      plated: true,
+                      maxLines: null,
+                    ),
+                  ],
+                  // The system IME owns the bottom of the screen while the
+                  // address is being typed, so the pad steps aside for it:
+                  // two keyboards for two fields at once is not a layout.
+                  // Tapping the figure brings it back
+                  // ([SendScreen.amountTarget]).
+                  if (!_addressFocus.hasFocus) ...[
+                    const SizedBox(height: KvSpace.l),
+                    KvKeypad.amount(onChar: _key, onBackspace: _backspace),
+                  ],
+                  const SizedBox(height: KvSpace.l),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.gutter,
+                0,
+                KvSpace.gutter,
+                KvSpace.m,
+              ),
+              child: Column(
+                children: [
+                  KvAction(
+                    label: 'Review this send',
+                    primary: !_building,
+                    disabledReason: _building
+                        ? 'Building your transaction…'
+                        : block?.reason,
+                    onTap: _review,
+                  ),
+                  if (block?.reason == null && !_building) ...[
+                    const SizedBox(height: KvSpace.s),
+                    const Text(
+                      'Nothing is signed until you hold to send.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 11,
+                        height: 15 / 11,
+                        color: KvColor.inkMetaLow,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A KAS figure for this screen's copy.
+///
+/// **Every significant digit and no trailing zeros** (D-210). BG-6's fixed
+/// eight belong to a signing surface, and this screen signs nothing — its own
+/// header says so — while the padding is noise a user has to read past to
+/// find where the number ends, and it is what made `available` too wide to
+/// render at a readable size.
+///
+/// A shortfall keeps every digit that carries value either way, because
+/// [trimFraction] only ever removes zeros: *"you are 0.00001994 KAS short"*
+/// survives verbatim (D-189), and *"2.40000000"* becomes *"2.40"*.
+String _trimmed(BigInt sompi) {
+  final p = kasParts(sompi);
+  return '${p.integer}.${trimFraction(p.fraction)}';
+}
+
+/// The amount as typed: grouped for reading, never reformatted underneath the
+/// hand that is typing it.
+///
+/// It scales down rather than wrapping or clipping (BG-5) — a figure is the
+/// one thing on a screen that may not reflow (L131/BG-14).
+class _TypedAmount extends StatelessWidget {
+  const _TypedAmount({required this.typed});
+
+  final String typed;
+
+  @override
+  Widget build(BuildContext context) {
+    final empty = typed.isEmpty;
+    // No `Semantics` here: the tap target above excludes this subtree, so a
+    // label placed on it could never be read. It speaks the whole phrase.
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        // The FIGURE is what gets fitted. A twelve-figure amount at
+        // 320dp/1.3× scales to about 0.43, which is fine for a 32dp number and
+        // fatal for the unit beside it — `KvAmount` had the same defect and
+        // took the same cure (`ux-auditor`, UX-4).
+        Flexible(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: AlignmentDirectional.centerStart,
+            child: Text(
+              // A placeholder `0`, not a fabricated `0.00000000`: nothing has
+              // been entered, and eight zeros would look like an amount.
+              empty ? '0' : groupTypedAmount(typed),
+              maxLines: 1,
+              style: TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 32,
+                height: 38 / 32,
+                fontWeight: FontWeight.w500,
+                color: empty ? KvColor.inkMeta : KvColor.ink,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: KvSpace.s),
+        const Padding(
+          padding: EdgeInsets.only(bottom: 2),
+          child: Text(
+            'KAS',
+            style: TextStyle(
+              fontFamily: KvFont.mono,
+              // `KvAmount`'s unit ratio floored at the readable minimum — the
+              // same size the unit takes beside the same 32dp figure on the
+              // ceremony. The number you type and the number you sign must be
+              // the same typographic object (§4).
+              fontSize: KvAmount.readableFloor,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.6,
+              color: KvColor.primaryMuted,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// "available N" — the spendable (mature) balance, informational only. It sits
+/// with Send max because that is the number Send max means (D-190).
+///
+/// **All three of BG-8's states.** `—` when unknown, dimmed with the reason in
+/// words when the figure is last-known, full brightness only when the link is
+/// up. The AGE that BG-8 pairs with a dimmed reading is deliberately absent
+/// and recorded as a divergence in `design_system.md` §9 rather than argued
+/// away here: an age belongs to the line that vouches for the number, and this
+/// screen carries no trust line.
+///
+/// **It never clips and never shrinks under the readable floor.** It sat in a
+/// `Row` with `Send max`, which at 320dp/1.3× left 157dp against a figure
+/// needing 262dp — first as a silent clip that showed a *smaller, different*
+/// number (BG-5, L131 exactly), then as a `FittedBox` rendering the balance at
+/// 6.7dp. Both found by `ux-auditor`; both invisible to the `TextPainter`
+/// guard, the first because it measured a layout without `Send max` and the
+/// second because a `Text` inside a `FittedBox` never exceeds its lines. The
+/// cure is width, not scale: the figure keeps the gutter and the chip wraps.
+class _AvailableLine extends StatelessWidget {
+  const _AvailableLine({required this.mature, required this.stale});
+
+  final ValueListenable<BigInt?> mature;
+  final ValueListenable<bool> stale;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<BigInt?>(
+      valueListenable: mature,
+      builder: (context, value, _) => ValueListenableBuilder<bool>(
+        valueListenable: stale,
+        builder: (context, isStale, _) {
+          const style = TextStyle(
+            fontFamily: KvFont.mono,
+            fontSize: 12,
+            height: 16 / 12,
+            color: KvColor.inkMetaLow,
+            fontFeatures: [FontFeature.tabularFigures()],
+          );
+          // BG-8: `—` while it is unknown, never a fabricated zero. D-210:
+          // every significant digit and no trailing zeros — this screen signs
+          // nothing, so the fixed eight are not its exception to claim, and
+          // the padding is what made the figure too wide to read.
+          final figure = value == null
+              ? 'available —'
+              : 'available ${_trimmed(value)}';
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AnimatedOpacity(
+                opacity: value != null && isStale
+                    ? KvFreshness.opacityStale
+                    : 1,
+                duration: KvMotion.instant,
+                curve: KvMotion.out,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Text(
+                    figure,
+                    maxLines: 1,
+                    softWrap: false,
+                    style: style,
                   ),
                 ),
               ),
-              const SizedBox(height: KvSpace.m),
-              FilledButton(
-                onPressed: _canReview ? _review : null,
-                child: _building
-                    ? const KvLoader.inline()
-                    : const Text('Review'),
-              ),
-              if (widget.prepareSweep != null) ...[
-                const SizedBox(height: KvSpace.xs),
-                TextButton(
-                  onPressed: _building ? null : _reviewSweep,
-                  child: const Text('Send everything'),
+              // The freshness clause is a SENTENCE and gets its own line, so
+              // it never eats the figure's width: BG-14 forbids a number from
+              // reflowing, not a clause. Words as well as opacity, so the
+              // state survives greyscale and a screen reader.
+              if (value != null && isStale)
+                Text(
+                  'not live — last known',
+                  style: style.copyWith(fontFamily: KvFont.ui),
                 ),
-              ],
             ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Send max. A chip rather than a button because it fills a field — it commits
+/// nothing.
+class _MaxChip extends StatelessWidget {
+  const _MaxChip({required this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Send the maximum, leaving only the fee',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+        child: KvSurface.control(
+          height: KvSpace.touchTarget,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+          child: const Text(
+            'Send max',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 12,
+              height: 16 / 12,
+              fontWeight: FontWeight.w600,
+              color: KvColor.inkBright,
+            ),
           ),
         ),
       ),
@@ -278,71 +788,133 @@ class _SendScreenState extends State<SendScreen> {
   }
 }
 
-/// "Available: N KAS" — the spendable (mature) balance, informational only.
-class _AvailableLine extends StatelessWidget {
-  const _AvailableLine({required this.mature});
+/// The destination field: paste on the left, the address, clear on the right.
+///
+/// **It stays typable, and the system keyboard is the right one for it.** The
+/// no-system-IME law protects SECRETS (§0.7/INV-3) and the amount pad exists
+/// for muscle memory (D-189); an address is public data, and a field that
+/// could only be pasted into would cost a user reading one off paper the
+/// ability to send at all — a sovereignty control must never remove a
+/// capability (BG-17's rule, applied one surface over).
+///
+/// **There is no scan affordance**, and its absence is deliberate: no QR
+/// scanner is built, and a control that looks pressable and does nothing is
+/// exactly what BG-12 forbids. The prototype drew one; drawing it here would
+/// have been a promise the app cannot keep.
+class _AddressField extends StatelessWidget {
+  const _AddressField({
+    required this.controller,
+    required this.focusNode,
+    required this.onPaste,
+    required this.onClear,
+  });
 
-  final ValueListenable<BigInt?> mature;
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final VoidCallback onPaste;
+  final VoidCallback onClear;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ValueListenableBuilder<BigInt?>(
-      valueListenable: mature,
-      builder: (context, value, _) {
-        if (value == null) return const SizedBox.shrink();
-        final parts = kasParts(value);
-        return Text(
-          'Available: ${parts.integer}.${parts.fraction} KAS',
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: KvColor.textTertiary,
+    return KvSurface.control(
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
+      child: Row(
+        children: [
+          _FieldAction(
+            mark: KvMark.paste,
+            label: 'Paste an address',
+            onTap: onPaste,
           ),
-        );
-      },
-    );
-  }
-}
-
-/// "Minimum right now: ≈ N KAS" — the probed KIP-9 floor for the wallet's
-/// current coin shape (D-054). Honest teaching line, not an enforcement point:
-/// the Generator on Review remains the single authority.
-class _MinimumLine extends StatelessWidget {
-  const _MinimumLine({required this.minSompi});
-
-  final BigInt minSompi;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final parts = kasParts(minSompi);
-    return Text(
-      'Minimum right now: ≈ ${parts.integer}.${parts.fraction} KAS '
-      '(network anti-dust rule for your current coins)',
-      style: theme.textTheme.bodySmall?.copyWith(color: KvColor.textTertiary),
-    );
-  }
-}
-
-/// The pasted address chunked in fours for a full-form review (BG-15) before it
-/// is ever signed — the user can read it back against the source.
-class _AddressReview extends StatelessWidget {
-  const _AddressReview({required this.address});
-
-  final String address;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(KvSpace.sm),
-      decoration: BoxDecoration(
-        color: KvColor.surfaceAlt,
-        borderRadius: BorderRadius.circular(KvRadius.data),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              minLines: 1,
+              maxLines: 2,
+              style: const TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 13,
+                height: 20 / 13,
+                color: KvColor.ink,
+              ),
+              // The field IS the container; a second painted fill and outline
+              // inside its own pill is the defect UX-3 found on the explorer
+              // rows (theme `applyDefaults` reaching into a styled field).
+              decoration: const InputDecoration(
+                isDense: true,
+                filled: false,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                contentPadding: EdgeInsets.symmetric(vertical: KvSpace.sm),
+                hintText: 'Paste a Kaspa address',
+                hintStyle: TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 13,
+                  height: 20 / 13,
+                  color: KvColor.inkMeta,
+                ),
+              ),
+            ),
+          ),
+          if (controller.text.isNotEmpty)
+            Semantics(
+              button: true,
+              label: 'Clear the destination address',
+              child: InkWell(
+                onTap: onClear,
+                borderRadius: BorderRadius.circular(KvRadius.control),
+                child: Container(
+                  constraints: const BoxConstraints(
+                    minHeight: KvSpace.touchTarget,
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'Clear',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: KvColor.primaryMuted,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
-      child: Text(
-        chunkAddress(address),
-        style: theme.textTheme.bodySmall?.copyWith(fontFamily: KvFont.mono),
+    );
+  }
+}
+
+/// A glyph inside the address field: **20 dp of glyph in a 48×48 target.**
+class _FieldAction extends StatelessWidget {
+  const _FieldAction({
+    required this.mark,
+    required this.label,
+    required this.onTap,
+  });
+
+  final KvMark mark;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(KvRadius.chip),
+        child: SizedBox(
+          width: KvSpace.touchTarget,
+          height: KvSpace.touchTarget,
+          child: Center(
+            child: KvGlyphIcon(mark, size: 20, tone: KvColor.inkMeta),
+          ),
+        ),
       ),
     );
   }

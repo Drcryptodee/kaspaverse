@@ -14,6 +14,7 @@ import 'widgets/entrance.dart';
 import 'widgets/kv_amount.dart';
 import 'widgets/kv_breath.dart';
 import 'widgets/kv_cadence.dart';
+import 'widgets/kv_chrome.dart';
 import 'widgets/kv_empty_state.dart';
 import 'widgets/kv_glyph.dart';
 import 'widgets/kv_status_chip.dart';
@@ -85,7 +86,15 @@ class HomeScreen extends StatefulWidget {
 
   /// Builds the Send screen (`null` ⇒ no Send UI). `main.dart` wires it to the
   /// wallet service so this consumer never imports it.
-  final WidgetBuilder? sendRoute;
+  ///
+  /// It is handed **this screen's own `_dimmed` bit**, not a fresh derivation
+  /// of its own: Send quotes the spendable balance back at the user (*"you are
+  /// N KAS short"*), so it owes BG-8's live/stale/unknown exactly as the plate
+  /// does — and two independent foldings of the link state are how a screen
+  /// and the screen behind it start disagreeing about whether the wallet is
+  /// connected (P0.3's shape; L133's warning about which bit an arm needs).
+  final Widget Function(BuildContext, ValueListenable<bool> balanceStale)?
+  sendRoute;
 
   /// Builds the Messages screen (P2.3 transport UI; `null` ⇒ no entry).
   ///
@@ -675,7 +684,11 @@ class _HomeScreenState extends State<HomeScreen> {
               balance: _balance,
               onSend: widget.sendRoute == null
                   ? null
-                  : () => _push(widget.sendRoute),
+                  : () => Navigator.of(context).push(
+                      KvPageRoute<void>(
+                        builder: (c) => widget.sendRoute!(c, _dimmed),
+                      ),
+                    ),
               onReceive: widget.receiveRoute == null
                   ? null
                   : () => _push(widget.receiveRoute),
@@ -2069,7 +2082,7 @@ class _ThumbActions extends StatelessWidget {
               children: [
                 if (onReceive != null)
                   Expanded(
-                    child: _Action(
+                    child: KvAction(
                       label: 'Receive',
                       primary: nothingToSend,
                       onTap: onReceive!,
@@ -2079,7 +2092,7 @@ class _ThumbActions extends StatelessWidget {
                   const SizedBox(width: KvSpace.sm),
                 if (onSend != null)
                   Expanded(
-                    child: _Action(
+                    child: KvAction(
                       label: 'Send',
                       primary: !nothingToSend,
                       // BG-12: a disabled control always says why, in words.
@@ -2094,84 +2107,6 @@ class _ThumbActions extends StatelessWidget {
           },
         ),
       ),
-    );
-  }
-}
-
-class _Action extends StatelessWidget {
-  const _Action({
-    required this.label,
-    required this.primary,
-    required this.onTap,
-    this.disabledReason,
-  });
-
-  final String label;
-  final bool primary;
-  final VoidCallback onTap;
-  final String? disabledReason;
-
-  @override
-  Widget build(BuildContext context) {
-    final disabled = disabledReason != null;
-    final lit = primary && !disabled;
-    // **Trialling the pre-UX-2 radius** (founder, on glass, still deciding).
-    // D-194 made every control a pill so that "at a glance the things you press
-    // are round and the things you read are milled" — these two are the loudest
-    // controls in the app, so if the pill language is wrong anywhere it shows
-    // here first. Reverting them alone means the money actions and the chip
-    // speak different shapes until the call is settled; recorded, not hidden.
-    const radius = KvRadius.button;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Semantics(
-          button: true,
-          enabled: !disabled,
-          child: InkWell(
-            onTap: disabled ? null : onTap,
-            borderRadius: BorderRadius.circular(radius),
-            child: Container(
-              height: KvSpace.control,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                // Teal fills exactly one thing on this screen: the single
-                // primary action (BG-2). Everything else recedes to `control`.
-                color: lit ? KvColor.primary : KvColor.control,
-                borderRadius: BorderRadius.circular(radius),
-                border: lit ? null : Border.all(color: KvColor.edgeHi),
-              ),
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 15,
-                  height: 20 / 15,
-                  fontWeight: FontWeight.w600,
-                  color: lit
-                      ? KvColor.onPrimary
-                      : (disabled ? KvColor.inkMeta : KvColor.ink),
-                ),
-              ),
-            ),
-          ),
-        ),
-        if (disabled) ...[
-          const SizedBox(height: KvSpace.xs),
-          Text(
-            disabledReason!,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 11,
-              height: 15 / 11,
-              color: KvColor.inkMetaLow,
-            ),
-          ),
-        ],
-      ],
     );
   }
 }

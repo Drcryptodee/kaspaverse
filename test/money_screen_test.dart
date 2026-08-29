@@ -134,7 +134,7 @@ void main() {
         enabled: ValueNotifier<bool?>(rateOn),
         quote: ValueNotifier<KvRateQuote?>(quote),
       ),
-      sendRoute: actions ? (_) => const Placeholder() : null,
+      sendRoute: actions ? (_, _) => const Placeholder() : null,
       receiveRoute: actions ? (_) => const Placeholder() : null,
     ),
   );

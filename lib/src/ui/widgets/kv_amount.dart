@@ -101,7 +101,12 @@ class KvAmount extends StatelessWidget {
   final double? size;
 
   /// Fixed count of fractional digits. Null trims trailing zeros to a minimum
-  /// of two. Defaults per role: hero **4**, screen **8**, row trimmed.
+  /// of two. Defaults per role: **hero and row trimmed, screen 8.**
+  ///
+  /// The hero used to fix at 4 and D-210 retired that — a hero stopping at
+  /// four decimals told a user holding `21.12345678` that they held `21.1234`.
+  /// The screen role keeps its fixed eight because BG-6 restates a built
+  /// transaction in full.
   final int? fractionDigits;
 
   /// Null shows the unit on [KvAmountRole.hero] and [KvAmountRole.screen], and
@@ -204,20 +209,6 @@ class KvAmount extends StatelessWidget {
                 color: KvColor.inkDim,
               ),
             ),
-            if (_unit) ...[
-              const SizedBox(width: KvSpace.s),
-              Text(
-                'KAS',
-                maxLines: 1,
-                style: TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: unitSize,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 0.6,
-                  color: KvColor.primaryMuted,
-                ),
-              ),
-            ],
           ],
         ),
       );
@@ -291,20 +282,6 @@ class KvAmount extends StatelessWidget {
                   fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
-            if (_unit) ...[
-              const SizedBox(width: KvSpace.s),
-              Text(
-                'KAS',
-                maxLines: 1,
-                style: TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: unitSize,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 0.6,
-                  color: KvColor.primaryMuted,
-                ),
-              ),
-            ],
           ],
         ),
       );
@@ -314,14 +291,57 @@ class KvAmount extends StatelessWidget {
       opacity: stale ? KvFreshness.opacityStale : 1,
       duration: KvMotion.instant,
       curve: KvMotion.out,
-      // Every role scales down rather than clipping (BG-5) — including a row,
-      // which the prototype left at a fixed size and which is exactly where a
-      // long amount at 1.3x on a 320dp screen runs out of room. A caller must
-      // give this a bounded width for the fit to have anything to work with.
-      child: FittedBox(
-        fit: BoxFit.scaleDown,
-        alignment: AlignmentDirectional.centerStart,
-        child: content,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          // Every role scales down rather than clipping (BG-5) — including a
+          // row, which the prototype left at a fixed size and which is exactly
+          // where a long amount at 1.3x on a 320dp screen runs out of room. A
+          // caller must give this a bounded width for the fit to have anything
+          // to work with.
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: AlignmentDirectional.centerStart,
+              child: content,
+            ),
+          ),
+          // **The unit sits OUTSIDE the fit, and that is the whole point of
+          // its floor.** Inside, [unitSize]'s `max(readableFloor, …)` was
+          // computed and then multiplied away by the very scale that saved the
+          // figure: a max-supply balance at 320dp/1.3× shrank the unit to
+          // 7.89dp against an 11dp law, on a signing surface
+          // (`ux-auditor`, UX-4). The figure may shrink — it is the thing
+          // being fitted — but a three-letter unit costs almost nothing to
+          // keep readable, and it is information the user must read.
+          if (_unit) ...[
+            const SizedBox(width: KvSpace.s),
+            Padding(
+              // An optical nudge so the unit sits on the figure's baseline
+              // rather than its line-box bottom, now that it is outside the
+              // fit and can no longer share a `CrossAxisAlignment.baseline`
+              // with it. **By eye, not derived** — said plainly, because a
+              // comment that implied a measurement would be the L121 defect
+              // this codebase keeps paying for. It moves no size the law
+              // governs; [unitSize] is computed and floored above.
+              padding: EdgeInsets.only(bottom: unitSize * 0.18),
+              child: ExcludeSemantics(
+                child: Text(
+                  'KAS',
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: unitSize,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.6,
+                    color: KvColor.primaryMuted,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

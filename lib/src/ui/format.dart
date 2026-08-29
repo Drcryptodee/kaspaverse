@@ -59,9 +59,19 @@ String trimFraction(String fraction, {int min = 2}) {
 /// `double`** (custody: a float can't represent 8-decimal sompi exactly).
 ///
 /// Returns `null` for anything not a clean non-negative amount: empty, signs,
-/// grouping commas, more than one dot, non-digits, or **more than 8 fractional
+/// grouping commas, more than one dot, non-digits, **more than 8 fractional
 /// digits** (sompi can't hold finer than 1e-8 KAS — rejected, never silently
-/// floored away). `"12.4"` → `1_240_000_000`; `".5"` → `50_000_000`; `"0"` → `0`.
+/// floored away), or **more sompi than a `u64` can carry**.
+///
+/// That last bound is the one that would fail silently. `amount_sompi` crosses
+/// the FFI as a `u64`, and flutter_rust_bridge's encoder ends in
+/// `ByteData.setUint64`, which **truncates mod 2⁶⁴ and throws nothing**:
+/// `184467440737.09551616` KAS would cross as **0**. A number quietly becoming
+/// a different number is BG-5's exact prohibition, and the refusal belongs
+/// here — at the boundary every caller already trusts — rather than in one
+/// screen's validation (`consensus-auditor`, UX-4).
+///
+/// `"12.4"` → `1_240_000_000`; `".5"` → `50_000_000`; `"0"` → `0`.
 BigInt? sompiFromKas(String input) {
   final text = input.trim();
   if (text.isEmpty) return null;
@@ -76,8 +86,15 @@ BigInt? sompiFromKas(String input) {
   if (!digits.hasMatch(intPart) || !digits.hasMatch(fracPart)) return null;
   final whole = intPart.isEmpty ? BigInt.zero : BigInt.parse(intPart);
   final frac = BigInt.parse(fracPart.padRight(8, '0')); // '' → '00000000' → 0
-  return whole * _sompiPerKas + frac;
+  final sompi = whole * _sompiPerKas + frac;
+  return sompi > maxSompi ? null : sompi;
 }
+
+/// The largest value the `u64` sompi wire can carry — `2⁶⁴ − 1`. Not a policy
+/// number: it is the width of the field, and above it the encoder wraps in
+/// silence. (Kaspa's whole supply is ~28.7e9 KAS, six orders of magnitude
+/// under it, so no real amount is ever near this.)
+final BigInt maxSompi = BigInt.parse('18446744073709551615');
 
 /// Trim trailing zeros from a **fiat** figure — the precision law (D-210)
 /// applied to a unit that is not KAS: every significant digit, no padding,
@@ -136,4 +153,56 @@ String truncateAddressPayload(String address) {
   final head = payload.substring(0, 8);
   final tail = payload.substring(payload.length - 8);
   return '$prefix$head…$tail';
+}
+
+/// Apply one amount-keypad press to the amount being typed, returning the new
+/// string. Pure, so the grammar of money entry is testable without a widget.
+///
+/// The rules are [sompiFromKas]'s, enforced at the keystroke instead of at the
+/// parse — a keypad that lets you type a ninth decimal and then refuses the
+/// whole amount teaches nothing:
+///
+///  * **at most one decimal point**, and a leading `.` becomes `0.`;
+///  * **at most 8 fractional digits** — sompi cannot hold finer, so the ninth
+///    press is simply not taken (never silently floored away);
+///  * a digit pressed against a lone leading `0` REPLACES it, so `05` cannot
+///    be typed.
+///
+/// [key] is a single character: `0`–`9` or `.`. Backspace is the caller's
+/// [amountBackspace].
+String amountKeyPress(String current, String key) {
+  if (key == '.') {
+    if (current.contains('.')) return current;
+    return current.isEmpty ? '0.' : '$current.';
+  }
+  if (key.length != 1 || key.codeUnitAt(0) < 0x30 || key.codeUnitAt(0) > 0x39) {
+    return current;
+  }
+  final dot = current.indexOf('.');
+  if (dot >= 0 && current.length - dot - 1 >= 8) return current;
+  final next = current == '0' ? key : '$current$key';
+  // The `u64` ceiling, refused at the keystroke rather than at the parse for
+  // the same reason as the ninth decimal: an amount that becomes unparseable
+  // several keys after the one that did it teaches nothing.
+  return sompiFromKas(next) == null && next != '0.' ? current : next;
+}
+
+/// Remove the last character of a typed amount. A trailing lone `0.` goes back
+/// to empty in one press rather than leaving a bare `0` the user did not type.
+String amountBackspace(String current) {
+  if (current.isEmpty) return current;
+  final next = current.substring(0, current.length - 1);
+  return next == '0' ? '' : next;
+}
+
+/// Group the integer part of a **typed** amount for display, leaving the
+/// fraction exactly as typed.
+///
+/// The canonical string stays ungrouped — [sompiFromKas] rejects grouping
+/// commas — so this is display only, and the value that gets parsed is never
+/// the one that was grouped.
+String groupTypedAmount(String typed) {
+  final dot = typed.indexOf('.');
+  if (dot < 0) return groupThousands(typed);
+  return '${groupThousands(typed.substring(0, dot))}${typed.substring(dot)}';
 }

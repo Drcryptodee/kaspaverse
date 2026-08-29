@@ -8,7 +8,7 @@ import 'address_text.dart';
 import 'biometric_copy.dart';
 import 'error_text.dart';
 import 'roadmap_screen.dart';
-import 'send/confirm_send_sheet.dart';
+import 'send/signing_ceremony.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/glass_panel.dart';
@@ -186,7 +186,7 @@ class WalletSettingsScope {
   final WidgetBuilder? receiveRoute;
 
   /// Merge coins (consolidation): Rust builds + stashes the plan, this screen
-  /// opens the ONE signing surface ([ConfirmSendSheet]) over its summary. All
+  /// opens the ONE signing surface ([SigningCeremony]) over its summary. All
   /// three seams present ⇒ the row renders; absent ⇒ hidden (tests, and any
   /// build without the send stack wired).
   final Future<SignableSummaryDto> Function()? consolidate;
@@ -579,7 +579,8 @@ class _SettingsScreenState extends State<SettingsScreen>
   // ── row actions ──────────────────────────────────────────────────────────
 
   /// Merge coins: prepare in Rust, then hand the summary to the ONE signing
-  /// surface — the same anti-blind-signing sheet every send uses (B7, BG-6).
+  /// surface — the same anti-blind-signing ceremony every send uses (B7,
+  /// BG-6).
   /// A refusal ("nothing to merge", dust beneath the fee) lands as the row's
   /// own status line, in Rust's honest words.
   Future<void> _runMergeCoins() async {
@@ -597,16 +598,11 @@ class _SettingsScreenState extends State<SettingsScreen>
       final summary = await consolidate();
       if (!mounted) return;
       _merge.value = null;
-      final outcome = await showModalBottomSheet<SendOutcomeDto?>(
-        context: context,
-        backgroundColor: KvColor.surface,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (_) => ConfirmSendSheet(
-          summary: summary,
-          commit: commit,
-          abandon: abandon,
-        ),
+      final outcome = await showSigningCeremony(
+        context,
+        summary: summary,
+        commit: commit,
+        abandon: abandon,
       );
       if (!mounted) return;
       if (outcome != null && !outcome.partial && outcome.error == null) {

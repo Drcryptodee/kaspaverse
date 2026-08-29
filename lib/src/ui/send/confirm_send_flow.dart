@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../../rust/api/send.dart';
 import '../theme/tokens.dart';
 import '../widgets/kv_loader.dart';
-import 'confirm_send_sheet.dart';
+import 'signing_ceremony.dart';
 
 /// How long a prepare may take before the wait is worth showing. Under this a
 /// card would flash and vanish, which reads as a glitch rather than progress.
@@ -22,7 +22,7 @@ const Duration _showProgressAfter = Duration(milliseconds: 250);
 /// starts, so the reason lands at `_showProgressAfter + _explainAfter` of
 /// prepare. At the old 1200 ms that was 1450 ms — and a healthy maturity wait
 /// measured **1203 ms** on glass, putting the whole prepare at roughly 1500 ms.
-/// The reason therefore fired ~50 ms before the sheet replaced the card: it
+/// The reason therefore fired ~50 ms before the ceremony replaced the card: it
 /// reproduced, one level down, exactly the flash-and-vanish that
 /// [_showProgressAfter] exists to prevent, and the founder saw only bare
 /// spinners across a ten-send sitting. Sized above the measured normal so it
@@ -50,15 +50,16 @@ const Duration _explainAfter = Duration(milliseconds: 2000);
 const Duration _reassureAfter = Duration(seconds: 7);
 
 /// THE one confirm-send ceremony (V5): prepare in Rust → open the shared
-/// hold-to-sign sheet over the Rust-decoded [SignableSummaryDto] (B7) →
-/// return the outcome (null = dismissed without signing; the sheet's own
+/// hold-to-sign [SigningCeremony] over the Rust-decoded [SignableSummaryDto]
+/// (B7) →
+/// return the outcome (null = dismissed without signing; the ceremony's own
 /// dispose already abandoned the stash).
 ///
 /// Deliberately owns ONLY the shared shape. Prepare errors PROPAGATE — each
 /// caller keeps its own surface (send screen: inline error; messaging
 /// surfaces: snackbar) — and each caller runs its own refresh after the
-/// sheet closes. Never auto-broadcasts: broadcast fires only inside a
-/// completed hold ([ConfirmSendSheet]).
+/// ceremony closes. Never auto-broadcasts: broadcast fires only inside a
+/// completed hold ([SigningCeremony]).
 ///
 /// A prepare in the messages lane can now BLOCK for up to twenty-odd seconds
 /// waiting for the previous send's change to mature, instead of failing the
@@ -109,25 +110,20 @@ Future<SendOutcomeDto?> runConfirmSend(
   }
 
   if (!context.mounted) {
-    // The surface died between prepare and the sheet: nobody can ever commit
+    // The surface died between prepare and the ceremony: nobody can ever commit
     // this plan — release the Rust stash instead of leaving an unsigned,
     // nonce-guarded orphan until the next prepare overwrites it (V5
     // wallet-security note, closed).
     await abandon();
     return null;
   }
-  return showModalBottomSheet<SendOutcomeDto>(
-    context: context,
-    backgroundColor: KvColor.surface,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (_) => ConfirmSendSheet(
-      summary: summary,
-      commit: commit,
-      abandon: abandon,
-      title: title,
-      contextNote: contextNote,
-    ),
+  return showSigningCeremony(
+    context,
+    summary: summary,
+    commit: commit,
+    abandon: abandon,
+    title: title,
+    contextNote: contextNote,
   );
 }
 
@@ -249,7 +245,7 @@ class _PreparingCardState extends State<_PreparingCard> {
           // is not, so it stays unnamed (L92).
           // §12: the funds-safe fact is stated because it is provably true —
           // nothing is signed or broadcast until a completed hold inside
-          // `ConfirmSendSheet`, which this card is still in front of. Scoped to
+          // `SigningCeremony`, which this card is still in front of. Scoped to
           // "this" on purpose: "nothing has been sent" would be false to a user
           // whose PREVIOUS send is the very thing being waited on. And the
           // second clause says "the wait", never "it": with a transaction

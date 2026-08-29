@@ -18,7 +18,13 @@ class KvRail extends StatelessWidget {
   const KvRail({super.key, required this.title, required this.onBack});
 
   final String title;
-  final VoidCallback onBack;
+
+  /// Null ⇒ **the way out is closed right now**, and the chevron says so
+  /// rather than looking live and doing nothing (BG-12). The ceremony uses it
+  /// while a broadcast is in flight: there is nothing left to cancel, and a
+  /// control that silently ignores a tap teaches distrust of every other
+  /// control on the screen.
+  final VoidCallback? onBack;
 
   @override
   Widget build(BuildContext context) {
@@ -28,17 +34,24 @@ class KvRail extends StatelessWidget {
         children: [
           Semantics(
             button: true,
+            enabled: onBack != null,
             label: 'Back',
             child: InkWell(
               onTap: onBack,
               borderRadius: BorderRadius.circular(KvRadius.control),
-              child: const SizedBox(
+              child: SizedBox(
                 width: KvSpace.touchTarget,
                 height: KvSpace.touchTarget,
                 child: Center(
                   child: RotatedBox(
                     quarterTurns: 2,
-                    child: KvGlyphIcon(KvMark.chevron, tone: KvColor.inkNav),
+                    child: KvGlyphIcon(
+                      KvMark.chevron,
+                      // `etch` is the disabled tone: decorative by design, and
+                      // it never carries information alone — what the exit is
+                      // waiting for is on the screen in words beneath it.
+                      tone: onBack == null ? KvColor.etch : KvColor.inkNav,
+                    ),
                   ),
                 ),
               ),
@@ -48,6 +61,18 @@ class KvRail extends StatelessWidget {
           // title can be wider than what is left between two 48dp targets, and
           // a Spacer cannot give any of it back. A label WRAPS (BG-14); only a
           // number is forbidden from doing so.
+          //
+          // **The cap stays at 2, and it was nearly changed on a false
+          // reading.** UX-4's `TextPainter` guard first reported *"Confirm
+          // contact request"* — the ceremony's longest heading — clipped in
+          // the 192dp this rail leaves at 320dp/1.3×. It was not: that run had
+          // not loaded the bundled faces, and the test fallback's square
+          // em-boxes overstate every label by roughly a factor of two. With
+          // Inter loaded the title fits two lines with room. The cap is still
+          // a magic number, but the guard now re-measures every ceremony
+          // heading at the floor, so a longer title fails a test instead of
+          // clipping in silence (L121: a measurement is only as true as what
+          // it measured).
           Expanded(
             child: Text(
               title,
@@ -96,4 +121,101 @@ class KvRuledLabel extends StatelessWidget {
       ),
     ],
   );
+}
+
+/// The primary (or secondary) action a screen ends on.
+///
+/// Promoted out of `home_screen.dart` at UX-4 rather than copied a third time:
+/// Send, the signing ceremony and the money screen's thumb arc are the same
+/// control, and a second private copy of a rail is exactly how two screens
+/// started disagreeing about where a back button is (the reason this file
+/// exists). `node_screen.dart` keeps its own, deliberately — it is never
+/// primary, it left-aligns its reason and it sits in a different register;
+/// folding it in here would be a re-skin of a settled surface, not a
+/// de-duplication.
+///
+/// **BG-12: a disabled control always says why.** [disabledReason] is both the
+/// disable switch and the sentence under the control — they cannot drift apart
+/// because they are one field.
+class KvAction extends StatelessWidget {
+  const KvAction({
+    super.key,
+    required this.label,
+    required this.primary,
+    required this.onTap,
+    this.disabledReason,
+  });
+
+  /// Verb plus object, never "Confirm" (BG-11).
+  final String label;
+
+  final bool primary;
+  final VoidCallback onTap;
+
+  /// Null ⇒ enabled. Non-null ⇒ disabled, and this is what it says.
+  final String? disabledReason;
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = disabledReason != null;
+    final lit = primary && !disabled;
+    // **Trialling the pre-UX-2 radius** (founder, on glass, still deciding).
+    // D-194 made every control a pill so that "at a glance the things you press
+    // are round and the things you read are milled" — these are the loudest
+    // controls in the app, so if the pill language is wrong anywhere it shows
+    // here first. Reverting them alone means the money actions and the chip
+    // speak different shapes until the call is settled; recorded, not hidden.
+    const radius = KvRadius.button;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          button: true,
+          enabled: !disabled,
+          child: InkWell(
+            onTap: disabled ? null : onTap,
+            borderRadius: BorderRadius.circular(radius),
+            child: Container(
+              height: KvSpace.control,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                // Teal fills exactly one thing on a screen: the single primary
+                // action (BG-2). Everything else recedes to `control`.
+                color: lit ? KvColor.primary : KvColor.control,
+                borderRadius: BorderRadius.circular(radius),
+                border: lit ? null : Border.all(color: KvColor.edgeHi),
+              ),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 15,
+                  height: 20 / 15,
+                  fontWeight: FontWeight.w600,
+                  color: lit
+                      ? KvColor.onPrimary
+                      : (disabled ? KvColor.inkMeta : KvColor.ink),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (disabled) ...[
+          const SizedBox(height: KvSpace.xs),
+          Text(
+            disabledReason!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 11,
+              height: 15 / 11,
+              color: KvColor.inkMetaLow,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
 }
