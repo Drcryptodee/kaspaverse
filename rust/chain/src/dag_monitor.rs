@@ -2362,8 +2362,11 @@ impl DagMonitor {
             Ok(()) => {
                 // **Publish atomically against retirement (R4, wallet-security
                 // BLOCK).** The identity gate runs at event INTAKE, but
-                // everything above — the strike settle, the demotion read, four
-                // subscription round-trips — takes real time, and `pause()`,
+                // everything above — the strike settle, the demotion read —
+                // takes real time (the subscribe leg does NOT: see
+                // `handle_connect`), and even a leg costing nothing would leave
+                // this window, because `handle_connect` is an await point
+                // whatever it spends. `pause()`,
                 // `reconnect()` and the race's own arms all retire from OTHER
                 // tasks. A retirement that lands inside that window used to
                 // find `bound = Some(..)`, tear the socket down, and then have
@@ -2436,9 +2439,29 @@ impl DagMonitor {
                 self.mark_endpoint_healthy(&bind.url);
             }
             // Stay "disconnected"; the race re-heal answers the Disconnected
-            // this failure ends in. KNOWN GAP (audited 2026-06-12, [→ P1]): if
-            // the node accepts the socket but rejects a subscription, the link
-            // idles half-set-up until the next natural reconnect.
+            // this failure ends in.
+            //
+            // **KNOWN GAP, and WORSE than it was written** (audited 2026-06-12;
+            // re-read at the pin 2026-08-29, `consensus-auditor` BLOCK on
+            // D-216). The old wording — "if the node accepts the socket but
+            // rejects a subscription" — cannot happen through this arm at all.
+            // `KaspaRpcClient::start_notify` (pin `client.rs:694`) is
+            // `notifier().try_start_notify()`, which is SYNCHRONOUS to a
+            // `parking_lot` mutation ending in unbounded channel sends
+            // (`notifier.rs:467` → `subscriber.rs:210`). The real
+            // `RpcApiOps::Subscribe` round-trip is issued later on the
+            // Subscriber's own task, and its failure is swallowed there by a
+            // `trace!`. So a node that takes the socket and never honours the
+            // subscription produces NO error here, `is_connected` publishes
+            // `true`, and the wallet is **connected and deaf** — the D-083
+            // shape. The only errors this arm can actually see are local.
+            //
+            // It is also unowned: this arm only warns. It does not retire and
+            // does not re-race, so a half-subscribed bind idles until a user
+            // tap, an OS network event or a natural drop. The fix is
+            // arm-and-verify (prove the push lane is live on the new socket —
+            // `bind.daa_seen_since_connect` already exists and is one `if`
+            // away), not a timeout on a local call.
             Err(e) => log::warn!(
                 "dag-monitor: subscription setup failed: {}",
                 link::sanitize_node_text(&e.to_string())
@@ -3704,7 +3727,8 @@ mod tests {
     /// **R4 — a bind retired while it was coming up must not publish.**
     ///
     /// The wallet-security BLOCK: the identity gate runs at event INTAKE, but
-    /// `on_connected` then spends four subscription round-trips before it
+    /// `on_connected` then runs the (LOCAL — not four round-trips; see the
+    /// arm's own note) subscribe leg before it
     /// publishes. A `pause()` / `reconnect()` / demoted-refusal landing inside
     /// that window used to be overwritten by the publish, leaving
     /// `is_connected = true` with NO bind installed — a state nothing could
