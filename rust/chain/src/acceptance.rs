@@ -164,17 +164,37 @@ struct WatchRecord {
     status: PersistedStatus,
 }
 
+/// The accepting block's own timestamp — **the chain's moment of acceptance.**
+///
+/// Extracted so the read can be asserted. The defect this field was fixed for
+/// did not live in the enum or in `on_accepted`, both of which are pure in the
+/// value; it lived in one line at the call site that passed the wallet's clock
+/// instead of the block's, and a test that chooses the argument itself cannot
+/// see that line (`consensus-auditor`, UX-4B).
+fn accepted_stamp(block: &kaspa_rpc_core::RpcBlock) -> u64 {
+    block.header.timestamp
+}
+
 /// A txid status as consumers see it (the spec's five states).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TxStatus {
     Submitted,
     /// Accepted by a chain block; `blue_depth` = live sink blue score −
     /// accepting block blue score (two node-read values).
+    ///
+    /// `accepted_unix_ms` is the **accepting block's header timestamp** — the
+    /// chain's own moment — or `0` when the block could not be fetched. A
+    /// receipt prints it under the label `Accepted`, so the device's clock is
+    /// not an acceptable substitute: it differs by however long the wallet
+    /// took to hear, by hours on a catch-up replay, and by anything at all on
+    /// a skewed device.
     Accepted {
         blue_depth: u64,
+        accepted_unix_ms: u64,
     },
     Confirmed {
         blue_depth: u64,
+        accepted_unix_ms: u64,
     },
     Displaced,
     /// Send-sourced, no acceptance for [`STALL_AFTER_MS`].
@@ -314,12 +334,21 @@ impl TrackerState {
     /// Fold one accepting block's accepted-txid list (already resolved to
     /// its blue score by the shell). Unwatched txids are ignored here — the
     /// shell pre-filters, this re-check just keeps the fold total.
+    /// `accepted_unix_ms` is the **accepting block's own header timestamp**,
+    /// or `0` when the block could not be fetched and there is none.
+    ///
+    /// It used to be `now_ms` — this wallet's clock at the moment it folded —
+    /// which is a different fact from the acceptance and is wrong by however
+    /// long the wallet took to hear. On a catch-up page replaying hours-old
+    /// blocks it is wrong by hours, and on a device with a skewed clock it is
+    /// simply false. A receipt prints this under the label **Accepted**, so it
+    /// has to be the chain's number or no number (`ffi-leak-auditor`, UX-4B).
     fn on_accepted(
         &mut self,
         accepting_block: &str,
         accepting_blue_score: u64,
         txids: &[String],
-        now_ms: u64,
+        accepted_unix_ms: u64,
     ) -> Result<Vec<AcceptanceEvent>> {
         let mut events = Vec::new();
         for txid in txids {
@@ -352,7 +381,7 @@ impl TrackerState {
             updated.status = PersistedStatus::Accepted {
                 accepting_block: accepting_block.to_string(),
                 accepting_blue_score,
-                accepted_unix_ms: now_ms,
+                accepted_unix_ms,
             };
             self.log.upsert(txid.clone(), updated)?;
             self.by_accepting_block
@@ -550,13 +579,20 @@ impl TrackerState {
             }
             PersistedStatus::Accepted {
                 accepting_blue_score,
+                accepted_unix_ms,
                 ..
             } => {
                 let blue_depth = self.sink_blue.saturating_sub(*accepting_blue_score);
                 if blue_depth >= CONFIRMED_DEPTH_BLUE {
-                    TxStatus::Confirmed { blue_depth }
+                    TxStatus::Confirmed {
+                        blue_depth,
+                        accepted_unix_ms: *accepted_unix_ms,
+                    }
                 } else {
-                    TxStatus::Accepted { blue_depth }
+                    TxStatus::Accepted {
+                        blue_depth,
+                        accepted_unix_ms: *accepted_unix_ms,
+                    }
                 }
             }
             // Finality was already established when the record finalized —
@@ -564,9 +600,11 @@ impl TrackerState {
             // sink value; the displayed depth grows as the sink arrives.
             PersistedStatus::Finalized {
                 accepting_blue_score,
+                accepted_unix_ms,
                 ..
             } => TxStatus::Confirmed {
                 blue_depth: self.sink_blue.saturating_sub(*accepting_blue_score),
+                accepted_unix_ms: *accepted_unix_ms,
             },
             PersistedStatus::Displaced { .. } => TxStatus::Displaced,
         })
@@ -796,9 +834,16 @@ impl AcceptanceTracker {
             // `daa_score` is the sibling of the blue score we already fetch —
             // and it is exactly the input `get_utxo_return_address` needs.
             let mut daa_score: Option<u64> = None;
+            // The accepting block's OWN timestamp — the chain's moment of
+            // acceptance, and the only honest source for a receipt's
+            // `Accepted` line. `0` when the block could not be fetched; the
+            // bridge maps that to `None` and the glass then shows no time
+            // rather than this device's clock.
+            let mut accepted_unix_ms: u64 = 0;
             let blue_score = match rpc.rpc_api().get_block(accepting_block, false).await {
                 Ok(block) => {
                     daa_score = Some(block.header.daa_score);
+                    accepted_unix_ms = accepted_stamp(&block);
                     block.header.blue_score
                 }
                 Err(e) => {
@@ -864,7 +909,12 @@ impl AcceptanceTracker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state
-                    .on_accepted(&accepting_block.to_string(), blue_score, &txids, now_ms)
+                    .on_accepted(
+                        &accepting_block.to_string(),
+                        blue_score,
+                        &txids,
+                        accepted_unix_ms,
+                    )
                     .unwrap_or_else(|e| {
                         log::warn!("acceptance: acceptance fold persist failed: {e}");
                         Vec::new()
@@ -1058,6 +1108,41 @@ mod tests {
         format!("{:02x}", n ^ 0xFF).repeat(32)
     }
 
+    /// **The seam that actually broke.** `on_accepted` is pure in its stamp
+    /// argument, so a test that chooses that argument proves only that a value
+    /// travels — it cannot see the one line at the call site that decides
+    /// WHICH value. That line passed the wallet's own clock, `ffi-leak-auditor`
+    /// caught it, and this asserts the read it was replaced with: the
+    /// accepting block's own header timestamp, and nothing that could be
+    /// confused with a local clock (`consensus-auditor`, UX-4B).
+    #[test]
+    fn accepted_stamp_reads_the_blocks_own_timestamp() {
+        // Deliberately nothing like `now`: a 1998 stamp cannot be produced by
+        // any clock this test could accidentally be reading instead.
+        const STAMP: u64 = 883_612_800_000;
+        let header = kaspa_rpc_core::RpcHeader {
+            hash: Hash::default(),
+            version: 0,
+            parents_by_level: Vec::new(),
+            hash_merkle_root: Hash::default(),
+            accepted_id_merkle_root: Hash::default(),
+            utxo_commitment: Hash::default(),
+            timestamp: STAMP,
+            bits: 0,
+            nonce: 0,
+            daa_score: 0,
+            blue_work: 0.into(),
+            blue_score: 0,
+            pruning_point: Hash::default(),
+        };
+        let block = kaspa_rpc_core::RpcBlock {
+            header,
+            transactions: Vec::new(),
+            verbose_data: None,
+        };
+        assert_eq!(accepted_stamp(&block), STAMP);
+    }
+
     /// The sender-interest set is the one queue in this file keyed on
     /// ATTACKER-MINTABLE input: anyone can put a `comm:` payload on chain
     /// addressed to a published key. So it must be bounded, in-memory, and
@@ -1134,7 +1219,14 @@ mod tests {
         assert_eq!(events, vec![AcceptanceEvent::Accepted { txid: txid(1) }]);
         assert_eq!(
             state.status(&txid(1), 2_000),
-            Some(TxStatus::Accepted { blue_depth: 0 }),
+            Some(TxStatus::Accepted {
+                blue_depth: 0,
+                // The accepting BLOCK's timestamp, carried straight through —
+                // this is the number a receipt prints under `Accepted`, and
+                // asserting it here is what stops it sliding back to the
+                // device's clock.
+                accepted_unix_ms: 2_000
+            }),
             "no sink blue yet — depth 0"
         );
 
@@ -1159,7 +1251,8 @@ mod tests {
         assert_eq!(
             state.status(&txid(1), 3_100),
             Some(TxStatus::Confirmed {
-                blue_depth: CONFIRMED_DEPTH_BLUE + 1
+                blue_depth: CONFIRMED_DEPTH_BLUE + 1,
+                accepted_unix_ms: 2_000
             })
         );
 

@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../rust/api/send.dart';
+import '../../rust/api/transport.dart';
 import '../error_text.dart';
 import '../format.dart';
 import '../theme/kv_page_route.dart';
@@ -13,6 +15,7 @@ import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_chrome.dart';
+import '../widgets/kv_glyph.dart';
 import '../widgets/kv_status_chip.dart';
 import '../widgets/kv_surface.dart';
 
@@ -45,6 +48,7 @@ class SigningCeremony extends StatefulWidget {
     required this.abandon,
     this.title,
     this.contextNote,
+    this.acceptanceStatus,
     this.onLeftInFlight,
   });
 
@@ -61,6 +65,16 @@ class SigningCeremony extends StatefulWidget {
   /// carries beyond value (e.g. the bond-refund rule). Never a number the
   /// summary doesn't back (B7: the DTO stays the only source of figures).
   final String? contextNote;
+
+  /// The tracker's live answer for one txid, polled once a second while the
+  /// receipt is on screen so the depth STREAMS.
+  ///
+  /// It is node-read (`AcceptanceTracker::status` computes the depth at read
+  /// from the live sink blue score — INV-9), and it is injected so the widget
+  /// tests run without the native library. **Null, or a null answer, renders
+  /// nothing at all**: unwatched, pruned or tracker-unavailable are all states
+  /// where the honest output is silence, never a zero.
+  final Future<TxStatusDto?> Function(String txid)? acceptanceStatus;
 
   /// Fired when the user leaves **after the hold completed and before the
   /// outcome landed** — the overrun exit.
@@ -93,6 +107,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
   required Future<void> Function() abandon,
   String? title,
   String? contextNote,
+  Future<TxStatusDto?> Function(String txid)? acceptanceStatus,
   VoidCallback? onLeftInFlight,
 }) {
   return Navigator.of(context).push(
@@ -103,6 +118,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
         abandon: abandon,
         title: title,
         contextNote: contextNote,
+        acceptanceStatus: acceptanceStatus,
         onLeftInFlight: onLeftInFlight,
       ),
     ),
@@ -178,6 +194,65 @@ class _SigningCeremonyState extends State<SigningCeremony>
   bool _mayLeave = false;
   Timer? _exitTimer;
 
+  /// The tracker's latest answer for this send's txid, or null while there is
+  /// nothing to ask about and whenever the answer itself is null.
+  TxStatusDto? _status;
+  Timer? _depthPoll;
+
+  /// One second, which is what makes the count STREAM rather than step. The
+  /// depth is recomputed at read from the live sink blue score, so each poll
+  /// is a fresh node-read rather than a cached number ticking on a clock.
+  static const Duration _depthEvery = Duration(seconds: 1);
+
+  /// Start streaming the depth once there is a txid to ask about. Every answer
+  /// is rendered as it comes and a null one clears the mark — the receipt
+  /// shows the chain's number or nothing, never a remembered one.
+  /// True only when `finalTxid` names the **payment** transaction.
+  ///
+  /// `PreparedSend::commit` reassigns `final_txid` after *every* successful
+  /// submit (`rust/chain/src/send.rs`), so on a partial broadcast it holds the
+  /// last leg that happened to land — a compounding leg, not the payment. That
+  /// leg is watched like any other, is accepted within about a second, and
+  /// would print `Accepted` directly under `Total`: a chain-stamped acceptance
+  /// sitting beside an amount that never went out. The verdict below would say
+  /// `Partly sent`, and the stamp would have already contradicted it.
+  ///
+  /// The four conditions MIRROR Rust's own [`fully_broadcast`]
+  /// (`rust/bridge/src/api/send.rs`), which is the D-041 change-cursor gate:
+  /// the question "is this send complete enough to name a payment id" has one
+  /// answer in this codebase, not two that can drift apart.
+  bool get _isFullyBroadcast {
+    final o = _outcome;
+    return o != null &&
+        !o.partial &&
+        o.error == null &&
+        o.total > 0 &&
+        o.submitted == o.total;
+  }
+
+  void _watchDepth() {
+    final probe = widget.acceptanceStatus;
+    final txid = _outcome?.finalTxid;
+    if (probe == null || txid == null || _depthPoll != null) return;
+    // A partial send has no payment id to ask about, so it asks nothing: the
+    // poll is gated at its ONE entry point rather than at the render, so there
+    // is no second site to keep in step and no 1 Hz poll running against a
+    // txid whose answer must never be shown.
+    if (!_isFullyBroadcast) return;
+    Future<void> tick() async {
+      try {
+        final status = await probe(txid);
+        if (mounted) setState(() => _status = status);
+      } catch (_) {
+        // A failed read is not a depth. Leave the last honest answer alone
+        // rather than blanking a number the chain did give us.
+      }
+    }
+
+    unawaited(tick());
+    _depthPoll = Timer.periodic(_depthEvery, (_) => tick());
+  }
+
   /// Comfortably past the measured 1.3–3.8 s submit→accepted range, so a
   /// normal send never sees the line at all.
   static const Duration _reopenExitAfter = Duration(seconds: 6);
@@ -206,6 +281,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
     _stageOne?.cancel();
     _stageTwo?.cancel();
     _exitTimer?.cancel();
+    _depthPoll?.cancel();
     _hold.dispose();
     super.dispose();
   }
@@ -255,7 +331,10 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // Broadcast accepted — the §6 money moment (fires only for real
       // acceptance, full or partial; a zero-submitted failure stays silent).
       if (outcome.submitted > 0) KvHaptic.moneyMoment();
-      if (mounted) setState(() => _outcome = outcome);
+      if (mounted) {
+        setState(() => _outcome = outcome);
+        _watchDepth();
+      }
     } catch (e) {
       // `e.toString()` on an AppError renders "Instance of 'AppError'" — the
       // type name, printed into the body of a failed SEND (run 1, F8).
@@ -269,6 +348,13 @@ class _SigningCeremonyState extends State<SigningCeremony>
   }
 
   bool get _settled => _outcome != null || _error != null;
+
+  /// When the chain accepted this send, or null while there is no acceptance
+  /// to stamp. Never the device's clock.
+  DateTime? get _acceptedAt {
+    final ms = _status?.acceptedUnixMs;
+    return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms.toInt());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -327,19 +413,20 @@ class _SigningCeremonyState extends State<SigningCeremony>
                   ),
                   children: [
                     const SizedBox(height: KvSpace.m),
-                    // **The answer comes first.** A settled screen is a
-                    // receipt, and a receipt leads with what happened and ends
-                    // with its reference number — it does not restate the
-                    // question, append the answer, and leave the reference on
-                    // top of the amount it refers to.
-                    if (_settled) ...[
-                      _OutcomeHead(outcome: _outcome, error: _error),
-                      const SizedBox(height: KvSpace.l),
-                    ],
                     ..._truthRows(context),
                     if (_sending) ...[
                       const SizedBox(height: KvSpace.l),
                       _StagedWait(stage: _stage, mayLeave: _mayLeave),
+                    ],
+                    // **The verdict sits BELOW the figures, not above them**
+                    // (founder, on glass 2026-08-30 — he tried it at the top
+                    // and preferred it where it was). What the rebuild keeps
+                    // is everything else: the rail speaks the outcome, the
+                    // verb block is past tense, the caution is gone, and the
+                    // reference number closes the receipt.
+                    if (_settled) ...[
+                      const SizedBox(height: KvSpace.l),
+                      _OutcomeHead(outcome: _outcome, error: _error),
                     ],
                     if (_settled && _outcome?.finalTxid != null)
                       _Receipt(txid: _outcome!.finalTxid!),
@@ -498,6 +585,20 @@ class _SigningCeremonyState extends State<SigningCeremony>
         _FactRow(label: 'Total', sompi: s.totalSompi),
       const _FactRule(),
 
+      // **The accepting BLOCK's own timestamp** — `TxStatusDto.acceptedUnixMs`,
+      // carried across the FFI for exactly this line. Neither `DateTime.now()`
+      // nor the wallet's fold time will do: both are this device's observation
+      // of an acceptance rather than the acceptance, wrong by the poll latency
+      // on a live link and by hours on a catch-up replay (`ffi-leak-auditor`
+      // caught the second of those in this field's first cut).
+      //
+      // It appears only once there is an acceptance to stamp; a send still
+      // waiting has no time to show and shows none.
+      if (_acceptedAt != null) ...[
+        _StampRow(label: 'Accepted', at: _acceptedAt!),
+        const _FactRule(),
+      ],
+
       if (selfSend) ...[
         const SizedBox(height: KvSpace.sm),
         _Note(
@@ -624,6 +725,47 @@ class _FactRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// One dated fact: label left, wall-clock stamp right, on the same ruled grid
+/// the money rows use.
+class _StampRow extends StatelessWidget {
+  const _StampRow({required this.label, required this.at});
+
+  final String label;
+  final DateTime at;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+    child: Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: KvSpace.m,
+      runSpacing: KvSpace.xs,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            height: 19 / 13,
+            color: KvColor.inkDim,
+          ),
+        ),
+        Text(
+          formatStamp(at),
+          style: const TextStyle(
+            fontFamily: KvFont.mono,
+            fontSize: 13,
+            height: 20 / 13,
+            color: KvColor.ink,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// The named post-signature wait (D-189): signing → broadcasting → waiting for
@@ -826,15 +968,13 @@ _Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
     _ => (
       KvLampTone.ok,
       'Sent',
-      // Names where the settling can be WATCHED. Kaspa runs at ~10 blocks a
-      // second, so the hundred-confirmation safety mark is a ten-second
-      // event and the thousand-block finality mark about a hundred — both
-      // genuinely watchable, which is why pointing at the feed is a real
-      // instruction and not a shrug. The gauge that renders that depth is
-      // D-192's and lives on transaction detail (UX-5); this line is the
-      // hand-off to it, not a second copy of it.
-      'The network accepted it. It settles over the next few minutes — you '
-          'can follow it in your activity.',
+      // **No waiting language.** It read *"settles over the next few
+      // minutes"*, which is slower than Kaspa is and slower than it feels:
+      // the network accepts in about a second and the hundred-confirmation
+      // safety mark lands in roughly ten. Telling a user to expect minutes on
+      // a chain built for seconds is a false impression assembled out of true
+      // words (founder, 2026-08-30).
+      'The network accepted it.',
     ),
   };
   // `landed` is the one bit the rest of the screen may act on: something was
@@ -843,8 +983,8 @@ _Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
   return (tone: tone, head: head, body: body, landed: (o?.submitted ?? 0) > 0);
 }
 
-/// The verdict's head and body — the ANSWER, which belongs above the receipt
-/// rather than under it.
+/// The verdict — what happened, in the three beats §7 requires, under the
+/// figures it concludes.
 class _OutcomeHead extends StatelessWidget {
   const _OutcomeHead({required this.outcome, required this.error});
 
@@ -867,7 +1007,16 @@ class _OutcomeHead extends StatelessWidget {
         children: [
           Row(
             children: [
-              KvLamp(tone),
+              // **A tick for the good outcome, a lamp for the exceptions.**
+              // Green means confirmed (BG-7), so a green lamp on `Sent` while
+              // the chain had confirmed nothing was an overclaim; a tick says
+              // *this step completed* and claims nothing about depth. The
+              // exceptions keep the lamp, because only the exception is marked
+              // (founder, on glass 2026-08-30).
+              if (tone == KvLampTone.ok)
+                const KvGlyphIcon(KvMark.check, size: 18, tone: KvColor.ok)
+              else
+                KvLamp(tone),
               const SizedBox(width: KvSpace.s),
               Expanded(
                 child: Text(
@@ -903,10 +1052,69 @@ class _OutcomeHead extends StatelessWidget {
                 ),
               ),
             ],
+          // **The explorer exit's card — placement now, destination in UX-5.**
+          //
+          // It is a control that does nothing, which BG-12 forbids outright.
+          // The founder allowed the exception in terms — *"even if its a
+          // placeholder that is breaking a law. i alllow it"* — so it is a law
+          // knowingly suspended and ledgered (D-223), not one quietly bent.
+          // **UX-5 is the trigger**: that sub-phase owns `ExplorerConfig`'s
+          // two URL builders and the disclosure of what the exit hands over.
+          if (v.landed) ...[
+            const SizedBox(height: KvSpace.m),
+            const _ExplorerCard(),
+          ],
         ],
       ),
     );
   }
+}
+
+/// The explorer exit, drawn where it will live and not yet wired.
+///
+/// **It says what it is.** A card that looked live and did nothing when tapped
+/// would teach the user that controls on this screen are unreliable, on the
+/// one surface where that lesson is most expensive — so the placeholder wears
+/// its state instead of hiding it, which is the least the suspended law can
+/// ask for.
+class _ExplorerCard extends StatelessWidget {
+  const _ExplorerCard();
+
+  @override
+  Widget build(BuildContext context) => KvSurface(
+    tone: KvSurfaceTone.chip,
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(
+      horizontal: KvSpace.m,
+      vertical: KvSpace.sm,
+    ),
+    child: Row(
+      children: [
+        const Expanded(
+          child: Text(
+            'View in explorer',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 13,
+              height: 19 / 13,
+              color: KvColor.inkMeta,
+            ),
+          ),
+        ),
+        Text(
+          'coming next',
+          style: TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 11,
+            height: 15 / 11,
+            fontWeight: FontWeight.w500,
+            color: KvColor.inkMetaLow,
+            letterSpacing: 0.4,
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// The receipt's reference number, at the FOOT of the receipt where a
@@ -923,17 +1131,42 @@ class _Receipt extends StatelessWidget {
       const SizedBox(height: KvSpace.l),
       const KvRuledLabel('Transaction id'),
       const SizedBox(height: KvSpace.xs),
-      KvSurface(
-        tone: KvSurfaceTone.well,
-        width: double.infinity,
-        padding: const EdgeInsets.all(KvSpace.sm),
-        child: SelectableText(
-          txid,
-          style: const TextStyle(
-            fontFamily: KvFont.mono,
-            fontSize: 13,
-            height: 20 / 13,
-            color: KvColor.ink,
+      // **Tap to copy** (founder, 2026-08-30). A `SelectableText` made the
+      // whole 64 characters reachable only through a long-press-and-drag,
+      // which is the wrong gesture for the one string on this screen a user
+      // wants to take somewhere else. The tap copies ALL of it — a truncated
+      // txid is as useless as a truncated address — and says so, because a
+      // copy with no acknowledgement leaves the user tapping twice.
+      Semantics(
+        button: true,
+        label: 'Copy the transaction id',
+        child: InkWell(
+          onTap: () async {
+            await Clipboard.setData(ClipboardData(text: txid));
+            KvHaptic.selection();
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Transaction id copied'),
+                  duration: KvMotion.toast,
+                ),
+              );
+            }
+          },
+          borderRadius: BorderRadius.circular(KvRadius.plate),
+          child: KvSurface(
+            tone: KvSurfaceTone.well,
+            width: double.infinity,
+            padding: const EdgeInsets.all(KvSpace.sm),
+            child: Text(
+              txid,
+              style: const TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 13,
+                height: 20 / 13,
+                color: KvColor.ink,
+              ),
+            ),
           ),
         ),
       ),

@@ -367,17 +367,21 @@ void main() {
       expect(tester.takeException(), isA<AssertionError>());
     });
 
-    testWidgets('chunked reads in fours with the ends weighted', (
-      tester,
-    ) async {
+    testWidgets('chunked reads in fours with the LAST FIVE together and the '
+        'ends weighted', (tester) async {
       await tester.pumpWidget(
         _host(const KvAddress(_address, form: KvAddressForm.chunked)),
       );
       final groups = KvAddress.groupsOf(_address);
       expect(groups.first, _address.substring(6, 10));
-      // 61 is not a multiple of 4, so the last group is ONE character — which
-      // is exactly where BG-15 puts the eye.
-      expect(groups.last, hasLength(1));
+      // **D-223, founder-ratified.** Chunking purely in fours left a 61-char
+      // payload ending `… c6jz qunt h`: a ONE-character final group, weighted
+      // bold, standing alone. The weighting exists so the eye lands where an
+      // address-poisoning attack has to succeed, and a single stranded
+      // character is the weakest possible place to put it — there is almost
+      // nothing there to compare against. The tail keeps five now.
+      expect(groups.last, hasLength(KvAddress.tailGroup));
+      expect(groups.last, _address.substring(_address.length - 5));
       // Nothing is lost in the chunking: this form is the one a user checks
       // character by character, so it must be the WHOLE payload.
       expect(groups.join(), _address.substring(_address.indexOf(':') + 1));

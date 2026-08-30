@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `chain_stamp`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `ParkedAcceptance`, `PinPolicy`, `ReplayGap`, `TransportHub`, `TransportIntent`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -1043,10 +1043,31 @@ class TxStatusDto {
   /// How long a `Stalled` submit has waited; `None` otherwise.
   final BigInt? waitedMs;
 
-  const TxStatusDto({required this.kind, this.blueDepth, this.waitedMs});
+  /// **The accepting block's own header timestamp**, unix ms, for
+  /// `Accepted`/`Confirmed`; `None` otherwise, including when the accepting
+  /// block could not be fetched.
+  ///
+  /// It crosses because a receipt that prints an acceptance time must print
+  /// the CHAIN's moment. `DateTime.now()` at the instant a poll noticed is a
+  /// wallet claim wearing a chain's clothes; so, as `ffi-leak-auditor` found
+  /// in the first cut of this field, is the wallet's fold time recorded in
+  /// Rust — it is the same observation moved one layer down, wrong by the
+  /// poll latency on a live link and by hours on a catch-up replay (UX-4B).
+  final BigInt? acceptedUnixMs;
+
+  const TxStatusDto({
+    required this.kind,
+    this.blueDepth,
+    this.waitedMs,
+    this.acceptedUnixMs,
+  });
 
   @override
-  int get hashCode => kind.hashCode ^ blueDepth.hashCode ^ waitedMs.hashCode;
+  int get hashCode =>
+      kind.hashCode ^
+      blueDepth.hashCode ^
+      waitedMs.hashCode ^
+      acceptedUnixMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1055,7 +1076,8 @@ class TxStatusDto {
           runtimeType == other.runtimeType &&
           kind == other.kind &&
           blueDepth == other.blueDepth &&
-          waitedMs == other.waitedMs;
+          waitedMs == other.waitedMs &&
+          acceptedUnixMs == other.acceptedUnixMs;
 }
 
 /// The five acceptance states a chip can wear (V2). Field-less — FRB 2.12

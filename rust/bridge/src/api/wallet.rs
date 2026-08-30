@@ -1781,16 +1781,34 @@ mod tests {
         use MaturityState::*;
         // Accepted upgrades Pending, leaves Confirmed alone.
         assert_eq!(
-            overlaid(Pending, &TxStatus::Accepted { blue_depth: 3 }),
+            overlaid(
+                Pending,
+                &TxStatus::Accepted {
+                    blue_depth: 3,
+                    accepted_unix_ms: 0
+                }
+            ),
             Accepted
         );
         assert_eq!(
-            overlaid(Confirmed, &TxStatus::Accepted { blue_depth: 3 }),
+            overlaid(
+                Confirmed,
+                &TxStatus::Accepted {
+                    blue_depth: 3,
+                    accepted_unix_ms: 0
+                }
+            ),
             Confirmed
         );
         // Tracker-confirmed (blue-score depth, node-read) confirms.
         assert_eq!(
-            overlaid(Pending, &TxStatus::Confirmed { blue_depth: 120 }),
+            overlaid(
+                Pending,
+                &TxStatus::Confirmed {
+                    blue_depth: 120,
+                    accepted_unix_ms: 0
+                }
+            ),
             Confirmed
         );
         // Displacement drops ANY state to Pending.
@@ -1812,7 +1830,13 @@ mod tests {
         assert_eq!(snapshot.activity[0].maturity, MaturityState::Pending);
 
         let mut overrides = HashMap::new();
-        overrides.insert(txid, TxStatus::Accepted { blue_depth: 1 });
+        overrides.insert(
+            txid,
+            TxStatus::Accepted {
+                blue_depth: 1,
+                accepted_unix_ms: 0,
+            },
+        );
         apply_overrides(&mut snapshot, &overrides);
         assert_eq!(snapshot.activity[0].maturity, MaturityState::Accepted);
 

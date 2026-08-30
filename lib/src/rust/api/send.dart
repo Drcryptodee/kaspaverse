@@ -17,6 +17,30 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// the advertised floor is the floor of the transaction that gets built.
 Future<BigInt?> sendMinimum() => RustLib.instance.api.crateApiSendSendMinimum();
 
+/// **The fee this exact payment would cost, priced by the Generator now.**
+///
+/// The send screen's live figure: it updates as the amount is typed so the
+/// cost is visible before Review, not after it. Signerless, stash-free and
+/// read-only — it may be called on every keystroke.
+///
+/// **A built fee, never an estimate**, and it runs the same two-shape build
+/// and the same shipping decision `send_prepare` runs — not a copy of it, so
+/// it cannot drift from the number the ceremony prints, which is the one B7
+/// vouches for.
+///
+/// `None` whenever no transaction can be built (below the KIP-9 floor, more
+/// than the coins can cover, a covenant-fenced draw, an unparseable
+/// destination). The caller renders **nothing** for it. A locked or unready
+/// wallet propagates an `AppError` instead, which Dart also renders as no
+/// fee.
+Future<BigInt?> sendFeePreview({
+  required String destination,
+  required BigInt amountSompi,
+}) => RustLib.instance.api.crateApiSendSendFeePreview(
+  destination: destination,
+  amountSompi: amountSompi,
+);
+
 /// Phase 1: validate, build the tx chain over the live UTXO context, and stash
 /// the unsigned transactions. Returns the Rust-decoded summary for the confirm.
 /// Errors honestly: malformed/wrong-network address, locked/unready wallet, or

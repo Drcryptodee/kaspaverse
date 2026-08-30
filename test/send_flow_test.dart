@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
+import 'package:kaspaverse/src/rust/api/transport.dart';
 import 'package:kaspaverse/src/ui/send/confirm_send_flow.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
@@ -18,6 +19,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
@@ -87,6 +89,21 @@ void _phone(WidgetTester tester, {Size size = const Size(393, 851)}) {
 /// appears in the figure above it can never be the thing that got tapped, and
 /// scrolled into view first so the assertion is about the grammar rather than
 /// about the test viewport.
+/// The screen's OWN list — the outer of the two scrollables inside it. The
+/// address field lives in the list and brings a `Scrollable` of its own, so
+/// "the scrollable" is ambiguous and `scrollUntilVisible`'s internal `.single`
+/// throws on it.
+ScrollableState _sendList(WidgetTester tester) => tester.state<ScrollableState>(
+  find
+      .descendant(
+        of: find.byKey(SendScreen.scrollTarget),
+        matching: find.byType(Scrollable),
+      )
+      .first,
+);
+
+/// Press keys on the amount pad. Scoped to the pad so a digit that also
+/// appears in the figure above it can never be the thing that got tapped.
 Future<void> _type(WidgetTester tester, String keys) async {
   for (final k in keys.split('')) {
     final key = find.descendant(
@@ -94,17 +111,14 @@ Future<void> _type(WidgetTester tester, String keys) async {
       matching: find.text(k),
     );
     if (key.evaluate().isEmpty) {
-      // Not built yet — the floor geometry puts the pad below the fold.
-      // `.first` is the screen's own ListView; a focused TextField adds a
-      // second Scrollable of its own.
-      await tester.scrollUntilVisible(
-        key,
-        120,
-        scrollable: find.byType(Scrollable).first,
-      );
-    } else {
-      await tester.ensureVisible(key);
+      // Not built: the floor geometry puts the pad below the fold. Jump the
+      // list directly rather than `scrollUntilVisible`, for the reason in
+      // [_sendList].
+      final position = _sendList(tester).position;
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pump();
     }
+    await tester.ensureVisible(key);
     await tester.pump();
     await tester.tap(key);
     await tester.pump();
@@ -114,20 +128,20 @@ Future<void> _type(WidgetTester tester, String keys) async {
 /// Put the destination in, then hand focus back to the amount pad the way a
 /// user does — by tapping the figure.
 Future<void> _address(WidgetTester tester, String address) async {
-  if (find.byType(TextField).evaluate().isEmpty) {
+  if (find.byKey(SendScreen.addressTarget).evaluate().isEmpty) {
     // The floor geometry can leave the field above the fold after the pad has
     // been scrolled to.
-    await tester.scrollUntilVisible(
-      find.byType(TextField),
-      -120,
-      scrollable: find.byType(Scrollable).first,
-    );
+    final position = _sendList(tester).position;
+    position.jumpTo(position.minScrollExtent);
+    await tester.pump();
   }
-  await tester.enterText(find.byType(TextField), address);
+  await tester.enterText(find.byKey(SendScreen.addressTarget), address);
   await tester.pump();
-  // The figure is pinned above the scroll, so this target is always built.
-  await tester.tap(find.byKey(SendScreen.amountTarget));
+  // Drop the address field's focus so the pad comes back. Tapping the figure
+  // would raise the AMOUNT keyboard now, which hides the pad just the same.
+  FocusManager.instance.primaryFocus?.unfocus();
   await tester.pump();
+  await tester.pump(KvMotion.calm);
 }
 
 /// The reason printed under a disabled Review, or null when it is live.
@@ -142,6 +156,7 @@ const Object _unset = Object();
 Widget _sendScreen({
   Object? mature = _unset,
   ValueListenable<bool>? balanceStale,
+  Future<BigInt?> Function(String, BigInt)? feePreview,
   Future<SignableSummaryDto> Function(String, BigInt)? prepare,
   Future<SignableSummaryDto> Function(String)? prepareSweep,
   Future<BigInt?> Function()? minimumSendable,
@@ -153,6 +168,7 @@ Widget _sendScreen({
       identical(mature, _unset) ? BigInt.from(100000000000) : mature as BigInt?,
     ),
     balanceStale: balanceStale,
+    feePreview: feePreview,
     prepare: prepare ?? (_, _) async => _summary(),
     commit: commit ?? (_) async => _ok(),
     abandon: abandon ?? () async {},
@@ -184,17 +200,59 @@ void main() {
   setUpAll(loadBundledFonts);
 
   group('SendScreen', () {
-    testWidgets('the amount is typed on the secure keypad — no system '
-        'keyboard is ever offered for it', (tester) async {
+    testWidgets('the pad is the default, and tapping the figure hands over to '
+        'the device keyboard', (tester) async {
+      // **D-189 narrowed, not reversed** (founder, 2026-08-30). The on-screen
+      // pad is still what a user meets, still the same primitive the
+      // passphrase keyboard uses. What is new is that an amount may ALSO be
+      // typed on the system keyboard — which costs nothing that mattered,
+      // because the no-system-IME law is INV-3's and it protects SECRETS. An
+      // amount is not one, and the passphrase surfaces have no such handover.
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
-      // ONE TextField on the screen, and it is the address. The amount has no
-      // editable text widget at all, which is what makes the no-system-IME
-      // guarantee structural rather than a promise (D-189).
-      expect(find.byType(TextField), findsOneWidget);
       expect(find.byType(KvKeypad), findsOneWidget);
-      await _type(tester, '12.4');
-      expect(find.text('12.4'), findsOneWidget);
+
+      await tester.tap(find.byKey(SendScreen.amountTarget));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      expect(
+        find.byType(KvKeypad),
+        findsNothing,
+        reason: 'two keyboards at once is not a layout',
+      );
+
+      // Dismissing the keyboard brings the pad back.
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      expect(find.byType(KvKeypad), findsOneWidget);
+    });
+
+    testWidgets('the system keyboard obeys the SAME grammar as the pad', (
+      tester,
+    ) async {
+      // One law, two doors: the formatter refuses at the field whatever
+      // `amountKeyPress` refuses at the key, so a device keyboard cannot type
+      // a second point, a ninth decimal, or a figure past the u64 ceiling.
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen());
+      final field = find.byKey(SendScreen.amountTarget);
+
+      await tester.enterText(field, '1.2345678');
+      await tester.pump();
+      // NINE decimals. `1.23456789` is eight and perfectly legal — a fixture
+      // that does not actually break the rule tests nothing (L126).
+      await tester.enterText(field, '1.234567891');
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(field).controller!.text,
+        '1.2345678',
+        reason: 'a ninth decimal is refused at the field too',
+      );
+
+      await tester.enterText(field, '1.2.3');
+      await tester.pump();
+      expect(tester.widget<TextField>(field).controller!.text, '1.2345678');
     });
 
     testWidgets('Review is disabled until a valid amount and address', (
@@ -273,6 +331,58 @@ void main() {
       expect(sweptTo, _addr);
       // The one signing surface opened over the sweep summary.
       expect(find.text('Confirm send all'), findsOneWidget);
+    });
+
+    testWidgets('the live fee is the Generator\'s, debounced, and never a stale '
+        'figure beside a changed amount', (tester) async {
+      // The fee moves with the coin shape the amount selects, so it is probed
+      // rather than computed — and the probe runs the SAME two-shape build and
+      // shipping decision `prepare_send` runs, which is what lets the figure
+      // carry no `≈`. What this pins is the Dart half: one probe per pause,
+      // the newest answer wins, and nothing shown while it is unknown.
+      _phone(tester);
+      final asked = <BigInt>[];
+      await tester.pumpWidget(
+        _sendScreen(
+          feePreview: (destination, amount) async {
+            asked.add(amount);
+            return BigInt.from(315400);
+          },
+        ),
+      );
+      await _address(tester, _addr);
+      await _type(tester, '1');
+
+      // Nothing yet: the probe is debounced, and an unknown fee shows nothing.
+      expect(find.textContaining('network fee'), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('network fee 0.003154'), findsOneWidget);
+
+      // A further keystroke clears the figure IMMEDIATELY — a fee left
+      // standing beside a changed amount is a lie for as long as it stands.
+      await _type(tester, '2');
+      expect(find.textContaining('network fee'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('network fee 0.003154'), findsOneWidget);
+
+      // One probe per pause, not one per keystroke.
+      expect(asked.length, 2);
+      expect(asked.last, BigInt.from(1200000000));
+    });
+
+    testWidgets('a null fee renders nothing at all — never a guess', (
+      tester,
+    ) async {
+      // `None` is a real answer: below the KIP-9 floor, more than the coins
+      // cover, or a covenant-fenced draw. The screen says nothing rather than
+      // showing a number nobody built.
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen(feePreview: (_, _) async => null));
+      await _address(tester, _addr);
+      await _type(tester, '1');
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.textContaining('network fee'), findsNothing);
     });
 
     testWidgets('an honest prepare error (not-yet-spendable) is surfaced', (
@@ -443,60 +553,27 @@ void main() {
       expect(_reviewReason(tester), 'Check the destination address');
     });
 
-    testWidgets('the typed amount is SPOKEN, and its target can be activated', (
+    testWidgets('the amount announces itself as an editable field', (
       tester,
     ) async {
-      // The wallet's only spending path: a screen-reader user has to be able
-      // to hear the amount they are about to send (BG-14 / item 22), and the
-      // control that gives the pad back must actually do something when
-      // TalkBack activates it (BG-12). `excludeSemantics` drops the whole
-      // subtree, so both have to live on this one node — a label pushed down
-      // into the figure would be dead code.
+      // It was a `Semantics(button:)` over two `Text` nodes, which needed a
+      // hand-written phrase and a hand-wired action. As a real `TextField` it
+      // announces itself, carries its own value, and is activatable by
+      // TalkBack for free — the accessible answer is the one that stopped
+      // pretending.
       _phone(tester);
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(_sendScreen());
-      expect(
-        tester.getSemantics(find.byKey(SendScreen.amountTarget)).label,
-        'Amount, none entered. Edit the amount',
-      );
       await _type(tester, '12.4');
-      final node = tester.getSemantics(find.byKey(SendScreen.amountTarget));
-      expect(node.label, 'Amount, 12.4 KAS. Edit the amount');
-      expect(node.flagsCollection.isButton, isTrue);
-      expect(
-        node.getSemanticsData().hasAction(SemanticsAction.tap),
-        isTrue,
-        reason: 'a button with no action is inert under TalkBack',
-      );
-      handle.dispose();
-    });
-
-    testWidgets('Send max is a CHIP — it hugs its label rather than taking the '
-        'row', (tester) async {
-      // `KvSurface` is a `Container`, and a `Container` given an `alignment`
-      // expands to its incoming constraints. In a `Row` beside an `Expanded`
-      // that was invisible; in the `Wrap` that cured the figure's shrink the
-      // chip was handed the whole gutter and rendered as a full-width button —
-      // a second primary action competing with the one teal control, which
-      // inverts D-190's reason for pairing it with `available`. Found on
-      // glass, device sitting 2026-08-30; no host test could see it because
-      // every assertion was about text, not width.
-      _phone(tester);
-      await tester.pumpWidget(
-        _sendScreen(
-          prepareSweep: (_) async =>
-              _summary(kind: SignableKind.sweep, utxoCount: 1),
+      final node = tester.getSemantics(
+        find.descendant(
+          of: find.byKey(SendScreen.amountTarget),
+          matching: find.byType(EditableText),
         ),
       );
-      final chip = tester.getSize(find.widgetWithText(InkWell, 'Send max'));
-      final screen = tester.getSize(find.byType(Scaffold));
-      expect(
-        chip.width,
-        lessThan(screen.width / 2),
-        reason: 'Send max is a chip, not a second primary action',
-      );
-      // And it still clears the touch-target floor.
-      expect(chip.height, greaterThanOrEqualTo(KvSpace.touchTarget));
+      expect(node.value, '12.4');
+      expect(node.flagsCollection.isTextField, isTrue);
+      handle.dispose();
     });
 
     testWidgets('the amount pad comes back after the address field takes '
@@ -505,7 +582,7 @@ void main() {
       // The pad steps aside for the system IME while the address is typed. If
       // nothing gave it back, the pad would be reachable exactly once.
       await tester.pumpWidget(_sendScreen());
-      await tester.enterText(find.byType(TextField), _addr);
+      await tester.enterText(find.byKey(SendScreen.addressTarget), _addr);
       await tester.pump();
       expect(find.byType(KvKeypad), findsNothing);
       await tester.tap(find.byKey(SendScreen.amountTarget));
@@ -671,7 +748,17 @@ void main() {
     /// gesture-absorbing child and `pixels` never advances, so the loop never
     /// terminates — tried, and it hung.
     Future<void> measureThroughTheScroll(WidgetTester tester) async {
-      final scrollable = find.byType(Scrollable).first;
+      // The screen's own list, named: the amount is a text field now and
+      // carries a `Scrollable` of its own, so "the first Scrollable" stopped
+      // meaning "the list".
+      final scrollable = find.byKey(SendScreen.scrollTarget).evaluate().isEmpty
+          ? find.byType(Scrollable).first
+          : find
+                .descendant(
+                  of: find.byKey(SendScreen.scrollTarget),
+                  matching: find.byType(Scrollable),
+                )
+                .first;
       var y = tester
           .state<ScrollableState>(scrollable)
           .position
@@ -811,20 +898,25 @@ void main() {
       );
     });
 
-    testWidgets('the destination is restated in full, chunked in fours, with '
-        'the first and last groups weighted', (tester) async {
+    testWidgets('the destination is restated in full, chunked in fours with '
+        'the LAST FIVE together, first and last weighted', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_ceremony(_summary()));
-      // Every character of the 61-char payload is on screen, in 16 groups —
-      // 15 of four and one of one. An address-poisoning attack buys a prefix
-      // and a suffix that look right, so the weighting puts the eye exactly
-      // where the attack has to succeed (BG-15).
+      // **D-223, ratified by the founder.** Chunking purely in fours left a
+      // 61-character payload ending `… c6jz qunt h`: a one-character final
+      // group, weighted bold, alone. The weighting exists so the eye lands
+      // where an address-poisoning attack has to succeed, and one stranded
+      // character is the weakest place to put it. The tail is five now, and
+      // the payload reads as 14 fours plus the five.
       final payload = _addr.substring(_addr.indexOf(':') + 1);
+      final head = payload.substring(0, payload.length - 5);
       final groups = <String>[
-        for (var i = 0; i < payload.length; i += 4)
-          payload.substring(i, i + 4 > payload.length ? payload.length : i + 4),
+        for (var i = 0; i < head.length; i += 4)
+          head.substring(i, i + 4 > head.length ? head.length : i + 4),
+        payload.substring(payload.length - 5),
       ];
-      expect(groups.length, 16);
+      expect(groups.length, 15);
+      expect(groups.last.length, 5);
       for (final g in groups) {
         expect(find.text(g), findsOneWidget, reason: 'group "$g" is missing');
       }
@@ -1288,6 +1380,11 @@ void main() {
       await tester.pumpWidget(
         _host(
           SigningCeremony(
+            // A fresh key each call: `pumpWidget` reuses the State for a
+            // widget of the same type at the same position, so a second
+            // settle in one test would have found the screen already settled
+            // and no hold control to press.
+            key: UniqueKey(),
             summary: _summary(),
             commit: commit,
             abandon: () async {},
@@ -1318,11 +1415,161 @@ void main() {
       );
       // Three deliberate places: the rail, the verdict head, the ruled label.
       expect(find.text('Sent'), findsNWidgets(3));
-      expect(find.textContaining('The network accepted it'), findsOneWidget);
-      // And it points at where the settling can actually be watched.
-      expect(find.textContaining('follow it in your activity'), findsOneWidget);
+      expect(find.text('The network accepted it.'), findsOneWidget);
+      // **No waiting language** — Kaspa accepts in about a second, and telling
+      // a user to expect minutes is a false impression built from true words.
+      expect(find.textContaining('next few minutes'), findsNothing);
+      // The explorer exit's card is placed, and says it is not yet wired.
+      expect(find.text('View in explorer'), findsOneWidget);
+      expect(find.text('coming next'), findsOneWidget);
       expect(find.text('a' * 64), findsOneWidget);
       expect(find.textContaining('Your funds are safe'), findsNothing);
+    });
+
+    testWidgets('the Accepted stamp is the CHAIN\'s moment, and absent until '
+        'there is one', (tester) async {
+      // `accepted_unix_ms` was carried across the FFI for this line (UX-4B).
+      // The device's own observation of an acceptance is a different fact, and
+      // printing it under the label `Accepted` would have been a wallet claim
+      // wearing a chain's clothes — wrong by however long the wallet took to
+      // hear.
+      _phone(tester);
+      TxStatusDto? answer;
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            acceptanceStatus: (_) async => answer,
+          ),
+        ),
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
+      await tester.pump();
+      await tester.pump();
+
+      // Nothing accepted yet: no row, and above all no invented time.
+      expect(find.text('Accepted'), findsNothing);
+
+      final at = DateTime(2026, 8, 30, 2, 48, 57);
+      answer = TxStatusDto(
+        kind: TxStatusKind.accepted,
+        blueDepth: BigInt.from(3),
+        acceptedUnixMs: BigInt.from(at.millisecondsSinceEpoch),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(find.text('Accepted'), findsOneWidget);
+      expect(find.text('30 Aug 2026, 02:48'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('a PARTIAL send is never stamped Accepted, and is never even '
+        'asked about', (tester) async {
+      // `PreparedSend::commit` reassigns `final_txid` after EVERY successful
+      // submit, so on a partial broadcast it names the last compounding leg
+      // rather than the payment. That leg is accepted within about a second
+      // like any other, and the stamp would then have printed a chain-vouched
+      // `Accepted` directly under `Total` — beside an amount that never went
+      // out, and directly above a verdict reading `Partly sent`. The figures
+      // would have contradicted the verdict on a funds surface
+      // (`wallet-security-auditor`, UX-4B).
+      _phone(tester);
+      var asked = 0;
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) async => SendOutcomeDto(
+              finalTxid: 'b' * 64,
+              submitted: 1,
+              total: 2,
+              partial: true,
+            ),
+            abandon: () async {},
+            acceptanceStatus: (_) async {
+              asked++;
+              return TxStatusDto(
+                kind: TxStatusKind.accepted,
+                blueDepth: BigInt.from(3),
+                acceptedUnixMs: BigInt.from(
+                  DateTime(2026, 8, 30, 2, 48, 57).millisecondsSinceEpoch,
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
+      await tester.pump();
+      await tester.pump();
+
+      // The screen really IS in the partial state. Without this the absences
+      // below would pass on a screen that simply never got anywhere. Two
+      // matches, not one: the rail and the outcome head both speak the verdict,
+      // which is the point of deriving both from `_verdictFor`.
+      expect(find.text('Partly sent'), findsNWidgets(2));
+
+      // Well past the 1 s poll the complete path uses.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      expect(find.text('Accepted'), findsNothing);
+      // Stronger than "renders nothing": it never asks. A partial has no
+      // payment id to enquire about, so the poll is gated at its one entry
+      // rather than at the render, and there is no second site to keep in step.
+      expect(asked, 0);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('only the EXCEPTION is marked — a successful verdict carries '
+        'no lamp, a failed one does', (tester) async {
+      // Green means confirmed (BG-7). A green dot on `Sent` while the burial
+      // mark below reads amber `Seen 26` claimed a certainty the chain was
+      // denying; past a hundred the two agreed and became one thing said
+      // twice. The receipt keeps ONE indicator, and it is the one reading the
+      // chain (founder, on glass 2026-08-30).
+      _phone(tester);
+
+      await settleWith(tester, (_) async => _ok());
+      expect(
+        find.descendant(
+          of: find.byType(KvSurface),
+          matching: find.byType(KvLamp),
+        ),
+        findsNothing,
+        reason: 'a successful verdict must not carry a lamp',
+      );
+      expect(find.text('Sent'), findsNWidgets(3));
+
+      // The exceptions keep theirs.
+      await settleWith(
+        tester,
+        (_) async => SendOutcomeDto(submitted: 1, total: 2, partial: true),
+      );
+      expect(find.byType(KvLamp), findsWidgets);
+
+      await settleWith(
+        tester,
+        (_) async =>
+            SendOutcomeDto(submitted: 0, total: 1, partial: false, error: 'x'),
+      );
+      expect(find.byType(KvLamp), findsWidgets);
     });
 
     testWidgets('the irreversibility caution is GONE once it has settled', (

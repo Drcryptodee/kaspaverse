@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:kaspaverse/src/rust/api/send.dart' show sendFeePreview;
+import 'package:kaspaverse/src/rust/api/transport.dart' show txAcceptanceStatus;
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/api/wallet.dart' show deepScan;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
@@ -191,6 +193,13 @@ class KaspaVerseApp extends StatelessWidget {
           sendRoute: (_, balanceStale) => SendScreen(
             mature: wallet.mature,
             balanceStale: balanceStale,
+            // The tracker's live depth for the txid the ceremony just made —
+            // node-read, polled once a second while the receipt is up.
+            acceptanceStatus: (txid) => txAcceptanceStatus(txid: txid),
+            // The Generator's own fee for what is typed — signerless,
+            // stash-free, priced over the live coins on every pause.
+            feePreview: (destination, amount) =>
+                sendFeePreview(destination: destination, amountSompi: amount),
             prepare: wallet.prepareSend,
             commit: wallet.commitSend,
             abandon: wallet.abandonSend,

@@ -203,6 +203,17 @@ pub struct TxStatusDto {
     pub blue_depth: Option<u64>,
     /// How long a `Stalled` submit has waited; `None` otherwise.
     pub waited_ms: Option<u64>,
+    /// **The accepting block's own header timestamp**, unix ms, for
+    /// `Accepted`/`Confirmed`; `None` otherwise, including when the accepting
+    /// block could not be fetched.
+    ///
+    /// It crosses because a receipt that prints an acceptance time must print
+    /// the CHAIN's moment. `DateTime.now()` at the instant a poll noticed is a
+    /// wallet claim wearing a chain's clothes; so, as `ffi-leak-auditor` found
+    /// in the first cut of this field, is the wallet's fold time recorded in
+    /// Rust — it is the same observation moved one layer down, wrong by the
+    /// poll latency on a live link and by hours on a catch-up replay (UX-4B).
+    pub accepted_unix_ms: Option<u64>,
 }
 
 /// Per-txid display status for EVERY message in a conversation — the cheap
@@ -5528,15 +5539,25 @@ fn invite_expired(status: ConversationStatus, created_unix_ms: u64, now_ms: u64)
 /// answer on a wallet that HAS live conversations would quietly de-fund them,
 /// which is the exact harm this set exists to prevent.
 pub(crate) fn drain_exclusions() -> Result<Vec<Address>, AppError> {
-    let hub = hub()?;
-    let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-    let slots: HashSet<(Branch, u32)> = store
-        .list_conversations()
-        .into_iter()
-        .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
-        .map(|c| (to_core_branch(c.bound_branch), c.bound_index))
-        .filter(|slot| *slot != (Branch::Receive, 0))
-        .collect();
+    // The store lock is dropped BEFORE any derivation. Each slot costs an
+    // HMAC-SHA512 and a secp256k1 child derivation — the pin caches neither —
+    // and holding the messages store across that run blocks every transport
+    // read for its whole duration, for nothing: the slots have already been
+    // copied out by then. The live fee preview made this path callable while
+    // the user types, which is what surfaced it (`wallet-security-auditor`,
+    // UX-4B); the win applies equally to `send_minimum` and `send_prepare`,
+    // which have always called it.
+    let slots: HashSet<(Branch, u32)> = {
+        let hub = hub()?;
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store
+            .list_conversations()
+            .into_iter()
+            .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
+            .map(|c| (to_core_branch(c.bound_branch), c.bound_index))
+            .filter(|slot| *slot != (Branch::Receive, 0))
+            .collect()
+    };
     slots
         .into_iter()
         .map(|(branch, index)| vault::wallet_address_at(branch, index))
@@ -6194,6 +6215,27 @@ fn row_source_label(source: RowSource) -> String {
     .to_string()
 }
 
+/// A chain timestamp the glass can actually render, or `None`.
+///
+/// Two ways this is not a number we may hand onward. `0` means the accepting
+/// block could not be fetched and there is no chain timestamp at all, so the
+/// glass shows no time rather than a 1970 stamp or this device's clock.
+///
+/// And the upper bound is not defensive dressing: this value is
+/// `block.header.timestamp` as reported by whichever resolver node answered,
+/// so it is **remote input on a funds surface** and nothing upstream bounds it.
+/// Dart's `DateTime.fromMillisecondsSinceEpoch` THROWS above 100,000,000 days
+/// (`BigInt.toInt()` clamps a `u64` to `i64::MAX`, which is far past it), and
+/// the call sits inside the receipt's build — so one nonsense header would
+/// replace the user's only record of a send that has already left, txid
+/// included, with an error widget. Out of range therefore reads as *no time*,
+/// which is a state the surface already renders correctly.
+fn chain_stamp(ms: u64) -> Option<u64> {
+    /// `DateTime`'s own ceiling: 100,000,000 days either side of the epoch.
+    const DART_MAX_MS: u64 = 8_640_000_000_000_000;
+    (ms != 0 && ms <= DART_MAX_MS).then_some(ms)
+}
+
 /// Mirror the chain crate's `TxStatus` for display (nothing recomputed).
 fn tx_status_dto(status: kaspaverse_chain::TxStatus) -> TxStatusDto {
     use kaspaverse_chain::TxStatus;
@@ -6202,26 +6244,37 @@ fn tx_status_dto(status: kaspaverse_chain::TxStatus) -> TxStatusDto {
             kind: TxStatusKind::Submitted,
             blue_depth: None,
             waited_ms: None,
+            accepted_unix_ms: None,
         },
-        TxStatus::Accepted { blue_depth } => TxStatusDto {
+        TxStatus::Accepted {
+            blue_depth,
+            accepted_unix_ms,
+        } => TxStatusDto {
             kind: TxStatusKind::Accepted,
             blue_depth: Some(blue_depth),
             waited_ms: None,
+            accepted_unix_ms: chain_stamp(accepted_unix_ms),
         },
-        TxStatus::Confirmed { blue_depth } => TxStatusDto {
+        TxStatus::Confirmed {
+            blue_depth,
+            accepted_unix_ms,
+        } => TxStatusDto {
             kind: TxStatusKind::Confirmed,
             blue_depth: Some(blue_depth),
             waited_ms: None,
+            accepted_unix_ms: chain_stamp(accepted_unix_ms),
         },
         TxStatus::Displaced => TxStatusDto {
             kind: TxStatusKind::Displaced,
             blue_depth: None,
             waited_ms: None,
+            accepted_unix_ms: None,
         },
         TxStatus::Stalled { waited_ms } => TxStatusDto {
             kind: TxStatusKind::Stalled,
             blue_depth: None,
             waited_ms: Some(waited_ms),
+            accepted_unix_ms: None,
         },
     }
 }
@@ -6441,6 +6494,34 @@ fn to_dto(event: TransportEvent) -> TransportEventDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block header timestamp is whatever the answering node said, and
+    /// nothing upstream bounds it. Dart's `DateTime.fromMillisecondsSinceEpoch`
+    /// THROWS outside 100,000,000 days either side of the epoch, and the
+    /// ceremony calls it inside the receipt's own `build` — so one nonsense
+    /// header would replace the user's only record of a send that has already
+    /// left, txid included, with an error widget. Out of range must therefore
+    /// read as *no time*, which the surface already renders correctly
+    /// (`wallet-security-auditor`, UX-4B).
+    ///
+    /// The two bounds are Dart's, measured rather than remembered: 8.64e15 ms
+    /// renders as 275760-09-13, 8.64e15 + 1 throws `RangeError`, and a `u64`
+    /// arrives via `BigInt.toInt()` which clamps to `i64::MAX` — also a throw.
+    #[test]
+    fn a_chain_stamp_outside_dart_s_range_reads_as_no_time() {
+        // Zero is the accepting block being unfetchable: no time, not 1970.
+        assert_eq!(chain_stamp(0), None);
+        assert_eq!(chain_stamp(1), Some(1));
+        // A real acceptance passes through untouched.
+        assert_eq!(chain_stamp(883_612_800_000), Some(883_612_800_000));
+        // The ceiling itself is admissible; one millisecond past it is not.
+        assert_eq!(
+            chain_stamp(8_640_000_000_000_000),
+            Some(8_640_000_000_000_000)
+        );
+        assert_eq!(chain_stamp(8_640_000_000_000_001), None);
+        assert_eq!(chain_stamp(u64::MAX), None);
+    }
 
     /// The confinement ceiling counts only coins that can actually PIN
     /// (closure-audit F-1 / L129): covenant dust on the bound address must

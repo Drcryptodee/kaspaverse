@@ -206,3 +206,37 @@ String groupTypedAmount(String typed) {
   if (dot < 0) return groupThousands(typed);
   return '${groupThousands(typed.substring(0, dot))}${typed.substring(dot)}';
 }
+
+/// A wall-clock stamp for a receipt — `30 Aug 2026, 02:48`.
+///
+/// **Local time, from the chain's own moment.** The caller passes the unix
+/// milliseconds the ACCEPTANCE was recorded (`TxStatusDto.acceptedUnixMs`),
+/// never `DateTime.now()`: the device's observation of an acceptance is a
+/// different fact from the acceptance, and a receipt that labelled one as the
+/// other would be a wallet claim wearing a chain's clothes.
+///
+/// **To the MINUTE, not the second, and that is a consensus fact rather than a
+/// taste.** A block's timestamp is miner-set within the pin's
+/// `TIMESTAMP_DEVIATION_TOLERANCE` of 132 seconds, so it may sit over two
+/// minutes ahead of the user's own clock on a send that landed in a second,
+/// and consecutive sends can stamp out of order — the DAG orders by blue
+/// score, never by time. Rendering seconds off a value with ±132 s of slack
+/// claims a precision consensus does not give (`consensus-auditor`, UX-4B).
+String formatStamp(DateTime at) {
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(at.day)} ${months[at.month - 1]} ${at.year}, '
+      '${two(at.hour)}:${two(at.minute)}';
+}
+
+/// Whether a pasted destination carries whitespace anywhere inside it.
+///
+/// Worth its own answer because the wallet's generic refusal — *"that doesn't
+/// look like a valid Kaspa address"* — leaves a user staring at an address
+/// that looks perfectly right, with an invisible character as the only thing
+/// wrong (founder, on glass 2026-08-30). Leading and trailing space is trimmed
+/// long before here; this is the one in the middle.
+bool hasInnerWhitespace(String s) => RegExp(r'\s').hasMatch(s.trim());

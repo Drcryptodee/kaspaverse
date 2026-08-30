@@ -687,10 +687,16 @@ fn finish_prepared_send(
 }
 
 /// One full (unsigned) generation over the live context with an explicit spend
-/// order. Pure plumbing shared by the ridered and riderless passes of
-/// `prepare_send_inner`; generation never mutates the context (context
-/// registration happens only in `try_submit`, pending.rs:214-219 @ `cfafeb4`),
-/// so running it twice is side-effect-free and a discarded chain simply drops.
+/// order — **the shippable door**, and the only one whose output may be signed.
+///
+/// The signer is deliberately NOT an `Option` here even though [`build_chain`]
+/// below takes one. A chain built without a signer is unsignable in a specific
+/// and unpleasant way: the pin's `PendingTransaction::try_sign` reaches it as
+/// `…signer().as_ref().expect("no signer in tx generator")` (pending.rs:246 @
+/// `cfafeb4`) — a **panic**, not an `Err`, on the one path INV-2 says must
+/// never panic across the bridge. Making the parameter mandatory means a caller
+/// cannot arrive there by defaulting an argument; reaching it now requires
+/// choosing [`price_chain`] by name, whose own doc says it must not be shipped.
 fn generate_chain(
     context: &kaspa_wallet_core::utxo::UtxoContext,
     order: Vec<UtxoEntryReference>,
@@ -699,6 +705,46 @@ fn generate_chain(
     fees: Fees,
     payload: Option<Vec<u8>>,
     signer: Arc<dyn SignerT>,
+) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
+    build_chain(context, order, change, payment, fees, payload, Some(signer))
+}
+
+/// The same generation **without a signer** — a priced probe, never a shippable
+/// plan.
+///
+/// The absent signer moves no fee: `signer` is stored by `Generator::try_new`
+/// and read back only by `pending.rs`'s signing path, touching no mass, fee or
+/// output computation, so a priced chain's numbers equal the shipped one's.
+/// That is what lets the live fee preview share this code with the real build
+/// instead of mirroring it and drifting (`consensus-auditor`, UX-4B).
+///
+/// **Its output must never reach the stash.** `PreparedSend::commit` calls
+/// `try_sign`, and on a chain built here that is the `.expect` named above:
+/// a panic crossing the FFI rather than an `AppError`. Price with it, read the
+/// summary, drop the chain.
+fn price_chain(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+    order: Vec<UtxoEntryReference>,
+    change: &Address,
+    payment: PaymentDestination,
+    fees: Fees,
+    payload: Option<Vec<u8>>,
+) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
+    build_chain(context, order, change, payment, fees, payload, None)
+}
+
+/// The shared engine behind [`generate_chain`] and [`price_chain`]. Generation
+/// never mutates the context (context registration happens only in
+/// `try_submit`, pending.rs:214-219 @ `cfafeb4`), so running it twice is
+/// side-effect-free and a discarded chain simply drops.
+fn build_chain(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+    order: Vec<UtxoEntryReference>,
+    change: &Address,
+    payment: PaymentDestination,
+    fees: Fees,
+    payload: Option<Vec<u8>>,
+    signer: Option<Arc<dyn SignerT>>,
 ) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
     let settings = GeneratorSettings::try_new_with_context(
         context.clone(),
@@ -732,7 +778,7 @@ fn generate_chain(
         None,    // multiplexer
     )?;
 
-    let generator = Generator::try_new(settings, Some(signer), None)?;
+    let generator = Generator::try_new(settings, signer, None)?;
 
     // Iterate the whole chain (compounding batches + final). Unsigned.
     let mut pending = Vec::new();
@@ -2371,6 +2417,96 @@ impl WalletEngine {
         )
     }
 
+    /// **The fee the ceremony will print, computed the same way it computes
+    /// it** — a preview for the send screen, so the cost is on the glass
+    /// before Review rather than after it.
+    ///
+    /// **It runs the REAL decision, not a copy of it.** The first cut built
+    /// the ridden shape alone and called that "the same fee"; `prepare_send`
+    /// builds **two** chains — ridden and riderless — and ships whichever
+    /// [`shipped_shape`] selects, so the preview could differ in both
+    /// directions. Measured on the founder's own wallet at **427_200 against
+    /// 315_400 sompi**, 0.001118 KAS apart, and this file's own tests assert
+    /// both the case where the cheap shape wins and the case where the leg law
+    /// ships the dearer one (`consensus-auditor`, UX-4B). Two numbers for one
+    /// send is precisely the confusion B7 exists to prevent, so this now calls
+    /// the same `generate_chain` and the same `shipped_shape` with the same
+    /// floor closure. The only differences from a real prepare are that the
+    /// Generator gets **no signer** — which moves no fee — and that nothing is
+    /// stashed.
+    ///
+    /// **It is fenced like the real path.** `select_spend_priority` withholds
+    /// covenant-bound coins from the ORDER, but the Generator's fallback pool
+    /// is the whole mature set, so a build can still draw one — which is why
+    /// the real path checks the BUILT artifact with [`covenant_fence`] and why
+    /// this must too (D-211: not-offering is not not-using). Without it the
+    /// screen would price a send that Review is guaranteed to refuse.
+    ///
+    /// `None` means no transaction could be built — below the KIP-9 floor,
+    /// above what the coins can cover, fenced, or an unparseable destination —
+    /// and the caller renders **nothing**, never a guess.
+    ///
+    /// Signerless and read-only: it takes no key, no stash slot, and cannot
+    /// disturb a concurrent real build (`generate_transaction` mutates only the
+    /// Generator's own state; the UTXO context is touched in `try_submit`,
+    /// which a preview never reaches).
+    pub fn fee_preview(
+        &self,
+        destination: Address,
+        change: Address,
+        amount_sompi: u64,
+        exclude: &[Address],
+    ) -> Result<Option<u64>> {
+        if amount_sompi == 0 {
+            return Ok(None);
+        }
+        let context = self.context();
+        let mature = mature_snapshot_sync(&context)?;
+        let payment = || -> PaymentDestination {
+            PaymentOutputs::from((destination.clone(), amount_sompi)).into()
+        };
+        let Ok(ridden) = price_chain(
+            &context,
+            spend_policy::select_spend_priority(&mature, &[], spend_policy::RIDER_LIMIT, exclude),
+            &change,
+            payment(),
+            Fees::SenderPays(0),
+            None,
+        ) else {
+            return Ok(None);
+        };
+        // The comparison shape is a QUESTION, never a gate — the same law the
+        // real path applies to it.
+        let comparison = price_chain(
+            &context,
+            spend_policy::select_spend_priority(&mature, &[], 0, exclude),
+            &change,
+            payment(),
+            Fees::SenderPays(0),
+            None,
+        )
+        .ok();
+        let (pending, summary) = shipped_shape(ridden, comparison, || {
+            let order = spend_policy::select_spend_priority(
+                &mature,
+                &[],
+                spend_policy::RIDER_LIMIT,
+                exclude,
+            );
+            let order = (!order.is_empty()).then_some(order);
+            search_minimum(
+                |amount| probe_context(&context, &change, amount, order.as_deref()),
+                free_balance(&mature, exclude),
+            )
+            .ok()
+            .flatten()
+        });
+        if covenant_fence(&pending).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(summary.aggregate_fees()))
+    }
+
     /// The largest payment the pinned Generator will build from the CURRENT
     /// mature UTXO set — the mirror of [`Self::minimum_sendable`], for the
     /// other half of the same window. `None` when the wallet cannot send at
@@ -2465,11 +2601,32 @@ fn mature_snapshot_sync(
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     match fut.as_mut().poll(&mut cx) {
         std::task::Poll::Ready(entries) => Ok(entries?.into_iter().map(Into::into).collect()),
-        std::task::Poll::Pending => Err(ChainError::Message(
-            "the pinned UtxoContext::get_utxos became genuinely asynchronous — \
-             re-plumb minimum_sendable's mature snapshot before trusting its floor"
-                .into(),
-        )),
+        std::task::Poll::Pending => {
+            // LATCHED, and it has to be. This error is a pin tripwire, but both
+            // of its consumers swallow it silently — the floor probe and the
+            // live fee preview each catch and render nothing — so a pin bump
+            // that made `get_utxos` genuinely async would present as a fee and
+            // a minimum that quietly stopped appearing, with no red anywhere.
+            // A signal with no reader is a silent failure by construction
+            // (`wallet-security-auditor`, UX-4B), and the log line is the reader.
+            //
+            // Behind a `Once` because the preview calls this on a keystroke
+            // debounce: unlatched it would flood logcat at several lines a
+            // second and evict the diagnostics around it (L65).
+            static TRIPPED: std::sync::Once = std::sync::Once::new();
+            TRIPPED.call_once(|| {
+                log::error!(
+                    "send: UtxoContext::get_utxos is no longer ready-on-poll — the mature \
+                     snapshot is now empty on every call; the KIP-9 floor and the live fee \
+                     preview have gone silent. Re-plumb before trusting either."
+                );
+            });
+            Err(ChainError::Message(
+                "the pinned UtxoContext::get_utxos became genuinely asynchronous — \
+                 re-plumb minimum_sendable's mature snapshot before trusting its floor"
+                    .into(),
+            ))
+        }
     }
 }
 

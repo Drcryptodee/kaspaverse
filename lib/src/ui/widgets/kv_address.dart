@@ -61,14 +61,34 @@ class KvAddress extends StatelessWidget {
     return Clipboard.setData(ClipboardData(text: address));
   }
 
-  /// The payload, split into groups of four.
+  /// How many characters the FINAL group keeps, whole (D-223, founder,
+  /// ratified 2026-08-30).
+  static const int tailGroup = 5;
+
+  /// The payload, split into groups of four — **except the last, which keeps
+  /// five characters together.**
+  ///
+  /// Chunking purely in fours left a 61-character payload ending
+  /// `… c6jz qunt h`: a one-character final group, weighted bold, sitting
+  /// alone. The weighting exists so the eye lands where an address-poisoning
+  /// attack has to succeed, and a single stranded character is the weakest
+  /// possible place to put it — there is almost nothing there to compare. The
+  /// tail is now `… c6jz qunth`, five characters, bold as one piece.
+  ///
+  /// The remainder is chunked from the LEFT so the short group, when a payload
+  /// length produces one, falls next to the tail rather than splitting it: a
+  /// 61-character payload gives fourteen fours and the five; a 63-character
+  /// ECDSA payload gives fourteen fours, a two, and the five.
   @visibleForTesting
   static List<String> groupsOf(String address) {
     final payload = address.substring(address.indexOf(':') + 1);
+    if (payload.length <= tailGroup) return [payload];
+    final head = payload.substring(0, payload.length - tailGroup);
     final out = <String>[];
-    for (var i = 0; i < payload.length; i += 4) {
-      out.add(payload.substring(i, math.min(i + 4, payload.length)));
+    for (var i = 0; i < head.length; i += 4) {
+      out.add(head.substring(i, math.min(i + 4, head.length)));
     }
+    out.add(payload.substring(payload.length - tailGroup));
     return out;
   }
 

@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
+import '../../rust/api/transport.dart';
 import '../error_text.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
@@ -43,6 +46,8 @@ class SendScreen extends StatefulWidget {
     required this.commit,
     required this.abandon,
     this.balanceStale,
+    this.feePreview,
+    this.acceptanceStatus,
     this.minimumSendable,
     this.prepareSweep,
   });
@@ -80,15 +85,36 @@ class SendScreen extends StatefulWidget {
   /// right). Null hides the affordance (tests that only exercise payments).
   final Future<SignableSummaryDto> Function(String destination)? prepareSweep;
 
+  /// **The fee this exact payment would cost, priced by the Generator now.**
+  ///
+  /// Called as the amount is typed so the cost is on the glass BEFORE Review,
+  /// not after it. Signerless and stash-free; `None` whenever no transaction
+  /// can be built, and the screen then shows no fee at all — never a guess,
+  /// and never a stale figure left standing beside a changed amount.
+  final Future<BigInt?> Function(String destination, BigInt amountSompi)?
+  feePreview;
+
+  /// The tracker's live answer for a txid, handed to the ceremony so the
+  /// receipt can stream its depth. Null ⇒ the receipt shows no depth mark.
+  final Future<TxStatusDto?> Function(String txid)? acceptanceStatus;
+
   /// The smallest currently-sendable amount (sompi), probed from the pinned
   /// Generator over the live coin shape (D-054). A null provider or a null
   /// result means no floor is known, and then nothing is ever blocked by one —
   /// the Generator on `prepare` stays the single authority either way.
   final Future<BigInt?> Function()? minimumSendable;
 
-  /// The tap target that hands focus back from the address field to the amount
-  /// pad. It has no text of its own, so a test needs a handle on it.
+  /// The amount field. Named because the screen now has two text fields and a
+  /// test must be able to say which one it means.
   static const Key amountTarget = Key('send-amount-target');
+
+  /// The destination field, for the same reason.
+  static const Key addressTarget = Key('send-address-target');
+
+  /// The screen's own scroll. Named because the amount is a text field now and
+  /// carries a `Scrollable` of its own, so "the first Scrollable" stopped
+  /// meaning "the list".
+  static const Key scrollTarget = Key('send-scroll');
 
   @override
   State<SendScreen> createState() => _SendScreenState();
@@ -120,7 +146,24 @@ typedef _Block = ({String? reason, String? notice});
 class _SendScreenState extends State<SendScreen> {
   /// The typed amount, canonical and ungrouped — exactly what
   /// [sompiFromKas] parses. Never a formatted string.
-  String _amount = '';
+  String get _amount => _amountField.text;
+  set _amount(String v) => _amountField.text = v;
+
+  /// The amount as an editable field, so the DEVICE keyboard can take over
+  /// when the figure is tapped (founder, 2026-08-30).
+  ///
+  /// **This narrows D-189 rather than reversing it.** The on-screen pad stays
+  /// the default and stays the same primitive the passphrase keyboard uses —
+  /// the muscle memory and the one-codepath audit both survive. What changes
+  /// is that an amount may ALSO be typed on the system keyboard, which costs
+  /// nothing that mattered: the no-system-IME law is INV-3's, and it protects
+  /// SECRETS. An amount is not one. The passphrase surfaces are untouched and
+  /// have no such handover.
+  ///
+  /// The controller is the single source of truth for both input paths, so the
+  /// pad and the keyboard can never disagree about what has been typed.
+  final _amountField = TextEditingController();
+  final _amountFocus = FocusNode();
 
   /// Never re-derived — see [SendScreen.balanceStale]. The fallback is a
   /// constant `false`, not a second folding of the link state.
@@ -132,11 +175,53 @@ class _SendScreenState extends State<SendScreen> {
   String? _error;
   BigInt? _minSompi;
 
+  /// The Generator's fee for what is currently typed, or null when there is
+  /// nothing buildable to price.
+  BigInt? _fee;
+  Timer? _feeDebounce;
+
+  /// Guards against an out-of-order answer overwriting a newer one: every
+  /// request carries a token and only the latest may land. Without it a slow
+  /// probe for `1` can return after a fast probe for `12` and leave the screen
+  /// showing the fee for an amount the user has already moved past — a true
+  /// number against the wrong figure, which is worse than none.
+  int _feeToken = 0;
+
+  /// Long enough that a run of keystrokes makes ONE probe, short enough that
+  /// the figure feels live. The probe builds a real transaction chain, so it
+  /// is not free.
+  static const Duration _feeDebounceFor = Duration(milliseconds: 250);
+
+  /// Re-price what is typed now. Clears the fee first, because a fee that
+  /// lingers beside a changed amount is a lie for as long as it lingers.
+  void _repriceFee() {
+    final probe = widget.feePreview;
+    _feeDebounce?.cancel();
+    final token = ++_feeToken;
+    if (_fee != null) setState(() => _fee = null);
+    final amount = _amountSompi;
+    if (probe == null || amount == null || amount <= BigInt.zero) return;
+    if (!_addressLooksValid) return;
+    final destination = _destination;
+    _feeDebounce = Timer(_feeDebounceFor, () async {
+      try {
+        final fee = await probe(destination, amount);
+        if (mounted && token == _feeToken) setState(() => _fee = fee);
+      } catch (_) {
+        // No fee is a real answer; a failed probe is not a number.
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
     _address.addListener(_onChanged);
     _addressFocus.addListener(_onChanged);
+    _amountFocus.addListener(() => setState(() {}));
+    // The system keyboard writes straight into the controller, so the fee and
+    // the block ladder have to hear about it the same way a pad press does.
+    _amountField.addListener(_onAmountChanged);
     // Fetch the live floor once per screen-open. Advisory: a failure (engine
     // not ready, probe error) simply means no floor is known, and a null floor
     // blocks nothing.
@@ -172,11 +257,18 @@ class _SendScreenState extends State<SendScreen> {
   void dispose() {
     _address.dispose();
     _addressFocus.dispose();
+    _amountField.dispose();
+    _amountFocus.dispose();
+    _feeDebounce?.cancel();
     super.dispose();
   }
 
-  /// Any edit rebuilds (Review enablement) and clears a prior error.
-  void _onChanged() => setState(() => _error = null);
+  /// Any edit rebuilds (Review enablement) and clears a prior error. The
+  /// destination is half of what the fee is priced on, so it re-prices too.
+  void _onChanged() {
+    setState(() => _error = null);
+    _repriceFee();
+  }
 
   BigInt? get _amountSompi => sompiFromKas(_amount);
 
@@ -187,15 +279,16 @@ class _SendScreenState extends State<SendScreen> {
       _destination.startsWith('kaspa:') &&
       _mainnetAddressLengths.contains(_destination.length);
 
-  void _key(String ch) => setState(() {
-    _amount = amountKeyPress(_amount, ch);
-    _error = null;
-  });
+  /// One handler for BOTH input paths — the pad writes through the controller
+  /// exactly as the keyboard does, so there is one place the amount changes.
+  void _onAmountChanged() {
+    setState(() => _error = null);
+    _repriceFee();
+  }
 
-  void _backspace() => setState(() {
-    _amount = amountBackspace(_amount);
-    _error = null;
-  });
+  void _key(String ch) => _amount = amountKeyPress(_amount, ch);
+
+  void _backspace() => _amount = amountBackspace(_amount);
 
   /// The one place a blocked or warned state is decided, in the order the user
   /// would fix it: what is missing, then what the amount cannot be, then the
@@ -260,6 +353,19 @@ class _SendScreenState extends State<SendScreen> {
 
     if (!hasAddress) {
       return (reason: 'Enter a destination address', notice: floorNotice);
+    }
+    // An invisible character is the worst possible refusal to read: the
+    // address LOOKS right, and the wallet's generic *"that doesn't look like a
+    // valid Kaspa address"* sends the user hunting through 67 correct
+    // characters (founder, on glass 2026-08-30). Leading and trailing space is
+    // trimmed long before here; this is the one in the middle.
+    if (hasInnerWhitespace(_destination)) {
+      return (
+        reason: 'Check the destination address',
+        notice:
+            'There is a space in that address. A Kaspa address has none — '
+            'delete it and the rest is fine.',
+      );
     }
     if (!_destination.startsWith('kaspa:')) {
       return (
@@ -338,6 +444,7 @@ class _SendScreenState extends State<SendScreen> {
         summary: summary,
         commit: widget.commit,
         abandon: widget.abandon,
+        acceptanceStatus: widget.acceptanceStatus,
         onLeftInFlight: () => leftInFlight = true,
       );
       if (!mounted) return;
@@ -420,35 +527,10 @@ class _SendScreenState extends State<SendScreen> {
                   // steps aside for the system IME, and nothing on the screen
                   // gives it back — a control that disappears with no way to
                   // recall it (BG-12's neighbour).
-                  Semantics(
-                    button: true,
-                    // **The phrase and the action are on ONE node**, and the
-                    // subtree under it is excluded.
-                    //
-                    // The figure and its unit are two `Text` nodes: left
-                    // alone a screen reader stops on each and reads the
-                    // GROUPED digits, then the unit, then the empty state as
-                    // a bare "0" with nothing marking it a placeholder. But
-                    // `excludeSemantics` drops the *entire* descendant
-                    // subtree, so a label pushed down into `_TypedAmount`
-                    // would be dead code — this node has to carry it.
-                    //
-                    // `onTap` matters as much: without it the one control
-                    // that gives the pad back after the address field takes
-                    // focus is inert under TalkBack. It moves focus and
-                    // signs nothing, so unlike the hold there is no friction
-                    // for an activation to collapse (contrast D-178).
-                    label: _amount.isEmpty
-                        ? 'Amount, none entered. Edit the amount'
-                        : 'Amount, $_amount KAS. Edit the amount',
-                    onTap: _addressFocus.unfocus,
-                    excludeSemantics: true,
-                    child: GestureDetector(
-                      key: SendScreen.amountTarget,
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _addressFocus.unfocus,
-                      child: _TypedAmount(typed: _amount),
-                    ),
+                  _TypedAmount(
+                    controller: _amountField,
+                    focusNode: _amountFocus,
+                    onTapWhileAddressFocused: _addressFocus.unfocus,
                   ),
                   const SizedBox(height: KvSpace.sm),
                   // The datum under a number being typed, with no end stops:
@@ -465,7 +547,12 @@ class _SendScreenState extends State<SendScreen> {
                   // seven-figure balance needing 262dp, which a `FittedBox`
                   // "solves" by rendering a 6.7dp reading. Wrapped, the chip
                   // drops to its own run and the figure keeps the gutter.
+                  // `spaceBetween` puts `Send max` on the RIGHT EDGE against
+                  // `available` on the left (founder, 2026-08-30) — and it is
+                  // still a `Wrap`, so the chip drops to its own run rather
+                  // than starving the figure at the floor geometry.
                   Wrap(
+                    alignment: WrapAlignment.spaceBetween,
                     spacing: KvSpace.s,
                     runSpacing: KvSpace.s,
                     crossAxisAlignment: WrapCrossAlignment.center,
@@ -475,11 +562,38 @@ class _SendScreenState extends State<SendScreen> {
                         _MaxChip(onTap: _reviewSweep),
                     ],
                   ),
+                  // **The fee, priced by the Generator over the real coins**,
+                  // as the amount is typed. It appears only when there is a
+                  // transaction to price and vanishes the instant the amount
+                  // changes, so the figure on screen is never one built for a
+                  // different amount.
+                  //
+                  // No `≈`, and that is earned rather than asserted: the probe
+                  // runs the SAME two-shape build and the same `shipped_shape`
+                  // decision `prepare_send` runs, so the ceremony prints this
+                  // number. The first cut priced one shape and claimed the
+                  // same thing, and was wrong by up to 0.001118 KAS on the
+                  // founder's own wallet (`consensus-auditor`, UX-4B).
+                  if (_fee != null) ...[
+                    const SizedBox(height: KvSpace.s),
+                    Text(
+                      'network fee ${_trimmed(_fee!)}',
+                      maxLines: 1,
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 12,
+                        height: 16 / 12,
+                        color: KvColor.inkMetaLow,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
             Expanded(
               child: ListView(
+                key: SendScreen.scrollTarget,
                 padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
                 children: [
                   const SizedBox(height: KvSpace.l),
@@ -536,15 +650,32 @@ class _SendScreenState extends State<SendScreen> {
                       maxLines: null,
                     ),
                   ],
-                  // The system IME owns the bottom of the screen while the
-                  // address is being typed, so the pad steps aside for it:
-                  // two keyboards for two fields at once is not a layout.
-                  // Tapping the figure brings it back
-                  // ([SendScreen.amountTarget]).
-                  if (!_addressFocus.hasFocus) ...[
-                    const SizedBox(height: KvSpace.l),
-                    KvKeypad.amount(onChar: _key, onBackspace: _backspace),
-                  ],
+                  // **The pad steps aside for EITHER system keyboard, and
+                  // comes back when it closes** — the address field's, and now
+                  // the amount's own (founder, 2026-08-30). Two keyboards at
+                  // once is not a layout, and a pad that stayed put under a
+                  // rising IME is the clunkiness he asked me to avoid.
+                  //
+                  // `AnimatedSize` on the one easing so the swap reads as the
+                  // pad making room rather than blinking out; the IME's own
+                  // rise runs over the top of it.
+                  AnimatedSize(
+                    duration: KvMotion.calm,
+                    curve: KvMotion.out,
+                    alignment: Alignment.topCenter,
+                    child: (_addressFocus.hasFocus || _amountFocus.hasFocus)
+                        ? const SizedBox(width: double.infinity)
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              const SizedBox(height: KvSpace.l),
+                              KvKeypad.amount(
+                                onChar: _key,
+                                onBackspace: _backspace,
+                              ),
+                            ],
+                          ),
+                  ),
                   const SizedBox(height: KvSpace.l),
                 ],
               ),
@@ -605,59 +736,95 @@ String _trimmed(BigInt sompi) {
   return '${p.integer}.${trimFraction(p.fraction)}';
 }
 
-/// The amount as typed: grouped for reading, never reformatted underneath the
-/// hand that is typing it.
+/// The amount, as an editable field that looks like the figure it is.
+///
+/// **Two input paths, one source of truth.** Tapping it raises the DEVICE's
+/// number keyboard and the on-screen pad steps aside; dismissing the keyboard
+/// brings the pad back. Both write the same [TextEditingController], so they
+/// cannot disagree about what has been typed, and the pad remains the default
+/// — this narrows D-189, it does not reverse it (see [SendScreen]'s field).
+///
+/// **The grammar is enforced on both.** The formatter below refuses anything
+/// [sompiFromKas] would refuse, so a system keyboard cannot type a second
+/// decimal point, a ninth decimal, or a figure past the `u64` sompi ceiling
+/// that the pad already refuses at the keystroke. One law, two doors.
 ///
 /// It scales down rather than wrapping or clipping (BG-5) — a figure is the
-/// one thing on a screen that may not reflow (L131/BG-14).
+/// one thing on a screen that may not reflow (L131/BG-14) — and the unit sits
+/// OUTSIDE that fit so its 11dp floor survives the scale.
 class _TypedAmount extends StatelessWidget {
-  const _TypedAmount({required this.typed});
+  const _TypedAmount({
+    required this.controller,
+    required this.focusNode,
+    required this.onTapWhileAddressFocused,
+  });
 
-  final String typed;
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final VoidCallback onTapWhileAddressFocused;
 
   @override
   Widget build(BuildContext context) {
-    final empty = typed.isEmpty;
-    // No `Semantics` here: the tap target above excludes this subtree, so a
-    // label placed on it could never be read. It speaks the whole phrase.
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        // The FIGURE is what gets fitted. A twelve-figure amount at
-        // 320dp/1.3× scales to about 0.43, which is fine for a 32dp number and
-        // fatal for the unit beside it — `KvAmount` had the same defect and
-        // took the same cure (`ux-auditor`, UX-4).
         Flexible(
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: AlignmentDirectional.centerStart,
-            child: Text(
-              // A placeholder `0`, not a fabricated `0.00000000`: nothing has
-              // been entered, and eight zeros would look like an amount.
-              empty ? '0' : groupTypedAmount(typed),
-              maxLines: 1,
-              style: TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: 32,
-                height: 38 / 32,
-                fontWeight: FontWeight.w500,
-                color: empty ? KvColor.inkMeta : KvColor.ink,
-                fontFeatures: const [FontFeature.tabularFigures()],
+          child: ValueListenableBuilder<TextEditingValue>(
+            valueListenable: controller,
+            builder: (context, value, _) => FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: AlignmentDirectional.centerStart,
+              child: IntrinsicWidth(
+                child: TextField(
+                  key: SendScreen.amountTarget,
+                  controller: controller,
+                  focusNode: focusNode,
+                  onTap: onTapWhileAddressFocused,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: const [_AmountGrammar()],
+                  maxLines: 1,
+                  cursorColor: KvColor.primary,
+                  // A placeholder `0`, not a fabricated `0.00000000`: nothing
+                  // has been entered, and eight zeros would look like an
+                  // amount.
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    filled: false,
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    contentPadding: EdgeInsets.zero,
+                    hintText: '0',
+                    hintStyle: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 32,
+                      height: 38 / 32,
+                      fontWeight: FontWeight.w500,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 32,
+                    height: 38 / 32,
+                    fontWeight: FontWeight.w500,
+                    color: KvColor.ink,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
               ),
             ),
           ),
         ),
         const SizedBox(width: KvSpace.s),
         const Padding(
-          padding: EdgeInsets.only(bottom: 2),
+          padding: EdgeInsets.only(bottom: 8),
           child: Text(
             'KAS',
             style: TextStyle(
               fontFamily: KvFont.mono,
-              // `KvAmount`'s unit ratio floored at the readable minimum — the
-              // same size the unit takes beside the same 32dp figure on the
-              // ceremony. The number you type and the number you sign must be
-              // the same typographic object (§4).
               fontSize: KvAmount.readableFloor,
               fontWeight: FontWeight.w500,
               letterSpacing: 0.6,
@@ -667,6 +834,30 @@ class _TypedAmount extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// The money-entry grammar, enforced on the SYSTEM keyboard.
+///
+/// The on-screen pad refuses an illegal keystroke at the key ([amountKeyPress]);
+/// this refuses the same things at the field, so a device keyboard cannot type
+/// a second decimal point, a ninth decimal, or a figure past the `u64` sompi
+/// ceiling. Rejecting means keeping the previous value — the character simply
+/// does not appear, which is what the pad does too.
+class _AmountGrammar extends TextInputFormatter {
+  const _AmountGrammar();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final text = newValue.text;
+    // Empty and a lone trailing point are legal *intermediate* states that
+    // `sompiFromKas` rejects as final values — the user is mid-way through
+    // typing `0.` and has not said anything wrong yet.
+    if (text.isEmpty || text == '0.' || text == '.') return newValue;
+    return sompiFromKas(text) == null ? oldValue : newValue;
   }
 }
 
@@ -781,6 +972,14 @@ class _MaxChip extends StatelessWidget {
         // height: a 16dp line box plus 2 × 16 is exactly `touchTarget`, and it
         // grows with the text scale instead of clipping.
         child: KvSurface.control(
+          // **A teal edge, by founder request (D-223).** BG-2 rations teal to
+          // three emitting objects and gives a FILL only to the one primary
+          // action; an edge is neither a fill nor a lit lamp, and `Send max`
+          // is the one control on this screen that fills the field the user is
+          // about to commit. Recorded because a teal outline on a secondary
+          // control is the kind of thing an auditor should find decided rather
+          // than drifted.
+          edge: KvColor.primaryMuted,
           padding: const EdgeInsets.symmetric(
             horizontal: KvSpace.m,
             vertical: KvSpace.m,
@@ -833,13 +1032,10 @@ class _AddressField extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
       child: Row(
         children: [
-          _FieldAction(
-            mark: KvMark.paste,
-            label: 'Paste an address',
-            onTap: onPaste,
-          ),
+          const SizedBox(width: KvSpace.s),
           Expanded(
             child: TextField(
+              key: SendScreen.addressTarget,
               controller: controller,
               focusNode: focusNode,
               minLines: 1,
@@ -895,6 +1091,15 @@ class _AddressField extends StatelessWidget {
                 ),
               ),
             ),
+          // **Paste sits on the RIGHT** and the hint gets the left edge
+          // (founder, 2026-08-30). It is the field's one action, and an action
+          // reads as an action at the end of the thing it acts on; on the left
+          // it competed with the placeholder for the eye.
+          _FieldAction(
+            mark: KvMark.paste,
+            label: 'Paste an address',
+            onTap: onPaste,
+          ),
         ],
       ),
     );

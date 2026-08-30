@@ -72,6 +72,11 @@ enum KvMark {
 
   /// Overflow.
   kebab,
+
+  /// Done. Two strokes on the 24dp grid, drawn at the same weight as every
+  /// other mark — a machined tick, not a celebration (§7: the vault register
+  /// does not cheer).
+  check,
 }
 
 /// One glyph, painted.
@@ -340,6 +345,13 @@ class KvGlyphPainter extends CustomPainter {
         canvas.drawPath(
           path([
             [12, 4, 20, 12, 12, 20, 4, 12, 12, 4],
+          ]),
+          p,
+        );
+      case KvMark.check:
+        canvas.drawPath(
+          path([
+            [5, 12.5, 10, 17.5, 19, 6.5],
           ]),
           p,
         );

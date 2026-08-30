@@ -327,6 +327,10 @@ abstract final class KvMotion {
   /// 320ms — something arriving on screen.
   static const Duration enter = Duration(milliseconds: 320);
 
+  /// How long a copy acknowledgement stands. Long enough to be read, short
+  /// enough that it never becomes the thing on screen.
+  static const Duration toast = Duration(milliseconds: 1600);
+
   /// **800ms — the hold-to-sign fill. A constant with no configuration
   /// surface.** Never shortened, including under reduced motion (BG-6/BG-9).
   static const Duration deliberate = Duration(milliseconds: 800);
