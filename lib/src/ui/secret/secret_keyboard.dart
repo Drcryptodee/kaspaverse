@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/kv_glyph.dart';
 import '../widgets/kv_keypad.dart';
 
 /// What set of keys the [SecretKeyboard] offers.
@@ -99,10 +100,10 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
   List<KvKey> _controlRow() => [
     if (_full && !_symbols)
       KvKey.command(
-        '⇧',
+        'Shift',
+        mark: KvMark.shift,
         flex: 3,
         active: _shift,
-        semantics: 'Shift',
         onTap: () => setState(() => _shift = !_shift),
       ),
     if (_full && _symbols)
@@ -126,9 +127,9 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
     // tokens, so a space in the word picker could only ever be a mistake.
     if (_full) KvKey.command('space', flex: 6, onTap: () => widget.onChar(' ')),
     KvKey.command(
-      '⌫',
+      'Backspace',
+      mark: KvMark.backspace,
       flex: 3,
-      semantics: 'Backspace',
       onTap: widget.onBackspace,
     ),
   ];

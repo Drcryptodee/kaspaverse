@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 import 'haptics.dart';
+import 'kv_glyph.dart';
 
 /// Which skin the ONE keypad wears (D-189).
 ///
@@ -60,14 +61,22 @@ class KvKey {
   /// unless [label] says otherwise, so the two cannot disagree by default.
   const KvKey.char(this.emits, {String? label, this.flex = 2, this.semantics})
     : _label = label,
+      mark = null,
       onTap = null,
       active = false;
 
   /// A key that does something to the keyboard or the buffer — shift, page,
   /// backspace, space. It emits nothing.
+  ///
+  /// A command cap is a **word** where a word works (`space`, `ABC`, `123`) and
+  /// a **drawn [mark]** where a mark is right. It is never a symbol codepoint:
+  /// BG-25 (D-229) puts glyph ownership in the app, and the cap that carried
+  /// `'⌫'` was rendered in a face with no U+232B in its cmap. When [mark] is
+  /// set, [label] stops being the cap and becomes what a screen reader says.
   const KvKey.command(
     String label, {
     required this.onTap,
+    this.mark,
     this.flex = 2,
     this.active = false,
     this.semantics,
@@ -81,6 +90,10 @@ class KvKey {
 
   /// The character this key writes, or null on a command key.
   final String? emits;
+
+  /// A drawn mark to print on the cap instead of [label]. Command keys only —
+  /// a character key's cap is the character it writes.
+  final KvMark? mark;
 
   /// A command key's action, or null on a character key.
   final VoidCallback? onTap;
@@ -132,7 +145,11 @@ class KvKeypad extends StatelessWidget {
          [
            const KvKey.char('.', semantics: 'Decimal point'),
            const KvKey.char('0'),
-           KvKey.command('⌫', onTap: onBackspace, semantics: 'Backspace'),
+           KvKey.command(
+             'Backspace',
+             mark: KvMark.backspace,
+             onTap: onBackspace,
+           ),
          ],
        ];
 
@@ -193,6 +210,32 @@ class _KeyCap extends StatelessWidget {
   final KvKeypadSkin skin;
   final ValueChanged<String> onChar;
 
+  /// The cap itself: a drawn mark, or the type. **The mark is sized from the
+  /// cap type it replaces** rather than from a constant of its own — one number
+  /// for both, so a type-ramp change carries the glyph with it and cannot leave
+  /// a mark behind at the old size (L121: a size nobody can re-derive is a size
+  /// nobody can re-check).
+  ///
+  /// **And it takes the text scaler, because a drawn cap is still type's job**
+  /// (BG-14; `ux-auditor`, D-229). The `'⌫'` it replaced was a `Text` and grew
+  /// with everyone's setting for free; a `KvGlyphIcon` takes a fixed dp, so
+  /// swapping the two silently made the erase key — the key that corrects a
+  /// wrong amount before it is signed — the only cap on the pad that ignored
+  /// the user's text size. A drawn mark that is a control's sole identification
+  /// is information, not decoration.
+  Widget _cap(BuildContext context, TextStyle? style, Color ink) {
+    final mark = cap.mark;
+    if (mark != null) {
+      final base = style?.fontSize ?? 20;
+      return KvGlyphIcon(
+        mark,
+        size: MediaQuery.textScalerOf(context).scale(base),
+        tone: ink,
+      );
+    }
+    return Text(cap.label, style: style?.copyWith(color: ink));
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -205,6 +248,14 @@ class _KeyCap extends StatelessWidget {
         cap.onTap!();
       }
     }
+
+    // One tone rule for both cap kinds, so a drawn mark and a typed cap can
+    // never disagree about what a lit or a command key looks like.
+    final ink = cap.active
+        ? KvColor.ok
+        : (cap.emits == null && skin == KvKeypadSkin.plain
+              ? KvColor.inkMeta
+              : KvColor.ink);
 
     final style = switch (skin) {
       // Mono, because every cap on the amount pad is a figure and the figure
@@ -237,22 +288,11 @@ class _KeyCap extends StatelessWidget {
                 color: cap.active ? KvColor.ok : KvColor.keyEdge,
               ),
             ),
-            // The cap's glyph is excluded: the `Semantics` above already
-            // speaks the key, and without this a screen reader reads
-            // *"Backspace ⌫"* — the word and then the symbol it stands in
-            // for. A cap whose glyph IS its name simply names itself.
-            child: ExcludeSemantics(
-              child: Text(
-                cap.label,
-                style: style?.copyWith(
-                  color: cap.active
-                      ? KvColor.ok
-                      : (cap.emits == null && skin == KvKeypadSkin.plain
-                            ? KvColor.inkMeta
-                            : KvColor.ink),
-                ),
-              ),
-            ),
+            // The cap is excluded from semantics: the `Semantics` above
+            // already speaks the key, and without this a screen reader would
+            // read the cap and then the word it stands for. A cap whose glyph
+            // IS its name simply names itself.
+            child: ExcludeSemantics(child: _cap(context, style, ink)),
           ),
         ),
       ),

@@ -1869,12 +1869,17 @@ class _ActivityRow extends StatelessWidget {
                     runSpacing: KvSpace.xs,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      // The lifecycle chip is NOT a second rendering of
-                      // `KvStatusChip`: it carries a breathing dot, a staged
-                      // transition and a streaming depth counter, and its
-                      // quiet `Pending` tier has no lamp tone at all — BG-7
-                      // gives lamps three hues and none of them is neutral.
-                      // The two answer different questions.
+                      // The lifecycle mark is NOT a second rendering of
+                      // `KvStatusChip`: it carries a streaming depth counter,
+                      // it crossfades between rungs, and its `final` rung has
+                      // no lamp at all — BG-7 gives lamps three hues and a
+                      // settled row needs none of them. The two answer
+                      // different questions.
+                      //
+                      // (This comment described a *breathing* dot and a
+                      // `Pending` tier until D-229. It was written at UX-2 for
+                      // the widget that used to sit here and outlived it —
+                      // L121: a claim in a comment is a claim to check.)
                       KvBurialMark(
                         state: chip,
                         confirmations: confirmations,

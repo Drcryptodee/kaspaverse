@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 
 /// F7. The app promises an any-character extra word on restore
 /// (`vault.rs:817-819`), and the no-IME keyboard is the ONLY way to type one —
@@ -13,7 +14,15 @@ import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 /// the same table the widget builds from proves only that the table equals
 /// itself. This walks every page the way a thumb does.
 void main() {
-  const controls = {'⇧', '123', 'ABC', '#+=', '⌫', 'space'};
+  // Shift and backspace are no longer in this set because they are no longer
+  // TEXT: BG-25 (D-229) made them drawn marks, so they never reach the census
+  // below. A control listed here that no longer exists would be a filter for
+  // nothing, quietly widening what counts as a character key.
+  const controls = {'123', 'ABC', '#+=', 'space'};
+
+  /// A cap that is a drawn mark rather than type.
+  Finder mark(KvMark m) =>
+      find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == m);
 
   List<String> characterKeys(WidgetTester tester) => tester
       .widgetList<Text>(
@@ -53,7 +62,7 @@ void main() {
     final lowercase = characterKeys(tester);
     for (final letter in lowercase) {
       // Shift is sticky-once, so it has to be re-armed for every capital.
-      await tester.tap(find.text('⇧'));
+      await tester.tap(mark(KvMark.shift));
       await tester.pump();
       await tester.tap(find.text(letter.toUpperCase()).first);
       await tester.pump();
@@ -102,7 +111,7 @@ void main() {
     // only ever be a mistake, so the wider inventory must NOT leak in.
     expect(find.text('space'), findsNothing);
     expect(find.text('123'), findsNothing);
-    expect(find.text('⇧'), findsNothing);
+    expect(mark(KvMark.shift), findsNothing);
 
     await tapEveryCharacterKey(tester);
     expect(typed, hasLength(26));

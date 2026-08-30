@@ -1198,7 +1198,6 @@ class _HoldToSign extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     return Semantics(
       // DESCRIPTIVE ONLY — no `onTap`, and that omission is the design.
       //
@@ -1227,22 +1226,29 @@ class _HoldToSign extends StatelessWidget {
         child: AnimatedBuilder(
           animation: progress,
           builder: (context, _) {
-            // **LINEAR on the way in, decelerating on the way back** (§4).
+            // **LINEAR IN BOTH DIRECTIONS** — the gauge is a reading, and
+            // BG-22 exempts a reading from BG-9's curve (D-229).
             //
-            // The one easing is a decelerating curve, and applying it to a
-            // PROGRESS GAUGE makes the gauge lie: on `Cubic(0.2, 0, 0, 1)` the
-            // ring reads 61% closed at 200ms and 93% at 480ms, so the last
-            // 320ms of safety friction — 40% of it — renders as the final 7%
-            // of the arc, indistinguishable from done. A reading of how much
-            // longer to hold has to be linear to be a reading at all.
+            // Forward, the reasoning is old: on `Cubic(0.2, 0, 0, 1)` the ring
+            // reads 61% closed at 200ms and 93% at 480ms, so the last 320ms of
+            // safety friction — 40% of it — renders as the final 7% of the arc,
+            // indistinguishable from done.
             //
-            // The fall is the opposite case: it is motion, not a reading, so
-            // it takes the curve and the short `reverseDuration` — an early
-            // release is not a failure and must not feel like one (BG-9: no
-            // overshoot, ever).
-            final t = progress.status == AnimationStatus.reverse
-                ? KvMotion.out.transform(progress.value)
-                : progress.value;
+            // **The fall used to take the curve**, on the argument that it is
+            // motion rather than a reading. That argument is wrong and
+            // `ux-auditor` found why: the controller does not reset on release,
+            // so a re-press RESUMES from wherever the fall reached. The value
+            // is live the whole way down, the arc is still reporting how much
+            // hold is banked, and the eased version overstated it by 1.76x at
+            // the midpoint — then dropped 38 points in one frame the instant a
+            // thumb came back. A gauge that is resumable is a reading in both
+            // directions.
+            //
+            // The forgiveness an early release needs lives in
+            // `reverseDuration` (240ms against the 800ms climb), which is
+            // untouched: the fall is still fast, it is simply honest while it
+            // falls.
+            final t = progress.value;
             return Container(
               // The §3 control height, and the same one `KvAction` takes — so
               // the footer does not change size when the ceremony settles and
@@ -1270,9 +1276,7 @@ class _HoldToSign extends StatelessWidget {
                     // eye is a number nobody can re-check (L121).
                     width: _ringSize,
                     height: _ringSize,
-                    child: CustomPaint(
-                      painter: _RingPainter(t, reduced: reduced),
-                    ),
+                    child: CustomPaint(painter: _RingPainter(t)),
                   ),
                   const SizedBox(width: KvSpace.sm),
                   // **It WRAPS; it does not shrink.** The label is a sentence
@@ -1313,15 +1317,29 @@ class _HoldToSign extends StatelessWidget {
 /// The sign ring: a track, the arrow of the thing this control does, and the
 /// filling arc.
 ///
-/// **Under reduced animations the arc does not sweep — it ramps in opacity**
-/// (§6/§11: reduced motion is opacity-only). The 800 ms itself never shortens;
-/// that half holds because the controller is built with
-/// `AnimationBehavior.preserve`, not because of anything drawn here.
+/// **The arc sweeps under reduced animations too, and that is BG-9's
+/// carve-out** (D-229). BG-9 and §3 both read *"reduced motion collapses
+/// everything to opacity, **except the hold**"*, and this painter used to
+/// collapse it anyway: it drew a COMPLETE circle for the whole 800 ms with only
+/// its opacity carrying `t`. At 100 ms of the hold the gauge read *closed* in
+/// the strongest channel it has — **BG-22's Lie Factor of 8, rising without
+/// bound as t approaches 0** — on the control that broadcasts an irreversible
+/// transaction, for exactly the users least able to compensate for it.
+///
+/// The exception had been half-discharged: D-177 fixed the *duration* half
+/// (`AnimationBehavior.preserve`, so 800 ms never becomes 40 ms) and nobody
+/// went back for the *extent* half. Both halves now hold.
+///
+/// **And a filling arc is not what reduced motion is for.** It translates
+/// nothing and parallaxes nothing; it is the direct reading of a control the
+/// user's own thumb is holding down. The opacity ramp it replaced was itself
+/// motion — a fade — so the old branch traded a readable channel for an
+/// unreadable one and bought nothing. There is now one rendering, which is also
+/// why BG-19 gets no second encoding to complain about.
 class _RingPainter extends CustomPainter {
-  const _RingPainter(this.t, {required this.reduced});
+  const _RingPainter(this.t);
 
   final double t;
-  final bool reduced;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1368,19 +1386,28 @@ class _RingPainter extends CustomPainter {
     final fill = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 4.5
-      ..strokeCap = StrokeCap.round
-      ..color = reduced
-          ? KvColor.primary.withValues(alpha: t)
-          : KvColor.primary;
+      // **BUTT, not round or square — and this is BG-22, not taste**
+      // (`ux-auditor`, D-229). A round or square cap paints half a stroke width
+      // PAST each end of the arc: 2 x 2.25dp on a 106.81dp circumference is
+      // **4.21% of the ring added to every reading**, so the gauge showed 16.7%
+      // at a true 12.5% — Lie Factor 1.34 at 100ms, and unbounded as t
+      // approaches 0. The house cap is square (`KvGlyph.cap`) because a glyph
+      // is a mark; a gauge is a measurement, and a measurement may not overhang
+      // its own value.
+      ..strokeCap = StrokeCap.butt
+      ..color = KvColor.primary;
+    // BG-22: the swept angle IS the reading, so it is `t` and nothing else —
+    // no easing in either direction (see the caller), no substitute channel
+    // under reduced motion, and no cap painting past the end.
     canvas.drawArc(
       Rect.fromCircle(center: c, radius: r),
       -math.pi / 2,
-      reduced ? 2 * math.pi : 2 * math.pi * t,
+      2 * math.pi * t,
       false,
       fill,
     );
   }
 
   @override
-  bool shouldRepaint(_RingPainter old) => old.t != t || old.reduced != reduced;
+  bool shouldRepaint(_RingPainter old) => old.t != t;
 }

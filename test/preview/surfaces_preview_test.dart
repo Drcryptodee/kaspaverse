@@ -6,6 +6,7 @@ import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
+import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
@@ -62,6 +63,11 @@ Widget _sendScreen() => SendScreen(
   abandon: () async {},
   feePreview: (_, _) async => BigInt.from(315400),
   minimumSendable: () async => BigInt.from(20000000),
+  // **Wired, because `Send max` is absent from the screen without it** — and
+  // absent from every preview of the screen with it. D-223 gave that chip the
+  // app's one teal EDGE, so a fixture that omits the callback silently hides
+  // the control the founder is most likely to want looked at (D-229 audit).
+  prepareSweep: (_) async => _summary(),
 );
 
 /// A small, plausible feed: one send still counting, one buried.
@@ -195,6 +201,19 @@ void main() {
             form: KvAddressForm.chunked,
             selectable: true,
           ),
+        ),
+      ),
+    );
+
+    // The two drawn caps BG-25 put here (D-229) ship on this surface and had
+    // nowhere to be looked at. `design-uplift` cannot touch a surface that is
+    // not in this catalogue, so a screen with new marks on it belongs in it.
+    surface(
+      'keyboard__secret',
+      () => Scaffold(
+        body: Align(
+          alignment: Alignment.bottomCenter,
+          child: SecretKeyboard(onChar: (_) {}, onBackspace: () {}),
         ),
       ),
     );

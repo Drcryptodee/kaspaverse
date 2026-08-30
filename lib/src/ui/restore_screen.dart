@@ -556,7 +556,7 @@ class _RestoreScreenState extends State<RestoreScreen>
                   Padding(
                     padding: const EdgeInsets.only(bottom: KvSpace.s),
                     child: Text(
-                      'All $_target words are in. Use ⌫ to change the last one.',
+                      'All $_target words are in. Use backspace to change the last one.',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: KvColor.textSecondary,
                       ),

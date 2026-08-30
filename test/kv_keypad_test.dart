@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 
 /// **The ONE keypad, in its two skins** (D-189). The amount pad IS the
@@ -21,6 +22,13 @@ Widget _host(Widget child) => MaterialApp(
 );
 
 void main() {
+  /// A cap that is a **drawn mark** rather than type. Shift and backspace stopped
+  /// being findable by their glyph at D-229: BG-25 put glyph ownership in the app,
+  /// and `'⌫'` was a codepoint `JetBrainsMono` has no entry for. Every assertion
+  /// below is the same assertion — only the locator moved.
+  Finder mark(KvMark m) =>
+      find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == m);
+
   group('one primitive, two skins', () {
     testWidgets('both skins render through the same key cap', (tester) async {
       // The structural claim behind "one codepath to audit": the amount pad is
@@ -90,7 +98,7 @@ void main() {
       );
       await tester.tap(find.text('7'));
       await tester.pump();
-      await tester.tap(find.text('⌫'));
+      await tester.tap(mark(KvMark.backspace));
       await tester.pump();
       expect(haptics, [
         'HapticFeedbackType.selectionClick',
@@ -106,24 +114,12 @@ void main() {
       await tester.pumpWidget(
         _host(KvKeypad.amount(onChar: (_) {}, onBackspace: () {})),
       );
-      for (final k in [
-        '0',
-        '1',
-        '2',
-        '3',
-        '4',
-        '5',
-        '6',
-        '7',
-        '8',
-        '9',
-        '.',
-        '⌫',
-      ]) {
+      for (final k in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.']) {
         expect(find.text(k), findsOneWidget, reason: 'missing "$k"');
       }
+      expect(mark(KvMark.backspace), findsOneWidget, reason: 'missing erase');
       expect(find.text('space'), findsNothing);
-      expect(find.text('⇧'), findsNothing);
+      expect(mark(KvMark.shift), findsNothing);
       expect(find.text('ABC'), findsNothing);
     });
 
@@ -136,19 +132,27 @@ void main() {
       await tester.pumpWidget(
         _host(KvKeypad.amount(onChar: (_) {}, onBackspace: () {})),
       );
-      // `.trim()`: the cap's own glyph merges into the node under the spoken
-      // label, leaving a trailing newline.
-      expect(tester.getSemantics(find.text('⌫')).label.trim(), 'Backspace');
+      // `.trim()`: a typed cap merges into the node under the spoken label,
+      // leaving a trailing newline. A drawn cap contributes nothing to speak,
+      // which is BG-25 paying an accessibility dividend rather than costing one.
+      expect(
+        tester.getSemantics(mark(KvMark.backspace)).label.trim(),
+        'Backspace',
+      );
       expect(tester.getSemantics(find.text('.')).label.trim(), 'Decimal point');
       expect(
         tester.getSemantics(find.text('7')).flagsCollection.isButton,
         isTrue,
       );
-      for (final k in ['7', '.', '⌫']) {
+      for (final (name, cap) in [
+        ('7', find.text('7')),
+        ('.', find.text('.')),
+        ('erase', mark(KvMark.backspace)),
+      ]) {
         final size = tester.getSize(
-          find.ancestor(of: find.text(k), matching: find.byType(InkWell)).first,
+          find.ancestor(of: cap, matching: find.byType(InkWell)).first,
         );
-        expect(size.height, greaterThanOrEqualTo(48), reason: 'cap "$k"');
+        expect(size.height, greaterThanOrEqualTo(48), reason: 'cap "$name"');
       }
       handle.dispose();
     });
@@ -164,7 +168,7 @@ void main() {
       await tester.pumpWidget(
         _host(SecretKeyboard(onChar: typed.add, onBackspace: () {})),
       );
-      await tester.tap(find.text('⇧'));
+      await tester.tap(mark(KvMark.shift));
       await tester.pump();
       expect(find.text('Q'), findsOneWidget);
       await tester.tap(find.text('Q'));
@@ -189,10 +193,10 @@ void main() {
           ),
         ),
       );
-      expect(find.text('⇧'), findsNothing);
+      expect(mark(KvMark.shift), findsNothing);
       expect(find.text('123'), findsNothing);
       expect(find.text('space'), findsNothing);
-      expect(find.text('⌫'), findsOneWidget);
+      expect(mark(KvMark.backspace), findsOneWidget);
     });
   });
 

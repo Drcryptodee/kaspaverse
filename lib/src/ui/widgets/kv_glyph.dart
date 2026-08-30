@@ -77,6 +77,19 @@ enum KvMark {
   /// other mark — a machined tick, not a celebration (§7: the vault register
   /// does not cheer).
   check,
+
+  /// Delete the character to the left. The wedge with a cross — the form every
+  /// keyboard on earth uses, so it needs no learning — and **drawn rather than
+  /// borrowed** (BG-25, D-229). It replaced the string `'⌫'`, which the amount
+  /// pad rendered in `KvFont.mono`: `JetBrainsMono-Variable.ttf` has no U+232B,
+  /// so the app's own bundled faces could not draw the cap on the key that
+  /// corrects a wrong amount.
+  backspace,
+
+  /// Shift, on the secret keyboard. The outlined up-arrow, one closed stroke.
+  /// Also drawn rather than borrowed: `'⇧'` did render (Inter carries it), from
+  /// a face chosen by a text style rather than by a decision (BG-25).
+  shift,
 }
 
 /// One glyph, painted.
@@ -352,6 +365,43 @@ class KvGlyphPainter extends CustomPainter {
         canvas.drawPath(
           path([
             [5, 12.5, 10, 17.5, 19, 6.5],
+          ]),
+          p,
+        );
+      case KvMark.backspace:
+        // Three strokes: the wedge, then the cross inside it. The cross spans
+        // five grid units so it survives the smallest size this cap ships at
+        // (BG-25's legibility half) — a two-unit cross would close up into a
+        // blob at 1.75dp before it ever reached a phone.
+        canvas.drawPath(
+          path([
+            [2, 12, 8.5, 5, 22, 5, 22, 19, 8.5, 19, 2, 12],
+            [12.5, 9, 18, 15],
+            [18, 9, 12.5, 15],
+          ]),
+          p,
+        );
+      case KvMark.shift:
+        canvas.drawPath(
+          path([
+            [
+              12,
+              4,
+              4.5,
+              11.5,
+              8.5,
+              11.5,
+              8.5,
+              19,
+              15.5,
+              19,
+              15.5,
+              11.5,
+              19.5,
+              11.5,
+              12,
+              4,
+            ],
           ]),
           p,
         );
