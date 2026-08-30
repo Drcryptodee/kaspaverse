@@ -132,6 +132,32 @@ Widget _home() => HomeScreen(
   settingsRoute: (_) => const SizedBox.shrink(),
 );
 
+/// Types an amount on the pad and pastes a destination — the state in which the
+/// send screen actually has a fee, an address review and a live Review button.
+Future<void> _typeASend(WidgetTester tester) async {
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    SystemChannels.platform,
+    (call) async => call.method == 'Clipboard.getData'
+        ? <String, dynamic>{'text': _addr}
+        : null,
+  );
+  // Scoped to the pad: an unscoped `find.text('.')` matches whatever
+  // else on the screen happens to render that glyph, and at the floor
+  // geometry it typed `124` instead of `12.4` — a harness artifact that
+  // would have read as a screen defect.
+  for (final key in ['1', '2', '.', '4']) {
+    await tester.tap(
+      find.descendant(of: find.byType(KvKeypad), matching: find.text(key)),
+    );
+    await tester.pump();
+  }
+  await tester.tap(
+    find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvMark.paste),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 600));
+}
+
 Widget _node() => NodeScreen(
   scope: NodeScope(
     connected: ValueNotifier(true),
@@ -200,38 +226,7 @@ void main() {
     // amount typed on the pad, a destination pasted, the chunked address
     // review, the live fee and Review enabled. `send__empty` renders the one
     // state where none of that exists.
-    surface(
-      'send__typed',
-      _sendScreen,
-      act: (tester) async {
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          (call) async => call.method == 'Clipboard.getData'
-              ? <String, dynamic>{'text': _addr}
-              : null,
-        );
-        // Scoped to the pad: an unscoped `find.text('.')` matches whatever
-        // else on the screen happens to render that glyph, and at the floor
-        // geometry it typed `124` instead of `12.4` — a harness artifact that
-        // would have read as a screen defect.
-        for (final key in ['1', '2', '.', '4']) {
-          await tester.tap(
-            find.descendant(
-              of: find.byType(KvKeypad),
-              matching: find.text(key),
-            ),
-          );
-          await tester.pump();
-        }
-        await tester.tap(
-          find.byWidgetPredicate(
-            (w) => w is KvGlyphIcon && w.mark == KvMark.paste,
-          ),
-        );
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 600));
-      },
-    );
+    surface('send__typed', _sendScreen, act: _typeASend);
 
     surface(
       'ceremony__confirm',

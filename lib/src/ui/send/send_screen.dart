@@ -574,20 +574,6 @@ class _SendScreenState extends State<SendScreen> {
                   // number. The first cut priced one shape and claimed the
                   // same thing, and was wrong by up to 0.001118 KAS on the
                   // founder's own wallet (`consensus-auditor`, UX-4B).
-                  if (_fee != null) ...[
-                    const SizedBox(height: KvSpace.s),
-                    Text(
-                      'network fee ${_trimmed(_fee!)}',
-                      maxLines: 1,
-                      style: const TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 12,
-                        height: 16 / 12,
-                        color: KvColor.inkMetaLow,
-                        fontFeatures: [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),
@@ -632,6 +618,21 @@ class _SendScreenState extends State<SendScreen> {
                   // Amber throughout, including the build refusal: a send that
                   // could not be BUILT put nothing at risk, and red made a
                   // neutral sentence read as blame (§13).
+                  // **The fee sits with the destination it prices** (founder,
+                  // on glass 2026-08-30, chosen from the rendered comparison —
+                  // D-231). It used to sit in the pinned amount block, above
+                  // `To`, which read as a property of the AMOUNT. It is not:
+                  // `_probeFee` refuses without both an amount and a valid
+                  // address, so the fee is the cost of THIS SEND and belongs
+                  // beside the address that makes it one. The third candidate
+                  // — last in the scroll, against the Review control — was
+                  // rendered and rejected on sight: below the keypad it falls
+                  // under the fold, so the number nobody scrolls to is a number
+                  // nobody reads.
+                  if (_fee != null) ...[
+                    const SizedBox(height: KvSpace.sm),
+                    _FeeLine(sompi: _fee!),
+                  ],
                   if (block?.notice != null) ...[
                     const SizedBox(height: KvSpace.sm),
                     KvStatusChip(
@@ -745,6 +746,47 @@ class _SendScreenState extends State<SendScreen> {
 String _trimmed(BigInt sompi) {
   final p = kasParts(sompi);
   return '${p.integer}.${trimFraction(p.fraction)}';
+}
+
+/// The live fee, in the same face the ceremony prints it in.
+///
+/// **A `KvAmount`, not a formatted string** (D-230). It used to be
+/// `Text('network fee 0.003154')` in mono, which meant BG-23's emphasis rule
+/// reached the ceremony and not the screen the number is first read on — the
+/// same figure wearing two faces, which is BG-21. Trimmed rather than padded to
+/// eight: this is a live datum under the precision law (D-210), not BG-6's
+/// restatement of what was built.
+class _FeeLine extends StatelessWidget {
+  const _FeeLine({required this.sompi});
+
+  final BigInt sompi;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
+      children: [
+        const Text(
+          'network fee ',
+          maxLines: 1,
+          style: TextStyle(
+            fontFamily: KvFont.mono,
+            fontSize: 12,
+            height: 16 / 12,
+            color: KvColor.inkMetaLow,
+          ),
+        ),
+        KvAmount(
+          sompi,
+          role: KvAmountRole.row,
+          size: 12,
+          emphasis: KvAmountEmphasis.significant,
+        ),
+      ],
+    );
+  }
 }
 
 /// The amount, as an editable field that looks like the figure it is.

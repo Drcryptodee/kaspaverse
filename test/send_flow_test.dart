@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
@@ -13,8 +14,10 @@ import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
@@ -176,6 +179,55 @@ Widget _sendScreen({
     minimumSendable: minimumSendable,
   ),
 );
+
+/// The send screen with an amount typed and a destination pasted — the only
+/// state in which a fee exists, since `_probeFee` refuses without both.
+Future<void> _pumpTypedSend(WidgetTester tester) async {
+  tester.view.physicalSize = const Size(393, 851);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    SystemChannels.platform,
+    (call) async => call.method == 'Clipboard.getData'
+        ? <String, dynamic>{'text': _addr}
+        : null,
+  );
+  await tester.pumpWidget(
+    _sendScreen(feePreview: (_, _) async => BigInt.from(315400)),
+  );
+  for (final key in ['1', '2', '.', '4']) {
+    await tester.tap(
+      find.descendant(of: find.byType(KvKeypad), matching: find.text(key)),
+    );
+    await tester.pump();
+  }
+  await tester.tap(
+    find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvMark.paste),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 600));
+}
+
+/// The fee line as the user reads it, joined across its runs.
+///
+/// **Not `find.text('network fee 0.003154')`.** Since D-230 the figure renders
+/// through `KvAmount`, so the leading zeros and the significant digits are
+/// separate `Text`s and the label is a third — the string was never the law,
+/// only how it happened to be drawn. Asserting the joined line survives the
+/// face changing again (L143: a string comparison cannot testify about a
+/// render, and its mirror — a string comparison breaks on a render that is
+/// still correct).
+String _feeLine(WidgetTester tester) => tester
+    .widgetList<Text>(
+      find.descendant(
+        of: find
+            .ancestor(of: find.text('network fee '), matching: find.byType(Row))
+            .first,
+        matching: find.byType(Text),
+      ),
+    )
+    .map((t) => t.data ?? '')
+    .join();
 
 void main() {
   setUpAll(loadBundledFonts);
@@ -343,14 +395,14 @@ void main() {
       expect(find.textContaining('network fee'), findsNothing);
 
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('network fee 0.003154'), findsOneWidget);
+      expect(_feeLine(tester), 'network fee 0.003154');
 
       // A further keystroke clears the figure IMMEDIATELY — a fee left
       // standing beside a changed amount is a lie for as long as it stands.
       await _type(tester, '2');
       expect(find.textContaining('network fee'), findsNothing);
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('network fee 0.003154'), findsOneWidget);
+      expect(_feeLine(tester), 'network fee 0.003154');
 
       // One probe per pause, not one per keystroke.
       expect(asked.length, 2);
@@ -2170,6 +2222,51 @@ void main() {
       await pending;
     });
   });
+
+  group(
+    'BG-23 · the live fee, where it belongs and in the face it belongs in',
+    () {
+      // Founder's calls, both taken from rendered comparisons (D-230/D-231): the
+      // fee shows its DIGITS rather than its leading zero, and it sits with the
+      // destination it prices rather than in the amount block. `_probeFee`
+      // refuses without both an amount and a valid address, so the fee is the
+      // cost of this send and not a property of the amount.
+
+      testWidgets('it renders BELOW the address it prices, not above it', (
+        tester,
+      ) async {
+        await _pumpTypedSend(tester);
+        final fee = find.textContaining('network fee');
+        expect(fee, findsOneWidget, reason: 'no fee to place');
+        final feeY = tester.getTopLeft(fee).dy;
+        final addressY = tester.getTopLeft(find.byType(KvAddress).first).dy;
+        expect(
+          feeY,
+          greaterThan(addressY),
+          reason:
+              'the fee is at y=$feeY and the address review at y=$addressY — it '
+              'is back in the amount block, where it reads as a property of the '
+              'amount rather than the cost of this send',
+        );
+      });
+
+      testWidgets('and it shows the digits that ARE the fee', (tester) async {
+        await _pumpTypedSend(tester);
+        final runs = tester
+            .widgetList<Text>(find.byType(Text))
+            .map((t) => t.data ?? '')
+            .toList();
+        expect(
+          runs,
+          containsAll(['0.00', '3154']),
+          reason:
+              'the fee renders as one run, so the weight is on a leading zero '
+              'here while the ceremony puts it on the digits: one figure, two '
+              'faces (BG-21)',
+        );
+      });
+    },
+  );
 
   group('the 800ms ring', () {
     test('the fee-strategy field rides the DTO (senderPays, 0)', () {
