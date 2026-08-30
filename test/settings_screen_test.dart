@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -13,33 +11,7 @@ import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 
-/// Track 2. Two properties matter here and they are different properties:
-///
-/// 1. **Reachability.** A setting nobody can open is a setting that does not
-///    exist — which is literally how biometric enrolment came to be unreachable
-///    after a restore while its native lane was complete and device-proven. So
-///    the walk starts at Home and taps its way in.
-/// 2. **Honesty.** Every row states a true thing about the state it reports,
-///    including the states where the answer is "we cannot".
-/// Without the real fonts the test font inflates every glyph and the measured
-/// widths mean nothing — the result would be a number about Ahem, not about what
-/// a user sees.
-///
-/// Called from `setUpAll`, NEVER from inside `testWidgets`: the test body runs in
-/// a fake-async zone where real file I/O never completes, so the load hangs until
-/// the harness gives up (observed: the suite sat for 2m57s and then died with
-/// "Cannot close sink while adding stream").
-Future<void> loadBundledFonts() async {
-  for (final font in const {
-    'Inter': 'assets/fonts/Inter-Variable.ttf',
-    'JetBrainsMono': 'assets/fonts/JetBrainsMono-Variable.ttf',
-  }.entries) {
-    final bytes = await File(font.value).readAsBytes();
-    await (FontLoader(
-      font.key,
-    )..addFont(Future.value(ByteData.view(bytes.buffer)))).load();
-  }
-}
+import 'support/preview_harness.dart';
 
 void main() {
   setUpAll(loadBundledFonts);

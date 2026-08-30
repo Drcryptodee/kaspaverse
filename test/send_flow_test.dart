@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
@@ -20,6 +18,8 @@ import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
+
+import 'support/preview_harness.dart';
 
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
@@ -176,25 +176,6 @@ Widget _sendScreen({
     minimumSendable: minimumSendable,
   ),
 );
-
-/// The bundled faces, so a width measured here is a width about Inter and
-/// JetBrains Mono rather than about the test fallback — whose glyphs are square
-/// em-boxes and overstate every label by roughly a factor of two. A 320dp /
-/// 1.3x claim measured in Ahem is a claim about Ahem.
-///
-/// Called from `setUpAll`, NEVER from inside `testWidgets`: the test body runs
-/// in a fake-async zone where real file I/O never completes.
-Future<void> loadBundledFonts() async {
-  for (final font in const {
-    'Inter': 'assets/fonts/Inter-Variable.ttf',
-    'JetBrainsMono': 'assets/fonts/JetBrainsMono-Variable.ttf',
-  }.entries) {
-    final bytes = await File(font.value).readAsBytes();
-    await (FontLoader(
-      font.key,
-    )..addFont(Future.value(ByteData.view(bytes.buffer)))).load();
-  }
-}
 
 void main() {
   setUpAll(loadBundledFonts);
