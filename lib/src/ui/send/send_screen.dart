@@ -768,10 +768,23 @@ class _MaxChip extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(KvRadius.control),
+        // **No `height`, no `alignment` — and that is the whole fix.**
+        // `KvSurface` is a `Container`, and a `Container` given an `alignment`
+        // EXPANDS to its incoming constraints. In the old `Row` the chip sat
+        // beside an `Expanded` and got only the leftover; in the `Wrap` that
+        // cured the figure's shrink it is handed the whole gutter, so it
+        // rendered as a full-width button — a second primary action competing
+        // with the one teal control, which inverts D-190's reason for putting
+        // it here (found on glass, device sitting 2026-08-30).
+        //
+        // Symmetric vertical padding reaches the 48dp target without a fixed
+        // height: a 16dp line box plus 2 × 16 is exactly `touchTarget`, and it
+        // grows with the text scale instead of clipping.
         child: KvSurface.control(
-          height: KvSpace.touchTarget,
-          alignment: Alignment.center,
-          padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.m,
+            vertical: KvSpace.m,
+          ),
           child: const Text(
             'Send max',
             style: TextStyle(

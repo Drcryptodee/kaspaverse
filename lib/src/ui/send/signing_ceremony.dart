@@ -292,7 +292,14 @@ class _SigningCeremonyState extends State<SigningCeremony>
             children: [
               const SizedBox(height: KvSpace.statusBarReserve),
               KvRail(
-                title: widget.title ?? _defaultTitle(s.kind),
+                // **Once it is settled the rail says what HAPPENED**, not what
+                // the screen was for. Leaving it at *"Confirm send"* over a
+                // completed send is the whole screen still reading as a
+                // confirm form with a note stuck to the bottom — founder, on
+                // glass, 2026-08-30.
+                title: _settled
+                    ? _verdictFor(_outcome, _error).head
+                    : (widget.title ?? _defaultTitle(s.kind)),
                 // Null while the broadcast is in flight: nothing is left to
                 // cancel, and the chevron reads as closed rather than looking
                 // live and ignoring the tap (BG-12).
@@ -320,15 +327,22 @@ class _SigningCeremonyState extends State<SigningCeremony>
                   ),
                   children: [
                     const SizedBox(height: KvSpace.m),
+                    // **The answer comes first.** A settled screen is a
+                    // receipt, and a receipt leads with what happened and ends
+                    // with its reference number — it does not restate the
+                    // question, append the answer, and leave the reference on
+                    // top of the amount it refers to.
+                    if (_settled) ...[
+                      _OutcomeHead(outcome: _outcome, error: _error),
+                      const SizedBox(height: KvSpace.l),
+                    ],
                     ..._truthRows(context),
                     if (_sending) ...[
                       const SizedBox(height: KvSpace.l),
                       _StagedWait(stage: _stage, mayLeave: _mayLeave),
                     ],
-                    if (_settled) ...[
-                      const SizedBox(height: KvSpace.l),
-                      _Outcome(outcome: _outcome, error: _error),
-                    ],
+                    if (_settled && _outcome?.finalTxid != null)
+                      _Receipt(txid: _outcome!.finalTxid!),
                     const SizedBox(height: KvSpace.l),
                   ],
                 ),
@@ -384,7 +398,19 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // The headline is the honest COST. For a payment that is the amount
       // leaving; for a self-send message the value returns as change, so the
       // cost is the network fee — never the returning value (D-069).
-      KvRuledLabel(returnsToSelf ? 'Costs you' : 'Sending'),
+      //
+      // **Past tense once something actually landed**, so the receipt does not
+      // still say *"Sending"* over a completed send (founder, on glass,
+      // 2026-08-30). It flips on `landed` — something was submitted — and NOT
+      // on "settled": a `Not confirmed` outcome keeps the present tense,
+      // because the wallet does not know whether it went and a past-tense
+      // label there would claim it did not. Same reasoning that deleted the
+      // funds-safe sentence.
+      KvRuledLabel(
+        _verdictFor(_outcome, _error).landed
+            ? (returnsToSelf ? 'Cost you' : 'Sent')
+            : (returnsToSelf ? 'Costs you' : 'Sending'),
+      ),
       const SizedBox(height: KvSpace.xs),
       KvAmount(
         returnsToSelf ? s.feeSompi : s.amountSompi,
@@ -492,14 +518,26 @@ class _SigningCeremonyState extends State<SigningCeremony>
         ),
       ],
 
-      const SizedBox(height: KvSpace.l),
-      // Irreversibility, said once, plainly, at signing (BG-11). `risk` is the
-      // one place on this screen a hue is spent: money is genuinely leaving.
-      const KvStatusChip(
-        tone: KvLampTone.risk,
-        words: 'Once this is signed it cannot be reversed.',
-        maxLines: null,
-      ),
+      // Irreversibility, said once, plainly, **before** signing (BG-11).
+      //
+      // **AMBER, not red** (founder call, on glass 2026-08-30 — D-222). BG-7
+      // gives red to money *leaving or at risk*; at the moment this line is
+      // read nothing has been signed and nothing is at risk, so it is a
+      // caution about what will become true — *"needs checking"*, which is
+      // amber's own definition. Red here spent the strongest hue in the system
+      // on a warning, one line above a control the user has not pressed.
+      //
+      // **And it disappears the moment the send settles**, because by then it
+      // is both redundant — the verdict plate says what happened — and wrong
+      // in tense: *"Once this is signed"* over an already-signed transaction.
+      if (!_settled) ...[
+        const SizedBox(height: KvSpace.l),
+        const KvStatusChip(
+          tone: KvLampTone.warn,
+          words: 'Once this is signed it cannot be reversed.',
+          maxLines: null,
+        ),
+      ],
     ];
   }
 }
@@ -732,8 +770,83 @@ class _StagedWait extends StatelessWidget {
 /// A thrown call gets the same treatment for the same reason: an exception
 /// says the call did not return a result, not how far it got, and this is not
 /// a surface for a comforting inference.
-class _Outcome extends StatelessWidget {
-  const _Outcome({required this.outcome, required this.error});
+/// What happened, as one value — so the RAIL, the labels and the plate all
+/// read from the same verdict instead of each deciding for itself.
+typedef _Verdict = ({KvLampTone tone, String head, String body, bool landed});
+
+/// The verdict, derived from Rust's outcome alone.
+_Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
+  final o = outcome;
+  final partial = o != null && o.partial;
+  final refused = o != null && o.submitted == 0;
+  final threw = o == null;
+
+  final (KvLampTone tone, String head, String body) = switch ((
+    threw,
+    refused,
+    partial,
+  )) {
+    // Same headline as the arm below, for the same reason: *"the send did
+    // not complete"* is *"it did not go through"* in another tense, and the
+    // third beat two lines later says *"if it did land"* — the copy would
+    // contradict itself. On the Rust side a throw does prove nothing left
+    // (`send_commit` returns `Err` only from `take_stashed`, before any
+    // signing), but that is one caller's guarantee and not this widget's,
+    // and the two arms stay distinguishable in the BODY where the claim is
+    // hedged (`wallet-security-auditor`, UX-4).
+    (true, _, _) => (
+      KvLampTone.warn,
+      'Not confirmed',
+      'The wallet could not finish the send. Check your activity before '
+          'sending again — if it did land, it will appear there.',
+    ),
+    // **`submitted == 0` is the ABSENCE of an answer, not a failure**, and
+    // the headline may not upgrade it into one. `chain::send` returns it for
+    // a local `try_sign` failure — before any node is contacted — and
+    // equally for a `try_submit` error, which covers a request timeout and a
+    // socket dropped after the bytes went out; a node can have accepted and
+    // relayed the transaction while the acknowledgement never came back.
+    // *"It did not go through"* invites the re-send that becomes a double
+    // spend just as surely as the funds-safe sentence this sitting deleted
+    // (`ux-auditor` / `wallet-security-auditor`, UX-4). The headline names
+    // what is known — nothing came back — `o.error` names the cause, and the
+    // third beat is the check that actually protects them.
+    (_, true, _) => (
+      KvLampTone.warn,
+      'Not confirmed',
+      'The wallet never got an answer about this send. Check your activity '
+          'before sending again — if it did land, it will appear there.',
+    ),
+    (_, _, true) => (
+      KvLampTone.risk,
+      'Partly sent',
+      'Broadcast ${o!.submitted} of ${o.total} transactions; the rest did '
+          'not send. Your activity will reflect what landed.',
+    ),
+    _ => (
+      KvLampTone.ok,
+      'Sent',
+      // Names where the settling can be WATCHED. Kaspa runs at ~10 blocks a
+      // second, so the hundred-confirmation safety mark is a ten-second
+      // event and the thousand-block finality mark about a hundred — both
+      // genuinely watchable, which is why pointing at the feed is a real
+      // instruction and not a shrug. The gauge that renders that depth is
+      // D-192's and lives on transaction detail (UX-5); this line is the
+      // hand-off to it, not a second copy of it.
+      'The network accepted it. It settles over the next few minutes — you '
+          'can follow it in your activity.',
+    ),
+  };
+  // `landed` is the one bit the rest of the screen may act on: something was
+  // submitted. It is NOT "it succeeded" — a partial landed too — and it is
+  // never inferred from the absence of an error.
+  return (tone: tone, head: head, body: body, landed: (o?.submitted ?? 0) > 0);
+}
+
+/// The verdict's head and body — the ANSWER, which belongs above the receipt
+/// rather than under it.
+class _OutcomeHead extends StatelessWidget {
+  const _OutcomeHead({required this.outcome, required this.error});
 
   final SendOutcomeDto? outcome;
   final String? error;
@@ -741,58 +854,10 @@ class _Outcome extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final o = outcome;
-    final partial = o != null && o.partial;
-    final refused = o != null && o.submitted == 0;
-    final threw = o == null;
-
-    final (KvLampTone tone, String head, String body) = switch ((
-      threw,
-      refused,
-      partial,
-    )) {
-      // Same headline as the arm below, for the same reason: *"the send did
-      // not complete"* is *"it did not go through"* in another tense, and the
-      // third beat two lines later says *"if it did land"* — the copy would
-      // contradict itself. On the Rust side a throw does prove nothing left
-      // (`send_commit` returns `Err` only from `take_stashed`, before any
-      // signing), but that is one caller's guarantee and not this widget's,
-      // and the two arms stay distinguishable in the BODY where the claim is
-      // hedged (`wallet-security-auditor`, UX-4).
-      (true, _, _) => (
-        KvLampTone.warn,
-        'Not confirmed',
-        'The wallet could not finish the send. Check your activity before '
-            'sending again — if it did land, it will appear there.',
-      ),
-      // **`submitted == 0` is the ABSENCE of an answer, not a failure**, and
-      // the headline may not upgrade it into one. `chain::send` returns it for
-      // a local `try_sign` failure — before any node is contacted — and
-      // equally for a `try_submit` error, which covers a request timeout and a
-      // socket dropped after the bytes went out; a node can have accepted and
-      // relayed the transaction while the acknowledgement never came back.
-      // *"It did not go through"* invites the re-send that becomes a double
-      // spend just as surely as the funds-safe sentence this sitting deleted
-      // (`ux-auditor` / `wallet-security-auditor`, UX-4). The headline names
-      // what is known — nothing came back — `o.error` names the cause, and the
-      // third beat is the check that actually protects them.
-      (_, true, _) => (
-        KvLampTone.warn,
-        'Not confirmed',
-        'The wallet never got an answer about this send. Check your activity '
-            'before sending again — if it did land, it will appear there.',
-      ),
-      (_, _, true) => (
-        KvLampTone.risk,
-        'Partly sent',
-        'Broadcast ${o!.submitted} of ${o.total} transactions; the rest did '
-            'not send. Your activity will reflect what landed.',
-      ),
-      _ => (
-        KvLampTone.ok,
-        'Sent',
-        'The network accepted it. It will settle over the next minutes.',
-      ),
-    };
+    final v = _verdictFor(outcome, error);
+    final tone = v.tone;
+    final head = v.head;
+    final body = v.body;
 
     return KvSurface(
       width: double.infinity,
@@ -838,29 +903,42 @@ class _Outcome extends StatelessWidget {
                 ),
               ),
             ],
-          if (o?.finalTxid != null) ...[
-            const SizedBox(height: KvSpace.m),
-            const KvRuledLabel('Transaction id'),
-            const SizedBox(height: KvSpace.xs),
-            KvSurface(
-              tone: KvSurfaceTone.well,
-              width: double.infinity,
-              padding: const EdgeInsets.all(KvSpace.sm),
-              child: SelectableText(
-                o!.finalTxid!,
-                style: const TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: 13,
-                  height: 20 / 13,
-                  color: KvColor.ink,
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );
   }
+}
+
+/// The receipt's reference number, at the FOOT of the receipt where a
+/// reference number goes — not stacked on top of the amount it refers to.
+class _Receipt extends StatelessWidget {
+  const _Receipt({required this.txid});
+
+  final String txid;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const SizedBox(height: KvSpace.l),
+      const KvRuledLabel('Transaction id'),
+      const SizedBox(height: KvSpace.xs),
+      KvSurface(
+        tone: KvSurfaceTone.well,
+        width: double.infinity,
+        padding: const EdgeInsets.all(KvSpace.sm),
+        child: SelectableText(
+          txid,
+          style: const TextStyle(
+            fontFamily: KvFont.mono,
+            fontSize: 13,
+            height: 20 / 13,
+            color: KvColor.ink,
+          ),
+        ),
+      ),
+    ],
+  );
 }
 
 /// BG-6 hold-to-sign: press and hold; the ring fills over [KvMotion.deliberate]

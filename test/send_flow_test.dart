@@ -17,6 +17,7 @@ import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
@@ -468,6 +469,34 @@ void main() {
         reason: 'a button with no action is inert under TalkBack',
       );
       handle.dispose();
+    });
+
+    testWidgets('Send max is a CHIP — it hugs its label rather than taking the '
+        'row', (tester) async {
+      // `KvSurface` is a `Container`, and a `Container` given an `alignment`
+      // expands to its incoming constraints. In a `Row` beside an `Expanded`
+      // that was invisible; in the `Wrap` that cured the figure's shrink the
+      // chip was handed the whole gutter and rendered as a full-width button —
+      // a second primary action competing with the one teal control, which
+      // inverts D-190's reason for pairing it with `available`. Found on
+      // glass, device sitting 2026-08-30; no host test could see it because
+      // every assertion was about text, not width.
+      _phone(tester);
+      await tester.pumpWidget(
+        _sendScreen(
+          prepareSweep: (_) async =>
+              _summary(kind: SignableKind.sweep, utxoCount: 1),
+        ),
+      );
+      final chip = tester.getSize(find.widgetWithText(InkWell, 'Send max'));
+      final screen = tester.getSize(find.byType(Scaffold));
+      expect(
+        chip.width,
+        lessThan(screen.width / 2),
+        reason: 'Send max is a chip, not a second primary action',
+      );
+      // And it still clears the touch-target floor.
+      expect(chip.height, greaterThanOrEqualTo(KvSpace.touchTarget));
     });
 
     testWidgets('the amount pad comes back after the address field takes '
@@ -1247,7 +1276,7 @@ void main() {
       landed.complete(_ok());
       await tester.pumpAndSettle();
       expect(find.text('Signing on this device'), findsNothing);
-      expect(find.text('Sent'), findsOneWidget);
+      expect(tester.widget<KvRail>(find.byType(KvRail)).title, 'Sent');
     });
   });
 
@@ -1274,13 +1303,80 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('accepted', (tester) async {
+    testWidgets('accepted — the WHOLE screen reads as sent, not just a plate '
+        'at the bottom', (tester) async {
+      // Founder, on glass 2026-08-30: a settled screen whose rail still says
+      // *Confirm send* and whose label still says *Sending* is a confirm form
+      // with a note stuck to the bottom. The verdict has to reach the rail and
+      // the label too.
       _phone(tester);
       await settleWith(tester, (_) async => _ok());
-      expect(find.text('Sent'), findsOneWidget);
+      expect(
+        tester.widget<KvRail>(find.byType(KvRail)).title,
+        'Sent',
+        reason: 'the rail still names the question, not the answer',
+      );
+      // Three deliberate places: the rail, the verdict head, the ruled label.
+      expect(find.text('Sent'), findsNWidgets(3));
       expect(find.textContaining('The network accepted it'), findsOneWidget);
+      // And it points at where the settling can actually be watched.
+      expect(find.textContaining('follow it in your activity'), findsOneWidget);
       expect(find.text('a' * 64), findsOneWidget);
       expect(find.textContaining('Your funds are safe'), findsNothing);
+    });
+
+    testWidgets('the irreversibility caution is GONE once it has settled', (
+      tester,
+    ) async {
+      // Redundant beside a verdict that says what happened, and wrong in
+      // tense: *"Once this is signed"* over an already-signed transaction
+      // (founder, on glass 2026-08-30).
+      _phone(tester);
+      await tester.pumpWidget(_ceremony(_summary()));
+      expect(
+        find.text('Once this is signed it cannot be reversed.'),
+        findsOneWidget,
+        reason: 'it must be there BEFORE the hold',
+      );
+      await settleWith(tester, (_) async => _ok());
+      expect(
+        find.text('Once this is signed it cannot be reversed.'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the caution is AMBER, never red', (tester) async {
+      // **D-222, founder call.** BG-7 gives red to money leaving or at risk;
+      // at the moment this line is read nothing has been signed and nothing is
+      // at risk, so it is a caution about what will become true — which is
+      // amber's own definition. Red spent the strongest hue in the system on a
+      // warning, one line above a control the user has not pressed.
+      _phone(tester);
+      await tester.pumpWidget(_ceremony(_summary()));
+      final chip = tester.widget<KvStatusChip>(
+        find.widgetWithText(
+          KvStatusChip,
+          'Once this is signed it cannot be reversed.',
+        ),
+      );
+      expect(chip.tone, KvLampTone.warn);
+    });
+
+    testWidgets('a NOT-CONFIRMED outcome keeps the present tense', (
+      tester,
+    ) async {
+      // The label flips on `landed` — something was submitted — never on
+      // "settled". A past-tense label over an unconfirmed send would claim it
+      // did not go, which is the same false claim the funds-safe sentence
+      // made.
+      _phone(tester);
+      await settleWith(
+        tester,
+        (_) async =>
+            SendOutcomeDto(submitted: 0, total: 1, partial: false, error: 'x'),
+      );
+      expect(find.text('Sending'), findsOneWidget);
+      expect(find.text('Sent'), findsNothing);
     });
 
     testWidgets('partial says what landed and what did not', (tester) async {
@@ -1294,7 +1390,9 @@ void main() {
           finalTxid: 'b' * 64,
         ),
       );
-      expect(find.text('Partly sent'), findsOneWidget);
+      // The rail and the verdict head both say it.
+      expect(find.text('Partly sent'), findsNWidgets(2));
+      expect(tester.widget<KvRail>(find.byType(KvRail)).title, 'Partly sent');
       expect(
         find.textContaining('Broadcast 1 of 2 transactions'),
         findsOneWidget,
@@ -1325,7 +1423,7 @@ void main() {
           error: 'orphan transaction rejected by the node',
         ),
       );
-      expect(find.text('Not confirmed'), findsOneWidget);
+      expect(find.text('Not confirmed'), findsNWidgets(2));
       expect(
         find.textContaining('Your funds are safe'),
         findsNothing,
@@ -1524,7 +1622,7 @@ void main() {
         (_) async =>
             throw const AppError(message: 'the wallet locked mid-send'),
       );
-      expect(find.text('Not confirmed'), findsOneWidget);
+      expect(find.text('Not confirmed'), findsNWidgets(2));
       expect(find.text('the wallet locked mid-send'), findsOneWidget);
       expect(
         find.textContaining('Your funds are safe'),
