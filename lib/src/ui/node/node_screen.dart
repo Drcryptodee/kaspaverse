@@ -11,6 +11,7 @@ import '../widgets/haptics.dart';
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_status_chip.dart';
+import '../widgets/kv_streaming_count.dart';
 import '../widgets/kv_surface.dart';
 import '../widgets/status_beacon.dart' show formatAge;
 import '../widgets/kv_toggle.dart';
@@ -604,11 +605,21 @@ class _NodeScreenState extends State<NodeScreen> {
               // last-known score when a dropped link emits nulls — which is
               // only honest if the screen dims it and says how old it is. A
               // disconnected reading at full brightness is the P0.3 scar.
-              _Reading(
-                label: 'DAA',
-                value: formatScore(s.virtualDaaScore.value),
-                stale: !connected,
-                age: connected ? null : _ageLabel(),
+              // **Streamed, not stepped** (BG-18 / D-226) — the same law as
+              // the money plate's chain clock. It was MISSED here in the first
+              // pass: the fix went to the surface being looked at rather than
+              // to every surface that renders a DAA, which is L83's shape, and
+              // the founder caught it on glass. `formatScore` still renders
+              // DS-1's dash when there is no reading at all.
+              KvStreamingCount(
+                value: s.virtualDaaScore.value,
+                stalled: !connected,
+                builder: (context, shown) => _Reading(
+                  label: 'DAA',
+                  value: formatScore(shown),
+                  stale: !connected,
+                  age: connected ? null : _ageLabel(),
+                ),
               ),
               // The sheet's scan line, carried across intact. *Live* is a
               // claim about the LINK, not about the age alone: this line

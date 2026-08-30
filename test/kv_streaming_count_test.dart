@@ -22,7 +22,9 @@ Widget _host(
       value: value,
       stalled: stalled,
       interval: interval,
-      builder: (context, shown) => Text('$shown'),
+      // DS-1: the caller renders the unknown dash. The primitive hands
+      // null through rather than deciding to render nothing.
+      builder: (context, shown) => Text(shown == null ? '—' : '$shown'),
     ),
   ),
 );
@@ -123,12 +125,17 @@ void main() {
       expect(_shown(tester), 90);
     });
 
-    testWidgets('a null reading renders nothing, and recovers', (tester) async {
+    testWidgets('a null reading hands NULL to the caller, so the surface can '
+        'render DS-1\'s dash', (tester) async {
+      // The first cut returned `SizedBox.shrink()` for null, which deleted the
+      // whole `DAA —` line from the money plate: an unknown value rendered as
+      // NOTHING, where DS-1/BG-8 require the dash. Deciding what "no reading"
+      // looks like belongs to the surface, never to the primitive.
       await tester.pumpWidget(_host(BigInt.from(7)));
       expect(_shown(tester), 7);
       await tester.pumpWidget(_host(null));
       await tester.pump();
-      expect(find.byType(Text), findsNothing);
+      expect(find.text('—'), findsOneWidget, reason: 'the dash, not a blank');
       await tester.pumpWidget(_host(BigInt.from(9)));
       await tester.pump();
       expect(_shown(tester), 9);

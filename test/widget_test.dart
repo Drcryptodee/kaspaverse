@@ -130,8 +130,12 @@ void main() {
     expect(find.text('No recent activity'), findsNothing);
     // V2 counter (founder request): an immature deposit streams its DAA
     // distance instead of a static "Pending".
-    // The burial mark: under 100 the number IS the word (founder, on glass).
-    expect(find.text('50'), findsOneWidget);
+    // The burial mark: under 100 the WORD TRAVELS WITH THE NUMBER (founder, on
+    // glass 2026-08-30, revising the earlier density call). `Seen` used to step
+    // aside the moment a count arrived, so a row read `Seen` and then a bare
+    // `50` — the label vanishing exactly when it became meaningful, and a bare
+    // number does not say what it counts.
+    expect(find.text('Seen 50'), findsOneWidget);
     expect(find.textContaining('confirmations'), findsNothing);
 
     // V2 chip walk: acceptance lands (V1 overlay) → 'Accepted'; a settled
@@ -332,9 +336,9 @@ void main() {
           ),
         ),
       );
-      // Accepted 7 DAA ago (1000 − 993) → streams "7 confirmations", NOT the
-      // 500 the submit-time blockDaaScore would have given.
-      expect(find.text('7'), findsOneWidget);
+      // Accepted 7 DAA ago (1000 − 993) → streams a depth of 7, NOT the 500 the
+      // submit-time blockDaaScore would have given. The word rides along.
+      expect(find.text('Seen 7'), findsOneWidget);
 
       // Deep past the ceiling (200 > 100) → the chip dissolves (Rams #5). The
       // AnimatedSwitcher out-transition takes `normal`; pump past it (a

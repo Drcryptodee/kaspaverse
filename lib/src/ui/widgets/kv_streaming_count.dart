@@ -53,8 +53,14 @@ class KvStreamingCount extends StatefulWidget {
   /// The latest OBSERVED reading, or null when there is nothing to show.
   final BigInt? value;
 
-  /// Renders the interpolated value. Called once per frame while moving.
-  final Widget Function(BuildContext context, BigInt shown) builder;
+  /// Renders the interpolated value. Called once per frame while moving, and
+  /// called with **null** when there is no reading at all.
+  ///
+  /// The null case is the caller's to render, deliberately: DS-1 says an
+  /// unknown value shows the dash, never nothing, and a primitive that quietly
+  /// returned an empty box would delete the whole line — which is exactly what
+  /// the first cut of this widget did to the money plate's `DAA —`.
+  final Widget Function(BuildContext context, BigInt? shown) builder;
 
   /// How long to take crossing one reading-to-reading gap. Match it to the
   /// poll cadence so the tween lands just as the next reading arrives; a late
@@ -164,9 +170,8 @@ class _KvStreamingCountState extends State<KvStreamingCount>
       animation: _c,
       builder: (context, _) {
         final shown = _shown;
-        if (shown == null) return const SizedBox.shrink();
         assert(
-          _to == null || shown <= _to!,
+          shown == null || _to == null || shown <= _to!,
           'KvStreamingCount rendered $shown past the latest observation $_to — '
           'a counter must never show a number the chain has not reached.',
         );

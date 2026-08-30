@@ -33,16 +33,11 @@ class KvBurialMark extends StatelessWidget {
     required this.state,
     required this.confirmations,
     required this.maturity,
-    this.verbose = false,
   });
 
   final TxChipState state;
   final int? confirmations;
   final MaturityState maturity;
-
-  /// Names the number as well as showing it — `Seen 42` rather than `42`.
-  /// A feed stays terse; a receipt explains itself.
-  final bool verbose;
 
   /// D-192's two thresholds, named once.
   static const int safe = 100;
@@ -62,23 +57,30 @@ class KvBurialMark extends StatelessWidget {
       return const _Mark(tone: KvLampTone.ok, words: 'Confirmed');
     }
     if (n < safe) {
-      // **The feed shows the number alone; a receipt names it.** In a ledger
-      // of many rows the live count says more than any word and the word
-      // steps aside — that is the density argument, and it holds for a feed.
-      // On the signing receipt there is one transaction and room to say what
-      // the number MEANS, so it reads `Seen 42` (founder, on glass
-      // 2026-08-30). Same ladder, same thresholds, same data.
-      // **Streamed, not stepped** (D-226). The depth is read on a 1 Hz poll;
-      // replaying the interval between the last two readings at the panel's
-      // refresh rate makes the count move rather than tick. Every frame is a
-      // depth the chain actually reached, and the count never runs past the
-      // newest reading — a burial depth that overstated itself, even by one,
-      // would be the gauge lying about how buried the money is.
+      // **`Seen` STAYS while the number streams** (founder, on glass
+      // 2026-08-30, revising the density call made earlier the same day). The
+      // word used to step aside the moment a count arrived, so a row read
+      // `Seen` and then bare `42` — the label vanishing at exactly the moment
+      // it became meaningful. A number alone does not say what it counts, and
+      // the ladder's whole job is to say how buried the money is. The word and
+      // the number now travel together on every surface, and the `verbose`
+      // flag that used to decide it is gone — a parameter that no longer
+      // changes anything is the API-level form of a control that does nothing.
+      //
+      // **Streamed, not stepped** (BG-18 / D-226). The depth is read on a 1 Hz
+      // poll; replaying the interval between the last two readings at the
+      // panel's refresh rate makes the count move rather than tick. Every frame
+      // is a depth the chain actually reached, and the count never runs past
+      // the newest reading — a burial depth that overstated itself, even by
+      // one, would be the gauge lying about how buried the money is.
       return KvStreamingCount(
         value: BigInt.from(n),
         builder: (context, shown) => _Mark(
           tone: KvLampTone.warn,
-          words: verbose ? 'Seen $shown' : '$shown',
+          // `shown` is null only when there is no reading, and this branch is
+          // reached with one in hand — so the fallback is the observed count,
+          // never a blank where a depth belongs.
+          words: 'Seen ${shown ?? n}',
           mono: true,
         ),
       );

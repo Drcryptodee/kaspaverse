@@ -38,6 +38,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
 
 /// The bundled faces, loaded exactly once per run.
 ///
@@ -130,7 +131,15 @@ Future<void> renderSurface(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  // **Bounded pumps, never `pumpAndSettle`.** A live surface does not quiesce:
+  // the cadence meter breathes on a repeating controller and the streaming
+  // counters run whenever a reading changes, so waiting for stillness waits
+  // forever — the home preview timed out on exactly this. Pump far enough for
+  // entrance motion to land and then take the frame as it is, which is also
+  // closer to what a user actually sees.
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.enter);
   await expectLater(
     find.byType(MaterialApp),
     matchesGoldenFile('$previewOut/${name}__${size.slug}.png'),

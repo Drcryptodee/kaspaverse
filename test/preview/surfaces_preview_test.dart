@@ -2,7 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
+import 'package:kaspaverse/src/ui/biometric_copy.dart';
+import 'package:kaspaverse/src/ui/home_screen.dart';
+import 'package:kaspaverse/src/ui/node/node_screen.dart';
+import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
+import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
@@ -59,6 +64,88 @@ Widget _sendScreen() => SendScreen(
   minimumSendable: () async => BigInt.from(20000000),
 );
 
+/// A small, plausible feed: one send still counting, one buried.
+List<ActivityRecord> _activity() => [
+  // Still counting: 47 DAA below the tip, so the burial mark streams `Seen 47`.
+  ActivityRecord(
+    txid: 'a' * 64,
+    valueSompi: BigInt.from(100000000),
+    unixtimeMsec: BigInt.from(1788085010103),
+    blockDaaScore: BigInt.from(526633400),
+    acceptedDaaScore: BigInt.from(526633400),
+    direction: ActivityDirection.outgoing,
+    isCoinbase: false,
+    maturity: MaturityState.pending,
+    stalled: false,
+  ),
+  // Long buried: past both thresholds, so the mark reads `final`.
+  ActivityRecord(
+    txid: 'b' * 64,
+    valueSompi: BigInt.from(2500000000),
+    unixtimeMsec: BigInt.from(1788080000000),
+    blockDaaScore: BigInt.from(526000000),
+    direction: ActivityDirection.incoming,
+    isCoinbase: false,
+    maturity: MaturityState.confirmed,
+    stalled: false,
+  ),
+];
+
+Widget _home() => HomeScreen(
+  chain: ChainScope(
+    connected: ValueNotifier(true),
+    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
+    error: ValueNotifier<String?>(null),
+    // FRESH on purpose. A stale plate suppresses the live depth (BG-8), which
+    // is correct behaviour and hides the streaming case this surface exists to
+    // show — the first render of it read a bare `Seen` for exactly that reason.
+    // One second behind the clock, comfortably inside `KvFreshness.staleAfter`.
+    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16, 29)),
+  ),
+  wallet: WalletScope(
+    mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
+    pending: ValueNotifier<BigInt?>(BigInt.zero),
+    activity: ValueNotifier(_activity()),
+    syncing: ValueNotifier(false),
+    utxoIndexMissing: ValueNotifier(false),
+  ),
+  clock: () => DateTime(2026, 8, 30, 11, 16, 30),
+);
+
+Widget _node() => NodeScreen(
+  scope: NodeScope(
+    connected: ValueNotifier(true),
+    activeEndpoint: ValueNotifier<String?>('wss://isla.kaspa.red'),
+    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
+    pinnedNode: ValueNotifier<String?>(null),
+    pinDropped: ValueNotifier(false),
+    setPinnedNode: (_) async {},
+    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16)),
+  ),
+);
+
+Widget _settings() => SettingsScreen(
+  security: SecurityScope(
+    biometricStatus: () async => 'ready',
+    pathAState: () async => pathANone,
+    enroll: () async => true,
+    clearEnrollment: () async {},
+    lockGraceSecs: ValueNotifier(0),
+    setLockGraceSecs: (_) async {},
+  ),
+  wallet: WalletSettingsScope(
+    receiveAddress: () async => _addr,
+    deepScan: () async =>
+        DeepScanReport(depth: 0, receiveSeen: 0, changeSeen: 0, widened: false),
+  ),
+  about: const AboutScope(packageInfo: _packageInfo),
+);
+
+Future<Map<String, String>> _packageInfo() async => const {
+  'version': '1.0.0',
+  'build': '1',
+};
+
 void main() {
   setUpAll(loadBundledFonts);
 
@@ -73,6 +160,10 @@ void main() {
   }
 
   group('surface previews (tier 2 — no device)', () {
+    surface('home__funded', _home);
+    surface('receive__address', () => ReceiveScreen(fetch: () async => _addr));
+    surface('node__connected', _node);
+    surface('settings__root', _settings);
     surface('send__empty', _sendScreen);
 
     surface(
@@ -119,7 +210,6 @@ void main() {
                 state: TxChipState.accepted,
                 confirmations: 42,
                 maturity: MaturityState.pending,
-                verbose: true,
               ),
               SizedBox(height: 12),
               KvBurialMark(
