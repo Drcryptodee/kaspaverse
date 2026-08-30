@@ -121,20 +121,55 @@ String trimTrailingZeros(double value, {int max = 8}) {
   return text.endsWith('.') ? text.substring(0, text.length - 1) : text;
 }
 
-/// Group an address payload in fours for a full-form review (BG-15): keep the
-/// `kaspa:` prefix intact (never spend the review budget on it), space the
-/// payload every 4 chars so it can be read/compared aloud. Full address — no
-/// truncation (this is the confirm-the-recipient surface).
+/// The last group of a chunked address keeps **five** characters, not four.
+///
+/// Ratified by the founder on glass (D-223) and it applies to **every** surface
+/// that chunks an address, which is why the rule lives here in the format layer
+/// rather than in any one widget.
+const int addressTailGroup = 5;
+
+/// The payload, split into groups of four — **except the last, which keeps five
+/// characters together.**
+///
+/// Chunking purely in fours left a 61-character payload ending
+/// `… c6jz qunt h`: a one-character final group, weighted bold, sitting alone.
+/// The weighting exists so the eye lands where an address-poisoning attack has
+/// to succeed, and a single stranded character is the weakest possible place to
+/// put it — there is almost nothing there to compare. The tail is now
+/// `… c6jz qunth`, five characters, bold as one piece.
+///
+/// The remainder is chunked from the LEFT so the short group, when a payload
+/// length produces one, falls next to the tail rather than splitting it: a
+/// 61-character payload gives fourteen fours and the five; a 63-character
+/// ECDSA payload gives fourteen fours, a two, and the five.
+///
+/// **This is the one implementation.** There were three — this function's
+/// predecessor, `KvAddress.groupsOf`, and a private copy in `restore_screen` —
+/// and the ratified amendment reached only one of them, so the Receive screen
+/// still rendered the stranded `h` the founder had asked to be rid of. A rule
+/// stated in three places is a rule that will be corrected in one (L83).
+List<String> addressPayloadGroups(String address) {
+  final sep = address.indexOf(':');
+  final payload = sep >= 0 ? address.substring(sep + 1) : address;
+  if (payload.length <= addressTailGroup) return [payload];
+  final head = payload.substring(0, payload.length - addressTailGroup);
+  final out = <String>[];
+  for (var i = 0; i < head.length; i += 4) {
+    final end = i + 4;
+    out.add(head.substring(i, end < head.length ? end : head.length));
+  }
+  out.add(payload.substring(payload.length - addressTailGroup));
+  return out;
+}
+
+/// Group an address for a full-form review (BG-15): keep the `kaspa:` prefix
+/// intact (never spend the review budget on it), then the payload in
+/// [addressPayloadGroups]' grouping so it can be read and compared aloud. Full
+/// address — no truncation (this is the confirm-the-recipient surface).
 String chunkAddress(String address) {
   final sep = address.indexOf(':');
   final prefix = sep >= 0 ? address.substring(0, sep + 1) : '';
-  final payload = sep >= 0 ? address.substring(sep + 1) : address;
-  final buffer = StringBuffer(prefix);
-  for (var i = 0; i < payload.length; i++) {
-    if (i > 0 && i % 4 == 0) buffer.write(' ');
-    buffer.write(payload[i]);
-  }
-  return buffer.toString();
+  return prefix + addressPayloadGroups(address).join(' ');
 }
 
 /// Compact, payload-aware address form for non-actionable contexts (BG-15): keep

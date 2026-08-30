@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
 import 'biometric_copy.dart';
+import 'format.dart';
 import 'secret/bip39_wordlist.dart';
 import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
@@ -714,7 +715,7 @@ class _RestoreScreenState extends State<RestoreScreen>
               borderRadius: BorderRadius.circular(KvRadius.data),
             ),
             child: SelectableText(
-              _chunkAddress(_previewAddress ?? ''),
+              chunkAddress(_previewAddress ?? ''),
               style: theme.textTheme.bodyLarge?.copyWith(
                 color: KvColor.primary,
               ),
@@ -802,18 +803,5 @@ class _RestoreScreenState extends State<RestoreScreen>
         ),
       ],
     );
-  }
-
-  /// BG-15: a confirm surface shows the FULL address, chunked in groups of 4.
-  String _chunkAddress(String addr) {
-    final parts = addr.split(':');
-    final prefix = parts.length > 1 ? '${parts.first}:' : '';
-    final payload = parts.length > 1 ? parts.sublist(1).join(':') : addr;
-    final buf = StringBuffer(prefix);
-    for (var i = 0; i < payload.length; i += 4) {
-      if (i > 0) buf.write(' ');
-      buf.write(payload.substring(i, (i + 4).clamp(0, payload.length)));
-    }
-    return buf.toString();
   }
 }

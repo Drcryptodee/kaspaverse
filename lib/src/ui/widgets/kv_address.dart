@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -39,6 +37,7 @@ class KvAddress extends StatelessWidget {
     super.key,
     this.form = KvAddressForm.compact,
     this.fontSize = 13,
+    this.selectable = false,
   });
 
   /// The full address, scheme included.
@@ -49,6 +48,12 @@ class KvAddress extends StatelessWidget {
   /// §2 gives the `address` role mono 13/22. Larger is legitimate on a surface
   /// whose whole job is reading it; smaller is not — 11dp is the floor.
   final double fontSize;
+
+  /// Render the chunked form as selectable text, so it can also be copied by
+  /// hand and compared against a source. Weighting is identical either way —
+  /// selection is never bought by giving up the thing the form exists for.
+  /// Ignored by the compact form. `copyFull` remains the sanctioned copy path.
+  final bool selectable;
 
   /// **The one copy path for an address**: it copies the whole string, always.
   /// A surface that offers "copy" calls this and cannot narrow it.
@@ -63,34 +68,15 @@ class KvAddress extends StatelessWidget {
 
   /// How many characters the FINAL group keeps, whole (D-223, founder,
   /// ratified 2026-08-30).
-  static const int tailGroup = 5;
+  static const int tailGroup = addressTailGroup;
 
-  /// The payload, split into groups of four — **except the last, which keeps
-  /// five characters together.**
-  ///
-  /// Chunking purely in fours left a 61-character payload ending
-  /// `… c6jz qunt h`: a one-character final group, weighted bold, sitting
-  /// alone. The weighting exists so the eye lands where an address-poisoning
-  /// attack has to succeed, and a single stranded character is the weakest
-  /// possible place to put it — there is almost nothing there to compare. The
-  /// tail is now `… c6jz qunth`, five characters, bold as one piece.
-  ///
-  /// The remainder is chunked from the LEFT so the short group, when a payload
-  /// length produces one, falls next to the tail rather than splitting it: a
-  /// 61-character payload gives fourteen fours and the five; a 63-character
-  /// ECDSA payload gives fourteen fours, a two, and the five.
+  /// The payload's groups, from [addressPayloadGroups] — the one implementation
+  /// of the founder's ratified tail rule (D-223), which lives in the format
+  /// layer because it governs **every** surface that chunks an address, not
+  /// just this widget. This used to be a second copy of that logic, and while
+  /// it carried the fix the Receive screen did not.
   @visibleForTesting
-  static List<String> groupsOf(String address) {
-    final payload = address.substring(address.indexOf(':') + 1);
-    if (payload.length <= tailGroup) return [payload];
-    final head = payload.substring(0, payload.length - tailGroup);
-    final out = <String>[];
-    for (var i = 0; i < head.length; i += 4) {
-      out.add(head.substring(i, math.min(i + 4, head.length)));
-    }
-    out.add(payload.substring(payload.length - tailGroup));
-    return out;
-  }
+  static List<String> groupsOf(String address) => addressPayloadGroups(address);
 
   String get _scheme {
     final sep = address.indexOf(':');
@@ -175,6 +161,20 @@ class KvAddress extends StatelessWidget {
     );
   }
 
+  /// **Which groups carry the weight**, and it is one rule with two renderers.
+  ///
+  /// An address-poisoning attack has to buy a convincing *prefix* and a
+  /// convincing *suffix*; the middle is where a mismatch is cheapest to hide
+  /// and hardest to notice. So the first and last groups are the ones the eye
+  /// is steered to, and they are the reason the tail keeps five characters
+  /// instead of stranding one (D-223).
+  static bool isWeightedGroup(int i, int count) => i == 0 || i == count - 1;
+
+  TextStyle _groupStyle(TextStyle base, int i, int count) => base.copyWith(
+    fontWeight: isWeightedGroup(i, count) ? FontWeight.w600 : FontWeight.w400,
+    color: isWeightedGroup(i, count) ? KvColor.ink : KvColor.inkDim,
+  );
+
   Widget _chunked() {
     final groups = groupsOf(address);
     final base = TextStyle(
@@ -182,6 +182,44 @@ class KvAddress extends StatelessWidget {
       fontSize: fontSize,
       height: 20 / 13,
     );
+    final Widget body;
+    if (selectable) {
+      // `SelectableText.rich` rather than the `Wrap` below, because a surface
+      // whose job is comparing against a source wants hand-selection — and it
+      // must not have to give up the weighting to keep it. The Receive screen
+      // used to buy selection with a plain `SelectableText` over a flat string,
+      // which is a string and therefore cannot carry per-group weight: it
+      // rendered all 67 characters at one weight, on the one screen most likely
+      // to be read character by character. The spans below carry the same rule
+      // the `Wrap` uses, from the same predicate.
+      body = SelectableText.rich(
+        TextSpan(
+          children: [
+            if (_scheme.isNotEmpty)
+              TextSpan(
+                text: _scheme,
+                style: base.copyWith(color: KvColor.inkMeta),
+              ),
+            for (var i = 0; i < groups.length; i++)
+              TextSpan(
+                text: i == groups.length - 1 ? groups[i] : '${groups[i]} ',
+                style: _groupStyle(base, i, groups.length),
+              ),
+          ],
+        ),
+      );
+    } else {
+      body = Wrap(
+        spacing: KvSpace.s,
+        runSpacing: KvSpace.xs,
+        children: [
+          if (_scheme.isNotEmpty)
+            Text(_scheme, style: base.copyWith(color: KvColor.inkMeta)),
+          for (var i = 0; i < groups.length; i++)
+            Text(groups[i], style: _groupStyle(base, i, groups.length)),
+        ],
+      );
+    }
     return Semantics(
       label: _spokenFull,
       excludeSemantics: true,
@@ -189,26 +227,7 @@ class KvAddress extends StatelessWidget {
         tone: KvSurfaceTone.well,
         width: double.infinity,
         padding: const EdgeInsets.all(KvSpace.m),
-        child: Wrap(
-          spacing: KvSpace.s,
-          runSpacing: KvSpace.xs,
-          children: [
-            if (_scheme.isNotEmpty)
-              Text(_scheme, style: base.copyWith(color: KvColor.inkMeta)),
-            for (var i = 0; i < groups.length; i++)
-              Text(
-                groups[i],
-                style: base.copyWith(
-                  fontWeight: (i == 0 || i == groups.length - 1)
-                      ? FontWeight.w600
-                      : FontWeight.w400,
-                  color: (i == 0 || i == groups.length - 1)
-                      ? KvColor.ink
-                      : KvColor.inkDim,
-                ),
-              ),
-          ],
-        ),
+        child: body,
       ),
     );
   }

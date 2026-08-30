@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../address_text.dart';
-import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/entrance.dart';
+import '../widgets/kv_address.dart';
 import '../widgets/kv_loader.dart';
 import '../widgets/haptics.dart';
 import 'qr_tile.dart';
@@ -117,29 +117,28 @@ class _ReceiveBody extends StatelessWidget {
   }
 }
 
-/// The full address chunked in fours (BG-15 confirm form), selectable so it can
-/// also be copied by hand and compared against the source.
+/// The full address in the BG-15 confirm form — **rendered by [KvAddress], not
+/// re-implemented here.**
+///
+/// This used to build the string itself with `chunkAddress` inside a plain
+/// `SelectableText`, and it cost two defects on the one screen most likely to
+/// be read character by character: the founder's ratified five-character tail
+/// never reached it (it still rendered the stranded `c6jz qunt h`), and a flat
+/// string cannot carry per-group weight, so all 67 characters came out at one
+/// weight with nothing for the eye to land on. Both were invisible from the
+/// Send screen, which was correct the whole time.
+///
+/// Selectable is kept — comparing against a source is exactly this surface's
+/// job — but it is now a property of the widget that owns the rule rather than
+/// a reason to bypass it.
 class _FullAddress extends StatelessWidget {
   const _FullAddress({required this.address});
 
   final String address;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(KvSpace.sm),
-      decoration: BoxDecoration(
-        color: KvColor.surfaceAlt,
-        borderRadius: BorderRadius.circular(KvRadius.data),
-      ),
-      child: SelectableText(
-        chunkAddress(address),
-        style: theme.textTheme.bodyMedium?.copyWith(fontFamily: KvFont.mono),
-      ),
-    );
-  }
+  Widget build(BuildContext context) =>
+      KvAddress(address, form: KvAddressForm.chunked, selectable: true);
 }
 
 class _ErrorBody extends StatelessWidget {

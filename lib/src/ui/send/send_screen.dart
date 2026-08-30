@@ -656,6 +656,17 @@ class _SendScreenState extends State<SendScreen> {
                   // once is not a layout, and a pad that stayed put under a
                   // rising IME is the clunkiness he asked me to avoid.
                   //
+                  // **Keyed off the KEYBOARD, not off focus**, and the
+                  // difference is the whole second half of the request. Back
+                  // dismisses the IME without dropping focus, so a
+                  // `hasFocus` predicate left the pad hidden with the keyboard
+                  // already gone: a dead void where the digits should be. The
+                  // comment above said "comes back when it closes" while the
+                  // code could not do it — found on glass, 2026-08-30.
+                  // `viewInsetsOf` also rebuilds as the IME animates, so the
+                  // pad yields the moment it starts rising rather than after
+                  // it has arrived.
+                  //
                   // `AnimatedSize` on the one easing so the swap reads as the
                   // pad making room rather than blinking out; the IME's own
                   // rise runs over the top of it.
@@ -663,7 +674,7 @@ class _SendScreenState extends State<SendScreen> {
                     duration: KvMotion.calm,
                     curve: KvMotion.out,
                     alignment: Alignment.topCenter,
-                    child: (_addressFocus.hasFocus || _amountFocus.hasFocus)
+                    child: MediaQuery.viewInsetsOf(context).bottom > 0
                         ? const SizedBox(width: double.infinity)
                         : Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,

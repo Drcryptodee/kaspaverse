@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/format.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 
 void main() {
   group('sompiFromKas (parse → sompi; string math, never a double)', () {
@@ -73,12 +74,44 @@ void main() {
   });
 
   group('chunkAddress (DS-8 full-form review)', () {
-    test('keeps the kaspa: prefix and groups the payload in fours', () {
-      expect(chunkAddress('kaspa:qz7ulu4c25dh'), 'kaspa:qz7u lu4c 25dh');
+    // The two expectations below CHANGED at D-223. They previously asserted a
+    // pure grouping in fours, which is the rule the founder replaced after
+    // seeing its output on glass: a 61-character payload ended `c6jz qunt h`,
+    // stranding one bold character where the eye is supposed to land.
+    test('keeps the kaspa: prefix, fours in the head, FIVE in the tail', () {
+      expect(chunkAddress('kaspa:qz7ulu4c25dh'), 'kaspa:qz7u lu4 c25dh');
     });
 
-    test('groups a colon-less string (e.g. a txid) wholesale', () {
-      expect(chunkAddress('abcdefgh'), 'abcd efgh');
+    test('a colon-less string takes the same rule', () {
+      expect(chunkAddress('abcdefgh'), 'abc defgh');
+    });
+
+    test('the real 61-character payload ends qunth, not qunt h', () {
+      // The exact address and the exact complaint that produced the amendment.
+      const addr =
+          'kaspa:qz5a8jtqt3l3nf8zxve9eu0qtrkewc5e0yn465djghw4438jqdecc6jzqunth';
+      final out = chunkAddress(addr);
+      expect(out, endsWith(' c6jz qunth'));
+      expect(out, isNot(contains(' qunt h')));
+      // Fourteen fours then the five: the short group, when a length produces
+      // one, falls NEXT TO the tail rather than splitting it.
+      expect(addressPayloadGroups(addr).last, 'qunth');
+      expect(addressPayloadGroups(addr).length, 15);
+    });
+
+    test('EVERY surface that chunks an address uses this one rule', () {
+      // The amendment was ratified for all screens and reached only one of the
+      // three implementations, so Receive still rendered the stranded `h` on a
+      // build whose Send screen did not. This asserts the seam, not the output:
+      // a fourth copy appearing anywhere is what this is written to catch.
+      const addr =
+          'kaspa:qz5a8jtqt3l3nf8zxve9eu0qtrkewc5e0yn465djghw4438jqdecc6jzqunth';
+      expect(KvAddress.groupsOf(addr), addressPayloadGroups(addr));
+      expect(
+        chunkAddress(addr),
+        'kaspa:${addressPayloadGroups(addr).join(' ')}',
+      );
+      expect(KvAddress.tailGroup, addressTailGroup);
     });
   });
 }

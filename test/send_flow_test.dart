@@ -212,7 +212,11 @@ void main() {
       await tester.pumpWidget(_sendScreen());
       expect(find.byType(KvKeypad), findsOneWidget);
 
+      // The IME is driven through `viewInsets` rather than inferred from
+      // focus: a widget test raises no real keyboard, and on the device the
+      // two come apart (see the `follows the KEYBOARD` test below).
       await tester.tap(find.byKey(SendScreen.amountTarget));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pump();
       await tester.pump(KvMotion.calm);
       expect(
@@ -222,6 +226,7 @@ void main() {
       );
 
       // Dismissing the keyboard brings the pad back.
+      tester.view.viewInsets = FakeViewPadding.zero;
       FocusManager.instance.primaryFocus?.unfocus();
       await tester.pump();
       await tester.pump(KvMotion.calm);
@@ -576,16 +581,57 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('the amount pad comes back after the address field takes '
-        'focus', (tester) async {
+    testWidgets('the amount pad follows the KEYBOARD, not the focus', (
+      tester,
+    ) async {
       _phone(tester);
-      // The pad steps aside for the system IME while the address is typed. If
-      // nothing gave it back, the pad would be reachable exactly once.
+      // Two different facts, and the device proved they come apart: the system
+      // BACK button dismisses the IME **without dropping focus**. A `hasFocus`
+      // predicate therefore left the pad hidden with the keyboard already
+      // gone, and the screen showed a dead void where the digits belong —
+      // while the code's own comment claimed the pad "comes back when it
+      // closes" (found on glass 2026-08-30; the comment was the older L121
+      // shape, a law nobody re-checked).
+      //
+      // `viewInsets` is what the IME actually moves, so that is what the pad
+      // is keyed to and what this test drives.
+      void keyboard({required bool up}) {
+        tester.view.viewInsets = up
+            ? const FakeViewPadding(bottom: 300)
+            : FakeViewPadding.zero;
+      }
+
       await tester.pumpWidget(_sendScreen());
+      expect(find.byType(KvKeypad), findsOneWidget, reason: 'nothing focused');
+
+      // Typing the address raises the IME: the pad steps aside.
       await tester.enterText(find.byKey(SendScreen.addressTarget), _addr);
+      keyboard(up: true);
       await tester.pump();
       expect(find.byType(KvKeypad), findsNothing);
+
+      // BACK closes the IME and the address field KEEPS focus. The pad must
+      // still come back — this is the assertion the old focus-based test could
+      // not make, and the defect it could not see.
+      keyboard(up: false);
+      await tester.pump();
+      expect(
+        find.byKey(SendScreen.addressTarget),
+        findsOneWidget,
+        reason: 'the field is still there and still focused',
+      );
+      expect(
+        find.byType(KvKeypad),
+        findsOneWidget,
+        reason: 'keyboard down means the pad is back, focus or no focus',
+      );
+
+      // And the amount field behaves the same way.
       await tester.tap(find.byKey(SendScreen.amountTarget));
+      keyboard(up: true);
+      await tester.pump();
+      expect(find.byType(KvKeypad), findsNothing);
+      keyboard(up: false);
       await tester.pump();
       expect(find.byType(KvKeypad), findsOneWidget);
     });

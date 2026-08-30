@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/format.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/receive/qr_tile.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
@@ -60,9 +61,34 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(QrTile), findsOneWidget);
-      // The verification surface shows the FULL address chunked in fours.
+
+      // The verification surface shows the FULL address, chunked, and it is
+      // rendered by KvAddress rather than by a local copy of the rule. Both
+      // halves of that sentence were false on the device: this screen built the
+      // string itself, so the founder's ratified five-character tail never
+      // reached it AND a flat string carried no weighting at all.
       final full = tester.widget<SelectableText>(find.byType(SelectableText));
-      expect(full.data, chunkAddress(_addr));
+      final span = full.textSpan!;
+      expect(span.toPlainText(), chunkAddress(_addr));
+      // The tail is five characters, together — never a stranded final char.
+      expect(span.toPlainText(), endsWith(' cd692'));
+
+      // And the eye is steered: first and last groups carry the weight, the
+      // middle does not. This is the assertion the sitting was missing — the
+      // grouping was right and every character still rendered at one weight.
+      final spans = <InlineSpan>[];
+      span.visitChildren((c) {
+        spans.add(c);
+        return true;
+      });
+      final groups = spans
+          .whereType<TextSpan>()
+          .where((t) => !(t.text ?? '').startsWith('kaspa:'))
+          .toList();
+      expect(groups.length, KvAddress.groupsOf(_addr).length);
+      expect(groups.first.style?.fontWeight, FontWeight.w600);
+      expect(groups.last.style?.fontWeight, FontWeight.w600);
+      expect(groups[groups.length ~/ 2].style?.fontWeight, FontWeight.w400);
     });
 
     testWidgets('Copy puts the FULL address on the clipboard', (tester) async {
