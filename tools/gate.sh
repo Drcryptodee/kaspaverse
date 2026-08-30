@@ -227,13 +227,36 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
         # different clones and let a fresh sibling vouch for the stale DB that was
         # actually queried — the very "lookup that cannot look" this lane's
         # control exists to prevent.
-        local fh
-        fh="$(dirname "$db")/.git/FETCH_HEAD"
-        if [ ! -f "$fh" ]; then
-          echo "   advisory DB has no FETCH_HEAD — its freshness cannot be established"
+        # THE INSTRUMENT, and it is the part that was wrong (D-224). `FETCH_HEAD`
+        # is written by `git fetch` and NEVER by `git clone`, so a database
+        # cloned fresh this second has none: the lane went RED exactly when the
+        # data was NEWEST. It passed here only because this box's clone dates
+        # from 12 Aug and has been fetched since, so local said GREEN while CI
+        # said RED for six consecutive pushes — D-024c's failure, and the reason
+        # a false red is worse than no lane: it trains the eye to skip the lane.
+        #
+        # The honest question is when the DATA last arrived, which is whichever
+        # of `FETCH_HEAD` (written by a fetch) and `HEAD` (written by the clone)
+        # is newer. A clone that was never fetched still ages out on its own
+        # timestamp, so the >7-day red keeps its full force in both worlds.
+        # Compared as integers via `stat`, never by parsing `ls -t`: `-t` is a
+        # sort flag to coreutils and an option that TAKES AN ARGUMENT to eza,
+        # so on a box where `ls` is aliased the same line silently swallows a
+        # filename and answers about the wrong file. It cost a false pass while
+        # this very fix was being falsified.
+        local gd f ts best=0
+        gd="$(dirname "$db")/.git"
+        for f in "$gd/FETCH_HEAD" "$gd/HEAD"; do
+          [ -f "$f" ] || continue
+          ts="$(stat -c %Y "$f" 2>/dev/null)" || continue
+          [ -n "$ts" ] && [ "$ts" -gt "$best" ] && best="$ts"
+        done
+        if [ "$best" -eq 0 ]; then
+          echo "   advisory DB has neither FETCH_HEAD nor HEAD — not a git clone,"
+          echo "   so its freshness cannot be established"
           rc=1
-        elif [ -n "$(find "$fh" -mtime +7 2>/dev/null)" ]; then
-          echo "   advisory DB last fetched $(date -r "$fh" '+%Y-%m-%d') — >7 days stale;"
+        elif [ "$(( $(date +%s) - best ))" -gt 604800 ]; then
+          echo "   advisory DB last updated $(date -d "@$best" '+%Y-%m-%d') — >7 days stale;"
           echo "   its silence about tokio-tungstenite is not evidence. Run: cargo deny check advisories"
           rc=1
         fi

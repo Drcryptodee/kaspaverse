@@ -119,6 +119,35 @@ elif [ -s "$PROBE_DIR/link_probe.tsv" ]; then
     && PROBE_NOTE="  ← STALE (${PROBE_AGE}m): cron armed but not writing"
   echo "• link prober: ${PROBE_N} rounds, ${PROBE_FAULT}, last ${PROBE_AGE}m ago (retires at 2016 rounds or 30d — tools/link_probe.sh --summary)${PROBE_NOTE}"
 fi
+# The REMOTE gate — the one D-094 actually gates a push on, and the one nothing in
+# this ritual used to read. A lane can be green on this machine and red on a cold
+# runner: the advisory-DB freshness check asserted its freshness from `.git/FETCH_HEAD`,
+# which `git fetch` writes and `git clone` never does, so it passed here (an old clone,
+# fetched since) and RED'd on CI (a fresh clone) — for six consecutive pushes across
+# 21 hours, unnoticed, because the record lived only in GitHub (D-224).
+#
+# One API call, hard-timeouted, never fatal, and silent when `gh` is missing or
+# unauthenticated so a public clone prints nothing odd. It reports the newest run and
+# says plainly when that run is not the commit sitting in this tree.
+if command -v gh >/dev/null 2>&1 && timeout 10 gh auth status >/dev/null 2>&1; then
+  CI_RUN=$(timeout 15 gh run list --workflow=gate.yml --limit 1 \
+             --json status,conclusion,headSha \
+             --jq '.[0] | "\(.status)|\(.conclusion)|\(.headSha)"' 2>/dev/null)
+  if [ -n "$CI_RUN" ]; then
+    CI_STATUS=${CI_RUN%%|*}; CI_REST=${CI_RUN#*|}
+    CI_CONC=${CI_REST%%|*}; CI_SHA=${CI_REST#*|}
+    CI_WHERE=$([ "$CI_SHA" = "$(git rev-parse HEAD 2>/dev/null)" ] \
+                 && echo "this HEAD" || echo "${CI_SHA%"${CI_SHA#???????}"} — NOT this HEAD")
+    if [ "$CI_STATUS" != "completed" ]; then
+      echo "• remote gate: $CI_STATUS on $CI_WHERE"
+    elif [ "$CI_CONC" = "success" ]; then
+      echo "• remote gate: GREEN on $CI_WHERE"
+    else
+      echo "• remote gate: $(echo "$CI_CONC" | tr '[:lower:]' '[:upper:]') on $CI_WHERE  <- investigate BEFORE building"
+      echo "    gh run view --log-failed   (a red remote gate means a push went out on one — D-094 says green only)"
+    fi
+  fi
+fi
 # Disk headroom. Build caches here are pure REGENERABLE artifact — `rust/target` reached
 # 62 GB and `build/` 24 GB by 2026-08-29, and a full clean of both returned 86 GB in 11 s —
 # so running out of space is a self-inflicted wound, and it already cost one session
