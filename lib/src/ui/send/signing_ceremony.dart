@@ -720,6 +720,16 @@ class _FactRow extends StatelessWidget {
             role: KvAmountRole.row,
             fractionDigits: 8,
             showUnit: true,
+            // **A fact row states a COST, and a cost is read for its digits**
+            // (BG-23, founder's call from the rendered comparison — D-230). The
+            // role default cannot decide this: `row` is also the home ledger,
+            // where a figure is a holding and the magnitude is the point. Here
+            // the figure is a fee, always below 1, so the magnitude is `0` in
+            // every case this surface will ever show and the weight belongs on
+            // the digits that are the fee. `Total` takes the same flag and is
+            // unaffected: above 1 every emphasis rule agrees, which is what
+            // stops a fee out-shouting the total it is part of.
+            emphasis: KvAmountEmphasis.significant,
           ),
         ],
       ),

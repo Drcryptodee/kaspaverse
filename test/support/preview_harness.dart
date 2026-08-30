@@ -117,6 +117,7 @@ Future<void> renderSurface(
   required String name,
   required Widget child,
   PreviewSize size = PreviewSize.reference,
+  Future<void> Function(WidgetTester tester)? act,
 }) async {
   tester.view.physicalSize = size.size;
   tester.view.devicePixelRatio = 1;
@@ -140,6 +141,17 @@ Future<void> renderSurface(
   await tester.pump();
   await tester.pump(KvMotion.enter);
   await tester.pump(KvMotion.enter);
+  // **A catalogue of first frames is a catalogue of empty screens.** Most of
+  // what a surface is FOR only exists after someone has touched it — the send
+  // screen's fee line, its address review and an enabled Review button are all
+  // invisible until an amount and a destination are in. [act] drives the real
+  // widget the way a thumb would, so the shot is a state rather than a start.
+  if (act != null) {
+    await act(tester);
+    await tester.pump();
+    await tester.pump(KvMotion.enter);
+    await tester.pump(KvMotion.enter);
+  }
   await expectLater(
     find.byType(MaterialApp),
     matchesGoldenFile('$previewOut/${name}__${size.slug}.png'),

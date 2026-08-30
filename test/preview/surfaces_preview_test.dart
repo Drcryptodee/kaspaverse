@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
@@ -12,6 +13,8 @@ import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 
 import '../support/preview_harness.dart';
@@ -116,6 +119,17 @@ Widget _home() => HomeScreen(
     utxoIndexMissing: ValueNotifier(false),
   ),
   clock: () => DateTime(2026, 8, 30, 11, 16, 30),
+  // **All four routes wired, because a null route removes the CONTROL, not
+  // just its destination.** Without these the catalogue rendered a money
+  // screen with no Send, no Receive and an empty nav rail — the two controls
+  // BG-12 puts in the resting thumb arc were absent from every contact sheet,
+  // and a variation proposed against that picture would be designing around a
+  // hole. Same class as the `Send max` fixture gap (D-229); L125 again — a
+  // fixture is a claim.
+  receiveRoute: (_) => const SizedBox.shrink(),
+  sendRoute: (_, _) => const SizedBox.shrink(),
+  messagesRoute: (_) => const SizedBox.shrink(),
+  settingsRoute: (_) => const SizedBox.shrink(),
 );
 
 Widget _node() => NodeScreen(
@@ -157,10 +171,20 @@ void main() {
 
   /// Renders one surface at BOTH geometries. The floor is where things break;
   /// a preview that only shows the reference is the comfortable half.
-  void surface(String name, Widget Function() build) {
+  void surface(
+    String name,
+    Widget Function() build, {
+    Future<void> Function(WidgetTester tester)? act,
+  }) {
     for (final size in PreviewSize.all) {
       testWidgets('preview: $name @ ${size.label}', (tester) async {
-        await renderSurface(tester, name: name, child: build(), size: size);
+        await renderSurface(
+          tester,
+          name: name,
+          child: build(),
+          size: size,
+          act: act,
+        );
       }, skip: !previewRequested);
     }
   }
@@ -171,6 +195,43 @@ void main() {
     surface('node__connected', _node);
     surface('settings__root', _settings);
     surface('send__empty', _sendScreen);
+
+    // **The send screen doing its job**, which no preview has ever shown: an
+    // amount typed on the pad, a destination pasted, the chunked address
+    // review, the live fee and Review enabled. `send__empty` renders the one
+    // state where none of that exists.
+    surface(
+      'send__typed',
+      _sendScreen,
+      act: (tester) async {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async => call.method == 'Clipboard.getData'
+              ? <String, dynamic>{'text': _addr}
+              : null,
+        );
+        // Scoped to the pad: an unscoped `find.text('.')` matches whatever
+        // else on the screen happens to render that glyph, and at the floor
+        // geometry it typed `124` instead of `12.4` — a harness artifact that
+        // would have read as a screen defect.
+        for (final key in ['1', '2', '.', '4']) {
+          await tester.tap(
+            find.descendant(
+              of: find.byType(KvKeypad),
+              matching: find.text(key),
+            ),
+          );
+          await tester.pump();
+        }
+        await tester.tap(
+          find.byWidgetPredicate(
+            (w) => w is KvGlyphIcon && w.mark == KvMark.paste,
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+      },
+    );
 
     surface(
       'ceremony__confirm',

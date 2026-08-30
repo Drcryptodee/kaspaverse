@@ -38,6 +38,17 @@ Widget _host(Widget child, {double width = 360, double textScale = 1}) =>
 TextStyle _styleOf(WidgetTester tester, String text) =>
     tester.widget<Text>(find.text(text)).style!;
 
+/// Every `Text` inside the amount, in order, concatenated — so an assertion is
+/// about the FIGURE the user reads rather than about how many runs it took to
+/// draw it.
+String _joinedFigure(WidgetTester tester) => tester
+    .widgetList<Text>(
+      find.descendant(of: find.byType(KvAmount), matching: find.byType(Text)),
+    )
+    .map((t) => t.data ?? '')
+    .where((t) => t != 'KAS') // the unit is beside the figure, not in it
+    .join();
+
 void main() {
   group('KvAmount — BG-5 money', () {
     testWidgets('unknown is `—`, never a fabricated zero', (tester) async {
@@ -139,10 +150,18 @@ void main() {
       );
       expect(find.text('.50'), findsOneWidget);
 
+      // **Concatenated across runs, not matched as one string.** A signing
+      // surface takes `significant` emphasis (D-230), so `0.50000000` renders
+      // as a quiet `0.` and a strong `50000000` — the eight decimals BG-6
+      // requires are all present, in two `Text`s instead of one. Asserting the
+      // joined figure is what the law actually says; asserting a single run was
+      // asserting an implementation detail, which is why this went red on a
+      // change that shows every digit it always did (L143's sibling: a string
+      // comparison cannot testify about a render).
       await tester.pumpWidget(
         _host(KvAmount(BigInt.from(50000000), role: KvAmountRole.screen)),
       );
-      expect(find.text('.50000000'), findsOneWidget);
+      expect(_joinedFigure(tester), '0.50000000');
     });
 
     testWidgets('direction rides sign, colour and weight at once (BG-7)', (

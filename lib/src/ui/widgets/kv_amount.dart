@@ -20,6 +20,33 @@ enum KvAmountRole {
   row,
 }
 
+/// **Where the weight falls on a figure (BG-23).**
+///
+/// `KvAmount` splits an amount into a big bright integer and a small dim
+/// fraction. For a **balance** that is right: the integer is the magnitude, and
+/// the magnitude is what you own. For a **fee** it is inverted — a fee is always
+/// below 1, so the one bright character is a `0` that is `0` in every case the
+/// surface will ever show, while the digits that carry the cost sit at 48%.
+///
+/// **Founder's call, 2026-08-30, taken from the rendered comparison rather than
+/// from an argument** (D-230): the balance keeps [magnitude], the fee takes
+/// [significant]. The two surfaces have different jobs — one is a magnitude you
+/// own, the other a cost you are checking — so the rule belongs to the ROLE and
+/// not to the app. That is why this is resolved from [KvAmountRole] rather than
+/// passed in at every call site: a future `screen`-role amount inherits the
+/// decision instead of re-making it (BG-21).
+enum KvAmountEmphasis {
+  /// The integer takes the weight, always. Balances and ledger rows.
+  magnitude,
+
+  /// Below 1, the leading `0.` and its zeros drop to the fraction's size and
+  /// the weight starts at the first digit that carries value. At or above 1
+  /// this is identical to [magnitude], so it changes only the case that was
+  /// wrong.
+  significant,
+}
+
+/// Which way the money is moving (BG-7).
 /// Which way the money is moving (BG-7). Direction rides **four ways at once**
 /// — word, sign, colour and weight — so a row survives greyscale,
 /// colour-blindness and a screen reader. The word is the caller's; the other
@@ -77,6 +104,7 @@ class KvAmount extends StatelessWidget {
     this.sompi, {
     super.key,
     this.role = KvAmountRole.hero,
+    this.emphasis,
     this.direction = KvMoneyDirection.internal,
     this.stale = false,
     this.size,
@@ -88,6 +116,20 @@ class KvAmount extends StatelessWidget {
   final BigInt? sompi;
 
   final KvAmountRole role;
+
+  /// Where the weight falls (BG-23). **Null resolves from [role]**, which is
+  /// where the decision lives; pass one only to override a single composition.
+  final KvAmountEmphasis? emphasis;
+
+  /// The role's own rule (D-230). A signing surface restates a cost and takes
+  /// [KvAmountEmphasis.significant]; a balance and a ledger row keep the
+  /// magnitude.
+  KvAmountEmphasis get _emphasis =>
+      emphasis ??
+      switch (role) {
+        KvAmountRole.screen => KvAmountEmphasis.significant,
+        KvAmountRole.hero || KvAmountRole.row => KvAmountEmphasis.magnitude,
+      };
   final KvMoneyDirection direction;
 
   /// Dims to [KvFreshness.opacityStale]. BG-8 also requires a **visible age**
@@ -173,6 +215,31 @@ class KvAmount extends StatelessWidget {
 
   bool get _unit => showUnit ?? (role != KvAmountRole.row);
 
+  /// Splits a figure into `(text, isStrong)` runs under the chosen [emphasis].
+  ///
+  /// The default returns exactly what the two-`Text` version rendered, which is
+  /// the property the guard pins: **a defaulted parameter that changed a shipped
+  /// pixel would be a canon change wearing a proposal's clothes.**
+  List<(String, bool)> _runs(String integer, String fraction) {
+    final head = '$_sign$integer';
+    final tail = fraction.isEmpty ? '' : '.$fraction';
+    // Above 1 the integer IS the magnitude, so every candidate agrees with the
+    // shipped rule and only the sub-1 case differs. That is the whole scope of
+    // the defect and therefore the whole scope of the variants.
+    final subUnit = integer == '0' && fraction.isNotEmpty;
+    if (_emphasis == KvAmountEmphasis.magnitude || !subUnit) {
+      return [(head, true), (tail, false)];
+    }
+    // `significant`: the quiet run swallows `0.` plus every leading zero, and
+    // the weight starts at the first digit that carries value.
+    final firstSignificant = fraction.indexOf(RegExp('[1-9]'));
+    if (firstSignificant < 0) return [(head, true), (tail, false)];
+    return [
+      ('$head.${fraction.substring(0, firstSignificant)}', false),
+      (fraction.substring(firstSignificant), true),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final base = size ?? _rampSize(role);
@@ -253,35 +320,34 @@ class KvAmount extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.baseline,
           textBaseline: TextBaseline.alphabetic,
           children: [
-            Text(
-              '$_sign${parts.integer}',
-              maxLines: 1,
-              style: TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: base,
-                height: 1.14,
-                fontWeight: _weight,
-                letterSpacing: role == KvAmountRole.hero ? -0.5 : 0,
-                color: _tone,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-            if (fraction.isNotEmpty)
-              Text(
-                '.$fraction',
-                maxLines: 1,
-                style: TextStyle(
-                  fontFamily: KvFont.mono,
-                  // A row is one run at one size: §2 gives `rowAmount` a single
-                  // style, and 48% of 15dp would land under the 11dp floor.
-                  fontSize: role == KvAmountRole.row ? base : fractionSize,
-                  fontWeight: role == KvAmountRole.row
-                      ? _weight
-                      : FontWeight.w400,
-                  color: _fractionTone,
-                  fontFeatures: const [FontFeature.tabularFigures()],
+            // **Three runs, not two** — `quiet · strong · quiet` — so BG-23's
+            // candidates are a matter of where the boundary falls rather than
+            // a second widget. Under the default the first run is empty and
+            // the boundary sits exactly where it always did.
+            for (final (text, strong) in _runs(parts.integer, fraction))
+              if (text.isNotEmpty)
+                Text(
+                  text,
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    // A row is one run at one size: §2 gives `rowAmount` a
+                    // single style, and 48% of 15dp would land under the 11dp
+                    // floor.
+                    fontSize: strong || role == KvAmountRole.row
+                        ? base
+                        : fractionSize,
+                    height: strong ? 1.14 : null,
+                    fontWeight: strong || role == KvAmountRole.row
+                        ? _weight
+                        : FontWeight.w400,
+                    letterSpacing: strong && role == KvAmountRole.hero
+                        ? -0.5
+                        : 0,
+                    color: strong ? _tone : _fractionTone,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
                 ),
-              ),
           ],
         ),
       );

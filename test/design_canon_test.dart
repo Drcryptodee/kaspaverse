@@ -9,6 +9,7 @@ import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
@@ -159,6 +160,90 @@ void main() {
       // 100% against a true 25%.
       withReducedAnimations(tester);
       await measureLieFactor(tester);
+    });
+  });
+
+  group('BG-23 · emphasis tracks information', () {
+    // Founder's call, taken from the rendered comparison rather than from an
+    // argument (D-230): a BALANCE keeps the magnitude, because the integer is
+    // what you own; a FEE takes the significant digits, because a fee is always
+    // below 1 and its integer is `0` in every case the surface will ever show.
+    // The rule lives on the ROLE, so a future screen-role amount inherits the
+    // decision instead of re-making it.
+
+    /// The `(text, isStrong)` runs of an amount, strong = at base size.
+    List<(String, bool)> runs(WidgetTester tester) {
+      final texts = tester.widgetList<Text>(
+        find.descendant(of: find.byType(KvAmount), matching: find.byType(Text)),
+      );
+      final sizes = texts.map((t) => t.style?.fontSize ?? 0).toList();
+      final base = sizes.reduce((a, b) => a > b ? a : b);
+      return [
+        for (final (i, t) in texts.indexed)
+          if ((t.data ?? '') != 'KAS') (t.data ?? '', sizes[i] == base),
+      ];
+    }
+
+    testWidgets('a fee puts the weight on the digits that ARE the fee', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(KvAmount(BigInt.from(315400), role: KvAmountRole.screen)),
+      );
+      expect(
+        runs(tester),
+        [('0.00', false), ('315400', true)],
+        reason:
+            'the bright run is the leading zero, which is `0` for every fee '
+            'this wallet will ever build',
+      );
+    });
+
+    testWidgets('a balance keeps the magnitude, which is what you own', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(KvAmount(BigInt.from(2597792200), role: KvAmountRole.hero)),
+      );
+      expect(runs(tester), [('25', true), ('.977922', false)]);
+    });
+
+    testWidgets('and above 1 every rule agrees, so a total is untouched', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(KvAmount(BigInt.from(1240315400), role: KvAmountRole.screen)),
+      );
+      expect(
+        runs(tester),
+        [('12', true), ('.40315400', false)],
+        reason:
+            'the sub-1 rule reached an amount above 1 — a fee must not out-shout '
+            'the total it is part of',
+      );
+    });
+
+    testWidgets('and the CEREMONY fee row is the surface that has to show it', (
+      tester,
+    ) async {
+      // The rule was first put on the role, and the role was the wrong lever:
+      // the ceremony's fact rows are `KvAmountRole.row`, not `screen`, so the
+      // fee kept its old face while the widget test passed. That is L144 in one
+      // move — the fix reached the abstraction and not the surface. This guard
+      // renders the real ceremony and reads the real fee.
+      await tester.pumpWidget(_holdHost());
+      final feeRuns = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data ?? '')
+          .where((t) => t.contains('315400') || t == '0.00')
+          .toList();
+      expect(
+        feeRuns,
+        containsAll(['0.00', '315400']),
+        reason:
+            'the fee renders as one run, so the weight is still on the leading '
+            'zero: $feeRuns',
+      );
     });
   });
 
