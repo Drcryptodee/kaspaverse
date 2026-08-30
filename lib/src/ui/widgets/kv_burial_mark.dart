@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../rust/api/wallet.dart';
 import '../theme/tokens.dart';
 import 'kv_status_chip.dart';
+import 'kv_streaming_count.dart';
 import 'tx_status_chip.dart';
 
 /// How deeply a row is buried, in the vocabulary D-192 settled for the
@@ -67,10 +68,19 @@ class KvBurialMark extends StatelessWidget {
       // On the signing receipt there is one transaction and room to say what
       // the number MEANS, so it reads `Seen 42` (founder, on glass
       // 2026-08-30). Same ladder, same thresholds, same data.
-      return _Mark(
-        tone: KvLampTone.warn,
-        words: verbose ? 'Seen $n' : '$n',
-        mono: true,
+      // **Streamed, not stepped** (D-226). The depth is read on a 1 Hz poll;
+      // replaying the interval between the last two readings at the panel's
+      // refresh rate makes the count move rather than tick. Every frame is a
+      // depth the chain actually reached, and the count never runs past the
+      // newest reading — a burial depth that overstated itself, even by one,
+      // would be the gauge lying about how buried the money is.
+      return KvStreamingCount(
+        value: BigInt.from(n),
+        builder: (context, shown) => _Mark(
+          tone: KvLampTone.warn,
+          words: verbose ? 'Seen $shown' : '$shown',
+          mono: true,
+        ),
       );
     }
     if (n < settled) {

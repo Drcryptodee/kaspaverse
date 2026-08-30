@@ -339,6 +339,12 @@ abstract final class KvMotion {
   static const Duration normal = calm;
   static const Duration slow = enter;
 
+  /// **One reading-to-reading gap for a streaming chain counter** (D-226).
+  /// Matched to the 1 Hz poll so the tween lands just as the next reading
+  /// arrives; a late reading means the counter has already stopped on the last
+  /// value it actually read, which is the honest place to stop.
+  static const Duration stream = Duration(seconds: 1);
+
   /// One full cadence cycle — the five bars breathing at block rhythm. It is
   /// both the liveness signal and the app's one loading indicator, and it
   /// freezes the instant the link dies (BG-8).

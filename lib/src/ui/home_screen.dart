@@ -19,6 +19,7 @@ import 'widgets/kv_chrome.dart';
 import 'widgets/kv_empty_state.dart';
 import 'widgets/kv_glyph.dart';
 import 'widgets/kv_status_chip.dart';
+import 'widgets/kv_streaming_count.dart';
 import 'widgets/kv_surface.dart';
 import 'widgets/status_beacon.dart';
 import 'widgets/tx_status_chip.dart';
@@ -1153,16 +1154,29 @@ class _MoneyPlate extends StatelessWidget {
                     opacity: stale ? KvFreshness.opacityStale : 1,
                     duration: KvMotion.instant,
                     curve: KvMotion.out,
+                    // **Streamed, not stepped** (D-226). The score is READ on
+                    // the 1 Hz ticker, so it used to repaint once a second and
+                    // jump about ten at a time. `KvStreamingCount` replays the
+                    // interval between the last two readings at the panel's
+                    // refresh rate — every frame is a score the chain actually
+                    // had, and it never runs past the newest reading. It stops
+                    // when the link does, which is why `stale` is passed in:
+                    // a clock still ticking on a dead link is a prediction, and
+                    // the dimming above already says the reading is old.
                     child: ValueListenableBuilder<BigInt?>(
                       valueListenable: daa,
-                      builder: (context, score, _) => Text(
-                        'DAA ${formatScore(score)}',
-                        style: const TextStyle(
-                          fontFamily: KvFont.mono,
-                          fontSize: 11,
-                          height: 15 / 11,
-                          color: KvColor.inkMetaLow,
-                          fontFeatures: [FontFeature.tabularFigures()],
+                      builder: (context, score, _) => KvStreamingCount(
+                        value: score,
+                        stalled: stale,
+                        builder: (context, shown) => Text(
+                          'DAA ${formatScore(shown)}',
+                          style: const TextStyle(
+                            fontFamily: KvFont.mono,
+                            fontSize: 11,
+                            height: 15 / 11,
+                            color: KvColor.inkMetaLow,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
                         ),
                       ),
                     ),
