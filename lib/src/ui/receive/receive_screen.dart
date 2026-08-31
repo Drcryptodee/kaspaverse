@@ -173,7 +173,7 @@ class _Body extends StatelessWidget {
                 key: ValueKey(full != null ? 'qr' : (error ?? 'waiting')),
                 dimension: QrTile.side,
                 child: switch ((full, error)) {
-                  (final a?, _) => QrTile(data: a),
+                  (final a?, _) => QrTile(data: a, onTap: onCopy),
                   (_, final e?) => _Failed(reason: e, onRetry: onRetry),
                   _ => const _Waiting(),
                 },
@@ -215,7 +215,16 @@ class _Body extends StatelessWidget {
                 // because comparing against a source is exactly this surface's
                 // job, and weighted at the head and tail either way — selection
                 // is never bought by giving up the thing the form exists for.
-                KvAddress(full, form: KvAddressForm.chunked, selectable: true),
+                // Tapping copies; a long press still selects. Both routes end
+                // at `copyFull`, so the button is no longer the only way to
+                // take an address off a screen whose whole job is handing it
+                // over — and neither route can narrow what "copy" means.
+                KvAddress(
+                  full,
+                  form: KvAddressForm.chunked,
+                  selectable: true,
+                  onTap: onCopy,
+                ),
               ],
             ),
           ),

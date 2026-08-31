@@ -15,7 +15,7 @@ import '../theme/tokens.dart';
 /// init; we paint it ourselves so the dark-on-light rule can never be themed
 /// away, and so the screen-entrance transition never re-encodes (§10).
 class QrTile extends StatefulWidget {
-  const QrTile({required this.data, this.size = side, super.key});
+  const QrTile({required this.data, this.size = side, this.onTap, super.key});
 
   /// The tile's side, named once so **every state of the Receive screen can
   /// reserve the same footprint**. A layout that jumps when the address
@@ -28,6 +28,12 @@ class QrTile extends StatefulWidget {
 
   /// Side length of the white tile (modules + quiet zone), in logical pixels.
   final double size;
+
+  /// Tapping the tile fires this. The QR *is* the address, so the surface that
+  /// renders it is a legitimate way to take it — the tile is not decoration
+  /// with a button beside it. Expected to route through `KvAddress.copyFull`,
+  /// which is still the one copy path.
+  final VoidCallback? onTap;
 
   /// **The quiet zone, computed rather than asserted** (item 0 / L121).
   ///
@@ -83,20 +89,30 @@ class _QrTileState extends State<QrTile> {
 
   @override
   Widget build(BuildContext context) {
+    // `button` when it copies, because a tile that acts is not an image to a
+    // screen reader — and `image` and `button` are different promises.
     return Semantics(
-      label: 'QR code for your receive address',
-      image: true,
-      child: Container(
-        width: widget.size,
-        height: widget.size,
-        padding: EdgeInsets.all(
-          QrTile.quietZone(_image.moduleCount, widget.size),
+      label: widget.onTap == null
+          ? 'QR code for your receive address'
+          : 'QR code for your receive address. Copies the address',
+      image: widget.onTap == null,
+      button: widget.onTap != null,
+      onTap: widget.onTap,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Container(
+          width: widget.size,
+          height: widget.size,
+          padding: EdgeInsets.all(
+            QrTile.quietZone(_image.moduleCount, widget.size),
+          ),
+          decoration: BoxDecoration(
+            color: KvColor.qrTile,
+            borderRadius: BorderRadius.circular(KvRadius.card),
+          ),
+          child: CustomPaint(painter: _QrPainter(_image)),
         ),
-        decoration: BoxDecoration(
-          color: KvColor.qrTile,
-          borderRadius: BorderRadius.circular(KvRadius.card),
-        ),
-        child: CustomPaint(painter: _QrPainter(_image)),
       ),
     );
   }

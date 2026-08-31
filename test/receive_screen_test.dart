@@ -288,6 +288,41 @@ void main() {
       await tester.pumpAndSettle(); // let the confirmation SnackBar timer clear
     });
 
+    // The button was the ONE way to take an address off the screen whose whole
+    // job is handing it over. Both of these route to `copyFull` too, so a
+    // second copy path cannot drift narrower than the sanctioned one (L143).
+    for (final (name, target) in <(String, Finder Function())>[
+      ('the QR tile', () => find.byType(QrTile)),
+      ('the address itself', () => find.byType(KvAddress)),
+    ]) {
+      testWidgets('tapping $name copies the FULL address', (tester) async {
+        String? copied;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              copied = (call.arguments as Map)['text'] as String?;
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+
+        await tester.pumpWidget(_host(ReceiveScreen(fetch: () async => _addr)));
+        await tester.pumpAndSettle();
+
+        await tester.tap(target());
+        await tester.pump();
+        expect(copied, _addr, reason: 'never the truncated compact form');
+        await tester.pumpAndSettle();
+      });
+    }
+
     testWidgets('nothing renders under the readable floor at 1.3x / 320dp', (
       tester,
     ) async {

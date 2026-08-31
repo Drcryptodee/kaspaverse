@@ -38,6 +38,7 @@ class KvAddress extends StatelessWidget {
     this.form = KvAddressForm.compact,
     this.fontSize = 13,
     this.selectable = false,
+    this.onTap,
   });
 
   /// The full address, scheme included.
@@ -54,6 +55,15 @@ class KvAddress extends StatelessWidget {
   /// selection is never bought by giving up the thing the form exists for.
   /// Ignored by the compact form. `copyFull` remains the sanctioned copy path.
   final bool selectable;
+
+  /// Tapping the rendered address fires this. It rides `SelectableText`'s own
+  /// `onTap` in the selectable form rather than a wrapping `GestureDetector`,
+  /// which would compete with the selection gestures for the same pointer —
+  /// a tap copies, a long press still selects, and neither costs the other.
+  /// The callback is expected to route through [copyFull]; this widget never
+  /// narrows what a copy means. **Chunked form only** — the compact form is a
+  /// one-line glance, not a control, and it is unwired on purpose.
+  final VoidCallback? onTap;
 
   /// **The one copy path for an address**: it copies the whole string, always.
   /// A surface that offers "copy" calls this and cannot narrow it.
@@ -207,6 +217,7 @@ class KvAddress extends StatelessWidget {
               ),
           ],
         ),
+        onTap: onTap,
       );
     } else {
       body = Wrap(
@@ -222,12 +233,25 @@ class KvAddress extends StatelessWidget {
     }
     return Semantics(
       label: _spokenFull,
+      button: onTap != null,
       excludeSemantics: true,
       child: KvSurface(
         tone: KvSurfaceTone.well,
         width: double.infinity,
         padding: const EdgeInsets.all(KvSpace.m),
-        child: body,
+        // The non-selectable form has no gesture of its own to compete with,
+        // so it takes the tap on the whole plate rather than on the glyphs:
+        // the target is the surface a thumb actually aims at. `opaque` so the
+        // padding counts, not only the ink. **The selectable form is excluded
+        // deliberately** — `SelectableText` already carries the tap above, and
+        // wrapping it too would put two recognisers on one pointer.
+        child: (onTap == null || selectable)
+            ? body
+            : GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onTap,
+                child: body,
+              ),
       ),
     );
   }
