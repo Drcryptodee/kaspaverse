@@ -786,7 +786,19 @@ class _HomeScreenState extends State<HomeScreen> {
             extent: _plateExtent,
             minimum: pinned,
             onMeasured: (h) => setState(() => _plateExtent = h),
-            child: Entrance(child: plate),
+            // **The strip rides INSIDE the pinned band, under the card.**
+            // As a sliver of its own it scrolled beneath the pinned plate and
+            // vanished — measured at 320x568, where it started 27dp above the
+            // header's own bottom edge. Pinned with the card, it cannot hide
+            // behind it, and the header's measured extent still grows and
+            // shrinks with the strip, which is what eases the ledger down.
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Entrance(child: plate),
+                _StatusStrip(balance: _balance, trust: _trust),
+              ],
+            ),
           ),
         ),
         ValueListenableBuilder<List<ActivityRecord>>(
@@ -1209,29 +1221,6 @@ class _MoneyPlate extends StatelessWidget {
                     ),
                   ),
                 ),
-                ValueListenableBuilder<_TrustView>(
-                  valueListenable: trust,
-                  builder: (context, t, _) {
-                    final words = t.words;
-                    if (words == null) return const SizedBox.shrink();
-                    return Padding(
-                      padding: const EdgeInsets.only(top: KvSpace.s),
-                      child: KvStatusChip(
-                        // Amber for everything the user should weigh, green
-                        // for a swap running behind a link that still works —
-                        // decided in `_computeTrust`, beside the sentences.
-                        tone: t.tone,
-                        // One lamp; the sentences queue under it, most
-                        // consequential first.
-                        words: words,
-                        maxLines: null,
-                        // 15% smaller than the meter's own scale: below the
-                        // rule it is a reading, not the screen's subject.
-                        trailing: KvCadence(running: t.running, scale: 0.85),
-                      ),
-                    );
-                  },
-                ),
               ],
             ),
           ),
@@ -1263,8 +1252,6 @@ class _Figure extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final pending = view.pending;
-    final outgoing = view.outgoing;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1277,133 +1264,11 @@ class _Figure extends StatelessWidget {
           padding: const EdgeInsets.only(top: KvSpace.xs),
           child: _FiatLine(fiat: fiat, sompi: view.mature, now: now),
         ),
-        if (pending != null && pending > BigInt.zero) ...[
-          const SizedBox(height: KvSpace.s),
-          // Money ARRIVING that the hero does not yet contain: at the pin
-          // `pending` is a set disjoint from `mature`. Green and signed `+`,
-          // which is what BG-7 reserves green for.
-          _Qualifier(
-            amount: pending,
-            direction: KvMoneyDirection.incoming,
-            words: 'pending',
-            stale: view.stale,
-          ),
-        ],
-        // Money we have spent that the network has not handed back yet. It
-        // matters most at exactly the moment it is easiest to miss: a wallet
-        // that just spent everything reads `0.00000000 KAS`, and without this
-        // line that zero is indistinguishable from an empty wallet (F4/F20,
-        // product-audit run 3).
-        //
-        // **It carries NO sign, and that is the whole design.** It looks like
-        // the pending line and it is NOT its mirror — the two have opposite
-        // arithmetic under identical grammar, which is exactly the trap
-        // (consensus-auditor, V5). At the pin the hero figure is already NET
-        // of the send: `mature = (mature_utxos + consumed).saturating_sub(fees
-        // + payment)` (`wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`).
-        // So `+ N pending` is money the hero does not yet contain, and this
-        // value is money the hero has already lost. A `−` here would invite a
-        // second subtraction: a partial send of 30 from 100 would read
-        // `70.00 KAS` over `− 30.00000000`, and 70 − 30 is wrong.
-        //
-        // The sign would also be a lie outright on `SignableKind::
-        // SelfSendFrame` — the KaChat message path — where `payment_value()`
-        // is `Some`, so the frame's own amount lands in
-        // `outgoing_without_batch_tx` and is rendered here while travelling
-        // straight back to this wallet.
-        //
-        // So it is a memo, not a term in a sum: the amount and what it is
-        // doing. The prototype drew it signed and red; the prototype was
-        // rendering a fabricated number and had never carried this argument.
-        //
-        // **Two bounds, verified at the pin rather than assumed.** The memo
-        // excludes FEES by construction — `Balance.outgoing` is
-        // `outgoing_without_batch_tx`, the payment alone, while the hero is
-        // net of payment *and* fee. And it goes silent on a SWEEP:
-        // `discharges_outgoing()` (`rust/chain/src/send.rs:1668`) drops the
-        // pin's outgoing record immediately after submit for a ReceiverPays
-        // drain, so a swept wallet reads `0.00000000 KAS` with no memo — the
-        // very state this line was written to prevent. The ledger row beneath
-        // is what carries it there. Gating the memo on an unaccepted outgoing
-        // row instead of on `Balance.outgoing` is the real fix and belongs
-        // with Send (UX-4); recorded rather than half-built
-        // (`consensus-auditor`, this sitting).
-        if (outgoing != null && outgoing > BigInt.zero) ...[
-          const SizedBox(height: KvSpace.s),
-          _Qualifier(
-            amount: outgoing,
-            direction: KvMoneyDirection.internal,
-            words: 'in flight',
-            stale: view.stale,
-          ),
-        ],
       ],
     );
   }
 }
 
-/// An amount that qualifies the hero, with the word that says what it is
-/// doing. Merged for a screen reader: unmerged, two bare KAS amounts are
-/// announced back to back and the qualifier arrives only on the next swipe.
-class _Qualifier extends StatelessWidget {
-  const _Qualifier({
-    required this.amount,
-    required this.direction,
-    required this.words,
-    required this.stale,
-  });
-
-  final BigInt amount;
-  final KvMoneyDirection direction;
-  final String words;
-  final bool stale;
-
-  @override
-  Widget build(BuildContext context) {
-    return MergeSemantics(
-      child: Row(
-        children: [
-          Flexible(
-            child: KvAmount(
-              amount,
-              role: KvAmountRole.row,
-              direction: direction,
-              stale: stale,
-              showUnit: true,
-            ),
-          ),
-          const SizedBox(width: KvSpace.s),
-          Text(
-            words,
-            style: const TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 12,
-              height: 16 / 12,
-              fontWeight: FontWeight.w500,
-              color: KvColor.inkMeta,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// What the balance is worth, in fiat — the app's one unverifiable claim.
-///
-/// D-191 permits it from a named, replaceable, disable-able source, and D-192
-/// then narrowed the disclosure twice: the figure is subordinate and
-/// `≈`-prefixed, its **source is disclosed where the source is chosen** (the
-/// node surface), its **age appears only when age matters** (D-189), and it
-/// reaches no signing surface. UX-3 built the source control, which is what
-/// let this stop rendering an honest placeholder and start rendering an honest
-/// number.
-///
-/// **Three states, and the third is the point.** A price: `≈ $12.34`. No
-/// usable price: `≈ —`, which is what BG-5 says an unknown renders as — never
-/// a stale figure at full confidence and never a fabricated one. Switched
-/// off: **nothing at all**, because a user who turned fiat off did not ask for
-/// a row explaining that they turned fiat off.
 class _FiatLine extends StatelessWidget {
   const _FiatLine({required this.fiat, required this.sompi, required this.now});
 
@@ -2038,6 +1903,219 @@ class _ThumbActions extends StatelessWidget {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+/// **Transient status, in a container of its own beneath the card** (founder,
+/// device sitting 2026-08-31).
+///
+/// The money plate used to hold these lines, so it grew one the moment a
+/// deposit started arriving, lost it again when the money matured, and lost
+/// another when `syncing…` cleared a second after every cold open — the balance
+/// moved three times for events the user did not cause. Reserving the space
+/// inside the card stopped the jump and left a permanent gap where the news
+/// usually is not. **The card now holds only what is always true** (BG-28), and
+/// everything transient arrives here, easing the ledger down and back.
+///
+/// ## It is a panel, not a list of loose lines
+///
+/// The first cut moved the lines out and left them unstyled under the card —
+/// structurally right and visually nothing, which is what the founder sent it
+/// back for. Every row now reads the way the transaction detail's table reads:
+/// **a lamp, a label in caps, and the value hard right**, on one recessed
+/// [KvSurfaceTone.notice] plate — the tone the system already reserves for a
+/// notice — with the ledger's own hairline between rows. The lamp carries the
+/// hue (§1.5: the dot is coloured, the words are not), so a status panel and a
+/// money row use one vocabulary instead of two.
+class _StatusStrip extends StatelessWidget {
+  const _StatusStrip({required this.balance, required this.trust});
+
+  final ValueListenable<_BalanceView> balance;
+  final ValueListenable<_TrustView> trust;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<_BalanceView>(
+      valueListenable: balance,
+      builder: (context, b, _) => ValueListenableBuilder<_TrustView>(
+        valueListenable: trust,
+        builder: (context, t, _) {
+          final pending = b.pending;
+          final outgoing = b.outgoing;
+          final rows = <Widget>[
+            // Money ARRIVING that the hero does not yet contain: at the pin
+            // `pending` is a set disjoint from `mature`.
+            if (pending != null && pending > BigInt.zero)
+              _StatusRow(
+                tone: KvLampTone.warn,
+                label: 'pending',
+                trailing: KvAmount(
+                  pending,
+                  role: KvAmountRole.row,
+                  direction: KvMoneyDirection.incoming,
+                  // **BG-23.** A qualifier is the likeliest sub-1 amount on the
+                  // screen — dust deposits land here — and `row`'s default
+                  // emphasis puts the one bright run on `+0`, lighting a
+                  // leading zero. The identical defect as [[L147]], one panel
+                  // over. At or above 1 the two rules agree exactly.
+                  emphasis: KvAmountEmphasis.significant,
+                  stale: b.stale,
+                  showUnit: true,
+                ),
+              ),
+            // **The in-flight memo carries NO sign, and that is the design.**
+            // It looks like the pending line and is NOT its mirror: the two
+            // have opposite arithmetic under identical grammar. At the pin the
+            // hero is already NET of the send (`mature = (mature_utxos +
+            // consumed).saturating_sub(fees + payment)`,
+            // `wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`), so a `−`
+            // would invite a second subtraction — a partial send of 30 from
+            // 100 would read `70.00 KAS` over `− 30.00000000`. It would also be
+            // a lie outright on `SignableKind::SelfSendFrame`, where the amount
+            // travels straight back to this wallet. So it is a memo, not a term
+            // in a sum.
+            //
+            // Two bounds verified at the pin: it excludes FEES by construction
+            // (`Balance.outgoing` is `outgoing_without_batch_tx`), and it goes
+            // silent on a SWEEP, because `discharges_outgoing()`
+            // (`rust/chain/src/send.rs:1668`) drops the record immediately
+            // after submit for a ReceiverPays drain. Gating the memo on an
+            // unaccepted outgoing row instead belongs with Send (UX-4);
+            // recorded rather than half-built (`consensus-auditor`).
+            if (outgoing != null && outgoing > BigInt.zero)
+              _StatusRow(
+                tone: KvLampTone.warn,
+                label: 'in flight',
+                trailing: KvAmount(
+                  outgoing,
+                  role: KvAmountRole.row,
+                  direction: KvMoneyDirection.internal,
+                  emphasis: KvAmountEmphasis.significant,
+                  stale: b.stale,
+                  showUnit: true,
+                ),
+              ),
+            // What is wrong with the NUMBER or with the LINK, most consequential
+            // first. It is a sentence rather than a label/value pair, so it
+            // spans the row and keeps the meter on the right — the one place
+            // this panel's grid bends, and it bends because the content is a
+            // different shape, not because the rule is weak.
+            if (t.words case final words?)
+              _StatusRow(
+                tone: t.tone,
+                sentence: words,
+                trailing: KvCadence(running: t.running, scale: 0.85),
+              ),
+          ];
+          return AnimatedSize(
+            duration: KvMotion.fast,
+            curve: KvMotion.out,
+            alignment: Alignment.topCenter,
+            child: rows.isEmpty
+                // Not `shrink()`: a zero-WIDTH child would make the panel
+                // animate its width as well as its height on the first row.
+                ? const SizedBox(width: double.infinity)
+                : Padding(
+                    // The plate's own inset, so the two containers share an
+                    // edge and read as one stack rather than two objects.
+                    padding: const EdgeInsets.fromLTRB(
+                      KvSpace.sm,
+                      0,
+                      KvSpace.sm,
+                      KvSpace.sm,
+                    ),
+                    child: KvSurface(
+                      tone: KvSurfaceTone.notice,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: KvSpace.m,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (var i = 0; i < rows.length; i++) ...[
+                            if (i > 0)
+                              Container(height: 1, color: KvColor.rowDivider),
+                            rows[i],
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// One line of the status panel: lamp, then either a label or a sentence, then
+/// the value hard right.
+///
+/// Merged for a screen reader — unmerged, a bare KAS amount is announced
+/// without the word that says what it is doing, and the qualifier arrives only
+/// on the next swipe.
+class _StatusRow extends StatelessWidget {
+  const _StatusRow({
+    required this.tone,
+    this.label,
+    this.sentence,
+    required this.trailing,
+  }) : assert(
+         (label == null) != (sentence == null),
+         'a row is a labelled value or a sentence, never both',
+       );
+
+  final KvLampTone tone;
+
+  /// A short noun set in caps, the way the transaction detail sets its labels.
+  final String? label;
+
+  /// A full sentence, which takes the width instead of a caps label.
+  final String? sentence;
+
+  final Widget trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final words = label;
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            KvLamp(tone),
+            const SizedBox(width: KvSpace.s),
+            if (words != null)
+              Text(
+                words.toUpperCase(),
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 11,
+                  height: 16 / 11,
+                  letterSpacing: 0.9,
+                  color: KvColor.inkMetaLow,
+                ),
+              )
+            else
+              Expanded(
+                child: Text(
+                  sentence!,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 13,
+                    height: 19 / 13,
+                    color: KvColor.inkDim,
+                  ),
+                ),
+              ),
+            if (words != null) const Spacer(),
+            const SizedBox(width: KvSpace.s),
+            trailing,
+          ],
         ),
       ),
     );

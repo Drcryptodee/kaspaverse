@@ -187,15 +187,15 @@ void main() {
     testWidgets('a direction prefix renders and is spoken (§11)', (
       tester,
     ) async {
-      await pumpRole(tester, BigInt.from(50000000), prefix: '+ ');
-      expect(rendered(tester), '+ 0.50 KAS');
+      await pumpRole(tester, BigInt.from(50000000), prefix: '+');
+      expect(rendered(tester), '+0.50 KAS');
       final text = tester.widget<Text>(
         find.descendant(
           of: find.byType(AmountText),
           matching: find.byType(Text),
         ),
       );
-      expect(text.semanticsLabel, '+ 0.50 KAS');
+      expect(text.semanticsLabel, '+0.50 KAS');
     });
   });
 }

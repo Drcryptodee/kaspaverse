@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import '../../rust/api/wallet.dart';
@@ -27,9 +25,10 @@ import 'tx_status_chip.dart';
 /// So the axis is named (`blocks deep`), and it carries five labelled marks:
 ///
 /// ```
-///   0        1        10       100      1,000
-///   ├────────┼────────┼────────┼────────]
-///                              safe    final
+///   0    10   100                     1,000
+///   ├┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼]
+///        ^    confirmed                final
+///        the exact centre of 0 … 100
 /// ```
 ///
 /// **The graduations are D-192's ratified ladder plus its origin.** 1 · 10 ·
@@ -42,13 +41,22 @@ import 'tx_status_chip.dart';
 /// — which is the one thing BG-22 forbids outright. It touches neither
 /// threshold nor vocabulary.
 ///
-/// With the origin declared, the marks are evenly spaced at quarters and the
-/// scale is `x(n) = (log10(n) + 1) / 4`. The first confirmation lands on its
-/// own labelled graduation a quarter of the way along, which is §5's *"the
-/// first one — the one the user is actually waiting for — has somewhere to
-/// be."* **Nothing ever renders strictly between `0` and `1`**: a depth is a
-/// count of whole blocks, and [KvStreamingCount] passes through the integers
-/// between two readings and never between two integers.
+/// **The decades are not evenly spaced, and that is the point.** The scale is
+/// piecewise: `0 … 100` shares the first third, and `100 … 1,000` takes the
+/// remaining two. Evenly spaced at quarters — the scale UX-5 shipped — the one
+/// decade that carries the decision occupied a quarter of the track, and it
+/// was measured on glass at the 2026-08-31 device sitting: a real send
+/// climbing from **981 to 1,000 moved the fill two pixels**. Nine hundred
+/// blocks of the journey from *confirmed* to *final* were visually
+/// indistinguishable on the surface built to show exactly that.
+///
+/// The rescale spends ink where the reading changes a decision, which is
+/// Tufte's argument rather than a departure from it, and it stays **declared**:
+/// every graduation is labelled, so a reader can see that `100 … 1,000` is
+/// wider than `10 … 100` and is not invited to interpolate. **Nothing ever
+/// renders strictly between `0` and `1`**: a depth is a count of whole blocks,
+/// and [KvStreamingCount] passes through the integers between two readings and
+/// never between two integers.
 ///
 /// ## The ink is the reading
 ///
@@ -89,7 +97,22 @@ class KvBurialGauge extends StatefulWidget {
   final bool stalled;
 
   /// The labelled graduations, in order. The ratified ladder plus its origin.
-  static const List<int> graduations = [0, 1, 10, 100, KvBurial.settled];
+  static const List<int> graduations = [0, 10, 100, KvBurial.settled];
+
+  /// **The sub-marks: the scale's own subdivisions, drawn and unlabelled.**
+  ///
+  /// This is what makes the compression *visible* rather than merely declared.
+  /// A reader seeing nine ticks bunch toward `10` and nine more bunch toward
+  /// `100` can see the axis is logarithmic without being told; the labels then
+  /// only have to name the decades. It is the canonical log ruler, and it is a
+  /// stronger answer to BG-22's *no unlabelled interpolation* than blank track
+  /// was — blank track invites the eye to interpolate linearly, and a ruler
+  /// shows it exactly why it must not.
+  static const List<int> subGraduations = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, //
+    20, 30, 40, 50, 60, 70, 80, 90,
+    200, 300, 400, 500, 600, 700, 800, 900,
+  ];
 
   /// The name of the axis, which is what turns four numerals into a scale.
   static const String axisName = 'blocks deep';
@@ -100,10 +123,45 @@ class KvBurialGauge extends StatefulWidget {
   /// it against the arithmetic instead of against another copy of the drawing
   /// code. `0` maps to the origin; anything past a thousand is a full track,
   /// because the scale ends where finality does.
+  /// Where `10` sits: **the exact centre of `0 … 100`** (founder, device
+  /// sitting). It is what makes the low end read as a ruler rather than as
+  /// three numbers crowded against the hundred mark.
+  static const double tenAt = 1 / 6;
+
+  /// Where the safe threshold sits. **One third**, so the decade that carries
+  /// the decision gets the other two.
+  static const double safeAt = 1 / 3;
+
+  /// The track is divided into this many equal steps, and every step that is
+  /// not already a labelled mark gets a sub-mark. **Thirty is not arbitrary:**
+  /// it is the smallest division on which all four labelled marks land exactly
+  /// — `0`, `10` at 5/30, `100` at 10/30, `1,000` at 30/30 — so the whole ruler
+  /// is one even rhythm with no tick out of step with its neighbours.
+  static const int subDivisions = 30;
+
+  /// **The declared scale: piecewise LINEAR, with labelled breakpoints.**
+  ///
+  /// `0 → 0`, `10 → 1/6`, `100 → 1/3`, `1,000 → 1`, straight lines between.
+  /// Pure, and public, so the guard that measures the painted ink compares it
+  /// against the arithmetic rather than against another copy of the drawing
+  /// code.
+  ///
+  /// Linear inside each segment is what lets the sub-marks be an even rhythm
+  /// and still mean something: an evenly spaced tick on a linear segment is an
+  /// even step of DEPTH. On the log scale this replaced, evenly spaced ticks
+  /// would have been decoration and clustered ticks were, in the founder's
+  /// words, "just not it".
   static double positionFor(int depth) {
     if (depth <= 0) return 0;
     if (depth >= KvBurial.settled) return 1;
-    return (math.log(depth) / math.ln10 + 1) / 4;
+    if (depth <= 10) return depth / 10 * tenAt;
+    if (depth <= KvBurial.safe) {
+      return tenAt + (depth - 10) / 90 * (safeAt - tenAt);
+    }
+    return safeAt +
+        (depth - KvBurial.safe) /
+            (KvBurial.settled - KvBurial.safe) *
+            (1 - safeAt);
   }
 
   @override
@@ -303,19 +361,12 @@ class _ReadingLine extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(width: KvSpace.s),
-        // **The axis, named beside the number it counts** — the clause of
-        // BG-22 that a bare ladder of numerals does not satisfy.
-        const Text(
-          KvBurialGauge.axisName,
-          maxLines: 1,
-          style: TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 11,
-            height: 15 / 11,
-            color: KvColor.inkMeta,
-          ),
-        ),
+        // **The axis is still named — by the section heading above it.**
+        // BG-22 requires a named axis, not an inline one, and `DEPTH` set in
+        // capitals at the head of the section names it louder than a dimmed
+        // 11 dp label sitting at the far end of the reading line ever did.
+        // [KvBurialGauge.axisName] survives as the spoken form, because a
+        // screen reader has no heading in earshot when it reaches the gauge.
       ],
     );
   }
@@ -344,7 +395,9 @@ class _Graduations extends StatelessWidget {
 
   /// The two thresholds D-192 settled, named on the axis itself (§5).
   static String? _threshold(int mark) => switch (mark) {
-    KvBurial.safe => 'safe',
+    // `confirmed` rather than `safe`: it is the word the rung itself uses at
+    // this depth, so the threshold and the reading now say the same thing.
+    KvBurial.safe => 'confirmed',
     KvBurial.settled => 'final',
     _ => null,
   };
@@ -398,7 +451,12 @@ class _Graduations extends StatelessWidget {
             children: [
               for (var i = 0; i < marks.length; i++)
                 Positioned(
-                  left: width * i / (marks.length - 1),
+                  // **The label sits where its own mark is drawn**, not where
+                  // its index falls. Even-index spacing was correct only while
+                  // the scale was even quarters; the moment the scale became
+                  // piecewise it made the numerals disagree with the ink they
+                  // name, which is the exact failure BG-22 exists to prevent.
+                  left: width * KvBurialGauge.positionFor(marks[i]),
                   top: 0,
                   child: FractionalTranslation(
                     // Flush at the ends, centred in between — so no label
@@ -452,6 +510,11 @@ class KvBurialGaugePainter extends CustomPainter {
 
   /// Tick lengths below the band. The thousand mark is the tallest thing the
   /// painter draws, which is what makes it read as the end of the scale.
+  /// A sub-mark is deliberately shorter than the shortest labelled tick, so
+  /// the hierarchy reads at a glance: named decades stand off the line, their
+  /// subdivisions only graze it.
+  static const double subTick = 2;
+
   static const double shortTick = 3;
   static const double safeTick = 5;
   static const double finalTick = 8;
@@ -512,9 +575,26 @@ class KvBurialGaugePainter extends CustomPainter {
       ..color = n == null ? KvColor.etch : KvColor.inkMetaLow
       ..strokeWidth = 1
       ..isAntiAlias = false;
+    // **The sub-marks: one even rhythm across the whole track.** Every step of
+    // `1 / subDivisions` that is not already a labelled mark gets a short tick,
+    // so the spacing is identical everywhere and the labelled marks sit ON the
+    // grid rather than beside it. Drawn first, so a major tick is never
+    // overdrawn by a minor one landing on the same pixel.
+    final majors = KvBurialGauge.graduations
+        .map(KvBurialGauge.positionFor)
+        .toList();
+    for (var i = 1; i < KvBurialGauge.subDivisions; i++) {
+      final at = i / KvBurialGauge.subDivisions;
+      if (majors.any((m) => (m - at).abs() < 1e-9)) continue;
+      final x = (w * at).clamp(0.5, w - 0.5);
+      canvas.drawLine(Offset(x, band), Offset(x, band + subTick), tick);
+    }
+    // **Every tick stands where the SCALE puts it, not where its index falls.**
+    // Index spacing was right only while the scale was even quarters; under a
+    // piecewise scale it drew a ruler that disagreed with its own fill.
     const marks = KvBurialGauge.graduations;
     for (var i = 0; i < marks.length - 1; i++) {
-      final x = (w * i / (marks.length - 1)).clamp(0.5, w - 0.5);
+      final x = (w * KvBurialGauge.positionFor(marks[i])).clamp(0.5, w - 0.5);
       final len = marks[i] == KvBurial.safe ? safeTick : shortTick;
       canvas.drawLine(Offset(x, band), Offset(x, band + len), tick);
     }

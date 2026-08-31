@@ -24,6 +24,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 
 import 'support/preview_harness.dart';
+import 'support/finders.dart';
 
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
@@ -1033,7 +1034,7 @@ void main() {
       );
 
       // Leads with the honest cost (the fee), never the returning value.
-      expect(find.text('Costs you'), findsOneWidget);
+      expect(findRuledLabel('Costs you'), findsOneWidget);
       expect(find.text('Returns to you'), findsOneWidget);
       // The raw self "To" address is dropped (D-069).
       expect(find.textContaining('kaspa:'), findsNothing);
@@ -1101,7 +1102,7 @@ void main() {
       );
       // A bond pays the counterparty: To shown, amount headline, Total row.
       expect(find.textContaining('kaspa:'), findsOneWidget);
-      expect(find.text('Sending'), findsOneWidget);
+      expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.text('Total'), findsOneWidget);
       expect(find.text('Confirm contact request'), findsOneWidget);
     });
@@ -1121,9 +1122,9 @@ void main() {
       );
       // D-069 keeps bonds as REAL value to the counterparty: never the
       // self-send rendering.
-      expect(find.text('Costs you'), findsNothing);
+      expect(findRuledLabel('Costs you'), findsNothing);
       expect(find.text('Returns to you'), findsNothing);
-      expect(find.text('Sending'), findsOneWidget);
+      expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(find.text('Total'), findsOneWidget);
       expect(find.text('Confirm accept'), findsOneWidget);
@@ -1137,7 +1138,7 @@ void main() {
         _ceremony(_summary(kind: SignableKind.sweep, utxoCount: 7)),
       );
       expect(find.text('Confirm send all'), findsOneWidget);
-      expect(find.text('Sending'), findsOneWidget);
+      expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(find.textContaining('all 7 spendable coins move'), findsOneWidget);
       expect(find.text('Total'), findsOneWidget);
@@ -1159,7 +1160,7 @@ void main() {
       );
       expect(find.text('Confirm merge'), findsOneWidget);
       // The honest headline is the fee; the value returns to us.
-      expect(find.text('Costs you'), findsOneWidget);
+      expect(findRuledLabel('Costs you'), findsOneWidget);
       expect(find.text('Returns to you'), findsOneWidget);
       // Our own address is not rendered as a destination (D-069's rule).
       expect(find.textContaining('kaspa:'), findsNothing);
@@ -1275,7 +1276,7 @@ void main() {
         ),
       );
       expect(find.text('Confirm stake'), findsOneWidget);
-      expect(find.text('Sending'), findsOneWidget);
+      expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(
         find.text(
@@ -1498,7 +1499,11 @@ void main() {
         reason: 'the rail still names the question, not the answer',
       );
       // Three deliberate places: the rail, the verdict head, the ruled label.
-      expect(find.text('Sent'), findsNWidgets(3));
+      // The ruled label is now set in capitals, so it is counted by the widget
+      // rather than by the string — which is the more precise assertion anyway,
+      // because it names WHICH of the three each one is.
+      expect(find.text('Sent'), findsNWidgets(2));
+      expect(findRuledLabel('Sent'), findsOneWidget);
       expect(find.text('The network accepted it.'), findsOneWidget);
       // **No waiting language** — Kaspa accepts in about a second, and telling
       // a user to expect minutes is a false impression built from true words.
@@ -1534,7 +1539,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('View on explorer.kaspa.org'), findsOneWidget);
       expect(
-        find.text('it will see this transaction id and your network address'),
+        find.text('Shares the transaction ID and your IP address'),
         findsOneWidget,
       );
       // And the host is named ONCE — the disclosure says "it", because the
@@ -1709,7 +1714,8 @@ void main() {
         findsNothing,
         reason: 'a successful verdict must not carry a lamp',
       );
-      expect(find.text('Sent'), findsNWidgets(3));
+      expect(find.text('Sent'), findsNWidgets(2));
+      expect(findRuledLabel('Sent'), findsOneWidget);
 
       // The exceptions keep theirs.
       await settleWith(
@@ -1776,7 +1782,7 @@ void main() {
         (_) async =>
             SendOutcomeDto(submitted: 0, total: 1, partial: false, error: 'x'),
       );
-      expect(find.text('Sending'), findsOneWidget);
+      expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.text('Sent'), findsNothing);
     });
 

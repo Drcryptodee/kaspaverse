@@ -14,7 +14,6 @@ import '../widgets/kv_burial_mark.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_explorer_exit.dart';
 import '../widgets/kv_glyph.dart';
-import '../widgets/kv_surface.dart';
 import '../widgets/tx_status_chip.dart';
 
 /// **Transaction detail** — one transaction, at full size, with the burial
@@ -135,7 +134,7 @@ class TxDetailScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const KvRuledLabel('Burial'),
+              const KvRuledLabel('Depth'),
               const SizedBox(height: KvSpace.sm),
               KvBurialGauge(
                 state: gateByDepth(
@@ -159,7 +158,7 @@ class TxDetailScreen extends StatelessWidget {
               // a number that is not moving (BG-24; measured, `ux-auditor`,
               // UX-5). Reserved, the layout never moves at all, which is the
               // stronger property here.
-              const SizedBox(height: KvSpace.s),
+              const SizedBox(height: KvSpace.xs),
               AnimatedOpacity(
                 opacity: dim ? 1 : 0,
                 duration: KvMotion.fast,
@@ -177,14 +176,14 @@ class TxDetailScreen extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: KvSpace.xl),
+        const SizedBox(height: KvSpace.l),
         Entrance(
           index: 2,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // **`Recorded`, not `Accepted`, and the distinction is the one
-              // `ffi-leak-auditor` already made once on this project.**
+              const _Rule(),
+              // **`Time`, not `Accepted`, and the restraint is deliberate.**
               // `ActivityRecord.unixtimeMsec` is wallet-core's own
               // `TransactionRecord::unixtime_msec` — for a row observed live it
               // is `unixtime_as_millis_u64()`, the WALLET's clock at the moment
@@ -193,35 +192,55 @@ class TxDetailScreen extends StatelessWidget {
               // estimate. Neither is the accepting block's header timestamp.
               // The ceremony's `Accepted` line has that (`acceptedUnixMs`,
               // carried across the FFI for exactly this reason at UX-4B); this
-              // field does not, so it does not borrow the word.
-              const KvRuledLabel('Recorded'),
-              const SizedBox(height: KvSpace.xs),
-              Text(
-                // **The wallet's own recording moment, or a node's DAA→time
-                // estimate — never the accepting block's header timestamp**
-                // (see the label above, and the pin: `record.rs` sets this from
-                // `unixtime_as_millis_u64()` at every constructor, and
-                // `set_unixtime` from `get_daa_score_timestamp_estimate`).
-                // Absent, it renders the dash rather than a stamp the wallet
-                // invented (BG-5).
-                at == null
+              // field does not, so it does not borrow the word. `Time` states
+              // what is true of both sources without claiming either clock.
+              _Fact(
+                label: 'Time',
+                value: at == null
                     ? '—'
                     : formatStamp(
                         DateTime.fromMillisecondsSinceEpoch(at.toInt()),
                       ),
-                style: const TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: 13,
-                  height: 20 / 13,
-                  color: KvColor.inkDim,
-                  fontFeatures: [FontFeature.tabularFigures()],
+              ),
+              const _Rule(),
+              // **The accepting score when the DAG has one, the containing
+              // block's otherwise.** This is the number the depth is measured
+              // against — `KvBurial.depthOf` subtracts exactly this from the
+              // virtual DAA score — so putting it on the screen lets a reader
+              // check the gauge's arithmetic instead of trusting it.
+              _Fact(
+                label: 'DAA',
+                value: formatScore(
+                  record.acceptedDaaScore ?? record.blockDaaScore,
                 ),
               ),
+              const _Rule(),
+              // **The id belongs IN the table, not in a well of its own.** It
+              // is one more fact about this transaction, and giving it a card
+              // made the screen read as two unrelated regions. The tap still
+              // copies all 64 characters — a truncated txid is as useless as a
+              // truncated address.
+              _Fact(
+                label: 'Transaction id',
+                value: record.txid,
+                onTap: () async {
+                  await Clipboard.setData(ClipboardData(text: record.txid));
+                  KvHaptic.selection();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Transaction id copied'),
+                        duration: KvMotion.toast,
+                      ),
+                    );
+                  }
+                },
+              ),
+              const _Rule(),
             ],
           ),
         ),
-        const SizedBox(height: KvSpace.xl),
-        Entrance(index: 3, child: _TxId(txid: record.txid)),
+
         if (explorerUrl case final resolve?) ...[
           const SizedBox(height: KvSpace.xl),
           Entrance(
@@ -314,63 +333,6 @@ class _Head extends StatelessWidget {
 /// The reference number, at the foot of the record where a reference number
 /// goes — and tappable, because the one string on this screen a user wants to
 /// take somewhere else should not need a long-press-and-drag.
-class _TxId extends StatelessWidget {
-  const _TxId({required this.txid});
-
-  final String txid;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      const KvRuledLabel('Transaction id'),
-      const SizedBox(height: KvSpace.xs),
-      Semantics(
-        button: true,
-        label: 'Copy the transaction id',
-        child: InkWell(
-          onTap: () async {
-            // The tap copies ALL of it — a truncated txid is as useless as a
-            // truncated address — and says so, because a copy with no
-            // acknowledgement leaves the user tapping twice.
-            await Clipboard.setData(ClipboardData(text: txid));
-            KvHaptic.selection();
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Transaction id copied'),
-                  duration: KvMotion.toast,
-                ),
-              );
-            }
-          },
-          borderRadius: BorderRadius.circular(KvRadius.plate),
-          // **Grey, not teal** — the ledger row that navigates here presses in
-          // `keyPressed` and there is no ripple in this language, so a teal
-          // splash one tap later is two vocabularies for one gesture (BG-21).
-          // The theme's `glow` default is what supplies the teal.
-          highlightColor: KvColor.keyPressed,
-          splashFactory: NoSplash.splashFactory,
-          child: KvSurface(
-            tone: KvSurfaceTone.well,
-            width: double.infinity,
-            padding: const EdgeInsets.all(KvSpace.sm),
-            child: Text(
-              txid,
-              style: const TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: 13,
-                height: 20 / 13,
-                color: KvColor.ink,
-              ),
-            ),
-          ),
-        ),
-      ),
-    ],
-  );
-}
-
 /// The row left the feed while the screen was open — the list arrives already
 /// truncated by Rust, so this is reachable and is a state, not an error.
 class _Gone extends StatelessWidget {
@@ -422,4 +384,91 @@ class _Gone extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// One labelled fact: the name in a fixed left column, the value beside it.
+///
+/// **The label column is a fixed width and that is the whole point.** A table
+/// whose labels each take their own width has a ragged left edge and no column
+/// at all — the eye has nothing to run down. Fixed, `TIME`, `DAA` and
+/// `TRANSACTION ID` start on one line and their values start on another, which
+/// is what makes three facts read as a record rather than as three sentences.
+class _Fact extends StatelessWidget {
+  const _Fact({required this.label, required this.value, this.onTap});
+
+  /// Wide enough for `TRANSACTION ID` — the longest label the screen has — to
+  /// sit on ONE line. Measured, not guessed: at 104 it wrapped to `TRANSACTION`
+  /// over `ID`, which is a ragged column pretending to be a straight one.
+  static const double labelColumn = 122;
+
+  final String label;
+  final String value;
+
+  /// A fact that can be taken away with you. Only the id has one.
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final row = Padding(
+      padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: labelColumn,
+            child: Text(
+              label.toUpperCase(),
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 11,
+                height: 20 / 11,
+                letterSpacing: 0.9,
+                color: KvColor.inkMetaLow,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 13,
+                height: 20 / 13,
+                color: KvColor.ink,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (onTap == null) return row;
+    return Semantics(
+      button: true,
+      label: 'Copy the transaction id',
+      child: InkWell(
+        onTap: onTap,
+        // **Grey, not teal** — the ledger row that navigates here presses in
+        // `keyPressed` and there is no ripple in this language, so a teal
+        // splash one tap later is two vocabularies for one gesture (BG-21).
+        highlightColor: KvColor.keyPressed,
+        splashFactory: NoSplash.splashFactory,
+        child: row,
+      ),
+    );
+  }
+}
+
+/// The hairline that divides one fact from the next.
+///
+/// [KvColor.rowDivider] — **the Activity ledger's own rule** (founder, device
+/// sitting). `etch` is the gauge's track tone and is built to be seen; a table
+/// rule is built to be read past, and at table density the heavier tone drew
+/// the eye to the lines instead of to the facts between them.
+class _Rule extends StatelessWidget {
+  const _Rule();
+
+  @override
+  Widget build(BuildContext context) =>
+      Container(height: 1, color: KvColor.rowDivider);
 }

@@ -42,7 +42,6 @@ class KvExplorerExit extends StatefulWidget {
     required this.subject,
     required this.resolve,
     required this.open,
-    this.what = 'this transaction id',
   });
 
   /// The identifier being looked up — a txid or an address. Public chain data
@@ -57,9 +56,6 @@ class KvExplorerExit extends StatefulWidget {
   /// Hands a resolved URL to the platform. `false` means the phone has no
   /// browser at all — a fact about the device, said plainly.
   final Future<bool> Function(String url) open;
-
-  /// What the destination will be told, in the user's words.
-  final String what;
 
   @override
   State<KvExplorerExit> createState() => _KvExplorerExitState();
@@ -160,7 +156,7 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
       // name is not one you consented to).
       (final u?, _) when u.isNotEmpty && _host.isNotEmpty => (
         'View on $_host',
-        'it will see ${widget.what} and your network address',
+        'Shares the transaction ID and your IP address',
         true,
       ),
       (_, final r?) => (

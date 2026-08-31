@@ -176,8 +176,12 @@ void main() {
           ),
         ),
       );
-      expect(_styleOf(tester, '+ 12').color, KvColor.ok);
-      expect(_styleOf(tester, '+ 12').fontWeight, FontWeight.w600);
+      // **The hue rides the sign; the magnitude is neutral ink** (founder,
+      // device sitting 2026-08-31). Both channels are still present and both
+      // are still asserted — this now names which object carries each, which
+      // the single-string form could not.
+      expect(_styleOf(tester, '+12').color, KvColor.ink);
+      expect(_styleOf(tester, '+12').fontWeight, FontWeight.w600);
 
       await tester.pumpWidget(
         _host(
@@ -188,8 +192,8 @@ void main() {
           ),
         ),
       );
-      expect(_styleOf(tester, '− 12').color, KvColor.risk);
-      expect(_styleOf(tester, '− 12').fontWeight, FontWeight.w400);
+      expect(_styleOf(tester, '−12').color, KvColor.ink);
+      expect(_styleOf(tester, '−12').fontWeight, FontWeight.w400);
 
       await tester.pumpWidget(
         _host(KvAmount(BigInt.from(1240000000), role: KvAmountRole.row)),

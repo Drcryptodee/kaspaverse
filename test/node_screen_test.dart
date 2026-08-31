@@ -12,6 +12,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 
 /// A stand-in for `ChainService`'s node seam. Nothing here talks to Rust; the
 /// screen's whole contract is these notifiers and this one call.
@@ -1144,6 +1145,57 @@ void main() {
         find.textContaining('Nothing is fetched'),
         findsOneWidget,
         reason: 'the off state says what it means, not just that it is off',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a control with something to commit LIGHTS UP (BG-12a)', (
+      tester,
+    ) async {
+      // **The defect this pins, found on glass.** Every commit control on this
+      // screen was the same grey whether it had a change to write or not, so
+      // the one question the user asks it — *did my edit register?* — was the
+      // one thing it would not answer. Send has always worked this way; the
+      // settings surfaces did not, and the inconsistency read as the whole
+      // screen being dead (founder, device sitting 2026-08-31).
+      //
+      // Measured as the EDGE the control actually paints, not as a bool it was
+      // handed: the armed tone is `primaryMuted`, the teal edge D-223 gave
+      // `Send max`, and the resting tone is `edgeHi`.
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        explorer: _FakeExplorer(),
+        height: 2400,
+      );
+      await tester.pumpAndSettle();
+
+      Color? edgeOf(String label) {
+        final surface = tester.widget<KvSurface>(
+          find
+              .ancestor(of: find.text(label), matching: find.byType(KvSurface))
+              .first,
+        );
+        return surface.edge;
+      }
+
+      await tester.ensureVisible(find.text('Use this explorer'));
+      await tester.pumpAndSettle();
+      expect(
+        edgeOf('Use this explorer'),
+        KvColor.edgeHi,
+        reason: 'nothing has changed, so there is nothing to commit',
+      );
+
+      await tester.enterText(
+        find.text('https://explorer.kaspa.org/txs/{txid}'),
+        'https://kaspa.stream/txs/{txid}',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        edgeOf('Use this explorer'),
+        KvColor.primaryMuted,
+        reason: 'an edited link is a change the control can now write',
       );
       await tester.pumpWidget(const SizedBox());
     });

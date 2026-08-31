@@ -36,8 +36,17 @@ class QrTile extends StatefulWidget {
   /// gives `4 * side / (modules + 8)` — so the margin is derived from the
   /// matrix the address actually produced, and a longer payload (more modules,
   /// smaller cells) cannot silently erode it. The 16 dp in the design bible is
-  /// the floor, not the rule: at 240 dp and 53 modules the four-module
-  /// requirement is 15.74 dp, which is why 16 has held.
+  /// the floor, not the rule — **and the floor never binds for a real address.**
+  ///
+  /// Measured on glass 2026-08-31 and confirmed against the pinned encoder: a
+  /// 67-character `kaspa:` address is **37 modules**, so the requirement is
+  /// `4 * 240 / 45 = 21.33 dp` and the rendered tile carries exactly that on all
+  /// four sides (64px at density 3.0, `quiet/cell = 4.000`). An earlier version
+  /// of this comment said *53 modules* and *15.74 dp*, and concluded that 16 dp
+  /// "has held" — both numbers wrong and the reasoning inverted. It mattered:
+  /// anyone trusting it and simplifying back to a fixed 16 dp would ship **3.0
+  /// modules** of quiet zone, under spec, which is the exact regression this
+  /// function exists to prevent.
   static double quietZone(int modules, double side) {
     final needed = 4 * side / (modules + 8);
     return needed > KvSpace.m ? needed : KvSpace.m;

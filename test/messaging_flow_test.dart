@@ -12,6 +12,7 @@ import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
+import 'support/finders.dart';
 
 ConversationDto conversation(
   String id, {
@@ -1778,7 +1779,7 @@ void main() {
       // value is shown as returning to you — not a cost.
       expect(find.text('Hold to send message'), findsOneWidget);
       expect(find.textContaining('Hold to send 0.12000000'), findsNothing);
-      expect(find.text('Costs you'), findsOneWidget);
+      expect(findRuledLabel('Costs you'), findsOneWidget);
       expect(find.text('Returns to you'), findsOneWidget);
     });
 

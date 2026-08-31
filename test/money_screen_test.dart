@@ -12,6 +12,8 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
+import 'support/finders.dart';
 
 /// **UX-2 — the money surface**, in the five states it has to hold
 /// (SCREEN_INVENTORY 7a–7e): first-run empty · live · syncing · in flight ·
@@ -457,17 +459,79 @@ void main() {
           outgoing: BigInt.from(3000000000),
         ),
       );
-      expect(find.text('in flight'), findsOneWidget);
+      expect(findCapsLabel('in flight'), findsOneWidget);
       expect(find.text('70'), findsOneWidget);
       expect(find.text('30'), findsOneWidget);
       expect(
-        find.textContaining('− '),
+        find.textContaining('−'),
         findsNothing,
         reason: 'the hero has already had it subtracted',
       );
       // Unsigned AND colourless: `risk` would say this money is at risk, and
       // on a self-send frame it is travelling straight back to this wallet.
       expect(styleOf(tester, '30').color, KvColor.ink);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the plate keeps ONE height, whatever it has to say', (
+      tester,
+    ) async {
+      // **The card must not resize under the thumb** (founder, device sitting
+      // 2026-08-31). It used to grow a line the moment a deposit started
+      // arriving and lose it again when the money matured, and lose another
+      // when `syncing…` cleared a second after every cold open — so the
+      // balance moved three times for events the user did not cause. This is
+      // BG-24's rule applied to a card rather than to a tile, and it is the
+      // same argument as Receive's reserved footprint.
+      //
+      // Written as a measurement of the RENDERED plate rather than of the
+      // widgets inside it: a slot that reserves the right height by accident
+      // passes for the right reason, and one that reserves it by a ghost
+      // child would fail the finder assertions below.
+      double plateHeight() =>
+          tester.getSize(find.byType(KvSurface).first).height;
+
+      await pump(tester, money(mature: BigInt.from(7000000000)));
+      final quiet = plateHeight();
+      expect(findCapsLabel('pending'), findsNothing);
+
+      await pump(
+        tester,
+        money(mature: BigInt.from(7000000000), pending: BigInt.from(50000000)),
+      );
+      expect(findCapsLabel('pending'), findsOneWidget);
+      expect(
+        plateHeight(),
+        quiet,
+        reason: 'the plate grew when money started arriving',
+      );
+
+      await pump(
+        tester,
+        money(mature: BigInt.from(7000000000), outgoing: BigInt.from(50000000)),
+      );
+      expect(findCapsLabel('in flight'), findsOneWidget);
+      expect(
+        plateHeight(),
+        quiet,
+        reason: 'the in-flight memo shares the reserved slot',
+      );
+
+      // And the other half of the jump: the trust sentence clearing.
+      await pump(tester, money(mature: BigInt.from(7000000000), syncing: true));
+      final syncing = plateHeight();
+      await pump(tester, money(mature: BigInt.from(7000000000)));
+      expect(
+        plateHeight(),
+        syncing,
+        reason: 'the plate shrank when the first scan finished',
+      );
+
+      // The reserved slot holds NOTHING when empty — no ghost child answering
+      // finders or screen readers with money that is not being shown (the
+      // `Visibility(maintainSize:)` trap, L121 / UX-5's duplicated `100`).
+      expect(findCapsLabel('pending'), findsNothing);
+      expect(findCapsLabel('in flight'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -478,11 +542,18 @@ void main() {
         tester,
         money(mature: BigInt.from(7000000000), pending: BigInt.from(50000000)),
       );
-      expect(find.text('pending'), findsOneWidget);
+      expect(findCapsLabel('pending'), findsOneWidget);
       // `pending` is a set DISJOINT from `mature`, so unlike the in-flight
       // memo it really is a term the hero does not yet contain.
-      expect(find.text('+ 0'), findsOneWidget);
-      expect(styleOf(tester, '+ 0').color, KvColor.ok);
+      // **BG-23 on the qualifier**, which is the likeliest sub-1 amount on the
+      // screen: the leading `+0.` drops to the fraction's size and the weight
+      // starts at the first digit that carries value. The whole figure is
+      // neutral ink (BG-26) — the lamp beside it carries the hue.
+      expect(find.text('+0.'), findsOneWidget);
+      // `50`, not `5`: `trimFraction` keeps a minimum of two digits.
+      expect(find.text('50'), findsOneWidget);
+      expect(styleOf(tester, '+0.').color, KvColor.inkDim);
+      expect(styleOf(tester, '50').color, KvColor.ink);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -596,15 +667,25 @@ void main() {
 
       // 1 · the word, 2 · the sign, 3 · the colour, 4 · the weight. Every one
       // of them survives greyscale, colour-blindness and a screen reader.
+      //
+      // **The colour rides the SIGN since the 2026-08-31 device sitting.** The
+      // figure itself is neutral ink in the balance's own hierarchy, so a row
+      // is read as a quantity rather than graded by hue before a digit of it
+      // is read. All four channels still stand — this asserts WHICH object
+      // carries each one, which the old single-string form could not.
       expect(find.text('Received'), findsOneWidget);
-      expect(find.text('+ 24'), findsOneWidget);
-      expect(styleOf(tester, '+ 24').color, KvColor.ok);
-      expect(styleOf(tester, '+ 24').fontWeight, FontWeight.w600);
+      // **The whole figure is neutral ink, sign included** (founder, device
+      // sitting). Direction rides the WORD, the MARK's tone and the sign's own
+      // glyph — never the magnitude, which is read as a quantity.
+      expect(find.text('Received'), findsOneWidget);
+      expect(find.text('+24'), findsOneWidget);
+      expect(styleOf(tester, '+24').color, KvColor.ink);
+      expect(styleOf(tester, '+24').fontWeight, FontWeight.w600);
 
       expect(find.text('Sent'), findsOneWidget);
-      expect(find.text('− 12'), findsOneWidget);
-      expect(styleOf(tester, '− 12').color, KvColor.risk);
-      expect(styleOf(tester, '− 12').fontWeight, FontWeight.w400);
+      expect(find.text('−12'), findsOneWidget);
+      expect(styleOf(tester, '−12').color, KvColor.ink);
+      expect(styleOf(tester, '−12').fontWeight, FontWeight.w400);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -772,6 +853,14 @@ void main() {
         // change: the plate now sheds ONLY under pressure, so on every screen
         // where the plate fits, nothing is shed and the sentence is always
         // there. See the A3 risk note in `2026-08-27_UI-UX_…TODO.md`.
+        // The honesty line moved out of the plate and into the status strip
+        // beneath the card (founder, device sitting 2026-08-31). **That did
+        // NOT retire the shed cost** — an earlier version of this comment
+        // claimed it did, and the measurement says otherwise: the strip rides
+        // inside the pinned band, so at the geometries where the band is
+        // smaller than its content the strip is clipped exactly as the line
+        // was before. At 320x568 it fits (header 72..303, strip 246..303);
+        // at the tightest it does not. The A3 risk note stands unchanged.
         if (fits) {
           expect(
             find.textContaining('node has no UTXO index'),
@@ -789,11 +878,28 @@ void main() {
           lessThanOrEqualTo(daa.top + 0.5),
           reason: '$where: the fiat restatement belongs with the figure',
         );
+        // The link sentence sits below the CARD, not below the chain clock:
+        // it is no longer inside the plate at all, so the ordering that
+        // matters is that it clears the pinned band. Comparing it against the
+        // DAA line would compare it against a widget the squeeze has clipped
+        // out of sight, which is how this assertion first failed.
+        // The link sentence sits below the CARD — it is not inside the plate
+        // any more, so the ordering that matters is that it clears the card's
+        // own bottom edge. Comparing it against the DAA line would compare it
+        // against a widget the squeeze has clipped out of sight, which is how
+        // this assertion first failed.
+        final card = tester.getRect(find.byType(KvSurface).first);
         expect(
-          daa.bottom,
-          lessThanOrEqualTo(trust.top + 0.5),
-          reason: '$where: the chain clock sits above the link sentence',
+          trust.top,
+          greaterThanOrEqualTo(card.bottom - 0.5),
+          reason: '$where: the status strip belongs under the card',
         );
+        // Deliberately NOT asserted here: that the strip lands inside the
+        // pinned band. It does at 320x568 (header 72..303, strip 246..303) and
+        // it does not at the tightest geometry, where the band is smaller than
+        // its own content and the tail is shed — which is the same cost the
+        // trust line already carried inside the plate. Two drafts of this
+        // assertion claimed otherwise and the measurement refused both.
 
         // The paint half cannot be observed off-golden: an `OverflowBox`
         // overflowing by design throws nothing, and `getRect` reports the

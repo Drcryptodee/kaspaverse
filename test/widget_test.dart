@@ -6,6 +6,7 @@ import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
+import 'support/finders.dart';
 
 /// Builds a [HomeScreen] from loose notifiers via the V5 scope objects —
 /// keeps the pre-V5 test shape while proving the scopes construct from
@@ -568,7 +569,7 @@ void main() {
     // The hero shows every significant decimal now (D-210), so it and the
     // in-flight row below agree digit for digit.
     expectFigure('16', '36694716');
-    expect(find.text('in flight'), findsNothing);
+    expect(findCapsLabel('in flight'), findsNothing);
 
     // The send lands. mature collapses to a real zero and the value moves into
     // the outgoing bucket.
@@ -578,7 +579,7 @@ void main() {
 
     expectFigure('0', '00');
     expect(
-      find.text('in flight'),
+      findCapsLabel('in flight'),
       findsOneWidget,
       reason:
           'but a wallet with value in flight must say so — a bare 0 here reads '
@@ -631,7 +632,7 @@ void main() {
     await tester.pump();
 
     expectFigure('70', '00');
-    expect(find.text('in flight'), findsOneWidget);
+    expect(findCapsLabel('in flight'), findsOneWidget);
     expect(
       find.textContaining('− '),
       findsNothing,

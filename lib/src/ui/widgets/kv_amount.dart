@@ -182,17 +182,21 @@ class KvAmount extends StatelessWidget {
     KvAmountRole.row => 15,
   };
 
-  Color get _tone => switch (direction) {
-    KvMoneyDirection.incoming => KvColor.ok,
-    KvMoneyDirection.outgoing => KvColor.risk,
-    KvMoneyDirection.internal => KvColor.ink,
-  };
+  /// **The figure is neutral ink, sign included** (founder, UX-5 device
+  /// sitting — it amends BG-7's colour channel).
+  ///
+  /// A whole figure painted green or red made every ledger row a coloured
+  /// object, so the eye graded the SIZE of the money by its hue before it read
+  /// a digit. Moving the hue onto the sign fixed that but left a one-glyph
+  /// splash of colour on an otherwise neutral number; the sign is now neutral
+  /// too, and direction rides the WORD, the MARK's tone and the sign's own
+  /// glyph — three channels, none of them the magnitude itself.
+  ///
+  /// There is deliberately **no `_signTone`**: a getter that returns the same
+  /// value as [_digitTone] is scaffolding pretending to be a decision.
+  Color get _digitTone => KvColor.ink;
 
-  /// A directional amount is one coloured number: splitting the hue across
-  /// integer and fraction would weaken the very signal the hue is carrying.
-  /// Only the neutral case takes the ink/inkDim hierarchy.
-  Color get _fractionTone =>
-      direction == KvMoneyDirection.internal ? KvColor.inkDim : _tone;
+  Color get _fractionTone => KvColor.inkDim;
 
   FontWeight get _weight => switch (role) {
     // §2: incoming 600, outgoing 400, internal unsigned 400.
@@ -204,8 +208,8 @@ class KvAmount extends StatelessWidget {
   };
 
   String get _sign => switch (direction) {
-    KvMoneyDirection.incoming => '+ ',
-    KvMoneyDirection.outgoing => '− ',
+    KvMoneyDirection.incoming => '+',
+    KvMoneyDirection.outgoing => '−',
     KvMoneyDirection.internal => '',
   };
 
@@ -235,6 +239,9 @@ class KvAmount extends StatelessWidget {
   /// the property the guard pins: **a defaulted parameter that changed a shipped
   /// pixel would be a canon change wearing a proposal's clothes.**
   List<(String, bool)> _runs(String integer, String fraction) {
+    // **Tight against the digits.** `'+ 12.40'` put a full mono space between
+    // the sign and the magnitude, which read as two objects; `+12.40` is one
+    // number with a sign on it, which is what it is.
     final head = '$_sign$integer';
     final tail = fraction.isEmpty ? '' : '.$fraction';
     // Above 1 the integer IS the magnitude, so every candidate agrees with the
@@ -358,7 +365,7 @@ class KvAmount extends StatelessWidget {
                     letterSpacing: strong && role == KvAmountRole.hero
                         ? -0.5
                         : 0,
-                    color: strong ? _tone : _fractionTone,
+                    color: strong ? _digitTone : _fractionTone,
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
                 ),

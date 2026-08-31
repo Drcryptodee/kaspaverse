@@ -135,6 +135,36 @@ Widget _home() => HomeScreen(
   settingsRoute: (_) => const SizedBox.shrink(),
 );
 
+/// The money screen **with news**: a deposit arriving, a send still in flight,
+/// and a link the wallet cannot fully trust — the three things that used to
+/// resize the balance card and now share the status panel beneath it (BG-28).
+///
+/// It exists because `home__funded` renders none of them, so the panel was
+/// absent from every contact sheet and the first version of it shipped unlooked
+/// at. Same class as the `Send max` fixture gap (D-229); L125 again — a fixture
+/// is a claim, and a missing one is a claim that a state does not exist.
+Widget _homeStatus() => HomeScreen(
+  chain: ChainScope(
+    connected: ValueNotifier(true),
+    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
+    error: ValueNotifier<String?>(null),
+    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16, 29)),
+  ),
+  wallet: WalletScope(
+    mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
+    pending: ValueNotifier<BigInt?>(BigInt.from(20035640)),
+    outgoing: ValueNotifier<BigInt?>(BigInt.from(100000000)),
+    activity: ValueNotifier(_activity()),
+    syncing: ValueNotifier(true),
+    utxoIndexMissing: ValueNotifier(false),
+  ),
+  clock: () => DateTime(2026, 8, 30, 11, 16, 30),
+  receiveRoute: (_) => const SizedBox.shrink(),
+  sendRoute: (_, _) => const SizedBox.shrink(),
+  messagesRoute: (_) => const SizedBox.shrink(),
+  settingsRoute: (_) => const SizedBox.shrink(),
+);
+
 /// Types an amount on the pad and pastes a destination — the state in which the
 /// send screen actually has a fee, an address review and a live Review button.
 Future<void> _typeASend(WidgetTester tester) async {
@@ -280,6 +310,7 @@ void main() {
 
   group('surface previews (tier 2 — no device)', () {
     surface('home__funded', _home);
+    surface('home__status', _homeStatus);
     surface('receive__address', () => ReceiveScreen(fetch: () async => _addr));
 
     // **The failed state, at the same footprint** — the composition UX-5 owes

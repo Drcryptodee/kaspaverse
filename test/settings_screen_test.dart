@@ -12,6 +12,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 
 import 'support/preview_harness.dart';
+import 'support/finders.dart';
 
 void main() {
   setUpAll(loadBundledFonts);
@@ -111,7 +112,7 @@ void main() {
       expect(find.text('Settings'), findsWidgets);
       // Every section the registry declares is on the glass.
       for (final section in ['Security', 'Wallet', 'Network', 'About']) {
-        expect(find.text(section), findsOneWidget, reason: section);
+        expect(findRuledLabel(section), findsOneWidget, reason: section);
       }
       semantics.dispose();
     },
@@ -369,11 +370,11 @@ void main() {
     tester,
   ) async {
     await pump(tester, screen(withNetwork: false));
-    expect(find.text('Network'), findsNothing);
+    expect(findRuledLabel('Network'), findsNothing);
     expect(find.text('Node & connection'), findsNothing);
     // The custody domains are untouched by the absence.
-    expect(find.text('Security'), findsOneWidget);
-    expect(find.text('About'), findsOneWidget);
+    expect(findRuledLabel('Security'), findsOneWidget);
+    expect(findRuledLabel('About'), findsOneWidget);
   });
 
   testWidgets("what a PLANNED destination says, when tapped", (tester) async {
@@ -625,7 +626,7 @@ void main() {
       // The same anti-blind-signing sheet every send uses (B7): kind-derived
       // title, fee-led headline, the absorbed count from the DTO.
       expect(find.text('Confirm merge'), findsOneWidget);
-      expect(find.text('Costs you'), findsOneWidget);
+      expect(findRuledLabel('Costs you'), findsOneWidget);
       expect(find.textContaining('Merges 22 coins into one'), findsOneWidget);
     });
 

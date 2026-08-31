@@ -1517,6 +1517,20 @@ class _Action extends StatelessWidget {
             onTap: enabled ? onTap : null,
             borderRadius: BorderRadius.circular(KvRadius.control),
             child: KvSurface.control(
+              // **A control with something to commit is LIT** (founder, device
+              // sitting 2026-08-31). Every commit button on this screen was
+              // the same grey whether it had a change to write or not, so the
+              // one question the user is asking it — *did my edit take?* —
+              // was the one thing it would not answer. Send already works this
+              // way; settings did not, and the inconsistency read as the whole
+              // settings surface being dead.
+              //
+              // The edge is [KvColor.primaryMuted], the teal edge D-223 gave
+              // `Send max` — the app's existing armed-edge token, not a new
+              // one. `enabled` is already exactly "there is a change to save":
+              // each call site computes it as such, and states the negative in
+              // words underneath (BG-12).
+              edge: enabled ? KvColor.primaryMuted : KvColor.edgeHi,
               width: double.infinity,
               height: KvSpace.control,
               alignment: Alignment.center,

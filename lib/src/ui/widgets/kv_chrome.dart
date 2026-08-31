@@ -110,11 +110,19 @@ class KvRuledLabel extends StatelessWidget {
       // can be wider than a 320dp gutter leaves it.
       Flexible(
         child: Text(
-          text,
+          // **Section labels are set in capitals** (UX-5 device sitting).
+          // A ruled label is chrome, not content: caps on a wider track read
+          // as a machined heading and stop competing with the datum beneath
+          // them, which on the transaction detail is the entire point of the
+          // screen. The size drops a point because caps carry more visual
+          // weight than lowercase at the same ramp — still clear of BG-14's
+          // 11 dp floor.
+          text.toUpperCase(),
           style: const TextStyle(
             fontFamily: KvFont.ui,
-            fontSize: 13,
-            height: 18 / 13,
+            fontSize: 12,
+            height: 16 / 12,
+            letterSpacing: 0.8,
             color: KvColor.inkDim,
           ),
         ),

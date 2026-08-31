@@ -35,7 +35,25 @@ void main() {
     test(
       'every graduation is a decade of the ratified ladder, plus its origin',
       () {
-        expect(KvBurialGauge.graduations, [0, 1, 10, 100, 1000]);
+        // The LABELLED ladder is `0 · 10 · 100 · 1,000` (founder, device
+        // sitting). `1` became a sub-mark: it is still drawn, and still has
+        // somewhere to be, but naming every decade in a third of the track
+        // crowded the labels the eye actually navigates by.
+        expect(KvBurialGauge.graduations, [0, 10, 100, 1000]);
+        // And the sub-marks are the subdivisions of the very decades the
+        // labels name — never arbitrary ink between them.
+        // Every labelled mark lands exactly on the sub-mark grid, which is
+        // what makes the ruler one even rhythm instead of a major scale with
+        // a minor one laid over it at a different pitch.
+        for (final n in KvBurialGauge.graduations) {
+          final steps =
+              KvBurialGauge.positionFor(n) * KvBurialGauge.subDivisions;
+          expect(
+            (steps - steps.roundToDouble()).abs(),
+            lessThan(1e-9),
+            reason: '$n sits between two sub-marks instead of on one',
+          );
+        }
         // The two thresholds D-192 settled are marks on the axis, not thresholds
         // the reader has to be told about somewhere else.
         expect(KvBurialGauge.graduations, contains(KvBurial.safe));
@@ -43,23 +61,83 @@ void main() {
       },
     );
 
-    test('the marks are evenly spaced, which is what declares a log axis', () {
+    test('the marks sit where the PIECEWISE scale puts them', () {
+      // Superseded 2026-08-31 (device sitting): the marks used to be at even
+      // quarters. They are now `[0, 1/9, 2/9, 1/3, 1]` — three decades sharing
+      // the first third, one decade taking the other two.
       final xs = KvBurialGauge.graduations
           .map(KvBurialGauge.positionFor)
           .toList();
-      expect(xs, [0, 0.25, 0.5, 0.75, 1.0]);
+      expect(xs[0], 0);
+      expect(xs[1], closeTo(KvBurialGauge.tenAt, 1e-12));
+      expect(xs[2], closeTo(KvBurialGauge.safeAt, 1e-12));
+      expect(xs[3], 1);
+      // **`10` is the exact centre of `0 … 100`** (founder, device sitting).
+      expect(xs[1], closeTo(xs[2] / 2, 1e-12));
     });
 
-    test('a decade of data is a quarter of the track, at every decade', () {
-      // The Lie Factor identity on the DECLARED scale: equal ratios in the
-      // data are equal distances in the graphic.
-      for (final (a, b) in const [(1, 10), (10, 100), (100, 1000)]) {
+    test('the decade that carries the decision gets two thirds', () {
+      // **The reason for the rescale, kept as arithmetic.** On the even-quarter
+      // scale `100 → 1,000` was a quarter of the track, and a real send
+      // measured on glass climbing 981 → 1,000 moved the fill TWO PIXELS. The
+      // decade a user is actually waiting through now owns the majority of the
+      // graphic.
+      final safeToFinal =
+          KvBurialGauge.positionFor(1000) -
+          KvBurialGauge.positionFor(KvBurial.safe);
+      expect(safeToFinal, closeTo(2 / 3, 1e-12));
+      // And the two below it split the remaining third evenly: `0 → 10` and
+      // `10 → 100` are one sixth each.
+      expect(
+        KvBurialGauge.positionFor(10) - KvBurialGauge.positionFor(0),
+        closeTo(1 / 6, 1e-12),
+      );
+      expect(
+        KvBurialGauge.positionFor(100) - KvBurialGauge.positionFor(10),
+        closeTo(1 / 6, 1e-12),
+      );
+    });
+
+    test('the scale is MONOTONE across the break, and never steps back', () {
+      // A piecewise scale earns exactly one new way to be wrong: a
+      // discontinuity at the join. Walk the boundary and the whole range.
+      var previous = -1.0;
+      for (final n in [
+        0,
+        1,
+        2,
+        9,
+        10,
+        11,
+        98,
+        99,
+        100,
+        101,
+        102,
+        500,
+        998,
+        999,
+        1000,
+      ]) {
+        final x = KvBurialGauge.positionFor(n);
         expect(
-          KvBurialGauge.positionFor(b) - KvBurialGauge.positionFor(a),
-          closeTo(0.25, 1e-12),
-          reason: '$a → $b is one decade and must be one quarter of the track',
+          x,
+          greaterThanOrEqualTo(previous),
+          reason: 'depth $n went BACKWARDS on the track',
         );
+        previous = x;
       }
+      // The join itself is continuous: 100 approached from either side is the
+      // same point, which is what stops the fill jumping as it crosses.
+      expect(
+        KvBurialGauge.positionFor(100),
+        closeTo(KvBurialGauge.safeAt, 1e-12),
+      );
+      expect(
+        KvBurialGauge.positionFor(101) - KvBurialGauge.positionFor(100),
+        lessThan(0.01),
+        reason: 'a visible step at the join would be a discontinuity',
+      );
     });
 
     test('the scale ends where finality does, and never runs past it', () {
@@ -381,7 +459,22 @@ void main() {
       await tester.pump();
       final ink = _Ink.of(tester);
       final ticks = ink.verticalTicks;
-      expect(ticks, hasLength(KvBurialGauge.graduations.length));
+      // Every labelled mark, plus every step of the sub-grid that is not
+      // already one of them. Derived from the constants so the count cannot
+      // drift from the drawing.
+      final majors = KvBurialGauge.graduations
+          .map(KvBurialGauge.positionFor)
+          .toList();
+      var subs = 0;
+      for (var i = 1; i < KvBurialGauge.subDivisions; i++) {
+        final at = i / KvBurialGauge.subDivisions;
+        if (!majors.any((m) => (m - at).abs() < 1e-9)) subs++;
+      }
+      expect(
+        ticks,
+        hasLength(KvBurialGauge.graduations.length + subs),
+        reason: 'every labelled mark and every sub-mark is drawn',
+      );
       final last = ticks.last;
       for (final tick in ticks.take(ticks.length - 1)) {
         expect(
@@ -624,16 +717,24 @@ void main() {
     testWidgets('the name and every decade are on the glass', (tester) async {
       await tester.pumpWidget(_host(_gauge(42)));
       await tester.pump();
-      expect(find.text(KvBurialGauge.axisName), findsOneWidget);
-      for (final label in const ['0', '1', '10', '100', '1,000']) {
+      // **The axis name is no longer drawn beside the reading** — the `DEPTH`
+      // section heading names it, louder and higher than a dimmed 11 dp label
+      // at the far end of the line ever did (founder's call, device sitting).
+      // BG-22 asks for a NAMED axis, not an inline one. It survives as the
+      // spoken form, asserted below, because a screen reader arriving at the
+      // gauge has no heading in earshot.
+      expect(find.text(KvBurialGauge.axisName), findsNothing);
+      for (final label in const ['0', '10', '100', '1,000']) {
         expect(
           find.text(label),
           findsOneWidget,
           reason: 'a log scale is honest only where every decade is labelled',
         );
       }
-      // Both thresholds are named where they fall (D-192, §5).
-      expect(find.text('safe'), findsOneWidget);
+      // Both thresholds are named where they fall (D-192, §5). `confirmed`
+      // rather than `safe` since the device sitting: the threshold now uses the
+      // same word the rung uses at that depth.
+      expect(find.text('confirmed'), findsOneWidget);
       expect(find.text('final'), findsOneWidget);
     });
 

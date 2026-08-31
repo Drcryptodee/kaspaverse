@@ -12,6 +12,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
 
 import 'support/preview_harness.dart';
+import 'support/finders.dart';
 
 const _txid =
     'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34';
@@ -52,6 +53,17 @@ void main() {
     stale: ValueNotifier<bool>(false),
   );
 
+  /// The default test surface is 800x600 — wider and shorter than a phone.
+  /// The transaction detail is a `ListView`, so anything past that boundary is
+  /// never BUILT and every finder returns nothing, which reads exactly like a
+  /// missing widget. These tests reach the bottom of the screen, so they are
+  /// given the reference device's real geometry (360x820dp at 3.0).
+  void phone(WidgetTester tester) {
+    tester.view.physicalSize = const Size(1080, 2460);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+  }
+
   Widget host(
     ({
       ValueNotifier<List<ActivityRecord>> activity,
@@ -91,16 +103,27 @@ void main() {
     // on this surface that states the burial.
     expect(find.byType(KvBurialGauge), findsOneWidget);
     expect(find.text('Seen 42'), findsOneWidget);
-    expect(find.text('blocks deep'), findsOneWidget);
+    // The axis is named by the `DEPTH` heading now, not beside the reading
+    // (founder, device sitting). BG-22 asks for a named axis, not an inline
+    // one; the spoken form still carries `blocks deep`, asserted in
+    // `burial_gauge_test`.
+    expect(find.text(KvBurialGauge.axisName), findsNothing);
+    expect(findRuledLabel('Depth'), findsOneWidget);
     // **The record's own moment, under a label that does not overclaim it.**
     // `unixtimeMsec` is wallet-core's recording time (or a node's DAA→time
     // estimate) — never the accepting block's header timestamp — so the label
-    // is `Recorded` and not `Accepted`, which is the ceremony's word for the
-    // field that genuinely carries the chain's moment. Asserted against the
-    // record's OWN unix ms, so a screen that reached for `DateTime.now()`
-    // fails here rather than looking plausible.
-    expect(find.text('Recorded'), findsOneWidget);
+    // is `Time` and not `Accepted`, which is the ceremony's word for the field
+    // that genuinely carries the chain's moment. Asserted against the record's
+    // OWN unix ms, so a screen that reached for `DateTime.now()` fails here
+    // rather than looking plausible.
+    // A `_Fact` row, not a ruled heading — the lower half of this screen is a
+    // table now, so the labels are set in caps by the row itself.
+    expect(find.text('TIME'), findsOneWidget);
+    expect(find.text('ACCEPTED'), findsNothing);
     expect(find.text('Accepted'), findsNothing);
+    // The accepting score is on the glass beside it, so a reader can check the
+    // gauge's arithmetic rather than trust it.
+    expect(find.text('DAA'), findsOneWidget);
     expect(
       find.text(formatStamp(DateTime.fromMillisecondsSinceEpoch(_recordedMs))),
       findsOneWidget,
@@ -250,6 +273,7 @@ void main() {
     });
 
     testWidgets('names the destination and what it hands over', (tester) async {
+      phone(tester);
       String? opened;
       await tester.pumpWidget(
         host(
@@ -265,7 +289,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('View on kaspa.stream'), findsOneWidget);
       expect(
-        find.text('it will see this transaction id and your network address'),
+        find.text('Shares the transaction ID and your IP address'),
         findsOneWidget,
       );
       await tester.tap(find.byType(KvExplorerExit));
@@ -274,6 +298,7 @@ void main() {
     });
 
     testWidgets('a link it cannot NAME is refused, not opened', (tester) async {
+      phone(tester);
       // `validate_template` requires https and a non-empty authority and
       // refuses credentials — but never checks the authority parses as a host.
       // `https://:8080/txs/{txid}` passes Rust and came back here with an empty
@@ -302,6 +327,7 @@ void main() {
     testWidgets('a platform throw is said out loud, never swallowed', (
       tester,
     ) async {
+      phone(tester);
       // An unhandled throw out of `onTap` is a control that visibly does
       // nothing — the BG-12 shape this widget exists to eliminate.
       await tester.pumpWidget(
@@ -328,6 +354,7 @@ void main() {
     testWidgets('a refused template is disabled and says what to fix', (
       tester,
     ) async {
+      phone(tester);
       var opened = false;
       await tester.pumpWidget(
         host(
