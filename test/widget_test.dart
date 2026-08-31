@@ -181,10 +181,27 @@ void main() {
     expect(find.text('Not accepted yet'), findsOneWidget); // stalled, honest
     expect(
       find.byWidgetPredicate(
-        (w) => w is Text && (w.data == 'Confirmed' || w.data == 'final'),
+        (w) =>
+            w is Text &&
+            (w.data == 'Confirmed' ||
+                w.data == 'Confirmed —' ||
+                w.data == 'final'),
       ),
       findsWidgets,
       reason: 'a settled row states its burial rather than going quiet',
+    );
+    // **And it does not overstate what it knows** (BG-20, UX-5). Both `b` and
+    // `d` are outgoing sends with no acceptance DAA, so a depth cannot be
+    // computed for either: `Confirmed` is what wallet-core's maturity flag
+    // justifies, and the dash is the measurement nobody has. Before UX-5 these
+    // rendered identically to a row measured at three hundred blocks — two
+    // states that demand different actions wearing one face, and the face was
+    // the stronger of the two.
+    expect(find.text('Confirmed —'), findsNWidgets(2));
+    expect(
+      find.text('Confirmed'),
+      findsNothing,
+      reason: 'nothing here has a depth, so nothing may claim a measured one',
     );
 
     // Back to the pending-deposit shape for the staleness beat below.
@@ -211,8 +228,11 @@ void main() {
     expect(find.text('as of 12 s ago'), findsOneWidget);
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
+    // **And the word says which one it is** (BG-20, UX-5): a stale link has no
+    // depth to report, so the row reads `Seen —` rather than a bare `Seen`
+    // that a reader could take for a measurement of zero.
     expect(find.textContaining('confirmations'), findsNothing);
-    expect(find.text('Seen'), findsOneWidget);
+    expect(find.text('Seen —'), findsOneWidget);
     expectFigure('1,234', '56789012'); // retained, dimmed — never blanked
 
     await tester.pumpWidget(const SizedBox()); // cancel the ticker

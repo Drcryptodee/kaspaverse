@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
@@ -10,8 +11,10 @@ import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
+import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
@@ -192,6 +195,66 @@ Future<Map<String, String>> _packageInfo() async => const {
   'build': '1',
 };
 
+/// One send, forty-two blocks deep, with the explorer exit resolved to a
+/// plausible host. Fixture data only — no preview ever carries an address, a
+/// balance or a txid that belongs to anyone.
+Widget _txDetail() => TxDetailScreen(
+  txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',
+  activity: ValueNotifier<List<ActivityRecord>>([
+    ActivityRecord(
+      txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',
+      valueSompi: BigInt.from(1240000000),
+      unixtimeMsec: BigInt.from(1788058080000),
+      blockDaaScore: BigInt.from(458173900),
+      acceptedDaaScore: BigInt.from(458174000),
+      direction: ActivityDirection.outgoing,
+      isCoinbase: false,
+      maturity: MaturityState.pending,
+      stalled: false,
+    ),
+  ]),
+  virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(458174042)),
+  stale: ValueNotifier<bool>(false),
+  explorerUrl: (txid) async => 'https://explorer.kaspa.org/txs/$txid',
+  openUrl: (_) async => true,
+);
+
+/// The gauge at one reading per decade, so the declared scale can be read off
+/// a still: 1 lands on its own graduation, 1,000 seats the bracket.
+Widget _gaugeLadder() => const Scaffold(
+  body: Padding(
+    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 48),
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        KvBurialGauge(
+          state: TxChipState.accepted,
+          confirmations: 1,
+          maturity: MaturityState.pending,
+        ),
+        SizedBox(height: 32),
+        KvBurialGauge(
+          state: TxChipState.accepted,
+          confirmations: 10,
+          maturity: MaturityState.pending,
+        ),
+        SizedBox(height: 32),
+        KvBurialGauge(
+          state: TxChipState.accepted,
+          confirmations: 340,
+          maturity: MaturityState.accepted,
+        ),
+        SizedBox(height: 32),
+        KvBurialGauge(
+          state: TxChipState.accepted,
+          confirmations: 4200,
+          maturity: MaturityState.confirmed,
+        ),
+      ],
+    ),
+  ),
+);
+
 void main() {
   setUpAll(loadBundledFonts);
 
@@ -218,6 +281,15 @@ void main() {
   group('surface previews (tier 2 — no device)', () {
     surface('home__funded', _home);
     surface('receive__address', () => ReceiveScreen(fetch: () async => _addr));
+
+    // **The failed state, at the same footprint** — the composition UX-5 owes
+    // (BG-20), and the one no happy-path preview can show.
+    surface(
+      'receive__failed',
+      () => ReceiveScreen(
+        fetch: () async => throw const AppError(message: 'the vault is locked'),
+      ),
+    );
     surface('node__connected', _node);
     surface('settings__root', _settings);
     surface('send__empty', _sendScreen);
@@ -273,6 +345,16 @@ void main() {
         ),
       ),
     );
+
+    // **The transaction detail and its gauge** — UX-5's new surface, and the
+    // one place in the app where a declared logarithmic scale is drawn. A
+    // still is exactly the right instrument for judging an axis.
+    surface('tx__detail', _txDetail);
+
+    // The gauge alone, at four readings that sit on the four decades. Whether
+    // a log axis reads as a scale rather than as a progress bar is a judgement
+    // a contact sheet settles and an argument does not (D-228's ladder).
+    surface('tx__gauge_ladder', _gaugeLadder);
 
     surface(
       'burial__ladder',

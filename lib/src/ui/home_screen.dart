@@ -11,6 +11,7 @@ import 'format.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/entrance.dart';
+import 'widgets/kv_activity.dart';
 import 'widgets/kv_amount.dart';
 import 'widgets/kv_breath.dart';
 import 'widgets/kv_burial_mark.dart';
@@ -64,6 +65,7 @@ class HomeScreen extends StatefulWidget {
     this.messagesRoute,
     this.settingsRoute,
     this.nodeRoute,
+    this.detailRoute,
     this.fiat,
     this.clock = DateTime.now,
     this.floatingActionButton,
@@ -78,6 +80,24 @@ class HomeScreen extends StatefulWidget {
 
   /// Wallet scope (WalletService): balance + activity + the pull heal.
   final WalletScope wallet;
+
+  /// Where a ledger row goes when it is tapped — the transaction detail, by
+  /// txid rather than by a captured snapshot, because that screen stays live
+  /// while the burial gauge climbs. Null leaves the rows unreachable and
+  /// **untappable**: a row that swallowed a tap would teach distrust of every
+  /// other control on the screen (BG-12).
+  ///
+  /// Like [sendRoute] it is handed **this screen's own `_dimmed` bit** rather
+  /// than deriving one of its own. The detail plots a burial depth against the
+  /// live DAA, so it owes BG-8's live/stale exactly as this screen does, and
+  /// two independent foldings of the link state are how a screen and the screen
+  /// behind it start disagreeing about whether the wallet is connected.
+  final Widget Function(
+    BuildContext context,
+    String txid,
+    ValueListenable<bool> stale,
+  )?
+  detailRoute;
 
   /// Called once on mount (post-unlock) — starts the wallet sync engine.
   final VoidCallback? onReady;
@@ -798,6 +818,13 @@ class _HomeScreenState extends State<HomeScreen> {
             now: _now.value,
             virtualDaaScore: widget.chain.virtualDaaScore.value,
             stale: _dimmed.value,
+            onOpen: widget.detailRoute == null
+                ? null
+                : (txid) => Navigator.of(context).push(
+                    KvPageRoute<void>(
+                      builder: (c) => widget.detailRoute!(c, txid, _dimmed),
+                    ),
+                  ),
           ),
         ),
         const SliverToBoxAdapter(child: SizedBox(height: KvSpace.l)),
@@ -1640,6 +1667,7 @@ class _Feed extends StatelessWidget {
     required this.now,
     this.virtualDaaScore,
     this.stale = false,
+    this.onOpen,
   });
 
   final List<ActivityRecord> records;
@@ -1657,6 +1685,9 @@ class _Feed extends StatelessWidget {
   /// send's laggy 1 Hz tracker-depth poll with this synchronous path so it
   /// streams as fluidly as a deposit).
   final BigInt? virtualDaaScore;
+
+  /// Opens one row's detail. Null ⇒ the rows are not controls at all.
+  final void Function(String txid)? onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -1725,6 +1756,7 @@ class _Feed extends StatelessWidget {
               now: now,
               stale: stale,
               confirmations: _confirmations(records[i]),
+              onOpen: onOpen,
             ),
           ],
         );
@@ -1734,29 +1766,16 @@ class _Feed extends StatelessWidget {
 
   /// The chip's streaming counter for one row — a DAA-distance depth, node-read
   /// and cosmetic (it dies with wallet-core's own maturity truth; the depth
-  /// gate quiets it once deep). `null` ⇒ static label. A stale link never
-  /// counts (a frozen last-known DAA must not read live — BG-8).
+  /// gate quiets it once deep). `null` ⇒ static label.
   ///
-  /// A SEND counts from the DAG-ACCEPTANCE DAA (`acceptedDaaScore`) — the honest
-  /// anchor. Its `blockDaaScore` is only submit time and would overstate the
-  /// depth (finding 18: the old path polled the tracker's blue-depth at 1 Hz,
-  /// which stuttered — the async gap plus wallet-core's Pending→Confirmed
-  /// collapse meant the count often never rendered). A DEPOSIT counts its own
-  /// inclusion-DAA distance (its maturity clock).
-  int? _confirmations(ActivityRecord record) {
-    if (stale) return null;
-    final daa = virtualDaaScore;
-    if (daa == null) return null;
-    // A send counts from its DAG-ACCEPTANCE score; a receive from its own
-    // inclusion score. Widened at the founder's call so EVERY row has a depth,
-    // not only the ones that were still counting — the burial mark needs the
-    // number on both sides of 100 and 1,000 to say which side it is on.
-    final anchor = record.direction == ActivityDirection.outgoing
-        ? record.acceptedDaaScore
-        : record.blockDaaScore;
-    if (anchor == null || daa < anchor) return null;
-    return (daa - anchor).toInt();
-  }
+  /// **The arithmetic itself is [KvBurial.depthOf]'s, and this is only its
+  /// caller.** It used to live here, and UX-5 gave the same fact a second
+  /// surface — the transaction detail plots this number on a gauge. Two copies
+  /// of the anchor rule (a send counts from its ACCEPTANCE score, a deposit
+  /// from its own inclusion score) would be two surfaces disagreeing about one
+  /// transaction, which is L143 with real money on it.
+  int? _confirmations(ActivityRecord record) =>
+      KvBurial.depthOf(record, virtualDaaScore, stale: stale);
 }
 
 class _ActivityRow extends StatelessWidget {
@@ -1766,12 +1785,16 @@ class _ActivityRow extends StatelessWidget {
     required this.now,
     required this.stale,
     this.confirmations,
+    this.onOpen,
   });
 
   final ActivityRecord record;
   final DateTime now;
   final bool stale;
   final int? confirmations;
+
+  /// Null ⇒ this row is a record, not a control.
+  final void Function(String txid)? onOpen;
 
   /// The chip state, with the finding-18 revival: a send whose base state is
   /// the quiet terminal (`none` — wallet-core confirmed it at acceptance) but
@@ -1796,28 +1819,10 @@ class _ActivityRow extends StatelessWidget {
   Widget build(BuildContext context) {
     // Direction rides FOUR ways at once — word, sign, colour and weight — so
     // the row survives greyscale, colour-blindness and a screen reader (BG-7).
-    // `KvAmount` carries the last three; the title carries the word.
-    final (
-      KvMark mark,
-      KvMoneyDirection direction,
-      String title,
-    ) = switch (record.direction) {
-      ActivityDirection.incoming => (
-        KvMark.arrowIn,
-        KvMoneyDirection.incoming,
-        record.isCoinbase ? 'Mined' : 'Received',
-      ),
-      ActivityDirection.outgoing => (
-        KvMark.arrowOut,
-        KvMoneyDirection.outgoing,
-        'Sent',
-      ),
-      ActivityDirection.change => (
-        KvMark.selfSend,
-        KvMoneyDirection.internal,
-        'Consolidated',
-      ),
-    };
+    // `KvAmount` carries the last three; the title carries the word. The
+    // switch itself is `kvActivityFace`, shared with the transaction detail
+    // that renders the same transaction at full size (BG-21).
+    final (:mark, :direction, :title) = kvActivityFace(record);
     final tone = switch (direction) {
       KvMoneyDirection.incoming => KvColor.ok,
       KvMoneyDirection.outgoing => KvColor.risk,
@@ -1826,7 +1831,8 @@ class _ActivityRow extends StatelessWidget {
     final chip = _chipState();
     final time = record.unixtimeMsec;
 
-    return Opacity(
+    final open = onOpen;
+    final body = Opacity(
       opacity: stale ? KvFreshness.opacityStale : 1,
       // No card and no tinted icon plate: the ledger reads by spacing, and a
       // container that exists because content needed somewhere to sit is the
@@ -1924,6 +1930,23 @@ class _ActivityRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+    if (open == null) return body;
+    // **The row becomes a control** (UX-5): it opens the transaction detail,
+    // where the burial gauge has the room the ledger does not. The whole row
+    // is the target, so the 48dp minimum is met by the row's own height rather
+    // than by a separate chevron competing with the amount for the right edge.
+    return Semantics(
+      button: true,
+      label: '$title, details',
+      child: InkWell(
+        onTap: () => open(record.txid),
+        // §1.1's pressed-key tone: a row is not a plate and must not light up
+        // like one, and there is no ripple in this language.
+        highlightColor: KvColor.keyPressed,
+        splashFactory: NoSplash.splashFactory,
+        child: body,
       ),
     );
   }

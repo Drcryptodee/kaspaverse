@@ -17,6 +17,7 @@ import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
@@ -1454,8 +1455,10 @@ void main() {
   group('the outcome, in three beats', () {
     Future<void> settleWith(
       WidgetTester tester,
-      Future<SendOutcomeDto> Function(BigInt) commit,
-    ) async {
+      Future<SendOutcomeDto> Function(BigInt) commit, {
+      Future<String> Function(String txid)? explorerUrl,
+      Future<bool> Function(String url)? openUrl,
+    }) async {
       await tester.pumpWidget(
         _host(
           SigningCeremony(
@@ -1467,6 +1470,8 @@ void main() {
             summary: _summary(),
             commit: commit,
             abandon: () async {},
+            explorerUrl: explorerUrl,
+            openUrl: openUrl,
           ),
         ),
       );
@@ -1498,11 +1503,81 @@ void main() {
       // **No waiting language** — Kaspa accepts in about a second, and telling
       // a user to expect minutes is a false impression built from true words.
       expect(find.textContaining('next few minutes'), findsNothing);
-      // The explorer exit's card is placed, and says it is not yet wired.
-      expect(find.text('View in explorer'), findsOneWidget);
-      expect(find.text('coming next'), findsOneWidget);
+      // **The placeholder is gone** (UX-5 discharged D-223's suspended law).
+      // With no explorer seam wired there is no exit at all, which is what a
+      // control with nowhere to go should do — never a card that looks live.
+      expect(find.text('View in explorer'), findsNothing);
+      expect(find.text('coming next'), findsNothing);
+      expect(find.byType(KvExplorerExit), findsNothing);
       expect(find.text('a' * 64), findsOneWidget);
       expect(find.textContaining('Your funds are safe'), findsNothing);
+    });
+
+    testWidgets('the explorer exit names its destination and what it hands '
+        'over, before the tap', (tester) async {
+      // §5: *"an explorer" cannot be a sovereignty decision*. The user picked a
+      // host in Settings, and the exit says which one they picked and what it
+      // will see — the identifier, and the network address they hand over
+      // simply by asking. This is the wallet's one deliberate egress (INV-8),
+      // so it is disclosed BEFORE the tap rather than after it.
+      _phone(tester);
+      String? opened;
+      await settleWith(
+        tester,
+        (_) async => _ok(),
+        explorerUrl: (txid) async => 'https://explorer.kaspa.org/txs/$txid',
+        openUrl: (url) async {
+          opened = url;
+          return true;
+        },
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('View on explorer.kaspa.org'), findsOneWidget);
+      expect(
+        find.text('it will see this transaction id and your network address'),
+        findsOneWidget,
+      );
+      // And the host is named ONCE — the disclosure says "it", because the
+      // control above it already said which "it" (BG-19).
+      expect(find.textContaining('explorer.kaspa.org'), findsOneWidget);
+
+      await tester.tap(find.byType(KvExplorerExit));
+      await tester.pumpAndSettle();
+      expect(
+        opened,
+        'https://explorer.kaspa.org/txs/${'a' * 64}',
+        reason: 'the URL opened is the one Rust resolved, unedited',
+      );
+    });
+
+    testWidgets('a refused explorer template disables the exit and says why', (
+      tester,
+    ) async {
+      // Rust keeps a stored template that no longer validates rather than
+      // silently substituting ours — a user who replaced the vendor must never
+      // be quietly returned to it. So the exit has a third face: not a link,
+      // and it says what to fix (BG-12/BG-20).
+      _phone(tester);
+      var opened = false;
+      await settleWith(
+        tester,
+        (_) async => _ok(),
+        explorerUrl: (_) async =>
+            throw const AppError(message: 'the explorer link is empty'),
+        openUrl: (_) async {
+          opened = true;
+          return true;
+        },
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('The explorer link cannot be used'), findsOneWidget);
+      expect(
+        find.text('the explorer link is empty — set it in Settings'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byType(KvExplorerExit));
+      await tester.pumpAndSettle();
+      expect(opened, isFalse, reason: 'a refused link is not a live control');
     });
 
     testWidgets('the Accepted stamp is the CHAIN\'s moment, and absent until '

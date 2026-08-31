@@ -293,6 +293,27 @@ class VaultService with WidgetsBindingObserver {
       }) ??
       false;
 
+  /// Open an https link the user asked for, in whatever browser the phone has
+  /// (UX-5, the explorer exit).
+  ///
+  /// **The URL is built and validated in Rust** — `prefs_explorer_tx_url` /
+  /// `prefs_explorer_address_url` run the stored template through
+  /// `validate_template`, which requires `https://`, refuses credentials in the
+  /// authority and requires the identifier to sit in the PATH. Nothing here
+  /// parses or concatenates a URL; this method is a pipe, and the native side
+  /// re-checks the scheme rather than trusting what reached it.
+  ///
+  /// It sits on the ceremony channel with the other platform ceremonies for the
+  /// reason `getFilesDir` does: no new plugin, for a job that is one intent.
+  /// This is a **deliberate, user-initiated egress** — the app never phones
+  /// home (INV-8), and the exit that fires this discloses the destination and
+  /// what it hands over before the user taps it.
+  ///
+  /// Returns false when the phone has no browser at all — a fact about the
+  /// device, not a failure, and the caller says so plainly.
+  Future<bool> openUrl(String url) async =>
+      await ceremony.invokeMethod<bool>('openUrl', {'url': url}) ?? false;
+
   /// Run a native ceremony that may pause Flutter, with the §0.11 auto-lock held
   /// open across it and **resolved honestly afterwards**.
   ///

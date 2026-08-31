@@ -15,13 +15,33 @@ import '../theme/tokens.dart';
 /// init; we paint it ourselves so the dark-on-light rule can never be themed
 /// away, and so the screen-entrance transition never re-encodes (§10).
 class QrTile extends StatefulWidget {
-  const QrTile({required this.data, this.size = 240, super.key});
+  const QrTile({required this.data, this.size = side, super.key});
+
+  /// The tile's side, named once so **every state of the Receive screen can
+  /// reserve the same footprint**. A layout that jumps when the address
+  /// arrives, or when it fails to, moves the tile out from under a hand that
+  /// is already aiming a camera at it.
+  static const double side = 240;
 
   /// The exact string the QR encodes — for receive, the full `kaspa:…` address.
   final String data;
 
   /// Side length of the white tile (modules + quiet zone), in logical pixels.
   final double size;
+
+  /// **The quiet zone, computed rather than asserted** (item 0 / L121).
+  ///
+  /// The spec is four modules of clear margin on every side, and a QR without
+  /// it fails many scanners. Solving `q >= 4 * (side - 2q) / modules` for `q`
+  /// gives `4 * side / (modules + 8)` — so the margin is derived from the
+  /// matrix the address actually produced, and a longer payload (more modules,
+  /// smaller cells) cannot silently erode it. The 16 dp in the design bible is
+  /// the floor, not the rule: at 240 dp and 53 modules the four-module
+  /// requirement is 15.74 dp, which is why 16 has held.
+  static double quietZone(int modules, double side) {
+    final needed = 4 * side / (modules + 8);
+    return needed > KvSpace.m ? needed : KvSpace.m;
+  }
 
   @override
   State<QrTile> createState() => _QrTileState();
@@ -60,7 +80,9 @@ class _QrTileState extends State<QrTile> {
       child: Container(
         width: widget.size,
         height: widget.size,
-        padding: const EdgeInsets.all(KvSpace.m), // 16dp quiet zone (BG-15)
+        padding: EdgeInsets.all(
+          QrTile.quietZone(_image.moduleCount, widget.size),
+        ),
         decoration: BoxDecoration(
           color: KvColor.qrTile,
           borderRadius: BorderRadius.circular(KvRadius.card),

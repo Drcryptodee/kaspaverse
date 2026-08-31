@@ -7,12 +7,26 @@ import '../theme/tokens.dart';
 
 /// Where an amount sits on the §2 ramp.
 enum KvAmountRole {
-  /// The home balance. Mono 46/52 at weight 500. **Every significant decimal,
-  /// trailing zeros trimmed** — see the precision law in the class doc.
+  /// **A magnitude, in full.** Mono 46/52 at weight 500, and **every
+  /// significant decimal with the trailing zeros trimmed** — see the precision
+  /// law in the class doc.
+  ///
+  /// Named for the home balance, which is where it started, but the rule it
+  /// carries is about the JOB and not the screen: a figure that states what
+  /// something *is* rather than what is about to be committed. The transaction
+  /// detail's amount takes it too, one ramp step down — a record of a settled
+  /// transaction is a magnitude, and D-210's padding prohibition applies to it
+  /// (`ux-auditor`, UX-5).
   hero,
 
-  /// A screen-level amount: the confirm sheet's headline, a detail's value.
-  /// All eight decimals, because this is where commitment happens.
+  /// **A screen-level amount at the moment of commitment**: the ceremony's
+  /// headline. All eight decimals, because BG-6 restates the built transaction
+  /// in full and a trimmed figure is a different string from the one being
+  /// signed — D-210's one exception.
+  ///
+  /// It used to say *"a detail's value"* as well, and that reading is what put
+  /// the fixed eight on a surface where nothing is being signed. A record takes
+  /// [hero].
   screen,
 
   /// An amount in a ledger row. One mono run at 15, weight carrying direction,

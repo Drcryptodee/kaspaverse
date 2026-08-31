@@ -336,10 +336,20 @@ void main() {
 
       rebuild(() => confirmations = 1500); // Confirmed -> final, a shrink
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 20));
-      final atStart = width();
+      // **Walk to the CROSSING, not to the arrival.** Since UX-5 the rung is
+      // derived from the streamed depth rather than from the newest reading —
+      // so a reading of 1500 landing over a row at 150 replays the interval
+      // first and the rung changes when the COUNT passes a thousand, which is
+      // also the frame the words change on. Measuring 20 ms after the reading
+      // arrived measured a row that had not crossed anything yet.
+      double? atStart;
+      for (var i = 0; i < 80 && atStart == null; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (find.text('final').evaluate().isNotEmpty) atStart = width();
+      }
       await tester.pumpAndSettle();
       final settled = width();
+      expect(atStart, isNotNull, reason: 'the crossing never ran');
 
       expect(settled, lessThan(before), reason: 'precondition: it shrinks');
       expect(

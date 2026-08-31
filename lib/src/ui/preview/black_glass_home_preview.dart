@@ -971,6 +971,11 @@ class _DetailRow extends StatelessWidget {
 /// thousand mark is taller, brighter and labelled — it is the point the scale
 /// exists to reach.
 ///
+/// **This is the prototype's gauge, not the build's.** The shipped one is
+/// `KvBurialGauge`, and it graduates **0 · 1 · 10 · 100 · 1,000**: D-232 added
+/// the labelled origin, because `log10(0)` has no position and an undeclared
+/// origin is what BG-22 forbids. Where the two disagree, the build wins.
+///
 /// The fill is amber while settling and green once buried, because that is a
 /// value judgement about certainty (BG-7). It is never teal: teal is light, not
 /// a status.

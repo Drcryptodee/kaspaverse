@@ -23,8 +23,10 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterFragmentActivity() {
     companion object {
-        // Stable platform error codes for the save lane — the CODE is the
-        // contract Dart branches on, never the message (KeystoreVault's rule).
+        // Stable platform error codes — the CODE is the contract Dart branches
+        // on, never the message (KeystoreVault's rule). `CODE_SAVE_FAILED` is
+        // the channel's generic failure and is no longer the save lane's
+        // alone: the explorer exit answers with it too.
         const val CODE_SAVE_CANCELLED = "cancelled"
         const val CODE_SAVE_BUSY = "busy"
         const val CODE_SAVE_FAILED = "failed"
@@ -181,6 +183,51 @@ class MainActivity : FlutterFragmentActivity() {
                                 // `<queries>`, so an empty result would report
                                 // "nothing can open this" about a phone that
                                 // opens it fine.
+                                result.success(false)
+                            } catch (e: Exception) {
+                                result.error(CODE_SAVE_FAILED, e.message, null)
+                            }
+                        }
+                    }
+
+                    // Hand an https link the user asked for to whatever
+                    // browser the phone has (UX-5, the explorer exit).
+                    //
+                    // **The URL is built and validated in Rust and never
+                    // here** — `ExplorerConfig::tx_url` refuses anything that
+                    // is not `https://`, refuses credentials in the authority,
+                    // and substitutes the identifier into the PATH only, so a
+                    // template can never send a txid out as a DNS query. This
+                    // end re-checks the scheme anyway rather than trusting the
+                    // string that arrived: an ACTION_VIEW that takes any
+                    // scheme is a way to reach `intent:`, `file:` and every
+                    // other handler on the device from one caller's typo.
+                    //
+                    // **No chooser, deliberately, and the file lane next door
+                    // argues the opposite for a real reason.** `openFile`
+                    // always offers the list because a file-type default set
+                    // once silently owns every file of that type afterwards
+                    // with no way back from inside the app. A web link has no
+                    // such trap: Android gives the user a first-class default
+                    // browser setting they can see and change, so forcing a
+                    // chooser on every explorer tap would be noise on top of a
+                    // choice they have already made.
+                    "openUrl" -> {
+                        val url = call.argument<String>("url")
+                        if (url == null || !url.startsWith("https://")) {
+                            result.error(CODE_SAVE_FAILED, "not an https link", null)
+                        } else {
+                            try {
+                                startActivity(
+                                    Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                                        .addCategory(Intent.CATEGORY_BROWSABLE)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                                result.success(true)
+                            } catch (e: android.content.ActivityNotFoundException) {
+                                // A phone with no browser at all. Answered as
+                                // `false` rather than as an error, so the exit
+                                // can say so in words instead of throwing.
                                 result.success(false)
                             } catch (e: Exception) {
                                 result.error(CODE_SAVE_FAILED, e.message, null)

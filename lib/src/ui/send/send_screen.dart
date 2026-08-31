@@ -50,6 +50,8 @@ class SendScreen extends StatefulWidget {
     this.acceptanceStatus,
     this.minimumSendable,
     this.prepareSweep,
+    this.explorerUrl,
+    this.openUrl,
   });
 
   /// Spendable (mature) balance, for the informational "available" line and
@@ -84,6 +86,14 @@ class SendScreen extends StatefulWidget {
   /// fee of the transaction spending it, so the field's number can never be
   /// right). Null hides the affordance (tests that only exercise payments).
   final Future<SignableSummaryDto> Function(String destination)? prepareSweep;
+
+  /// The receipt's explorer exit (UX-5), forwarded to the ceremony. Resolved in
+  /// **Rust** — the template is validated there and no URL is built on this
+  /// side — and opened by the platform channel the app already owns. Null hides
+  /// the exit, which is what replaced D-223's knowingly-suspended placeholder.
+  final Future<String> Function(String txid)? explorerUrl;
+
+  final Future<bool> Function(String url)? openUrl;
 
   /// **The fee this exact payment would cost, priced by the Generator now.**
   ///
@@ -446,6 +456,8 @@ class _SendScreenState extends State<SendScreen> {
         abandon: widget.abandon,
         acceptanceStatus: widget.acceptanceStatus,
         onLeftInFlight: () => leftInFlight = true,
+        explorerUrl: widget.explorerUrl,
+        openUrl: widget.openUrl,
       );
       if (!mounted) return;
       // A fully-broadcast send returns to home; the new balance + outgoing row

@@ -15,6 +15,7 @@ import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_chrome.dart';
+import '../widgets/kv_explorer_exit.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_status_chip.dart';
 import '../widgets/kv_surface.dart';
@@ -50,6 +51,8 @@ class SigningCeremony extends StatefulWidget {
     this.contextNote,
     this.acceptanceStatus,
     this.onLeftInFlight,
+    this.explorerUrl,
+    this.openUrl,
   });
 
   final SignableSummaryDto summary;
@@ -88,6 +91,16 @@ class SigningCeremony extends StatefulWidget {
   /// can take them somewhere better says so here.
   final VoidCallback? onLeftInFlight;
 
+  /// The explorer exit's two seams (UX-5). [explorerUrl] resolves a txid to the
+  /// exact URL the user's chosen explorer would open — **built and validated in
+  /// Rust**, never here — and [openUrl] hands it to the platform. Null hides
+  /// the exit rather than showing a control that goes nowhere (BG-12), which is
+  /// what the placeholder it replaced was doing under a knowingly-suspended law
+  /// (D-223; this sub-phase was its named trigger).
+  final Future<String> Function(String txid)? explorerUrl;
+
+  final Future<bool> Function(String url)? openUrl;
+
   @override
   State<SigningCeremony> createState() => _SigningCeremonyState();
 }
@@ -109,6 +122,8 @@ Future<SendOutcomeDto?> showSigningCeremony(
   String? contextNote,
   Future<TxStatusDto?> Function(String txid)? acceptanceStatus,
   VoidCallback? onLeftInFlight,
+  Future<String> Function(String txid)? explorerUrl,
+  Future<bool> Function(String url)? openUrl,
 }) {
   return Navigator.of(context).push(
     KvPageRoute<SendOutcomeDto>(
@@ -120,6 +135,8 @@ Future<SendOutcomeDto?> showSigningCeremony(
         contextNote: contextNote,
         acceptanceStatus: acceptanceStatus,
         onLeftInFlight: onLeftInFlight,
+        explorerUrl: explorerUrl,
+        openUrl: openUrl,
       ),
     ),
   );
@@ -426,7 +443,12 @@ class _SigningCeremonyState extends State<SigningCeremony>
                     // reference number closes the receipt.
                     if (_settled) ...[
                       const SizedBox(height: KvSpace.l),
-                      _OutcomeHead(outcome: _outcome, error: _error),
+                      _OutcomeHead(
+                        outcome: _outcome,
+                        error: _error,
+                        explorerUrl: widget.explorerUrl,
+                        openUrl: widget.openUrl,
+                      ),
                     ],
                     if (_settled && _outcome?.finalTxid != null)
                       _Receipt(txid: _outcome!.finalTxid!),
@@ -996,14 +1018,22 @@ _Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
 /// The verdict — what happened, in the three beats §7 requires, under the
 /// figures it concludes.
 class _OutcomeHead extends StatelessWidget {
-  const _OutcomeHead({required this.outcome, required this.error});
+  const _OutcomeHead({
+    required this.outcome,
+    required this.error,
+    this.explorerUrl,
+    this.openUrl,
+  });
 
   final SendOutcomeDto? outcome;
   final String? error;
+  final Future<String> Function(String txid)? explorerUrl;
+  final Future<bool> Function(String url)? openUrl;
 
   @override
   Widget build(BuildContext context) {
     final o = outcome;
+    final txid = o?.finalTxid;
     final v = _verdictFor(outcome, error);
     final tone = v.tone;
     final head = v.head;
@@ -1062,69 +1092,28 @@ class _OutcomeHead extends StatelessWidget {
                 ),
               ),
             ],
-          // **The explorer exit's card — placement now, destination in UX-5.**
+          // **The explorer exit, and the suspended law is discharged.**
           //
-          // It is a control that does nothing, which BG-12 forbids outright.
+          // This was a control that did nothing, which BG-12 forbids outright.
           // The founder allowed the exception in terms — *"even if its a
-          // placeholder that is breaking a law. i alllow it"* — so it is a law
-          // knowingly suspended and ledgered (D-223), not one quietly bent.
-          // **UX-5 is the trigger**: that sub-phase owns `ExplorerConfig`'s
-          // two URL builders and the disclosure of what the exit hands over.
-          if (v.landed) ...[
+          // placeholder that is breaking a law. i alllow it"* — and named UX-5
+          // as its trigger (D-223). It is now the real exit, and it is the
+          // **same widget** the transaction detail uses: one rendering of "this
+          // goes to a third party, here is which one and here is what it will
+          // see" (BG-21). It disappears entirely when the seams are absent,
+          // which is what a control with nowhere to go should do.
+          if (v.landed && txid != null && explorerUrl != null) ...[
             const SizedBox(height: KvSpace.m),
-            const _ExplorerCard(),
+            KvExplorerExit(
+              subject: txid,
+              resolve: explorerUrl!,
+              open: openUrl ?? (_) async => false,
+            ),
           ],
         ],
       ),
     );
   }
-}
-
-/// The explorer exit, drawn where it will live and not yet wired.
-///
-/// **It says what it is.** A card that looked live and did nothing when tapped
-/// would teach the user that controls on this screen are unreliable, on the
-/// one surface where that lesson is most expensive — so the placeholder wears
-/// its state instead of hiding it, which is the least the suspended law can
-/// ask for.
-class _ExplorerCard extends StatelessWidget {
-  const _ExplorerCard();
-
-  @override
-  Widget build(BuildContext context) => KvSurface(
-    tone: KvSurfaceTone.chip,
-    width: double.infinity,
-    padding: const EdgeInsets.symmetric(
-      horizontal: KvSpace.m,
-      vertical: KvSpace.sm,
-    ),
-    child: Row(
-      children: [
-        const Expanded(
-          child: Text(
-            'View in explorer',
-            style: TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 13,
-              height: 19 / 13,
-              color: KvColor.inkMeta,
-            ),
-          ),
-        ),
-        Text(
-          'coming next',
-          style: TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 11,
-            height: 15 / 11,
-            fontWeight: FontWeight.w500,
-            color: KvColor.inkMetaLow,
-            letterSpacing: 0.4,
-          ),
-        ),
-      ],
-    ),
-  );
 }
 
 /// The receipt's reference number, at the FOOT of the receipt where a

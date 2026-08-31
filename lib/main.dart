@@ -23,11 +23,12 @@ import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/preview/black_glass_home_preview.dart';
 import 'package:kaspaverse/src/rust/api/dag.dart' show dagStatus;
 import 'package:kaspaverse/src/rust/api/prefs.dart'
-    show prefsExplorerConfig, prefsSetExplorerConfig;
+    show prefsExplorerConfig, prefsExplorerTxUrl, prefsSetExplorerConfig;
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
+import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
 
@@ -205,8 +206,26 @@ class KaspaVerseApp extends StatelessWidget {
             abandon: wallet.abandonSend,
             minimumSendable: wallet.minimumSendable,
             prepareSweep: wallet.prepareSweep,
+            // The receipt's explorer exit — the same widget the transaction
+            // detail uses, with the same disclosure (D-223's placeholder is
+            // now the real thing).
+            explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
+            openUrl: VaultService.instance.openUrl,
           ),
           messagesRoute: (_) => const ContactsScreen(),
+          // A tapped ledger row opens the record at full size, with the burial
+          // gauge the feed has no room for. The explorer link is RESOLVED in
+          // Rust (validated template, identifier in the path, https only) and
+          // opened by the platform channel the app already owns — no plugin,
+          // and no URL built on this side (UX-5).
+          detailRoute: (_, txid, stale) => TxDetailScreen(
+            txid: txid,
+            activity: wallet.activity,
+            virtualDaaScore: chain.virtualDaaScore,
+            stale: stale,
+            explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
+            openUrl: VaultService.instance.openUrl,
+          ),
           nodeRoute: _nodeRoute(chain),
           // Read-only on this surface by construction: the plate shows a
           // price, and the place a price is chosen is the place it can be
