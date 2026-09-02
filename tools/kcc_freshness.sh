@@ -9,13 +9,16 @@
 # tool is the internal record's own freshness probe); the table is duplicated inline so the
 # script still works in the public clone, which carries code and tooling only.
 set -uo pipefail
-REV=ea5176aa65b14b11be6ff4840ba0076893ada87e   # kaspanet/kccs main @ 2026-08-20T23:18:28Z; read 2026-08-25
-PINNED='ce968e3a4941649c46d4b946c34ee8931f9f8a4a README.md
-bcb00fbdafcc9582da62b52182c046196e5269c3 kcc-0001.md
-4a87ff06eb4a8dfc9152b4423634ddf3e01defa3 kcc-0002.md
+REV=54f4f9c2730f77ec5b1ee8bc746d7f94d83b8ee6   # kaspanet/kccs main @ 2026-09-02T11:06:54Z; re-pinned 2026-09-02 (trajectory audit; was ea5176a, read 2026-08-25)
+PINNED='b17b9b81d55ea51dce633c9b992287cabcd85edf LICENSE.md
+94d9965319f4bb2b26bdc7f5b8a91357f109e274 README.md
+2866e9f7ee513a736d9ee1920547899078608832 kcc-0000.md
+a1d3f1725d869f63b3b4304662dfe0b2c42e7dc0 kcc-0001.md
+e6b1b5362b7ee54791799c9db410ce7370799102 kcc-0002.md
 e6e96f39a15b0e8bf6a319152a8fa0e54b3c93ab kcc-0002/reference-code.md
-2934142610bc43b7bcfb6b633c0c0518af13e906 kcc-0020.md
-283f146e688a500bc8de79dad85f9343753c8f2d kcc-0020/borrowed-receive-authorization.md'
+58c359a393868789e82431d911065cd7c79db9d6 kcc-0020.md
+8810f111ebeba86b276e0cced167df5712e6621d kcc-0020/borrowed-receive-authorization.md
+092c27277d16c2c10566701b80a5d3be95898e8a kcc-template.md'
 TREE=$(curl -fsS --max-time 12 -H 'Accept: application/vnd.github+json' \
   'https://api.github.com/repos/kaspanet/kccs/git/trees/main?recursive=1' 2>/dev/null) || {
   echo "KCC freshness: SKIP (network unreachable) — still pinned at ${REV:0:7}"; exit 0; }
