@@ -118,6 +118,7 @@ expect_lane "race fan-out exponent (L135)"
 { [ -f "$ROOT/rust/rust-toolchain.toml" ] || [ -f "$ROOT/.github/workflows/gate.yml" ]; } \
   && expect_lane "toolchain pins (D-024)"
 expect_lane "public-repo hygiene (no tracked secrets)"
+expect_lane "section-anchor resolution (Group U-2)"
 expect_lane "internal-record boundary (D-102)"
 expect_lane "internal-record pointers (D-102 / L88)"
 expect_lane "repo-path resolution (L88 / F48)"
@@ -1382,6 +1383,356 @@ repo_path_targets() {
   return $bad
 }
 run_check "repo-path resolution (L88 / F48)" repo_path_targets
+
+# ── §-anchor resolution (Group U-2; the L78 prescription, built) ──────────────
+# The repo-path lane above proves a named FILE exists. This one proves the SECTION
+# named inside it exists too — the same defect one level finer, and the one that
+# actually bites: a document is renumbered, and forty citations quietly point at a
+# section that moved. F48 was a phase file citing a summary that never existed; this
+# is a phase file citing §5.3 of a document whose §5 has four items.
+#
+# ── WHAT "RESOLVES" MEANS (the rule; everything else here is downstream of it) ──
+# Defining this was the deliverable, because the corpus's dominant citation idiom is
+# *document-implied*: "§19 drain", "(P0 §0.5)", "the armed trigger in §3". Measured on
+# the tree this lane was written against: 6,599 section citations, of which ~3,600 name
+# no document on their line at all. Nothing mechanical can say what those point at, and
+# a lane that GUESSES produces confident nonsense — the first draft of this one, binding
+# each citation to the nearest .md on its line, reported 2,662 dangles, essentially all
+# of them fiction.
+#
+# So the rule is deliberately narrow, and it is a rule about ADJACENCY:
+#
+#     a citation is CHECKED when its target document is named immediately before it —
+#     <file>.md, an optional closing backtick, at most two of {space, colon, hyphen},
+#     then the section token. `toccata_protocol.md §3` is checked. Everything else is
+#     NOT CHECKED, and is not counted as passing either.
+#
+# That connector class is small on purpose, and each exclusion is a measured false pair:
+#   - `|`  — a table cell boundary. "| covenant_custody.md | §6.2 — why now |" is a
+#            two-column row, not a citation; §6.2 belongs to the citing document.
+#   - `)`  — "…fires on your STATES.md), §4 (commit-reveal" — the filename closes a
+#            parenthetical and the §4 has a different antecedent entirely.
+#   - `,`  — a list separator, same shape.
+#   - `·`  — this corpus's list separator. "DESIGN_SURFACE_INVENTORY.md · §17" reads as
+#            two items, and §17 is the CITING file's section.
+# Each of those produced a false finding before it was excluded. They are gaps, not
+# errors: an unchecked citation is reported as unchecked, never as fine.
+#
+# ── WHAT A DOCUMENT DEFINES (four forms, every one found the hard way) ──
+# Every form below was discovered because real citations dangled for want of it, and
+# each discovery is L130 in miniature — a negative claim is only as strong as the
+# pattern's coverage of the family:
+#   heading      "## 4. x" · "### 2.1 x" · "## §9 — x" · "## **1.1 x**"   -> 4 / 2.1 / 9 / 1.1
+#   bold marker  "**4.1 Wallet kernel — SHIPPED.**"                        -> 4.1
+#   list item    a top-level "3." under section N                          -> N.3
+#   table row    a leading "| 3 |" cell under section N                    -> N.3
+# The last two are not decoration. `design_system.md` §9's divergences and
+# `transactor_protocol.md` §5's invariants are ORDERED LISTS, not headings — the corpus
+# writes "§9.3" and means "section 9, item 3" (design_system.md itself says "§9.3
+# divergence 3"). A matcher that saw only headings called 15 correct citations broken.
+#
+# ── THE COLLATION SCAR, and why LC_ALL=C is load-bearing ──
+# The marker set is de-duplicated, and that dedup MUST run under LC_ALL=C. In a UTF-8
+# locale `sort -u` collates "1.1" and "11" as EQUAL — the dot is ignored at the primary
+# level — so a document defining both silently loses one, and every citation to it is
+# then reported as dangling. This is not hypothetical: it deleted §11 from
+# design_system.md's marker set and manufactured four false findings. The control below
+# asserts the property rather than trusting it, because the failure is invisible.
+#
+# ── RESIDUALS, stated rather than papered over (gaps, not absences) ──
+#   - implied-target citations (~3,600 of them) are OUT, per the rule above.
+#   - a citation broken across a line wrap is seen only as its tail; one such
+#     ("covenant_design_" / "patterns.md §9") was rejoined rather than exempted.
+#   - the table-row form is WIDER than the citations that motivated it. It accepts any
+#     table whose first column is numeric, and some of those columns are ids rather than
+#     section numbers — this blueprint's own primitive-stack table makes §2.1…§2.6
+#     resolve. So a citation into a numeric-first-column table is accepted without being
+#     verified, which weakens the negative claim exactly where the lane is least able to
+#     tell an enumeration from a data column. Disclosed rather than silently relied on.
+#   - a bold line opening with a DATE is rejected above, and the reason is the opposite of
+#     harmless: it would take over `cur` and delete the section's real item markers,
+#     turning correct citations red. Found by the consensus audit of this lane.
+#   - dates are only the sub-case that bites today. ANY bold line opening with a number
+#     takes over `cur`, and 21 such values are live in this corpus — every one a figure,
+#     never a section: "**456 Dart tests**", "**625 ms**", "**106.81dp**", a bare
+#     "**2026**" the date guard does not catch. Each has both failure directions: it
+#     publishes a bogus marker (so a citation to §456 would resolve) and it ends the
+#     enclosing section's item numbering (so a correct §N.M below it reads as dangling).
+#     None is live now — every non-heading resolution in the tree today is legitimate —
+#     and the obvious tightening (require a bold marker to extend its enclosing heading's
+#     number) rejects 264 markers including legitimate top-of-file ones, so it is named
+#     here as a known edge rather than half-fixed. L130 applies to this lane too.
+#   - the target's EXISTENCE is this lane's business only because an anchor cannot
+#     resolve into a missing file; bare basenames are resolved through both indexes.
+#
+# ── THE ARCHIVE QUESTION, decided ──
+# Most of this corpus is append-only history: ledger entries, watermark chains, archived
+# session summaries. Their citations were CORRECT when written and the documents moved
+# afterwards. There is no blanket archive-class exemption, and that is a deliberate call:
+# the session-archive tree alone is most of the record, so a class exemption would silence the
+# lane exactly where a future real defect would hide. Instead each historical dangle
+# gets its own register line with its own reason, and the liveness check below reds when
+# one goes stale — an exemption list that can only shrink or be re-justified.
+ANCHOR_REGISTER=".claude/gate/anchor-allow.txt" # gate-allow:internal-path — ops-mirror-only by D-102, absent on a public clone
+# Emits every section number a document DEFINES. § is stripped from the line first so
+# every pattern below stays pure ASCII — a multibyte literal inside a bracket expression
+# is byte-split under a C locale, which is how this kind of matcher silently stops looking.
+ANCHOR_MARKS_AWK='
+{
+  line = $0
+  gsub(/§/, "", line)
+  if (match(line, /^#+[ \t]*(\*\*)?[ \t]*[0-9]+(\.[0-9]+)*/)) {
+    t = substr(line, RSTART, RLENGTH); gsub(/[^0-9.]/, "", t); sub(/\.$/, "", t)
+    if (t != "") { print t; cur = t }
+    next
+  }
+  if (match(line, /^\*\*[ \t]*[0-9]+(\.[0-9]+)*/)) {
+    # A DATE is not a section. "**2026-08-27 — an amendment landed.**" under "## 5."
+    # would otherwise set cur=2026, so the real items of section 5 are emitted as 2026.1, 2026.2 ...
+    # and a correct §5.2 citation is then reported as dangling. Live in seven documents.
+    if (line !~ /^\*\*[ \t]*[0-9][0-9][0-9][0-9][-.][0-9][0-9]/) {
+      t = substr(line, RSTART, RLENGTH); gsub(/[^0-9.]/, "", t); sub(/\.$/, "", t)
+      if (t != "") { print t; cur = t }
+    }
+    next
+  }
+  if (cur == "") next
+  if (match(line, /^[0-9]+\.[ \t]/)) {
+    t = substr(line, RSTART, RLENGTH); gsub(/[^0-9]/, "", t); print cur "." t; next
+  }
+  if (match(line, /^\|[ \t]*[0-9]+[ \t]*\|/)) {
+    t = substr(line, RSTART, RLENGTH); gsub(/[^0-9]/, "", t); print cur "." t
+  }
+}'
+
+section_anchor_targets() {
+  local ops=0 bad=0 shown=0 checked=0 unchecked=0
+  local hit f n pair file num base tgt text reason marker i matched d probe pnum probe_f
+  local -a reg_src=() reg_tgt=() reg_hit=() ops_scope=() mdfiles=()
+  local -A BYBASE=() BASEN=() MARKS=()
+  local re='\.?[A-Za-z0-9_][A-Za-z0-9_/+.-]*\.md`?[ :-]{0,2}§ ?[0-9]+(\.[0-9]+)*'
+
+  require_git_repo || { echo "   not a git repository — citations unverifiable, failing closed"; return 1; }
+
+  if [ -d "$OPS_GIT_DIR" ] && \
+     git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    ops=1
+    mapfile -t ops_scope < <(
+      git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files 2>/dev/null |
+        sed -E 's|/.*||' | sort -u )
+    if [ "${#ops_scope[@]}" -eq 0 ]; then
+      echo "   the internal record's index names no paths — the sweep would be unbounded."
+      echo "   Failing closed."; return 1
+    fi
+  elif [ -d "$ROOT/docs" ]; then
+    echo "   the internal record is on disk but its index is not readable"
+    echo "   (KASPAVERSE_OPS_GIT_DIR) — that is most of the cited corpus. Failing closed."
+    return 1
+  fi
+
+  # The document universe, derived from both indexes — never hand-written (L88).
+  mapfile -t mdfiles < <(
+    { git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files -- '*.md'
+      [ "$ops" = 1 ] && git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files -- '*.md'
+    } 2>/dev/null | sort -u )
+  if [ "${#mdfiles[@]}" -eq 0 ]; then
+    echo "   no tracked markdown found — this lane would match nothing and pass"
+    echo "   vacuously. Failing closed."; return 1
+  fi
+  for f in "${mdfiles[@]}"; do
+    base="${f##*/}"
+    BASEN["$base"]=$(( ${BASEN["$base"]:-0} + 1 ))
+    BYBASE["$base"]="$f"
+  done
+
+  # Control 1 — the collation property this lane's correctness rests on. A UTF-8 sort
+  # folds "1.1" into "11"; if that ever happens here, marker sets lose sections and the
+  # lane manufactures findings. Asserted, not assumed.
+  if [ "$(printf '1.1\n11\n' | LC_ALL=C sort -u | wc -l)" != "2" ]; then
+    echo "   the marker de-duplication collapsed '1.1' and '11' into one entry. Section"
+    echo "   numbers would silently vanish from every document's marker set and this lane"
+    echo "   would report false dangles. Failing closed."
+    return 1
+  fi
+
+  # Control 2 — prove the matcher can SEE a citation, and that a TRUE one resolves.
+  # Both halves are built from a real tracked document chosen at run time, never from a
+  # literal, so the probe cannot drift away from what the lane actually searches for.
+  probe=""; probe_f=""
+  for f in "${mdfiles[@]}"; do
+    pnum="$(awk "$ANCHOR_MARKS_AWK" "$ROOT/$f" 2>/dev/null | head -1)"
+    [ -n "$pnum" ] && { probe="${f##*/} §$pnum"; probe_f="$f"; break; }
+  done
+  if [ -z "$probe" ]; then
+    echo "   no tracked document defines a single numbered section — the marker extractor"
+    echo "   has stopped seeing headings entirely. Failing closed."; return 1
+  fi
+  if ! printf 'see %s for the rest\n' "$probe" | grep -qE "$re"; then
+    echo "   the citation matcher failed its own control: it did not match"
+    echo "     $probe"
+    echo "   built from a tracked document. A zero from this lane would mean 'stopped"
+    echo "   looking', not 'nothing dangles'. Failing closed."
+    return 1
+  fi
+  # …and the other half of it: a matcher that SEES a citation but whose resolution path
+  # (basename -> index -> marker set) is broken would fail safe, but silently — so the
+  # probe is run all the way through, against a section the document provably defines.
+  base="${probe_f##*/}"
+  if [ "${BASEN[$base]:-0}" = "1" ]; then
+    MARKS["$probe_f"]=" $(awk "$ANCHOR_MARKS_AWK" "$ROOT/$probe_f" 2>/dev/null | LC_ALL=C sort -u | tr '\n' ' ')"
+    case "${MARKS[$probe_f]}" in
+      *" $pnum "*) ;;
+      *) echo "   the resolver failed its own control: $probe_f defines section $pnum, but"
+         echo "   the marker set built for it does not contain that section. Every citation"
+         echo "   would be reported dangling. Failing closed."
+         return 1 ;;
+    esac
+  fi
+
+  # The register, validated before use: a malformed line STOPS the lane rather than
+  # being skipped, or it enforces less than it advertises while looking non-empty.
+  if [ -f "$ROOT/$ANCHOR_REGISTER" ]; then
+    while IFS= read -r hit || [ -n "$hit" ]; do
+      case "$hit" in ''|'#'*) continue ;; esac
+      f="${hit%%|*}"; text="${hit#*|}"
+      [ "$text" = "$hit" ] && { echo "   register entry has no '|': $hit"; return 1; }
+      tgt="${text%%|*}"; reason="${text#*|}"
+      if [ "$reason" = "$text" ] || [ -z "$f" ] || [ -z "$tgt" ] || [ "${#reason}" -lt 10 ]; then
+        echo "   malformed register entry — need 'source|target|reason' with a reason of at"
+        echo "   least 10 characters. An exemption without a stated reason is a silenced"
+        echo "   check, not an exemption:"
+        echo "     $hit"; return 1
+      fi
+      case "$f$tgt" in *..*) echo "   register entry uses '..': $hit"; return 1 ;; esac
+      reg_src+=("$f"); reg_tgt+=("$tgt"); reg_hit+=(0)
+    done < "$ROOT/$ANCHOR_REGISTER"
+  fi
+
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    f="${hit%%:*}"; text="${hit#*:}"; n="${text%%:*}"; pair="${text#*:}"
+    case "$f" in *.md) ;; *) continue ;; esac
+    file="$(printf '%s' "$pair" | grep -oE '^\.?[A-Za-z0-9_][A-Za-z0-9_/+.-]*\.md')"
+    num="$(printf '%s' "$pair" | grep -oE '[0-9]+(\.[0-9]+)*$')"
+    [ -n "$file" ] && [ -n "$num" ] || continue
+    checked=$((checked+1))
+
+    base="${file##*/}"
+    if [ -f "$ROOT/$file" ]; then tgt="$file"
+    elif [ "${BASEN[$base]:-0}" = "1" ]; then tgt="${BYBASE[$base]}"
+    else tgt=""; fi
+
+    if [ -n "$tgt" ]; then
+      if [ -z "${MARKS[$tgt]+x}" ]; then
+        MARKS["$tgt"]=" $(awk "$ANCHOR_MARKS_AWK" "$ROOT/$tgt" 2>/dev/null | LC_ALL=C sort -u | tr '\n' ' ')"
+      fi
+      case "${MARKS[$tgt]}" in *" $num "*) continue ;; esac
+      d="$file §$num  (target: $tgt)"
+    elif [ "${BASEN[$base]:-0}" -gt 1 ]; then
+      d="$file §$num  (ambiguous — $base names ${BASEN[$base]} tracked files; cite the path)"
+    elif [ "$ops" = 0 ]; then
+      # The internal record is not on disk — a public clone, which is what CI runs
+      # (GATE_STRICT=1 on a checkout with no docs/ and no ops mirror). Most of this
+      # corpus lives there, and this lane matches BARE BASENAMES, which carry no
+      # directory anchor to fall out of scope on. Judging those dangling would red
+      # every public run on 32 citations that are all correct — and a spuriously red
+      # check is how a real check earns a `git rm` from the ledger. Unchecked, and
+      # counted as unchecked, is the honest answer.
+      unchecked=$((unchecked+1)); checked=$((checked-1)); continue
+    else
+      d="$file §$num  (no such document in either index)"
+    fi
+
+    # Hatch 1, inline at the site.
+    text="$(sed -n "${n}p" "$ROOT/$f" 2>/dev/null)"
+    case "$text" in
+      *gate-allow:dangling-anchor*)
+        reason="${text#*gate-allow:dangling-anchor}"
+        reason="$(printf '%s' "$reason" | sed 's/^[[:space:]:—–-]*//')"
+        if [ "${#reason}" -ge 10 ]; then continue; fi
+        echo "   $f:$n  'gate-allow:dangling-anchor' with no stated reason."
+        bad=1; continue ;;
+    esac
+    # Hatch 2, file-scoped to ONE target: 'gate-allow:dangling-anchor <file.md> — <why>'.
+    marker="$(grep -m1 -F "gate-allow:dangling-anchor $file" "$ROOT/$f" 2>/dev/null || true)"
+    if [ -n "$marker" ]; then
+      reason="${marker#*gate-allow:dangling-anchor $file}"
+      reason="$(printf '%s' "$reason" | sed 's/^[[:space:]:—–-]*//')"
+      if [ "${#reason}" -ge 10 ]; then continue; fi
+      echo "   $f  file-scoped 'gate-allow:dangling-anchor $file' with no stated reason."
+      bad=1; continue
+    fi
+    # Hatch 3, the register — for lines that must stay VERBATIM (append-only ledgers,
+    # watermark chains, archived summaries), where editing the evidence to please a
+    # checker is the failure the gate exists to prevent.
+    matched=0
+    for i in "${!reg_src[@]}"; do
+      # shellcheck disable=SC2254 — register entries ARE globs, deliberately
+      case "$f" in ${reg_src[$i]}) ;; *) continue ;; esac
+      case "$file §$num" in ${reg_tgt[$i]}) ;; *) continue ;; esac
+      reg_hit[$i]=1; matched=1; break
+    done
+    [ "$matched" = 1 ] && continue
+
+    [ "$shown" -eq 0 ] && echo "   these citations name a section their target does not define:"
+    shown=$((shown+1))
+    [ "$shown" -le 40 ] && echo "     $f:$n  ->  $d"
+    bad=1
+  done < <(
+    cd "$ROOT" || exit 0
+    git --git-dir="$ROOT/.git" --work-tree="$ROOT" grep --untracked -nIoE "$re" \
+        -- '*.md' ":!$ANCHOR_REGISTER" 2>/dev/null
+    [ "$ops" = 1 ] && git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" \
+        grep --untracked --no-exclude-standard -nIoE "$re" \
+        -- "${ops_scope[@]}" ":!$ANCHOR_REGISTER" 2>/dev/null
+  )
+
+  [ "$shown" -gt 40 ] && echo "     ... and $((shown-40)) more"
+  if [ "$shown" -gt 0 ]; then
+    echo "   A section number in a sentence is a promise about another document. Fix:"
+    echo "   re-point it at the section that exists, name the path if the basename is"
+    echo "   ambiguous, or — if the citation is HISTORY that was true when written — add"
+    echo "   a 'source|target|reason' line to the register this lane reads."
+  fi
+
+  for i in "${!reg_src[@]}"; do
+    [ "${reg_hit[$i]}" = 1 ] && continue
+    echo "   STALE exemption — it matches no dangling citation any more:"
+    echo "     ${reg_src[$i]}|${reg_tgt[$i]}"
+    echo "   The citation was fixed, moved, or now resolves. Delete the line."
+    bad=1
+  done
+
+  # The second half of the control. The probe proves the PATTERN works; this proves the
+  # SCAN ran. A corpus whose own router is a table of section citations cannot reach zero.
+  if [ "$checked" -eq 0 ]; then
+    echo "   the scan examined ZERO document-qualified citations, in a corpus built out of"
+    echo "   them. The matcher passed its control, so the grep invocation returned nothing —"
+    echo "   a lane that has stopped looking, not a clean tree. Failing closed."
+    return 1
+  fi
+
+  if [ "$bad" -eq 0 ]; then
+    # The denominator is stated, because a numerator alone reads as coverage it does
+    # not have: this lane checks the document-qualified minority of a corpus whose
+    # dominant idiom is document-implied, and says so in its own green row.
+    local total
+    total="$(
+      cd "$ROOT" || exit 0
+      # Markdown-only on BOTH halves: the numerator counts citations in .md, so a
+      # denominator that also swept .sh and .txt would publish a ratio of two different
+      # populations. The ops pathspec is a directory list, so the filter is applied here.
+      { git --git-dir="$ROOT/.git" --work-tree="$ROOT" grep --untracked -nIoE '§ ?[0-9]' -- '*.md'
+        [ "$ops" = 1 ] && git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" \
+            grep --untracked --no-exclude-standard -nIoE '§ ?[0-9]' -- "${ops_scope[@]}"
+      } 2>/dev/null | grep -c '^[^:]*\.md:' )"
+    echo "   $checked document-qualified section citation(s) resolve, of $total citation(s) swept"
+    echo "   ($unchecked unchecked: target outside this clone; the implied-target majority is"
+    echo "   out of scope by the rule in this file); ${#reg_src[@]} live exemption(s)"
+  fi
+  return $bad
+}
+run_check "section-anchor resolution (Group U-2)" section_anchor_targets
 
 # ── Roster assertion (the fix for the whole F2/F9/S4-11/S4-54 class) ──
 # Everything above reports what it DID. This reports what nothing did. A lane on
