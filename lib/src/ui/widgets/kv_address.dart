@@ -180,8 +180,24 @@ class KvAddress extends StatelessWidget {
   /// instead of stranding one (D-223).
   static bool isWeightedGroup(int i, int count) => i == 0 || i == count - 1;
 
+  /// **Both channels, and this one is a security affordance** ([[L150]]'s
+  /// original victim, measured again 2026-09-04).
+  ///
+  /// D-223's head-and-tail weighting is the address-poisoning steer: an
+  /// attacker must buy a convincing prefix *and* a convincing suffix, so the
+  /// eye is pointed at both ends. On a variable face `fontWeight` is a hint and
+  /// `FontVariation('wght', …)` is the ink, and an inline style merges over the
+  /// ambient `DefaultTextStyle` — inheriting its axis. **So only the colour
+  /// half ever rendered**, and the apparent bold was `ink` against `inkDim`:
+  /// one channel doing the work of two, on the control that exists to make
+  /// substitution visible.
+  ///
+  /// §2 and `ux-auditor` item 17 ask for **700** on the checkpoints; this stays
+  /// at 600, because raising it is a composition change on a surface **UX-R2**
+  /// audits. Recorded there rather than taken in passing.
   TextStyle _groupStyle(TextStyle base, int i, int count) => base.copyWith(
     fontWeight: isWeightedGroup(i, count) ? FontWeight.w600 : FontWeight.w400,
+    fontVariations: isWeightedGroup(i, count) ? KvWeight.w600 : KvWeight.w400,
     color: isWeightedGroup(i, count) ? KvColor.ink : KvColor.inkDim,
   );
 

@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 
 import '../rust/api/wallet.dart';
 import '../services/rate_service.dart' show KvRateQuote, RateService;
+import 'format.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/kv_window.dart';
 import 'theme/tokens.dart';
@@ -23,6 +24,7 @@ import 'widgets/kv_glyph.dart';
 import 'widgets/kv_money_plate.dart';
 import 'widgets/kv_rows.dart';
 import 'widgets/kv_status_chip.dart';
+import 'widgets/kv_streaming_count.dart';
 import 'widgets/kv_tabs.dart';
 import 'widgets/kv_two_pane.dart';
 import 'widgets/status_beacon.dart';
@@ -48,13 +50,13 @@ import 'widgets/tx_status_chip.dart';
 /// `KvMoneyBar`. Every one of those readings comes from `KvWindow.of` — there
 /// is no breakpoint anywhere in this file.
 ///
-/// **The DAA readout is gone from this screen**, and that is a disposition
-/// rather than an omission. A4 asked for it under the rule; Deep V6's §5 puts
-/// *"DAA streaming"* on the network surface and BG-8 says nothing animates on
-/// a settled money screen except the two ambient rhythms. A chain clock
-/// counting in the corner of a balance was the last thing on this screen
-/// breaking that, and it is one tap away behind the chip that already opens
-/// the node surface.
+/// **The DAA readout sits under the balance** (A4, founder ruling D-256). It
+/// came off at UX-R1 on a reading of BG-8 — *nothing animates on a settled
+/// screen* — and went back on with the distinction that reading was missing:
+/// **the counter's animation is not the point, the numbers are**, and a chain
+/// counter that stops IS the stale signal rather than a decoration that
+/// happens to move. BG-8 is amended to seat it, because BG-18 had always
+/// licensed a streaming chain counter and the two laws met on this one object.
 ///
 /// **Silence is the healthy state** (BG-8 as amended at D-192). The trust line
 /// earns its place by appearing: it shows up when the link is not live or a
@@ -781,6 +783,10 @@ class _HomeScreenState extends State<HomeScreen> {
               label: 'Available balance',
               figure: KvAmount(b.mature, stale: b.stale),
               fiat: _FiatLine(fiat: widget.fiat, sompi: b.mature, now: _now),
+              chainClock: _ChainClock(
+                daa: widget.chain.virtualDaaScore,
+                dimmed: _dimmed,
+              ),
               indicator: _indicator(),
               onSend: _sendTap(),
               onReceive: _receiveTap(),
@@ -1160,6 +1166,7 @@ class _Header extends StatelessWidget {
                 fontSize: 20,
                 height: 24 / 20,
                 fontWeight: FontWeight.w700,
+                fontVariations: KvWeight.w700,
                 letterSpacing: -0.2,
                 color: KvColor.ink,
               ),
@@ -1209,6 +1216,7 @@ class _Avatar extends StatelessWidget {
                     fontSize: 17,
                     height: 1,
                     fontWeight: FontWeight.w700,
+                    fontVariations: KvWeight.w700,
                     color: KvColor.primaryMuted,
                   ),
                 ),
@@ -1277,6 +1285,7 @@ class _NetworkChip extends StatelessWidget {
               fontSize: 11,
               height: 16 / 11,
               fontWeight: FontWeight.w600,
+              fontVariations: KvWeight.w600,
               // `inkMeta` fails AA on `chip` (§1.4), and this is information.
               color: KvColor.inkDim,
             ),
@@ -1308,6 +1317,82 @@ class _NetworkChip extends StatelessWidget {
           child: SizedBox(
             height: KvSpace.touchTarget,
             child: Center(child: chip),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **The chain clock, under the balance** (A4, founder ruling D-256).
+///
+/// It came off this screen at UX-R1 on a reading of BG-8 — *nothing animates on
+/// a settled screen* — and the founder put it back with the distinction the law
+/// was missing: **the counter's animation is not the point, the numbers are.**
+/// BG-8 is amended rather than worked around, because BG-18 had always
+/// licensed a streaming chain counter and the two laws met on exactly this
+/// object.
+///
+/// **Streamed, not stepped** (D-226). The score is READ on the 1 Hz ticker, so
+/// a plain render repaints once a second and jumps about ten at a time.
+/// `KvStreamingCount` replays the interval between the last two readings at the
+/// panel's refresh rate — every frame is a score the chain actually had, and it
+/// never runs past the newest reading. **It stops when the link does**, which
+/// is why `stale` is passed in: a clock still ticking on a dead link is a
+/// prediction, and the dimming above already says the reading is old.
+///
+/// `DAA` is a word and takes Jakarta; the score is a figure and takes mono
+/// (BG-30). One line, two faces, which is the law rather than a flourish.
+class _ChainClock extends StatelessWidget {
+  const _ChainClock({required this.daa, required this.dimmed});
+
+  final ValueListenable<BigInt?> daa;
+  final ValueListenable<bool> dimmed;
+
+  @override
+  Widget build(BuildContext context) {
+    // **It stops; it does not dim** (BG-8 as amended, D-257). At 11 dp the 45%
+    // multiply takes `inkMeta` to **1.93:1** against BG-14's 4.5 — and no
+    // opacity rescues it, because the tone is 4.75 at full strength. The
+    // stopping IS the stale signal, which is the clause this same amendment
+    // seated; the age and the amber lamp carry the rest.
+    return ValueListenableBuilder<bool>(
+      valueListenable: dimmed,
+      builder: (context, stale, _) => RepaintBoundary(
+        child: ValueListenableBuilder<BigInt?>(
+          valueListenable: daa,
+          builder: (context, score, _) => KvStreamingCount(
+            value: score,
+            stalled: stale,
+            builder: (context, shown) => Text.rich(
+              TextSpan(
+                children: [
+                  const TextSpan(
+                    text: 'DAA ',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontWeight: FontWeight.w600,
+                      fontVariations: KvWeight.w600,
+                      letterSpacing: 1.1,
+                    ),
+                  ),
+                  TextSpan(
+                    text: formatScore(shown),
+                    style: const TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontWeight: FontWeight.w500,
+                      fontVariations: KvWeight.w500,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
+              style: const TextStyle(
+                fontSize: 11,
+                height: 16 / 11,
+                color: KvColor.inkMeta,
+              ),
+            ),
           ),
         ),
       ),
@@ -1386,6 +1471,7 @@ class _FiatLine extends StatelessWidget {
                         fontSize: 13,
                         height: 18 / 13,
                         fontWeight: FontWeight.w500,
+                        fontVariations: KvWeight.w500,
                         // Subordinate by scale AND tone (BG-5): KAS is the
                         // unit of account and this sits beside it, never
                         // instead.
@@ -1400,20 +1486,21 @@ class _FiatLine extends StatelessWidget {
                           age,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          // **An elapsed time is `metaMono`** (§2, BG-30) —
-                          // the same fact class as the ledger's own row times
-                          // twelve rows below, which are mono. One fact, one
-                          // face (L143); the unit word rides with it because
-                          // splitting `12 m old` into two runs to set three
-                          // characters in Jakarta is a rule applied past the
-                          // point where it means anything.
-                          style: const TextStyle(
-                            fontFamily: KvFont.mono,
+                          // **Mono for the age, Jakarta for the sentence**
+                          // (BG-30). `12 m old` is an elapsed time and takes
+                          // `metaMono`, the same face as the ledger's own row
+                          // times; `no rate yet` is a *sentence*, and mono
+                          // never carries one — which the first cut got wrong
+                          // by setting the whole slot in mono because the
+                          // common branch is a figure.
+                          style: TextStyle(
+                            fontFamily: quote == null ? KvFont.ui : KvFont.mono,
                             fontSize: 11,
                             height: 16 / 11,
                             fontWeight: FontWeight.w500,
+                            fontVariations: KvWeight.w500,
                             color: KvColor.inkMeta,
-                            fontFeatures: [FontFeature.tabularFigures()],
+                            fontFeatures: const [FontFeature.tabularFigures()],
                           ),
                         ),
                       ),
@@ -1720,8 +1807,14 @@ class _LedgerRow extends StatelessWidget {
     };
     final time = record.unixtimeMsec;
     final open = onOpen;
-    return Opacity(
-      opacity: stale ? KvFreshness.opacityStale : 1,
+    // **A ledger row does not dim, and that is not a relaxation** (D-257).
+    // BG-8's dim is for a live *reading*; a row is a record of something that
+    // happened, and it did not become less true when the socket dropped. Its
+    // only live parts are the depth counter and the relative age, and both
+    // already stop on `stale`. Dimming the whole row put a 16 dp amount at
+    // **3.03:1** and an 11 dp time at **1.93** against BG-14's 4.5 — reading
+    // the past through a fog because the present is uncertain.
+    return RepaintBoundary(
       child: DecoratedBox(
         decoration: BoxDecoration(
           // The selected row in a two-pane window lifts one step, which is the
@@ -1768,6 +1861,7 @@ class _LedgerRow extends StatelessWidget {
                     fontSize: 11,
                     height: 16 / 11,
                     fontWeight: FontWeight.w500,
+                    fontVariations: KvWeight.w500,
                     color: selected ? KvColor.inkDim : KvColor.inkMeta,
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
@@ -1983,6 +2077,7 @@ class _StatusRow extends StatelessWidget {
                     fontSize: 11,
                     height: 16 / 11,
                     fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
                     letterSpacing: 1.1,
                     color: KvColor.inkMeta,
                   ),

@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
+
+import 'support/preview_harness.dart';
 
 /// A real mainnet address shape: `kaspa:` + a 61-character payload = 67
 /// characters, taken from the Rust transport-store fixtures rather than typed.
@@ -50,6 +54,11 @@ String _joinedFigure(WidgetTester tester) => tester
     .join();
 
 void main() {
+  // **The bundled faces, or every width here is a lie** (L139): the test
+  // fallback's glyphs are square em-boxes, so a weight difference measures as
+  // zero whether it was painted or not.
+  setUpAll(loadBundledFonts);
+
   group('KvAmount — BG-5 money', () {
     testWidgets('unknown is `—`, never a fabricated zero', (tester) async {
       final semantics = tester.ensureSemantics();
@@ -202,6 +211,91 @@ void main() {
         _host(KvAmount(BigInt.from(1240000000), role: KvAmountRole.row)),
       );
       expect(_styleOf(tester, '12').color, KvColor.ink);
+    });
+
+    testWidgets('the weight channel is PAINTED, not merely declared (BG-26)', (
+      tester,
+    ) async {
+      // **The defect this is written against, measured 2026-09-04.** Both faces
+      // are variable, so `fontWeight:` is a hint and `FontVariation('wght', …)`
+      // is what the rasteriser uses — and an inline `TextStyle` merges over the
+      // ambient `DefaultTextStyle`, **inheriting its axis**. An incoming row
+      // declared at `w700` and an outgoing row declared at `w500` therefore
+      // rendered at **identical width, both at axis 400**: BG-26 says direction
+      // rides four channels and only three existed.
+      //
+      // **Asserted on the rendered width**, never on `style.fontWeight` — a
+      // guard that read the declaration back to itself is exactly what let this
+      // survive (L150). It runs inside a real `Scaffold` under `kvDarkTheme()`,
+      // because the ambient axis is the whole mechanism and a bare host has
+      // none.
+      // **Width cannot be the probe here, and that is not a shortcut.**
+      // JetBrains Mono is monospaced: every glyph has the same advance at every
+      // weight, so a figure measures identically whether the axis was applied
+      // or not. What the rasteriser actually receives is the **merged** style's
+      // `fontVariations` — the ambient axis is what was overwriting it — so
+      // that is what is asserted, and the proportional half is proved below on
+      // a Jakarta run where width *is* a valid measurement.
+      Future<List<FontVariation>?> axisFor(KvMoneyDirection direction) async {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: kvDarkTheme(),
+            home: Scaffold(
+              body: Center(
+                child: KvAmount(
+                  BigInt.from(2400000000),
+                  role: KvAmountRole.row,
+                  direction: direction,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        return tester
+            .renderObject<RenderParagraph>(find.textContaining('24'))
+            .text
+            .style!
+            .fontVariations;
+      }
+
+      expect(await axisFor(KvMoneyDirection.incoming), KvWeight.w700);
+      expect(await axisFor(KvMoneyDirection.outgoing), KvWeight.w500);
+
+      // The proportional half, measured as ink: the same word at 600 and at
+      // 400 in Plus Jakarta Sans, inside a real theme so the ambient axis is
+      // present. Before the fix these measured identically.
+      Future<double> jakartaWidth(FontWeight weight) async {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: kvDarkTheme(),
+            home: Scaffold(
+              body: Center(
+                child: Text(
+                  'Received',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    fontWeight: weight,
+                    fontVariations: KvWeight.of(weight),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        return tester.getSize(find.text('Received')).width;
+      }
+
+      expect(
+        await jakartaWidth(FontWeight.w600),
+        greaterThan(await jakartaWidth(FontWeight.w400)),
+        reason: 'a heavier word must actually be wider, or nothing was painted',
+      );
+      await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('it speaks naturally — the sign is a WORD (§11)', (

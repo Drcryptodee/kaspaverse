@@ -398,17 +398,23 @@ void main() {
     });
   });
 
-  testWidgets('a long amount shrinks the FIGURE, never the title — and never '
-      'overflows (BG-5, BG-14)', (tester) async {
-    // **The defect this is written against**, measured at 320 dp / 1.3× before
-    // the fix: an unbounded trailing column took its intrinsic width, so
-    // `KvAmount`'s own `FittedBox(scaleDown)` had nothing to fit inside. A
-    // 1,234.56789012 KAS row drove the title to **0 dp** and overflowed the
-    // row by 19; a 123,456 KAS row painted the figure past the screen edge.
+  testWidgets('a row holds its figure, its floor and its right edge at once '
+      '(BG-5, BG-14, A11)', (tester) async {
+    // **Three shapes were tried and each broke one of these three.** The guard
+    // is written to fail on any of them, because the first two fixes each
+    // passed a test written for the defect it was fixing:
     //
-    // **No `find.text` assertion could see it** — a finder matches a 0 dp
-    // `Text` (L131) — so the gate was green through it and `ux-auditor` was
-    // not. That is the whole argument for item 24d.
+    //  * unbounded — the figure cannot scale, the title starves to 0 dp and the
+    //    row overflows past the screen edge (BG-5, BG-14; invisible to
+    //    `find.text`, which matches a 0 dp `Text` — L131);
+    //  * `Flexible` — bounded, but the leftover lands after the last child, so
+    //    a short amount floats clear of the gutter (**A11**);
+    //  * two `Expanded` — flush and bounded, but a 50/50 partition regardless
+    //    of need scaled a long figure to **7.72 dp** against BG-14's floor of
+    //    11, and truncated the title beside a half-empty column.
+    //
+    // Measured on the AMOUNT, never on the row: the row's own right edge cannot
+    // fail an alignment assertion, which is how the second shape passed one.
     tester.view.devicePixelRatio = 3;
     tester.view.physicalSize = const Size(320 * 3, 720 * 3);
     tester.platformDispatcher.textScaleFactorTestValue = 1.3;
@@ -458,15 +464,67 @@ void main() {
       );
       expect(
         tester.getSize(find.text('Received')).width,
-        greaterThan(40),
-        reason: '$sompi: the title was starved to nothing',
+        greaterThan(30),
+        reason: '$sompi: the title was starved',
+      );
+
+      // **The figure is measured, not the box it sits in.** `KvAmount` scales
+      // by `FittedBox`, so the rendered size divided by the laid-out text's
+      // intrinsic size is the scale actually applied — and the readable floor
+      // is a property of the painted glyphs, not of the style.
+      final figure = find.descendant(
+        of: find.byType(KvAmount),
+        matching: find.byType(Text),
+      );
+      final painted = tester.renderObject<RenderParagraph>(figure.first);
+      final scale =
+          tester.getSize(find.byType(FittedBox).first).height /
+          painted.size.height;
+      final smallest = painted.text.style!.fontSize! * scale;
+      debugPrint(
+        'ROW $sompi — scale ${scale.toStringAsFixed(3)} · figure '
+        '${smallest.toStringAsFixed(2)} dp · title '
+        '${tester.getSize(find.text('Received')).width.toStringAsFixed(1)} · '
+        'amount right ${tester.getRect(find.byType(KvAmount)).right.toStringAsFixed(1)} '
+        'vs row ${tester.getRect(find.byType(KvRow)).right.toStringAsFixed(1)}',
       );
       expect(
-        tester.getRect(find.byType(KvRow)).right,
-        lessThanOrEqualTo(320 - KvSpace.gutter + 0.5),
-        reason: '$sompi: the row is painted past the gutter',
+        smallest,
+        greaterThanOrEqualTo(KvAmount.readableFloor - 0.5),
+        reason:
+            '$sompi: the figure scaled to ${smallest.toStringAsFixed(2)} dp, '
+            'under BG-14\'s 11 dp floor — the fit multiplied the floor away',
+      );
+
+      // A11: the amount's own right edge is the row's, whatever its length.
+      expect(
+        tester.getRect(find.byType(KvAmount)).right,
+        closeTo(tester.getRect(find.byType(KvRow)).right, 1.0),
+        reason: '$sompi: the ledger edge reads ragged',
       );
     }
+  });
+
+  testWidgets('the rail quantises its scroll to whole sockets', (tester) async {
+    // **The fix shipped inert and nothing said so.** `Expanded` hands its child
+    // a *tight* height, so the `SizedBox(height: whole)` inside it was
+    // discarded: the viewport stayed 180 dp — 2.368 sockets — and the third
+    // disc was still cut through its middle, which is exactly what the code
+    // was written to prevent (INV-10: done means proven).
+    await pumpShell(tester, const Size(915, 412));
+    final rail = find.byType(KvRail);
+    expect(rail, findsOneWidget);
+    final viewport = tester.getSize(
+      find.descendant(of: rail, matching: find.byType(SingleChildScrollView)),
+    );
+    expect(
+      viewport.height % _railSocketHeight,
+      closeTo(0, 0.01),
+      reason:
+          'the scroll region ends mid-socket: ${viewport.height} dp is '
+          '${viewport.height / _railSocketHeight} sockets, so a clip falls '
+          'through a glyph',
+    );
   });
 
   // ───────────────────────────────────────────────────────────────────────
@@ -679,6 +737,11 @@ Widget _squeezed() {
     ),
   );
 }
+
+/// A rail socket's whole height, mirrored from `kv_drawer.dart`'s private
+/// constant: 8 + 40 disc + 4 + 16 label + 8.
+const double _railSocketHeight =
+    KvSpace.s + KvSpace.rowDisc + KvSpace.xs + 16 + KvSpace.s;
 
 bool _isPrimaryFill(Decoration? d) =>
     d is BoxDecoration && d.color == KvColor.primary;

@@ -114,11 +114,10 @@ void main() {
     await tester.pump();
     expectFigure('0', '00');
     expect(find.text('—'), findsNothing);
-    // **No chain clock on the money screen since UX-R1.** §5 puts "DAA
-    // streaming" on the network surface and BG-8 forbids anything animating
-    // on a settled money screen except the two ambient rhythms; the reading
-    // is one tap away behind the Mainnet chip.
-    expect(find.textContaining('DAA '), findsNothing);
+    // **The chain clock reads under the balance** (A4, founder ruling D-256).
+    // BG-8 is amended to seat it: a chain counter that stops IS the stale
+    // signal, so its motion is the reading rather than decoration.
+    expect(find.textContaining('DAA 458,174,109'), findsOneWidget);
 
     // Funds arrive (matured + pending) with an incoming, still-pending row.
     mature.value = BigInt.parse('123456789012'); // 1,234.56789012 KAS

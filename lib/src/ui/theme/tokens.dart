@@ -576,6 +576,34 @@ abstract final class KvFreshness {
   /// A stale reading dims to this.
   static const double opacityStale = 0.45;
 
+  /// **The size at or above which the 45% dim is permitted** — and below which
+  /// it is a BG-14 violation *(amended 2026-09-04, D-257; the collision was
+  /// measured, not argued)*.
+  ///
+  /// BG-8 asks a stale reading to dim to [opacityStale]; BG-14 asks every
+  /// information-bearing run to hold AA against the surface it lands on, and
+  /// BG-14 is one of §0's four clauses that do not bend to taste. Composited on
+  /// `plate`, the dim does this:
+  ///
+  /// | object | size | fresh | dimmed | bar | |
+  /// |:--|--:|--:|--:|--:|:--|
+  /// | balance figure | 48 | 16.49 | **4.22** | 3.0 | passes — large text |
+  /// | ledger amount, in | 16 | 10.10 | **3.03** | 4.5 | fails |
+  /// | ledger amount, out | 16 | 6.14 | **2.18** | 4.5 | fails |
+  /// | row title | 15 | 16.49 | **4.22** | 4.5 | fails |
+  /// | a `metaMono` time | 11 | 4.75 | **1.93** | 4.5 | fails |
+  ///
+  /// No opacity ≤ 1 rescues an `inkMeta` line: at full strength it is 4.75, so
+  /// any multiply at all puts it under. **The dim is therefore a large-text
+  /// device.** 18.66 is WCAG's own boundary between the 4.5 body bar and the
+  /// 3.0 large-text bar, which is why it is this number and not a taste.
+  ///
+  /// A body-size live reading carries staleness the ways BG-8 already provides
+  /// and BG-14 does not forbid: **the visible age**, the lamp going amber, and
+  /// — for a counter — **stopping**, which BG-8 as amended names as the stale
+  /// signal in its own right.
+  static const double staleDimFloor = 18.66;
+
   /// How long a reading stays live without a refresh.
   static const Duration staleAfter = Duration(seconds: 5);
 
@@ -591,6 +619,43 @@ abstract final class KvFreshness {
 /// Both are variable; every slot pins `FontVariation('wght')` rather than
 /// `FontWeight` — on a variable face the enum is a hint and the axis is the ink
 /// (L150).
+/// §2 — **a weight is TWO channels, and only one of them is ink.**
+///
+/// Both faces are variable. On a variable face `fontWeight:` is a *hint* and
+/// `FontVariation('wght', …)` is what the rasteriser actually uses — and an
+/// inline `TextStyle` merges over the ambient `DefaultTextStyle`, **inheriting
+/// its `fontVariations`**. So a style that sets the enum and not the axis
+/// declares a weight it does not paint.
+///
+/// **Measured again on the bundled Plus Jakarta Sans, 2026-09-04**, on the
+/// widgets shipped that day: a `KvAmount` row at declared `w700` (incoming) and
+/// one at declared `w500` (outgoing) rendered at **identical width, both at
+/// axis 400** — so BG-26's weight channel, one of the four ways direction is
+/// supposed to ride, did not exist. The enum alone measured 66.885 against
+/// 68.326 with the axis set. That is [[L150]], and it is why these constants
+/// exist rather than a helper function: they are `const`, so a `const
+/// TextStyle` can carry one.
+///
+/// **Set both, always.** `fontWeight:` stays because the framework, the
+/// semantics tree and every non-variable fallback read it.
+abstract final class KvWeight {
+  static const List<FontVariation> w400 = [FontVariation('wght', 400)];
+  static const List<FontVariation> w500 = [FontVariation('wght', 500)];
+  static const List<FontVariation> w600 = [FontVariation('wght', 600)];
+  static const List<FontVariation> w700 = [FontVariation('wght', 700)];
+  static const List<FontVariation> w800 = [FontVariation('wght', 800)];
+
+  /// The axis list for a [FontWeight], for the one case a weight is chosen at
+  /// run time (a ledger row's direction). Not `const`; prefer the constants.
+  static List<FontVariation> of(FontWeight weight) => switch (weight.value) {
+    <= 400 => w400,
+    500 => w500,
+    600 => w600,
+    700 => w700,
+    _ => w800,
+  };
+}
+
 abstract final class KvFont {
   /// **Plus Jakarta Sans speaks** (§2, BG-30). Bundled, never fetched (BG-16).
   ///

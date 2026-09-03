@@ -28,6 +28,7 @@ class KvMoneyPlate extends StatelessWidget {
     required this.figure,
     required this.indicator,
     this.fiat,
+    this.chainClock,
     this.onSend,
     this.onReceive,
     this.sendDisabledReason,
@@ -48,6 +49,18 @@ class KvMoneyPlate extends StatelessWidget {
   /// The `≈` restatement. Null ⇒ the user switched it off, or no rate seam is
   /// wired: **the line is gone, never a dash** (D-193).
   final Widget? fiat;
+
+  /// **The chain clock, under the balance** (A4, founder ruling 2026-09-04,
+  /// D-256). It reads the DAA score the wallet is measuring everything else
+  /// against, and it belongs in the plate under BG-28 because it is always
+  /// true: a number when the link is live, `—` when it is not.
+  ///
+  /// It streams (D-226, BG-18) and that is now explicitly seated in BG-8
+  /// rather than tolerated against it: **a chain counter that stops IS the
+  /// stale signal**, so its motion is the reading rather than decoration. What
+  /// BG-8 still forbids on a settled screen is a spinner, a shimmer, a loader
+  /// or a meter — none of which carry a value.
+  final Widget? chainClock;
 
   final VoidCallback? onSend;
   final VoidCallback? onReceive;
@@ -91,6 +104,10 @@ class KvMoneyPlate extends StatelessWidget {
             const SizedBox(height: KvSpace.s),
             figure,
             if (fiat != null) ...[const SizedBox(height: KvSpace.xs), fiat!],
+            if (chainClock != null) ...[
+              const SizedBox(height: KvSpace.xs),
+              chainClock!,
+            ],
             const SizedBox(height: KvSpace.s20),
             _Pair(
               onSend: onSend,
@@ -257,11 +274,7 @@ class _KvMoneyBarState extends State<KvMoneyBar> {
                             // (`ux-auditor`, UX-R1). The ellipsis sits where
                             // the fraction will land, so the tap that reveals
                             // it is the obvious next move.
-                            if (!_full) ...[
-                              const _Truncated(),
-                              const SizedBox(width: KvSpace.s),
-                              const _Unit(),
-                            ],
+                            if (!_full) const _Truncated(),
                           ],
                         ),
                       ),
@@ -269,22 +282,57 @@ class _KvMoneyBarState extends State<KvMoneyBar> {
                   ),
                 ),
               ),
+              // **The unit sits OUTSIDE the fit, and that is the whole point
+              // of its floor.** Inside, `max(readableFloor, …)` is computed and
+              // then multiplied away by the very scale that saved the figure —
+              // measured at a 340 dp pane / 1.3×, `KAS` painted at **7.98 dp**
+              // against an 11 dp law. It is the identical defect `KvAmount`
+              // rescued its own unit from at UX-4, reintroduced one widget
+              // over by grouping the runs (`ux-auditor`, UX-R1).
+              if (!_full) ...[const SizedBox(width: KvSpace.s), const _Unit()],
               const SizedBox(width: KvSpace.sm),
               if (widget.onReceive != null)
                 _BarPill(label: 'Receive', onTap: widget.onReceive!),
-              // **A pill that cannot act and has nowhere to say why is not
-              // shown at all** (BG-12). The plate renders the reason in
-              // `inkMeta` under the control; a 56 dp bar has no line to put it
-              // on, and a silent `shelf` pill is the disabled-with-no-reason
-              // form the law forbids outright. On a proven zero there is
-              // nothing to send, Receive is the sensible next act, and the
-              // plate one rotation away still says why in words.
-              if (widget.onReceive != null &&
-                  widget.onSend != null &&
-                  widget.sendDisabledReason == null)
+              if (widget.onReceive != null && widget.onSend != null)
                 const SizedBox(width: KvSpace.s),
-              if (widget.onSend != null && widget.sendDisabledReason == null)
-                _BarPill(label: 'Send', onTap: widget.onSend!),
+              // **A pill that cannot act is replaced by the reason, not
+              // deleted** (BG-12, BG-24). A 56 dp bar has no line beneath a
+              // control to put a reason on, and a silent `shelf` pill is the
+              // disabled-with-no-reason form the law forbids outright — but
+              // simply dropping it says nothing either, and drops it without
+              // the motion that accounts for it. The slot cross-fades between
+              // the control and the sentence, so `short` still tells the user
+              // why the money door is closed.
+              if (widget.onSend != null)
+                AnimatedSwitcher(
+                  duration: KvMotion.calm,
+                  switchInCurve: KvMotion.curve,
+                  switchOutCurve: KvMotion.curve,
+                  child: widget.sendDisabledReason == null
+                      ? _BarPill(
+                          key: const ValueKey('send'),
+                          label: 'Send',
+                          onTap: widget.onSend!,
+                        )
+                      : Padding(
+                          key: const ValueKey('reason'),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: KvSpace.s,
+                          ),
+                          child: Text(
+                            widget.sendDisabledReason!,
+                            maxLines: 2,
+                            style: const TextStyle(
+                              fontFamily: KvFont.ui,
+                              fontSize: 11,
+                              height: 16 / 11,
+                              fontWeight: FontWeight.w500,
+                              fontVariations: KvWeight.w500,
+                              color: KvColor.inkMeta,
+                            ),
+                          ),
+                        ),
+                ),
             ],
           ),
         ),
@@ -298,7 +346,7 @@ class _KvMoneyBarState extends State<KvMoneyBar> {
 /// **There is no disabled form**: a control that cannot act has nowhere in a
 /// 56 dp bar to say why, so the bar omits it instead (BG-12).
 class _BarPill extends StatelessWidget {
-  const _BarPill({required this.label, required this.onTap});
+  const _BarPill({super.key, required this.label, required this.onTap});
 
   final String label;
   final VoidCallback onTap;
@@ -328,6 +376,7 @@ class _BarPill extends StatelessWidget {
                 fontSize: 15,
                 height: 20 / 15,
                 fontWeight: FontWeight.w600,
+                fontVariations: KvWeight.w600,
                 color: KvColor.ink,
               ),
             ),
@@ -357,6 +406,7 @@ class _Truncated extends StatelessWidget {
       fontSize: 12,
       height: 1.14,
       fontWeight: FontWeight.w500,
+      fontVariations: KvWeight.w500,
       color: KvColor.inkMeta,
     ),
   );
@@ -375,6 +425,7 @@ class _Unit extends StatelessWidget {
       fontSize: 11,
       height: 16 / 11,
       fontWeight: FontWeight.w600,
+      fontVariations: KvWeight.w600,
       color: KvColor.primaryMuted,
     ),
   );
@@ -396,6 +447,7 @@ class _Caps extends StatelessWidget {
       fontSize: 11,
       height: 16 / 11,
       fontWeight: FontWeight.w600,
+      fontVariations: KvWeight.w600,
       letterSpacing: 1.1,
       color: KvColor.inkMeta,
     ),

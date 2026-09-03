@@ -311,13 +311,14 @@ void main() {
       expect(find.text('KAS'), findsWidgets);
       expect(styleOf(tester, 'KAS').color, KvColor.primaryMuted);
 
-      // **No chain clock on this screen since UX-R1.** A4 asked for a DAA
-      // readout under the rule; Deep V6's §5 puts "DAA streaming" on the
-      // network surface, and BG-8 says nothing animates on a settled money
-      // screen except the two ambient rhythms. A counter ticking in the
-      // corner of a balance was the last thing here breaking that — it is one
-      // tap away behind the chip above.
-      expect(find.textContaining('DAA'), findsNothing);
+      // **The chain clock reads under the balance** (A4, founder ruling
+      // D-256). It came off at UX-R1 on a reading of BG-8 and went back on
+      // with the distinction that reading was missing: the counter's animation
+      // is not the point, the numbers are — and a chain counter that stops IS
+      // the stale signal. BG-8 is amended to seat it rather than worked
+      // around. `DAA` is a word and takes Jakarta; the score is a figure and
+      // takes mono (BG-30).
+      expect(find.textContaining('DAA 2,000'), findsOneWidget);
       // The fiat slot rendering the honest unknown.
       expect(find.text('≈ —'), findsOneWidget);
       expect(find.text('no rate yet'), findsOneWidget);
@@ -619,6 +620,30 @@ void main() {
         reason: 'nothing is happening, so nothing may look like it is',
       );
       expect(find.text('1,284'), findsOneWidget); // retained, never blanked
+
+      // **The BALANCE dims; the ledger row does not** (BG-8 as amended,
+      // D-257). The 45% multiply is a large-text device: measured on `plate`
+      // it takes a 16 dp ledger amount to **3.03:1** and an 11 dp time to
+      // **1.93** against BG-14's 4.5 — and BG-14 is one of §0's clauses that
+      // do not bend. Only the balance figure is large enough to sit on the
+      // 3.0 large-text bar, where the dim lands at 4.22.
+      //
+      // A row is also a *record*, not a live reading: it did not become less
+      // true when the socket dropped. Its live parts — the depth counter and
+      // the relative age — stop instead, which is what the amended BG-8 names
+      // as the stale signal.
+      expect(
+        tester
+            .widgetList<AnimatedOpacity>(
+              find.ancestor(
+                of: find.text('1,284'),
+                matching: find.byType(AnimatedOpacity),
+              ),
+            )
+            .map((o) => o.opacity),
+        contains(KvFreshness.opacityStale),
+        reason: 'the balance is large text and must still dim',
+      );
       expect(
         tester
             .widgetList<Opacity>(
@@ -627,8 +652,11 @@ void main() {
                 matching: find.byType(Opacity),
               ),
             )
-            .map((o) => o.opacity),
-        contains(KvFreshness.opacityStale),
+            .where((o) => o.opacity == KvFreshness.opacityStale),
+        isEmpty,
+        reason:
+            'a 16 dp amount dimmed to 45% is 3.03:1 — under AA, and a record '
+            'does not go stale',
       );
       // A frozen last-known DAA must not tick at full presence.
       expect(find.textContaining('confirmations'), findsNothing);

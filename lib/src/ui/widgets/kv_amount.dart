@@ -317,6 +317,7 @@ class KvAmount extends StatelessWidget {
                 fontSize: base,
                 height: 1.14,
                 fontWeight: _weight,
+                fontVariations: KvWeight.of(_weight),
                 color: KvColor.inkDim,
               ),
             ),
@@ -382,9 +383,21 @@ class KvAmount extends StatelessWidget {
                         ? base
                         : fractionSize,
                     height: strong ? 1.14 : null,
+                    // **Both channels, and BG-26 depends on it.** On a variable
+                    // face `fontWeight` is a hint and `fontVariations` is the
+                    // ink, and an inline style inherits the ambient axis — so
+                    // until UX-R1 measured it, an incoming row declared at 700
+                    // and an outgoing row declared at 500 rendered at
+                    // **identical width, both at axis 400**. Direction was
+                    // riding three channels, not four (L150).
                     fontWeight: strong || role == KvAmountRole.row
                         ? _weight
                         : FontWeight.w600,
+                    fontVariations: KvWeight.of(
+                      strong || role == KvAmountRole.row
+                          ? _weight
+                          : FontWeight.w600,
+                    ),
                     letterSpacing: strong && role == KvAmountRole.hero
                         ? -0.5
                         : 0,
@@ -397,8 +410,16 @@ class KvAmount extends StatelessWidget {
       );
     }
 
+    // **The 45% stale dim is a LARGE-TEXT device** (BG-8 as amended, D-257).
+    // Measured on `plate`: it takes a 16 dp ledger amount to 3.03 and an 11 dp
+    // meta line to 1.93, against BG-14's 4.5 — and BG-14 does not bend. Only
+    // the balance figure is large enough to sit on the 3.0 bar, where the dim
+    // lands at 4.22. Below the floor the staleness is carried by the visible
+    // age, the amber lamp and a counter that stops, which is what BG-8 asks
+    // for anyway.
+    final dim = stale && base >= KvFreshness.staleDimFloor;
     return AnimatedOpacity(
-      opacity: stale ? KvFreshness.opacityStale : 1,
+      opacity: dim ? KvFreshness.opacityStale : 1,
       duration: KvMotion.instant,
       curve: KvMotion.out,
       child: Row(
@@ -444,6 +465,7 @@ class KvAmount extends StatelessWidget {
                     fontFamily: KvFont.mono,
                     fontSize: unitSize,
                     fontWeight: FontWeight.w500,
+                    fontVariations: KvWeight.w500,
                     letterSpacing: 0.6,
                     color: KvColor.primaryMuted,
                   ),

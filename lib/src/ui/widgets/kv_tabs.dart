@@ -101,6 +101,12 @@ class _Tab extends StatelessWidget {
                           fontWeight: active
                               ? FontWeight.w600
                               : FontWeight.w400,
+                          // Both channels: on a variable face the enum is a
+                          // hint and the axis is the ink, and an inline style
+                          // inherits the ambient axis (L150).
+                          fontVariations: active
+                              ? KvWeight.w600
+                              : KvWeight.w400,
                           color: active ? KvColor.ink : KvColor.inkMeta,
                         ),
                       ),

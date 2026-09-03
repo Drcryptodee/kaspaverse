@@ -180,6 +180,18 @@ class KvRow extends StatefulWidget {
   /// §4: fixed in every window class (BG-33).
   static const double height = KvSpace.row;
 
+  /// **The widest the trailing column may grow**, so a long figure scales
+  /// inside a bound rather than taking the row.
+  ///
+  /// **Measured, not chosen** (item 0). At 320 dp / 1.3× — the floor, where the
+  /// row is tightest — this value keeps every property the two previous shapes
+  /// each broke one of: a short amount holds its right edge at the row's own
+  /// (A11) with 87.9 dp left for the title; a fourteen-digit amount caps here,
+  /// sits flush right, scales to 12.1 dp (clear of BG-14's 11 dp floor) and
+  /// leaves the title 36 dp rather than nothing. Fixed in dp, like every other
+  /// height and gap in the system (BG-33).
+  static const double trailingMax = 132;
+
   @override
   State<KvRow> createState() => _KvRowState();
 }
@@ -221,6 +233,7 @@ class _KvRowState extends State<KvRow> {
                       fontSize: 15,
                       height: 20 / 15,
                       fontWeight: FontWeight.w600,
+                      fontVariations: KvWeight.w600,
                       color: KvColor.ink,
                     ),
                   ),
@@ -242,27 +255,34 @@ class _KvRowState extends State<KvRow> {
             ),
             if (trail != null || meta != null) ...[
               const SizedBox(width: KvSpace.sm),
-              // **Two `Expanded` children, and both halves of that matter.**
+              // **Intrinsic first, capped, flush right — and it took three
+              // attempts to get all three at once.**
               //
-              // Unbounded, the trailing column takes its intrinsic width, so
-              // `KvAmount`'s own `FittedBox(scaleDown)` has nothing to fit
-              // inside and the figure cannot shrink: measured at 320 dp /
-              // 1.3×, a 1,234.56789012 KAS row drove the title to **0 dp** and
-              // overflowed the row by 19, and a 123,456 KAS row painted the
-              // figure past the screen edge — BG-5's one prohibition (a figure
-              // clips instead of scaling) and BG-14's floor, together. **No
-              // `find.text` could see it**: a finder matches a 0 dp `Text`
-              // (L131), which is why the gate was green through it and
-              // `ux-auditor` was not.
+              // *Unbounded* (a bare non-flex child): `KvAmount`'s own
+              // `FittedBox(scaleDown)` has nothing to fit inside, so the figure
+              // cannot shrink. Measured at 320 dp / 1.3×, a 1,234.56789012 KAS
+              // row drove the title to **0 dp** and overflowed by 19, and a
+              // 123,456 KAS row painted past the screen edge — BG-5's one
+              // prohibition and BG-14's floor together, with **no `find.text`
+              // able to see it** because a finder matches a 0 dp `Text` (L131).
               //
-              // `Flexible` bounds it but leaves the leftover *after* the last
-              // child, so a short amount floated ~60 dp clear of the gutter and
-              // the ledger's right edge read ragged again — **A11, the
-              // founder's own finding, undone by the fix for something else.**
-              // Two `Expanded` children split the free space with nothing left
-              // over, so the trailing column's right edge IS the row's, and it
-              // still has a bounded width to scale inside.
-              Expanded(
+              // *`Flexible`*: bounded, but the leftover lands **after** the
+              // last child, so a short amount floated ~60 dp clear of the
+              // gutter — **A11, the founder's own ragged-edge finding, undone
+              // by the fix for something else.**
+              //
+              // *Two `Expanded`*: flush right and bounded, but they partition
+              // 50/50 **regardless of need** — so a four-character amount
+              // truncated the title beside a half-empty column, and a long one
+              // scaled the figure to **7.72 dp** against BG-14's floor of 11.
+              //
+              // A non-flex child under a stated cap is the shape that holds all
+              // three: it takes its intrinsic width when it is small (title
+              // keeps the rest, right edge unmoved), and stops at
+              // [trailingMax] when it is not (the figure scales inside a bound
+              // instead of eating the row).
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: KvRow.trailingMax),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisAlignment: MainAxisAlignment.center,

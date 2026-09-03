@@ -414,6 +414,7 @@ class KvDrawer extends StatelessWidget {
                         fontSize: 22,
                         height: 26 / 22,
                         fontWeight: FontWeight.w700,
+                        fontVariations: KvWeight.w700,
                         letterSpacing: -0.22,
                         color: KvColor.ink,
                       ),
@@ -558,6 +559,7 @@ class _Tag extends StatelessWidget {
         fontSize: 11,
         height: 16 / 11,
         fontWeight: FontWeight.w600,
+        fontVariations: KvWeight.w600,
         color: KvColor.inkDim,
       ),
     ),
@@ -614,17 +616,28 @@ class KvRail extends StatelessWidget {
                     final whole =
                         (box.maxHeight / _RailSocket.height).floor() *
                         _RailSocket.height;
-                    return SizedBox(
-                      height: whole > 0 ? whole : box.maxHeight,
-                      child: SingleChildScrollView(
-                        child: Column(
-                          children: [
-                            for (var i = 0; i < destinations.length; i++)
-                              _RailSocket(
-                                destination: destinations[i],
-                                active: i == selected,
-                              ),
-                          ],
+                    // **`Align` is load-bearing, and its absence made the fix
+                    // inert.** `Expanded` hands its child a *tight* height, so
+                    // a bare `SizedBox(height: whole)` is discarded and the
+                    // viewport stayed 180 dp — 2.368 sockets — which cut the
+                    // third disc through its middle, exactly what this code
+                    // exists to prevent. It shipped that way and unproven,
+                    // which is why `ux_r1_shell_test.dart` now asserts the
+                    // viewport is an integer multiple of the socket.
+                    return Align(
+                      alignment: Alignment.topCenter,
+                      child: SizedBox(
+                        height: whole > 0 ? whole : box.maxHeight,
+                        child: SingleChildScrollView(
+                          child: Column(
+                            children: [
+                              for (var i = 0; i < destinations.length; i++)
+                                _RailSocket(
+                                  destination: destinations[i],
+                                  active: i == selected,
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -681,6 +694,7 @@ class _RailSocket extends StatelessWidget {
                 fontSize: 11,
                 height: 16 / 11,
                 fontWeight: FontWeight.w600,
+                fontVariations: KvWeight.w600,
                 // An unbuilt destination is quieter than a built one, and there
                 // is no room out here for the tag the drawer's row carries.
                 color: destination.built ? KvColor.inkDim : KvColor.inkMeta,
