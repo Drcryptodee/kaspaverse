@@ -233,7 +233,7 @@ bool _cadenceRunning(WidgetTester tester) =>
 
 Future<void> loadBundledFonts() async {
   for (final font in const {
-    'Inter': 'assets/fonts/Inter-Variable.ttf',
+    'PlusJakartaSans': 'assets/fonts/PlusJakartaSans-Variable.ttf',
     'JetBrainsMono': 'assets/fonts/JetBrainsMono-Variable.ttf',
   }.entries) {
     final bytes = await File(font.value).readAsBytes();

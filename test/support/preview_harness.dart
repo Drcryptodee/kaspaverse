@@ -52,7 +52,7 @@ import 'package:kaspaverse/src/ui/theme/tokens.dart';
 /// in a fake-async zone where real file I/O never completes.
 Future<void> loadBundledFonts() async {
   for (final font in const {
-    'Inter': 'assets/fonts/Inter-Variable.ttf',
+    'PlusJakartaSans': 'assets/fonts/PlusJakartaSans-Variable.ttf',
     'JetBrainsMono': 'assets/fonts/JetBrainsMono-Variable.ttf',
   }.entries) {
     final bytes = await File(font.value).readAsBytes();

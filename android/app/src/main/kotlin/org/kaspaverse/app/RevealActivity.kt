@@ -89,8 +89,19 @@ class RevealActivity : Activity() {
         fallback
     }
 
+    // **This string is a third mirror of the bundle and nothing compiles it.**
+    // `createFromAsset` resolves a path at RUNTIME, so a wrong name does not
+    // fail the build, does not fail `kotlin compile`, and does not fail any
+    // test — `face()` catches, logs at warn, and quietly renders the seed
+    // phrase in the system face. It went stale for exactly one audit cycle when
+    // Inter was removed at D-252 and was caught by `dependency-steward`, not by
+    // a lane. The `bundled fonts (INV-7)` gate lane now asserts this literal
+    // against `pubspec.yaml`, so the next rename reddens instead of degrading.
     private val faceUi: Typeface by lazy {
-        face("flutter_assets/assets/fonts/Inter-Variable.ttf", Typeface.DEFAULT)
+        face(
+            "flutter_assets/assets/fonts/PlusJakartaSans-Variable.ttf",
+            Typeface.DEFAULT,
+        )
     }
     private val faceMono: Typeface by lazy {
         face(

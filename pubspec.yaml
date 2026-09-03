@@ -48,14 +48,26 @@ flutter:
   assets:
     - assets/bip39/english.txt
 
-  # Bundled type — never runtime-fetched (DS-6/§4). Two faces only (§13):
-  # Inter (UI) + JetBrains Mono (every amount/address/hash/score, DS-2).
-  # Variable TTFs; weight rides the `wght` axis via FontVariation (kv_theme).
-  # OFL-licensed (assets/fonts/OFL-*.txt); fetched at build time, committed.
+  # Bundled type — never runtime-fetched (BG-16). **Two faces, never three**
+  # (BG-30): Plus Jakarta Sans SPEAKS, JetBrains Mono COUNTS, and they never
+  # trade jobs. Variable TTFs; every weight rides the `wght` axis via
+  # `FontVariation`, never `FontWeight` (L150 — on a variable face the enum is a
+  # hint and the axis is the ink). OFL-licensed (assets/fonts/OFL-*.txt),
+  # committed rather than fetched at build time.
+  #
+  # **Inter was REMOVED at UX-R0 (D-252, §2).** Deep V6 replaced it and nothing
+  # referenced it afterwards; an unused face in the bundle is 877 KB of APK and
+  # a third face waiting to be picked up by accident (§8).
+  #
+  # Provenance, verified 2026-09-03 before it entered the tree: Plus Jakarta
+  # Sans by Tokotype, OFL 1.1, fetched from google/fonts AND from the designer's
+  # own repo (tokotype/PlusJakartaSans) and the two are **byte-identical** —
+  # sha256 89b3fb38aa0d275d7a731d0d817a4f1622b316b4d7fbdedcf02ee9099ff68bc8.
+  # `fvar`: one axis, `wght` 200–800, default 400, which covers §2's 400–800.
   fonts:
-    - family: Inter
+    - family: PlusJakartaSans
       fonts:
-        - asset: assets/fonts/Inter-Variable.ttf
+        - asset: assets/fonts/PlusJakartaSans-Variable.ttf
     - family: JetBrainsMono
       fonts:
         - asset: assets/fonts/JetBrainsMono-Variable.ttf

@@ -592,25 +592,16 @@ abstract final class KvFreshness {
 /// `FontWeight` — on a variable face the enum is a hint and the axis is the ink
 /// (L150).
 abstract final class KvFont {
-  /// **Deep V6's speaking face is Plus Jakarta Sans, and it is not bundled
-  /// yet** — the intake carried no font file, and BG-16 forbids fetching one
-  /// at runtime. Naming a family Flutter cannot resolve does not fail the
-  /// build; it silently falls back to the platform default, which would put
-  /// every word in all fifteen screens into a face nobody chose. So this holds
-  /// at [uiLegacy] until the asset lands.
+  /// **Plus Jakarta Sans speaks** (§2, BG-30). Bundled, never fetched (BG-16).
   ///
-  /// **To close it** (one commit, `dependency-steward` — a font is a
-  /// dependency): drop `PlusJakartaSans-Variable.ttf` and its OFL text into
-  /// `assets/fonts/`, add the `family: PlusJakartaSans` stanza to `pubspec.yaml`
-  /// beside the existing two, and change this one line to [uiCanon]. Every
-  /// call site already reads [ui]. Recorded as Bible §9.10.
-  static const String ui = uiLegacy;
-
-  /// The v4.2 canon face (§2). Unresolvable until the asset ships.
-  static const String uiCanon = 'PlusJakartaSans';
-
-  /// v3.1's face — still the one actually in the bundle.
-  static const String uiLegacy = 'Inter';
+  /// Landed 2026-09-03 (D-252) with its provenance checked: OFL 1.1 by Tokotype,
+  /// fetched from google/fonts **and** the designer's own repo and found
+  /// byte-identical — a compromise would have had to hit both. `fvar` carries
+  /// one axis, `wght` 200–800 at default 400, which covers §2's 400–800 range.
+  ///
+  /// **Inter is gone from the bundle**, not merely unreferenced: an unused face
+  /// is a third face waiting to be picked up by accident (§8, BG-30).
+  static const String ui = 'PlusJakartaSans';
 
   static const String mono = 'JetBrainsMono';
 }

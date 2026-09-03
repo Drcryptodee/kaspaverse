@@ -157,7 +157,7 @@ Android-first, **arm64-only**, physical device:
 flutter pub get
 tools/preflight.sh                                        # orientation
 flutter build apk --debug --target-platform android-arm64 # then `flutter install`
-tools/gate.sh   # the proof gate, all twenty-two lanes: cargo fmt · clippy · test (bounded) ·
+tools/gate.sh   # the proof gate, all twenty-three lanes: cargo fmt · clippy · test (bounded) ·
                 # cargo-deny · vendored-dialer tests · arm64 cross-compile · dart format ·
                 # flutter analyze · flutter test · gradle wrapper · gradle dependency
                 # verification · kotlin compile · android lint (NewApi) · codegen-drift ·

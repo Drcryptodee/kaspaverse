@@ -98,6 +98,7 @@ else
 fi
 if [ -f "$ROOT/pubspec.yaml" ]; then
   expect_lane "dart format"; expect_lane "flutter analyze"; expect_lane "flutter test"
+  [ -d "$ROOT/assets/fonts" ] && expect_lane "bundled fonts (INV-7)"
 else
   expect_lane "flutter app"
 fi
@@ -324,6 +325,14 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   # it diverge from the artifact it exists to be a record of. No app code lives
   # under `docs/` and none can — the app is `lib/`, `test/`, `integration_test/`
   # and `test_driver/`, all still enumerated.
+  #
+  # `docs/` is subtracted for the same reason as the generated dirs, not as an
+  # exemption: it is the founder's design drop-zone, and a reference
+  # implementation handed over there (`kv_mark.dart`) is PORTED into `lib/`,
+  # where this check does cover it. Reformatting the handed-over copy would make
+  # it diverge from the artifact it exists to be a record of. No app code lives
+  # under `docs/` and none can — the app is `lib/`, `test/`, `integration_test/`
+  # and `test_driver/`, all still enumerated.
   mapfile -t dart_format_files < <(cd "$ROOT" && find . -name '*.dart' \
     -not -path './lib/src/rust/*' \
     -not -path './rust_builder/cargokit/*' \
@@ -349,6 +358,85 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
     run_check "flutter test" flutter test
   else
     skip_check "flutter test" "no tests yet"
+  fi
+
+  # ── The bundled faces (INV-7) ───────────────────────────────────────────────
+  # A font compiled into the APK is a third-party binary with no lockfile, no
+  # transitive graph and, until this lane, no machine-checkable anchor at all:
+  # its digest lived in a YAML comment, and a comment cannot fail a build.
+  # `dependency-steward` raised it at the Plus Jakarta Sans intake (D-252) and
+  # named the honest part — JetBrains Mono had been equally unpinned since P1.3,
+  # so this closes a standing gap rather than covering only the new file.
+  #
+  # Part (d) is the one no other check can reach. `RevealActivity.kt` names its
+  # two faces as RUNTIME asset-path strings; nothing compiles them, and
+  # `createFromAsset` failing is caught and logged at warn — so a stale path
+  # renders the SEED PHRASE in the system typeface and says nothing at all.
+  # That happened, once, in the commit that removed Inter.
+  fonts_pinned() {
+    local dir="$ROOT/assets/fonts" rec="$ROOT/assets/fonts/PROVENANCE.md"
+    local rc=0 checked=0 file want bytes got actual fam kt
+    [ -f "$rec" ] || { echo "   assets/fonts/PROVENANCE.md is missing — fail closed"; return 1; }
+
+    # (a) every recorded face still hashes and sizes to its anchor.
+    while read -r file want bytes; do
+      got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d" " -f1)"
+      if [ "$got" != "$want" ]; then
+        echo "   DRIFT: $file does not match its PROVENANCE.md digest"
+        rc=1
+      fi
+      actual="$(stat -c%s "$dir/$file" 2>/dev/null || echo 0)"
+      if [ "$actual" != "$bytes" ]; then
+        echo "   DRIFT: $file is $actual bytes, PROVENANCE.md records $bytes"
+        rc=1
+      fi
+      checked=$((checked+1))
+    done < <(awk -F'|' '/-Variable\.ttf`/ && NF>4 {
+        gsub(/[ `]/,"",$2); gsub(/[ `]/,"",$4); gsub(/[ `]/,"",$5);
+        if ($4 ~ /^[0-9a-f]{64}$/) print $2, $4, $5 }' "$rec")
+
+    if [ "$checked" -ne 2 ]; then
+      echo "   PROVENANCE.md anchored $checked faces, expected 2 — the record moved"
+      rc=1
+    fi
+
+    # (b) NOTHING WAS ADDED. Hashing only what the record lists cannot see a
+    #     third face, and BG-30 is a law about the COUNT, not just the names.
+    actual="$(find "$dir" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*.otf' -o -name '*.woff*' \) | wc -l)"
+    if [ "$actual" -ne 2 ]; then
+      echo "   $actual font files in assets/fonts/, expected exactly 2 (BG-30: two faces, never three)"
+      rc=1
+    fi
+
+    # (c) pubspec declares exactly the two recorded families and no others.
+    for fam in PlusJakartaSans JetBrainsMono; do
+      grep -q "family: $fam" "$ROOT/pubspec.yaml" || {
+        echo "   pubspec.yaml does not declare family: $fam"; rc=1; }
+    done
+    actual="$(grep -c '^    - family: ' "$ROOT/pubspec.yaml")"
+    if [ "$actual" -ne 2 ]; then
+      echo "   pubspec.yaml declares $actual font families, expected 2 (BG-30)"
+      rc=1
+    fi
+
+    # (d) the native surface's hand-written asset paths still resolve.
+    kt="$ROOT/android/app/src/main/kotlin/org/kaspaverse/app/RevealActivity.kt"
+    if [ -f "$kt" ]; then
+      while read -r file; do
+        [ -n "$file" ] || continue
+        [ -f "$dir/$file" ] || {
+          echo "   RevealActivity.kt loads assets/fonts/$file, which does not exist —"
+          echo "   createFromAsset fails at RUNTIME and is caught, so the seed screen"
+          echo "   would silently render in the system face"
+          rc=1; }
+      done < <(grep -o "flutter_assets/assets/fonts/[A-Za-z-]*\.ttf" "$kt" | sed 's|.*/||')
+    fi
+    return $rc
+  }
+  if [ -d "$ROOT/assets/fonts" ]; then
+    run_check "bundled fonts (INV-7)" fonts_pinned
+  else
+    skip_check "bundled fonts (INV-7)" "assets/fonts/ absent"
   fi
 else
   skip_check "flutter app" "pubspec.yaml absent (pre-P0-D1 scaffold state)"

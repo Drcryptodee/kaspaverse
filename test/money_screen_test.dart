@@ -32,7 +32,7 @@ import 'support/finders.dart';
 /// test.dart records the 2m57s hang that taught this).
 Future<void> loadBundledFonts() async {
   for (final font in const {
-    'Inter': 'assets/fonts/Inter-Variable.ttf',
+    'PlusJakartaSans': 'assets/fonts/PlusJakartaSans-Variable.ttf',
     'JetBrainsMono': 'assets/fonts/JetBrainsMono-Variable.ttf',
   }.entries) {
     final bytes = await File(font.value).readAsBytes();
