@@ -76,7 +76,7 @@ class TxDetailScreen extends StatelessWidget {
             // BG-14: the top 52dp belongs to the real system status bar and
             // nothing is painted there.
             const SizedBox(height: KvSpace.statusBarReserve),
-            KvRail(
+            KvTopBar(
               title: 'Transaction',
               onBack: () => Navigator.of(context).pop(),
             ),

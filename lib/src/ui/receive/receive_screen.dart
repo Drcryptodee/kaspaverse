@@ -86,7 +86,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           children: [
             // BG-14: the top 52dp belongs to the real system status bar.
             const SizedBox(height: KvSpace.statusBarReserve),
-            KvRail(title: 'Receive', onBack: () => Navigator.of(context).pop()),
+            KvTopBar(
+              title: 'Receive',
+              onBack: () => Navigator.of(context).pop(),
+            ),
             Expanded(
               child: FutureBuilder<String>(
                 future: _address,

@@ -7,6 +7,7 @@ import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
@@ -61,6 +62,9 @@ void main() {
     bool withNode = true,
   }) => MaterialApp(
     theme: kvDarkTheme(),
+    // The window is derived once at the root and read from context (BG-33) —
+    // the same mount point `main.dart` uses.
+    builder: (context, page) => KvWindow(child: page!),
     home: HomeScreen(
       nodeRoute: withNode
           ? (_) => NodeScreen(
@@ -102,9 +106,13 @@ void main() {
   /// rendered before the trust line's. Asserting the tone rather than a
   /// presence is what catches the P0.3 shape — a lamp that reads live beside
   /// words that say the link is gone.
+  /// **The live dot, since UX-R1** (§4, A6): `primary` and pulsing while the
+  /// socket is up, amber the moment it is not. BG-2 lists the live dot among
+  /// `primary`'s permitted appearances, so this is the one object on the
+  /// screen where teal reports a state.
   bool linkReadsLive(WidgetTester tester) =>
       tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone ==
-      KvLampTone.ok;
+      KvLampTone.live;
 
   /// The TRUST line's own lamp — the LAST on the screen, where the network
   /// chip's is the first. Both describe the same link, so a test that reads

@@ -276,35 +276,49 @@ void main() {
   });
 
   group('KvLamp / KvStatusChip — lamp and words, always both (§4)', () {
-    test('a lamp can only take a value hue — teal is never a status', () {
-      expect(KvLampTone.values, hasLength(3));
+    test('teal is a status nowhere except the named live dot', () {
+      // Four tones since Deep V6: BG-2 lists *the live dot* among `primary`'s
+      // permitted appearances, and §4's money plate anatomy asks for one by
+      // name. Every OTHER tone is still barred from both teals, which is what
+      // keeps "teal is never a status" true where it matters.
+      expect(KvLampTone.values, hasLength(4));
       for (final tone in KvLampTone.values) {
+        if (tone == KvLampTone.live) continue;
         expect(tone.color, isNot(KvColor.primary));
         expect(tone.color, isNot(KvColor.primaryMuted));
       }
+      expect(KvLampTone.live.color, KvColor.primary);
       expect(KvLampTone.ok.color, KvColor.ok);
       expect(KvLampTone.warn.color, KvColor.warn);
       expect(KvLampTone.risk.color, KvColor.risk);
-      expect(KvLampTone.ok.bloom, KvColor.okBloom);
-      expect(KvLampTone.warn.bloom, KvColor.warnBloom);
-      expect(KvLampTone.risk.bloom, KvColor.riskBloom);
+      // The ring is the hue's own tint, and there is no bloom left to check:
+      // BG-32 seats exactly two glowing things and a lamp is neither.
+      expect(KvLampTone.live.ring, KvColor.tealTint);
+      expect(KvLampTone.ok.ring, KvColor.okTint);
+      expect(KvLampTone.warn.ring, KvColor.warnTint);
+      expect(KvLampTone.risk.ring, KvColor.riskTint);
     });
 
-    testWidgets('6dp dot, 8dp blur, NO spread', (tester) async {
+    testWidgets('a disc in a ring, and NO bloom (BG-32)', (tester) async {
       await tester.pumpWidget(_host(const KvLamp(KvLampTone.ok)));
-      final box = tester.widget<Container>(
+      for (final box in tester.widgetList<Container>(
         find.descendant(
           of: find.byType(KvLamp),
           matching: find.byType(Container),
         ),
+      )) {
+        final decoration = box.decoration! as BoxDecoration;
+        expect(decoration.shape, BoxShape.circle);
+        expect(
+          decoration.boxShadow,
+          isNull,
+          reason: 'a lamp is a disc, not a bloom',
+        );
+      }
+      expect(
+        tester.getSize(find.byType(KvLamp)),
+        const Size(KvLamp.extent, KvLamp.extent),
       );
-      final decoration = box.decoration! as BoxDecoration;
-      expect(decoration.shape, BoxShape.circle);
-      final shadow = decoration.boxShadow!.single;
-      expect(shadow.blurRadius, KvLamp.blur);
-      expect(shadow.spreadRadius, 0);
-      expect(shadow.color, KvColor.okBloom);
-      expect(tester.getSize(find.byType(KvLamp)), const Size(6, 6));
     });
 
     testWidgets('the words are colourless whatever the lamp does', (

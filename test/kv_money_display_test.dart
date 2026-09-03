@@ -176,12 +176,13 @@ void main() {
           ),
         ),
       );
-      // **The hue rides the sign; the magnitude is neutral ink** (founder,
-      // device sitting 2026-08-31). Both channels are still present and both
-      // are still asserted — this now names which object carries each, which
-      // the single-string form could not.
-      expect(_styleOf(tester, '+12').color, KvColor.ink);
-      expect(_styleOf(tester, '+12').fontWeight, FontWeight.w600);
+      // **The figure takes the direction's hue, and weight carries what hue
+      // used to** (BG-7 as amended in Deep V6 v4.2 — it *reverses* BG-26's
+      // colour channel; a neutral ledger figure is now the finding). Both
+      // channels are still present and both are still asserted; which object
+      // carries which has swapped.
+      expect(_styleOf(tester, '+12').color, KvColor.ok);
+      expect(_styleOf(tester, '+12').fontWeight, FontWeight.w700);
 
       await tester.pumpWidget(
         _host(
@@ -192,9 +193,11 @@ void main() {
           ),
         ),
       );
-      expect(_styleOf(tester, '−12').color, KvColor.ink);
-      expect(_styleOf(tester, '−12').fontWeight, FontWeight.w400);
+      expect(_styleOf(tester, '−12').color, KvColor.risk);
+      expect(_styleOf(tester, '−12').fontWeight, FontWeight.w500);
 
+      // A figure with no direction — a balance, a fee, a self-send — carries
+      // no hue: BG-7 colours *value in motion*, and information is colourless.
       await tester.pumpWidget(
         _host(KvAmount(BigInt.from(1240000000), role: KvAmountRole.row)),
       );

@@ -14,8 +14,8 @@ void main() {
     });
   });
 
-  group('KvBreath — the one breathing primitive (§8 v2.2)', () {
-    testWidgets('active: a repeating sine — opacity leaves 1.0 and returns', (
+  group('KvBreath — the live dot\'s pulse (BG-9, §3)', () {
+    testWidgets('active: one sine period on BOTH channels, 1600 ms', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -27,15 +27,23 @@ void main() {
       final fade = tester.widget<FadeTransition>(
         find.byType(FadeTransition).first,
       );
+      final scale = tester.widget<ScaleTransition>(
+        find.byType(ScaleTransition).first,
+      );
       expect(fade.opacity.value, 1.0); // wakes bright
+      expect(scale.scale.value, 1.0);
 
-      // Mid-cycle the dot is dimmed toward opacity-stale…
-      await tester.pump(KvMotion.breath * 0.5);
-      expect(fade.opacity.value, closeTo(KvFreshness.opacityStale, 0.01));
+      // §3: the trough is scale .7 and opacity .55 — NOT `opacityStale`, which
+      // is the *stale* step and would have a live dot reaching a dead
+      // reading's tone twice a second.
+      await tester.pump(KvMotion.pulse * 0.5);
+      expect(fade.opacity.value, closeTo(0.55, 0.01));
+      expect(scale.scale.value, closeTo(0.7, 0.01));
 
       // …and a full period later it is bright again (seamless loop).
-      await tester.pump(KvMotion.breath * 0.5);
+      await tester.pump(KvMotion.pulse * 0.5);
       expect(fade.opacity.value, closeTo(1.0, 0.01));
+      expect(scale.scale.value, closeTo(1.0, 0.01));
       await tester.pumpWidget(const SizedBox());
     });
 

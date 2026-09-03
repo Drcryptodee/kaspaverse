@@ -2,17 +2,26 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// The three tones a lamp is allowed to take (BG-7).
+/// The tones a lamp is allowed to take (§4, BG-7).
 ///
 /// It is an enum rather than a [Color] on purpose: **teal is never a status**
-/// (BG-2), and a lamp that cannot be handed [KvColor.primary] cannot become
-/// one by accident. There is no informational hue and no fourth accent.
+/// (BG-2), and a lamp that could be handed [KvColor.primary] freely would
+/// become one by accident. [live] is the single, named exception — BG-2 lists
+/// *the live dot* among `primary`'s permitted appearances, and it says
+/// "the link is up right now", which is not a state of the user's money.
+/// There is no informational hue and no fourth accent.
 enum KvLampTone {
-  /// Money arriving, and things confirmed, final, or switched on by the user
-  /// (D-200).
+  /// **The live dot.** [KvColor.primary] on a [KvColor.tealTint] ring, and the
+  /// one lamp that pulses (BG-9's first ambient loop). It counts against
+  /// BG-2's cap of three.
+  live,
+
+  /// Money arriving, accepted on chain, switched on by the user, **link
+  /// healthy** (BG-7 as amended v4.3 — the D-200 narrowing that took link
+  /// health away from `ok` is gone).
   ok,
 
-  /// Not yet certain: stale, syncing, settling, degraded, or blocked. Every
+  /// Not yet certain: pending, stale, syncing, degraded, or blocked. Every
   /// validation block is amber — red on a validation nit claims money is at
   /// risk when none is.
   warn,
@@ -23,44 +32,63 @@ enum KvLampTone {
 
 extension KvLampToneTokens on KvLampTone {
   Color get color => switch (this) {
+    KvLampTone.live => KvColor.primary,
     KvLampTone.ok => KvColor.ok,
     KvLampTone.warn => KvColor.warn,
     KvLampTone.risk => KvColor.risk,
   };
 
-  Color get bloom => switch (this) {
-    KvLampTone.ok => KvColor.okBloom,
-    KvLampTone.warn => KvColor.warnBloom,
-    KvLampTone.risk => KvColor.riskBloom,
+  /// The ring the disc sits in — the hue's own tint (§4). **Not a bloom**:
+  /// BG-32 seats exactly two glowing things and a lamp is neither of them.
+  Color get ring => switch (this) {
+    KvLampTone.live => KvColor.tealTint,
+    KvLampTone.ok => KvColor.okTint,
+    KvLampTone.warn => KvColor.warnTint,
+    KvLampTone.risk => KvColor.riskTint,
   };
 }
 
-/// A lamp: a 6dp dot under an 8dp blur with **no spread** (§1.5).
+/// **A lamp is a disc, not a bloom** (BG-32).
 ///
-/// One of the only three things in the system that emit at all, and the only
-/// one that is not teal. It is never alone — the words beside it carry the
-/// meaning, so every state survives greyscale, colour-blindness and a screen
-/// reader (BG-7). Decorative to semantics for exactly that reason.
+/// An 8 dp disc of the tone inside a 3 dp ring of its tint (§4) — 14 dp
+/// overall. Under Black Glass it was a 6 dp dot under an 8 dp blur; BG-32 now
+/// seats exactly two glowing things in the whole app (the orb's halo and an
+/// armed control's edge) and a lamp is neither, so the bloom is gone and the
+/// ring carries the presence it was doing badly.
+///
+/// It is never alone — the words beside it carry the meaning, so every state
+/// survives greyscale, colour-blindness and a screen reader (BG-7). Decorative
+/// to semantics for exactly that reason.
 class KvLamp extends StatelessWidget {
   const KvLamp(this.tone, {super.key});
 
   final KvLampTone tone;
 
-  static const double size = 6;
-  static const double blur = 8;
+  /// The disc (§4).
+  static const double size = 8;
+
+  /// The ring around it.
+  static const double ring = 3;
+
+  /// The whole lamp's footprint — what a caller reserves space for.
+  static const double extent = size + ring * 2;
 
   @override
   Widget build(BuildContext context) {
     return ExcludeSemantics(
       child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: tone.color,
-          // No spread. A lamp glows; it does not light the plate it sits on,
-          // and a spread would be elevation wearing an emission's clothes.
-          boxShadow: [BoxShadow(color: tone.bloom, blurRadius: blur)],
+        width: extent,
+        height: extent,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: tone.ring),
+        child: Center(
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: tone.color,
+            ),
+          ),
         ),
       ),
     );

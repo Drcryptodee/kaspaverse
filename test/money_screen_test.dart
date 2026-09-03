@@ -9,10 +9,11 @@ import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/services/rate_service.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 import 'support/finders.dart';
 
 /// **UX-2 — the money surface**, in the five states it has to hold
@@ -114,6 +115,9 @@ void main() {
     DateTime Function()? clock,
   }) => MaterialApp(
     theme: kvDarkTheme(),
+    // The window is derived once at the root and read from context (BG-33) —
+    // the same mount point `main.dart` uses.
+    builder: (context, page) => KvWindow(child: page!),
     home: HomeScreen(
       chain: ChainScope(
         connected: ValueNotifier(connected),
@@ -171,7 +175,7 @@ void main() {
       tester.renderObject<RenderParagraph>(find.text(text)).text.style!;
 
   group('the five states', () {
-    testWidgets('first run: the one empty state, and Receive takes the light', (
+    testWidgets('first run: the one empty state, and the door that says why', (
       tester,
     ) async {
       await pump(tester, money(mature: BigInt.zero));
@@ -183,24 +187,45 @@ void main() {
         find.text('Payments you send and receive appear here.'),
         findsOneWidget,
       );
-      // The section rule does not promise a ledger there is none of.
+      // The tabs head the container whether or not it has rows; what must not
+      // appear is a promise of a ledger there is none of.
       expect(find.text('Recent activity'), findsNothing);
+      expect(find.text('Activity'), findsOneWidget);
 
-      // The brightest thing on screen is the most sensible next act, and the
-      // control that cannot fire says why, in words (BG-12).
+      // **Neither pill is primary, and UX-2's light-flip is superseded.**
+      // §4 gives the money plate a *raised* Send / Receive pair, so this
+      // screen's emissions are the live dot and the ledger's active tab
+      // underline — and on a proven zero the statement is not a brighter
+      // Receive but a Send that is disabled and says why (BG-12), which is
+      // the stronger of the two.
       expect(find.text('Nothing to send yet'), findsOneWidget);
-      final receive = tester.widget<Container>(
+      for (final pill in const ['Receive', 'Send']) {
+        final box = tester.widget<AnimatedContainer>(
+          find
+              .ancestor(
+                of: find.text(pill),
+                matching: find.byType(AnimatedContainer),
+              )
+              .first,
+        );
+        expect(
+          (box.decoration! as BoxDecoration).color,
+          isNot(KvColor.primary),
+          reason: '$pill is raised, never the one primary fill',
+        );
+      }
+      final send = tester.widget<AnimatedContainer>(
         find
             .ancestor(
-              of: find.text('Receive'),
-              matching: find.byType(Container),
+              of: find.text('Send'),
+              matching: find.byType(AnimatedContainer),
             )
             .first,
       );
       expect(
-        (receive.decoration! as BoxDecoration).color,
-        KvColor.primary,
-        reason: 'on an empty wallet the light flips to Receive',
+        (send.decoration! as BoxDecoration).color,
+        KvColor.shelf,
+        reason: 'a disabled pill is `shelf` with an `etch` label (§4)',
       );
 
       await tester.pumpWidget(const SizedBox());
@@ -270,20 +295,30 @@ void main() {
       expect(find.byType(KvLamp), findsOneWidget);
       expect(
         tester.widget<KvLamp>(find.byType(KvLamp)).tone,
-        KvLampTone.ok,
+        // **The live dot** (§4's money-plate anatomy, A6): `primary` and
+        // pulsing while the socket is up. BG-2 lists the live dot among
+        // `primary`'s permitted appearances, so this is the one place on the
+        // screen where teal reports a state.
+        KvLampTone.live,
         reason: 'a live link reads live on the chip',
       );
 
-      // The figure: sentence-case label, unit WITH the number, hero floored at
-      // four decimals (§2 — all eight live one tap away and always at signing).
-      expect(find.text('Available balance'), findsOneWidget);
+      // The figure: a `caps` label nested into the plate's corner (A8), the
+      // unit WITH the number, every significant decimal and no more.
+      expect(findCapsLabel('Available balance'), findsOneWidget);
       expect(find.text('1,284'), findsOneWidget);
       expect(find.text('.5027'), findsOneWidget);
       expect(find.text('KAS'), findsWidgets);
       expect(styleOf(tester, 'KAS').color, KvColor.primaryMuted);
 
-      // The chain clock, and the fiat slot rendering the honest unknown.
-      expect(find.text('DAA 2,000'), findsOneWidget);
+      // **No chain clock on this screen since UX-R1.** A4 asked for a DAA
+      // readout under the rule; Deep V6's §5 puts "DAA streaming" on the
+      // network surface, and BG-8 says nothing animates on a settled money
+      // screen except the two ambient rhythms. A counter ticking in the
+      // corner of a balance was the last thing here breaking that — it is one
+      // tap away behind the chip above.
+      expect(find.textContaining('DAA'), findsNothing);
+      // The fiat slot rendering the honest unknown.
       expect(find.text('≈ —'), findsOneWidget);
       expect(find.text('no rate yet'), findsOneWidget);
 
@@ -488,8 +523,7 @@ void main() {
       // widgets inside it: a slot that reserves the right height by accident
       // passes for the right reason, and one that reserves it by a ghost
       // child would fail the finder assertions below.
-      double plateHeight() =>
-          tester.getSize(find.byType(KvSurface).first).height;
+      double plateHeight() => tester.getSize(find.byType(KvMoneyPlate)).height;
 
       await pump(tester, money(mature: BigInt.from(7000000000)));
       final quiet = plateHeight();
@@ -547,13 +581,14 @@ void main() {
       // memo it really is a term the hero does not yet contain.
       // **BG-23 on the qualifier**, which is the likeliest sub-1 amount on the
       // screen: the leading `+0.` drops to the fraction's size and the weight
-      // starts at the first digit that carries value. The whole figure is
-      // neutral ink (BG-26) — the lamp beside it carries the hue.
+      // starts at the first digit that carries value. Since BG-7's reversal
+      // the figure takes the direction's hue in **both** runs — it is one
+      // object in one colour, and emphasis is the channel that separates them.
       expect(find.text('+0.'), findsOneWidget);
       // `50`, not `5`: `trimFraction` keeps a minimum of two digits.
       expect(find.text('50'), findsOneWidget);
-      expect(styleOf(tester, '+0.').color, KvColor.inkDim);
-      expect(styleOf(tester, '50').color, KvColor.ink);
+      expect(styleOf(tester, '+0.').color, KvColor.ok);
+      expect(styleOf(tester, '50').color, KvColor.ok);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -668,24 +703,23 @@ void main() {
       // 1 · the word, 2 · the sign, 3 · the colour, 4 · the weight. Every one
       // of them survives greyscale, colour-blindness and a screen reader.
       //
-      // **The colour rides the SIGN since the 2026-08-31 device sitting.** The
-      // figure itself is neutral ink in the balance's own hierarchy, so a row
-      // is read as a quantity rather than graded by hue before a digit of it
-      // is read. All four channels still stand — this asserts WHICH object
-      // carries each one, which the old single-string form could not.
-      expect(find.text('Received'), findsOneWidget);
-      // **The whole figure is neutral ink, sign included** (founder, device
-      // sitting). Direction rides the WORD, the MARK's tone and the sign's own
-      // glyph — never the magnitude, which is read as a quantity.
+      // **BG-7 reversed the colour channel in Deep V6.** UX-5 made the figure
+      // neutral so a row read as a quantity first; on the tinted ground the
+      // coloured figure is what makes the ledger scannable at arm's length —
+      // the eye finds *what left* before it reads a digit. The cost BG-26
+      // named (hue grading the size of money) is answered by weight instead:
+      // incoming 700, outgoing 500. **A neutral ledger figure is now the
+      // finding.** All four channels still stand; which object carries which
+      // has swapped.
       expect(find.text('Received'), findsOneWidget);
       expect(find.text('+24'), findsOneWidget);
-      expect(styleOf(tester, '+24').color, KvColor.ink);
-      expect(styleOf(tester, '+24').fontWeight, FontWeight.w600);
+      expect(styleOf(tester, '+24').color, KvColor.ok);
+      expect(styleOf(tester, '+24').fontWeight, FontWeight.w700);
 
       expect(find.text('Sent'), findsOneWidget);
       expect(find.text('−12'), findsOneWidget);
-      expect(styleOf(tester, '−12').color, KvColor.ink);
-      expect(styleOf(tester, '−12').fontWeight, FontWeight.w400);
+      expect(styleOf(tester, '−12').color, KvColor.risk);
+      expect(styleOf(tester, '−12').fontWeight, FontWeight.w500);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -696,7 +730,10 @@ void main() {
     /// top of the ledger.** Asserted rather than the number itself, because a
     /// number is exactly the claim `L121` says goes stale.
     void expectNoOverlap(WidgetTester tester) {
-      final plateBottom = tester.getRect(find.text('DAA 2,000')).bottom;
+      // Measured off the LAST thing inside the pinned band. Since BG-28 that
+      // is the plate's own Send / Receive pair, not the chain clock — the DAA
+      // readout moved to the network surface at UX-R1.
+      final plateBottom = tester.getRect(find.text('Receive')).bottom;
       final rowTop = tester.getRect(find.text('Received')).top;
       expect(
         plateBottom,
@@ -775,15 +812,21 @@ void main() {
       //
       // The third column is whether the honesty line is PROMISED to fit inside
       // the band. It is, at every phone the app claims to support. It is not
-      // at 320x400 — a 240dp viewport cannot hold a 280dp essential block, and
-      // at that size something has to give; the whole plate stays one
+      // at 320x400 — a 240dp viewport cannot hold the essential block, and at
+      // that size something has to give; the whole plate stays one
       // scroll-to-top away. Recorded as a bounded promise rather than dropped,
       // because a promise that quietly excludes the tight cases is the kind
       // this audit has already caught twice.
-      for (final (w, h, clamped, fits) in const [
-        (320.0, 568.0, false, true),
-        (360.0, 640.0, false, true),
-        (320.0, 400.0, true, false),
+      //
+      // **320x400 is also `short`** (BG-33's height class is `< 480`), so it
+      // is the geometry where the plate collapses to `KvMoneyBar` and the
+      // plate-shaped assertions below do not apply to it. That is the law's
+      // own answer to a viewport this tight, and the fourth column says which
+      // of the two shapes is on the glass.
+      for (final (w, h, clamped, fits, short) in const [
+        (320.0, 568.0, false, true, false),
+        (360.0, 640.0, false, true, false),
+        (320.0, 400.0, true, false, true),
       ]) {
         await pump(
           tester,
@@ -817,6 +860,19 @@ void main() {
             .first;
         final pinned = header.geometry!.paintExtent;
         final where = '${w.toInt()}x${h.toInt()}';
+        // **The one collapse there is** (BG-33): a `short` window trades the
+        // plate for the 56 dp bar, and nothing else on the screen changes.
+        expect(
+          find.byType(KvMoneyBar),
+          short ? findsOneWidget : findsNothing,
+          reason:
+              '$where: the money plate collapses in `short`, and only there',
+        );
+        expect(
+          find.byType(KvMoneyPlate),
+          short ? findsNothing : findsOneWidget,
+          reason: where,
+        );
         if (clamped) {
           expect(
             pinned,
@@ -868,16 +924,20 @@ void main() {
             reason: '$where: the sentence must at least still be rendered',
           );
         }
-        // The order the founder set on glass, pinned so a later edit cannot
-        // shuffle it back: the money above the rule, the instrument below it.
-        // Figure -> fiat -> [rule] -> chain clock -> the link's sentence.
-        final fiat = tester.getRect(find.text('≈ —'));
-        final daa = tester.getRect(find.textContaining('DAA '));
-        expect(
-          fiat.bottom,
-          lessThanOrEqualTo(daa.top + 0.5),
-          reason: '$where: the fiat restatement belongs with the figure',
-        );
+        // **BG-28's order, pinned so a later edit cannot shuffle it back**:
+        // the plate holds only what is always true — figure, then its `≈`
+        // restatement, then the raised pair — and everything transient is
+        // beneath it. The chain clock is not in this comparison any more
+        // because it is not on this screen any more (UX-R1).
+        if (!short) {
+          final fiat = tester.getRect(find.text('≈ —'));
+          final pair = tester.getRect(find.text('Receive'));
+          expect(
+            fiat.bottom,
+            lessThanOrEqualTo(pair.top + 0.5),
+            reason: '$where: the fiat restatement belongs with the figure',
+          );
+        }
         // The link sentence sits below the CARD, not below the chain clock:
         // it is no longer inside the plate at all, so the ordering that
         // matters is that it clears the pinned band. Comparing it against the
@@ -888,7 +948,9 @@ void main() {
         // own bottom edge. Comparing it against the DAA line would compare it
         // against a widget the squeeze has clipped out of sight, which is how
         // this assertion first failed.
-        final card = tester.getRect(find.byType(KvSurface).first);
+        final card = tester.getRect(
+          short ? find.byType(KvMoneyBar) : find.byType(KvMoneyPlate),
+        );
         expect(
           trust.top,
           greaterThanOrEqualTo(card.bottom - 0.5),
@@ -957,7 +1019,10 @@ void main() {
         ),
       );
 
-      await tester.drag(find.text('Available balance'), const Offset(0, 320));
+      await tester.drag(
+        findCapsLabel('Available balance'),
+        const Offset(0, 320),
+      );
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
       expect(pulls, 1, reason: 'the drag started ON the balance');

@@ -169,42 +169,65 @@ class KvAmount extends StatelessWidget {
   /// hides it in a row, where the column heading carries it.
   final bool? showUnit;
 
-  /// Fraction and unit as a share of the integer's size.
-  static const double fractionRatio = 0.48;
+  /// Fraction and unit as a share of the integer's size. §2 pairs
+  /// `balanceHero` 48 with a 24 fraction and `amountScreen` 44 with 22 — one
+  /// half in both cases, so the ratio is derived rather than chosen.
+  static const double fractionRatio = 0.5;
   static const double unitRatio = 0.33;
 
   /// 11dp is the floor for anything a user must read (§2/BG-14).
   static const double readableFloor = 11;
 
   static double _rampSize(KvAmountRole role) => switch (role) {
-    KvAmountRole.hero => 46,
+    // §2 as amended by Deep V6: `balanceHero` 48/52 (fraction 24),
+    // `amountRow` 16/20. **`screen` is still v3.1's 32 and that is
+    // deliberate**: §2 puts `amountScreen` at 44/48, but the only surface
+    // wearing it is the signing ceremony, whose composition belongs to UX-R2
+    // — changing the figure's size there is a re-skin of a funds surface by a
+    // sitting that is not auditing it. The *law* below (hue and weight)
+    // applies to every role now, because that is a law and not a composition.
+    KvAmountRole.hero => 48,
     KvAmountRole.screen => 32,
-    KvAmountRole.row => 15,
+    KvAmountRole.row => 16,
   };
 
-  /// **The figure is neutral ink, sign included** (founder, UX-5 device
-  /// sitting — it amends BG-7's colour channel).
+  /// **A figure that has a direction takes that direction's hue** (BG-7 as
+  /// amended in Deep V6 v4.2 — this *reverses* BG-26's colour channel).
   ///
-  /// A whole figure painted green or red made every ledger row a coloured
-  /// object, so the eye graded the SIZE of the money by its hue before it read
-  /// a digit. Moving the hue onto the sign fixed that but left a one-glyph
-  /// splash of colour on an otherwise neutral number; the sign is now neutral
-  /// too, and direction rides the WORD, the MARK's tone and the sign's own
-  /// glyph — three channels, none of them the magnitude itself.
+  /// UX-5 made the figure neutral so a row read as a quantity first, and the
+  /// reasoning was sound on Black Glass. On the tinted ground the coloured
+  /// figure is what makes the ledger scannable at arm's length: the eye finds
+  /// *what left* before it reads a digit, which on a money surface is the
+  /// right order. **A neutral ledger figure is now the finding.**
   ///
-  /// There is deliberately **no `_signTone`**: a getter that returns the same
-  /// value as [_digitTone] is scaffolding pretending to be a decision.
-  Color get _digitTone => KvColor.ink;
+  /// The cost BG-26 named — hue grading the *size* of money — is answered by
+  /// weight instead (see [_weight]): incoming 700, outgoing 500. A balance,
+  /// a fee and a self-send carry no direction and stay [KvColor.ink].
+  Color get _digitTone => switch (direction) {
+    KvMoneyDirection.incoming => KvColor.ok,
+    KvMoneyDirection.outgoing => KvColor.risk,
+    KvMoneyDirection.internal => KvColor.ink,
+  };
 
-  Color get _fractionTone => KvColor.inkDim;
+  /// The quiet run. A directed figure is **one object in one hue** — splitting
+  /// its fraction into a second colour would put two channels on one number —
+  /// so only an undirected figure has a quiet tone at all, and §2 sets the
+  /// balance hero's fraction in [KvColor.inkMeta].
+  Color get _fractionTone => switch (direction) {
+    KvMoneyDirection.incoming || KvMoneyDirection.outgoing => _digitTone,
+    KvMoneyDirection.internal =>
+      role == KvAmountRole.hero ? KvColor.inkMeta : KvColor.inkDim,
+  };
 
   FontWeight get _weight => switch (role) {
-    // §2: incoming 600, outgoing 400, internal unsigned 400.
+    // §2 `amountRow`: **incoming 700, outgoing 500** — the channel that took
+    // over the job hue used to do (BG-26 as amended).
     KvAmountRole.row =>
       direction == KvMoneyDirection.incoming
-          ? FontWeight.w600
-          : FontWeight.w400,
-    _ => FontWeight.w500,
+          ? FontWeight.w700
+          : FontWeight.w500,
+    // `balanceHero` and `amountScreen`: integer 700, fraction 600.
+    _ => FontWeight.w700,
   };
 
   String get _sign => switch (direction) {
@@ -361,7 +384,7 @@ class KvAmount extends StatelessWidget {
                     height: strong ? 1.14 : null,
                     fontWeight: strong || role == KvAmountRole.row
                         ? _weight
-                        : FontWeight.w400,
+                        : FontWeight.w600,
                     letterSpacing: strong && role == KvAmountRole.hero
                         ? -0.5
                         : 0,

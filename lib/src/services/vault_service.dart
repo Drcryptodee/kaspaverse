@@ -623,6 +623,14 @@ class VaultService with WidgetsBindingObserver {
     _graceTimer = null;
   }
 
+  /// **Lock now, at the user's own hand** (BG-13) — the drawer's Lock row.
+  ///
+  /// The same discard the §0.11 background lock performs: it cancels any grace
+  /// in flight and asks Rust to drop the keys. Nothing here navigates — the
+  /// shell routes off `VaultService.status`, so the locked surface arrives
+  /// because the vault is locked and not because a screen decided to show it.
+  void lockNow() => _lockNow();
+
   void _lockNow() {
     _cancelGrace();
     unawaited(lockVaultFn());

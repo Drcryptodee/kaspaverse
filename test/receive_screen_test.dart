@@ -102,7 +102,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(QrTile), findsOneWidget);
-      expect(tester.widget<KvRail>(find.byType(KvRail)).title, 'Receive');
+      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).title, 'Receive');
 
       // The verification surface shows the FULL address, chunked, and it is
       // rendered by KvAddress rather than by a local copy of the rule. Both

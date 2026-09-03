@@ -394,7 +394,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
           child: Column(
             children: [
               const SizedBox(height: KvSpace.statusBarReserve),
-              KvRail(
+              KvTopBar(
                 // **Once it is settled the rail says what HAPPENED**, not what
                 // the screen was for. Leaving it at *"Confirm send"* over a
                 // completed send is the whole screen still reading as a

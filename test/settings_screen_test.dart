@@ -9,7 +9,10 @@ import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 
 import 'support/preview_harness.dart';
 import 'support/finders.dart';
@@ -106,6 +109,9 @@ void main() {
       await tester.pumpWidget(_home(settings: screen()));
       await tester.pump();
 
+      // The door is in the drawer since UX-R1, and the K avatar is what opens
+      // it (§3a.2) — so reachability is now two taps, and both are asserted.
+      await openDrawer(tester);
       await tester.tap(find.bySemanticsLabel('Settings'));
       await tester.pumpAndSettle();
 
@@ -157,10 +163,13 @@ void main() {
   // "Largest" lost the gear during every launch hunt. 320 dp is the narrowest
   // phone the app claims to support.
   // 2.0 is beyond BG-14's 1.3 floor on purpose: it is Android 14's "Largest"
-  // font size, and it is the geometry where the rail's mechanism is actually
-  // load-bearing. At 1.3 the wordmark and the two doors fit on a 320dp phone
-  // with room to spare, so a test that stopped there would pass whether the
-  // wordmark yields or not — which is exactly the vacuous guard F5 was.
+  // font size, and it is the geometry where a door is actually at risk.
+  //
+  // **The squeeze has a different shape since UX-R1 and the property is the
+  // same.** The doors were two 52 dp targets in a top rail beside a wordmark
+  // that had to yield; they are now rows in a 296 dp drawer, and what can go
+  // wrong is a row growing past the panel or a label eating its own target.
+  // A custody door never yields, whatever is holding it.
   for (final geometry in const [
     (320.0, 1.30),
     (320.0, 1.15),
@@ -168,37 +177,33 @@ void main() {
     (393.0, 1.30),
     (320.0, 2.00),
   ]) {
-    testWidgets('both rail doors are still tappable at '
+    testWidgets('both drawer doors are still tappable at '
         '${geometry.$1.toInt()} dp / textScale ${geometry.$2}', (tester) async {
       final semantics = tester.ensureSemantics();
       await pumpPhone(tester, widthDp: geometry.$1, textScale: geometry.$2);
+      await openDrawer(tester);
 
-      // Nothing may be pushed past the Row's own edge. Measured, not eyeballed:
-      // at 320dp / 2.0 the wordmark wants 172.5dp against a 168dp budget, so
-      // the push a non-yielding wordmark produces is **4.5dp** — which a
-      // centre-of-the-target assertion is far too loose to see. The right EDGE
-      // is the line that matters, and it is the viewport minus the gutter.
       expect(
         tester.takeException(),
         isNull,
-        reason: 'the rail overflowed instead of the wordmark yielding',
+        reason: 'the drawer overflowed instead of laying its rows out',
       );
       for (final door in const ['Messages', 'Settings']) {
         final finder = find.bySemanticsLabel(door);
         expect(finder, findsOneWidget, reason: door);
+        // Nothing may be pushed past the panel's own edge.
         expect(
           tester.getRect(finder).right,
-          lessThanOrEqualTo(geometry.$1 - KvSpace.gutter + 0.5),
-          reason:
-              '$door is outside the rail Row clip — pushed out by the '
-              'wordmark taking its intrinsic width',
+          lessThanOrEqualTo(KvLayout.drawer + 0.5),
+          reason: '$door is outside the drawer panel',
         );
-        // A 48dp target is a promise, and a 48dp target that has been
-        // compressed by a Row is a promise the geometry broke.
+        // A 52 dp target is a promise, and a target compressed by a Row is a
+        // promise the geometry broke (BG-12). The row is fixed at 64 in every
+        // class and grows with text scale rather than clipping (BG-33/BG-14).
         expect(
-          tester.getSize(finder).width,
+          tester.getSize(finder).height,
           greaterThanOrEqualTo(KvSpace.touchTarget),
-          reason: '$door yielded its target instead of the wordmark yielding',
+          reason: '$door yielded its target',
         );
       }
 
@@ -655,7 +660,12 @@ void main() {
   });
 }
 
-/// The money screen, wired to nothing but the doors under test.
+/// The money screen **inside the app's navigation**, wired to nothing but the
+/// doors under test.
+///
+/// Settings and Messages are drawer destinations since UX-R1, not rail icons
+/// on the money screen, so a reachability test has to mount the drawer that
+/// holds them — which is exactly the property being asserted.
 Widget _home({
   required Widget settings,
   Widget? messages,
@@ -667,23 +677,66 @@ Widget _home({
   final clock = now ?? DateTime(2026, 8, 24);
   return MaterialApp(
     theme: kvDarkTheme(),
-    home: HomeScreen(
-      chain: ChainScope(
-        connected: ValueNotifier(connected),
-        virtualDaaScore: ValueNotifier(BigInt.from(2000)),
-        error: ValueNotifier(null),
-        lastUpdate: ValueNotifier(lastUpdate),
+    builder: (context, page) => KvWindow(child: page!),
+    home: Builder(
+      builder: (context) => KvNav(
+        selected: 0,
+        destinations: [
+          const KvDestination(mark: KvGlyph.money, label: 'Wallet'),
+          if (messages != null)
+            KvDestination(
+              mark: KvGlyph.chat,
+              label: 'Messages',
+              onTap: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute<void>(builder: (_) => messages)),
+            ),
+        ],
+        footer: [
+          KvDestination(
+            mark: KvGlyph.settings,
+            label: 'Settings',
+            onTap: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute<void>(builder: (_) => settings)),
+          ),
+        ],
+        child: HomeScreen(
+          chain: ChainScope(
+            connected: ValueNotifier(connected),
+            virtualDaaScore: ValueNotifier(BigInt.from(2000)),
+            error: ValueNotifier(null),
+            lastUpdate: ValueNotifier(lastUpdate),
+          ),
+          wallet: WalletScope(
+            mature: ValueNotifier(mature ?? BigInt.zero),
+            pending: ValueNotifier(BigInt.zero),
+            activity: ValueNotifier(const []),
+            syncing: ValueNotifier(false),
+            utxoIndexMissing: ValueNotifier(false),
+          ),
+          clock: () => clock,
+        ),
       ),
-      wallet: WalletScope(
-        mature: ValueNotifier(mature ?? BigInt.zero),
-        pending: ValueNotifier(BigInt.zero),
-        activity: ValueNotifier(const []),
-        syncing: ValueNotifier(false),
-        utxoIndexMissing: ValueNotifier(false),
-      ),
-      clock: () => clock,
-      settingsRoute: (_) => settings,
-      messagesRoute: messages == null ? null : (_) => messages,
     ),
   );
+}
+
+/// Open the drawer the way a thumb does, and settle it.
+///
+/// In `expanded`+ there is nothing to open — the drawer is already standing
+/// and §3a.2 drops the avatar — so the helper is a no-op there rather than a
+/// failure. That branch is itself the property: navigation is on screen.
+Future<void> openDrawer(WidgetTester tester) async {
+  final avatar = find.bySemanticsLabel('Open navigation');
+  if (avatar.evaluate().isEmpty) return;
+  await tester.tap(avatar);
+  // **Bounded pumps, never `pumpAndSettle`.** The drawer does not push a
+  // route, so the money screen stays visible and its tickers keep running —
+  // the live dot and the cadence never quiesce, by design (BG-9). Waiting for
+  // stillness here waits forever; a pushed route mutes them via `TickerMode`,
+  // which is why every OTHER settle in this file works.
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.enter);
 }

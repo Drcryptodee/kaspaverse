@@ -511,7 +511,7 @@ class _SendScreenState extends State<SendScreen> {
         child: Column(
           children: [
             const SizedBox(height: KvSpace.statusBarReserve),
-            KvRail(title: 'Send', onBack: () => Navigator.of(context).pop()),
+            KvTopBar(title: 'Send', onBack: () => Navigator.of(context).pop()),
             // **The amount block is FIXED and everything else scrolls.**
             // The figure is the subject of this screen and it is being typed:
             // a readout that scrolls out from under the hand typing it is

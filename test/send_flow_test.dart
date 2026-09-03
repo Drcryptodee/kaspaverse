@@ -1331,7 +1331,7 @@ void main() {
         await tester.pumpWidget(_ceremony(_summary(kind: kind)));
         final (heading, label) = entry.value;
         expect(
-          tester.widget<KvRail>(find.byType(KvRail)).title,
+          tester.widget<KvTopBar>(find.byType(KvTopBar)).title,
           heading,
           reason: '$kind heading',
         );
@@ -1449,7 +1449,7 @@ void main() {
       landed.complete(_ok());
       await tester.pumpAndSettle();
       expect(find.text('Signing on this device'), findsNothing);
-      expect(tester.widget<KvRail>(find.byType(KvRail)).title, 'Sent');
+      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).title, 'Sent');
     });
   });
 
@@ -1494,7 +1494,7 @@ void main() {
       _phone(tester);
       await settleWith(tester, (_) async => _ok());
       expect(
-        tester.widget<KvRail>(find.byType(KvRail)).title,
+        tester.widget<KvTopBar>(find.byType(KvTopBar)).title,
         'Sent',
         reason: 'the rail still names the question, not the answer',
       );
@@ -1799,7 +1799,10 @@ void main() {
       );
       // The rail and the verdict head both say it.
       expect(find.text('Partly sent'), findsNWidgets(2));
-      expect(tester.widget<KvRail>(find.byType(KvRail)).title, 'Partly sent');
+      expect(
+        tester.widget<KvTopBar>(find.byType(KvTopBar)).title,
+        'Partly sent',
+      );
       expect(
         find.textContaining('Broadcast 1 of 2 transactions'),
         findsOneWidget,
@@ -1892,7 +1895,7 @@ void main() {
 
       await tester.tap(
         find.descendant(
-          of: find.byType(KvRail),
+          of: find.byType(KvTopBar),
           matching: find.byType(InkWell),
         ),
       );
@@ -1957,7 +1960,7 @@ void main() {
       await holdIt(tester);
       await tester.tap(
         find.descendant(
-          of: find.byType(KvRail),
+          of: find.byType(KvTopBar),
           matching: find.byType(InkWell),
         ),
       );
@@ -1978,7 +1981,7 @@ void main() {
       await open(tester);
       await tester.tap(
         find.descendant(
-          of: find.byType(KvRail),
+          of: find.byType(KvTopBar),
           matching: find.byType(InkWell),
         ),
       );
@@ -2010,11 +2013,11 @@ void main() {
       await tester.pump();
 
       // Sealed while the wait still looks normal.
-      expect(tester.widget<KvRail>(find.byType(KvRail)).onBack, isNull);
+      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).onBack, isNull);
       expect(find.textContaining('You can leave'), findsNothing);
 
       await tester.pump(const Duration(seconds: 7));
-      expect(tester.widget<KvRail>(find.byType(KvRail)).onBack, isNotNull);
+      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).onBack, isNotNull);
       expect(find.textContaining('leaving cancels nothing'), findsOneWidget);
       // And it claims nothing about where the transaction has GOT to — the
       // reasoning that deleted the funds-safe sentence applies here too.
@@ -2043,11 +2046,11 @@ void main() {
 
   group('runConfirmSend (the slow-prepare card)', () {
     /// The ceremony is a full screen now; leaving it is the rail's back
-    /// target, which is the only InkWell KvRail draws.
+    /// target, which is the only InkWell KvTopBar draws.
     Future<void> leaveCeremony(WidgetTester tester) async {
       await tester.tap(
         find.descendant(
-          of: find.byType(KvRail),
+          of: find.byType(KvTopBar),
           matching: find.byType(InkWell),
         ),
       );

@@ -7,8 +7,8 @@ import 'package:flutter/rendering.dart';
 
 import '../rust/api/wallet.dart';
 import '../services/rate_service.dart' show KvRateQuote, RateService;
-import 'format.dart';
 import 'theme/kv_page_route.dart';
+import 'theme/kv_window.dart';
 import 'theme/tokens.dart';
 import 'widgets/entrance.dart';
 import 'widgets/kv_activity.dart';
@@ -16,26 +16,45 @@ import 'widgets/kv_amount.dart';
 import 'widgets/kv_breath.dart';
 import 'widgets/kv_burial_mark.dart';
 import 'widgets/kv_cadence.dart';
-import 'widgets/kv_chrome.dart';
+import 'widgets/kv_coming_soon.dart';
+import 'widgets/kv_drawer.dart';
 import 'widgets/kv_empty_state.dart';
 import 'widgets/kv_glyph.dart';
+import 'widgets/kv_money_plate.dart';
+import 'widgets/kv_rows.dart';
 import 'widgets/kv_status_chip.dart';
-import 'widgets/kv_streaming_count.dart';
-import 'widgets/kv_surface.dart';
+import 'widgets/kv_tabs.dart';
+import 'widgets/kv_two_pane.dart';
 import 'widgets/status_beacon.dart';
 import 'widgets/tx_status_chip.dart';
 
 /// **Money** — the surface a user opens every day, and the first one wired to
 /// real funds (design_system §5, D-191…D-194).
 ///
-/// The screen *is* the instrument. The balance is **plated** — an earned
-/// container (BG-1: this one is earned), sentence case, the unit *with* the
-/// figure, and the statements that vouch for the number sitting inside it
-/// beside the number they vouch for. The plate is **pinned** and the ledger
-/// scrolls under it: what you own is not something you should have to scroll
-/// back up to see. **Pull-to-refresh is hosted by the whole scroll view**, not
-/// by the list, so the gesture works from the balance too — which is where a
-/// hand reaches for it first (D-194).
+/// Rebuilt in **Deep V6** at UX-R1. The balance sits on a `plateHero` money
+/// plate holding *only what is always true* — the label, the figure, its `≈`
+/// restatement, the live dot and the raised Send / Receive pair (BG-28) —
+/// and everything transient arrives in a strip beneath it. The plate is
+/// **pinned** and the ledger scrolls under it in one row container headed by
+/// Activity · Tokens tabs (§5): what you own is not something you should have
+/// to scroll back up to see. **Pull-to-refresh is hosted by the whole scroll
+/// view**, not by the list, so the gesture works from the balance too — which
+/// is where a hand reaches for it first (D-194).
+///
+/// **The window class decides the arrangement, and nothing else does**
+/// (BG-33): `compact` is one column with the drawer pushing; `medium` is one
+/// centred column beside the rail; `expanded`+ is ledger left, transaction
+/// right, with no push at all; and `short` collapses the plate to
+/// `KvMoneyBar`. Every one of those readings comes from `KvWindow.of` — there
+/// is no breakpoint anywhere in this file.
+///
+/// **The DAA readout is gone from this screen**, and that is a disposition
+/// rather than an omission. A4 asked for it under the rule; Deep V6's §5 puts
+/// *"DAA streaming"* on the network surface and BG-8 says nothing animates on
+/// a settled money screen except the two ambient rhythms. A chain clock
+/// counting in the corner of a balance was the last thing on this screen
+/// breaking that, and it is one tap away behind the chip that already opens
+/// the node surface.
 ///
 /// **Silence is the healthy state** (BG-8 as amended at D-192). The trust line
 /// earns its place by appearing: it shows up when the link is not live or a
@@ -62,8 +81,6 @@ class HomeScreen extends StatefulWidget {
     this.onReady,
     this.receiveRoute,
     this.sendRoute,
-    this.messagesRoute,
-    this.settingsRoute,
     this.nodeRoute,
     this.detailRoute,
     this.fiat,
@@ -72,7 +89,7 @@ class HomeScreen extends StatefulWidget {
   });
 
   /// Node / link scope (ChainService): the network chip's lamp, the trust
-  /// line, the live DAA readout and the node surface behind the chip. A
+  /// line, the ledger's depth counters and the node surface behind the chip. A
   /// grouping of the SAME injected listenables the V4 seam law protects — the
   /// scope object may be rebuilt per parent build; the notifiers inside must
   /// stay identical (asserted in [State.didUpdateWidget]).
@@ -118,19 +135,11 @@ class HomeScreen extends StatefulWidget {
   final Widget Function(BuildContext, ValueListenable<bool> balanceStale)?
   sendRoute;
 
-  /// Builds the Messages screen (P2.3 transport UI; `null` ⇒ no entry).
-  ///
-  /// It sits in the top rail rather than the thumb arc: **the thumb arc is for
-  /// money** (§5), and Messages is a destination, not a money action. With the
-  /// navigation panel withdrawn (D-190) the rail is the only place a
-  /// destination can live, and home is still the app's only door to it.
-  final WidgetBuilder? messagesRoute;
-
-  /// Builds the Settings screen (Track 2; `null` ⇒ no entry). Home is the ONLY
-  /// door to it — a setting nobody can reach is a setting that does not exist,
-  /// which is precisely how biometric enrolment came to be unreachable after a
-  /// restore.
-  final WidgetBuilder? settingsRoute;
+  // **Messages and Settings are the drawer's, not this screen's** (§4). They
+  // were `messagesRoute` / `settingsRoute` here while the top rail was the
+  // only place a destination could live (D-190 withdrew the nav panel); Deep
+  // V6 seats them in `KvDrawer`, and a screen that also offered them would be
+  // two doors to one room.
 
   /// Builds **the** node surface — who serves you, the explorer choice and the
   /// price source (`null` ⇒ the network chip is a plain reading rather than a
@@ -280,8 +289,8 @@ typedef _LinkView = ({
 /// a healthy screen looks like (D-192).
 typedef _TrustView = ({String? words, bool running, KvLampTone tone});
 
-/// What the balance region renders (the DAA line is scoped separately inside
-/// the plate — the chain clock must not rebuild the money number).
+/// What the balance region renders. The ledger's depth counters are scoped
+/// separately — a DAA tick must not rebuild the money number.
 typedef _BalanceView = ({
   BigInt? mature,
   BigInt? pending,
@@ -354,20 +363,18 @@ class _HomeScreenState extends State<HomeScreen> {
   /// The real number lands on the next frame, behind [Entrance]'s own fade —
   /// so the bootstrap frame is not one a user can see.
   double _plateExtent = 1;
-  double _ruleExtent = 1;
 
-  /// The height of the plate's **sheddable tail** — the rule, the chain clock
-  /// and the link's own sentence. Subtracted from the plate to get the block
-  /// that must survive a squeeze, so the pinned floor is a measurement rather
-  /// than a fraction somebody liked the look of.
+  /// The height of the pinned band's **sheddable tail** — which, since BG-28,
+  /// is the transient strip and nothing else. Subtracted from the band to get
+  /// the block that must survive a squeeze, so the pinned floor is a
+  /// measurement rather than a fraction somebody liked the look of.
   ///
-  /// **The fiat line is NOT in it**, and both halves of that matter. It
-  /// renders inside `_Figure`, above the measured block, so it survives a
-  /// squeeze — which is the cost D-193's shed order recorded when the founder
-  /// moved it up beside the figure on glass. Two comments here said otherwise
-  /// while it was a placeholder; UX-3 gave it a real height, at which point a
-  /// stale comment about which things shed becomes a wrong claim about a
-  /// measurement (`ux-auditor`, L121).
+  /// **Nothing inside the plate sheds**, because BG-28 admits only what is
+  /// always true into it and each of those things is load-bearing. What sheds
+  /// is the trust *sentence*; the trust *signal* — the amber lamp and the
+  /// figure's 45% dimming — is inside the plate and stays. That is the honest
+  /// reading of A3's risk note, and `money_screen_test.dart` measures it at
+  /// 320x568 / 1.3x rather than this comment asserting it (L121).
   double _tailExtent = 0;
 
   @override
@@ -655,33 +662,17 @@ class _HomeScreenState extends State<HomeScreen> {
     Navigator.of(context).push(KvPageRoute<void>(builder: builder));
   }
 
+  /// The row the detail column is showing, in `expanded`+ (§3a.2). Null is
+  /// the pane's one truth: *"Select a transaction."*
+  ///
+  /// It is a **txid**, not a record, for the same reason [detailRoute] takes
+  /// one: the detail stays live while the burial gauge climbs, and a captured
+  /// snapshot would freeze on the frame it was tapped.
+  String? _selected;
+
   @override
   Widget build(BuildContext context) {
-    final plate = Padding(
-      // Wider than the gutter the ledger keeps: the money is the reason the
-      // screen exists, so its container runs nearer the edge than the rows
-      // beneath it (founder, on glass). Responsiveness on larger screens is
-      // explicitly deferred.
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.sm,
-        KvSpace.s,
-        KvSpace.sm,
-        KvSpace.sm,
-      ),
-      child: _MoneyPlate(
-        balance: _balance,
-        trust: _trust,
-        dimmed: _dimmed,
-        daa: widget.chain.virtualDaaScore,
-        fiat: widget.fiat,
-        now: _now,
-        onNetwork: widget.nodeRoute == null ? null : _openNode,
-        onTailMeasured: (h) {
-          if (_tailExtent != h) setState(() => _tailExtent = h);
-        },
-      ),
-    );
-
+    final metrics = KvWindow.of(context);
     return Scaffold(
       backgroundColor: KvColor.abyss,
       floatingActionButton: widget.floatingActionButton,
@@ -693,27 +684,43 @@ class _HomeScreenState extends State<HomeScreen> {
             // BG-14: the top 52dp belongs to the real system status bar and
             // nothing is painted there.
             const SizedBox(height: KvSpace.statusBarReserve),
-            _TopRail(
-              onMessages: widget.messagesRoute == null
-                  ? null
-                  : () => _push(widget.messagesRoute),
-              onSettings: widget.settingsRoute == null
-                  ? null
-                  : () => _push(widget.settingsRoute),
+            // **The title sits over its own column, not over the window.**
+            // Left at the page edge it started 28 dp inboard of the plate in
+            // `expanded` and 40 dp of it in `medium` — a heading that does not
+            // line up with the thing it names, visible on the first contact
+            // sheet.
+            _columnAligned(
+              metrics,
+              _Header(
+                title: 'Wallet · Main',
+                // `_columnAligned` has already applied the outer gutter in a
+                // two-pane window, so the header must not apply it twice.
+                inset: metrics.isTwoPane ? 0 : null,
+                // §3a.2: the avatar opens the drawer in `compact` and does
+                // nothing in the classes where navigation is already
+                // standing, **so the header drops it** rather than keeping a
+                // control that is live in one window and inert in another.
+                onOpenDrawer: KvNavScope.maybeOf(context)?.openDrawer,
+              ),
             ),
-            Expanded(child: _scroller(plate)),
-            _ThumbActions(
-              balance: _balance,
-              onSend: widget.sendRoute == null
-                  ? null
-                  : () => Navigator.of(context).push(
-                      KvPageRoute<void>(
-                        builder: (c) => widget.sendRoute!(c, _dimmed),
+            Expanded(
+              child: metrics.isTwoPane
+                  ? KvTwoPane(
+                      list: _moneyColumn(metrics),
+                      detail: _detailPane(),
+                    )
+                  : Align(
+                      alignment: Alignment.topCenter,
+                      child: ConstrainedBox(
+                        // A content column never exceeds 560, in any class
+                        // (BG-33) — a wider window gains columns, never a
+                        // wider column.
+                        constraints: const BoxConstraints(
+                          maxWidth: KvLayout.columnMax,
+                        ),
+                        child: _moneyColumn(metrics),
                       ),
                     ),
-              onReceive: widget.receiveRoute == null
-                  ? null
-                  : () => _push(widget.receiveRoute),
             ),
           ],
         ),
@@ -721,55 +728,208 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Puts [child] on the same horizontal grid the content column stands on:
+  /// the outer gutter in a two-pane window, the centred 560 column otherwise.
+  Widget _columnAligned(KvWindowMetrics metrics, Widget child) {
+    if (metrics.isTwoPane) {
+      return Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: KvLayout.pageMax),
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: metrics.gutter),
+            child: child,
+          ),
+        ),
+      );
+    }
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: KvLayout.columnMax),
+        child: child,
+      ),
+    );
+  }
+
+  /// The money column: the plate pinned, the ledger scrolling under it.
+  Widget _moneyColumn(KvWindowMetrics metrics) {
+    // **`short` is the only collapse there is** (BG-33). A phone on its side
+    // has 412 dp of height and the ledger is what it was turned for, so the
+    // plate becomes a 56 dp bar and the fraction goes one tap away.
+    final Widget plate = metrics.collapseMoneyPlate
+        ? ValueListenableBuilder<_BalanceView>(
+            valueListenable: _balance,
+            builder: (context, b, _) => KvMoneyBar(
+              sompi: b.mature,
+              stale: b.stale,
+              // **A live dot, not the whole chip** (§3a.1: "integer figure +
+              // live dot + Send · Receive as 44 pills"). The `Mainnet` chip
+              // is ~110 dp wide; in a 340 dp list pane it took the room the
+              // figure needed and the balance was fitted down to nothing —
+              // BG-5's one prohibition, found by looking at the 915x412 frame.
+              // The node surface stays one door away, through Settings.
+              indicator: _liveDot(),
+              onSend: _sendTap(),
+              onReceive: _receiveTap(),
+              sendDisabledReason: _sendBlocked(b),
+            ),
+          )
+        : ValueListenableBuilder<_BalanceView>(
+            valueListenable: _balance,
+            builder: (context, b, _) => KvMoneyPlate(
+              label: 'Available balance',
+              figure: KvAmount(b.mature, stale: b.stale),
+              fiat: _FiatLine(fiat: widget.fiat, sompi: b.mature, now: _now),
+              indicator: _indicator(),
+              onSend: _sendTap(),
+              onReceive: _receiveTap(),
+              sendDisabledReason: _sendBlocked(b),
+            ),
+          );
+    return _scroller(
+      Padding(
+        padding: EdgeInsets.fromLTRB(
+          metrics.isTwoPane ? 0 : KvSpace.gutter,
+          KvSpace.s,
+          metrics.isTwoPane ? 0 : KvSpace.gutter,
+          KvSpace.sm,
+        ),
+        child: plate,
+      ),
+      metrics,
+    );
+  }
+
+  /// The live indicator, and the money screen's door to the node surface.
+  ///
+  /// **The pulsing dot is back** (A6, founder ask). It was removed at UX-2
+  /// because D-200's narrowing took link health away from `ok`; BG-7 as
+  /// amended in Deep V6 v4.2 lists *"link healthy"* among `ok`'s meanings
+  /// outright, so the ask is law-compliant as written and needed no
+  /// amendment. Live is the **live dot** — `primary`, pulsing, one of BG-2's
+  /// three permitted emissions — and a dark link is a static amber lamp.
+  ///
+  /// The lamp and the trust line are computed from the SAME `_LinkView`, so
+  /// they cannot disagree; that is what guards the P0.3 scar now.
+  Widget _indicator() => ValueListenableBuilder<bool>(
+    valueListenable: _dimmed,
+    builder: (context, stale, _) => _NetworkChip(
+      live: !stale,
+      onTap: widget.nodeRoute == null ? null : _openNode,
+    ),
+  );
+
+  /// The bare live dot the `short` bar carries. Same widget, same law, same
+  /// `_dimmed` reading as the chip's — so the two can never disagree about a
+  /// link the way P0.3's did.
+  Widget _liveDot() => ValueListenableBuilder<bool>(
+    valueListenable: _dimmed,
+    builder: (context, stale, _) => KvBreath(
+      active: !stale,
+      child: KvLamp(stale ? KvLampTone.warn : KvLampTone.live),
+    ),
+  );
+
+  VoidCallback? _sendTap() => widget.sendRoute == null
+      ? null
+      : () => Navigator.of(context).push(
+          KvPageRoute<void>(builder: (c) => widget.sendRoute!(c, _dimmed)),
+        );
+
+  VoidCallback? _receiveTap() =>
+      widget.receiveRoute == null ? null : () => _push(widget.receiveRoute);
+
+  /// **Only a PROVEN zero closes the money door**, and proven means more than
+  /// non-null. `discoveryIncomplete` says the balance was computed over a
+  /// window that may be SHORT, and `utxoIndexMissing` says the node cannot see
+  /// this wallet's coins at all — a zero under either is exactly the
+  /// confidently-wrong number those flags exist to mark. Without these terms
+  /// the plate said "this may not be your whole balance" and "Nothing to send
+  /// yet" in the same frame (`consensus-auditor`, UX-2).
+  String? _sendBlocked(_BalanceView b) {
+    final mature = b.mature;
+    final nothing =
+        mature != null &&
+        mature == BigInt.zero &&
+        !b.utxoIndexMissing &&
+        !b.discoveryIncomplete;
+    return nothing ? 'Nothing to send yet' : null;
+  }
+
+  /// The detail column in `expanded`+ (§3a.2): the transaction, or the one
+  /// truth that says why it is empty.
+  Widget _detailPane() {
+    final txid = _selected;
+    final route = widget.detailRoute;
+    if (txid == null || route == null) {
+      return const Center(
+        child: KvEmptyState(
+          mark: KvGlyph.history,
+          truth: 'Select a transaction.',
+          nudge: 'Its detail opens here, beside the ledger.',
+        ),
+      );
+    }
+    return route(context, txid, _dimmed);
+  }
+
+  /// Opens one row: **the detail column in `expanded`+, a pushed route below
+  /// it.** One decision, taken from the window class rather than from two
+  /// call sites (BG-33).
+  void _open(String txid, KvWindowMetrics metrics) {
+    if (metrics.isTwoPane) {
+      setState(() => _selected = txid);
+      return;
+    }
+    final route = widget.detailRoute;
+    if (route == null) return;
+    Navigator.of(
+      context,
+    ).push(KvPageRoute<void>(builder: (c) => route(c, txid, _dimmed)));
+  }
+
   /// The plate is pinned INSIDE the scroll view rather than sitting above it,
   /// and that is what makes D-194 true: a drag that starts on the balance is a
   /// drag on the scrollable, so the refresh gesture is reachable from the one
   /// place a hand goes first. A plate outside the viewport would emit no
   /// scroll notification and the gesture would die on it.
-  Widget _scroller(Widget plate) {
+  Widget _scroller(Widget plate, KvWindowMetrics metrics) {
     // The viewport's own height is what bounds the pinned plate, so the scroll
-    // view is built inside a `LayoutBuilder` rather than beside one.
+    // view is built inside a `LayoutBuilder` rather than beside one. This
+    // measures the space it was given; it does not choose a layout from a
+    // width, which is the thing BG-33 forbids.
     return LayoutBuilder(
-      builder: (context, box) => _viewport(plate, box.maxHeight),
+      builder: (context, box) => _viewport(plate, box.maxHeight, metrics),
     );
   }
 
-  Widget _viewport(Widget plate, double viewportHeight) {
+  Widget _viewport(Widget plate, double viewportHeight, KvWindowMetrics m) {
     final refresh = widget.wallet.onRefreshActivity;
-    // **What the plate keeps when it cannot keep everything.**
+    // **What the pinned band keeps when it cannot keep everything.**
     //
-    // `minExtent` was the measured plate, unbounded — and at 320x568 with 1.3x
-    // text in the degraded state the plate measures 446.8dp against a 406.0dp
-    // viewport, so the header pinned at the FULL viewport at every scroll
-    // offset and the ledger became unreachable (`ux-auditor`). 360x640 at 1.3x
-    // measured 437.6 against 478.0, one caption line from the same failure on
-    // the founder's own device.
+    // BG-28 changed the shed order and it must be stated rather than
+    // discovered: the plate now holds *only what is always true*, and the
+    // transient strip — pending, in flight, the trust line — sits BENEATH it.
+    // So the strip is the sheddable tail, and the honesty line is what goes
+    // first under a squeeze. A3's risk note called this, and it is real.
     //
-    // The floor is **measured, not chosen**: the plate reports the height of
-    // its sheddable tail — the rule, the chain clock and the trust line — and
-    // what is left is the part that must survive a squeeze, which is the
-    // number and the sentence that vouches for it. The order of the plate was
-    // rebuilt around that, because shedding bottom-first previously shed the
-    // honesty line before the fiat line and inverted BG-8's priority.
+    // **What does not go is the signal.** The plate itself carries the live
+    // dot and the figure's own BG-8 dimming, so a squeezed screen still shows
+    // an amber lamp over a 45% balance — the user can never read a bright
+    // confident number with nothing to say it is old. The sentence scrolls;
+    // the state does not. Measured at 320x568 / 1.3x in
+    // `money_screen_test.dart`, which is where the number lives rather than
+    // in this comment (L121).
     //
-    // Half the viewport is the one POLICY number here, and **it is the floor
-    // that actually binds on a small screen** — not a rare backstop. Measured
-    // in the degraded state: it is what pins at 320x568 and 360x640 at 1.3x
-    // and at 360x640 at 1.0x, while the measured essential binds only on a
-    // roomy 393x852. An earlier version of this comment called it a backstop,
-    // which was a claim about geometry nobody had measured — the same class of
-    // wrong as a stated extent (`ux-auditor`, item 0 / L121).
+    // Half the viewport is the one POLICY number here: a header that owns most
+    // of the screen has stopped being a header, and the whole plate is one
+    // scroll-to-top away regardless. Never below the 1dp bootstrap — a pinned
+    // sliver at zero extent does not build its child, so a degenerate viewport
+    // would deadlock the measurement rather than squeeze it.
     //
-    // A header that owns most of the screen has stopped being a header, and
-    // the whole plate is one scroll-to-top away regardless. Never below the
-    // 1dp bootstrap — a pinned sliver at zero extent does not build its child,
-    // so a degenerate viewport would deadlock the measurement rather than
-    // squeeze it.
-    // **The plate sheds ONLY under pressure.** An earlier version made
-    // `minExtent` the essential block unconditionally, so the tail scrolled
-    // away on every screen whether or not there was room — and dragged the
-    // Activity header up with it before it stuck (founder, on glass). If the
-    // whole plate fits inside the cap, the whole plate pins and nothing moves.
+    // **The band sheds ONLY under pressure.** If the whole band fits inside
+    // the cap, the whole band pins and nothing moves (founder, on glass).
     final cap = viewportHeight / 2;
     final essential = _plateExtent - _tailExtent;
     final pinned = _plateExtent <= cap
@@ -786,57 +946,43 @@ class _HomeScreenState extends State<HomeScreen> {
             extent: _plateExtent,
             minimum: pinned,
             onMeasured: (h) => setState(() => _plateExtent = h),
-            // **The strip rides INSIDE the pinned band, under the card.**
+            // **The strip rides INSIDE the pinned band, under the plate.**
             // As a sliver of its own it scrolled beneath the pinned plate and
             // vanished — measured at 320x568, where it started 27dp above the
-            // header's own bottom edge. Pinned with the card, it cannot hide
-            // behind it, and the header's measured extent still grows and
-            // shrinks with the strip, which is what eases the ledger down.
+            // header's own bottom edge.
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Entrance(child: plate),
-                _StatusStrip(balance: _balance, trust: _trust),
+                _MeasuredHeight(
+                  onMeasured: (h) {
+                    if (_tailExtent != h) setState(() => _tailExtent = h);
+                  },
+                  child: _StatusStrip(
+                    balance: _balance,
+                    trust: _trust,
+                    gutter: m.isTwoPane ? 0 : KvSpace.gutter,
+                  ),
+                ),
               ],
             ),
           ),
-        ),
-        ValueListenableBuilder<List<ActivityRecord>>(
-          valueListenable: widget.wallet.activity,
-          builder: (context, records, _) => records.isEmpty
-              ? const SliverToBoxAdapter(child: SizedBox.shrink())
-              : SliverPersistentHeader(
-                  pinned: true,
-                  delegate: _PinnedHeader(
-                    extent: _ruleExtent,
-                    minimum: _ruleExtent,
-                    onMeasured: (h) => setState(() => _ruleExtent = h),
-                    // Shortened to `Activity` at the founder's call on glass.
-                    // F29's concern — that the header must not promise a full
-                    // history the bound does not deliver — is unaffected: one
-                    // word promises less than two, and the cap's own caption
-                    // still discloses the bound where it binds.
-                    child: const _SectionRule('Activity'),
-                  ),
-                ),
         ),
         // The feed's counters and relative ages are live by design, so it
         // listens to the clock and the chain — but a balance tick never lands
         // here (and the feed never rebuilds the plate).
         ListenableBuilder(
           listenable: _feedInputs,
-          builder: (context, _) => _Feed(
+          builder: (context, _) => _Ledger(
             records: widget.wallet.activity.value,
             now: _now.value,
             virtualDaaScore: widget.chain.virtualDaaScore.value,
             stale: _dimmed.value,
+            gutter: m.isTwoPane ? 0 : KvSpace.gutter,
+            selected: m.isTwoPane ? _selected : null,
             onOpen: widget.detailRoute == null
                 ? null
-                : (txid) => Navigator.of(context).push(
-                    KvPageRoute<void>(
-                      builder: (c) => widget.detailRoute!(c, txid, _dimmed),
-                    ),
-                  ),
+                : (txid) => _open(txid, m),
           ),
         ),
         const SliverToBoxAdapter(child: SizedBox(height: KvSpace.l)),
@@ -849,7 +995,7 @@ class _HomeScreenState extends State<HomeScreen> {
       // RefreshIndicator resolves colorScheme.primary by default and no
       // component theme covers it.
       color: KvColor.ink,
-      backgroundColor: KvColor.key,
+      backgroundColor: KvColor.plate,
       strokeWidth: 2,
       child: scroll,
     );
@@ -900,14 +1046,7 @@ class _PinnedHeader extends SliverPersistentHeaderDelegate {
     // the child lays out at its natural height whatever the current extent
     // says — that is what makes the measurement possible — but an unclipped
     // overflow keeps PAINTING past the sliver's band, with no ground behind
-    // it, straight over the ledger rows. Measured at 320x568 and 360x640 at
-    // 1.3x: the trust line and the chain clock rendered as text on top of the
-    // activity rows, and no widget test could see it because an `OverflowBox`
-    // overflowing by design throws nothing (`ux-auditor`, this sitting — the
-    // second BLOCK, and the first one my own comment had claimed was fine).
-    //
-    // Clipping costs the measurement nothing: layout is unaffected, only paint
-    // is bounded.
+    // it, straight over the ledger rows (`ux-auditor`, UX-3).
     return ClipRect(
       child: Container(
         color: KvColor.abyss,
@@ -969,110 +1108,113 @@ class _RenderMeasuredHeight extends RenderProxyBox {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The rail — the app's two destinations, and nothing that competes with money.
+// The header — who this wallet is, and the way into the app (§5).
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _TopRail extends StatelessWidget {
-  const _TopRail({required this.onMessages, required this.onSettings});
+/// The K avatar that summons the drawer, and the screen's own name.
+///
+/// **There is no scan button**, and §5 lists one. A scanner does not exist in
+/// this build — no camera permission, no decoder, no call site — so the icon
+/// would be a control that responds and does nothing, which is the one thing
+/// §8 forbids outright. It is recorded in the register rather than rendered
+/// as a stub.
+class _Header extends StatelessWidget {
+  const _Header({required this.title, required this.onOpenDrawer, this.inset});
 
-  final VoidCallback? onMessages;
-  final VoidCallback? onSettings;
+  final String title;
+
+  /// The horizontal inset. Null takes the class's own gutter; a pane that has
+  /// already been inset passes 0.
+  final double? inset;
+
+  /// Null ⇒ navigation is already standing (rail or drawer), so the avatar is
+  /// dropped rather than shown inert (§3a.2).
+  final VoidCallback? onOpenDrawer;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+      // The avatar's own 52 dp target overhangs the gutter by 4 dp on each
+      // side, so the glyph inside it lands on the gutter rather than beside
+      // it — the same trick the plate's label row uses.
+      padding: EdgeInsets.fromLTRB(
+        inset ?? (onOpenDrawer == null ? KvSpace.gutter : KvSpace.s20),
+        KvSpace.s,
+        inset ?? KvSpace.gutter,
+        KvSpace.s,
+      ),
       child: Row(
         children: [
-          // The wordmark is the ONLY flex child, and that is the whole layout
-          // decision — F5's lesson, pointed the other way.
-          //
-          // Flutter lays non-flex children out first with UNBOUNDED main-axis
-          // constraints and hands the remainder to the flex ones. In the old
-          // header the beacon pill sat after a `Spacer()`, took its intrinsic
-          // width, and pushed the Settings gear past the Row's clip — at 320dp
-          // from textScale 1.15, and at 360dp (the V60's bucket) at 1.30,
-          // which is AOSP's stock maximum. The app's only door to biometric
-          // enrolment, the lock-grace picker, address scanning and merge
-          // became untappable.
-          //
-          // Here the doors are fixed 48dp targets that must never move, so the
-          // WORDMARK is the thing given a bounded constraint and told to
-          // yield. `Expanded` + a left `Align` reproduces a `Spacer`'s visual
-          // result exactly when there is room, while making the brand — not a
-          // custody control — the thing that gives way under a squeeze.
-          //
-          // Not `Flexible` beside a `Spacer()`: that is two flex children at
-          // flex 1 each, so the wordmark would take half the free space and
-          // ellipsize on a wide screen with room to spare — a new defect
-          // wearing the fix's clothes.
-          //
-          // `inkNav` is the wordmark's own tone (§1.3). The literal string in
-          // Inter stands until the brand identity lands (phase §3).
-          const Expanded(
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'KaspaVerse',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 15,
-                  height: 20 / 15,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.1,
-                  color: KvColor.inkNav,
-                ),
+          if (onOpenDrawer != null) ...[
+            _Avatar(onTap: onOpenDrawer!),
+            const SizedBox(width: KvSpace.sm),
+          ],
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              // §2 `pageTitle`: a drawer-header screen, not a back-button one.
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 20,
+                height: 24 / 20,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.2,
+                color: KvColor.ink,
               ),
             ),
           ),
-          if (onMessages != null)
-            _RailAction(
-              mark: KvGlyph.chat,
-              label: 'Messages',
-              onTap: onMessages!,
-            ),
-          if (onMessages != null && onSettings != null)
-            const SizedBox(width: KvSpace.touchGap),
-          if (onSettings != null)
-            _RailAction(
-              mark: KvGlyph.settings,
-              label: 'Settings',
-              onTap: onSettings!,
-            ),
         ],
       ),
     );
   }
 }
 
-/// A 24dp mark inside a 48dp target — the smaller visual is permitted only
-/// because the code says so (BG-12), and the target never shrinks. The label
-/// is what a screen reader reads; the glyph stays decorative (§1.2a).
-class _RailAction extends StatelessWidget {
-  const _RailAction({
-    required this.mark,
-    required this.label,
-    required this.onTap,
-  });
+/// *Ours* — [KvColor.tealTint] with a [KvColor.primaryMuted] initial at 700
+/// (§4). **Never `primary`**: an avatar that emits is BG-2's most common
+/// finding, and `primaryMuted` is uncounted (§1.5).
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.onTap});
 
-  final KvGlyph mark;
-  final String label;
   final VoidCallback onTap;
+
+  /// §4: 44 in a row, and the header is a row.
+  static const double size = 44;
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
-      label: label,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(KvRadius.control),
-        child: SizedBox(
-          width: KvSpace.touchTarget,
-          height: KvSpace.touchTarget,
-          child: Center(child: KvGlyphIcon(mark, tone: KvColor.inkNav)),
+      label: 'Open navigation',
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: SizedBox.square(
+            dimension: KvSpace.touchTarget,
+            child: Center(
+              child: Container(
+                width: size,
+                height: size,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                  color: KvColor.tealTint,
+                  shape: BoxShape.circle,
+                ),
+                child: const Text(
+                  'K',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 17,
+                    height: 1,
+                    fontWeight: FontWeight.w700,
+                    color: KvColor.primaryMuted,
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -1080,195 +1222,100 @@ class _RailAction extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The plate — an earned container, and the only one on this screen.
+// The plate's own control — the network chip, and the live dot (A6).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The balance, plated (D-191).
+/// The money screen's standing link indicator, and its door to the node
+/// surface.
 ///
-/// The export drew this in an instrument register — tracked mono caps, a
-/// graduated datum, the unit engraved under a scale — and on glass it read as
-/// **telemetry**: it made a number look measured rather than owned. It was
-/// reversed. Sentence case, the unit beside the figure, and every statement
-/// that vouches for the number sits inside the plate with it.
-class _MoneyPlate extends StatelessWidget {
-  const _MoneyPlate({
-    required this.balance,
-    required this.trust,
-    required this.dimmed,
-    required this.daa,
-    required this.onNetwork,
-    required this.onTailMeasured,
-    required this.fiat,
-    required this.now,
-  });
+/// **The lamp came back on a founder call, 2026-08-27, and A6 is now
+/// law-compliant on its own terms.** It was deleted at UX-2 because BG-7, as
+/// narrowed at D-200, took link health away from `ok`; Deep V6's BG-7 lists
+/// *"link healthy"* among `ok`'s meanings outright, so no amendment was
+/// needed to build it — only the new law.
+///
+/// Live is the **live dot** (`primary`, pulsing at [KvMotion.pulse]) rather
+/// than a green health lamp: §4's money plate anatomy is *"`caps` label + live
+/// dot"*, BG-2 lists the live dot among `primary`'s permitted appearances, and
+/// a dot that pulses only while the socket is up is the liveness tell the
+/// founder asked for. A dark link is a static amber lamp — motion means
+/// something is happening, and nothing is.
+class _NetworkChip extends StatelessWidget {
+  const _NetworkChip({required this.live, required this.onTap});
 
-  final ValueListenable<_BalanceView> balance;
-  final ValueListenable<_TrustView> trust;
-  final ValueListenable<bool> dimmed;
-  final ValueListenable<BigInt?> daa;
-  final VoidCallback? onNetwork;
+  /// Drives the lamp. Never const — one sat green beside an amber "Link lost"
+  /// on this very plate once.
+  final bool live;
 
-  /// The fiat seam. Null ⇒ the restatement line does not render at all.
-  final FiatScope? fiat;
-
-  /// The screen's freshness clock (BG-8), forwarded to the restatement.
-  final ValueListenable<DateTime> now;
-
-  /// Reports the height of everything below the rule, so the pinned floor can
-  /// be the measured remainder rather than a fraction.
-  final ValueChanged<double> onTailMeasured;
+  /// Null ⇒ no node surface is wired, so this is a plain reading rather than a
+  /// control. Never a dead button (BG-12).
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return KvSurface(
-      // Tight to the corners. The label row is 48dp because the chip's TARGET
-      // is 48dp (BG-12 — the target never shrinks), so the plate's own top
-      // padding is small and the target's transparent half supplies the
-      // breathing room instead of stacking on top of it. That is most of what
-      // made the plate read as a box rather than a container.
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.m,
-        KvSpace.xs,
-        KvSpace.m,
-        KvSpace.sm,
+    final chip = Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+      decoration: BoxDecoration(
+        color: KvColor.chip,
+        borderRadius: BorderRadius.circular(KvRadius.control),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              // NOT "Total balance". The figure below is the MATURE balance,
-              // and the qualifiers sit directly under it — so "total" would be
-              // wrong by exactly the amount printed beneath it, and would
-              // disagree with the send screen, which calls the identical value
-              // "Available" (product-audit run 1, F9). One value, one name,
-              // both surfaces.
-              //
-              // The label yields, never the chip: the chip is a control with
-              // a 48dp target and a destination, and F5's lesson is that the
-              // thing which gives way under a squeeze must never be the one
-              // the user needs to press. At 320dp / 1.3x this label is what
-              // runs out of room, so it wraps (BG-14: labels wrap or shrink)
-              // and the plate's MEASURED extent absorbs the extra line.
-              const Expanded(child: _SoftLabel('Available balance')),
-              ValueListenableBuilder<bool>(
-                valueListenable: dimmed,
-                builder: (context, stale, _) =>
-                    _NetworkChip(live: !stale, onTap: onNetwork),
-              ),
-            ],
+          // The pulse is the liveness tell; it stills when the link does, the
+          // way every other breathing thing in this app does (BG-8/BG-9).
+          KvBreath(
+            active: live,
+            child: KvLamp(live ? KvLampTone.live : KvLampTone.warn),
           ),
-          const SizedBox(height: KvSpace.xs),
-          // **Above the rule: the money.** The figure, its fiat restatement,
-          // and the amounts that qualify it. **Below: the instrument** — the
-          // chain clock and the link's own sentence (founder, on glass).
-          //
-          // This moves the honesty line BELOW the rule, which reverses the
-          // order the third `ux-auditor` pass required — there, the trust line
-          // had to sit above the shed point so a squeeze took the decoration
-          // first. It is only safe because the plate now sheds **solely under
-          // pressure**: when the whole plate fits the cap, nothing is shed at
-          // all. At the geometries where it does not fit, the honesty line is
-          // again what goes, and that is a real cost, recorded rather than
-          // discovered later (`2026-08-27_UI-UX_…TODO.md`, risk note on A3).
-          ValueListenableBuilder<_BalanceView>(
-            valueListenable: balance,
-            builder: (context, b, _) => _Figure(view: b, fiat: fiat, now: now),
-          ),
-          _MeasuredHeight(
-            onMeasured: onTailMeasured,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: KvSpace.sm),
-                Container(height: 1, color: KvColor.plateDivider),
-                const SizedBox(height: KvSpace.s),
-                // The chain clock, where an instrument puts its reading: small,
-                // mono, tabular, and never competing with the money above it.
-                // Dimmed with the link (BG-8) — a frozen last-known score at
-                // full brightness is the P0.3 scar.
-                ValueListenableBuilder<bool>(
-                  valueListenable: dimmed,
-                  builder: (context, stale, _) => AnimatedOpacity(
-                    opacity: stale ? KvFreshness.opacityStale : 1,
-                    duration: KvMotion.instant,
-                    curve: KvMotion.out,
-                    // **Streamed, not stepped** (D-226). The score is READ on
-                    // the 1 Hz ticker, so it used to repaint once a second and
-                    // jump about ten at a time. `KvStreamingCount` replays the
-                    // interval between the last two readings at the panel's
-                    // refresh rate — every frame is a score the chain actually
-                    // had, and it never runs past the newest reading. It stops
-                    // when the link does, which is why `stale` is passed in:
-                    // a clock still ticking on a dead link is a prediction, and
-                    // the dimming above already says the reading is old.
-                    child: ValueListenableBuilder<BigInt?>(
-                      valueListenable: daa,
-                      builder: (context, score, _) => KvStreamingCount(
-                        value: score,
-                        stalled: stale,
-                        builder: (context, shown) => Text(
-                          'DAA ${formatScore(shown)}',
-                          style: const TextStyle(
-                            fontFamily: KvFont.mono,
-                            fontSize: 11,
-                            height: 15 / 11,
-                            color: KvColor.inkMetaLow,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+          const SizedBox(width: KvSpace.s),
+          const Text(
+            'Mainnet',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 11,
+              height: 16 / 11,
+              fontWeight: FontWeight.w600,
+              // `inkMeta` fails AA on `chip` (§1.4), and this is information.
+              color: KvColor.inkDim,
             ),
           ),
+          if (onTap != null) ...[
+            const SizedBox(width: KvSpace.xs),
+            const KvGlyphIcon(KvGlyph.chevron, size: 12, tone: KvColor.etch),
+          ],
         ],
       ),
     );
-  }
-}
-
-/// The number, its fiat restatement, and the two lines that qualify it.
-class _Figure extends StatelessWidget {
-  const _Figure({required this.view, required this.fiat, required this.now});
-
-  final _BalanceView view;
-
-  /// The fiat seam, forwarded from the screen. Null ⇒ no line (a build or a
-  /// test with no rate wired).
-  final FiatScope? fiat;
-
-  /// The screen's 1 s freshness clock, forwarded so the restatement's age can
-  /// advance without a new quote.
-  final ValueListenable<DateTime> now;
-
-  /// One step down from §2's `balanceHero` 46, because the unit now sits
-  /// **beside** the figure instead of being engraved under it and the line has
-  /// to hold both (D-191). Passed as [KvAmount.size] — the ramp is the rule
-  /// and this is the composition asking for an exception, out loud.
-  static const double heroSize = 42;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        KvAmount(view.mature, size: heroSize, stale: view.stale),
-        // The fiat restatement sits with the figure it restates, above the
-        // rule (founder, on glass) — it is the same number in another unit,
-        // not an instrument reading. It restates `mature`, the same BigInt
-        // the hero above renders, so the two cannot drift.
-        Padding(
-          padding: const EdgeInsets.only(top: KvSpace.xs),
-          child: _FiatLine(fiat: fiat, sompi: view.mature, now: now),
+    if (onTap == null) {
+      return Semantics(
+        label: 'Mainnet',
+        child: ExcludeSemantics(child: chip),
+      );
+    }
+    return Semantics(
+      button: true,
+      label: 'Mainnet. Open network and node settings',
+      child: ExcludeSemantics(
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(KvRadius.control),
+          // A 32dp visual inside a 52dp target. It sits beside a 48dp balance
+          // and would compete with it at full height; a network chip is a way
+          // OUT of this screen, not a thing on it. The smaller visual is
+          // declared (BG-12) and the target never shrinks.
+          child: SizedBox(
+            height: KvSpace.touchTarget,
+            child: Center(child: chip),
+          ),
         ),
-      ],
+      ),
     );
   }
 }
 
+/// The `≈` restatement, in mono at `inkMeta`, one step under the figure (BG-5).
 class _FiatLine extends StatelessWidget {
   const _FiatLine({required this.fiat, required this.sompi, required this.now});
 
@@ -1290,9 +1337,7 @@ class _FiatLine extends StatelessWidget {
   /// bare `clock()` it was unreachable in practice: the only thing that
   /// rebuilt this line was a fresh quote, and a fresh quote resets the age to
   /// zero. So a dead source rendered a confident `≈ \$36.79`, ageless, forever
-  /// (`consensus-auditor`, this sitting — `L126` in its purest form: the
-  /// degraded branch was tested by constructing it already-degraded, which
-  /// proves the rendering and not the transition).
+  /// (`consensus-auditor`, UX-3 — `L126` in its purest form).
   final ValueListenable<DateTime> now;
 
   @override
@@ -1315,8 +1360,8 @@ class _FiatLine extends StatelessWidget {
                   ? '≈ —'
                   : '≈ \$${value.toStringAsFixed(2)}';
               // Silence is the healthy state (D-189/D-192): a fresh rate says
-              // nothing about its age, and the age appears at the point where it
-              // could start to mislead.
+              // nothing about its age, and the age appears at the point where
+              // it could start to mislead.
               final since = quote == null
                   ? null
                   : at.difference(quote.fetchedAt);
@@ -1340,8 +1385,10 @@ class _FiatLine extends StatelessWidget {
                         fontFamily: KvFont.mono,
                         fontSize: 13,
                         height: 18 / 13,
-                        // Subordinate by scale AND tone (BG-5): KAS is the unit
-                        // of account and this sits beside it, never instead.
+                        fontWeight: FontWeight.w500,
+                        // Subordinate by scale AND tone (BG-5): KAS is the
+                        // unit of account and this sits beside it, never
+                        // instead.
                         color: KvColor.inkMeta,
                         fontFeatures: [FontFeature.tabularFigures()],
                       ),
@@ -1353,11 +1400,20 @@ class _FiatLine extends StatelessWidget {
                           age,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          // **An elapsed time is `metaMono`** (§2, BG-30) —
+                          // the same fact class as the ledger's own row times
+                          // twelve rows below, which are mono. One fact, one
+                          // face (L143); the unit word rides with it because
+                          // splitting `12 m old` into two runs to set three
+                          // characters in Jakarta is a rule applied past the
+                          // point where it means anything.
                           style: const TextStyle(
-                            fontFamily: KvFont.ui,
+                            fontFamily: KvFont.mono,
                             fontSize: 11,
-                            height: 15 / 11,
-                            color: KvColor.inkMetaLow,
+                            height: 16 / 11,
+                            fontWeight: FontWeight.w500,
+                            color: KvColor.inkMeta,
+                            fontFeatures: [FontFeature.tabularFigures()],
                           ),
                         ),
                       ),
@@ -1373,149 +1429,9 @@ class _FiatLine extends StatelessWidget {
   }
 }
 
-/// Sentence case, Inter, no tracking — a label a person reads, not one an
-/// instrument wears.
-class _SoftLabel extends StatelessWidget {
-  const _SoftLabel(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Text(
-    text,
-    maxLines: 2,
-    overflow: TextOverflow.ellipsis,
-    style: const TextStyle(
-      fontFamily: KvFont.ui,
-      fontSize: 13,
-      height: 18 / 13,
-      color: KvColor.inkDim,
-    ),
-  );
-}
-
-/// The plate's own control, the money screen's door to the node surface, and
-/// **the screen's standing link indicator**.
-///
-/// **The lamp came back on a founder call, 2026-08-27, and it needs its history
-/// stated or the next auditor removes it again.** It was deleted earlier in
-/// this same sitting because BG-7, as narrowed at **D-200**, took link health
-/// away from `ok` green — green is money arriving, things confirmed, and a
-/// control the user switched on, and a link changes without the user. That
-/// reading is what made a green lamp here forbidden and an amber one redundant
-/// with the trust line.
-///
-/// The founder's call, made on glass, is that a wallet's connection is exactly
-/// the thing a user should be able to read at a glance without parsing a
-/// sentence, and that the pulse is what makes it legible. **It is a scope
-/// decision, and scope is his** — but it amends BG-7, so it is ledgered rather
-/// than absorbed. The P0.3 scar the original lamp caused is guarded a
-/// different way now: this lamp and the trust line are computed from the SAME
-/// `_LinkView`, so they cannot disagree, and a test pins that.
-class _NetworkChip extends StatelessWidget {
-  const _NetworkChip({required this.live, required this.onTap});
-
-  /// Drives the lamp. Never const — one sat green beside an amber "Link lost"
-  /// on this very plate once.
-  final bool live;
-
-  /// Null ⇒ no node surface is wired, so this is a plain reading rather than a
-  /// control. Never a dead button: BG-12 forbids a disabled control with no
-  /// stated reason, and "the seam is absent" is not a reason a user can act on.
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final chip = KvSurface.control(
-      height: 28,
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // The pulse is the liveness tell; it stills when the link does, the
-          // way every other breathing thing in this app does (BG-8).
-          KvBreath(
-            active: live,
-            child: KvLamp(live ? KvLampTone.ok : KvLampTone.warn),
-          ),
-          const SizedBox(width: KvSpace.s),
-          const Text(
-            'Mainnet',
-            style: TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 11,
-              height: 15 / 11,
-              fontWeight: FontWeight.w500,
-              color: KvColor.inkDim,
-            ),
-          ),
-          if (onTap != null) ...[
-            const SizedBox(width: KvSpace.xs),
-            const KvGlyphIcon(KvGlyph.chevron, size: 12, tone: KvColor.inkMeta),
-          ],
-        ],
-      ),
-    );
-    if (onTap == null) {
-      return Semantics(
-        label: 'Mainnet',
-        child: ExcludeSemantics(child: chip),
-      );
-    }
-    return Semantics(
-      button: true,
-      label: 'Mainnet. Open network and node settings',
-      child: ExcludeSemantics(
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(KvRadius.control),
-          // A 28dp visual inside a 48dp target. It sits beside a 42dp balance
-          // and would compete with it at full height; a network chip is a way
-          // OUT of this screen, not a thing on it. The smaller visual is
-          // declared (BG-12) and the target never shrinks.
-          child: SizedBox(
-            height: KvSpace.touchTarget,
-            child: Center(child: chip),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// The ledger — rows, not cards. Rhythm from spacing (BG-1).
+// The ledger — one row container, headed by tabs (§4, §5).
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Pins under the plate: scrolling a ledger should never leave you unsure
-/// which ledger you are in (D-189).
-class _SectionRule extends StatelessWidget {
-  const _SectionRule(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        KvSpace.gutter,
-        0,
-        KvSpace.gutter,
-        KvSpace.s,
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          fontFamily: KvFont.ui,
-          fontSize: 15,
-          height: 20 / 15,
-          fontWeight: FontWeight.w600,
-          color: KvColor.ink,
-        ),
-      ),
-    );
-  }
-}
 
 /// How many rows the feed can hold — the Rust-side bound, mirrored.
 ///
@@ -1525,39 +1441,83 @@ class _SectionRule extends StatelessWidget {
 /// constant and fails if the two ever drift — the mirror is pinned, not trusted.
 const int kActivityFeedCap = 100;
 
-/// The activity list, or the one empty state (live, never a forever-skeleton).
-class _Feed extends StatelessWidget {
-  const _Feed({
+/// The ledger, in **one row container** (§4, BG-1 as amended: a container that
+/// groups rows is now the default and a bare list on the ground is the
+/// finding), headed by the Activity · Tokens tabs.
+///
+/// **The Tokens tab ships as a seat, not a feature.** §5 specifies the whole
+/// composition — KAS first, a `KvCheck` on the selected row, selection
+/// re-scoping the plate, the ledger, Send and Receive, the title becoming
+/// "Wallet · NACHO" — and **no token layer exists in Rust, the bridge or the
+/// DTOs** (B1). So the tab renders a `KvComingSoon` in the seat the feature
+/// will occupy, which is the founder's own acceptance condition: the shape of
+/// what is missing is visible rather than tracked.
+///
+/// **There is no `All` ghost action**, and §5 lists one. It would need a full
+/// history to open, and paging is a deliberate non-feature (D-175) — the feed
+/// arrives from Rust already capped at [kActivityFeedCap] and there is nothing
+/// behind the word. A ghost action that does nothing is §8's anti-pattern, so
+/// it is recorded in the register instead of rendered.
+class _Ledger extends StatefulWidget {
+  const _Ledger({
     required this.records,
     required this.now,
+    required this.gutter,
     this.virtualDaaScore,
     this.stale = false,
+    this.selected,
     this.onOpen,
   });
 
   final List<ActivityRecord> records;
   final DateTime now;
 
+  /// The screen gutter, or 0 in a pane that is already inset.
+  final double gutter;
+
   /// BG-8: a stale link must not stream a frozen counter at full presence —
-  /// counters fall back to their static words until the link is live again
-  /// (ux-audit counter finding 1; the P0.3 scar class).
+  /// counters fall back to their static words until the link is live again.
   final bool stale;
 
-  /// Live DAA — the streaming counter for both directions is a DAA-distance:
-  /// a deposit counts from its inclusion DAA (`blockDaaScore`), a send from its
-  /// DAG-acceptance DAA (`acceptedDaaScore`). Both node-read and cosmetic (the
-  /// number dies with wallet-core's own maturity truth; finding 18 replaced the
-  /// send's laggy 1 Hz tracker-depth poll with this synchronous path so it
-  /// streams as fluidly as a deposit).
+  /// Live DAA — the streaming counter for both directions is a DAA-distance.
   final BigInt? virtualDaaScore;
 
-  /// Opens one row's detail. Null ⇒ the rows are not controls at all.
+  /// The row the detail column is showing, in `expanded`+.
+  final String? selected;
+
+  /// Opens one row. Null ⇒ the rows are not controls at all.
   final void Function(String txid)? onOpen;
 
   @override
+  State<_Ledger> createState() => _LedgerState();
+}
+
+class _LedgerState extends State<_Ledger> {
+  int _tab = 0;
+
+  @override
   Widget build(BuildContext context) {
-    if (records.isEmpty) {
-      return const SliverToBoxAdapter(
+    final header = Padding(
+      padding: const EdgeInsets.only(bottom: KvSpace.xs),
+      child: KvTabs(
+        tabs: const [KvTab('Activity'), KvTab('Tokens')],
+        index: _tab,
+        onSelect: (i) => setState(() => _tab = i),
+      ),
+    );
+    final Widget body;
+    if (_tab == 1) {
+      body = const Padding(
+        padding: EdgeInsets.only(bottom: KvSpace.sm),
+        child: KvComingSoon(
+          mark: KvGlyph.assets,
+          name: 'Assets',
+          sentence: 'Not built yet. Your tokens will live here.',
+        ),
+      );
+    } else if (widget.records.isEmpty) {
+      body = const Padding(
+        padding: EdgeInsets.only(bottom: KvSpace.sm),
         child: KvEmptyState(
           mark: KvGlyph.diamond,
           // Shipped copy, verbatim (D-196): the redesign is a change of form,
@@ -1566,89 +1526,148 @@ class _Feed extends StatelessWidget {
           nudge: 'Payments you send and receive appear here.',
         ),
       );
+    } else {
+      body = const SizedBox.shrink();
     }
+    // **One container, headed by the tabs.** The rows are built lazily inside
+    // it: a `SliverList` under a `DecoratedSliver` keeps the plate behind a
+    // hundred rows without building a hundred rows, which a `Column` in a
+    // `SliverToBoxAdapter` would.
+    final rows = _tab == 0 && widget.records.isNotEmpty;
+    return SliverPadding(
+      padding: EdgeInsets.symmetric(horizontal: widget.gutter),
+      sliver: DecoratedSliver(
+        decoration: BoxDecoration(
+          color: KvColor.plate,
+          borderRadius: BorderRadius.circular(KvRadius.plate),
+        ),
+        sliver: SliverMainAxisGroup(
+          slivers: [
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(
+                KvRowContainer.padding.left,
+                6,
+                KvRowContainer.padding.right,
+                rows ? 0 : 6,
+              ),
+              sliver: SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [header, body],
+                ),
+              ),
+            ),
+            if (rows)
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(
+                  KvRowContainer.padding.left,
+                  0,
+                  KvRowContainer.padding.right,
+                  6,
+                ),
+                sliver: _rows(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _rows() {
     // The list arrives already truncated by Rust, so "full" is the only signal
     // the glass gets that anything was cut (F29).
-    final atCap = records.length >= kActivityFeedCap;
+    final atCap = widget.records.length >= kActivityFeedCap;
     return SliverList.builder(
       // +1 for the bound's own caption when the feed is full (F29).
-      itemCount: records.length + (atCap ? 1 : 0),
+      itemCount: widget.records.length + (atCap ? 1 : 0),
       itemBuilder: (context, i) {
-        if (i == records.length) {
+        if (i == widget.records.length) {
           // Only a user the bound actually binds ever reads this. Quiet tier:
           // it states the bound, it does not offer to lift it. Paging is a
           // deliberate non-feature (D-175).
+          // **The count is mono, the sentence is not** (BG-30). Two faces,
+          // one line, because the reader should know before reading whether a
+          // run is to be read or checked.
           return const Padding(
-            padding: EdgeInsets.fromLTRB(
-              KvSpace.gutter,
-              KvSpace.sm,
-              KvSpace.gutter,
-              0,
-            ),
-            child: Text(
-              'Showing the $kActivityFeedCap most recent.',
+            padding: EdgeInsets.symmetric(vertical: KvSpace.sm),
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(text: 'Showing the '),
+                  TextSpan(
+                    text: '$kActivityFeedCap',
+                    style: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  TextSpan(text: ' most recent.'),
+                ],
+              ),
               textAlign: TextAlign.center,
-              // `inkMetaLow`, the smallest tone that still carries
-              // information: this is the app's only disclosure that the
-              // user's history has been cut, and `etch` is decoration only.
               style: TextStyle(
                 fontFamily: KvFont.ui,
                 fontSize: 11,
-                height: 15 / 11,
-                color: KvColor.inkMetaLow,
+                height: 16 / 11,
+                color: KvColor.inkMeta,
               ),
             ),
           );
         }
+        final record = widget.records[i];
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // A hairline between two facts is what turns a list into a ledger
-            // you read down rather than a block you scan (D-189).
+            // The one line inside a container (§1.2) — never above the first.
             if (i > 0)
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: KvSpace.gutter),
-                child: SizedBox(
-                  height: 1,
-                  child: ColoredBox(color: KvColor.rowDivider),
-                ),
+              const SizedBox(
+                height: 1,
+                child: ColoredBox(color: KvColor.hairline),
               ),
-            _ActivityRow(
-              // Txid-keyed so a row keeps its chip's transition state across
+            _LedgerRow(
+              // Txid-keyed so a row keeps its mark's transition state across
               // reconciles (the list is rebuilt on every snapshot).
-              key: ValueKey(records[i].txid),
-              record: records[i],
-              now: now,
-              stale: stale,
-              confirmations: _confirmations(records[i]),
-              onOpen: onOpen,
+              key: ValueKey(record.txid),
+              record: record,
+              now: widget.now,
+              stale: widget.stale,
+              selected: record.txid == widget.selected,
+              confirmations: KvBurial.depthOf(
+                record,
+                widget.virtualDaaScore,
+                stale: widget.stale,
+              ),
+              onOpen: widget.onOpen,
             ),
           ],
         );
       },
     );
   }
-
-  /// The chip's streaming counter for one row — a DAA-distance depth, node-read
-  /// and cosmetic (it dies with wallet-core's own maturity truth; the depth
-  /// gate quiets it once deep). `null` ⇒ static label.
-  ///
-  /// **The arithmetic itself is [KvBurial.depthOf]'s, and this is only its
-  /// caller.** It used to live here, and UX-5 gave the same fact a second
-  /// surface — the transaction detail plots this number on a gauge. Two copies
-  /// of the anchor rule (a send counts from its ACCEPTANCE score, a deposit
-  /// from its own inclusion score) would be two surfaces disagreeing about one
-  /// transaction, which is L143 with real money on it.
-  int? _confirmations(ActivityRecord record) =>
-      KvBurial.depthOf(record, virtualDaaScore, stale: stale);
 }
 
-class _ActivityRow extends StatelessWidget {
-  const _ActivityRow({
+/// One ledger row: direction disc · `rowTitle` · the lifecycle mark ·
+/// `amountRow` **in the direction's hue** · `metaMono` time (§4, BG-7).
+///
+/// **64 dp in every window class** (BG-33, A9) — a tablet shows more rows,
+/// never smaller ones. It is a *minimum* rather than a clamp, because BG-14
+/// requires the row to survive the user's 1.3× font setting and a clamped row
+/// would clip instead of growing.
+///
+/// The lifecycle mark still speaks `Seen · Confirmed · final`. That is
+/// **correct for this sitting**: D-248/D-249 rewrote the vocabulary to
+/// `Pending · Accepted · Settled` with its thresholds read from the pin, and
+/// UX-R3 rebuilds `KvBurialMark` at T2 with the bridge surface that carries
+/// them. Half-migrating the words here would put two vocabularies on one fact,
+/// which is the defect the amendment exists to remove.
+class _LedgerRow extends StatelessWidget {
+  const _LedgerRow({
     super.key,
     required this.record,
     required this.now,
     required this.stale,
+    required this.selected,
     this.confirmations,
     this.onOpen,
   });
@@ -1656,6 +1675,10 @@ class _ActivityRow extends StatelessWidget {
   final ActivityRecord record;
   final DateTime now;
   final bool stale;
+
+  /// This row is the one the detail column is showing (`expanded`+).
+  final bool selected;
+
   final int? confirmations;
 
   /// Null ⇒ this row is a record, not a control.
@@ -1664,9 +1687,9 @@ class _ActivityRow extends StatelessWidget {
   /// The chip state, with the finding-18 revival: a send whose base state is
   /// the quiet terminal (`none` — wallet-core confirmed it at acceptance) but
   /// which still has a live sub-ceiling acceptance-depth counts as `accepted`
-  /// (green, streaming), exactly like a maturing deposit; the depth gate quiets
-  /// it once deep. Every other row keeps its base state. Pure display; the
-  /// underlying maturity truth is untouched.
+  /// (green, streaming), exactly like a maturing deposit; the depth gate
+  /// quiets it once deep. Pure display; the underlying maturity truth is
+  /// untouched.
   TxChipState _chipState() {
     final base = gateByDepth(
       chipStateOf(record.maturity, stalled: record.stalled),
@@ -1688,130 +1711,70 @@ class _ActivityRow extends StatelessWidget {
     // switch itself is `kvActivityFace`, shared with the transaction detail
     // that renders the same transaction at full size (BG-21).
     final (:mark, :direction, :title) = kvActivityFace(record);
-    final tone = switch (direction) {
-      KvMoneyDirection.incoming => KvColor.ok,
-      KvMoneyDirection.outgoing => KvColor.risk,
-      KvMoneyDirection.internal => KvColor.inkDim,
+    final (tint, tone) = switch (direction) {
+      KvMoneyDirection.incoming => (KvColor.okTint, KvColor.ok),
+      KvMoneyDirection.outgoing => (KvColor.riskTint, KvColor.risk),
+      // A self-send is not a value event: neither tint carries it, so it takes
+      // the neutral socket (§4).
+      KvMoneyDirection.internal => (KvColor.chip, KvColor.inkDim),
     };
-    final chip = _chipState();
     final time = record.unixtimeMsec;
-
     final open = onOpen;
-    final body = Opacity(
+    return Opacity(
       opacity: stale ? KvFreshness.opacityStale : 1,
-      // No card and no tinted icon plate: the ledger reads by spacing, and a
-      // container that exists because content needed somewhere to sit is the
-      // admission BG-1 forbids.
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: KvSpace.gutter,
-          vertical: KvSpace.m,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          // The selected row in a two-pane window lifts one step, which is the
+          // whole of what "selected" needs to be (§1.1) — no tint, no edge.
+          color: selected ? KvColor.chip : Colors.transparent,
+          borderRadius: BorderRadius.circular(KvRadius.row),
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: KvGlyphIcon(mark, tone: tone),
-            ),
-            const SizedBox(width: KvSpace.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 15,
-                      height: 20 / 15,
-                      fontWeight: FontWeight.w500,
-                      color: KvColor.ink,
-                    ),
+        child: KvRow(
+          leading: KvRowDisc(
+            mark: mark,
+            tint: tint,
+            tone: tone,
+            // BG-25: a direction arrow inside a value disc is 2.75 on the
+            // 24 dp grid, not the 2.5 every other mark takes.
+            stroke: direction == KvMoneyDirection.internal
+                ? null
+                : KvGlyphSpec.strokeArrow,
+          ),
+          title: title,
+          subWidget: KvBurialMark(
+            state: _chipState(),
+            confirmations: confirmations,
+            maturity: record.maturity,
+          ),
+          trailing: KvAmount(
+            record.valueSompi,
+            role: KvAmountRole.row,
+            direction: direction,
+          ),
+          trailingMeta: time == null
+              ? null
+              : Text(
+                  _relativeAge(now, time),
+                  maxLines: 1,
+                  // A timestamp is tabular (§2/BG-30), so a ticking age does
+                  // not jiggle the row.
+                  //
+                  // **`inkDim` on a selected row.** §1.4's one standing
+                  // obligation: `inkMeta` is 4.30 on `chip` and may not carry
+                  // information there. A selection is persistent, not a press,
+                  // so the row cannot borrow a pressed state's licence.
+                  style: TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 11,
+                    height: 16 / 11,
+                    fontWeight: FontWeight.w500,
+                    color: selected ? KvColor.inkDim : KvColor.inkMeta,
+                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
-                  const SizedBox(height: KvSpace.xs),
-                  // A `Wrap`, not a `Row`: at 320dp / 1.3x the lifecycle label
-                  // and the age together need more than this text column has,
-                  // and the honest answer is a second line rather than a
-                  // clipped one. On every geometry with room they sit side by
-                  // side, so nothing is spent on the common case.
-                  Wrap(
-                    spacing: KvSpace.s,
-                    runSpacing: KvSpace.xs,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      // The lifecycle mark is NOT a second rendering of
-                      // `KvStatusChip`: it carries a streaming depth counter,
-                      // it crossfades between rungs, and its `final` rung has
-                      // no lamp at all — BG-7 gives lamps three hues and a
-                      // settled row needs none of them. The two answer
-                      // different questions.
-                      //
-                      // (This comment described a *breathing* dot and a
-                      // `Pending` tier until D-229. It was written at UX-2 for
-                      // the widget that used to sit here and outlived it —
-                      // L121: a claim in a comment is a claim to check.)
-                      KvBurialMark(
-                        state: chip,
-                        confirmations: confirmations,
-                        maturity: record.maturity,
-                      ),
-                      if (time != null)
-                        Text(
-                          _relativeAge(now, time),
-                          maxLines: 1,
-                          // A timestamp is tabular (§2), so a ticking age does
-                          // not jiggle the row.
-                          style: const TextStyle(
-                            fontFamily: KvFont.mono,
-                            fontSize: 11,
-                            height: 15 / 11,
-                            color: KvColor.inkMetaLow,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: KvSpace.sm),
-            // **Hard against the row's end.** `Flexible` alone let the amount
-            // hug the START of its share of the free space, so a short figure
-            // floated ~33dp clear of the gutter while the divider above it ran
-            // the full width — the ledger's right edge read ragged (founder, on
-            // glass). `Expanded` + a right `Align` gives it the whole column
-            // and puts the figure at the end of it, while `KvAmount`'s own
-            // `FittedBox` still scales down rather than clipping (BG-5).
-            Expanded(
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: KvAmount(
-                  record.valueSompi,
-                  role: KvAmountRole.row,
-                  direction: direction,
                 ),
-              ),
-            ),
-          ],
+          semanticLabel: '$title, details',
+          onTap: open == null ? null : () => open(record.txid),
         ),
-      ),
-    );
-    if (open == null) return body;
-    // **The row becomes a control** (UX-5): it opens the transaction detail,
-    // where the burial gauge has the room the ledger does not. The whole row
-    // is the target, so the 48dp minimum is met by the row's own height rather
-    // than by a separate chevron competing with the amount for the right edge.
-    return Semantics(
-      button: true,
-      label: '$title, details',
-      child: InkWell(
-        onTap: () => open(record.txid),
-        // §1.1's pressed-key tone: a row is not a plate and must not light up
-        // like one, and there is no ripple in this language.
-        highlightColor: KvColor.keyPressed,
-        splashFactory: NoSplash.splashFactory,
-        child: body,
       ),
     );
   }
@@ -1826,115 +1789,33 @@ class _ActivityRow extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The thumb arc — Send and Receive, and nothing else (§5).
+// The strip — transient news, beneath the plate (BG-28).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// On a wallet with nothing to send the light flips to Receive, because the
-/// brightest thing on screen should always be the most sensible next act.
-///
-/// **Only a PROVEN zero flips it.** An unknown balance is not an empty one, and
-/// telling a user with a dark link that they have nothing to send is a claim we
-/// cannot make (BG-5/BG-8).
-class _ThumbActions extends StatelessWidget {
-  const _ThumbActions({
-    required this.balance,
-    required this.onSend,
-    required this.onReceive,
-  });
-
-  final ValueListenable<_BalanceView> balance;
-  final VoidCallback? onSend;
-  final VoidCallback? onReceive;
-
-  @override
-  Widget build(BuildContext context) {
-    if (onSend == null && onReceive == null) return const SizedBox.shrink();
-    return Entrance(
-      index: 1,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          KvSpace.gutter,
-          KvSpace.sm,
-          KvSpace.gutter,
-          KvSpace.m,
-        ),
-        child: ValueListenableBuilder<_BalanceView>(
-          valueListenable: balance,
-          builder: (context, b, _) {
-            final mature = b.mature;
-            // **Only a PROVEN zero flips it**, and proven means more than
-            // non-null. `discoveryIncomplete` says the balance was computed
-            // over a window that may be SHORT, and `utxoIndexMissing` says the
-            // node cannot see this wallet's coins at all — a zero under either
-            // is exactly the confidently-wrong number those flags exist to
-            // mark. Without these terms the plate said "this may not be your
-            // whole balance" and "Nothing to send yet" in the same frame, and
-            // closed the money door on a wallet that may hold funds
-            // (`consensus-auditor`, this sitting).
-            final nothingToSend =
-                mature != null &&
-                mature == BigInt.zero &&
-                !b.utxoIndexMissing &&
-                !b.discoveryIncomplete;
-            return Row(
-              children: [
-                if (onReceive != null)
-                  Expanded(
-                    child: KvAction(
-                      label: 'Receive',
-                      primary: nothingToSend,
-                      onTap: onReceive!,
-                    ),
-                  ),
-                if (onReceive != null && onSend != null)
-                  const SizedBox(width: KvSpace.sm),
-                if (onSend != null)
-                  Expanded(
-                    child: KvAction(
-                      label: 'Send',
-                      primary: !nothingToSend,
-                      // BG-12: a disabled control always says why, in words.
-                      disabledReason: nothingToSend
-                          ? 'Nothing to send yet'
-                          : null,
-                      onTap: onSend!,
-                    ),
-                  ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-/// **Transient status, in a container of its own beneath the card** (founder,
-/// device sitting 2026-08-31).
+/// **Transient status, in a container of its own beneath the plate** (BG-28,
+/// founder device sitting 2026-08-31).
 ///
 /// The money plate used to hold these lines, so it grew one the moment a
 /// deposit started arriving, lost it again when the money matured, and lost
-/// another when `syncing…` cleared a second after every cold open — the balance
-/// moved three times for events the user did not cause. Reserving the space
-/// inside the card stopped the jump and left a permanent gap where the news
-/// usually is not. **The card now holds only what is always true** (BG-28), and
-/// everything transient arrives here, easing the ledger down and back.
+/// another when `syncing…` cleared a second after every cold open — the
+/// balance moved three times for events the user did not cause. **The plate
+/// now holds only what is always true**, and everything transient arrives
+/// here, easing the ledger down and back.
 ///
-/// ## It is a panel, not a list of loose lines
-///
-/// The first cut moved the lines out and left them unstyled under the card —
-/// structurally right and visually nothing, which is what the founder sent it
-/// back for. Every row now reads the way the transaction detail's table reads:
-/// **a lamp, a label in caps, and the value hard right**, on one recessed
-/// [KvSurfaceTone.notice] plate — the tone the system already reserves for a
-/// notice — with the ledger's own hairline between rows. The lamp carries the
-/// hue (§1.5: the dot is coloured, the words are not), so a status panel and a
-/// money row use one vocabulary instead of two.
+/// Every row reads the way a ledger row reads: a lamp, a label in `caps`, and
+/// the value hard right, on one [KvColor.plate] container with the hairline
+/// between rows. The lamp carries the hue (§1.6: the dot is coloured, the
+/// words are not), so a status panel and a money row use one vocabulary.
 class _StatusStrip extends StatelessWidget {
-  const _StatusStrip({required this.balance, required this.trust});
+  const _StatusStrip({
+    required this.balance,
+    required this.trust,
+    required this.gutter,
+  });
 
   final ValueListenable<_BalanceView> balance;
   final ValueListenable<_TrustView> trust;
+  final double gutter;
 
   @override
   Widget build(BuildContext context) {
@@ -1959,32 +1840,20 @@ class _StatusStrip extends StatelessWidget {
                   // **BG-23.** A qualifier is the likeliest sub-1 amount on the
                   // screen — dust deposits land here — and `row`'s default
                   // emphasis puts the one bright run on `+0`, lighting a
-                  // leading zero. The identical defect as [[L147]], one panel
-                  // over. At or above 1 the two rules agree exactly.
+                  // leading zero (the identical defect as [[L147]]).
                   emphasis: KvAmountEmphasis.significant,
                   stale: b.stale,
                   showUnit: true,
                 ),
               ),
             // **The in-flight memo carries NO sign, and that is the design.**
-            // It looks like the pending line and is NOT its mirror: the two
-            // have opposite arithmetic under identical grammar. At the pin the
-            // hero is already NET of the send (`mature = (mature_utxos +
-            // consumed).saturating_sub(fees + payment)`,
+            // At the pin the hero is already NET of the send (`mature =
+            // (mature_utxos + consumed).saturating_sub(fees + payment)`,
             // `wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`), so a `−`
             // would invite a second subtraction — a partial send of 30 from
-            // 100 would read `70.00 KAS` over `− 30.00000000`. It would also be
-            // a lie outright on `SignableKind::SelfSendFrame`, where the amount
-            // travels straight back to this wallet. So it is a memo, not a term
-            // in a sum.
-            //
-            // Two bounds verified at the pin: it excludes FEES by construction
-            // (`Balance.outgoing` is `outgoing_without_batch_tx`), and it goes
-            // silent on a SWEEP, because `discharges_outgoing()`
-            // (`rust/chain/src/send.rs:1668`) drops the record immediately
-            // after submit for a ReceiverPays drain. Gating the memo on an
-            // unaccepted outgoing row instead belongs with Send (UX-4);
-            // recorded rather than half-built (`consensus-auditor`).
+            // 100 would read `70.00 KAS` over `− 30.00000000`. It would also
+            // be a lie outright on `SignableKind::SelfSendFrame`. So it is a
+            // memo, not a term in a sum.
             if (outgoing != null && outgoing > BigInt.zero)
               _StatusRow(
                 tone: KvLampTone.warn,
@@ -1998,49 +1867,55 @@ class _StatusStrip extends StatelessWidget {
                   showUnit: true,
                 ),
               ),
-            // What is wrong with the NUMBER or with the LINK, most consequential
-            // first. It is a sentence rather than a label/value pair, so it
-            // spans the row and keeps the meter on the right — the one place
-            // this panel's grid bends, and it bends because the content is a
-            // different shape, not because the rule is weak.
+            // What is wrong with the NUMBER or with the LINK, most
+            // consequential first. It is a sentence rather than a label/value
+            // pair, so it spans the row and keeps the meter on the right.
             if (t.words case final words?)
               _StatusRow(
                 tone: t.tone,
                 sentence: words,
-                trailing: KvCadence(running: t.running, scale: 0.85),
+                // The meter shares the lamp's hue (§4): one indicator, one
+                // colour, and no teal object on this screen that BG-2's list
+                // does not name.
+                trailing: KvCadence(
+                  running: t.running,
+                  scale: 0.85,
+                  tone: t.tone.color,
+                ),
               ),
           ];
           return AnimatedSize(
             duration: KvMotion.fast,
-            curve: KvMotion.out,
+            curve: KvMotion.curve,
             alignment: Alignment.topCenter,
             child: rows.isEmpty
                 // Not `shrink()`: a zero-WIDTH child would make the panel
                 // animate its width as well as its height on the first row.
                 ? const SizedBox(width: double.infinity)
                 : Padding(
-                    // The plate's own inset, so the two containers share an
-                    // edge and read as one stack rather than two objects.
-                    padding: const EdgeInsets.fromLTRB(
-                      KvSpace.sm,
-                      0,
-                      KvSpace.sm,
-                      KvSpace.sm,
-                    ),
-                    child: KvSurface(
-                      tone: KvSurfaceTone.notice,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: KvSpace.m,
+                    padding: EdgeInsets.fromLTRB(gutter, 0, gutter, KvSpace.sm),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: KvColor.plate,
+                        borderRadius: BorderRadius.circular(KvRadius.plate),
                       ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          for (var i = 0; i < rows.length; i++) ...[
-                            if (i > 0)
-                              Container(height: 1, color: KvColor.rowDivider),
-                            rows[i],
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: KvSpace.s20,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (var i = 0; i < rows.length; i++) ...[
+                              if (i > 0)
+                                const SizedBox(
+                                  height: 1,
+                                  child: ColoredBox(color: KvColor.hairline),
+                                ),
+                              rows[i],
+                            ],
                           ],
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -2070,7 +1945,7 @@ class _StatusRow extends StatelessWidget {
 
   final KvLampTone tone;
 
-  /// A short noun set in caps, the way the transaction detail sets its labels.
+  /// A short noun set in `caps` (§2).
   final String? label;
 
   /// A full sentence, which takes the width instead of a caps label.
@@ -2085,19 +1960,32 @@ class _StatusRow extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             KvLamp(tone),
             const SizedBox(width: KvSpace.s),
+            // **The label yields; the figure never does.** A `Spacer` beside
+            // an intrinsically-sized caps label overflowed this row by 43 dp
+            // at 320 dp / 1.3×, and the thing that would have been cut is an
+            // amount — which BG-5 forbids outright. `Expanded` gives the
+            // label the remainder and lets it ellipsize instead.
             if (words != null)
-              Text(
-                words.toUpperCase(),
-                style: const TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 11,
-                  height: 16 / 11,
-                  letterSpacing: 0.9,
-                  color: KvColor.inkMetaLow,
+              Expanded(
+                child: Text(
+                  words.toUpperCase(),
+                  // Two lines before it gives up: at 320 dp / 1.3x a one-line
+                  // cap turned `PENDING` into `PEN…` beside a figure it was
+                  // supposed to name. A label wraps (BG-14); the row's own
+                  // height is measured, so growing costs nothing.
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 11,
+                    height: 16 / 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.1,
+                    color: KvColor.inkMeta,
+                  ),
                 ),
               )
             else
@@ -2107,12 +1995,11 @@ class _StatusRow extends StatelessWidget {
                   style: const TextStyle(
                     fontFamily: KvFont.ui,
                     fontSize: 13,
-                    height: 19 / 13,
+                    height: 18 / 13,
                     color: KvColor.inkDim,
                   ),
                 ),
               ),
-            if (words != null) const Spacer(),
             const SizedBox(width: KvSpace.s),
             trailing,
           ],

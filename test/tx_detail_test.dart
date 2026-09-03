@@ -95,7 +95,7 @@ void main() {
     await tester.pumpWidget(host(seams()));
     await tester.pumpAndSettle();
 
-    expect(tester.widget<KvRail>(find.byType(KvRail)).title, 'Transaction');
+    expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).title, 'Transaction');
     // The verb comes from the shared `kvActivityFace`, so this screen and the
     // ledger row cannot name one transaction two ways (BG-21).
     expect(find.text('Sent'), findsOneWidget);

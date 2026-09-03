@@ -455,7 +455,7 @@ class _NodeScreenState extends State<NodeScreen> {
           children: [
             // BG-14: the top 52dp belongs to the real system status bar.
             const SizedBox(height: KvSpace.statusBarReserve),
-            KvRail(
+            KvTopBar(
               title: 'Node & connection',
               onBack: () => Navigator.of(context).maybePop(),
             ),

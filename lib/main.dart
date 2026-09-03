@@ -28,6 +28,9 @@ import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
@@ -146,6 +149,13 @@ class KaspaVerseApp extends StatelessWidget {
       title: 'KaspaVerse',
       debugShowCheckedModeBanner: false,
       theme: kvDarkTheme(),
+      // **The window is derived once, here, and provided to the whole tree**
+      // (BG-33, §3a). `builder` rather than wrapping `home:` on purpose: it
+      // sits ABOVE the Navigator, so a pushed route — Send, Receive, the
+      // ceremony, Settings, the node surface — reads the same class the money
+      // screen did. Below `home:` every one of them would find no provider and
+      // lay a tablet out as a phone.
+      builder: (context, child) => KvWindow(child: child!),
       home: AppShell(
         status: VaultService.instance.status,
         initializing: const KvSplash(),
@@ -159,118 +169,202 @@ class KaspaVerseApp extends StatelessWidget {
         locked: const UnlockSurface(
           debugFooter: kDebugMode ? _DevPanelLink() : null,
         ),
-        home: HomeScreen(
-          // V5 service scopes: the SAME service notifiers as ever, grouped —
-          // inner identities stay stable for the life of the state (the V4
-          // seam law; scope objects themselves may rebuild freely).
-          chain: ChainScope(
-            connected: chain.connected,
-            virtualDaaScore: chain.virtualDaaScore,
-            error: chain.error,
-            lastUpdate: chain.lastUpdate,
-            reconnecting: chain.reconnecting,
-            searching: chain.searching,
-            osOffline: chain.osOffline,
-            disconnectedAt: chain.disconnectedAt,
-          ),
-          wallet: WalletScope(
-            mature: wallet.mature,
-            pending: wallet.pending,
-            activity: wallet.activity,
-            syncing: wallet.syncing,
-            utxoIndexMissing: wallet.utxoIndexMissing,
-            outgoing: wallet.outgoing,
-            discoveryIncomplete: wallet.discoveryIncomplete,
-            onRefreshActivity: wallet.refreshNow,
-          ),
-          onReady: () {
-            wallet.start();
-            // P2.3 transport hub: needs the unlocked vault (this screen only
-            // mounts unlocked) and rebuilds after a re-unlock. Fire-and-forget;
-            // the service surfaces its own errors.
-            MessagingService.instance.start();
-          },
-          receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
-          sendRoute: (_, balanceStale) => SendScreen(
-            mature: wallet.mature,
-            balanceStale: balanceStale,
-            // The tracker's live depth for the txid the ceremony just made —
-            // node-read, polled once a second while the receipt is up.
-            acceptanceStatus: (txid) => txAcceptanceStatus(txid: txid),
-            // The Generator's own fee for what is typed — signerless,
-            // stash-free, priced over the live coins on every pause.
-            feePreview: (destination, amount) =>
-                sendFeePreview(destination: destination, amountSompi: amount),
-            prepare: wallet.prepareSend,
-            commit: wallet.commitSend,
-            abandon: wallet.abandonSend,
-            minimumSendable: wallet.minimumSendable,
-            prepareSweep: wallet.prepareSweep,
-            // The receipt's explorer exit — the same widget the transaction
-            // detail uses, with the same disclosure (D-223's placeholder is
-            // now the real thing).
-            explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
-            openUrl: VaultService.instance.openUrl,
-          ),
-          messagesRoute: (_) => const ContactsScreen(),
-          // A tapped ledger row opens the record at full size, with the burial
-          // gauge the feed has no room for. The explorer link is RESOLVED in
-          // Rust (validated template, identifier in the path, https only) and
-          // opened by the platform channel the app already owns — no plugin,
-          // and no URL built on this side (UX-5).
-          detailRoute: (_, txid, stale) => TxDetailScreen(
-            txid: txid,
-            activity: wallet.activity,
-            virtualDaaScore: chain.virtualDaaScore,
-            stale: stale,
-            explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
-            openUrl: VaultService.instance.openUrl,
-          ),
-          nodeRoute: _nodeRoute(chain),
-          // Read-only on this surface by construction: the plate shows a
-          // price, and the place a price is chosen is the place it can be
-          // switched off (D-193).
-          fiat: FiatScope(
-            enabled: RateService.instance.enabled,
-            quote: RateService.instance.quote,
-            attach: RateService.instance.attach,
-            detach: RateService.instance.detach,
-          ),
-          // Track 2: the app's settings surface, and the only door to biometric
-          // enrolment outside the create flow. Every seam is wired here so the
-          // screen itself imports no service (the V5 scope law).
-          settingsRoute: (_) => SettingsScreen(
-            security: SecurityScope(
-              biometricStatus: VaultService.instance.biometricStatus,
-              pathAState: VaultService.instance.pathAState,
-              enroll: VaultService.instance.enrollBiometric,
-              clearEnrollment: VaultService.instance.clearBiometric,
-              lockGraceSecs: VaultService.instance.lockGraceSecs,
-              setLockGraceSecs: VaultService.instance.setLockGraceSecs,
-            ),
-            wallet: WalletSettingsScope(
-              receiveAddress: vaultReceiveAddress,
-              deepScan: deepScan,
-              receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
-              consolidate: wallet.prepareConsolidate,
-              commitSend: wallet.commitSend,
-              abandonSend: wallet.abandonSend,
-            ),
-            about: AboutScope(packageInfo: VaultService.instance.packageInfo),
-            // The SAME screen the money plate's chip opens, from the same
-            // builder — never a second rendering of one truth (C7). The
-            // summary beside the row reports the CHOICE (whose node, fiat on
-            // or off), never the link's health, which changes without the
-            // user and belongs to the screen behind it.
-            network: NetworkSettingsScope(
-              route: _nodeRoute(chain),
-              pinnedNode: chain.pinnedNode,
-              rateEnabled: RateService.instance.enabled,
-            ),
-          ),
-          floatingActionButton: kDebugMode ? const _DevFabs() : null,
-        ),
+        home: _MoneyShell(chain: chain, wallet: wallet),
       ),
+    );
+  }
+}
+
+/// **The** settings surface, built once so the drawer and any later door
+/// open the same screen rather than two renderings of one truth (C7).
+WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
+    (_) => SettingsScreen(
+      security: SecurityScope(
+        biometricStatus: VaultService.instance.biometricStatus,
+        pathAState: VaultService.instance.pathAState,
+        enroll: VaultService.instance.enrollBiometric,
+        clearEnrollment: VaultService.instance.clearBiometric,
+        lockGraceSecs: VaultService.instance.lockGraceSecs,
+        setLockGraceSecs: VaultService.instance.setLockGraceSecs,
+      ),
+      wallet: WalletSettingsScope(
+        receiveAddress: vaultReceiveAddress,
+        deepScan: deepScan,
+        receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
+        consolidate: wallet.prepareConsolidate,
+        commitSend: wallet.commitSend,
+        abandonSend: wallet.abandonSend,
+      ),
+      about: AboutScope(packageInfo: VaultService.instance.packageInfo),
+      // The SAME screen the money plate's chip opens, from the same
+      // builder — never a second rendering of one truth (C7). The
+      // summary beside the row reports the CHOICE (whose node, fiat on
+      // or off), never the link's health, which changes without the
+      // user and belongs to the screen behind it.
+      network: NetworkSettingsScope(
+        route: _nodeRoute(chain),
+        pinnedNode: chain.pinnedNode,
+        rateEnabled: RateService.instance.enabled,
+      ),
+    );
+
+/// **The money screen inside the app's navigation** (§4, §3a.2).
+///
+/// `KvNav` is what makes the drawer one widget in three postures: it pushes
+/// the page in `compact`, stands as an 80 dp rail in `medium` (and in any
+/// window too short to seat its rows), and stands as the 296 dp panel in
+/// `expanded`+. It wraps **home only**, which is what makes BG-13 true by
+/// construction: the shell discards this whole subtree the instant the vault
+/// locks, so the drawer has nowhere to survive.
+///
+/// Messages and Settings were `HomeScreen` parameters until UX-R1, back when
+/// a top rail was the only place a destination could live (D-190 withdrew the
+/// nav panel). They are destinations now, and the money screen offers neither
+/// — two doors to one room is how they start disagreeing.
+class _MoneyShell extends StatefulWidget {
+  const _MoneyShell({required this.chain, required this.wallet});
+
+  final ChainService chain;
+  final WalletService wallet;
+
+  @override
+  State<_MoneyShell> createState() => _MoneyShellState();
+}
+
+class _MoneyShellState extends State<_MoneyShell> {
+  /// Built once and held, so a drawer swipe does not rebuild the money
+  /// screen's whole subtree — and, more importantly, does not tear down the
+  /// derived notifiers it mounted (the V4 seam law).
+  late final Widget _home = HomeScreen(
+    // V5 service scopes: the SAME service notifiers as ever, grouped —
+    // inner identities stay stable for the life of the state (the V4
+    // seam law; scope objects themselves may rebuild freely).
+    chain: ChainScope(
+      connected: widget.chain.connected,
+      virtualDaaScore: widget.chain.virtualDaaScore,
+      error: widget.chain.error,
+      lastUpdate: widget.chain.lastUpdate,
+      reconnecting: widget.chain.reconnecting,
+      searching: widget.chain.searching,
+      osOffline: widget.chain.osOffline,
+      disconnectedAt: widget.chain.disconnectedAt,
+    ),
+    wallet: WalletScope(
+      mature: widget.wallet.mature,
+      pending: widget.wallet.pending,
+      activity: widget.wallet.activity,
+      syncing: widget.wallet.syncing,
+      utxoIndexMissing: widget.wallet.utxoIndexMissing,
+      outgoing: widget.wallet.outgoing,
+      discoveryIncomplete: widget.wallet.discoveryIncomplete,
+      onRefreshActivity: widget.wallet.refreshNow,
+    ),
+    onReady: () {
+      widget.wallet.start();
+      // P2.3 transport hub: needs the unlocked vault (this screen only
+      // mounts unlocked) and rebuilds after a re-unlock. Fire-and-forget;
+      // the service surfaces its own errors.
+      MessagingService.instance.start();
+    },
+    receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
+    sendRoute: (_, balanceStale) => SendScreen(
+      mature: widget.wallet.mature,
+      balanceStale: balanceStale,
+      // The tracker's live depth for the txid the ceremony just made —
+      // node-read, polled once a second while the receipt is up.
+      acceptanceStatus: (txid) => txAcceptanceStatus(txid: txid),
+      // The Generator's own fee for what is typed — signerless,
+      // stash-free, priced over the live coins on every pause.
+      feePreview: (destination, amount) =>
+          sendFeePreview(destination: destination, amountSompi: amount),
+      prepare: widget.wallet.prepareSend,
+      commit: widget.wallet.commitSend,
+      abandon: widget.wallet.abandonSend,
+      minimumSendable: widget.wallet.minimumSendable,
+      prepareSweep: widget.wallet.prepareSweep,
+      // The receipt's explorer exit — the same widget the transaction
+      // detail uses, with the same disclosure (D-223's placeholder is
+      // now the real thing).
+      explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
+      openUrl: VaultService.instance.openUrl,
+    ),
+    // A tapped ledger row opens the record at full size, with the burial
+    // gauge the feed has no room for. The explorer link is RESOLVED in
+    // Rust (validated template, identifier in the path, https only) and
+    // opened by the platform channel the app already owns — no plugin,
+    // and no URL built on this side (UX-5).
+    detailRoute: (_, txid, stale) => TxDetailScreen(
+      txid: txid,
+      activity: widget.wallet.activity,
+      virtualDaaScore: widget.chain.virtualDaaScore,
+      stale: stale,
+      explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
+      openUrl: VaultService.instance.openUrl,
+    ),
+    nodeRoute: _nodeRoute(widget.chain),
+    // Read-only on this surface by construction: the plate shows a
+    // price, and the place a price is chosen is the place it can be
+    // switched off (D-193).
+    fiat: FiatScope(
+      enabled: RateService.instance.enabled,
+      quote: RateService.instance.quote,
+      attach: RateService.instance.attach,
+      detach: RateService.instance.detach,
+    ),
+    floatingActionButton: kDebugMode ? const _DevFabs() : null,
+  );
+
+  void _push(WidgetBuilder builder) =>
+      Navigator.of(context).push(KvPageRoute<void>(builder: builder));
+
+  @override
+  Widget build(BuildContext context) {
+    return KvNav(
+      selected: 0,
+      // §4's five, in §4's order. An unbuilt one carries a `chipLabel` tag and
+      // takes no tap at all — never a dead button (§8).
+      destinations: [
+        KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
+        KvDestination(
+          mark: KvGlyph.chat,
+          label: 'Messages',
+          onTap: () => _push((_) => const ContactsScreen()),
+        ),
+        // The arcade waits on P4's covenant engine, swaps on an engine that
+        // does not exist, and identity on a scope nobody has named yet
+        // (register §4, D-1). Each says so where it will live.
+        const KvDestination(
+          mark: KvGlyph.games,
+          label: 'Games',
+          tag: 'Coming soon',
+        ),
+        const KvDestination(
+          mark: KvGlyph.finance,
+          label: 'Finance',
+          tag: 'Coming soon',
+        ),
+        const KvDestination(
+          mark: KvGlyph.identity,
+          label: 'Identity',
+          tag: 'Coming soon',
+        ),
+      ],
+      footer: [
+        KvDestination(
+          mark: KvGlyph.settings,
+          label: 'Settings',
+          onTap: () => _push(_settingsRoute(widget.chain, widget.wallet)),
+        ),
+        // **Lock is a discard, not a pause** (BG-13): 0 ms, and the shell
+        // routes to the locked surface on the vault's own status stream, so
+        // nothing here has to navigate.
+        KvDestination(
+          mark: KvGlyph.lock,
+          label: 'Lock',
+          onTap: VaultService.instance.lockNow,
+        ),
+      ],
+      child: _home,
     );
   }
 }

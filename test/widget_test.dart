@@ -5,6 +5,7 @@ import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 import 'support/finders.dart';
 
@@ -78,6 +79,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: homeScreen(
           connected: connected,
           virtualDaaScore: daa,
@@ -95,7 +97,10 @@ void main() {
 
     // Connecting: no data yet → balance unknown `—`, connecting beacon, empty
     // activity (never a forever-skeleton).
-    expect(find.text('KaspaVerse'), findsOneWidget);
+    // The screen names itself; the wordmark moved to the drawer's header
+    // (§4/§5) — this surface is mounted bare, without `KvNav`, so what is
+    // asserted here is the page title rather than the brand.
+    expect(find.text('Wallet · Main'), findsOneWidget);
     expect(find.text('finding a node…'), findsOneWidget); // C7 copy
     expect(find.text('—'), findsOneWidget);
     expect(find.text('No recent activity'), findsOneWidget);
@@ -109,7 +114,11 @@ void main() {
     await tester.pump();
     expectFigure('0', '00');
     expect(find.text('—'), findsNothing);
-    expect(find.text('DAA 458,174,109'), findsOneWidget);
+    // **No chain clock on the money screen since UX-R1.** §5 puts "DAA
+    // streaming" on the network surface and BG-8 forbids anything animating
+    // on a settled money screen except the two ambient rhythms; the reading
+    // is one tap away behind the Mainnet chip.
+    expect(find.textContaining('DAA '), findsNothing);
 
     // Funds arrive (matured + pending) with an incoming, still-pending row.
     mature.value = BigInt.parse('123456789012'); // 1,234.56789012 KAS
@@ -245,6 +254,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: homeScreen(
           connected: ValueNotifier(true),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),
@@ -288,6 +298,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: homeScreen(
           connected: ValueNotifier(true),
           virtualDaaScore: ValueNotifier(BigInt.from(1)),
@@ -343,6 +354,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: kvDarkTheme(),
+          builder: (context, page) => KvWindow(child: page!),
           home: homeScreen(
             connected: ValueNotifier(true),
             virtualDaaScore: daa,
@@ -396,6 +408,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: kvDarkTheme(),
+          builder: (context, page) => KvWindow(child: page!),
           home: ValueListenableBuilder<int>(
             valueListenable: rebuild,
             builder: (_, _, _) => HomeScreen(
@@ -506,6 +519,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: homeScreen(
           connected: ValueNotifier(true),
           virtualDaaScore: daa,
@@ -544,6 +558,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: HomeScreen(
           chain: ChainScope(
             connected: ValueNotifier(true),
@@ -609,6 +624,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: HomeScreen(
           chain: ChainScope(
             connected: ValueNotifier(true),
@@ -663,6 +679,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
         home: homeScreen(
           connected: ValueNotifier(true),
           virtualDaaScore: ValueNotifier(BigInt.from(2000)),

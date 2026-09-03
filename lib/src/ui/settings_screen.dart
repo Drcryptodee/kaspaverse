@@ -923,7 +923,7 @@ class _SettingsScreenState extends State<SettingsScreen>
           children: [
             // BG-14: the top 52dp belongs to the real system status bar.
             const SizedBox(height: KvSpace.statusBarReserve),
-            KvRail(
+            KvTopBar(
               title: 'Settings',
               onBack: () => Navigator.of(context).maybePop(),
             ),

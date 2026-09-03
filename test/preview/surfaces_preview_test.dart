@@ -5,6 +5,7 @@ import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
+import 'package:kaspaverse/src/services/rate_service.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
@@ -18,6 +19,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
@@ -134,8 +136,25 @@ Widget _home() => HomeScreen(
   // fixture is a claim.
   receiveRoute: (_) => const SizedBox.shrink(),
   sendRoute: (_, _) => const SizedBox.shrink(),
-  messagesRoute: (_) => const SizedBox.shrink(),
-  settingsRoute: (_) => const SizedBox.shrink(),
+  detailRoute: (_, _, _) => const SizedBox.shrink(),
+  // **The `≈` line is one of BG-28's always-true five**, so a fixture with no
+  // rate seam renders a money plate that is missing a fifth of itself — and
+  // every contact sheet would show the incomplete one. L125 again: a fixture
+  // is a claim, and a missing one claims a line does not exist.
+  fiat: _fiat(),
+);
+
+/// A settled rate: on, quoted, and fresh — so the plate shows the restatement
+/// rather than the `≈ —` the first seconds of a launch show.
+FiatScope _fiat() => FiatScope(
+  enabled: ValueNotifier<bool?>(true),
+  quote: ValueNotifier<KvRateQuote?>(
+    KvRateQuote(
+      usdPerKas: 0.0821,
+      fetchedAt: DateTime(2026, 8, 30, 11, 16, 25),
+      source: 'preview',
+    ),
+  ),
 );
 
 /// The money screen **with news**: a deposit arriving, a send still in flight,
@@ -164,9 +183,52 @@ Widget _homeStatus() => HomeScreen(
   clock: () => DateTime(2026, 8, 30, 11, 16, 30),
   receiveRoute: (_) => const SizedBox.shrink(),
   sendRoute: (_, _) => const SizedBox.shrink(),
-  messagesRoute: (_) => const SizedBox.shrink(),
-  settingsRoute: (_) => const SizedBox.shrink(),
+  fiat: _fiat(),
 );
+
+/// **The money screen inside the app's navigation**, which is the only way it
+/// is ever seen.
+///
+/// Without this the four frames would be four pictures of a page with no
+/// drawer, no rail and no standing panel — a contact sheet that says
+/// "responsive" while proving nothing, and the exact class of fixture gap
+/// D-229 recorded. `KvNav` is what turns one page into `compact` pushed,
+/// `medium` rail and `expanded` standing.
+Widget _shell(Widget home, {int selected = 0}) => KvNav(
+  selected: selected,
+  destinations: [
+    KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
+    KvDestination(mark: KvGlyph.chat, label: 'Messages', onTap: () {}),
+    const KvDestination(
+      mark: KvGlyph.games,
+      label: 'Games',
+      tag: 'Coming soon',
+    ),
+    const KvDestination(
+      mark: KvGlyph.finance,
+      label: 'Finance',
+      tag: 'Coming soon',
+    ),
+    const KvDestination(
+      mark: KvGlyph.identity,
+      label: 'Identity',
+      tag: 'Coming soon',
+    ),
+  ],
+  footer: [
+    KvDestination(mark: KvGlyph.settings, label: 'Settings', onTap: () {}),
+    KvDestination(mark: KvGlyph.lock, label: 'Lock', onTap: () {}),
+  ],
+  child: home,
+);
+
+/// Summons the drawer the way a thumb does — the `compact` posture, and a
+/// no-op in the classes where navigation already stands.
+Future<void> _summonDrawer(WidgetTester tester) async {
+  final avatar = find.bySemanticsLabel('Open navigation');
+  if (avatar.evaluate().isEmpty) return;
+  await tester.tap(avatar);
+}
 
 /// Types an amount on the pad and pastes a destination — the state in which the
 /// send screen actually has a fee, an address review and a live Review button.
@@ -336,8 +398,13 @@ void main() {
   }
 
   group('surface previews (tier 2 — no device)', () {
-    surface('home__funded', _home);
-    surface('home__status', _homeStatus);
+    // **The money screen, in all four window classes** (BG-33, UX-R1): the
+    // pushed drawer at `compact`, the 80 dp rail at `medium`, ledger + detail
+    // beside a standing drawer at `expanded`, and the `KvMoneyBar` collapse at
+    // `expanded short`.
+    framedSurface('home__funded', () => _shell(_home()));
+    framedSurface('home__status', () => _shell(_homeStatus()));
+    framedSurface('home__drawer', () => _shell(_home()), act: _summonDrawer);
     surface('receive__address', () => ReceiveScreen(fetch: () async => _addr));
 
     // **The failed state, at the same footprint** — the composition UX-5 owes

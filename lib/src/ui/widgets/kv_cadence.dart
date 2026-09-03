@@ -30,11 +30,29 @@ import '../theme/tokens.dart';
 /// Decorative to a screen reader: the words beside it carry the meaning (BG-7),
 /// and a meter that announced itself would announce it on every rebuild.
 class KvCadence extends StatefulWidget {
-  const KvCadence({super.key, required this.running, this.scale = 1});
+  const KvCadence({
+    super.key,
+    required this.running,
+    this.scale = 1,
+    this.tone,
+  });
 
   /// True only while something is genuinely happening — a hunt, a sync, a
   /// pending broadcast.
   final bool running;
+
+  /// The bars' hue. Null keeps the Black Glass teal, which is what the two
+  /// unmigrated screens still wear.
+  ///
+  /// **A teal meter is not on BG-2's list.** Teal appears as the one primary
+  /// pill, the live dot, the caret, a ghost text action, an active tab's
+  /// underline and an armed glow pill's edge — a loading meter is none of
+  /// those. §4's re-spec settles it the other way round: *"number, word, dot
+  /// and bars share one hue"*, and the hue is the tier's. A migrated caller
+  /// therefore passes the hue of the lamp the meter is explaining; UX-R3 owns
+  /// re-specifying the widget itself as a latency reading (A5 / B3), at which
+  /// point this parameter stops being optional.
+  final Color? tone;
 
   /// Uniform size multiplier. The bar RATIO is the meter's identity, so this
   /// scales the whole figure rather than letting a caller pick heights — a
@@ -138,7 +156,9 @@ class _KvCadenceState extends State<KvCadence>
                 Container(
                   width: KvCadence.barWidth * widget.scale,
                   height: KvCadence.barHeights[i] * widget.scale,
-                  color: KvColor.primary.withValues(alpha: _alphaAt(i)),
+                  color: (widget.tone ?? KvColor.primary).withValues(
+                    alpha: _alphaAt(i),
+                  ),
                 ),
               ],
             ],

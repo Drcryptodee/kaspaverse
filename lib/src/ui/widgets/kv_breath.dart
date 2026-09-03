@@ -4,13 +4,17 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// The §8 KvBreath primitive (v2.2): the ONE way a live-attention dot
-/// breathes. A single repeating controller drives opacity through a full
-/// sine period ([KvMotion.breath]): 1.0 → [KvFreshness.opacityStale] → 1.0,
-/// seamless — a true breath, not a tick-driven square wave.
+/// **The live dot's pulse** — one of exactly two ambient loops in the app
+/// (BG-9; the other is the orb's halo, and it belongs to `KvMark`).
 ///
-/// Rationed by the doc to the StatusBeacon connected dot and the
-/// TxStatusChip pending dot. Gates: [active] false or
+/// A single repeating controller drives one full sine period of
+/// [KvMotion.pulse] (1600 ms): **scale 1 → .7 and opacity 1 → .55** (§3),
+/// seamless — a true breath, not a tick-driven square wave. v3.1 ran it at
+/// 1100 ms on opacity alone and dimmed to [KvFreshness.opacityStale], which is
+/// the *stale* step and meant a live dot and a dead reading reached the same
+/// tone twice a second.
+///
+/// Rationed to the live dot and nothing else. Gates: [active] false or
 /// `MediaQuery.disableAnimations` render the child plain with the controller
 /// STOPPED (no frame production); covered routes mute the ticker for free
 /// (`TickerMode`).
@@ -31,13 +35,21 @@ class _KvBreathState extends State<KvBreath>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _opacity;
+  late final Animation<double> _scale;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: KvMotion.breath);
-    _opacity = _controller.drive(_SineBreath());
+    _controller = AnimationController(vsync: this, duration: KvMotion.pulse);
+    _opacity = _controller.drive(const _SineBreath(_KvBreathState.dimOpacity));
+    _scale = _controller.drive(const _SineBreath(_KvBreathState.dimScale));
   }
+
+  /// §3: the dot fades to 55% at the trough.
+  static const double dimOpacity = 0.55;
+
+  /// §3: and shrinks to 70%.
+  static const double dimScale = 0.7;
 
   @override
   void didChangeDependencies() {
@@ -72,14 +84,24 @@ class _KvBreathState extends State<KvBreath>
   @override
   Widget build(BuildContext context) {
     if (!widget.active || _reduced) return widget.child;
-    return FadeTransition(opacity: _opacity, child: widget.child);
+    // Reduced motion collapses to opacity everywhere except the hold (BG-9),
+    // and the branch above has already returned for it — so both channels run
+    // together or neither does.
+    return FadeTransition(
+      opacity: _opacity,
+      child: ScaleTransition(scale: _scale, child: widget.child),
+    );
   }
 }
 
-/// t ∈ [0,1] → one cosine period of opacity: full at both ends, dimmest at
-/// the midpoint — so the loop point is seamless and the dot wakes bright.
+/// t ∈ [0,1] → one cosine period between 1 and [_dim]: full at both ends,
+/// least at the midpoint — so the loop point is seamless and the dot wakes
+/// bright. One curve drives both channels, which is what keeps the scale and
+/// the fade in phase.
 class _SineBreath extends Animatable<double> {
-  static const double _dim = KvFreshness.opacityStale;
+  const _SineBreath(this._dim);
+
+  final double _dim;
 
   @override
   double transform(double t) {

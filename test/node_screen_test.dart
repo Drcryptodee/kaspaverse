@@ -9,6 +9,7 @@ import 'package:kaspaverse/src/services/rate_service.dart' show KvRateQuote;
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
@@ -1352,6 +1353,10 @@ void main() {
 /// without a route it opens nothing.
 Widget _home({required NodeScope? node, required DateTime now}) => MaterialApp(
   theme: kvDarkTheme(),
+  // The window is derived once at the root and read from context (BG-33) —
+  // the same mount point `main.dart` uses, so a test lays out the way the app
+  // does rather than falling back to `compact`.
+  builder: (context, page) => KvWindow(child: page!),
   home: HomeScreen(
     nodeRoute: node == null ? null : (_) => NodeScreen(scope: node),
     chain: ChainScope(

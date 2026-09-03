@@ -58,6 +58,15 @@ enum KvGlyph {
   /// Destination: settings.
   settings,
 
+  /// Destination: identity — **who you are to other people**, as distinct
+  /// from [settings], which is how the app behaves. Lucide's `user`: a head
+  /// and a pair of shoulders, two strokes.
+  ///
+  /// It is drawn rather than shared with [settings] because the drawer seats
+  /// both, and two rows wearing one mark is a mark that has stopped
+  /// identifying anything (BG-25, and Kare's own law).
+  identity,
+
   /// The lock, and locking.
   lock,
 
@@ -112,6 +121,7 @@ class KvGlyphIcon extends StatelessWidget {
     this.size = KvGlyphSpec.grid,
     this.tone = KvColor.inkMeta,
     this.semanticLabel,
+    this.stroke,
   });
 
   final KvGlyph mark;
@@ -125,18 +135,26 @@ class KvGlyphIcon extends StatelessWidget {
   /// Names the glyph to a screen reader. Null (the default) excludes it.
   final String? semanticLabel;
 
+  /// The stroke **on the 24 dp grid**, before [size] scales it. Null takes
+  /// [KvGlyphSpec.stroke]; BG-25 names exactly three other values —
+  /// [KvGlyphSpec.strokeArrow] for a direction arrow inside a value disc,
+  /// [KvGlyphSpec.strokeCheck] for the check, and
+  /// [KvGlyphSpec.strokeIllustrative] where a mark is illustration rather than
+  /// icon. Anything else is a finding.
+  final double? stroke;
+
   /// The rendered stroke width at a given glyph [size] — [KvGlyphSpec.stroke]
   /// scaled off the 24 dp grid (2.5 dp round-capped since v4.2, BG-25). Exposed so a caller that must line a glyph up with a
   /// rule can ask rather than guess (item 0: geometry is computed, never
   /// asserted in a comment).
-  static double strokeFor(double size) =>
-      KvGlyphSpec.stroke * (size / KvGlyphSpec.grid);
+  static double strokeFor(double size, {double? stroke}) =>
+      (stroke ?? KvGlyphSpec.stroke) * (size / KvGlyphSpec.grid);
 
   @override
   Widget build(BuildContext context) {
     final painted = CustomPaint(
       size: Size.square(size),
-      painter: KvGlyphPainter(mark, tone: tone),
+      painter: KvGlyphPainter(mark, tone: tone, stroke: stroke),
     );
     final label = semanticLabel;
     return label == null
@@ -151,10 +169,13 @@ class KvGlyphIcon extends StatelessWidget {
 /// Assumes a **square** canvas — the 24dp grid is scaled by `size.width`, so a
 /// non-square [Size] crops rather than distorts.
 class KvGlyphPainter extends CustomPainter {
-  const KvGlyphPainter(this.mark, {this.tone = KvColor.inkMeta});
+  const KvGlyphPainter(this.mark, {this.tone = KvColor.inkMeta, this.stroke});
 
   final KvGlyph mark;
   final Color tone;
+
+  /// The stroke on the 24 dp grid; null takes [KvGlyphSpec.stroke].
+  final double? stroke;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -162,7 +183,7 @@ class KvGlyphPainter extends CustomPainter {
     final p = Paint()
       ..color = tone
       ..style = PaintingStyle.stroke
-      ..strokeWidth = KvGlyphSpec.stroke * s
+      ..strokeWidth = (stroke ?? KvGlyphSpec.stroke) * s
       ..strokeCap = KvGlyphSpec.cap
       ..strokeJoin = KvGlyphSpec.join;
 
@@ -294,6 +315,16 @@ class KvGlyphPainter extends CustomPainter {
         for (final c in const [Offset(9, 7), Offset(15, 12), Offset(11, 17)]) {
           canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.1 * s, knob);
         }
+      case KvGlyph.identity:
+        canvas.drawCircle(Offset(12 * s, 8 * s), 4 * s, p);
+        canvas.drawPath(
+          Path()..addArc(
+            Rect.fromCircle(center: Offset(12 * s, 20 * s), radius: 7 * s),
+            math.pi,
+            math.pi,
+          ),
+          p,
+        );
       case KvGlyph.lock:
         canvas.drawPath(
           path([
@@ -410,5 +441,5 @@ class KvGlyphPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(KvGlyphPainter old) =>
-      old.mark != mark || old.tone != tone;
+      old.mark != mark || old.tone != tone || old.stroke != stroke;
 }

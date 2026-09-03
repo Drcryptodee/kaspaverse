@@ -38,6 +38,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 
 /// The bundled faces, loaded exactly once per run.
@@ -68,7 +69,7 @@ Future<void> loadBundledFonts() async {
 /// where it breaks, and every geometry defect this project has found on glass
 /// was found at the floor rather than the reference.
 class PreviewSize {
-  const PreviewSize(this.label, this.size, this.textScale);
+  const PreviewSize(this.label, this.size, this.textScale, [this.expect]);
 
   /// The design's reference geometry.
   static const reference = PreviewSize('393dp', Size(393, 851), 1.0);
@@ -87,14 +88,23 @@ class PreviewSize {
   // (BG-14).
 
   /// `compact` — the design's own frame.
-  static const compact = PreviewSize('393 compact', Size(393, 851), 1.0);
+  static const compact = PreviewSize('393 compact', Size(393, 851), 1.0, (
+    KvWindowClass.compact,
+    KvHeightClass.tall,
+  ));
 
   /// `medium` — unfolded foldable / 8" tablet portrait. One centred column,
   /// standing rail.
-  static const medium = PreviewSize('700 medium', Size(700, 900), 1.0);
+  static const medium = PreviewSize('700 medium', Size(700, 900), 1.0, (
+    KvWindowClass.medium,
+    KvHeightClass.tall,
+  ));
 
   /// `expanded` — tablet landscape. Two panes, standing drawer.
-  static const expanded = PreviewSize('1180 expanded', Size(1180, 800), 1.0);
+  static const expanded = PreviewSize('1180 expanded', Size(1180, 800), 1.0, (
+    KvWindowClass.expanded,
+    KvHeightClass.tall,
+  ));
 
   /// `expanded short` — **the V60 on its side**, which is the frame this
   /// project will actually be looked at in most often after portrait. The
@@ -103,6 +113,7 @@ class PreviewSize {
     '915x412 expanded short',
     Size(915, 412),
     1.0,
+    (KvWindowClass.expanded, KvHeightClass.short),
   );
 
   /// The four-frame set BG-33 requires before a screen is called done.
@@ -116,6 +127,17 @@ class PreviewSize {
   final String label;
   final Size size;
   final double textScale;
+
+  /// The window class this frame **is**, when the frame is named for one.
+  ///
+  /// It exists so the harness can check itself. A bare
+  /// `MediaQueryData(textScaler:)` silently zeroed `size` for the whole of
+  /// UX-R0, so every "window class" frame rendered as `compact short` and the
+  /// contact sheet was four pictures of a phone. Nothing read the size then,
+  /// so nothing could tell. Now [renderSurface] asserts the resolved class
+  /// against this, and an instrument that lies about the thing it exists to
+  /// show fails instead (L157).
+  final (KvWindowClass, KvHeightClass)? expect;
 
   /// Filesystem-safe form of [label].
   String get slug => label.replaceAll(RegExp(r'[^a-zA-Z0-9]+'), '_');
@@ -158,10 +180,27 @@ Future<void> renderSurface(
   addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MediaQuery(
-      data: MediaQueryData(textScaler: TextScaler.linear(size.textScale)),
+      // **Derived from the view, then scaled** — never a bare
+      // `MediaQueryData(textScaler:)`.
+      //
+      // A bare one REPLACES the whole data, so `size` becomes `Size.zero` and
+      // `MaterialApp` does not re-derive it because a `MediaQuery` already
+      // exists above. Nothing read the size until BG-33 landed, at which point
+      // every frame in the catalogue silently resolved to `compact short` and
+      // the money plate collapsed to `KvMoneyBar` at 320 dp — where it
+      // overflowed, which is how this was found. L139's shape exactly: the
+      // harness lied about the thing it was built to show.
+      data: MediaQueryData.fromView(
+        tester.view,
+      ).copyWith(textScaler: TextScaler.linear(size.textScale)),
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: kvDarkTheme(),
+        // **The same mount point the app uses** (`main.dart`'s `builder`), so
+        // a preview reads the window class the device would (BG-33). Without
+        // it every frame would render the `compact` fallback and a contact
+        // sheet of four window classes would be four pictures of a phone.
+        builder: (context, page) => KvWindow(child: page!),
         home: child,
       ),
     ),
@@ -175,6 +214,7 @@ Future<void> renderSurface(
   await tester.pump();
   await tester.pump(KvMotion.enter);
   await tester.pump(KvMotion.enter);
+  _assertFrameResolved(tester, size);
   // **A catalogue of first frames is a catalogue of empty screens.** Most of
   // what a surface is FOR only exists after someone has touched it — the send
   // screen's fee line, its address review and an enabled Review button are all
@@ -189,6 +229,22 @@ Future<void> renderSurface(
   await expectLater(
     find.byType(MaterialApp),
     matchesGoldenFile('$previewOut/${name}__${size.slug}.png'),
+  );
+}
+
+/// The harness checking itself: the surface really did resolve to the window
+/// class its frame is named for (L157).
+void _assertFrameResolved(WidgetTester tester, PreviewSize size) {
+  final want = size.expect;
+  if (want == null) return;
+  final metrics = KvWindow.of(tester.element(find.byType(Navigator)));
+  expect(
+    (metrics.widthClass, metrics.heightClass),
+    want,
+    reason:
+        '${size.label} rendered as ${metrics.widthClass.name} '
+        '${metrics.heightClass.name} — the frame is not the frame it says it '
+        'is, and every render under it is a picture of the wrong window',
   );
 }
 
@@ -212,10 +268,27 @@ Future<void> renderFrames(
   addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MediaQuery(
-      data: MediaQueryData(textScaler: TextScaler.linear(size.textScale)),
+      // **Derived from the view, then scaled** — never a bare
+      // `MediaQueryData(textScaler:)`.
+      //
+      // A bare one REPLACES the whole data, so `size` becomes `Size.zero` and
+      // `MaterialApp` does not re-derive it because a `MediaQuery` already
+      // exists above. Nothing read the size until BG-33 landed, at which point
+      // every frame in the catalogue silently resolved to `compact short` and
+      // the money plate collapsed to `KvMoneyBar` at 320 dp — where it
+      // overflowed, which is how this was found. L139's shape exactly: the
+      // harness lied about the thing it was built to show.
+      data: MediaQueryData.fromView(
+        tester.view,
+      ).copyWith(textScaler: TextScaler.linear(size.textScale)),
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: kvDarkTheme(),
+        // **The same mount point the app uses** (`main.dart`'s `builder`), so
+        // a preview reads the window class the device would (BG-33). Without
+        // it every frame would render the `compact` fallback and a contact
+        // sheet of four window classes would be four pictures of a phone.
+        builder: (context, page) => KvWindow(child: page!),
         home: child,
       ),
     ),
