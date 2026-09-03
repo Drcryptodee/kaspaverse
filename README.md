@@ -18,7 +18,8 @@ a claim. Two are shipped.
 - **Money** — Keystore/biometric vault, send/receive at 10 bps speed, fees priced by the
   pinned consensus crates rather than by us. **Shipped and device-proven** (status below).
 - **Communication** — encrypted-payload messaging as a first-class L1 primitive: the
-  challenge/handshake rail the games ride on, wire-compatible with the ecosystem's
+  negotiation and social rail beside the games — challenges, taunts, results — never the
+  match's own state, which lives in the contract. Wire-compatible with the ecosystem's
   established Kasia payload format. **Shipped and interop-proven** against live
   third-party clients.
 - **Contracts** — a covenant engine on Toccata (KIP-17/20): state machines whose rules live
@@ -26,11 +27,16 @@ a claim. Two are shipped.
   proxy and no pause guardian**, and every state has a timeout exit one party can take
   alone. That is a claim about *our* contracts, not about every asset the app can display —
   see **Assets** below for what we promise about someone else's. **In progress.**
-- **Games** — PvP duels with on-chain wager escrow, no house and no server holding funds.
-  The design bar, which no contract ships without meeting: **every state has a timeout exit
-  one player can take alone**, so an opponent who walks away cannot strand your money.
-  Commit-reveal RPS → tic-tac-toe → **Attack & Defend** → ZK battleship (KIP-16,
-  settlement-time proving) → tournaments.
+- **Games** — **the arcade is designed as a public room you can walk into.** An offer stands
+  on chain with its terms in the open — stake, windows, expiry — and any player who meets them
+  can take it, without the two of you having met or exchanged a message. Finding an opponent is
+  reading one covenant lineage off the chain, so **discovery needs no server and no indexer** —
+  nothing sits between you and the offer but a node. Playing a friend from a message thread is a second door into
+  the same room, not a different product. On-chain wager escrow, no house and no server holding
+  funds. The design bar, which no contract ships without meeting: **every state has a timeout
+  exit one player can take alone**, so an opponent who walks away cannot strand your money.
+  First duel is **Attack & Defend**; then tic-tac-toe → ZK battleship (KIP-16, settlement-time
+  proving) → tournaments. **Not started.**
 - **Finance** — the contract engine turned inward: time-locked recovery, spending limits,
   dead-man's-switch inheritance — funds owned by a rule you can read rather than a party you
   must trust — **and peer-to-peer swaps of native covenant assets, with no house and no
@@ -110,11 +116,14 @@ ours, not the nodes'. Verified across two multi-hour soaks of ordinary use on a 
 zero healthy nodes wrongly blamed, and reconnects that used to hang now land in seconds
 (residual limitation below).
 
-Next: a **grounding pass** — the covenant standards the ecosystem is converging on (the
-Kaspa Calls for Conventions, `KCC-0001/0002/0020`) landed in August 2026 and land directly on
-top of the covenant engine's design, so the engine's wire format, authority model and
-toolchain get settled against them before any contract is written. Then the **covenant
-engine** (Phase 3), then the arcade.
+**The grounding pass landed 2026-08-25.** The covenant standards the ecosystem is converging
+on (the Kaspa Calls for Conventions, `KCC-0000/0001/0002/0020`) were read against the engine's
+design, and they are re-read whenever they move — they are drafts, they change weekly, and none
+of them is final. The engine's wire format and authority model are settled against them.
+
+Next: the **contract toolchain** — pinning the authoring language and compiler, and committing
+the first compiled artifact with the checks that prove it did not drift. Then the **covenant
+engine** itself (Phase 3), then the arcade.
 
 The state of every subsystem, and the reasoning behind every established choice, live in
 the project's engineering record — which is private (see [CONTRIBUTING.md](CONTRIBUTING.md)).
@@ -148,11 +157,13 @@ Android-first, **arm64-only**, physical device:
 flutter pub get
 tools/preflight.sh                                        # orientation
 flutter build apk --debug --target-platform android-arm64 # then `flutter install`
-tools/gate.sh   # the proof gate, all seventeen lanes: cargo fmt · clippy · test (bounded) ·
-                # cargo-deny · arm64 cross-compile · dart format · flutter analyze ·
-                # flutter test · gradle wrapper · kotlin compile · android lint (NewApi) ·
-                # codegen-drift · contract spine · toolchain pins · repo hygiene ·
-                # record boundary · record pointers
+tools/gate.sh   # the proof gate, all twenty-two lanes: cargo fmt · clippy · test (bounded) ·
+                # cargo-deny · vendored-dialer tests · arm64 cross-compile · dart format ·
+                # flutter analyze · flutter test · gradle wrapper · gradle dependency
+                # verification · kotlin compile · android lint (NewApi) · codegen-drift ·
+                # contract spine · race fan-out exponent · toolchain pins · repo hygiene ·
+                # record boundary · record pointers · repo-path resolution ·
+                # section-anchor resolution
                 #
                 # The roster is asserted, not implied: a lane that fails to report at all
                 # is a failure, so GREEN means the lanes this tree declares actually ran.

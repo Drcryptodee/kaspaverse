@@ -1,5 +1,16 @@
 # duel_ad — SPEC: Attack & Defend, formally (COVENANT C3, D-120/D-121 · amended C6, D-127/D-128/D-129)
 
+> **► Scope note, 2026-09-03 (D-246) — nothing below is edited.** The founder ruled that the
+> arcade is a **public room you can walk into**, which makes **one covenant id per league with
+> standing offers** the default P4's `enter-phase` §0 confirms or refutes. **This document remains
+> the ratified per-match machine and P4's fallback**, and it is the only machine with a shipped
+> SPEC, a proven exit walker and a ratified input-0 law. **What carries over to whichever machine
+> P4 chooses:** the game theory, the value laws (D-127/D-128), the sighash law (D-115) and the
+> exit-proof discipline (D-121). **What is re-derived rather than inherited:** the *packaging* —
+> per-match genesis, bare P2PK payouts, and the per-match reading of D-129's input-0 law — under
+> Argent's leader/delegate closure (`argents/00_ARGENT_MODEL.md §9`). A default is not a verdict:
+> until P4 §0 rules, this file is the machine of record.
+
 > ⚠ **Amended at COVENANT C6, 2026-08-07 — the pass's only machine sitting.**
 > C3 ratified this machine and C4/C5 were forbidden to touch it: every finding
 > that wanted a change became a register row with a named trigger, and all
