@@ -204,7 +204,7 @@ Future<void> _pumpTypedSend(WidgetTester tester) async {
     await tester.pump();
   }
   await tester.tap(
-    find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvMark.paste),
+    find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvGlyph.paste),
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 600));

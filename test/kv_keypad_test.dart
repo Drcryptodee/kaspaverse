@@ -26,7 +26,7 @@ void main() {
   /// being findable by their glyph at D-229: BG-25 put glyph ownership in the app,
   /// and `'⌫'` was a codepoint `JetBrainsMono` has no entry for. Every assertion
   /// below is the same assertion — only the locator moved.
-  Finder mark(KvMark m) =>
+  Finder mark(KvGlyph m) =>
       find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == m);
 
   group('one primitive, two skins', () {
@@ -98,7 +98,7 @@ void main() {
       );
       await tester.tap(find.text('7'));
       await tester.pump();
-      await tester.tap(mark(KvMark.backspace));
+      await tester.tap(mark(KvGlyph.backspace));
       await tester.pump();
       expect(haptics, [
         'HapticFeedbackType.selectionClick',
@@ -117,9 +117,9 @@ void main() {
       for (final k in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.']) {
         expect(find.text(k), findsOneWidget, reason: 'missing "$k"');
       }
-      expect(mark(KvMark.backspace), findsOneWidget, reason: 'missing erase');
+      expect(mark(KvGlyph.backspace), findsOneWidget, reason: 'missing erase');
       expect(find.text('space'), findsNothing);
-      expect(mark(KvMark.shift), findsNothing);
+      expect(mark(KvGlyph.shift), findsNothing);
       expect(find.text('ABC'), findsNothing);
     });
 
@@ -136,7 +136,7 @@ void main() {
       // leaving a trailing newline. A drawn cap contributes nothing to speak,
       // which is BG-25 paying an accessibility dividend rather than costing one.
       expect(
-        tester.getSemantics(mark(KvMark.backspace)).label.trim(),
+        tester.getSemantics(mark(KvGlyph.backspace)).label.trim(),
         'Backspace',
       );
       expect(tester.getSemantics(find.text('.')).label.trim(), 'Decimal point');
@@ -147,7 +147,7 @@ void main() {
       for (final (name, cap) in [
         ('7', find.text('7')),
         ('.', find.text('.')),
-        ('erase', mark(KvMark.backspace)),
+        ('erase', mark(KvGlyph.backspace)),
       ]) {
         final size = tester.getSize(
           find.ancestor(of: cap, matching: find.byType(InkWell)).first,
@@ -168,7 +168,7 @@ void main() {
       await tester.pumpWidget(
         _host(SecretKeyboard(onChar: typed.add, onBackspace: () {})),
       );
-      await tester.tap(mark(KvMark.shift));
+      await tester.tap(mark(KvGlyph.shift));
       await tester.pump();
       expect(find.text('Q'), findsOneWidget);
       await tester.tap(find.text('Q'));
@@ -193,10 +193,10 @@ void main() {
           ),
         ),
       );
-      expect(mark(KvMark.shift), findsNothing);
+      expect(mark(KvGlyph.shift), findsNothing);
       expect(find.text('123'), findsNothing);
       expect(find.text('space'), findsNothing);
-      expect(mark(KvMark.backspace), findsOneWidget);
+      expect(mark(KvGlyph.backspace), findsOneWidget);
     });
   });
 

@@ -208,7 +208,7 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
           // borrowed (BG-25). `etch` while there is nowhere to go, because a
           // dead affordance must not look live — the words carry the reason.
           KvGlyphIcon(
-            KvMark.chevron,
+            KvGlyph.chevron,
             tone: live ? KvColor.inkNav : KvColor.etch,
             size: 20,
           ),

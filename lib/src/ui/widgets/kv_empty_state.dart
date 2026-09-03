@@ -21,7 +21,7 @@ class KvEmptyState extends StatelessWidget {
     required this.nudge,
   });
 
-  final KvMark mark;
+  final KvGlyph mark;
 
   /// What is true. One sentence, no exclamation mark, no apology.
   final String truth;

@@ -267,7 +267,7 @@ class _Head extends StatelessWidget {
     required this.record,
   });
 
-  final KvMark mark;
+  final KvGlyph mark;
   final String title;
   final KvMoneyDirection direction;
   final ActivityRecord record;

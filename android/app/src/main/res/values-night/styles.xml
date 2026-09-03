@@ -13,6 +13,9 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- kv_abyss, not the platform background: this app is dark-only and
+             deferring to `?android:colorBackground` shows a light window behind
+             the Flutter UI while it initialises (BG-1, D-247). -->
+        <item name="android:windowBackground">@color/kv_abyss</item>
     </style>
 </resources>

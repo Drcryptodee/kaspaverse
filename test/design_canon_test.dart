@@ -471,7 +471,7 @@ void main() {
         tester
             .widgetList<KvGlyphIcon>(find.byType(KvGlyphIcon))
             .map((g) => g.mark),
-        contains(KvMark.backspace),
+        contains(KvGlyph.backspace),
       );
       // And it still says what it is, so nothing was traded for the glyph.
       expect(find.bySemanticsLabel('Backspace'), findsOneWidget);
@@ -486,7 +486,7 @@ void main() {
       // A mark that is a control's sole identification is information.
       Size capAt(double scale) => tester.getSize(
         find.byWidgetPredicate(
-          (w) => w is KvGlyphIcon && w.mark == KvMark.backspace,
+          (w) => w is KvGlyphIcon && w.mark == KvGlyph.backspace,
         ),
       );
       await tester.pumpWidget(
@@ -519,8 +519,8 @@ void main() {
       final marks = tester
           .widgetList<KvGlyphIcon>(find.byType(KvGlyphIcon))
           .map((g) => g.mark);
-      expect(marks, contains(KvMark.backspace));
-      expect(marks, contains(KvMark.shift));
+      expect(marks, contains(KvGlyph.backspace));
+      expect(marks, contains(KvGlyph.shift));
       expect(find.bySemanticsLabel('Shift'), findsOneWidget);
       expect(find.bySemanticsLabel('Backspace'), findsOneWidget);
     });

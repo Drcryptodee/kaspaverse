@@ -79,6 +79,40 @@ class PreviewSize {
 
   static const all = [reference, floor];
 
+  // ── BG-33's four spec frames (§3a.1, D-247) ──────────────────────────────
+  //
+  // **A screen is not done until it has been seen in all four.** They are not
+  // "tablet support": they are four window CLASSES, each of which the design
+  // has already decided a different answer for. Drawn without a status bar
+  // (BG-14).
+
+  /// `compact` — the design's own frame.
+  static const compact = PreviewSize('393 compact', Size(393, 851), 1.0);
+
+  /// `medium` — unfolded foldable / 8" tablet portrait. One centred column,
+  /// standing rail.
+  static const medium = PreviewSize('700 medium', Size(700, 900), 1.0);
+
+  /// `expanded` — tablet landscape. Two panes, standing drawer.
+  static const expanded = PreviewSize('1180 expanded', Size(1180, 800), 1.0);
+
+  /// `expanded short` — **the V60 on its side**, which is the frame this
+  /// project will actually be looked at in most often after portrait. The
+  /// money plate collapses to `KvMoneyBar` here and nothing else does.
+  static const expandedShort = PreviewSize(
+    '915x412 expanded short',
+    Size(915, 412),
+    1.0,
+  );
+
+  /// The four-frame set BG-33 requires before a screen is called done.
+  static const frames = [compact, medium, expanded, expandedShort];
+
+  /// Every geometry a fully-migrated screen is rendered at: the four classes
+  /// plus the 320 dp / 1.3× floor, which is where geometry defects are
+  /// actually found.
+  static const allFrames = [compact, medium, expanded, expandedShort, floor];
+
   final String label;
   final Size size;
   final double textScale;

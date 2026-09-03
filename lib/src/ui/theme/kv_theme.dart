@@ -43,7 +43,7 @@ TextTheme kvTextTheme() {
     displayMedium: _slot(
       family: KvFont.mono,
       size: 46,
-      weight: 550,
+      weight: 600,
       heightRatio: 52 / 46,
       letterSpacing: -0.5,
       mono: true,
@@ -53,7 +53,7 @@ TextTheme kvTextTheme() {
     displaySmall: _slot(
       family: KvFont.mono,
       size: 32,
-      weight: 550,
+      weight: 600,
       heightRatio: 38 / 32,
       letterSpacing: 0,
       mono: true,
@@ -106,7 +106,7 @@ TextTheme kvTextTheme() {
     bodyMedium: _slot(
       family: KvFont.ui,
       size: 15,
-      weight: 450,
+      weight: 400,
       heightRatio: 22 / 15,
       letterSpacing: 0,
     ),
@@ -114,7 +114,7 @@ TextTheme kvTextTheme() {
     bodySmall: _slot(
       family: KvFont.mono,
       size: 13,
-      weight: 450,
+      weight: 500,
       heightRatio: 22 / 13,
       letterSpacing: 0,
       mono: true,

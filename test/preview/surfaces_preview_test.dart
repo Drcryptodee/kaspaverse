@@ -16,7 +16,10 @@ import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 
@@ -185,7 +188,7 @@ Future<void> _typeASend(WidgetTester tester) async {
     await tester.pump();
   }
   await tester.tap(
-    find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvMark.paste),
+    find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvGlyph.paste),
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 600));
@@ -308,6 +311,30 @@ void main() {
     }
   }
 
+  /// Renders one surface in **all four BG-33 spec frames plus the floor**.
+  ///
+  /// Use this for anything already built to `KvWindowClass`; `surface()` stays
+  /// the two-geometry form for surfaces still wearing Black Glass, which have
+  /// no four-frame answer yet and would only produce four identical stretched
+  /// columns — a picture that says "responsive" while proving nothing.
+  void framedSurface(
+    String name,
+    Widget Function() build, {
+    Future<void> Function(WidgetTester tester)? act,
+  }) {
+    for (final size in PreviewSize.allFrames) {
+      testWidgets('preview: $name @ ${size.label}', (tester) async {
+        await renderSurface(
+          tester,
+          name: name,
+          child: build(),
+          size: size,
+          act: act,
+        );
+      }, skip: !previewRequested);
+    }
+  }
+
   group('surface previews (tier 2 — no device)', () {
     surface('home__funded', _home);
     surface('home__status', _homeStatus);
@@ -416,5 +443,84 @@ void main() {
         ),
       ),
     );
+
+    // ── Deep V6 · UX-R0's own surfaces ──────────────────────────────────────
+
+    // **The mark, at every canon size and in all three styles** (§4a). It is
+    // LOCKED, so this sheet is the record of what "locked" looks like: a later
+    // sitting that redraws, traces or tidies it has a picture to be wrong
+    // against. The gap between stem and chevron is the thing to look at — it
+    // is why the stroke CLIMBS as the mark shrinks.
+    framedSurface('mark__ladder', _markLadder);
+
+    // **Every coming-soon placement** (§4, D-247). This is the founder's own
+    // acceptance condition rendered: where a feature does not exist yet, the
+    // surface says so in the seat the feature will occupy. Four features, one
+    // sheet, and the answer to "where do I build next" is a picture.
+    framedSurface('coming_soon__all', _comingSoon);
   });
 }
+
+/// The locked mark at its canon sizes, plus the bare and tile styles.
+Widget _markLadder() => const Scaffold(
+  body: Center(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Wrap(
+          spacing: 20,
+          runSpacing: 20,
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            KvMark(size: 96),
+            KvMark(size: 64),
+            KvMark(size: 40),
+            KvMark(size: 28),
+            KvMark(size: 24, halo: false),
+          ],
+        ),
+        SizedBox(height: 28),
+        Wrap(
+          spacing: 20,
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            KvMark(size: 40, style: KvMarkStyle.bare),
+            KvMark(size: 28, style: KvMarkStyle.bare),
+            KvMark(size: 64, style: KvMarkStyle.tile),
+          ],
+        ),
+      ],
+    ),
+  ),
+);
+
+/// The four unbuilt features, each in the plate it will be replaced by.
+///
+/// **Scrolls, because the catalogue is the artificial case.** In the build each
+/// of these sits alone in a different screen's list; four stacked in one 320 dp
+/// frame at 1.3× is a density no real surface has, and the floor frame caught
+/// it on the first render. A `SingleChildScrollView` is what the real seats
+/// are, so the sheet shows the plates at their true size rather than four
+/// squeezed ones (BG-14 — the layout survives the floor; it is not exempted
+/// from it).
+Widget _comingSoon() => const Scaffold(
+  body: SafeArea(
+    child: SingleChildScrollView(
+      padding: EdgeInsets.all(KvSpace.gutter),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          KvComingSoon(mark: KvGlyph.games, name: 'Arcade'),
+          SizedBox(height: KvSpace.sm),
+          KvComingSoon(mark: KvGlyph.assets, name: 'Assets'),
+          SizedBox(height: KvSpace.sm),
+          KvComingSoon(mark: KvGlyph.finance, name: 'Swaps'),
+          SizedBox(height: KvSpace.sm),
+          KvComingSoon(mark: KvGlyph.contracts, name: 'Contracts'),
+        ],
+      ),
+    ),
+  ),
+);

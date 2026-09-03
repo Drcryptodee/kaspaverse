@@ -316,11 +316,20 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   # this was measured. Enumerate the tree and subtract what is generated,
   # vendored, or built, so a new top-level Dart dir is covered on the day it
   # appears rather than the day someone remembers to add it here.
+  #
+  # `docs/` is subtracted for the same reason as the generated dirs, not as an
+  # exemption: it is the founder's design drop-zone, and a reference
+  # implementation handed over there (`kv_mark.dart`) is PORTED into `lib/`,
+  # where this check does cover it. Reformatting the handed-over copy would make
+  # it diverge from the artifact it exists to be a record of. No app code lives
+  # under `docs/` and none can — the app is `lib/`, `test/`, `integration_test/`
+  # and `test_driver/`, all still enumerated.
   mapfile -t dart_format_files < <(cd "$ROOT" && find . -name '*.dart' \
     -not -path './lib/src/rust/*' \
     -not -path './rust_builder/cargokit/*' \
     -not -path './build/*' \
     -not -path './.dart_tool/*' \
+    -not -path './docs/*' \
     -not -path './android/*' \
     -not -path './ios/*' \
     -not -path './linux/*' \

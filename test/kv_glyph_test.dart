@@ -33,9 +33,9 @@ class _RecordingCanvas implements Canvas {
 }
 
 List<Paint> _paintsFor(
-  KvMark mark, {
+  KvGlyph mark, {
   Color tone = KvColor.inkMeta,
-  double size = KvGlyph.grid,
+  double size = KvGlyphSpec.grid,
 }) {
   final canvas = _RecordingCanvas();
   KvGlyphPainter(mark, tone: tone).paint(canvas, Size.square(size));
@@ -67,16 +67,16 @@ class _Census implements Canvas {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-_Census _censusOf(KvMark mark) {
+_Census _censusOf(KvGlyph mark) {
   final canvas = _Census();
-  KvGlyphPainter(mark).paint(canvas, const Size.square(KvGlyph.grid));
+  KvGlyphPainter(mark).paint(canvas, const Size.square(KvGlyphSpec.grid));
   return canvas;
 }
 
 void main() {
-  group('KvGlyph — the drawn set (§2, D-205)', () {
+  group('KvGlyphSpec — the drawn set (§2, D-205)', () {
     test('every mark paints something', () {
-      for (final mark in KvMark.values) {
+      for (final mark in KvGlyph.values) {
         expect(
           _paintsFor(mark),
           isNotEmpty,
@@ -90,7 +90,7 @@ void main() {
       // colour while every other mark took `tone`, so a dimmed nav mark
       // rendered at full brightness with no error anywhere.
       const tone = KvColor.etch;
-      for (final mark in KvMark.values) {
+      for (final mark in KvGlyph.values) {
         for (final paint in _paintsFor(mark, tone: tone)) {
           expect(
             paint.color.toARGB32(),
@@ -101,25 +101,38 @@ void main() {
       }
     });
 
-    test('strokes are 1.75dp square-capped on the 24dp grid', () {
-      for (final mark in KvMark.values) {
+    // BG-25 was amended in v4.2 (D-247): Lucide's 2 dp nominal thins on the
+    // tinted dark, so the set is redrawn at 2.5 with ROUND caps and joins.
+    // v3.1's 1.75 square-capped machined stroke is retired. The cap and join
+    // are read from KvGlyphSpec rather than restated, so the law has one home.
+    test('strokes are 2.5dp round-capped on the 24dp grid (BG-25, v4.2)', () {
+      expect(KvGlyphSpec.stroke, 2.5);
+      expect(KvGlyphSpec.cap, StrokeCap.round);
+      expect(KvGlyphSpec.join, StrokeJoin.round);
+      for (final mark in KvGlyph.values) {
         final stroked = _paintsFor(
           mark,
         ).where((p) => p.style == PaintingStyle.stroke);
         for (final paint in stroked) {
-          expect(paint.strokeWidth, KvGlyph.stroke, reason: '$mark');
-          expect(paint.strokeCap, StrokeCap.square, reason: '$mark');
-          expect(paint.strokeJoin, StrokeJoin.miter, reason: '$mark');
+          expect(paint.strokeWidth, KvGlyphSpec.stroke, reason: '$mark');
+          expect(paint.strokeCap, KvGlyphSpec.cap, reason: '$mark');
+          expect(paint.strokeJoin, KvGlyphSpec.join, reason: '$mark');
         }
       }
     });
 
     test('the stroke scales with the glyph, and is computed not asserted', () {
       // A glyph rendered smaller is a scaled 24dp glyph, not a thinner one.
-      expect(KvGlyphIcon.strokeFor(KvGlyph.grid), KvGlyph.stroke);
-      expect(KvGlyphIcon.strokeFor(KvGlyph.grid / 2), KvGlyph.stroke / 2);
-      final half = _paintsFor(KvMark.chevron, size: KvGlyph.grid / 2).single;
-      expect(half.strokeWidth, KvGlyphIcon.strokeFor(KvGlyph.grid / 2));
+      expect(KvGlyphIcon.strokeFor(KvGlyphSpec.grid), KvGlyphSpec.stroke);
+      expect(
+        KvGlyphIcon.strokeFor(KvGlyphSpec.grid / 2),
+        KvGlyphSpec.stroke / 2,
+      );
+      final half = _paintsFor(
+        KvGlyph.chevron,
+        size: KvGlyphSpec.grid / 2,
+      ).single;
+      expect(half.strokeWidth, KvGlyphIcon.strokeFor(KvGlyphSpec.grid / 2));
     });
 
     test('no mark drifts into an illustration', () {
@@ -129,7 +142,7 @@ void main() {
       // the law. It is a **drift ceiling**, set one step above where the
       // set actually sits today (max 4 contours, max 4 dots), so a glyph that
       // grows a fifth line reds here and gets looked at on glass.
-      for (final mark in KvMark.values) {
+      for (final mark in KvGlyph.values) {
         final census = _censusOf(mark);
         expect(
           census.contours + census.arcs,
@@ -149,8 +162,8 @@ void main() {
           textDirection: TextDirection.ltr,
           child: Column(
             children: [
-              KvGlyphIcon(KvMark.money),
-              KvGlyphIcon(KvMark.lock, semanticLabel: 'Locked'),
+              KvGlyphIcon(KvGlyph.money),
+              KvGlyphIcon(KvGlyph.lock, semanticLabel: 'Locked'),
             ],
           ),
         ),
@@ -166,20 +179,20 @@ void main() {
       await tester.pumpWidget(
         const Directionality(
           textDirection: TextDirection.ltr,
-          child: Center(child: KvGlyphIcon(KvMark.diamond, size: 18)),
+          child: Center(child: KvGlyphIcon(KvGlyph.diamond, size: 18)),
         ),
       );
       expect(tester.getSize(find.byType(CustomPaint).last), const Size(18, 18));
     });
 
     test('shouldRepaint tracks both inputs', () {
-      const a = KvGlyphPainter(KvMark.money);
-      expect(a.shouldRepaint(const KvGlyphPainter(KvMark.chat)), isTrue);
+      const a = KvGlyphPainter(KvGlyph.money);
+      expect(a.shouldRepaint(const KvGlyphPainter(KvGlyph.chat)), isTrue);
       expect(
-        a.shouldRepaint(const KvGlyphPainter(KvMark.money, tone: KvColor.ink)),
+        a.shouldRepaint(const KvGlyphPainter(KvGlyph.money, tone: KvColor.ink)),
         isTrue,
       );
-      expect(a.shouldRepaint(const KvGlyphPainter(KvMark.money)), isFalse);
+      expect(a.shouldRepaint(const KvGlyphPainter(KvGlyph.money)), isFalse);
     });
   });
 }

@@ -1,12 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
+<!-- The window the OS paints before Flutter's first frame. `kv_abyss`, never
+     white and never `?android:colorBackground` — this app is dark-only, so
+     deferring to the platform means a light flash on a light-mode device
+     (BG-1, D-247). -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@android:color/white" />
-
-    <!-- You can insert your own image assets here -->
-    <!-- <item>
-        <bitmap
-            android:gravity="center"
-            android:src="@mipmap/launch_image" />
-    </item> -->
+    <item android:drawable="@color/kv_abyss" />
 </layer-list>

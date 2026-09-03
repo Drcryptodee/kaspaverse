@@ -255,7 +255,11 @@ void main() {
         expect(surface.resolvedRadius, KvRadius.pill);
         expect(surface.tone.fill, KvColor.control);
         expect(surface.resolvedEdge, KvColor.edgeHi);
-        // The alias is the same tone, so the ramp stays eight deep, not nine.
+        // `control` and `notice` are ONE tone, not two — v3.1 defined
+        // `control = notice` and `KvSurfaceTone.notice` is the tone every
+        // control wears. v4.2's ramp is five deep, not eight (§1.1), and the
+        // legacy aliases must map onto it without splitting a pair the widgets
+        // treat as interchangeable.
         expect(KvColor.control, KvColor.notice);
       },
     );
@@ -364,7 +368,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           const KvEmptyState(
-            mark: KvMark.diamond,
+            mark: KvGlyph.diamond,
             truth: 'Nothing has moved yet',
             nudge: 'Your address is ready to receive.',
           ),
@@ -394,7 +398,7 @@ void main() {
             child: Material(
               color: KvColor.abyss,
               child: KvEmptyState(
-                mark: KvMark.diamond,
+                mark: KvGlyph.diamond,
                 truth: 'Nothing has moved yet',
                 nudge: 'Your address is ready to receive.',
               ),

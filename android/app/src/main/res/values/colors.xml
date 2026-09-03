@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Deep V6 ground, hand-mirrored (design_system.md §1.1, D-247).
+
+  NO GATE LANE CHECKS THIS FILE AGAINST tokens.dart — the same §9.1 obligation
+  RevealActivity.kt carries. If KvColor.abyss changes, change it here in the
+  same commit.
+
+  This is the colour the OS paints BEFORE Flutter's first frame. It was
+  `@android:color/white` on a dark-only wallet, so every cold start opened with
+  a white flash (ux-auditor, UX-R0). Declared once and used by both the launch
+  drawable and NormalTheme, in both the day and night value sets, because a
+  dark-only app has no day answer that differs.
+-->
+<resources>
+    <color name="kv_abyss">#FF0A0D0D</color>
+</resources>

@@ -18,13 +18,32 @@ void main() {
   final t = kvTextTheme();
 
   group('§2 type ramp', () {
-    // D-241: on a #000000 ground light glyphs optically thin, so the reading
-    // slots sit half a step above nominal. A legibility correction, not taste.
-    test('the reading slots carry the ground compensation', () {
-      expect(_wght(t.bodyMedium!), 450, reason: 'body copy');
-      expect(_wght(t.bodySmall!), 450, reason: 'address / hash');
-      expect(_wght(t.displayMedium!), 550, reason: 'balance hero');
-      expect(_wght(t.displaySmall!), 550, reason: 'screen amount');
+    // **D-241's ground compensation is WITHDRAWN** (v4.2 §2, D-247). The
+    // 450 / 550 lifts corrected for light glyphs optically thinning on a pure
+    // `#000000`; on the tinted `abyss` the effect is not visible on the V60 at
+    // 1x, so the slots return to whole weights. Re-measure if the ground moves
+    // again — the correction was real for the ground it was made against.
+    //
+    // This test pinned the retired values and would therefore have stayed green
+    // on superseded law while reddening on the correction. Caught by
+    // `ux-auditor` at the UX-R0 landing.
+    test('the reading slots are whole weights — D-241 withdrawn', () {
+      expect(_wght(t.bodyMedium!), 400, reason: 'body copy');
+      expect(_wght(t.bodySmall!), 500, reason: 'address / hash');
+      expect(_wght(t.displayMedium!), 600, reason: 'balance hero');
+      expect(_wght(t.displaySmall!), 600, reason: 'screen amount');
+      for (final slot in [
+        t.bodyMedium!,
+        t.bodySmall!,
+        t.displayMedium!,
+        t.displaySmall!,
+      ]) {
+        expect(
+          _wght(slot) % 100,
+          0,
+          reason: 'no half-step survives the withdrawal',
+        );
+      }
     });
 
     // The one slot deliberately left at nominal. BG-7 spends rowAmount's weight

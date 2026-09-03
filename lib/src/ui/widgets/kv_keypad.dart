@@ -93,7 +93,7 @@ class KvKey {
 
   /// A drawn mark to print on the cap instead of [label]. Command keys only —
   /// a character key's cap is the character it writes.
-  final KvMark? mark;
+  final KvGlyph? mark;
 
   /// A command key's action, or null on a character key.
   final VoidCallback? onTap;
@@ -147,7 +147,7 @@ class KvKeypad extends StatelessWidget {
            const KvKey.char('0'),
            KvKey.command(
              'Backspace',
-             mark: KvMark.backspace,
+             mark: KvGlyph.backspace,
              onTap: onBackspace,
            ),
          ],

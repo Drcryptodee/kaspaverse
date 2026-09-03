@@ -18,7 +18,7 @@ import '../theme/tokens.dart';
 /// which is deliberately the whole cost: this file is the single place a glyph
 /// is chosen, so the decision stays one file wide **in both directions** — if
 /// D-205 is ever reversed, this is the only file that changes.
-enum KvMark {
+enum KvGlyph {
   /// Money arriving.
   arrowIn,
 
@@ -109,12 +109,12 @@ class KvGlyphIcon extends StatelessWidget {
   const KvGlyphIcon(
     this.mark, {
     super.key,
-    this.size = KvGlyph.grid,
+    this.size = KvGlyphSpec.grid,
     this.tone = KvColor.inkMeta,
     this.semanticLabel,
   });
 
-  final KvMark mark;
+  final KvGlyph mark;
 
   /// Side of the square the glyph is painted into, in logical pixels. The
   /// 24dp grid is scaled to it uniformly.
@@ -125,12 +125,12 @@ class KvGlyphIcon extends StatelessWidget {
   /// Names the glyph to a screen reader. Null (the default) excludes it.
   final String? semanticLabel;
 
-  /// The rendered stroke width at a given glyph [size] — the 1.75dp law scaled
-  /// off the 24dp grid. Exposed so a caller that must line a glyph up with a
+  /// The rendered stroke width at a given glyph [size] — [KvGlyphSpec.stroke]
+  /// scaled off the 24 dp grid (2.5 dp round-capped since v4.2, BG-25). Exposed so a caller that must line a glyph up with a
   /// rule can ask rather than guess (item 0: geometry is computed, never
   /// asserted in a comment).
   static double strokeFor(double size) =>
-      KvGlyph.stroke * (size / KvGlyph.grid);
+      KvGlyphSpec.stroke * (size / KvGlyphSpec.grid);
 
   @override
   Widget build(BuildContext context) {
@@ -153,18 +153,18 @@ class KvGlyphIcon extends StatelessWidget {
 class KvGlyphPainter extends CustomPainter {
   const KvGlyphPainter(this.mark, {this.tone = KvColor.inkMeta});
 
-  final KvMark mark;
+  final KvGlyph mark;
   final Color tone;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final s = size.width / KvGlyph.grid;
+    final s = size.width / KvGlyphSpec.grid;
     final p = Paint()
       ..color = tone
       ..style = PaintingStyle.stroke
-      ..strokeWidth = KvGlyph.stroke * s
-      ..strokeCap = KvGlyph.cap
-      ..strokeJoin = StrokeJoin.miter;
+      ..strokeWidth = KvGlyphSpec.stroke * s
+      ..strokeCap = KvGlyphSpec.cap
+      ..strokeJoin = KvGlyphSpec.join;
 
     // Every glyph is a list of polylines on the 24dp grid: [x0,y0, x1,y1, …].
     Path path(List<List<double>> polylines) {
@@ -183,7 +183,7 @@ class KvGlyphPainter extends CustomPainter {
     Paint filled() => Paint()..color = tone;
 
     switch (mark) {
-      case KvMark.arrowIn:
+      case KvGlyph.arrowIn:
         canvas.drawPath(
           path([
             [12, 4, 12, 15],
@@ -192,7 +192,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.arrowOut:
+      case KvGlyph.arrowOut:
         canvas.drawPath(
           path([
             [12, 20, 12, 9],
@@ -201,7 +201,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.selfSend:
+      case KvGlyph.selfSend:
         canvas.drawPath(
           path([
             [5, 8, 16, 8],
@@ -211,7 +211,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.navDots:
+      case KvGlyph.navDots:
         final dot = filled();
         for (final c in const [
           Offset(7.5, 7.5),
@@ -221,7 +221,7 @@ class KvGlyphPainter extends CustomPainter {
         ]) {
           canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.5 * s, dot);
         }
-      case KvMark.money:
+      case KvGlyph.money:
         // A note, not a coin: a circle with strokes through it reads as a
         // symbol to be decoded, and a glyph you decode has already failed.
         canvas.drawPath(
@@ -231,14 +231,14 @@ class KvGlyphPainter extends CustomPainter {
           p,
         );
         canvas.drawCircle(Offset(12 * s, 12 * s), 2.6 * s, p);
-      case KvMark.chat:
+      case KvGlyph.chat:
         canvas.drawPath(
           path([
             [4.5, 5.5, 19.5, 5.5, 19.5, 15.5, 9.5, 15.5, 5.5, 19.5, 5.5, 5.5],
           ]),
           p,
         );
-      case KvMark.games:
+      case KvGlyph.games:
         canvas.drawPath(
           path([
             [5, 5, 19, 5, 19, 19, 5, 19, 5, 5],
@@ -254,7 +254,7 @@ class KvGlyphPainter extends CustomPainter {
         ]) {
           canvas.drawCircle(Offset(c.dx * s, c.dy * s), 1.4 * s, dot);
         }
-      case KvMark.contracts:
+      case KvGlyph.contracts:
         canvas.drawPath(
           path([
             [7, 4, 17, 4, 17, 20, 7, 20, 7, 4],
@@ -263,7 +263,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.finance:
+      case KvGlyph.finance:
         // A trend on a baseline. The export's three-bar mark read as "++".
         canvas.drawPath(
           path([
@@ -273,14 +273,14 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.assets:
+      case KvGlyph.assets:
         canvas.drawPath(
           path([
             [12, 4, 20, 8.5, 20, 15.5, 12, 20, 4, 15.5, 4, 8.5, 12, 4],
           ]),
           p,
         );
-      case KvMark.settings:
+      case KvGlyph.settings:
         // Sliders. A cross-haired dot is a target, not a setting.
         canvas.drawPath(
           path([
@@ -294,7 +294,7 @@ class KvGlyphPainter extends CustomPainter {
         for (final c in const [Offset(9, 7), Offset(15, 12), Offset(11, 17)]) {
           canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.1 * s, knob);
         }
-      case KvMark.lock:
+      case KvGlyph.lock:
         canvas.drawPath(
           path([
             [6, 11, 18, 11, 18, 20, 6, 20, 6, 11],
@@ -308,7 +308,7 @@ class KvGlyphPainter extends CustomPainter {
             math.pi,
           );
         canvas.drawPath(shackle, p);
-      case KvMark.paste:
+      case KvGlyph.paste:
         canvas.drawPath(
           path([
             [6, 6, 18, 6, 18, 20, 6, 20, 6, 6],
@@ -316,7 +316,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.scan:
+      case KvGlyph.scan:
         // A viewfinder: four corners and nothing between them.
         canvas.drawPath(
           path([
@@ -327,7 +327,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.history:
+      case KvGlyph.history:
         canvas.drawPath(
           path([
             [12, 7, 12, 12, 16, 14],
@@ -342,33 +342,33 @@ class KvGlyphPainter extends CustomPainter {
           false,
           p,
         );
-      case KvMark.kebab:
+      case KvGlyph.kebab:
         final d = filled();
         for (final y in const [6.5, 12.0, 17.5]) {
           canvas.drawCircle(Offset(12 * s, y * s), 1.7 * s, d);
         }
-      case KvMark.chevron:
+      case KvGlyph.chevron:
         canvas.drawPath(
           path([
             [9, 5, 16, 12, 9, 19],
           ]),
           p,
         );
-      case KvMark.diamond:
+      case KvGlyph.diamond:
         canvas.drawPath(
           path([
             [12, 4, 20, 12, 12, 20, 4, 12, 12, 4],
           ]),
           p,
         );
-      case KvMark.check:
+      case KvGlyph.check:
         canvas.drawPath(
           path([
             [5, 12.5, 10, 17.5, 19, 6.5],
           ]),
           p,
         );
-      case KvMark.backspace:
+      case KvGlyph.backspace:
         // Three strokes: the wedge, then the cross inside it. The cross spans
         // five grid units so it survives the smallest size this cap ships at
         // (BG-25's legibility half) — a two-unit cross would close up into a
@@ -381,7 +381,7 @@ class KvGlyphPainter extends CustomPainter {
           ]),
           p,
         );
-      case KvMark.shift:
+      case KvGlyph.shift:
         canvas.drawPath(
           path([
             [

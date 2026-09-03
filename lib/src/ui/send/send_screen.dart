@@ -1161,7 +1161,7 @@ class _AddressField extends StatelessWidget {
           // reads as an action at the end of the thing it acts on; on the left
           // it competed with the placeholder for the eye.
           _FieldAction(
-            mark: KvMark.paste,
+            mark: KvGlyph.paste,
             label: 'Paste an address',
             onTap: onPaste,
           ),
@@ -1179,7 +1179,7 @@ class _FieldAction extends StatelessWidget {
     required this.onTap,
   });
 
-  final KvMark mark;
+  final KvGlyph mark;
   final String label;
   final VoidCallback onTap;
 

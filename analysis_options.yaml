@@ -14,6 +14,11 @@ analyzer:
     # Vendored by `flutter_rust_bridge_codegen integrate` — cargokit is a
     # standalone Dart CLI package with its own SDK constraints, not app code.
     - rust_builder/cargokit/**
+    # Design intake is a founder drop-zone, not app source: it holds reference
+    # implementations (`kv_mark.dart`) that are PORTED into `lib/`, never
+    # compiled from here. Analysing them reports the port's own import paths as
+    # errors and would red the gate on a file nothing builds.
+    - docs/**
 
 linter:
   # The lint rules applied to this project can be customized in the

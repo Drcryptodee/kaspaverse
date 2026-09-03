@@ -46,7 +46,7 @@ class KvRail extends StatelessWidget {
                   child: RotatedBox(
                     quarterTurns: 2,
                     child: KvGlyphIcon(
-                      KvMark.chevron,
+                      KvGlyph.chevron,
                       // `etch` is the disabled tone: decorative by design, and
                       // it never carries information alone — what the exit is
                       // waiting for is on the screen in words beneath it.

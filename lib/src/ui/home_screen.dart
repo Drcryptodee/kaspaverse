@@ -1029,7 +1029,7 @@ class _TopRail extends StatelessWidget {
           ),
           if (onMessages != null)
             _RailAction(
-              mark: KvMark.chat,
+              mark: KvGlyph.chat,
               label: 'Messages',
               onTap: onMessages!,
             ),
@@ -1037,7 +1037,7 @@ class _TopRail extends StatelessWidget {
             const SizedBox(width: KvSpace.touchGap),
           if (onSettings != null)
             _RailAction(
-              mark: KvMark.settings,
+              mark: KvGlyph.settings,
               label: 'Settings',
               onTap: onSettings!,
             ),
@@ -1057,7 +1057,7 @@ class _RailAction extends StatelessWidget {
     required this.onTap,
   });
 
-  final KvMark mark;
+  final KvGlyph mark;
   final String label;
   final VoidCallback onTap;
 
@@ -1451,7 +1451,7 @@ class _NetworkChip extends StatelessWidget {
           ),
           if (onTap != null) ...[
             const SizedBox(width: KvSpace.xs),
-            const KvGlyphIcon(KvMark.chevron, size: 12, tone: KvColor.inkMeta),
+            const KvGlyphIcon(KvGlyph.chevron, size: 12, tone: KvColor.inkMeta),
           ],
         ],
       ),
@@ -1559,7 +1559,7 @@ class _Feed extends StatelessWidget {
     if (records.isEmpty) {
       return const SliverToBoxAdapter(
         child: KvEmptyState(
-          mark: KvMark.diamond,
+          mark: KvGlyph.diamond,
           // Shipped copy, verbatim (D-196): the redesign is a change of form,
           // not of voice.
           truth: 'No recent activity',

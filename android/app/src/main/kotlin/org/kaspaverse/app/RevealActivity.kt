@@ -44,21 +44,30 @@ class RevealActivity : Activity() {
     // NO GATE LANE CHECKS THIS FILE AGAINST tokens.dart. If you change the
     // palette there, change it here in the same commit, or the app's most
     // security-critical screen silently keeps the previous design system.
-    // Black Glass values (D-185).
-    private val cAbyss = Color.parseColor("#000000")      // KvColor.abyss
-    private val cSurfaceAlt = Color.parseColor("#111111") // KvColor.key
-    private val cBorder = Color.parseColor("#262626")     // KvColor.keyEdge
+    // Deep V6 values (D-247, design_system.md v4.2). Every dark is teal-leaning:
+    // a pure grey here is now the defect, not the rule (BG-1, BG-3 — this
+    // reverses v3.1's "every neutral is strictly R = G = B").
+    private val cAbyss = Color.parseColor("#0A0D0D")      // KvColor.abyss
+    private val cSurfaceAlt = Color.parseColor("#121717") // KvColor.plate
+    private val cBorder = Color.parseColor("#1E2626")     // KvColor.plateEdge
     private val cPrimary = Color.parseColor("#49EACB")    // KvColor.primary
-    private val cTextPrimary = Color.parseColor("#EDEDED")   // KvColor.ink
-    private val cTextSecondary = Color.parseColor("#9E9E9E") // KvColor.inkDim
+    private val cTextPrimary = Color.parseColor("#F2F5F4")   // KvColor.ink
+    private val cTextSecondary = Color.parseColor("#A6B0AE") // KvColor.inkDim
     // Mirrored from KvColor.warn. tokens.dart reserves risk red for fund risk
     // and destruction ONLY, and none of this screen's three amber moments
     // qualify: "hold to reveal first" is guidance, "not quite" is a wrong
     // answer, and the bounce notice is a redirection. Amber is exactly the
     // "not yet certain / needs checking" meaning the law assigns it (BG-7).
     private val cWarning = Color.parseColor("#E0B15C")    // KvColor.warn
-    private val cControl = Color.parseColor("#060606")    // KvColor.control
-    private val cEdgeHi = Color.parseColor("#2A2A2A")     // KvColor.edgeHi
+    private val cControl = Color.parseColor("#121717")    // KvColor.control -> plate
+    private val cEdgeHi = Color.parseColor("#2A3433")     // KvColor.edgeHi
+    // Ink on a `primary` fill has its own token in Deep V6 (§1.3) rather than
+    // borrowing the ground. Not a contrast fix — `abyss` on `primary` still
+    // measures 12.93:1 and `onPrimary` measures 11.31:1, both far above AA —
+    // but the ground moved, and a fill's ink that tracks whatever the canvas
+    // happens to be is a coincidence the next palette change would break.
+    // Used by the reveal-screen chips, the only `primary` fills here.
+    private val cOnPrimary = Color.parseColor("#06201B")  // KvColor.onPrimary
 
     // The two bundled faces, loaded from the Flutter asset bundle. Until now
     // this screen rendered in Roboto and Droid Sans Mono while every Flutter
@@ -347,7 +356,7 @@ class RevealActivity : Activity() {
 
     /** The words have been shown at least once: promote Continue to the real CTA. */
     private fun armContinue(cont: Button, hint: TextView) {
-        cont.setTextColor(cAbyss)
+        cont.setTextColor(cOnPrimary)
         cont.background = GradientDrawable().apply {
             cornerRadius = dp(100).toFloat()
             setColor(cPrimary)
@@ -550,7 +559,7 @@ class RevealActivity : Activity() {
         if (word == quizExpected[quizProgress]) {
             chip.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
             chip.isEnabled = false
-            chip.setTextColor(cAbyss)
+            chip.setTextColor(cOnPrimary)
             chip.background = GradientDrawable().apply {
                 cornerRadius = dp(100).toFloat()
                 setColor(cPrimary)

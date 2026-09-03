@@ -1,7 +1,7 @@
 /// KaspaVerse design tokens — the single source for colour, motion, spacing,
-/// radii and the freshness constants. The design-system record (internal),
-/// **Black Glass · Machined Instrument** (D-185, BG-1…BG-14), is the law; this
-/// file is its code form.
+/// radii, layout classes and the freshness constants. The design-system record
+/// (internal), **Deep V6** v4.2 (D-247; lifecycle and gauge by D-248), is the
+/// law; this file is its code form.
 ///
 /// **This is the one file in `lib/` permitted to hold a raw colour hex** (the
 /// P1.3 zero-freestyle-hex acceptance grep excludes it by name). Every other
@@ -9,13 +9,22 @@
 /// `Color(0x…)` or a bespoke dp/duration. Extend the doc first, then this file,
 /// then the widgets (flutter-ui-architect skill).
 ///
-/// The type ramp (§2) is assembled in `kv_theme.dart` from these primitives.
+/// The type ramp (§2) is assembled in `kv_theme.dart` from these primitives;
+/// the window classes (§3a) live in `kv_window.dart` and read nothing here but
+/// [KvLayout].
 ///
-/// **Names are owned here; values are owned by the design.** The export names
-/// the ground token `void`, which is a Dart reserved word — it lands as
-/// [KvColor.abyss], which carries the same meaning. Legacy names that widgets
-/// still reference are kept as aliases onto their new role rather than
-/// renamed, so a palette change is never also a refactor.
+/// **`RevealActivity.kt` mirrors this palette by hand and must change in the
+/// same commit** (§9.1). No gate lane compares them, and it is the seed-reveal
+/// screen — a stale mirror means the most security-critical surface in the app
+/// silently keeps the previous design system. `ux-auditor` item 16 is the only
+/// check that exists.
+///
+/// **Names are owned here; values are owned by the design.** Legacy names that
+/// widgets still reference are kept as aliases onto their new role rather than
+/// renamed, so a palette change is never also a refactor. The alias block at
+/// the foot of each class is **deleted by the sitting after the last screen
+/// migrates** (Bible §9.8) — until then a screen still wearing Black Glass
+/// compiles and renders Deep V6's nearest tone.
 library;
 
 import 'package:flutter/material.dart';
@@ -23,387 +32,609 @@ import 'package:flutter/material.dart';
 /// §1 — Colour. Dark-only, OLED-true. `#RRGGBB` ⇒ `Color(0xFFRRGGBB)`;
 /// alpha-bearing tokens encode `#RRGGBBAA` as `0xAARRGGBB`.
 ///
-/// **Every neutral is strictly R = G = B** (BG-3). The only tinted surfaces in
-/// the system are named in the "deliberate exceptions" block at the bottom of
-/// this class; anything else with a colour cast is a bug.
+/// **Every dark is teal-leaning; a pure grey is a defect** (BG-1, BG-3 — this
+/// reverses v3.1's "every neutral is strictly R = G = B"). Every surface, line
+/// and ink step carries the same slight teal cast on one lightness scale, so
+/// `primary` reads as light the material emits rather than paint applied to it.
+/// The only non-teal values in the system are the QR pair and the four value
+/// hues with their tints.
 abstract final class KvColor {
-  // ── Surfaces — depth is tone plus one honest edge, never a shadow (BG-4) ──
+  // ── §1.1 Surfaces — five tones, one job each ──────────────────────────────
   //
-  // Eight tones, one job each. Nearer is one step lighter; a recess goes one
-  // step darker. The ground is literally off on OLED: the instrument floats in
-  // nothing, which is the whole metaphor.
+  // Nearer is one step lighter. v3.1 had eight tones one step apart on black;
+  // they could not be told apart and each needed its own edge. Five with a real
+  // step between them, and radius and containment do the rest.
 
-  /// The canvas — an absence, not a surface. (`void` in the design record.)
-  static const Color abyss = Color(0xFF000000);
+  /// Under the drawer; a disabled pill; the QR tile's error footprint ground.
+  static const Color shelf = Color(0xFF060808);
 
-  /// Sunken entry: text fields, masked dots, word cells. Edge [hairline].
-  static const Color well = Color(0xFF050505);
+  /// **The ground.** A glow pill at rest; the icon tile. (`void` in the design
+  /// record — a Dart reserved word, so it lands under the name it always had.)
+  static const Color abyss = Color(0xFF0A0D0D);
 
-  /// A recessed alert/notice plate. Edge [noticeEdge].
-  static const Color notice = Color(0xFF060606);
+  /// Plates, row containers, sheets, keypad keys, fields, icon buttons,
+  /// their-bubbles. **No edge on the ground**; [hairline] between rows inside.
+  static const Color plate = Color(0xFF121717);
 
-  /// **Every control that is not the one primary action.** Secondary buttons,
-  /// input fields, chips — all of them sit at this one tone, deeper than the
-  /// ground's plates rather than raised above them. A control that is not the
-  /// primary action should read as a *recess you press into*, not as another
-  /// plate competing with the surface it sits on; the primary action is the
-  /// only thing on a screen that comes forward (D-194).
-  static const Color control = notice;
+  /// Raised pills, chips, segmented thumb, lifted rows, a plate inside a sheet,
+  /// the ring track, an inner card. No edge.
+  static const Color chip = Color(0xFF1A2120);
 
-  /// Chips, pills, activity rows, secondary controls. Edge [plateDivider] or
-  /// [edgeHi].
-  static const Color chip = Color(0xFF0A0A0A);
+  /// Pressed / hover of [chip]; a pressed ledger row; an unlit cadence bar.
+  static const Color chipPressed = Color(0xFF212A29);
 
-  /// A bounded, earned panel. Edge [plateEdge]. Containers are earned by a
-  /// real grouping job, never by habit (BG-1).
-  static const Color plate = Color(0xFF0C0C0C);
-
-  /// Keypad keys, grid cells, word cells. Edge [keyEdge].
-  static const Color key = Color(0xFF111111);
-
-  /// A pressed key, an inline mono badge, a gauge track.
-  static const Color keyPressed = Color(0xFF141414);
-
-  /// Summoned layers — sheets, the nav panel's milled roadmap block.
-  static const Color summoned = Color(0xFF161616);
-
-  /// Legacy alias — the elevated surface widgets already ask for.
-  static const Color surface = plate;
-
-  /// Legacy alias — interiors and pressed fills.
-  static const Color surfaceAlt = key;
-
-  // ── Lines — non-text; a boundary gets a single 1dp rule only where it is
-  // real (BG-4). WCAG 1.4.11's 3:1 floor governs any of these that carries
-  // meaning; the purely decorative ones are exempt and are marked.
-
-  /// Between activity or chat rows.
-  static const Color rowDivider = Color(0xFF181818);
-
-  /// A divider inside a plate.
-  static const Color plateDivider = Color(0xFF1C1C1C);
-
-  /// The resting hairline — the default edge.
-  static const Color hairline = Color(0xFF1E1E1E);
-
-  /// The edge of a notice plate.
-  static const Color noticeEdge = Color(0xFF202020);
-
-  /// **The datum line** — the engraved rule a key number sits on, like a
-  /// gauge's zero mark. It gives the void structure without a container, and
-  /// it is the system's signature move.
-  static const Color datum = Color(0xFF212121);
-
-  /// The edge of a [plate].
-  static const Color plateEdge = Color(0xFF242424);
-
-  /// The edge of a [key] or a frame.
-  static const Color keyEdge = Color(0xFF262626);
-
-  /// Nearer layers, a focused field, focus-adjacent strokes.
-  static const Color edgeHi = Color(0xFF2A2A2A);
-
-  /// The edge of a [summoned] block.
-  static const Color summonedEdge = Color(0xFF2E2E2E);
-
-  /// Decorative only — the tick before a section label, a dashed placeholder.
-  static const Color tick = Color(0xFF3A3A3A);
-
-  /// Legacy alias — the generic hairline border.
-  static const Color border = keyEdge;
-
-  // ── Ink — contrast measured on every surface it can land on (BG-14).
-  // Hierarchy is weight and scale, never colour (BG-7).
-
-  /// Primary text and every amount — never pure white. 17.94:1 on [abyss].
-  static const Color ink = Color(0xFFEDEDED);
-
-  /// A brighter secondary — nav panel row labels. 15.02:1 on [abyss].
-  static const Color inkBright = Color(0xFFDADADA);
-
-  /// Nav destination names, the wordmark, icon strokes. 10.13:1 on [abyss].
-  static const Color inkNav = Color(0xFFB4B4B4);
-
-  /// Secondary text, helper copy, the hero's fraction. 7.84:1 on [abyss].
-  static const Color inkDim = Color(0xFF9E9E9E);
-
-  /// Labels, timestamps, units, `PLANNED` tags. 6.08:1 on [abyss], 5.24:1 on
-  /// [summoned] — the smallest tone that clears AA on every surface.
-  static const Color inkMeta = Color(0xFF8A8A8A);
-
-  /// The smallest information tone on the darker surfaces. 5.32:1 on [abyss],
-  /// 4.58:1 on [summoned].
-  static const Color inkMetaLow = Color(0xFF808080);
-
-  /// **Decorative only — 3.04:1, below AA by design.** Glyph accents and
-  /// disabled figures. It never carries information alone; a disabled control
-  /// always says why, in [inkDim] words (BG-12).
-  static const Color etch = Color(0xFF5A5A5A);
-
-  /// Legacy aliases onto the ink ramp.
-  static const Color textPrimary = ink;
-  static const Color textSecondary = inkDim;
-  static const Color textTertiary = inkMeta;
-  static const Color textDisabled = etch;
-
-  // ── Brand — the light (BG-2) ──
+  // ── §1.2 Lines — demarcation, not structure ───────────────────────────────
   //
-  // Teal is emitted, not applied. At most three emissions per screen; a fill
-  // only ever marks the one primary action. Only three things emit at all: a
-  // lit lamp, the live cadence, and a filling sign ring. Emission is never
-  // elevation, and teal is never a health signal.
+  // A control is identified by its text or its disc, never its boundary.
 
-  /// The light. 13.91:1 on [abyss]; text on a primary fill is [abyss] itself.
+  /// Between rows inside one container; a divider inside a plate. White @ 7%.
+  static const Color hairline = Color(0x12FFFFFF);
+
+  /// The only drawn boundary: the icon tile's rim; a spec frame. 1.26:1 on
+  /// [abyss] — it demarcates, it does not structure.
+  static const Color plateEdge = Color(0xFF1E2626);
+
+  /// An empty radio ring; a dashed placeholder; the sheet grabber; the
+  /// segmented track edge if one is ever needed.
+  static const Color edgeHi = Color(0xFF2A3433);
+
+  /// The glow pill's resting border. White @ 12%.
+  static const Color controlEdge = Color(0x1FFFFFFF);
+
+  // ── §1.3 Ink — four steps, all cool ───────────────────────────────────────
+
+  /// Titles, values, row titles, the wordmark, checkpoints. **Never pure
+  /// white.** 17.79:1 on [abyss].
+  static const Color ink = Color(0xFFF2F5F4);
+
+  /// Body, sub-lines on [chip], quiet text actions, the middle of an address.
+  static const Color inkDim = Color(0xFFA6B0AE);
+
+  /// Labels, `caps`, times, units, the `kaspa:` scheme, an inactive tab,
+  /// placeholders that are not information.
+  ///
+  /// **BG-14's one standing obligation: this may not carry information on
+  /// [chip] (4.30) or [chipPressed] (3.86).** Inside a sheet's inner card every
+  /// information-bearing sub-line is [inkDim].
+  static const Color inkMeta = Color(0xFF7A8583);
+
+  /// **Decorative only** — sleeping pill labels, field placeholders, empty
+  /// radio rings, chevrons, masked dots. Carries no information anywhere.
+  static const Color etch = Color(0xFF4B5553);
+
+  // ── §1.5 Brand — two teals, a deliberate hierarchy ────────────────────────
+  //
+  // `primary` is what you press or what is alive; `primaryMuted` is who or what
+  // is *ours*; `tealTint` is where ours sits.
+
+  /// **Emits** (BG-2, counted — ≤3 per screen). The one primary pill per screen
+  /// (ink [onPrimary]); the live dot; the caret; ghost text actions; the active
+  /// tab underline; the armed edge and glyph of a glow pill; the orb disc.
   static const Color primary = Color(0xFF49EACB);
 
-  /// Ambient teal — links, quiet badges, decorative strokes. 10.57:1.
+  /// Hover of [primary].
+  static const Color primaryHover = Color(0xFF3DD9BB);
+
+  /// Pressed of [primary].
+  static const Color primaryPressed = Color(0xFF2FCBAD);
+
+  /// **Carries** (uncounted). Avatars and socket glyphs, counts, the Paste
+  /// chip, notice glyphs, links in prose, the bare mark below 28 dp, and **the
+  /// orb's halo** — which is never [primary] (§1.8).
   static const Color primaryMuted = Color(0xFF70C7BA);
 
-  /// `primary` @ 12% — emission, never elevation, never a material.
-  static const Color glow = Color(0x1F49EACB);
+  /// **Surface** of teal: the avatar disc, my bubble, the hold badge's tint,
+  /// the trust notice plate, a spec badge.
+  static const Color tealTint = Color(0xFF0F2E28);
 
-  /// Ink on a [primary] fill.
-  static const Color onPrimary = abyss;
+  /// A stroke on [tealTint]; an unlit chart bar; the drawer's active socket
+  /// ring.
+  static const Color tealTintEdge = Color(0xFF164A40);
 
-  // ── Value & state (BG-7) — one hue, one meaning, always with sign + words ──
+  /// A glow pill's fill while armed — [abyss] lifted a hair toward teal.
+  static const Color armed = Color(0xFF0B1715);
+
+  /// Ink on a [primary] fill. 11.31:1.
+  static const Color onPrimary = Color(0xFF06201B);
+
+  // ── §1.6 Value — four hues, each with its tint ────────────────────────────
   //
-  // Every meaning survives greyscale because colour never travels alone.
-  // **Information has no hue**: a tip carries itself through type, weight,
-  // position and a quiet outline glyph. There is no informational blue and no
-  // fourth accent (founder directive, 2026-08-25).
+  // The disc is the whole signal: a hue arrives as a 40 dp disc of its tint
+  // with the glyph in the hue, and the container stays [plate]. No bloom, no
+  // tinted edge, no tinted plate — except the amber notice plate.
 
-  /// Money **arriving**, things confirmed or final, **and a control that is
-  /// switched on**. 11.72:1 on [abyss].
-  ///
-  /// The active half was widened by founder directive 2026-07-11, narrowed away
-  /// at D-185 when the cadence took over reporting *link* health, and restored
-  /// at **D-200** — because those are two different claims. A cadence reports
-  /// whether the chain is answering, which changes without the user. **A toggle
-  /// reports a state the user set and that is TRUE**, which is the same family
-  /// as confirmed. Teal stays excluded: teal is light, never a status.
+  /// Arriving · **accepted** · switched on · link healthy · latency < 150 ms.
   static const Color ok = Color(0xFF7DD584);
 
-  /// **Not yet certain** — stale, syncing, settling, degraded, and any block
-  /// that needs checking. 10.61:1 on [abyss].
+  /// Surface of [ok].
+  static const Color okTint = Color(0xFF0F2A1B);
+
+  /// The check stroke and the toggle knob — ink that sits *on* [ok].
+  static const Color okDeep = Color(0xFF0F2A1B);
+
+  /// **Pending** · syncing · stale · check this · latency 150–400 ms.
   static const Color warn = Color(0xFFE0B15C);
 
-  /// Money **leaving**, or money at risk — outgoing amounts, destruction,
-  /// irreversibility. **Never a validation nit.** 7.13:1 on [abyss].
+  /// Surface of [warn]; the one tinted plate (the notice).
+  static const Color warnTint = Color(0xFF2E2510);
+
+  /// Body on [warnTint]. 10.98:1.
+  static const Color warnInk = Color(0xFFF3D9A0);
+
+  /// Leaving · at risk · remove · latency > 400 ms.
   static const Color risk = Color(0xFFF26D5F);
 
-  /// Legacy aliases onto the value set.
+  /// Surface of [risk].
+  static const Color riskTint = Color(0xFF33191A);
+
+  /// **Past reversal — the terminal lifecycle rung, and nothing else** (D-248,
+  /// BG-3's fourth hue).
+  ///
+  /// Spent on exactly three things: the `Settled` chip, the `Settled`
+  /// graduation, and the burial track past 100. It is **never** a general
+  /// status, a link state, a latency tier or an "info" colour, and **never the
+  /// check** — [KvCheck] stays [ok] at every rung (BG-29), because the mark
+  /// means *yes*, not *which rung*.
+  ///
+  /// Measured, not picked: 9.98:1 on [abyss] — between [ok] (10.89) and [warn]
+  /// (9.86) — and AA on all five surfaces including [chipPressed] (7.52). Hue
+  /// 206.8°, a full 38° off [primary] (168.4°), so it cannot be misread as the
+  /// brand.
+  static const Color settled = Color(0xFF7CC0F7);
+
+  /// Surface of [settled]. 8.02:1 for [settled] on it.
+  static const Color settledTint = Color(0xFF12243A);
+
+  // ── §1.7 The other tinted surfaces ────────────────────────────────────────
+
+  /// Scannability beats theming: dark on **white**, never themed. 19.51:1.
+  static const Color qrTile = Color(0xFFFFFFFF);
+
+  /// The QR's modules.
+  static const Color qrModule = Color(0xFF0A0D0D);
+
+  // ── §1.8 Atmosphere — the five slices, and nothing else uses them ─────────
+  //
+  // Order: scrim → blur → shadow → surface+border → glow. Plates, rows,
+  // avatars, bubbles, lamps and figures have NO slice.
+
+  /// Slice 1 under a sheet. `rgba(6,8,8,.55)`.
+  static const Color sheetScrim = Color(0x8C060808);
+
+  /// Slice 1 under the pushed page. `rgba(6,8,8,.45)`.
+  static const Color drawerScrim = Color(0x73060808);
+
+  /// Slice 5, inner ring of an armed control's glow. `rgba(73,234,203,.14)`.
+  static const Color armedGlowRing = Color(0x2449EACB);
+
+  /// Slice 5, outer bloom of an armed control's glow. `rgba(73,234,203,.25)`.
+  static const Color armedGlowBloom = Color(0x4049EACB);
+
+  /// Slice 3. `rgba(0,0,0,.55)` — floating layers only.
+  static const Color layerShadow = Color(0x8C000000);
+
+  // ── Legacy aliases (Bible §9.8) — deleted after the last screen migrates ──
+  //
+  // Every name a Black Glass screen still references, mapped to its Deep V6
+  // successor. A screen that has not had its UX-R group sitting compiles and
+  // renders the nearest correct tone rather than failing to build.
+
+  /// @Deprecated — v3.1 sunken entry. Deep V6 sets a figure in a plate.
+  static const Color well = plate;
+
+  /// @Deprecated — v3.1 notice ground.
+  static const Color notice = plate;
+
+  /// @Deprecated — v3.1 keypad key.
+  static const Color key = plate;
+
+  /// @Deprecated — v3.1 pressed key.
+  static const Color keyPressed = chip;
+
+  /// @Deprecated — v3.1 summoned panel; the panel itself is retired (§4).
+  static const Color summoned = plate;
+
+  /// @Deprecated — v3.1 control ground. **Held identical to [notice]**, which
+  /// is what it was in v3.1 (`control = notice`) and what `KvSurfaceTone.notice`
+  /// still assumes: it is the tone every unmigrated control wears. Splitting the
+  /// two here silently re-tones every legacy control — caught by
+  /// `kv_widgets_test.dart`'s KvSurface law test, which is why that test exists.
+  static const Color control = notice;
+
+  /// @Deprecated — v3.1 generic surface.
+  static const Color surface = plate;
+
+  /// @Deprecated — v3.1 alternate surface.
+  static const Color surfaceAlt = chip;
+
+  /// @Deprecated — v3.1 row divider. Deep V6 has one line inside a container.
+  static const Color rowDivider = hairline;
+
+  /// @Deprecated — v3.1 plate divider.
+  static const Color plateDivider = hairline;
+
+  /// @Deprecated — v3.1 notice edge.
+  static const Color noticeEdge = plateEdge;
+
+  /// @Deprecated — v3.1 engraved datum line. The `datum` rule is gone (§1.2).
+  static const Color datum = hairline;
+
+  /// @Deprecated — v3.1 key edge.
+  static const Color keyEdge = plateEdge;
+
+  /// @Deprecated — v3.1 summoned edge.
+  static const Color summonedEdge = edgeHi;
+
+  /// @Deprecated — v3.1 gauge tick.
+  static const Color tick = edgeHi;
+
+  /// @Deprecated — v3.1 generic border.
+  static const Color border = plateEdge;
+
+  /// @Deprecated — v3.1 brightest ink step; Deep V6 has four.
+  static const Color inkBright = ink;
+
+  /// @Deprecated — v3.1 nav ink.
+  static const Color inkNav = inkDim;
+
+  /// @Deprecated — v3.1 fifth ink step.
+  static const Color inkMetaLow = inkMeta;
+
+  /// @Deprecated — v3.1 Material-ish alias.
+  static const Color textPrimary = ink;
+
+  /// @Deprecated — v3.1 Material-ish alias.
+  static const Color textSecondary = inkDim;
+
+  /// @Deprecated — v3.1 Material-ish alias.
+  static const Color textTertiary = inkMeta;
+
+  /// @Deprecated — v3.1 Material-ish alias.
+  static const Color textDisabled = etch;
+
+  /// @Deprecated — v3.1 semantic alias.
   static const Color success = ok;
+
+  /// @Deprecated — v3.1 semantic alias.
   static const Color warning = warn;
+
+  /// @Deprecated — v3.1 semantic alias.
   static const Color error = risk;
 
-  // Lamp blooms — a 6dp dot under an 8dp blur with no spread. With the
-  // cadence and the sign ring, these are the only simulated light in the app.
-  // The lamp and its words carry the meaning; the plate stays plain, with only
-  // its edge tinted to the same hue.
+  /// @Deprecated — blooms are retired (§1.6); exactly two things glow (BG-32).
+  static const Color okBloom = okTint;
 
-  /// `ok` @ 55%.
-  static const Color okBloom = Color(0x8C7DD584);
+  /// @Deprecated — see [okBloom].
+  static const Color warnBloom = warnTint;
 
-  /// `warn` @ 55%.
-  static const Color warnBloom = Color(0x8CE0B15C);
+  /// @Deprecated — see [okBloom].
+  static const Color riskBloom = riskTint;
 
-  /// `risk` @ 50%.
-  static const Color riskBloom = Color(0x80F26D5F);
+  /// @Deprecated — see [okBloom].
+  static const Color successGlow = okTint;
 
-  /// Legacy alias.
-  static const Color successGlow = okBloom;
+  /// @Deprecated — v3.1 teal glow; replaced by [armedGlowRing] and the halo.
+  static const Color glow = armedGlowRing;
 
-  // ── Deliberate exceptions to the neutral ramp ──
-  //
-  // These four are the ONLY tinted surfaces in the system. Each is named here
-  // so that "is this hue legitimate?" is answerable by grep rather than taste.
+  /// @Deprecated — absorbed by [tealTint] (§10.2).
+  static const Color messageMine = tealTint;
 
-  /// The QR tile (BG-5). Always dark modules on a light tile regardless of
-  /// theme: scannability is the function and a dark-themed QR defeats
-  /// scanners. 18.37:1 measured. Never themed, never inverted (D-045b).
-  static const Color qrTile = Color(0xFFF7F7F7);
-  static const Color qrModule = Color(0xFF0B0B0B);
+  /// @Deprecated — bubbles carry no edge in Deep V6 (§4).
+  static const Color messageMineEdge = tealTintEdge;
 
-  /// My message field — teal mixed down to a quiet surface, not the light
-  /// itself: a column of `primary` would shout over every button on screen.
-  /// What survives is the lineage. `ink` 15.09:1, `inkDim` 6.59:1.
-  static const Color messageMine = Color(0xFF0E1B18);
-  static const Color messageMineEdge = Color(0xFF1E332E);
+  /// @Deprecated — their-bubbles are [plate] (§1.7).
+  static const Color messageTheirs = plate;
 
-  /// Their message field — neutral raised. `ink` 15.87:1, `inkDim` 6.94:1.
-  static const Color messageTheirs = Color(0xFF131313);
-  static const Color messageTheirsEdge = keyEdge;
+  /// @Deprecated — bubbles carry no edge in Deep V6 (§4).
+  static const Color messageTheirsEdge = plateEdge;
 
-  /// A sunken panel INSIDE a bubble (a text attachment's body). Depth reads as
-  /// darker-than-its-container, and it is the same on both sides because the
-  /// panel is the file's content, not the speaker's voice.
+  /// @Deprecated — v3.1 message inset.
   static const Color messageInset = abyss;
 
-  /// The warning notice plate — a faintly warm fill behind a warm edge, the
-  /// same move the lamp makes with its plate edge. `ink` 16.84:1, `warn`
-  /// 9.97:1. Used for validation blocks, which are amber and never red: red
-  /// would claim money is at risk when none is.
-  static const Color noticeWarnFill = Color(0xFF0D0A0A);
-  static const Color noticeWarnEdge = Color(0xFF3A2D1A);
+  /// @Deprecated — the notice plate is [warnTint] itself (§1.6).
+  static const Color noticeWarnFill = warnTint;
 
-  /// Subordinate ink on a [primary] fill — the exact fee printed on the
-  /// control that spends it. 8.67:1 on `primary`.
-  static const Color onPrimaryDim = Color(0xFF00382E);
+  /// @Deprecated — the notice plate carries no edge (§1.6).
+  static const Color noticeWarnEdge = warnTint;
 
-  /// GlassPanel fill — 3% white over a σ16 backdrop blur; the frost, not a
-  /// surface. **At most one live blur per screen** (BG-4), only under a
-  /// summoned layer, never inside a scroll. Solid fallback is [summoned].
+  /// @Deprecated — alias of [onPrimary] (§10.2).
+  static const Color onPrimaryDim = onPrimary;
+
+  /// @Deprecated — v3.1 frost fill. Glass floats, never sits (BG-31).
   static const Color glassFill = Color(0x08FFFFFF);
 }
 
-/// §3 — Spacing. 4 dp base grid; the only permitted steps. Screen gutter 24 dp.
+/// §3 — Spacing. 4 dp grid; the only permitted steps. Screen gutter 24 dp.
 abstract final class KvSpace {
   static const double xs = 4;
   static const double s = 8;
+  static const double s10 = 10;
   static const double sm = 12;
+  static const double s14 = 14;
   static const double m = 16;
+  static const double s20 = 20;
+  static const double s22 = 22;
   static const double l = 24;
+  static const double s28 = 28;
   static const double xl = 32;
+
+  /// @Deprecated — not a Deep V6 step; nearest is [xl].
   static const double xxl = 48;
 
-  /// Screen edge gutter.
+  /// Screen edge gutter in `compact`. Wider classes use [KvLayout.gutterFor].
   static const double gutter = 24;
 
-  /// Minimum touch target — Material, not HIG's 44 (BG-12, P1 §0.6 lock). A
-  /// smaller *visual* is permitted inside a target this size; the target
-  /// itself never shrinks.
-  static const double touchTarget = 48;
+  /// Minimum touch target — **raised from 48 to 52 in v4.2** (BG-12). A
+  /// smaller *visual* is permitted inside a target this size only if the code
+  /// states it; the target itself never shrinks.
+  static const double touchTarget = 52;
 
   /// Minimum gap between two adjacent targets (BG-12).
   static const double touchGap = 8;
 
-  /// Primary action (button) height — comfortably above the 48 dp law for the
-  /// thumb-zone money actions.
+  /// Primary action (button) height.
   static const double control = 56;
 
+  /// The thumb-arc pair (Send / Receive) and secondary rows.
+  static const double controlThumb = 52;
+
+  /// An icon button's visual disc, inside a [touchTarget].
+  static const double iconButton = 44;
+
+  /// A row's height — **fixed in every window class** (BG-33). A tablet shows
+  /// more rows, never smaller ones.
+  static const double row = 64;
+
+  /// The 40 dp disc that opens a row.
+  static const double rowDisc = 40;
+
   /// The top strip that belongs to the real system status bar. Nothing is
-  /// ever painted here, and no status bar is ever drawn (BG-14).
+  /// ever painted here, and no status bar is ever drawn in a spec frame
+  /// (BG-14).
   static const double statusBarReserve = 52;
 }
 
-/// §3 — Corner radii. Machined, not rounded: the form language is milled metal,
-/// so every radius is small and deliberate.
+/// §3 — Corner radii. **Everything is round; the question is how round.**
+/// v3.1's machined 4–8 dp language is retired.
 abstract final class KvRadius {
-  static const double chip = 4;
-  static const double key = 5;
-  static const double plate = 6;
-  static const double panel = 8;
-  static const double pill = 999;
+  /// Every button, field, chip, tag, toggle, icon button, disc.
+  static const double control = 999;
 
-  /// A message bubble; its tail corner tightens to [bubbleTail] on the last
-  /// bubble of a run, which is the third way direction is carried.
-  static const double bubble = 8;
-  static const double bubbleTail = 3;
+  /// Row containers, plates, settings groups.
+  static const double plate = 28;
 
-  /// **Controls are pills; surfaces are machined.** A radius this large would
-  /// be wrong on a plate — a rounded panel reads as soft, and the form language
-  /// is milled. On a *control* it does the opposite: it separates the things
-  /// you press from the things you read, at a glance and without a second
-  /// colour. Buttons, chips and input fields take this; plates never do (D-194).
-  static const double control = pill;
+  /// Money plate, network plate, About header, a sheet's top, a frame.
+  static const double plateHero = 32;
 
-  /// Legacy aliases.
-  static const double card = panel;
-  static const double button = panel;
-  static const double data = plate;
+  /// The pushed page while the drawer is open (0 closed; animates).
+  static const double page = 36;
+
+  /// A plate inside a sheet; the QR tile; a text area.
+  static const double inner = 22;
+
+  /// The amber notice plate.
+  static const double notice = 18;
+
+  /// Keypad keys; the icon tile at 64 (27% of side).
+  static const double key = 18;
+
+  /// A lifted row's own rounding.
+  static const double row = 14;
+
+  /// A message bubble; its tail corner tightens to [bubbleTail].
+  static const double bubble = 22;
+
+  /// The tail corner of the last bubble in a run.
+  static const double bubbleTail = 6;
+
+  // ── Legacy aliases (Bible §9.8) ───────────────────────────────────────────
+
+  /// @Deprecated — v3.1 pill; [control] is the name now.
+  static const double pill = control;
+
+  /// @Deprecated — v3.1 chip radius 4. Deep V6 chips are stadiums.
+  static const double chip = control;
+
+  /// @Deprecated — v3.1 panel radius 8.
+  static const double panel = plate;
+
+  /// @Deprecated — v3.1 card radius.
+  static const double card = plate;
+
+  /// @Deprecated — v3.1 button radius.
+  static const double button = control;
+
+  /// @Deprecated — v3.1 data radius.
+  static const double data = inner;
 }
 
-/// §3 — Motion. **Decelerate only, no overshoot, ever** (BG-9).
+/// §3 — Motion. **One curve, deceleration only, no overshoot.**
 abstract final class KvMotion {
-  /// 80ms — a state tint.
-  static const Duration instant = Duration(milliseconds: 80);
+  /// The one curve. `Cubic(0.2, 0, 0, 1)`.
+  static const Curve curve = Cubic(0.2, 0, 0, 1);
 
-  /// 160ms — tap feedback.
+  /// A border, ink or fill tint — arming a glow pill.
   static const Duration fast = Duration(milliseconds: 160);
 
-  /// 240ms — a panel or value transition.
+  /// A value change, a colour-tier change, a crossfade.
   static const Duration calm = Duration(milliseconds: 240);
 
-  /// 320ms — something arriving on screen.
+  /// A sheet rising, the drawer push, page radius and shadow.
   static const Duration enter = Duration(milliseconds: 320);
 
-  /// How long a copy acknowledgement stands. Long enough to be read, short
-  /// enough that it never becomes the thing on screen.
-  static const Duration toast = Duration(milliseconds: 1600);
-
-  /// **800ms — the hold-to-sign fill. A constant with no configuration
-  /// surface.** Never shortened, including under reduced motion (BG-6/BG-9).
+  /// **The hold — linear, `AnimationBehavior.preserve`, never shortened and
+  /// with no configuration surface** (BG-6).
   static const Duration deliberate = Duration(milliseconds: 800);
 
-  /// Legacy aliases.
-  static const Duration normal = calm;
-  static const Duration slow = enter;
+  /// The live dot: scale 1 → .7, opacity 1 → .55. One of exactly two ambient
+  /// loops (BG-9).
+  static const Duration pulse = Duration(milliseconds: 1600);
 
-  /// **One reading-to-reading gap for a streaming chain counter** (D-226).
-  /// Matched to the 1 Hz poll so the tween lands just as the next reading
-  /// arrives; a late reading means the counter has already stopped on the last
-  /// value it actually read, which is the honest place to stop.
+  /// The orb's halo, as a **round trip**. The other ambient loop.
+  static const Duration breathe = Duration(milliseconds: breatheMs);
+
+  /// [breathe] in milliseconds, so a caller that reverses can derive one leg as
+  /// a `const` rather than restating 1600 (`kv_mark.dart`'s splash).
+  static const int breatheMs = 3200;
+
+  /// Entrance offset: fade + `translateY(24)`.
+  static const double entranceOffset = 24;
+
+  /// Entrance stagger between siblings.
+  static const Duration stagger = Duration(milliseconds: 75);
+
+  /// The drawer translates the page this far right.
+  static const double drawerPush = 296;
+
+  /// Streaming cadence for a chain counter (BG-18).
   static const Duration stream = Duration(seconds: 1);
 
-  /// One full cadence cycle — the five bars breathing at block rhythm. It is
-  /// both the liveness signal and the app's one loading indicator, and it
-  /// freezes the instant the link dies (BG-8).
+  // ── Legacy aliases (Bible §9.8) ───────────────────────────────────────────
+
+  /// @Deprecated — v3.1 name for [curve].
+  static const Curve out = curve;
+
+  /// @Deprecated — the 80 ms step is **retired** (BG-9); nearest is [fast].
+  static const Duration instant = fast;
+
+  /// @Deprecated — there are no toasts (§4).
+  static const Duration toast = pulse;
+
+  /// @Deprecated — v3.1 alias.
+  static const Duration normal = calm;
+
+  /// @Deprecated — v3.1 alias.
+  static const Duration slow = enter;
+
+  /// @Deprecated — retired with the five-bar loading cadence (§10.2).
   static const Duration breath = Duration(milliseconds: 1100);
 
-  /// Per-bar delay across the cadence meter.
+  /// @Deprecated — retired with the five-bar loading cadence (§10.2).
   static const Duration cadenceStagger = Duration(milliseconds: 120);
-
-  /// The one easing — `cubic-bezier(0.2, 0, 0, 1)`. Decelerating, no
-  /// overshoot. There is no second curve; a spring anywhere in this app is a
-  /// defect, including in the arcade register.
-  static const Curve out = Cubic(0.2, 0, 0, 1);
-
-  /// Entrance law: elements arrive with `translateY(entranceOffset)` + fade,
-  /// staggered [stagger] per element. Reduced motion ⇒ opacity-only.
-  static const double entranceOffset = 24;
-  static const Duration stagger = Duration(milliseconds: 75);
 }
 
-/// §3 — GlassPanel blur strength. At most ONE live blur per screen, never
-/// inside a scrollable (saveLayer cost); the solid fallback needs no budget.
+/// §1.8 — Atmosphere constants. **Glass floats, it never sits** (BG-31): a
+/// `BackdropFilter` exists at exactly two call sites in the app — under a sheet
+/// and on the pushed page — and nowhere else.
 abstract final class KvGlass {
-  static const double blurSigma = 16;
+  /// Sigma for both scrims. **6, not 16**: 16 read as frosted and hid the page
+  /// the user had just left; 6 keeps it legible as *behind*, which is the only
+  /// job the blur has.
+  static const double blurSigma = 6;
+
+  /// Under reduced transparency the blur is off and the scrim rises to this.
+  static const double reducedScrimOpacity = 0.80;
 }
 
-/// BG-8 — Freshness. A chain-derived datum renders live, stale (dimmed + a
-/// visible age) or unknown (`—`); these are the stale boundary and the dim
-/// level. Dimmed cached truth beats a shimmer.
+/// §3a.3 — Layout constants (BG-33). **Widgets read [KvWindowClass], never raw
+/// width**; these are the numbers that class resolves to. The class itself and
+/// its provider live in `kv_window.dart`.
+abstract final class KvLayout {
+  /// A content column never exceeds this, in any window class.
+  static const double columnMax = 560;
+
+  /// A page never exceeds this; wider windows centre it.
+  static const double pageMax = 1200;
+
+  /// The list pane in a two-pane layout.
+  static const double listPaneMin = 400;
+
+  /// The list pane's upper bound.
+  static const double listPaneMax = 480;
+
+  /// The standing rail in `medium`.
+  static const double rail = 80;
+
+  /// The drawer, in all three postures.
+  static const double drawer = 296;
+
+  /// The gap between two columns — 24 in every class.
+  static const double columnGap = 24;
+
+  /// Outer gutter per width class: compact · medium · expanded · wide.
+  static const List<double> gutters = [24, 32, 40, 48];
+
+  /// A floating sheet's width in `medium` and above.
+  static const double sheetFloatingWidth = 560;
+
+  /// A floating sheet's inset from the bottom edge.
+  static const double sheetFloatingInset = 24;
+
+  /// The four spec frames a screen must be seen in before it is done (BG-33):
+  /// 393 `compact` · 700 `medium` · 1180 `expanded` · 915 × 412 `expanded
+  /// short`.
+  static const List<Size> specFrames = [
+    Size(393, 852),
+    Size(700, 900),
+    Size(1180, 800),
+    Size(915, 412),
+  ];
+}
+
+/// §1 — Freshness (BG-8). Stale dims and says its age; unknown renders `—`.
 abstract final class KvFreshness {
-  /// Last-known data dims to this when stale, and says how old it is.
+  /// A stale reading dims to this.
   static const double opacityStale = 0.45;
 
-  /// A datum with no fresh snapshot for longer than this reads as stale. At
-  /// ~10 bps a multi-second silence is anomalous, not jitter (tuned for the
-  /// on-device kill-the-network observation).
+  /// How long a reading stays live without a refresh.
   static const Duration staleAfter = Duration(seconds: 5);
 
-  /// A link that drops and returns inside this window never flips the glass
-  /// (the engine's twin is `link::MIN_STRIKE_RUN_SECS`, 10 s): Wi-Fi
-  /// re-association noise is not information, and a beacon that blinks on it
-  /// teaches distrust. Strictly below [staleAfter], so the hold can never
-  /// present stale data as live.
+  /// Grace before a churning link is called stale.
   static const Duration linkChurnGrace = Duration(seconds: 2);
 }
 
-/// §2 — Font families (bundled assets, never runtime-fetched). **Two faces,
-/// never three**: Inter for UI, JetBrains Mono for every amount, address, hash,
-/// timestamp and counter — always with tabular figures, so digits never shift
-/// as values tick.
+/// §2 — Font families (bundled assets, never runtime-fetched — BG-16).
+/// **Two faces, never three, and they never trade jobs** (BG-30): Plus Jakarta
+/// Sans speaks, JetBrains Mono counts. A unit beside a figure is Jakarta; mono
+/// never carries a sentence. **Inter is removed.**
+///
+/// Both are variable; every slot pins `FontVariation('wght')` rather than
+/// `FontWeight` — on a variable face the enum is a hint and the axis is the ink
+/// (L150).
 abstract final class KvFont {
-  static const String ui = 'Inter';
+  /// **Deep V6's speaking face is Plus Jakarta Sans, and it is not bundled
+  /// yet** — the intake carried no font file, and BG-16 forbids fetching one
+  /// at runtime. Naming a family Flutter cannot resolve does not fail the
+  /// build; it silently falls back to the platform default, which would put
+  /// every word in all fifteen screens into a face nobody chose. So this holds
+  /// at [uiLegacy] until the asset lands.
+  ///
+  /// **To close it** (one commit, `dependency-steward` — a font is a
+  /// dependency): drop `PlusJakartaSans-Variable.ttf` and its OFL text into
+  /// `assets/fonts/`, add the `family: PlusJakartaSans` stanza to `pubspec.yaml`
+  /// beside the existing two, and change this one line to [uiCanon]. Every
+  /// call site already reads [ui]. Recorded as Bible §9.10.
+  static const String ui = uiLegacy;
+
+  /// The v4.2 canon face (§2). Unresolvable until the asset ships.
+  static const String uiCanon = 'PlusJakartaSans';
+
+  /// v3.1's face — still the one actually in the bundle.
+  static const String uiLegacy = 'Inter';
+
   static const String mono = 'JetBrainsMono';
 }
 
-/// §2 — Glyphs. There is no icon package: every glyph is 1–3 strokes drawn
-/// with `CustomPaint` on a 24 dp grid. This is a dependency decision (INV-7)
-/// as much as a visual one.
-abstract final class KvGlyph {
+/// §2a — Mark geometry. There is no icon package: every mark is a Lucide
+/// outline redrawn with `CustomPaint` on the 24 dp grid (BG-16, BG-25, INV-7).
+/// The set itself is the `KvGlyphSpec` enum in `widgets/kv_glyph.dart`.
+abstract final class KvGlyphSpec {
   static const double grid = 24;
-  static const double stroke = 1.75;
-  static const StrokeCap cap = StrokeCap.square;
+
+  /// **2.5 with round caps and joins** — Lucide's nominal 2 thins on the
+  /// tinted dark. v3.1's 1.75 square is retired.
+  static const double stroke = 2.5;
+
+  /// Direction arrows inside a value disc.
+  static const double strokeArrow = 2.75;
+
+  /// The check inside [KvCheck] — a 12 dp glyph in a 22 disc reads thin below
+  /// this.
+  static const double strokeCheck = 3.5;
+
+  /// Fingerprint and face at 46–56 dp, where the mark is illustrative.
+  static const double strokeIllustrative = 2.25;
+
+  static const StrokeCap cap = StrokeCap.round;
+  static const StrokeJoin join = StrokeJoin.round;
 }

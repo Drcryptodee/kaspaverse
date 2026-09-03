@@ -419,7 +419,7 @@ class _MicroLabel extends StatelessWidget {
 /// `widgets/kv_glyph.dart` with tests. Aliased rather than re-declared so the
 /// two cannot drift while the remaining preview screens are still standing —
 /// a second copy of a component is two places to disagree about one design.
-typedef _Glyph = KvMark;
+typedef _Glyph = KvGlyph;
 typedef _GlyphPainter = KvGlyphPainter;
 
 /// Debug-only. Not part of the design — it exists so every state and every
@@ -568,7 +568,7 @@ class _TransactionDetailPreviewState extends State<_TransactionDetailPreview> {
                   Row(
                     children: [
                       CustomPaint(
-                        size: const Size(KvGlyph.grid, KvGlyph.grid),
+                        size: const Size(KvGlyphSpec.grid, KvGlyphSpec.grid),
                         painter: _GlyphPainter(e.glyph, tone: e.tone),
                       ),
                       const SizedBox(width: KvSpace.sm),
@@ -840,7 +840,7 @@ class _DetailRail extends StatelessWidget {
                   child: RotatedBox(
                     quarterTurns: 2,
                     child: CustomPaint(
-                      size: Size(KvGlyph.grid, KvGlyph.grid),
+                      size: Size(KvGlyphSpec.grid, KvGlyphSpec.grid),
                       painter: _GlyphPainter(
                         _Glyph.chevron,
                         tone: KvColor.inkNav,
@@ -2545,8 +2545,8 @@ class _RingPainter extends CustomPainter {
     final arrow = Paint()
       ..color = KvColor.primary
       ..style = PaintingStyle.stroke
-      ..strokeWidth = KvGlyph.stroke * k
-      ..strokeCap = KvGlyph.cap
+      ..strokeWidth = KvGlyphSpec.stroke * k
+      ..strokeCap = KvGlyphSpec.cap
       ..strokeJoin = StrokeJoin.miter;
     final a = Path()
       ..moveTo(12 * k, 17 * k)
@@ -4187,7 +4187,7 @@ class _Gate extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           const CustomPaint(
-            size: Size(KvGlyph.grid, KvGlyph.grid),
+            size: Size(KvGlyphSpec.grid, KvGlyphSpec.grid),
             painter: _GlyphPainter(_Glyph.lock, tone: KvColor.inkNav),
           ),
           const SizedBox(height: KvSpace.m),

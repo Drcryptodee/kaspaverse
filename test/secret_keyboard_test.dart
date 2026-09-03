@@ -21,7 +21,7 @@ void main() {
   const controls = {'123', 'ABC', '#+=', 'space'};
 
   /// A cap that is a drawn mark rather than type.
-  Finder mark(KvMark m) =>
+  Finder mark(KvGlyph m) =>
       find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == m);
 
   List<String> characterKeys(WidgetTester tester) => tester
@@ -62,7 +62,7 @@ void main() {
     final lowercase = characterKeys(tester);
     for (final letter in lowercase) {
       // Shift is sticky-once, so it has to be re-armed for every capital.
-      await tester.tap(mark(KvMark.shift));
+      await tester.tap(mark(KvGlyph.shift));
       await tester.pump();
       await tester.tap(find.text(letter.toUpperCase()).first);
       await tester.pump();
@@ -111,7 +111,7 @@ void main() {
     // only ever be a mistake, so the wider inventory must NOT leak in.
     expect(find.text('space'), findsNothing);
     expect(find.text('123'), findsNothing);
-    expect(mark(KvMark.shift), findsNothing);
+    expect(mark(KvGlyph.shift), findsNothing);
 
     await tapEveryCharacterKey(tester);
     expect(typed, hasLength(26));

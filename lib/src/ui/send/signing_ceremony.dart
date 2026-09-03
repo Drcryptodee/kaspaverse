@@ -1054,7 +1054,7 @@ class _OutcomeHead extends StatelessWidget {
               // exceptions keep the lamp, because only the exception is marked
               // (founder, on glass 2026-08-30).
               if (tone == KvLampTone.ok)
-                const KvGlyphIcon(KvMark.check, size: 18, tone: KvColor.ok)
+                const KvGlyphIcon(KvGlyph.check, size: 18, tone: KvColor.ok)
               else
                 KvLamp(tone),
               const SizedBox(width: KvSpace.s),
@@ -1358,14 +1358,14 @@ class _RingPainter extends CustomPainter {
     // app that emit (BG-2) — and this is that same emission, not a second one.
     // Smaller than the ring it sits in: the ring is the mechanism, the arrow
     // is only its label.
-    final k = (size.width * 0.56) / KvGlyph.grid;
+    final k = (size.width * 0.56) / KvGlyphSpec.grid;
     canvas.save();
     canvas.translate(size.width * 0.22, size.height * 0.22);
     final arrow = Paint()
       ..color = KvColor.primary
       ..style = PaintingStyle.stroke
-      ..strokeWidth = KvGlyph.stroke * k
-      ..strokeCap = KvGlyph.cap
+      ..strokeWidth = KvGlyphSpec.stroke * k
+      ..strokeCap = KvGlyphSpec.cap
       ..strokeJoin = StrokeJoin.miter;
     canvas.drawPath(
       Path()
@@ -1390,9 +1390,12 @@ class _RingPainter extends CustomPainter {
       // PAST each end of the arc: 2 x 2.25dp on a 106.81dp circumference is
       // **4.21% of the ring added to every reading**, so the gauge showed 16.7%
       // at a true 12.5% — Lie Factor 1.34 at 100ms, and unbounded as t
-      // approaches 0. The house cap is square (`KvGlyph.cap`) because a glyph
-      // is a mark; a gauge is a measurement, and a measurement may not overhang
-      // its own value.
+      // approaches 0. The house cap is ROUND (`KvGlyphSpec.cap`, 2.5dp since
+      // v4.2 — it was square under Black Glass) because a glyph is a mark; a
+      // gauge is a measurement, and a measurement may not overhang its own
+      // value. **The house cap changing is exactly why this one is written as a
+      // literal `StrokeCap.butt` and not as a token**: a measuring stroke does
+      // not follow the mark language, in either direction.
       ..strokeCap = StrokeCap.butt
       ..color = KvColor.primary;
     // BG-22: the swept angle IS the reading, so it is `t` and nothing else —

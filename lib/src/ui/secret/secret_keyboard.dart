@@ -101,7 +101,7 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
     if (_full && !_symbols)
       KvKey.command(
         'Shift',
-        mark: KvMark.shift,
+        mark: KvGlyph.shift,
         flex: 3,
         active: _shift,
         onTap: () => setState(() => _shift = !_shift),
@@ -128,7 +128,7 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
     if (_full) KvKey.command('space', flex: 6, onTap: () => widget.onChar(' ')),
     KvKey.command(
       'Backspace',
-      mark: KvMark.backspace,
+      mark: KvGlyph.backspace,
       flex: 3,
       onTap: widget.onBackspace,
     ),

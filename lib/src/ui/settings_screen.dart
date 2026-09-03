@@ -1032,7 +1032,7 @@ class _SheetButton extends StatelessWidget {
                   // selected lock-grace is information, and information is
                   // colourless (BG-7).
                   const KvGlyphIcon(
-                    KvMark.diamond,
+                    KvGlyph.diamond,
                     size: 12,
                     tone: KvColor.inkBright,
                   ),
@@ -1160,7 +1160,7 @@ class _Row extends StatelessWidget {
                 const KvLoader.inline()
               else if (row.onTap != null)
                 const KvGlyphIcon(
-                  KvMark.chevron,
+                  KvGlyph.chevron,
                   size: 16,
                   tone: KvColor.inkMeta,
                 ),

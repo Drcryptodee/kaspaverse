@@ -16,7 +16,7 @@ import 'kv_glyph.dart';
 /// formatting, which is exactly where it turned up a second time (D-229's
 /// finding 7).
 typedef KvActivityFace = ({
-  KvMark mark,
+  KvGlyph mark,
   KvMoneyDirection direction,
   String title,
 });
@@ -24,21 +24,21 @@ typedef KvActivityFace = ({
 KvActivityFace kvActivityFace(ActivityRecord record) =>
     switch (record.direction) {
       ActivityDirection.incoming => (
-        mark: KvMark.arrowIn,
+        mark: KvGlyph.arrowIn,
         direction: KvMoneyDirection.incoming,
         // A coinbase is money that was mined to this wallet, not money someone
         // sent it, and the two are different facts about where value came from.
         title: record.isCoinbase ? 'Mined' : 'Received',
       ),
       ActivityDirection.outgoing => (
-        mark: KvMark.arrowOut,
+        mark: KvGlyph.arrowOut,
         direction: KvMoneyDirection.outgoing,
         title: 'Sent',
       ),
       // Value that never left the wallet. Unsigned and colourless: nothing
       // arrived and nothing went.
       ActivityDirection.change => (
-        mark: KvMark.selfSend,
+        mark: KvGlyph.selfSend,
         direction: KvMoneyDirection.internal,
         title: 'Consolidated',
       ),
