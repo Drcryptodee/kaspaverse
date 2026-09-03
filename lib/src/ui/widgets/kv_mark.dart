@@ -28,9 +28,21 @@ class KvMark extends StatelessWidget {
   /// Splash only: halo breathes 3.2 s. Respects disableAnimations.
   final bool breathe;
 
-  /// Stroke in 100-grid units — climbs as the mark shrinks so the gap survives.
-  static double strokeUnitsFor(double size) =>
-      size >= 96 ? 12 : (size >= 40 ? 14 : 16);
+  /// Stroke in 100-grid units. **One weight at every size** (founder ruling,
+  /// D-250).
+  ///
+  /// The v4.1 ladder climbed to 14 and 16 as the mark shrank, on the stated
+  /// reasoning that a heavier stroke made "the gap survive". It does the
+  /// opposite: the two locked paths' closest approach is **fixed at 14.374
+  /// units**, so every unit of stroke is a unit of gap spent. At 16 they
+  /// overlapped by 1.63 units and the K read as one shape (Bible §9.12).
+  ///
+  /// Flat 12 leaves **2.374 units** of clearance at every size — 2.59 dp on the
+  /// 176 splash, and **0.35 dp at 24 dp**, which is roughly one pixel on the
+  /// reference panel. That is the founder's brief exactly: *touching but not
+  /// quite touching.* Dial it with this one number — 11 opens the gap, 13
+  /// closes it toward a hairline that aliases away at 24 dp.
+  static double strokeUnitsFor(double size) => 12;
 
   /// Halo per §1.8: 14 px @ 36 % at 40 dp, 8 px at 25, none below 24.
   static List<BoxShadow> orbHalo(double size, {double t = 0}) {

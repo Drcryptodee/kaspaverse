@@ -21,9 +21,9 @@ void main() {
               // land at the same on-screen diameter. Same painted geometry,
               // fairly compared — only the stroke tier differs.
               for (final tier in const [
-                [96.0, 2.4], // stroke 12
-                [40.0, 5.76], // stroke 14
-                [24.0, 9.6], // stroke 16
+                [96.0, 2.4], // stroke 12 today
+                [40.0, 5.76], // stroke 14 today
+                [24.0, 9.6], // stroke 16 today
               ])
                 SizedBox(
                   width: 230,

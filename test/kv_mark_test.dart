@@ -26,36 +26,32 @@ void main() {
     ..lineTo(29.5 * k, 81 * k);
 
   group('KvMark — the locked geometry (§4a)', () {
-    test('the stroke ladder is exactly as §4a.1 declares it', () {
-      // §4a.1's ladder, pinned. **Its stated rationale is wrong** — see the
-      // clearance test below and Bible §9.12 — but the ladder is what ships
-      // and the mark is LOCKED, so this pins the shipped values rather than
-      // the values the rationale implies.
-      expect(KvMark.strokeUnitsFor(176), 12);
-      expect(KvMark.strokeUnitsFor(96), 12);
-      expect(KvMark.strokeUnitsFor(64), 14);
-      expect(KvMark.strokeUnitsFor(40), 14);
-      expect(KvMark.strokeUnitsFor(28), 16);
-      expect(KvMark.strokeUnitsFor(24), 16);
-      for (var s = 24.0; s <= 176; s += 1) {
+    test('one stroke weight at every size (D-250)', () {
+      // The v4.1 ladder (12 / 14 / 16) closed the gap it claimed to protect;
+      // §9.12 has the measurement. The founder ruled ONE weight, sized so the
+      // strokes come close without meeting.
+      for (final size in const <double>[176, 120, 96, 64, 40, 28, 24]) {
         expect(
-          KvMark.strokeUnitsFor(s),
-          lessThanOrEqualTo(KvMark.strokeUnitsFor(s - 1) + 0.0001),
-          reason: 'stroke must be monotonically non-increasing in size at $s',
+          KvMark.strokeUnitsFor(size),
+          12,
+          reason: 'the mark has one stroke weight; $size dp disagreed',
         );
+      }
+      // Constant, not a ladder that happens to agree on the canon sizes.
+      for (var s = 20.0; s <= 200; s += 0.5) {
+        expect(KvMark.strokeUnitsFor(s), 12, reason: 'at $s dp');
       }
     });
 
     test('the clearance between stem and chevron, measured and pinned', () {
-      // **§4a defines the mark as "two strokes that never touch." At strokes 14
-      // and 16 they touch, and at 16 they overlap.** Measured here rather than
-      // asserted, and pinned to what the LOCKED geometry actually delivers —
-      // not to §4a.1's ">= 2 units at every size", which the shipped mark fails
-      // at four of its seven canon sizes. Recorded as Bible §9.12; the mark is
-      // locked, so the ladder is a founder decision and not this test's to make.
+      // **§4a defines the mark as "two strokes that never touch", and now it
+      // does not.** The v4.1 ladder overlapped them by 1.63 units at 24-28 dp
+      // (§9.12); D-250 flattens the stroke to 12, leaving the same 2.374 units
+      // of clearance at EVERY size — a clean gap on the splash and a ~0.35 dp
+      // hairline at 24 dp, which is the founder's brief.
       //
-      // The guard still bites: any change to either path, or to the stroke
-      // ladder, moves these numbers and reddens.
+      // Measured, never asserted. The guard bites on any change to either path
+      // or to the stroke.
       const grid = 1.0; // measure in raw grid units
       final chevPoints = <Offset>[];
       for (final metric in chevron(grid).computeMetrics()) {
@@ -82,23 +78,26 @@ void main() {
       // Clearance = centreline - stroke (half a stroke painted from each side).
       double clearance(double size) => centreline - KvMark.strokeUnitsFor(size);
 
-      expect(clearance(176), closeTo(2.374, 0.15));
-      expect(clearance(96), closeTo(2.374, 0.15));
-      expect(clearance(64), closeTo(0.374, 0.15)); // a hairline
-      expect(clearance(40), closeTo(0.374, 0.15));
-      expect(clearance(28), closeTo(-1.626, 0.15)); // OVERLAPPING
-      expect(clearance(24), closeTo(-1.626, 0.15));
-
-      // The finding, stated as an executable claim so it cannot be forgotten:
-      // the ladder's stated purpose is inverted. Climbing the weight CLOSES the
-      // gap, because the centreline distance is fixed.
-      expect(
-        clearance(24),
-        lessThan(clearance(176)),
-        reason:
-            'the small mark has LESS clearance, not more (§4a\'s rationale '
-            'says the climb makes "the gap survive"; it does the opposite)',
-      );
+      // **Positive and identical at every canon size — the property D-250
+      // bought.** The glyph box is 62% of the orb, so the on-glass gap is
+      // `clearance * size * 0.0062`: 2.59 dp at 176, 1.41 at 96, 0.59 at 40,
+      // 0.35 at 24.
+      for (final size in const <double>[176, 120, 96, 64, 40, 28, 24]) {
+        expect(
+          clearance(size),
+          closeTo(2.374, 0.15),
+          reason:
+              'clearance must be identical at every size; $size dp differed',
+        );
+        expect(
+          clearance(size),
+          greaterThan(0),
+          reason: 'the two strokes must never touch at $size dp (§4a)',
+        );
+      }
+      // 24 dp is where it is tightest on glass: about one pixel on the
+      // reference panel — a hairline, which is the brief.
+      expect(clearance(24) * 24 * 0.0062, closeTo(0.35, 0.05));
     });
 
     testWidgets('the orb is FLAT — no gradient, highlight or rim (BG-4)', (
