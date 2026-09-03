@@ -106,13 +106,12 @@ void main() {
   /// rendered before the trust line's. Asserting the tone rather than a
   /// presence is what catches the P0.3 shape — a lamp that reads live beside
   /// words that say the link is gone.
-  /// **The live dot, since UX-R1** (§4, A6): `primary` and pulsing while the
-  /// socket is up, amber the moment it is not. BG-2 lists the live dot among
-  /// `primary`'s permitted appearances, so this is the one object on the
-  /// screen where teal reports a state.
+  /// **`ok` green and pulsing while the socket is up**, amber the moment it is
+  /// not (A6, corrected to green by the founder at D-259 from the intake
+  /// render). Teal is never a status.
   bool linkReadsLive(WidgetTester tester) =>
       tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone ==
-      KvLampTone.live;
+      KvLampTone.ok;
 
   /// The TRUST line's own lamp — the LAST on the screen, where the network
   /// chip's is the first. Both describe the same link, so a test that reads

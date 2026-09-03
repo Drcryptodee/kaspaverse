@@ -662,13 +662,14 @@ void main() {
         .evaluate()
         .length;
 
-    // The money column: the live dot, and the ledger's active tab underline.
+    // The money column spends teal on **the ledger's active tab underline
+    // alone**, since the founder corrected the link dot to `ok` green (D-259).
     expect(
       emissionsIn(find.byType(HomeScreen)),
       lessThanOrEqualTo(3),
       reason: 'ration the light and its arrival still means something',
     );
-    expect(emissionsIn(find.byType(HomeScreen)), 2);
+    expect(emissionsIn(find.byType(HomeScreen)), 1);
     // The navigation column: the orb disc, and nothing else. Every socket
     // glyph and the K avatar are `primaryMuted`, which is ambient and
     // UNCOUNTED (§1.5) — counting them here is the finding pointed the wrong

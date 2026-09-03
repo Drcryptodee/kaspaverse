@@ -295,11 +295,11 @@ void main() {
       expect(find.byType(KvLamp), findsOneWidget);
       expect(
         tester.widget<KvLamp>(find.byType(KvLamp)).tone,
-        // **The live dot** (§4's money-plate anatomy, A6): `primary` and
-        // pulsing while the socket is up. BG-2 lists the live dot among
-        // `primary`'s permitted appearances, so this is the one place on the
-        // screen where teal reports a state.
-        KvLampTone.live,
+        // **`ok` green, pulsing** (founder correction D-259, from the intake
+        // render). A6 said `ok` from the start — *"link healthy"* is one of
+        // BG-7's `ok` meanings — and the teal reading was the transcription,
+        // not the design. Teal is never a status.
+        KvLampTone.ok,
         reason: 'a live link reads live on the chip',
       );
 

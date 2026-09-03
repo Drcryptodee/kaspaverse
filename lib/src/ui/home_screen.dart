@@ -833,7 +833,7 @@ class _HomeScreenState extends State<HomeScreen> {
     valueListenable: _dimmed,
     builder: (context, stale, _) => KvBreath(
       active: !stale,
-      child: KvLamp(stale ? KvLampTone.warn : KvLampTone.live),
+      child: KvLamp(stale ? KvLampTone.warn : KvLampTone.ok),
     ),
   );
 
@@ -1242,12 +1242,18 @@ class _Avatar extends StatelessWidget {
 /// *"link healthy"* among `ok`'s meanings outright, so no amendment was
 /// needed to build it — only the new law.
 ///
-/// Live is the **live dot** (`primary`, pulsing at [KvMotion.pulse]) rather
-/// than a green health lamp: §4's money plate anatomy is *"`caps` label + live
-/// dot"*, BG-2 lists the live dot among `primary`'s permitted appearances, and
-/// a dot that pulses only while the socket is up is the liveness tell the
-/// founder asked for. A dark link is a static amber lamp — motion means
-/// something is happening, and nothing is.
+/// **Live is `ok` GREEN, pulsing — not teal** (founder correction 2026-09-04,
+/// D-259, from the intake render `S1 · Home`). UX-R1 built it as the `primary`
+/// live dot on §4's *"`caps` label + live dot"*; the render the design came
+/// from shows a green dot, and A6 said `ok` from the start — *"BG-7 now reads
+/// `ok` = arriving, accepted, switched on, **link healthy**"*. The teal
+/// reading was the transcription, not the design.
+///
+/// It also gives an emission back: teal is now spent on the ledger's active
+/// tab underline alone, which is the ration BG-2 was asking for.
+///
+/// A dark link is a static amber lamp — motion means something is happening,
+/// and nothing is.
 class _NetworkChip extends StatelessWidget {
   const _NetworkChip({required this.live, required this.onTap});
 
@@ -1275,7 +1281,7 @@ class _NetworkChip extends StatelessWidget {
           // way every other breathing thing in this app does (BG-8/BG-9).
           KvBreath(
             active: live,
-            child: KvLamp(live ? KvLampTone.live : KvLampTone.warn),
+            child: KvLamp(live ? KvLampTone.ok : KvLampTone.warn),
           ),
           const SizedBox(width: KvSpace.s),
           const Text(
