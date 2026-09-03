@@ -232,6 +232,11 @@ class _MoneyShell extends StatefulWidget {
 }
 
 class _MoneyShellState extends State<_MoneyShell> {
+  /// The wallet's own receive address, for the drawer's identity header
+  /// (D-260). Resolved once per mount; null until the vault answers, and the
+  /// header renders the name alone rather than a placeholder.
+  late final Future<String> _address = vaultReceiveAddress();
+
   /// Built once and held, so a drawer swipe does not rebuild the money
   /// screen's whole subtree — and, more importantly, does not tear down the
   /// derived notifiers it mounted (the V4 seam law).
@@ -321,6 +326,14 @@ class _MoneyShellState extends State<_MoneyShell> {
   Widget build(BuildContext context) {
     return KvNav(
       selected: 0,
+      // **Who you are in, not what the app is called** (D-260). The seat
+      // becomes the wallet switcher when the app holds more than one account
+      // on a phone; it takes no tap until it does (§8).
+      header: FutureBuilder<String>(
+        future: _address,
+        builder: (context, snap) =>
+            KvWalletIdentity(name: 'Main wallet', address: snap.data),
+      ),
       // §4's five, in §4's order. An unbuilt one carries a `chipLabel` tag and
       // takes no tap at all — never a dead button (§8).
       destinations: [

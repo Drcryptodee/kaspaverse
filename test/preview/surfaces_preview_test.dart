@@ -196,6 +196,7 @@ Widget _homeStatus() => HomeScreen(
 /// `medium` rail and `expanded` standing.
 Widget _shell(Widget home, {int selected = 0}) => KvNav(
   selected: selected,
+  header: const KvWalletIdentity(name: 'Main wallet', address: _addr),
   destinations: [
     KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
     KvDestination(mark: KvGlyph.chat, label: 'Messages', onTap: () {}),

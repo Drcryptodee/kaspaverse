@@ -670,11 +670,12 @@ void main() {
       reason: 'ration the light and its arrival still means something',
     );
     expect(emissionsIn(find.byType(HomeScreen)), 1);
-    // The navigation column: the orb disc, and nothing else. Every socket
-    // glyph and the K avatar are `primaryMuted`, which is ambient and
-    // UNCOUNTED (§1.5) — counting them here is the finding pointed the wrong
-    // way round.
-    expect(emissionsIn(find.byType(KvDrawer)), 1);
+    // **The navigation column spends nothing now** (D-260): the orb and the
+    // wordmark are gone, and the header is the wallet's own identity — a
+    // `tealTint` avatar with a `primaryMuted` initial, both ambient and
+    // UNCOUNTED (§1.5). Counting `primaryMuted` here is the finding pointed
+    // the wrong way round.
+    expect(emissionsIn(find.byType(KvDrawer)), 0);
   });
 
   testWidgets('an avatar and a socket CARRY the brand, they never emit '
@@ -779,6 +780,7 @@ Future<void> pumpShell(
       builder: (context, page) => KvWindow(child: page!),
       home: KvNav(
         selected: 0,
+        header: const KvWalletIdentity(name: 'Main wallet'),
         destinations: [
           KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
           KvDestination(mark: KvGlyph.chat, label: 'Messages', onTap: () {}),

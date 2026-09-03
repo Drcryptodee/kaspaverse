@@ -282,22 +282,30 @@ void main() {
   }
 
   testWidgets(
-    'the wordmark does NOT ellipsize when there is room (393 dp / 1.0)',
+    'the wallet identity does NOT ellipsize when there is room (393 dp / 1.0)',
     (tester) async {
-      // The other half of the acceptance bar. Making the wordmark yield is
-      // only correct if it yields when squeezed and NOT otherwise — wrapping
-      // it in a `Flexible` beside a `Spacer()` would make it a second flex
-      // child at flex 1, taking half the free space and ellipsizing on a wide
-      // screen with room to spare. That is a new defect wearing the fix's
-      // clothes, and this is the test that tells the two apart.
+      // **The wordmark is gone** (D-260): §4 put an orb and `KaspaVerse` at the
+      // head of the drawer; the intake render puts the **wallet's own name and
+      // address** there, and the founder's reason is a product one — that seat
+      // becomes the wallet switcher when the app holds more than one account
+      // on a phone. A wordmark answers a question nobody standing inside their
+      // own wallet is asking.
+      //
+      // The property under test is unchanged and is still the other half of
+      // the acceptance bar: the header yields **when squeezed and not
+      // otherwise**. A `Flexible` beside a `Spacer()` would take half the free
+      // space and ellipsize on a wide screen with room to spare — a new defect
+      // wearing the fix's clothes, and this is the test that tells them apart.
       await pumpPhone(tester, widthDp: 393.0, textScale: 1.0);
+      await openDrawer(tester);
       final paragraph = tester.renderObject<RenderParagraph>(
-        find.text('KaspaVerse'),
+        find.text('Main wallet'),
       );
       expect(
         paragraph.didExceedMaxLines,
         isFalse,
-        reason: 'the wordmark is truncated on a 393 dp phone at default size',
+        reason:
+            'the wallet name is truncated on a 393 dp phone at default size',
       );
       await tester.pumpWidget(const SizedBox());
     },
@@ -681,6 +689,7 @@ Widget _home({
     home: Builder(
       builder: (context) => KvNav(
         selected: 0,
+        header: const KvWalletIdentity(name: 'Main wallet'),
         destinations: [
           const KvDestination(mark: KvGlyph.money, label: 'Wallet'),
           if (messages != null)

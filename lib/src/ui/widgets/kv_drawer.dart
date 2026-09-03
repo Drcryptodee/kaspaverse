@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
 import 'kv_glyph.dart';
+import 'kv_address.dart';
 import 'kv_mark.dart';
 import 'kv_rows.dart';
 
@@ -81,10 +82,14 @@ class KvNav extends StatefulWidget {
     required this.footer,
     required this.selected,
     required this.child,
+    this.header,
   });
 
   /// Wallet · Messages · Games · Finance · Identity (§4).
   final List<KvDestination> destinations;
+
+  /// The wallet's identity block, at the head of the panel (D-260).
+  final Widget? header;
 
   /// Settings and Lock, at the foot.
   final List<KvDestination> footer;
@@ -175,6 +180,7 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
                 destinations: widget.destinations,
                 footer: widget.footer,
                 selected: widget.selected,
+                header: widget.header,
                 // Standing: no scrim, no shadow, and the hairline is the only
                 // boundary it is allowed (§3a.2).
                 standing: true,
@@ -193,6 +199,15 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
         MediaQuery.maybeOf(context)?.highContrast ?? false;
     return Stack(
       children: [
+        // **The drawer's ground runs the full width, behind everything**
+        // (founder ruling D-260). The page rounds to 36 dp when it is pushed,
+        // and at the top and bottom of the divide that radius leaves a notch
+        // the page no longer covers — which showed the `Scaffold`'s own ground
+        // through, a second dark reading as a pair of quarter-circle nicks.
+        // Painting `shelf` across the whole stack puts the drawer's own colour
+        // in them, so the page reads as a rounded card standing ON the drawer
+        // rather than as a shape cut out of the dark.
+        const Positioned.fill(child: ColoredBox(color: KvColor.shelf)),
         // The panel is *under* the page, on the ground it lives on. It is
         // built once and stays built: rebuilding a navigation panel every
         // frame of a drag is how a drag drops frames.
@@ -217,6 +232,7 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
                   destinations: widget.destinations,
                   footer: widget.footer,
                   selected: widget.selected,
+                  header: widget.header,
                   standing: false,
                   onNavigate: _close,
                 ),
@@ -314,24 +330,16 @@ class _PushedPage extends StatelessWidget {
         ],
       ),
     );
-    if (t > 0) {
-      // Slice 3: the page is the layer above, so the shadow falls to its left.
-      page = DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(radius),
-          boxShadow: [
-            BoxShadow(
-              color: KvColor.layerShadow.withValues(
-                alpha: KvColor.layerShadow.a * t,
-              ),
-              blurRadius: 32,
-              offset: const Offset(-12, 0),
-            ),
-          ],
-        ),
-        child: page,
-      );
-    }
+    // **No shadow on the divide** (founder ruling 2026-09-04, D-260). §1.8's
+    // slice 3 gave the pushed page a `layerShadow` falling to its left. On
+    // glass it reads as a seam drawn between two panels rather than as a page
+    // lifted off a ground — the drawer is not *under* the page in the way a
+    // sheet is under a screen, it is beside it. The scrim and the blur already
+    // say which one is in focus, and they say it about the whole page rather
+    // than about a strip of its edge.
+    //
+    // The other four slices are untouched: scrim, blur, the 36 dp radius and
+    // the surface all stand.
     final drag = GestureDetector(
       behavior: HitTestBehavior.translucent,
       onHorizontalDragStart: onDragStart,
@@ -358,8 +366,9 @@ class _PushedPage extends StatelessWidget {
   }
 }
 
-/// The 296 dp panel (§4). Header orb + wordmark, the destinations as rows with
-/// a 40 dp socket, Settings and Lock at the foot.
+/// The 296 dp panel (§4, as corrected against the intake render `S2 · Drawer`).
+/// The wallet's identity at the head, the destinations, Settings and Lock at
+/// the foot.
 class KvDrawer extends StatelessWidget {
   const KvDrawer({
     super.key,
@@ -368,6 +377,7 @@ class KvDrawer extends StatelessWidget {
     required this.selected,
     required this.standing,
     this.onNavigate,
+    this.header,
   });
 
   final List<KvDestination> destinations;
@@ -381,8 +391,21 @@ class KvDrawer extends StatelessWidget {
   /// Called after a destination is taken, so a pushed drawer closes behind it.
   final VoidCallback? onNavigate;
 
-  /// The wordmark beside the orb (§2).
-  static const String wordmark = 'KaspaVerse';
+  /// **Who you are in, not what the app is called** (founder ruling
+  /// 2026-09-04, D-260, from the intake render `S2 · Drawer`).
+  ///
+  /// §4 put an orb and the `KaspaVerse` wordmark here. The render puts the
+  /// **wallet's own name and its address**, and the founder's reason is a
+  /// product one rather than a visual one: **this seat becomes the place a
+  /// user switches wallets.** The app will hold several accounts on one phone,
+  /// and the header is where you see which one you are in and, later, change
+  /// it. A wordmark answers a question nobody standing in their own wallet is
+  /// asking.
+  ///
+  /// It is **not tappable yet**, and deliberately: there is no second wallet
+  /// and no switch path, and §8 forbids a control that answers a tap and does
+  /// nothing. The seat is built; the mechanism is not.
+  final Widget? header;
 
   @override
   Widget build(BuildContext context) {
@@ -393,36 +416,16 @@ class KvDrawer extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const SizedBox(height: KvSpace.s),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                KvSpace.s20,
-                KvSpace.m,
-                KvSpace.s20,
-                KvSpace.l,
+            if (header != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  KvSpace.s20,
+                  KvSpace.m,
+                  KvSpace.s20,
+                  KvSpace.l,
+                ),
+                child: header!,
               ),
-              child: Row(
-                children: [
-                  const KvMark(size: 40),
-                  const SizedBox(width: KvSpace.sm),
-                  const Expanded(
-                    child: Text(
-                      wordmark,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 22,
-                        height: 26 / 22,
-                        fontWeight: FontWeight.w700,
-                        fontVariations: KvWeight.w700,
-                        letterSpacing: -0.22,
-                        color: KvColor.ink,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
@@ -531,6 +534,79 @@ class _DestinationRow extends StatelessWidget {
               onNavigate?.call();
               tap();
             },
+    );
+  }
+}
+
+/// **The wallet you are standing in** — the drawer's header (D-260).
+///
+/// The K avatar is *ours* (§4): [KvColor.tealTint] with a
+/// [KvColor.primaryMuted] initial, never [KvColor.primary]. The name sits over
+/// the address in its compact form, through [KvAddress] — the one widget for
+/// an address on every surface (BG-15), so the truncation counts payload
+/// entropy here exactly as it does on Receive.
+class KvWalletIdentity extends StatelessWidget {
+  const KvWalletIdentity({super.key, required this.name, this.address});
+
+  final String name;
+
+  /// Null while the vault has not answered yet. The row renders the name
+  /// alone rather than a placeholder — a line that appears one frame after
+  /// launch is better than one that appears and then leaves (BG-8).
+  final String? address;
+
+  @override
+  Widget build(BuildContext context) {
+    final addr = address;
+    return Row(
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          alignment: Alignment.center,
+          decoration: const BoxDecoration(
+            color: KvColor.tealTint,
+            shape: BoxShape.circle,
+          ),
+          child: const Text(
+            'K',
+            style: TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 17,
+              height: 1,
+              fontWeight: FontWeight.w700,
+              fontVariations: KvWeight.w700,
+              color: KvColor.primaryMuted,
+            ),
+          ),
+        ),
+        const SizedBox(width: KvSpace.sm),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 17,
+                  height: 22 / 17,
+                  fontWeight: FontWeight.w700,
+                  fontVariations: KvWeight.w700,
+                  color: KvColor.ink,
+                ),
+              ),
+              if (addr != null) ...[
+                const SizedBox(height: 2),
+                KvAddress(addr, fontSize: 12),
+              ],
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
