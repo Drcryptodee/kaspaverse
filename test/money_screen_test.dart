@@ -92,6 +92,11 @@ void main() {
         stalled: false,
       );
 
+  /// The freshness bit the screen hands to a pushed Send / detail route.
+  /// Captured so a test can outlive the screen that owns it, which is the
+  /// lifetime the founder's crash was about.
+  ValueListenable<bool>? handedStale;
+
   Widget money({
     BigInt? mature,
     BigInt? pending,
@@ -141,7 +146,12 @@ void main() {
         enabled: ValueNotifier<bool?>(rateOn),
         quote: ValueNotifier<KvRateQuote?>(quote),
       ),
-      sendRoute: actions ? (_, _) => const Placeholder() : null,
+      sendRoute: actions
+          ? (_, stale) {
+              handedStale = stale;
+              return const Placeholder();
+            }
+          : null,
       receiveRoute: actions ? (_) => const Placeholder() : null,
     ),
   );
@@ -1070,6 +1080,48 @@ void main() {
         );
         await tester.pumpWidget(const SizedBox());
       }
+    });
+  });
+
+  group('the freshness bit outlives the screen that owns it', () {
+    testWidgets('a consumer may unhook AFTER the money screen is gone', (
+      tester,
+    ) async {
+      // **The founder's crash, as a test** (on glass 2026-09-04, Send step 2):
+      //
+      //   > a _Derived<bool> was used after being disposed
+      //
+      // `_dimmed` is handed to Send and to the transaction detail on purpose —
+      // one folding of the link state, so two surfaces can never disagree
+      // about whether the wallet is connected. That makes the CONSUMER outlive
+      // the OWNER in the one case the owner cannot control: tearing down the
+      // whole authenticated stack disposes the element tree depth-first, so
+      // the money screen underneath goes first and a Send screen still mounted
+      // above it then unhooks from a dead notifier.
+      //
+      // Nothing was actually broken — `ChangeNotifier`'s guard is debug-only —
+      // but a red screen on a funds surface is a defect regardless. A disposed
+      // `_Derived` is frozen now, not poisoned: no more notifications, the
+      // last value still readable, and hooking or unhooking is a no-op.
+      await pump(tester, money(mature: BigInt.from(2597792200)));
+      // Open Send, which is where the bit is handed across a route boundary.
+      await tester.tap(find.text('Send').last);
+      await tester.pumpAndSettle();
+      final stale = handedStale;
+      expect(stale, isNotNull, reason: 'the screen hands its own bit down');
+
+      // Tear the screen down while something still holds the bit.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+
+      void noop() {}
+      expect(() => stale!.addListener(noop), returnsNormally);
+      expect(() => stale!.removeListener(noop), returnsNormally);
+      expect(
+        () => stale!.value,
+        returnsNormally,
+        reason: 'the last honest reading survives the owner',
+      );
     });
   });
 }

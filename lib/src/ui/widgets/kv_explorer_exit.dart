@@ -256,36 +256,24 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
     );
   }
 
-  /// `↗ Explorer`, with the destination named under it.
-  Widget _compact(String head, bool live) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [_button(head, live), const SizedBox(height: 2), _caption()],
-    );
-  }
-
-  /// The one-line disclosure that travels with the compact button. It sits
-  /// under the control it describes, so the sentence and the tap it qualifies
-  /// are read in one glance.
-  Widget _caption() => Text(
-    _host.isEmpty
-        ? (_refusal == null
-              ? 'reading your explorer choice\u2026'
-              : 'link unusable \u00b7 set it in Settings')
-        : 'opens $_host \u00b7 shares the id and your IP',
-    textAlign: TextAlign.center,
-    maxLines: 2,
-    overflow: TextOverflow.ellipsis,
-    style: const TextStyle(
-      fontFamily: KvFont.ui,
-      fontSize: 11,
-      height: 15 / 11,
-      // §1.3 retired `inkMetaLow` as an alias of `inkMeta`; the name is
-      // drift, so the token is named directly.
-      color: KvColor.inkMeta,
-    ),
-  );
+  /// `↗ Explorer` — **the button alone** (founder, on glass 2026-09-04:
+  /// *"remove the 'opens explorer.kaspa.org share the id and your ip' wording
+  /// under the explorer button. no need for that as well"*).
+  ///
+  /// **This narrows D-192; it does not repeal it.** *A departure you cannot
+  /// name is not one you consented to* — and the naming still happens, in the
+  /// two places the departure is actually chosen: Settings, where the explorer
+  /// is picked, and the transaction detail, where this widget renders in its
+  /// full register with the host and the IP spelled out. What the receipt
+  /// carries is an act on a destination already chosen, so it inherits that
+  /// consent rather than re-asking for it under a button.
+  ///
+  /// **The sentence is not deleted, only unprinted**: the spoken label still
+  /// carries the host and the IP in full, so a screen-reader user loses
+  /// nothing. And the refusal face still speaks — a link that cannot be used
+  /// says so on the button itself, because that is a fact about *this* tap
+  /// rather than a disclosure about where it goes.
+  Widget _compact(String head, bool live) => _button(head, live);
 
   Widget _button(String head, bool live) {
     return Semantics(

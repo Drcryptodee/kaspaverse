@@ -567,8 +567,11 @@ void main() {
       await _address(tester, _addr);
       await _type(tester, '12.4');
       await tester.tap(find.textContaining('Review '));
-      await tester.pump();
-      await tester.pump();
+      // **Let the sheet arrive before grabbing its control.** Two bare frames
+      // put the pointer down while the panel is still sliding, so the press
+      // could land beside the pill rather than on it — which is a test racing
+      // a transition, not a user (the shorter foot at UX-R2C made it show).
+      await tester.pumpAndSettle();
       final gesture = await tester.startGesture(
         tester.getCenter(find.textContaining('Hold to send')),
       );
@@ -1869,12 +1872,19 @@ void main() {
       // there: a departure you cannot name is not one you consented to.
       expect(find.text('Explorer'), findsOneWidget);
       expect(find.text('Copy ID'), findsOneWidget);
+      // **Nothing is printed beside the button** (founder, on glass
+      // 2026-09-04) — D-192's naming moved to where the destination is chosen
+      // and to the exit's full register on the transaction detail. What must
+      // NOT be lost is the spoken form, which still carries the host and the
+      // IP in full.
+      expect(find.textContaining('explorer.kaspa.org'), findsNothing);
       expect(
-        find.text('opens explorer.kaspa.org · shares the id and your IP'),
+        find.bySemanticsLabel(
+          'View on explorer.kaspa.org. Shares the transaction ID and your IP '
+          'address',
+        ),
         findsOneWidget,
       );
-      // And the host is named ONCE.
-      expect(find.textContaining('explorer.kaspa.org'), findsOneWidget);
 
       await tester.tap(find.byType(KvExplorerExit));
       await tester.pumpAndSettle();
@@ -1906,8 +1916,15 @@ void main() {
       );
       await tester.pumpAndSettle();
       // The third face survives the compact register: not a link, and it says
-      // what to fix (BG-12/BG-20).
-      expect(find.text('link unusable · set it in Settings'), findsOneWidget);
+      // so where it matters — the control is dead and its semantics say why
+      // (BG-12/BG-20).
+      expect(
+        find.bySemanticsLabel(
+          'The explorer link cannot be used. Shares the transaction ID and '
+          'your IP address',
+        ),
+        findsOneWidget,
+      );
       await tester.tap(find.byType(KvExplorerExit));
       await tester.pumpAndSettle();
       expect(opened, isFalse, reason: 'a refused link is not a live control');
@@ -2214,8 +2231,7 @@ void main() {
       await _address(tester, _addr);
       await _type(tester, '12.4');
       await tester.tap(find.textContaining('Review '));
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
 
       final gesture = await tester.startGesture(
         tester.getCenter(find.text('Hold to send 12.40 KAS')),

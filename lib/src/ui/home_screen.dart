@@ -294,6 +294,29 @@ typedef _BalanceView = ({
 /// The V4 scoping primitive: recomputes [_compute] whenever any source
 /// notifies, and — because [ValueNotifier] only notifies when the new value
 /// differs — swallows every tick that would not change pixels.
+///
+/// ## It survives its own disposal, and that is deliberate
+///
+/// `_dimmed` is **handed across route boundaries on purpose** — Send and the
+/// transaction detail are given this screen's own bit rather than deriving
+/// one of their own, so two surfaces can never disagree about whether the
+/// wallet is connected. That makes the consumers *outlive the owner* in one
+/// case the owner cannot control: a teardown of the whole authenticated stack
+/// (BG-13's discard on lock, or the app closing) disposes the element tree
+/// depth-first, so the money screen underneath can go first and a Send screen
+/// still mounted above it then unhooks from a dead notifier.
+///
+/// `ChangeNotifier` asserts on that — *"a _Derived&lt;bool&gt; was used after
+/// being disposed"*, which the founder hit on Send step 2 (2026-09-04). The
+/// error is debug-only and nothing was actually broken, but a red screen on a
+/// funds surface is a defect regardless.
+///
+/// So a disposed `_Derived` becomes **frozen rather than poisoned**: it stops
+/// listening to its sources and will never notify again, its last value stays
+/// readable, and hooking or unhooking is a no-op. A consumer tearing down
+/// after its owner gets the last honest reading instead of an assertion, and
+/// the *reason* the assertion exists — a notifier that keeps firing into dead
+/// widgets — is still impossible, because the sources are unhooked first.
 class _Derived<T> extends ValueNotifier<T> {
   _Derived(this._sources, this._compute) : super(_compute()) {
     for (final s in _sources) {
@@ -303,14 +326,32 @@ class _Derived<T> extends ValueNotifier<T> {
 
   final List<Listenable> _sources;
   final T Function() _compute;
+  bool _disposed = false;
 
-  void _recompute() => value = _compute();
+  void _recompute() {
+    if (_disposed) return;
+    value = _compute();
+  }
+
+  @override
+  void addListener(VoidCallback listener) {
+    if (_disposed) return;
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(VoidCallback listener) {
+    if (_disposed) return;
+    super.removeListener(listener);
+  }
 
   @override
   void dispose() {
+    if (_disposed) return;
     for (final s in _sources) {
       s.removeListener(_recompute);
     }
+    _disposed = true;
     super.dispose();
   }
 }

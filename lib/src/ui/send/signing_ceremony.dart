@@ -634,23 +634,6 @@ class _SigningCeremonyState extends State<SigningCeremony>
                       onDown: _down,
                       onUp: _release,
                     ),
-                    const SizedBox(height: KvSpace.sm),
-                    // One line of instruction (§5), and it names all three
-                    // outcomes of a press so the gesture cannot be guessed
-                    // wrongly: what it takes, what a release does, and what a
-                    // tap does not do.
-                    Text(
-                      'Hold for '
-                      '${(KvMotion.deliberate.inMilliseconds / 1000).toStringAsFixed(1)} s — the ring fills clockwise · '
-                      'release early to cancel · nothing signs on a tap',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 13,
-                        height: 18 / 13,
-                        color: KvColor.inkMeta,
-                      ),
-                    ),
                   ],
                 ),
         ),
@@ -1911,24 +1894,39 @@ class _ReceiptHead extends StatelessWidget {
         // So the row asks the question rather than assuming an answer, and
         // when the answer is no it puts the figure on its own line — the same
         // fallback `_FactLine` takes, and it keeps the right edge.
-        final painter = TextPainter(
-          text: TextSpan(
-            text: truncateAddressPayload(address),
-            style: const TextStyle(fontFamily: KvFont.mono, fontSize: 12),
-          ),
-          textDirection: TextDirection.ltr,
-          textScaler: MediaQuery.textScalerOf(context),
-        )..layout();
-        final needed = painter.width;
-        painter.dispose();
+        final scaler = MediaQuery.textScalerOf(context);
+        double widthOf(String text, double size) {
+          final painter = TextPainter(
+            text: TextSpan(
+              text: text,
+              style: TextStyle(fontFamily: KvFont.mono, fontSize: size),
+            ),
+            textDirection: TextDirection.ltr,
+            textScaler: scaler,
+          )..layout();
+          final w = painter.width;
+          painter.dispose();
+          return w;
+        }
+
+        final needed = widthOf(truncateAddressPayload(address), 12);
+        // **The figure is measured, not reserved.** A flat 150 dp guess was
+        // wider than `-12.403154` actually paints, so the head stacked at the
+        // 393 reference where `S8` draws it inline — the reserve, not the
+        // content, was deciding the layout.
+        final parts = kasParts(sompi);
+        final figureWidth = widthOf(
+          '-${parts.integer}.${trimFraction(parts.fraction)}',
+          18,
+        );
         // What the column would get: the row less the disc, the gaps, and the
-        // widest the figure is allowed to be.
+        // figure beside it.
         final room =
             constraints.maxWidth -
             KvSpace.rowDisc -
             KvSpace.sm -
             KvSpace.s -
-            150;
+            figureWidth;
 
         if (needed <= room) {
           return Row(
@@ -1939,7 +1937,7 @@ class _ReceiptHead extends StatelessWidget {
               Expanded(child: who),
               const SizedBox(width: KvSpace.s),
               ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 150),
+                constraints: BoxConstraints(maxWidth: figureWidth),
                 child: figure,
               ),
             ],
@@ -1973,11 +1971,13 @@ class _ReceiptHead extends StatelessWidget {
 /// example."* It was a full-width card under the copy action; the render draws
 /// a pair of text buttons, centred, and that is what this is.
 ///
-/// **The disclosure came with it, shrunk rather than dropped.** D-192 is why
-/// the exit ever named its destination — a departure you cannot name is not
-/// one you consented to — and `KvExplorerExit`'s compact register keeps the
-/// host and the IP on one 11 dp line under the button. One widget, two
-/// registers (BG-21).
+/// **The disclosure moved rather than vanished.** D-192 is why the exit ever
+/// named its destination — a departure you cannot name is not one you
+/// consented to — and the founder took the printed line off this seat on
+/// 2026-09-04. The naming now lives where the destination is *chosen*
+/// (Settings) and where the exit renders in its full register (the
+/// transaction detail); the spoken label here still carries it in full. One
+/// widget, two registers (BG-21).
 class _ReceiptActions extends StatelessWidget {
   const _ReceiptActions({
     required this.txid,
@@ -1993,9 +1993,7 @@ class _ReceiptActions extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
-      // The caption under the explorer button makes that child taller; the
-      // two buttons still line up because both are measured from the top.
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Flexible(
           child: Semantics(
