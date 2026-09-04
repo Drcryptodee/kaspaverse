@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
+import 'package:kaspaverse/src/rust/api/transport.dart'
+    show ContactDto, TxStatusDto, TxStatusKind;
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/services/rate_service.dart';
@@ -19,6 +21,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
@@ -70,13 +73,33 @@ SendOutcomeDto _sent() => SendOutcomeDto(
   partial: false,
 );
 
-Widget _sendScreen() => SendScreen(
+/// The address book the previews are drawn against (`S6a`'s own three names).
+///
+/// Wired, because the contacts card, the monogram on the recipient row, the
+/// match card and *Save as contact* are all absent from a preview built
+/// without it — and those are exactly the parts UX-R2B added.
+ContactsScope _contacts() {
+  final list = ValueNotifier<List<ContactDto>>([
+    const ContactDto(address: _addr, name: 'Mara'),
+    ContactDto(address: 'kaspa:qpz3${'x' * 59}', name: 'Jonas'),
+    ContactDto(address: 'kaspa:qz9c${'y' * 59}', name: 'Dev fund'),
+  ]);
+  return ContactsScope(
+    contacts: list,
+    refresh: () async {},
+    save: (_, _) async {},
+  );
+}
+
+Widget _sendScreen({bool book = true}) => SendScreen(
   mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
   prepare: (_, _) async => _summary(),
   commit: (_) async => _sent(),
   abandon: () async {},
   feePreview: (_, _) async => BigInt.from(315400),
   minimumSendable: () async => BigInt.from(20000000),
+  contacts: book ? _contacts() : null,
+  fiat: _fiat(),
   // **Wired, because `Send max` is absent from the screen without it** — and
   // absent from every preview of the screen with it. D-223 gave that chip the
   // app's one teal EDGE, so a fixture that omits the callback silently hides
@@ -298,13 +321,22 @@ Future<void> _typeASend(WidgetTester tester) async {
 /// about the harness rather than about the design. The layering is the point,
 /// and this shows exactly it — the scrimmed, blurred Send screen under a
 /// floating sheet.
-Widget _ceremonyOverSend() => Stack(
+Widget _ceremonyOverSend({bool book = true}) => Stack(
   children: [
-    _sendScreen(),
+    _sendScreen(book: book),
     SigningCeremony(
       summary: _summary(),
       commit: (_) async => _sent(),
       abandon: () async {},
+      contacts: book ? _contacts() : null,
+      fiat: _fiat(),
+      explorerUrl: (txid) async => 'https://explorer.kaspa.org/txs/$txid',
+      openUrl: (_) async => true,
+      acceptanceStatus: (_) async => TxStatusDto(
+        kind: TxStatusKind.accepted,
+        blueDepth: BigInt.from(42),
+        acceptedUnixMs: BigInt.from(1788085010103),
+      ),
     ),
   ],
 );
@@ -511,6 +543,15 @@ void main() {
     framedSurface('send__recipient', _sendScreen);
     framedSurface('send__checked', _sendScreen, act: _checkedDestination);
     framedSurface('send__amount', _sendScreen, act: _typeASend);
+    // **The stranger's half of both steps** (UX-R2B): no card to pick from,
+    // *Save as contact* on the checked line, and the recipient row wearing
+    // §4's stranger disc instead of a monogram.
+    framedSurface('send__recipient_nobook', () => _sendScreen(book: false));
+    framedSurface(
+      'send__checked_nobook',
+      () => _sendScreen(book: false),
+      act: _checkedDestination,
+    );
 
     // **The ceremony as a sheet over the page it was built on** (`S7`) — and
     // the hold part-way round, which is the state BG-6 is about.
@@ -519,6 +560,13 @@ void main() {
 
     // **The receipt** (`S8`): a place, not a modal.
     framedSurface('ceremony__sent', _ceremonyOverSend, act: _completeASend);
+    // The receipt for an address the book does not know: *Save as contact*
+    // stands where the name would be, and never the word "Unknown".
+    framedSurface(
+      'ceremony__sent_nobook',
+      () => _ceremonyOverSend(book: false),
+      act: _completeASend,
+    );
 
     surface(
       'address__chunked',

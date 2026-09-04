@@ -8,6 +8,7 @@ import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/api/wallet.dart' show deepScan;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
+import 'package:kaspaverse/src/services/contacts_service.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
 import 'package:kaspaverse/src/services/rate_service.dart';
 import 'package:kaspaverse/src/services/transport_service.dart';
@@ -30,6 +31,7 @@ import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_contact.dart' show ContactsScope;
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
@@ -299,6 +301,23 @@ class _MoneyShellState extends State<_MoneyShell> {
       // now the real thing).
       explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
       openUrl: VaultService.instance.openUrl,
+      // The `≈` price under the figure being typed and under the
+      // ceremony's restatement of it (founder, 2026-09-04). Read-only
+      // here by construction: the place a price is switched off is the
+      // place it is chosen (D-193).
+      fiat: FiatScope(
+        enabled: RateService.instance.enabled,
+        quote: RateService.instance.quote,
+        attach: RateService.instance.attach,
+        detach: RateService.instance.detach,
+      ),
+      // The address book — names for addresses, device-local, read on
+      // mount and re-read after every save.
+      contacts: ContactsScope(
+        contacts: ContactsService.instance.contacts,
+        refresh: ContactsService.instance.refresh,
+        save: ContactsService.instance.save,
+      ),
     ),
     // A tapped ledger row opens the record at full size, with the burial
     // gauge the feed has no room for. The explorer link is RESOLVED in

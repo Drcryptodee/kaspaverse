@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../rust/api/wallet.dart';
-import '../services/rate_service.dart' show KvRateQuote, RateService;
+import 'widgets/kv_fiat.dart';
 import 'format.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/kv_window.dart';
@@ -30,6 +30,11 @@ import 'widgets/kv_tabs.dart';
 import 'widgets/kv_two_pane.dart';
 import 'widgets/status_beacon.dart';
 import 'widgets/tx_status_chip.dart';
+
+/// `FiatScope` moved to `widgets/kv_fiat.dart` when a second and third
+/// surface began drawing a price (Send's amount, the signing sheet). Re-exported
+/// so every shipped import path keeps working.
+export 'widgets/kv_fiat.dart' show FiatScope, KvFiatLine;
 
 /// **Money** — the surface a user opens every day, and the first one wired to
 /// real funds (design_system §5, D-191…D-194).
@@ -214,23 +219,6 @@ class ChainScope {
 /// setting. The money plate reads a price; the place a price is chosen is the
 /// place it can be switched off (D-193), and a read-only seam is how that stays
 /// true by construction rather than by discipline.
-class FiatScope {
-  const FiatScope({
-    required this.enabled,
-    required this.quote,
-    this.attach,
-    this.detach,
-  });
-
-  /// `null` until the stored posture has been read — rendered as nothing,
-  /// never as an optimistic `≈ —` (`wallet-security-auditor`).
-  final ValueListenable<bool?> enabled;
-  final ValueListenable<KvRateQuote?> quote;
-
-  final VoidCallback? attach;
-  final VoidCallback? detach;
-}
-
 /// The wallet-facing wiring [HomeScreen] consumes — same law as [ChainScope].
 class WalletScope {
   const WalletScope({
@@ -765,7 +753,7 @@ class _HomeScreenState extends State<HomeScreen> {
             builder: (context, b, _) => KvMoneyPlate(
               label: 'Available balance',
               figure: KvAmount(b.mature, stale: b.stale),
-              fiat: _FiatLine(fiat: widget.fiat, sompi: b.mature, now: _now),
+              fiat: KvFiatLine(fiat: widget.fiat, sompi: b.mature, now: _now),
               chainClock: _ChainClock(
                 daa: widget.chain.virtualDaaScore,
                 dimmed: _dimmed,
@@ -1317,123 +1305,6 @@ class _ChainClock extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// The `≈` restatement, in mono at `inkMeta`, one step under the figure (BG-5).
-class _FiatLine extends StatelessWidget {
-  const _FiatLine({required this.fiat, required this.sompi, required this.now});
-
-  /// Null ⇒ the rate seam is not wired at all (a widget test, a build without
-  /// it): the line renders nothing, exactly as if the user had switched it off.
-  final FiatScope? fiat;
-
-  /// What to restate — the hero's own number, so the two can never disagree.
-  /// Null is the hero's `—`, and it restates as `≈ —` rather than as `$0.00`:
-  /// an unknown balance has an unknown value, and a confident zero beside a
-  /// dash is the kind of true-looking lie BG-8 exists to stop.
-  final BigInt? sompi;
-
-  /// **The screen's freshness clock, not a `clock()` call** (BG-8).
-  ///
-  /// The age below is the one branch that must appear WITHOUT a new value
-  /// arriving — a vendor that goes down stops delivering quotes, which is
-  /// exactly when the figure starts being able to mislead. Computed from a
-  /// bare `clock()` it was unreachable in practice: the only thing that
-  /// rebuilt this line was a fresh quote, and a fresh quote resets the age to
-  /// zero. So a dead source rendered a confident `≈ \$36.79`, ageless, forever
-  /// (`consensus-auditor`, UX-3 — `L126` in its purest form).
-  final ValueListenable<DateTime> now;
-
-  @override
-  Widget build(BuildContext context) {
-    final scope = fiat;
-    if (scope == null) return const SizedBox.shrink();
-    return ValueListenableBuilder<bool?>(
-      valueListenable: scope.enabled,
-      builder: (context, on, _) {
-        // Off, or not yet known: both render nothing. A line that appears one
-        // frame after launch is better than one that appears and then leaves.
-        if (on != true) return const SizedBox.shrink();
-        return ValueListenableBuilder<KvRateQuote?>(
-          valueListenable: scope.quote,
-          builder: (context, quote, _) => ValueListenableBuilder<DateTime>(
-            valueListenable: now,
-            builder: (context, at, _) {
-              final value = sompi == null ? null : quote?.usdFor(sompi!);
-              final figure = value == null
-                  ? '≈ —'
-                  : '≈ \$${value.toStringAsFixed(2)}';
-              // Silence is the healthy state (D-189/D-192): a fresh rate says
-              // nothing about its age, and the age appears at the point where
-              // it could start to mislead.
-              final since = quote == null
-                  ? null
-                  : at.difference(quote.fetchedAt);
-              final age = since == null
-                  ? 'no rate yet'
-                  : since >= RateService.staleAfter
-                  ? '${formatAge(since)} old'
-                  : null;
-              return Semantics(
-                label: value == null
-                    ? 'Value in dollars: no exchange rate yet'
-                    : 'Approximately ${value.toStringAsFixed(2)} US dollars',
-                excludeSemantics: true,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      figure,
-                      // 15, not `fact`'s 13 (render `S1`, measured, D-261).
-                      style: const TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 15,
-                        height: 20 / 15,
-                        fontWeight: FontWeight.w500,
-                        fontVariations: KvWeight.w500,
-                        // Subordinate by scale AND tone (BG-5): KAS is the
-                        // unit of account and this sits beside it, never
-                        // instead.
-                        color: KvColor.inkMeta,
-                        fontFeatures: [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                    if (age != null) ...[
-                      const SizedBox(width: KvSpace.s),
-                      Flexible(
-                        child: Text(
-                          age,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          // **Mono for the age, Jakarta for the sentence**
-                          // (BG-30). `12 m old` is an elapsed time and takes
-                          // `metaMono`, the same face as the ledger's own row
-                          // times; `no rate yet` is a *sentence*, and mono
-                          // never carries one — which the first cut got wrong
-                          // by setting the whole slot in mono because the
-                          // common branch is a figure.
-                          style: TextStyle(
-                            fontFamily: quote == null ? KvFont.ui : KvFont.mono,
-                            fontSize: 11,
-                            height: 16 / 11,
-                            fontWeight: FontWeight.w500,
-                            fontVariations: KvWeight.w500,
-                            color: KvColor.inkMeta,
-                            fontFeatures: const [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              );
-            },
-          ),
-        );
-      },
     );
   }
 }

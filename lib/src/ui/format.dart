@@ -43,9 +43,18 @@ final BigInt _sompiPerKas = BigInt.from(100000000);
 }
 
 /// Trim trailing zeros from an 8-digit KAS fraction, keeping at least [min]
-/// digits — the §5 feeds/lists rule (`"50000000"` → `"50"`, `"00000000"` →
-/// `"00"`). **Never** used on a signing surface: there the full 8 digits are
-/// the truth at the moment of commitment (BG-5/BG-6).
+/// digits (`"50000000"` → `"50"`, `"00000000"` → `"00"`).
+///
+/// **This is now the rule on EVERY surface, the one that signs included**
+/// (founder, 2026-09-04, D-267 — withdrawing D-210's carve-out). The doc here
+/// used to say the opposite, in bold, on the formatter the signing surface now
+/// calls: `KvAmountRole.screen`, `_kas` and `_holdLabel` all route through it.
+///
+/// It is safe on a signing surface because the trim is **lossless**: it only
+/// ever removes zeros, so no digit that carries value is dropped and nothing
+/// rounds. What BG-6 needs from a restatement is that no digit be *hidden*,
+/// and eight fixed places hid the end of a number behind five zeros the eye
+/// had to count past.
 String trimFraction(String fraction, {int min = 2}) {
   var end = fraction.length;
   while (end > min && fraction[end - 1] == '0') {

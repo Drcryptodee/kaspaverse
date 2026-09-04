@@ -42,7 +42,23 @@ class KvExplorerExit extends StatefulWidget {
     required this.subject,
     required this.resolve,
     required this.open,
+    this.compact = false,
   });
+
+  /// **The receipt's register** (`S8`, founder 2026-09-04: *"let it just say
+  /// `<icon> Explorer` … let it be like the screenshot example"*).
+  ///
+  /// A button the width of its label, sitting beside *Copy ID*, with the
+  /// disclosure on one quiet line under the pair instead of inside a card.
+  ///
+  /// **The disclosure shrinks; it does not go.** D-192 is what put it there —
+  /// *a departure you cannot name is not one you consented to* — and the
+  /// founder's note is about the weight of the control, not about deleting
+  /// the sentence that says where the tap goes and what it hands over. So the
+  /// host is still named and the IP is still mentioned, at 11 dp, and this is
+  /// **one widget in two registers rather than two implementations of one
+  /// law** (BG-21; L143 is the scar from getting that wrong).
+  final bool compact;
 
   /// The identifier being looked up — a txid or an address. Public chain data
   /// either way; the disclosure is about who gets to watch you ask.
@@ -167,6 +183,8 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
       _ => ('View in an explorer', 'reading your explorer choice…', false),
     };
 
+    if (widget.compact) return _compact(head, live);
+
     final card = KvSurface(
       tone: KvSurfaceTone.chip,
       width: double.infinity,
@@ -197,7 +215,9 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
                     fontFamily: KvFont.ui,
                     fontSize: 11,
                     height: 15 / 11,
-                    color: KvColor.inkMetaLow,
+                    // §1.3 retired `inkMetaLow` as an alias of `inkMeta`; the name is
+                    // drift, so the token is named directly.
+                    color: KvColor.inkMeta,
                   ),
                 ),
               ],
@@ -233,6 +253,84 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
               child: card,
             )
           : card,
+    );
+  }
+
+  /// `↗ Explorer`, with the destination named under it.
+  Widget _compact(String head, bool live) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [_button(head, live), const SizedBox(height: 2), _caption()],
+    );
+  }
+
+  /// The one-line disclosure that travels with the compact button. It sits
+  /// under the control it describes, so the sentence and the tap it qualifies
+  /// are read in one glance.
+  Widget _caption() => Text(
+    _host.isEmpty
+        ? (_refusal == null
+              ? 'reading your explorer choice\u2026'
+              : 'link unusable \u00b7 set it in Settings')
+        : 'opens $_host \u00b7 shares the id and your IP',
+    textAlign: TextAlign.center,
+    maxLines: 2,
+    overflow: TextOverflow.ellipsis,
+    style: const TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 11,
+      height: 15 / 11,
+      // §1.3 retired `inkMetaLow` as an alias of `inkMeta`; the name is
+      // drift, so the token is named directly.
+      color: KvColor.inkMeta,
+    ),
+  );
+
+  Widget _button(String head, bool live) {
+    return Semantics(
+      button: true,
+      enabled: live,
+      // The spoken label keeps the FULL disclosure even though the printed
+      // one is shortened: a screen reader user gets the same facts about
+      // where the tap goes (D-192).
+      label: '$head. Shares the transaction ID and your IP address',
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: live ? _go : null,
+        child: Padding(
+          // 52 dp (BG-12) — the same target *Copy ID* takes beside it.
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.sm,
+            vertical: KvSpace.s,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              KvGlyphIcon(
+                KvGlyph.external,
+                size: 18,
+                // `etch` while there is nowhere to go: a dead affordance must
+                // not look live (BG-12).
+                tone: live ? KvColor.inkDim : KvColor.etch,
+              ),
+              const SizedBox(width: KvSpace.s),
+              Text(
+                'Explorer',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 14,
+                  height: 18 / 14,
+                  fontWeight: FontWeight.w600,
+                  fontVariations: KvWeight.w600,
+                  color: live ? KvColor.inkDim : KvColor.etch,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

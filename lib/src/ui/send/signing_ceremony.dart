@@ -13,6 +13,11 @@ import '../widgets/haptics.dart';
 import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
 import '../widgets/kv_check.dart';
+import '../../rust/api/wallet.dart' show MaturityState;
+import '../widgets/kv_burial_mark.dart';
+import '../widgets/kv_contact.dart';
+import '../widgets/kv_fiat.dart';
+import '../widgets/tx_status_chip.dart' show chipStateOfAcceptance;
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_explorer_exit.dart';
@@ -33,9 +38,14 @@ import '../widgets/kv_two_pane.dart';
 /// wager would inherit whatever the messaging lane is allowed to do; keyed off
 /// the enum, it cannot.
 ///
-/// Every amount here is exact to all eight decimals — the one place D-210's
-/// trailing-zero trim does **not** apply, because a trimmed figure is a
-/// different string from the one that was signed.
+/// Every amount here shows every significant decimal to a minimum of two —
+/// **the same precision law every other surface takes** (D-267, withdrawing
+/// D-210's carve-out for this one). The rationale the carve-out rested on
+/// (*"a trimmed figure is a different string from the one that was signed"*)
+/// is false: the trim removes only zeros, so `12.40000000` and `12.40` are the
+/// same number and no digit that carries value can be dropped. What BG-6 needs
+/// is that no digit be HIDDEN, and eight fixed places hid the end of a figure
+/// behind five zeros the eye had to count past.
 ///
 /// **A sheet while it is a question, a screen once it is an answer** (`S7` →
 /// `S8`, UX-R2). The review floats over the Send screen the user built it on,
@@ -63,6 +73,8 @@ class SigningCeremony extends StatefulWidget {
     this.title,
     this.contextNote,
     this.acceptanceStatus,
+    this.fiat,
+    this.contacts,
     this.onLeftInFlight,
     this.explorerUrl,
     this.openUrl,
@@ -92,6 +104,19 @@ class SigningCeremony extends StatefulWidget {
   /// nothing at all**: unwatched, pruned or tracker-unavailable are all states
   /// where the honest output is silence, never a zero.
   final Future<TxStatusDto?> Function(String txid)? acceptanceStatus;
+
+  /// The `≈` price under the restatement (`S7`, founder 2026-09-04). Null ⇒
+  /// no rate seam is wired and no line is drawn. It restates the KAS figure
+  /// above it and is never a term in anything: **what is signed is the KAS
+  /// amount**, and BG-5's safety half is what keeps a vendor's number from
+  /// ever being that.
+  final FiatScope? fiat;
+
+  /// The address book, so the sheet and the receipt can say *who* (`S7`'s
+  /// `To  Mara`, `S8`'s `To Mara`). Null ⇒ no name is shown and no contact can
+  /// be saved — the address is rendered in full either way, which is the part
+  /// that is not optional (BG-15).
+  final ContactsScope? contacts;
 
   /// Fired when the user leaves **after the hold completed and before the
   /// outcome landed** — the overrun exit.
@@ -147,6 +172,8 @@ Future<SendOutcomeDto?> showSigningCeremony(
   Future<String> Function(String txid)? explorerUrl,
   Future<bool> Function(String url)? openUrl,
   VoidCallback? onSendAnother,
+  FiatScope? fiat,
+  ContactsScope? contacts,
 }) {
   return Navigator.of(context).push(
     // **A sheet route, so the page underneath stays on screen** — scrimmed and
@@ -165,6 +192,8 @@ Future<SendOutcomeDto?> showSigningCeremony(
         explorerUrl: explorerUrl,
         openUrl: openUrl,
         onSendAnother: onSendAnother,
+        fiat: fiat,
+        contacts: contacts,
       ),
     ),
   );
@@ -193,8 +222,7 @@ String _defaultTitle(SignableKind kind) => switch (kind) {
 /// irreversible transaction, and a new kind inheriting "Hold to send N KAS"
 /// could describe the wrong operation entirely.
 String _holdLabel(SignableSummaryDto s) {
-  final amount = kasParts(s.amountSompi);
-  final kas = '${amount.integer}.${amount.fraction} KAS';
+  final kas = '${_kas(s.amountSompi)} KAS';
   return switch (s.kind) {
     SignableKind.payment => 'Hold to send $kas',
     SignableKind.bond => 'Hold to send $kas',
@@ -207,11 +235,18 @@ String _holdLabel(SignableSummaryDto s) {
   };
 }
 
-/// Inline KAS figure for sentence copy — full 8 decimals (BG-5 applies to
-/// every number on a signing surface, prose included).
+/// Inline KAS figure for sentence copy, and for the label on the control that
+/// signs.
+///
+/// **Trailing zeros trimmed, to a minimum of two** — the founder's precision
+/// ruling of 2026-09-04, which withdrew the signing surface's exemption from
+/// D-210. It reaches prose because BG-5 applies to every number on a signing
+/// surface, prose included, and a hold pill reading *"Hold to send 12.40 KAS"*
+/// beside a restatement reading `12.40` is one figure said twice rather than
+/// two figures that need reconciling.
 String _kas(BigInt sompi) {
   final parts = kasParts(sompi);
-  return '${parts.integer}.${parts.fraction}';
+  return '${parts.integer}.${trimFraction(parts.fraction)}';
 }
 
 class _SigningCeremonyState extends State<SigningCeremony>
@@ -225,6 +260,30 @@ class _SigningCeremonyState extends State<SigningCeremony>
   int _stage = 0;
   Timer? _stageOne;
   Timer? _stageTwo;
+
+  /// **The beat between the ring completing and the wait appearing** (founder,
+  /// on glass 2026-09-04: *"when the mark shows, it goes to the sent screen
+  /// after like 200ms or something so user can have a feel of the fingerprint
+  /// change"*).
+  ///
+  /// It is **purely visual, and the broadcast does not wait for it.**
+  /// `_commit()` is already awaiting Rust while this runs; what the timer
+  /// delays is only the foot swapping the hold pill for the staged wait, so
+  /// the check the badge just drew is on screen long enough to be seen.
+  /// Every safety property that keys off `_sending` — the closed exit, the
+  /// in-flight signal, the sealed back gesture — flips at the instant the
+  /// commit starts, exactly as before.
+  ///
+  /// **And the beat does not lead to the receipt.** The founder's phrasing
+  /// describes what a fast send looks like from the outside; between the hold
+  /// and an acceptance there is a real 1.3–3.8 s the wallet cannot skip, and
+  /// a receipt shown at 200 ms would claim a network acceptance nobody has
+  /// been told about. What follows the beat is the named wait, and the
+  /// receipt follows the outcome.
+  bool _showWait = false;
+  Timer? _signedBeat;
+
+  static const Duration _signedBeatFor = Duration(milliseconds: 200);
 
   /// Whether the screen has held the user past the wait's expected shape and
   /// should give the exit back.
@@ -326,6 +385,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
     _stageOne?.cancel();
     _stageTwo?.cancel();
     _exitTimer?.cancel();
+    _signedBeat?.cancel();
     _depthPoll?.cancel();
     _hold.dispose();
     super.dispose();
@@ -358,6 +418,9 @@ class _SigningCeremonyState extends State<SigningCeremony>
       _sending = true;
       _error = null;
       _stage = 0;
+    });
+    _signedBeat = Timer(_signedBeatFor, () {
+      if (mounted) setState(() => _showWait = true);
     });
     // The named wait (D-189). It runs against the clock because the wallet has
     // no finer signal to run against — see [_StagedWait], which is where that
@@ -448,6 +511,37 @@ class _SigningCeremonyState extends State<SigningCeremony>
     );
   }
 
+  /// Name the destination from the receipt (`S8`). The same sheet Send step 1
+  /// opens, so a name is bound to an address in exactly one place (BG-21).
+  Future<void> _saveContact() async {
+    final scope = widget.contacts;
+    if (scope == null) return;
+    final address = widget.summary.destination;
+    final name = await showContactNameSheet(
+      context,
+      address: address,
+      initial: scope.nameFor(address),
+    );
+    if (name == null || !mounted) return;
+    try {
+      await scope.save(address, name);
+    } catch (e) {
+      // **Said, not swallowed.** The send has already happened and a failed
+      // save costs a label and nothing else — but a control that answers a tap
+      // and silently does nothing is §8's one prohibition, and the same
+      // operation on Send surfaces its error. One operation, one honesty
+      // posture (`wallet-security-auditor`, UX-R2B).
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('The contact could not be saved. ${displayError(e)}'),
+            duration: KvMotion.toast,
+          ),
+        );
+      }
+    }
+  }
+
   /// **The one exit.** Cancel, Done, Send another and the system back gesture
   /// all arrive here, so the outcome reaches the caller whichever door was
   /// used and the in-flight signal fires exactly once from any of them — the
@@ -468,6 +562,10 @@ class _SigningCeremonyState extends State<SigningCeremony>
       title: widget.title ?? _defaultTitle(s.kind),
       onCancel: exit,
       onDismiss: exit,
+      // **Red, by founder ruling on glass** (2026-09-04). This is the one
+      // Cancel in the app that BG-7's risk hue actually describes: the way out
+      // of a commitment that cannot be undone once it is made.
+      cancelTone: KvColor.risk,
       foot: Padding(
         padding: const EdgeInsets.fromLTRB(KvSpace.l, KvSpace.m, KvSpace.l, 0),
         // The foot changes shape when the hold fires; `AnimatedSize` on the
@@ -477,7 +575,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
           duration: KvMotion.calm,
           curve: KvMotion.curve,
           alignment: Alignment.topCenter,
-          child: _sending
+          child: _sending && _showWait
               ? _StagedWait(stage: _stage, mayLeave: _mayLeave)
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -485,7 +583,11 @@ class _SigningCeremonyState extends State<SigningCeremony>
                     KvHold(
                       label: _holdLabel(s),
                       progress: _hold,
-                      enabled: true,
+                      // Dead the moment it fires: the ring is full, the
+                      // transaction is Rust's, and a second press has nothing
+                      // to start.
+                      enabled: !_fired,
+                      signed: _fired,
                       onDown: _down,
                       onUp: _release,
                     ),
@@ -618,6 +720,9 @@ class _SigningCeremonyState extends State<SigningCeremony>
                       returnsToSelf: returnsToSelf,
                       acceptedAt: _acceptedAt,
                       txid: txid,
+                      status: _status,
+                      contacts: widget.contacts,
+                      onSaveContact: _saveContact,
                     ),
                     if (v.landed && txid != null) ...[
                       const SizedBox(height: KvSpace.m),
@@ -707,6 +812,14 @@ class _SigningCeremonyState extends State<SigningCeremony>
       KvAmount(
         returnsToSelf ? s.feeSompi : s.amountSompi,
         role: KvAmountRole.screen,
+      ),
+      // The `≈` price, under the figure it restates (`S7`, founder
+      // 2026-09-04). Subordinate in scale and tone, and it restates the same
+      // sompi the row above renders — never a second arithmetic.
+      const SizedBox(height: KvSpace.xs),
+      KvFiatLine(
+        fiat: widget.fiat,
+        sompi: returnsToSelf ? s.feeSompi : s.amountSompi,
       ),
 
       // Kind-derived plain-English lines, each citing only the DTO's own
@@ -805,7 +918,13 @@ class _SigningCeremonyState extends State<SigningCeremony>
           // that raw address reads as "sending to a stranger". Drop it; the
           // thread (or the wallet itself) is the destination.
           if (!returnsToSelf) ...[
-            const _CardLabel('To'),
+            // **`To` left, the name right** (`S7`, measured: every value on
+            // this card ends on one right edge at 348.5 dp). The name is on
+            // the line ABOVE the address and never in place of it — the 67
+            // characters below are what the signature commits to, and they
+            // are rendered in full whether or not the book knew this address
+            // (BG-15).
+            _ToHead(address: s.destination, contacts: widget.contacts),
             const SizedBox(height: KvSpace.s),
             // One mono run with the first and last groups weighted: an
             // address-poisoning attack buys a prefix and a suffix that LOOK
@@ -876,18 +995,127 @@ class _FactRule extends StatelessWidget {
       Container(height: 1, color: KvColor.hairline);
 }
 
-/// One exact cost line: label left, all-8-decimals amount right (BG-5).
+/// **One grid, and every value ends on the same right edge.**
 ///
-/// **A `Wrap`, not a `Row` of two equal `Flexible`s.** Equal flex hands the
-/// figure exactly half the width whatever the label needs, so the fee and the
-/// total on the signing surface fell under the 11dp floor from about
-/// 10,000 KAS upward at 320dp/1.3× — 6.70dp at whole supply — while the row
-/// still had space the label was not using. Wrapped, each child may take the
-/// whole width and the amount drops to its own run when it needs to: the
-/// widest figure the network can express then renders at 17.1dp.
+/// `S7` and `S8` were measured and they agree to a decimal: every value on the
+/// card — the fee, what leaves, the name, the stamp, the status — ends at
+/// 348.5 dp on the sheet and 347.5 dp on the receipt, with the labels on one
+/// left edge. The founder's note said the same thing from the glass: *"let the
+/// numbers move to the right edge instead of the position you put them so its
+/// not clunky."*
 ///
-/// It is the cure `_AvailableLine` took one screen over, for the same reason:
-/// **the cure is width, not scale** (`ux-auditor`, UX-4).
+/// **Why the old construction drifted.** It was a `Wrap` with
+/// `spaceBetween`, chosen so a very wide figure could take a run of its own
+/// instead of being squeezed under the 11 dp floor. That works for the squeeze
+/// and fails for the alignment: the instant a value wrapped it became the only
+/// child of its run, and `spaceBetween` start-aligns a lone child — so the
+/// figure landed on the LEFT, under its own label.
+///
+/// This keeps both properties. The label is `Expanded`, so it takes whatever
+/// the value does not and wraps rather than pushing; the value is measured
+/// against a share of the row and `KvAmount` fits itself inside that, keeping
+/// its unit outside the fit so the 11 dp floor survives. The value cannot
+/// drift left because it is the last child of a full-width row.
+class _FactLine extends StatelessWidget {
+  const _FactLine({
+    required this.label,
+    required this.value,
+    // `S7` draws `Network fee` and `Leaves your wallet` both inline at the
+    // reference width; 0.62 stacked the second of them there (`ux-auditor`,
+    // measured off the 393 frame). 0.45 restores the render's grid and still
+    // leaves a whole-supply figure room to fit itself.
+    this.valueShare = 0.45,
+    this.strongLabel = false,
+  });
+
+  final String label;
+  final Widget value;
+
+  /// The most of the row the value may take before it starts fitting itself
+  /// down. The label wraps into the rest.
+  final double valueShare;
+
+  /// `Leaves your wallet` is the row a user must not miss (`S7` sets it in
+  /// `ink` at 600 while its neighbours stay `inkDim`).
+  final bool strongLabel;
+
+  /// `inkDim`, not `inkMeta`: these rows live on a `chip` inner card, where
+  /// `inkMeta` is 4.30 and under AA (§1.4, BG-14).
+  TextStyle get _labelStyle => TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 13,
+    height: 19 / 13,
+    fontWeight: strongLabel ? FontWeight.w600 : FontWeight.w400,
+    fontVariations: strongLabel ? KvWeight.w600 : KvWeight.w400,
+    color: strongLabel ? KvColor.ink : KvColor.inkDim,
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          // **What the label needs to stay one word.** Measured, not guessed:
+          // at 320 dp / 1.3× the value's share left `Accepted` about 70 dp,
+          // which is under the width of the word — so Flutter did the only
+          // thing left and broke it, rendering `Accepte` over `d` on a
+          // receipt (found in the floor frame, not argued).
+          final painter = TextPainter(
+            text: TextSpan(text: label, style: _labelStyle),
+            textDirection: TextDirection.ltr,
+            textScaler: scaler,
+          )..layout();
+          final needed = painter.maxIntrinsicWidth;
+          painter.dispose();
+          final room = width * (1 - valueShare) - KvSpace.m;
+
+          final text = Text(label, style: _labelStyle);
+          final bounded = ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: width * valueShare),
+            child: value,
+          );
+
+          // **Tight: stack, and keep the right edge.** Wrapping the label into
+          // a column beneath is what the space allows; what must NOT change is
+          // where the value sits, because one right edge down the card is the
+          // whole point of this widget (`S7`/`S8` measured, founder's own
+          // note). So the fallback is a column whose value is still hard
+          // right, never a run that drifts back to the left.
+          if (needed > room) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                text,
+                const SizedBox(height: KvSpace.xs),
+                Align(alignment: Alignment.centerRight, child: value),
+              ],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(child: text),
+              const SizedBox(width: KvSpace.m),
+              bounded,
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// One exact cost line: label left, amount hard right (BG-5).
+///
+/// **Trailing zeros trimmed, on the signing surface too** (founder,
+/// 2026-09-04). `12.40000000` reads `12.40` and `0.00010000` reads `0.0001`.
+/// It is a safe change to make on the one surface D-210 used to exempt,
+/// because the trim removes only zeros: no digit that carries value is lost,
+/// nothing rounds, and what BG-6 needs from a restatement — that no digit be
+/// hidden — is better served by a number whose end the eye can find.
 class _FactRow extends StatelessWidget {
   const _FactRow({
     required this.label,
@@ -904,57 +1132,34 @@ class _FactRow extends StatelessWidget {
   final KvMoneyDirection direction;
 
   @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
-      child: Wrap(
-        alignment: WrapAlignment.spaceBetween,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        spacing: KvSpace.m,
-        runSpacing: KvSpace.xs,
-        children: [
-          Text(
-            label,
-            // `inkDim`, not `inkMeta`: this row lives on a `chip` inner card,
-            // where `inkMeta` is 4.30 and under AA (§1.4, BG-14).
-            style: const TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 13,
-              height: 19 / 13,
-              color: KvColor.inkDim,
-            ),
-          ),
-          // No `FittedBox`. `KvAmount` fits its own figure given a bounded
-          // width and keeps the unit OUT of that fit so its 11dp floor
-          // survives — an outer one scales the whole thing again and puts the
-          // unit back under the floor (measured at 6.01dp for a whole-supply
-          // fee row). Fitting a widget that already fits itself is how a floor
-          // gets multiplied away.
-          KvAmount(
-            sompi,
-            role: KvAmountRole.row,
-            direction: direction,
-            fractionDigits: 8,
-            showUnit: true,
-            // **A fact row states a COST, and a cost is read for its digits**
-            // (BG-23, founder's call from the rendered comparison — D-230). The
-            // role default cannot decide this: `row` is also the home ledger,
-            // where a figure is a holding and the magnitude is the point. Here
-            // the figure is a fee, always below 1, so the magnitude is `0` in
-            // every case this surface will ever show and the weight belongs on
-            // the digits that are the fee. `Total` takes the same flag and is
-            // unaffected: above 1 every emphasis rule agrees, which is what
-            // stops a fee out-shouting the total it is part of.
-            emphasis: KvAmountEmphasis.significant,
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _FactLine(
+    label: label,
+    strongLabel: direction == KvMoneyDirection.outgoing,
+    // No `FittedBox`. `KvAmount` fits its own figure given a bounded width
+    // and keeps the unit OUT of that fit so its 11dp floor survives — an
+    // outer one scales the whole thing again and puts the unit back under the
+    // floor (measured at 6.01dp for a whole-supply fee row). Fitting a widget
+    // that already fits itself is how a floor gets multiplied away.
+    value: KvAmount(
+      sompi,
+      role: KvAmountRole.row,
+      direction: direction,
+      showUnit: true,
+      // **A fact row states a COST, and a cost is read for its digits**
+      // (BG-23, founder's call from the rendered comparison — D-230). The
+      // role default cannot decide this: `row` is also the home ledger,
+      // where a figure is a holding and the magnitude is the point. Here
+      // the figure is a fee, always below 1, so the magnitude is `0` in
+      // every case this surface will ever show and the weight belongs on
+      // the digits that are the fee. `Leaves your wallet` takes the same flag
+      // and is unaffected: above 1 every emphasis rule agrees, which is what
+      // stops a fee out-shouting the total it is part of.
+      emphasis: KvAmountEmphasis.significant,
+    ),
+  );
 }
 
-/// One dated fact: label left, wall-clock stamp right, on the same ruled grid
-/// the money rows use.
+/// One dated fact: label left, wall-clock stamp right, on the same grid.
 class _StampRow extends StatelessWidget {
   const _StampRow({required this.label, required this.at});
 
@@ -962,36 +1167,57 @@ class _StampRow extends StatelessWidget {
   final DateTime at;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
-    child: Wrap(
-      alignment: WrapAlignment.spaceBetween,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: KvSpace.m,
-      runSpacing: KvSpace.xs,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 13,
-            height: 19 / 13,
-            color: KvColor.inkDim,
-          ),
-        ),
-        Text(
-          formatStamp(at),
-          style: const TextStyle(
-            fontFamily: KvFont.mono,
-            fontSize: 13,
-            height: 20 / 13,
-            color: KvColor.ink,
-            fontFeatures: [FontFeature.tabularFigures()],
-          ),
-        ),
-      ],
+  Widget build(BuildContext context) => _FactLine(
+    label: label,
+    value: Text(
+      formatStamp(at),
+      textAlign: TextAlign.right,
+      style: const TextStyle(
+        fontFamily: KvFont.mono,
+        fontSize: 13,
+        height: 20 / 13,
+        color: KvColor.ink,
+        fontFeatures: [FontFeature.tabularFigures()],
+      ),
     ),
   );
+}
+
+/// `To` on the left, the contact's name on the right (`S7`).
+class _ToHead extends StatelessWidget {
+  const _ToHead({required this.address, required this.contacts});
+
+  final String address;
+  final ContactsScope? contacts;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = contacts;
+    if (scope == null) return const _CardLabel('To');
+    return ValueListenableBuilder<List<ContactDto>>(
+      valueListenable: scope.contacts,
+      builder: (context, _, _) {
+        final name = scope.nameFor(address);
+        return Row(
+          children: [
+            const _CardLabel('To'),
+            const SizedBox(width: KvSpace.m),
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerRight,
+                // Absent, not "Unknown", when the book does not know it: the
+                // seat is a name or nothing, and the offer to make one lives
+                // where there is room for a control (`S6b`, `S8`).
+                child: name == null
+                    ? const SizedBox.shrink()
+                    : KvContactName(name: name),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
 }
 
 /// The named post-signature wait (D-189): signing → broadcasting → waiting for
@@ -1255,28 +1481,48 @@ class _CardLabel extends StatelessWidget {
   );
 }
 
-/// The receipt's card (`S8`): what was sent, what it cost, where it stands and
-/// when — on the same ruled grid the review used, so the two read as one
-/// document rather than two designs of the same facts (BG-21).
+/// The receipt's card (`S8`): who it went to, what was sent, what it cost,
+/// where it stands and when — on the same ruled grid the review used, so the
+/// two read as one document rather than two designs of the same facts (BG-21).
 ///
-/// **The status row is deliberately absent.** `S8` draws `Settling · 1 of 10`,
-/// which is the retired vocabulary *and* a threshold typed into the UI. D-249
-/// requires both lifecycle thresholds to cross the FFI from `NetworkParams`,
-/// and UX-R3 owns that migration at T2 — so this receipt states the acceptance
-/// it can actually vouch for (the accepting block's own timestamp) and says
-/// nothing about depth until the seam exists.
+/// **Every value ends on one right edge** (`S8`, measured: 347.5 dp for all
+/// four rows, labels at 45.5). That is [_FactLine]'s job and the founder's
+/// note from the glass — *"let the details infront of them move to the other
+/// edge of the screen"*.
+///
+/// **The status row is here now, and it carries no new number.** It was left
+/// out at UX-R2 because `S8` draws `Settling · 1 of 10` — the retired
+/// vocabulary and a threshold typed into the UI, which D-249 forbids until
+/// both thresholds cross the FFI. What makes it buildable today is that
+/// neither is needed: `TxStatusDto.blueDepth` is a node-read depth that
+/// already crosses, and [KvBurialMark] already owns the ladder — `KvBurial`'s
+/// ratified `Seen → Confirmed → final` and its `safe`/`settled` thresholds,
+/// which live in one place and are read, never retyped. So the founder's
+/// *"numbers streams from 1 - 100 and says confirmed after 100 confirmations"*
+/// is exactly the shipped widget, pointed at this transaction. The vocabulary
+/// migration he named next (*"eventually it will be Accepted and Settled"*)
+/// is still D-248's and still R3's.
 class _ReceiptCard extends StatelessWidget {
   const _ReceiptCard({
     required this.summary,
     required this.returnsToSelf,
     required this.acceptedAt,
     required this.txid,
+    required this.status,
+    required this.contacts,
+    required this.onSaveContact,
   });
 
   final SignableSummaryDto summary;
   final bool returnsToSelf;
   final DateTime? acceptedAt;
   final String? txid;
+
+  /// The tracker's latest answer, or null while there is nothing to ask about.
+  final TxStatusDto? status;
+
+  final ContactsScope? contacts;
+  final VoidCallback onSaveContact;
 
   @override
   Widget build(BuildContext context) {
@@ -1296,20 +1542,17 @@ class _ReceiptCard extends StatelessWidget {
         children: [
           if (!returnsToSelf) ...[
             const SizedBox(height: KvSpace.s),
-            const Text(
-              'To',
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 13,
-                height: 19 / 13,
-                color: KvColor.inkMeta,
-              ),
-            ),
-            const SizedBox(height: KvSpace.xs),
-            KvAddress(
-              s.destination,
-              form: KvAddressForm.chunked,
-              plated: false,
+            _ReceiptHead(
+              address: s.destination,
+              // **What LEFT, not the amount** — §5's own words for this slot,
+              // and it removes a duplication `S8` does not have: the head, an
+              // `Amount` row and a `Left your wallet` row were three printings
+              // of two numbers, with the `risk` weight on the wrong one
+              // (`ux-auditor`, UX-R2B). The head is now the total and the two
+              // rows below explain it.
+              sompi: returnsToSelf ? s.amountSompi : s.totalSompi,
+              contacts: contacts,
+              onSaveContact: onSaveContact,
             ),
             const SizedBox(height: KvSpace.s),
             const _FactRule(),
@@ -1317,12 +1560,51 @@ class _ReceiptCard extends StatelessWidget {
           _FactRow(label: 'Amount', sompi: s.amountSompi),
           const _FactRule(),
           _FactRow(label: 'Network fee', sompi: s.feeSompi),
-          if (!returnsToSelf) ...[
+          // **How deeply buried, streamed** — the ladder's own widget, so the
+          // receipt and the ledger cannot disagree about one transaction
+          // (BG-21). It appears once the tracker has answered at all; before
+          // that there is nothing to say and it says nothing.
+          if (status != null) ...[
             const _FactRule(),
-            _FactRow(
-              label: 'Left your wallet',
-              sompi: s.totalSompi,
-              direction: KvMoneyDirection.outgoing,
+            _FactLine(
+              label: 'Status',
+              valueShare: 0.55,
+              // **The tracker's own kind decides the reading — this surface
+              // asserts nothing** (INV-9, BG-20).
+              //
+              // The first cut hardcoded `TxChipState.accepted` and consumed
+              // only the depth, which made two of the DTO's five kinds
+              // indistinguishable from a healthy send: `Stalled` (the tracker's
+              // explicit *submitted, nothing accepted it past 60 s*) and
+              // `Displaced` (the accepting block left the chain) both arrive
+              // with `blue_depth: None`, and a null depth over `accepted` falls
+              // to the `seen` rung — so both printed `Seen —`, in amber, on the
+              // one surface a user consults to decide whether a payment needs
+              // sending again. Caught independently by `wallet-security` and
+              // `consensus` at UX-R2B; the mapper it should have used
+              // (`chipStateOfAcceptance`) was already imported *beside* it,
+              // which is L143 in one line.
+              value: status!.kind == TxStatusKind.displaced
+                  // **Displaced is not a rung, so it does not borrow one.**
+                  // The burial ladder measures how deep an accepted
+                  // transaction is; a displaced one has no depth to be at, and
+                  // dressing it as `Seen —` would say the chain still holds it.
+                  // The sentence is the thread's own (BG-21) — the wallet says
+                  // this in exactly one wording — and it is reversible by
+                  // construction: the next poll lifts it if the network
+                  // re-accepts.
+                  ? const _StatusSentence('Displaced by the network')
+                  : KvBurialMark(
+                      state: chipStateOfAcceptance(status!.kind),
+                      confirmations: status!.blueDepth?.toInt(),
+                      // **`pending`, so an unknown depth reads `Seen —`.** The
+                      // rung arithmetic only consults maturity when there is no
+                      // depth to consult, and claiming `Confirmed` off a
+                      // missing reading is the exact overclaim BG-20 exists to
+                      // stop.
+                      maturity: MaturityState.pending,
+                      fontSize: 13,
+                    ),
             ),
           ],
           // **The accepting BLOCK's own timestamp** — `TxStatusDto
@@ -1339,6 +1621,29 @@ class _ReceiptCard extends StatelessWidget {
             const _FactRule(),
             _StampRow(label: 'Accepted', at: acceptedAt!),
           ],
+          // The id, under the acceptance (founder, 2026-09-04). **Truncated in
+          // the middle, never at one end**: a txid is compared by both ends,
+          // and *Copy ID* below copies every character of it.
+          if (txid != null) ...[
+            const _FactRule(),
+            _FactLine(
+              label: 'Transaction ID',
+              valueShare: 0.66,
+              value: Text(
+                _shortId(txid!),
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 13,
+                  height: 20 / 13,
+                  fontWeight: FontWeight.w500,
+                  fontVariations: KvWeight.w500,
+                  color: KvColor.ink,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: KvSpace.s),
         ],
       ),
@@ -1346,8 +1651,205 @@ class _ReceiptCard extends StatelessWidget {
   }
 }
 
-/// Copy ID · Explorer (`S8`) — the two quiet things worth doing with a
-/// transaction that has landed.
+/// A status the burial ladder has no rung for, said in words with a `warn`
+/// lamp — the same dot-and-words shape `KvBurialMark` wears, so the row reads
+/// as one channel rather than two (BG-21).
+class _StatusSentence extends StatelessWidget {
+  const _StatusSentence(this.words);
+
+  final String words;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 6,
+        height: 6,
+        decoration: const BoxDecoration(
+          color: KvColor.warn,
+          shape: BoxShape.circle,
+        ),
+      ),
+      const SizedBox(width: KvSpace.xs),
+      Flexible(
+        child: Text(
+          words,
+          maxLines: 2,
+          textAlign: TextAlign.right,
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            height: 18 / 13,
+            fontWeight: FontWeight.w500,
+            fontVariations: KvWeight.w500,
+            // The dot carries the hue; the words do not (§1.5).
+            color: KvColor.inkDim,
+          ),
+        ),
+      ),
+    ],
+  );
+}
+
+/// A 64-character txid, shortened for a row that has to hold something else
+/// too: eight from each end, which is what a user compares against a block
+/// explorer. The whole string is one tap away on *Copy ID*.
+String _shortId(String txid) => txid.length <= 20
+    ? txid
+    : '${txid.substring(0, 8)}\u2026'
+          '${txid.substring(txid.length - 8)}';
+
+/// The receipt card's head (`S8`): the disc, *To Mara* over the compact
+/// address, and what left on the right.
+///
+/// **When the book does not know the address, the name's seat becomes the
+/// offer to fill it** (founder, 2026-09-04: *"if not, it shouldn't say
+/// unknown, i change my mind, just put 'save as contact' where it says 'To
+/// Mara'"*). It is the best moment in the app to ask: the user has just chosen
+/// to send here, so the address has earned a name — and the row still shows
+/// the address either way, because a name is never what a funds surface is
+/// checked against (BG-15).
+class _ReceiptHead extends StatelessWidget {
+  const _ReceiptHead({
+    required this.address,
+    required this.sompi,
+    required this.contacts,
+    required this.onSaveContact,
+  });
+
+  final String address;
+  final BigInt sompi;
+  final ContactsScope? contacts;
+  final VoidCallback onSaveContact;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = contacts;
+    if (scope == null) return _row(null);
+    return ValueListenableBuilder<List<ContactDto>>(
+      valueListenable: scope.contacts,
+      builder: (context, _, _) => _row(scope.nameFor(address)),
+    );
+  }
+
+  Widget _row(String? name) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final avatar = KvContactAvatar(name: name);
+        final who = Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (name == null)
+              KvContactAction(
+                label: 'Save as contact',
+                tone: KvColor.primaryMuted,
+                onTap: onSaveContact,
+              )
+            else
+              Text(
+                'To $name',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 15,
+                  height: 20 / 15,
+                  fontWeight: FontWeight.w600,
+                  fontVariations: KvWeight.w600,
+                  color: KvColor.ink,
+                ),
+              ),
+            KvAddress(address, fontSize: 12),
+          ],
+        );
+        // `S8`, measured: `amountReceipt`'s 18, in `risk` with its sign — what
+        // left, at a glance, before any row is read.
+        final figure = KvAmount(
+          sompi,
+          role: KvAmountRole.row,
+          size: 18,
+          direction: KvMoneyDirection.outgoing,
+          showUnit: false,
+        );
+
+        // **Does the address still fit beside the figure?** Measured, because
+        // guessing here produced two defects in one sitting: unbounded, the
+        // address scaled to 7.5 dp at the floor; given a floor and no room, it
+        // wrapped INSIDE a row that had none and collided with the amount
+        // (both found in the 320 dp / 1.3× frame, not argued).
+        //
+        // So the row asks the question rather than assuming an answer, and
+        // when the answer is no it puts the figure on its own line — the same
+        // fallback `_FactLine` takes, and it keeps the right edge.
+        final painter = TextPainter(
+          text: TextSpan(
+            text: truncateAddressPayload(address),
+            style: const TextStyle(fontFamily: KvFont.mono, fontSize: 12),
+          ),
+          textDirection: TextDirection.ltr,
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout();
+        final needed = painter.width;
+        painter.dispose();
+        // What the column would get: the row less the disc, the gaps, and the
+        // widest the figure is allowed to be.
+        final room =
+            constraints.maxWidth -
+            KvSpace.rowDisc -
+            KvSpace.sm -
+            KvSpace.s -
+            150;
+
+        if (needed <= room) {
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              avatar,
+              const SizedBox(width: KvSpace.sm),
+              Expanded(child: who),
+              const SizedBox(width: KvSpace.s),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 150),
+                child: figure,
+              ),
+            ],
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                avatar,
+                const SizedBox(width: KvSpace.sm),
+                Expanded(child: who),
+              ],
+            ),
+            const SizedBox(height: KvSpace.s),
+            Align(alignment: Alignment.centerRight, child: figure),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// `Copy ID` · `Explorer` (`S8`) — the two quiet things worth doing with a
+/// transaction that has landed, **side by side**.
+///
+/// The founder's note: *"Make view on explorer be a but beside the Copy ID,
+/// let it just say `<icon> Explorer` … let it be like the screenshot
+/// example."* It was a full-width card under the copy action; the render draws
+/// a pair of text buttons, centred, and that is what this is.
+///
+/// **The disclosure came with it, shrunk rather than dropped.** D-192 is why
+/// the exit ever named its destination — a departure you cannot name is not
+/// one you consented to — and `KvExplorerExit`'s compact register keeps the
+/// host and the IP on one 11 dp line under the button. One widget, two
+/// registers (BG-21).
 class _ReceiptActions extends StatelessWidget {
   const _ReceiptActions({
     required this.txid,
@@ -1361,9 +1863,13 @@ class _ReceiptActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      // The caption under the explorer button makes that child taller; the
+      // two buttons still line up because both are measured from the top.
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Center(
+        Flexible(
           child: Semantics(
             button: true,
             label: 'Copy the transaction id',
@@ -1412,17 +1918,17 @@ class _ReceiptActions extends StatelessWidget {
             ),
           ),
         ),
-        // **The explorer exit, and the suspended law discharged.** It is the
-        // same widget the transaction detail uses: one rendering of *"this
-        // goes to a third party, here is which one and here is what it will
-        // see"* (BG-21). It disappears entirely when the seams are absent,
-        // which is what a control with nowhere to go should do (BG-12).
+        // It disappears entirely when the seams are absent, which is what a
+        // control with nowhere to go should do (BG-12).
         if (explorerUrl != null) ...[
-          const SizedBox(height: KvSpace.s),
-          KvExplorerExit(
-            subject: txid,
-            resolve: explorerUrl!,
-            open: openUrl ?? (_) async => false,
+          const SizedBox(width: KvSpace.m),
+          Flexible(
+            child: KvExplorerExit(
+              subject: txid,
+              resolve: explorerUrl!,
+              open: openUrl ?? (_) async => false,
+              compact: true,
+            ),
           ),
         ],
       ],

@@ -1491,10 +1491,7 @@ void main() {
       expect(prepared, 'c1');
       // The B7 ceremony renders Rust's numbers: the refund is the headline.
       expect(find.text('Confirm accept'), findsOneWidget);
-      expect(
-        find.textContaining('Hold to send 0.20000000 KAS'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('Hold to send 0.20 KAS'), findsOneWidget);
     });
 
     testWidgets('active rows open the thread', (tester) async {

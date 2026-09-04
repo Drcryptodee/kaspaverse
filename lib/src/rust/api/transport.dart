@@ -10,7 +10,7 @@ import 'send.dart';
 
 // These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `chain_stamp`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `ParkedAcceptance`, `PinPolicy`, `ReplayGap`, `TransportHub`, `TransportIntent`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -133,6 +133,29 @@ Future<String?> transportSetContactName({
   address: address,
   name: name,
 );
+
+/// Every saved contact, sorted by name.
+///
+/// The write side (`transport_set_contact_name`) has existed since the
+/// messaging lane needed to label a thread; this is the read that lets a
+/// surface OTHER than a conversation ask "who do I know?" — the Send screen's
+/// contacts card and the receipt's "save as contact".
+///
+/// **Nothing secret crosses.** An address is public by construction and a name
+/// is the user's own label for it; neither is key material, and the store is
+/// device-local plaintext JSON by design (`contact_names.rs`) — this read adds
+/// no exposure the write did not already have.
+///
+/// **Sorted here rather than at each caller.** Two surfaces now render this
+/// list, and an order computed twice is an order that will disagree once
+/// (BG-21). The comparator folds case before comparing, so `dev fund` sits
+/// beside `Dev Fund` instead of every capital being banished to the top, and
+/// ties break on the address so the order is total rather than merely stable.
+///
+/// Infallible in practice: a missing or corrupt file reads as "no contacts"
+/// (`ContactNames::load`), which costs the user a list and never a send.
+Future<List<ContactDto>> transportContactNames() =>
+    RustLib.instance.api.crateApiTransportTransportContactNames();
 
 /// Phase 1 (accept an inbound handshake): resolve the SENDER via the node's
 /// own return-address lookup (consensus data, never payload content — §0.3:
@@ -527,6 +550,30 @@ class AttachmentDto {
           text == other.text &&
           broken == other.broken &&
           viewMime == other.viewMime;
+}
+
+/// One saved contact: the address, and the name the user gave it.
+///
+/// The pair travels together because a name without its address is not a
+/// contact — it is a label the wallet cannot route to, and every surface that
+/// renders a name must be able to show the address it stands for (BG-15: a
+/// name never replaces an address on a funds surface).
+class ContactDto {
+  final String address;
+  final String name;
+
+  const ContactDto({required this.address, required this.name});
+
+  @override
+  int get hashCode => address.hashCode ^ name.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ContactDto &&
+          runtimeType == other.runtimeType &&
+          address == other.address &&
+          name == other.name;
 }
 
 /// Where "add this contact" should actually go.

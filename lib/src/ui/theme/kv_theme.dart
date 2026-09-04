@@ -48,8 +48,9 @@ TextTheme kvTextTheme() {
       letterSpacing: -0.5,
       mono: true,
     ),
-    // amountScreen — a screen-level amount. At signing this carries all eight
-    // decimals (BG-6).
+    // amountScreen — a screen-level amount. At signing it carries every
+    // significant decimal to a minimum of two, like every other surface
+    // (BG-5/BG-6 as amended, D-267).
     displaySmall: _slot(
       family: KvFont.mono,
       size: 32,

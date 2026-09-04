@@ -4570,6 +4570,78 @@ pub fn transport_set_contact_name(
     Ok(stored)
 }
 
+/// One saved contact: the address, and the name the user gave it.
+///
+/// The pair travels together because a name without its address is not a
+/// contact — it is a label the wallet cannot route to, and every surface that
+/// renders a name must be able to show the address it stands for (BG-15: a
+/// name never replaces an address on a funds surface).
+#[derive(Clone, Debug)]
+pub struct ContactDto {
+    pub address: String,
+    pub name: String,
+}
+
+/// Every saved contact, sorted by name.
+///
+/// The write side (`transport_set_contact_name`) has existed since the
+/// messaging lane needed to label a thread; this is the read that lets a
+/// surface OTHER than a conversation ask "who do I know?" — the Send screen's
+/// contacts card and the receipt's "save as contact".
+///
+/// **Nothing secret crosses.** An address is public by construction and a name
+/// is the user's own label for it; neither is key material, and the store is
+/// device-local plaintext JSON by design (`contact_names.rs`) — this read adds
+/// no exposure the write did not already have.
+///
+/// **Sorted here rather than at each caller.** Two surfaces now render this
+/// list, and an order computed twice is an order that will disagree once
+/// (BG-21). The comparator folds case before comparing, so `dev fund` sits
+/// beside `Dev Fund` instead of every capital being banished to the top, and
+/// ties break on the address so the order is total rather than merely stable.
+///
+/// Infallible in practice: a missing or corrupt file reads as "no contacts"
+/// (`ContactNames::load`), which costs the user a list and never a send.
+pub fn transport_contact_names() -> Result<Vec<ContactDto>, AppError> {
+    let dir = vault::transport_store_dir()?;
+    let names = kaspaverse_chain::ContactNames::load(&dir);
+    let mut out: Vec<ContactDto> = names
+        .names
+        .into_iter()
+        // **Cleaned and validated on the way OUT, not only on the way in.**
+        //
+        // The write has sanitized since `sanitize_name` existed — but the
+        // deceptive-format filter (bidi overrides, zero-width joiners, the BOM)
+        // landed one commit AFTER the store did, so a name written in that
+        // window carries only control-character filtering. Nothing re-cleaned
+        // it, and this read now carries names onto a funds surface, where an
+        // RLO inside `This matches <name> in your contacts.` reorders the
+        // sentence around it (`wallet-security-auditor`, UX-R2B). Re-running
+        // the same function makes the read total against any past build and
+        // against a hand-edited `contact.names`.
+        //
+        // The address is re-checked for the same reason and by the pinned
+        // crate's own parse (INV-9): a row whose key does not parse is a
+        // tappable destination the wallet cannot route to, and it is dropped
+        // rather than offered. Both filters are free — this file is tens of
+        // rows, read once per mount.
+        .filter(|(address, _)| validate_mainnet_address(address).is_ok())
+        .map(|(address, name)| ContactDto {
+            address,
+            name: kaspaverse_chain::sanitize_name(&name),
+        })
+        .filter(|c| !c.name.is_empty())
+        .collect();
+    out.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.address.cmp(&b.address))
+    });
+    log::info!("transport: {} contact(s) read", out.len());
+    Ok(out)
+}
+
 /// Where "add this contact" should actually go.
 #[derive(Clone, Debug)]
 pub struct ContactRouteDto {

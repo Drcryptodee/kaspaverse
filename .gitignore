@@ -54,3 +54,8 @@ AGENTS.md
 .claude/
 docs/
 # gate:internal-record-end
+
+# Golden-diff debris from an opt-in `KV_PREVIEW=1` render. Regenerable, binary,
+# and outside the gate (preview tests skip unless requested) — so an `add -A` at
+# a wrap would commit it into `main` unnoticed (`dependency-steward`, UX-R2B).
+test/preview/failures/

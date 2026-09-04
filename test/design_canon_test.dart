@@ -194,8 +194,12 @@ void main() {
         _host(KvAmount(BigInt.from(315400), role: KvAmountRole.screen)),
       );
       expect(
+        // `3154`, not `315400`: the founder withdrew the signing surface's
+        // fixed eight on 2026-09-04 — *"i like how fees amount is elaborated
+        // from the digits … but lets not have the 000 after the digits too"*.
+        // The emphasis boundary is unchanged; only the padding behind it went.
         runs(tester),
-        [('0.00', false), ('315400', true)],
+        [('0.00', false), ('3154', true)],
         reason:
             'the bright run is the leading zero, which is `0` for every fee '
             'this wallet will ever build',
@@ -219,7 +223,7 @@ void main() {
       );
       expect(
         runs(tester),
-        [('12', true), ('.40315400', false)],
+        [('12', true), ('.403154', false)],
         reason:
             'the sub-1 rule reached an amount above 1 — a fee must not out-shout '
             'the total it is part of',
@@ -238,11 +242,11 @@ void main() {
       final feeRuns = tester
           .widgetList<Text>(find.byType(Text))
           .map((t) => t.data ?? '')
-          .where((t) => t.contains('315400') || t == '0.00')
+          .where((t) => t.contains('3154') || t == '0.00')
           .toList();
       expect(
         feeRuns,
-        containsAll(['0.00', '315400']),
+        containsAll(['0.00', '3154']),
         reason:
             'the fee renders as one run, so the weight is still on the leading '
             'zero: $feeRuns',
@@ -543,7 +547,7 @@ Widget _host(Widget child) => MaterialApp(
   ),
 );
 
-const String _holdLabel = 'Hold to send 12.40000000 KAS';
+const String _holdLabel = 'Hold to send 12.40 KAS';
 
 Widget _holdHost() => _host(
   SigningCeremony(

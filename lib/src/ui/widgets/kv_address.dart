@@ -156,30 +156,79 @@ class KvAddress extends StatelessWidget {
     // eight of the payload, which is the entropy the compact form exists
     // to keep. Clipping loses them silently; an ellipsis loses them and
     // looks correct doing it. Neither is acceptable, so neither happens.
-    return FittedBox(
-      fit: BoxFit.scaleDown,
-      alignment: AlignmentDirectional.centerStart,
-      child: Text.rich(
+    //
+    // **And the scaling has a FLOOR, which it did not have.** This doc has
+    // claimed "11 dp is the floor" since the widget shipped and nothing
+    // enforced it: an unbounded `FittedBox` will scale to whatever the parent
+    // leaves, and on the receipt's head row at 320 dp / 1.3× it reached
+    // **7.52 dp** — an address rendered below the size at which it can be
+    // compared, on the surface whose whole job is being compared (`ux-auditor`,
+    // UX-R2B, measured against the real widgets).
+    //
+    // So below the floor it stops shrinking and **wraps to a second line**
+    // instead. A break is legible; 7 dp is not. It breaks at the scheme, so
+    // both weighted ends stay whole on the line that carries them — the
+    // property the compact form exists for survives the reflow, which is why
+    // this is the one place the run may become two.
+    final span = TextSpan(
+      children: [
+        if (scheme.isNotEmpty)
+          TextSpan(
+            text: scheme,
+            style: base.copyWith(color: KvColor.inkMeta),
+          ),
         TextSpan(
-          children: [
-            if (scheme.isNotEmpty)
-              TextSpan(
-                text: scheme,
-                style: base.copyWith(color: KvColor.inkMeta),
-              ),
-            TextSpan(
-              text: payload,
-              style: base.copyWith(color: KvColor.ink),
-            ),
-          ],
+          text: payload,
+          style: base.copyWith(color: KvColor.ink),
         ),
-        maxLines: 1,
-        overflow: TextOverflow.clip,
-        softWrap: false,
-        semanticsLabel: _spokenTail,
-      ),
+      ],
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scaler = MediaQuery.textScalerOf(context);
+        final painter = TextPainter(
+          text: span,
+          textDirection: Directionality.of(context),
+          textScaler: scaler,
+          maxLines: 1,
+        )..layout();
+        final needed = painter.width;
+        painter.dispose();
+        final room = constraints.maxWidth;
+        // The scale a `FittedBox` would apply, against the scale at which the
+        // glyphs land on the floor. `fontSize` is the unscaled size; the
+        // painter measured the scaled one, so both sides are compared in the
+        // same units.
+        final wouldScaleTo = room.isFinite && needed > room && needed > 0
+            ? scaler.scale(fontSize) * (room / needed)
+            : scaler.scale(fontSize);
+        if (wouldScaleTo >= floor) {
+          return FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: AlignmentDirectional.centerStart,
+            child: Text.rich(
+              span,
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              softWrap: false,
+              semanticsLabel: _spokenTail,
+            ),
+          );
+        }
+        return Text.rich(
+          span,
+          maxLines: 2,
+          softWrap: true,
+          semanticsLabel: _spokenTail,
+        );
+      },
     );
   }
+
+  /// **The size below which an address stops being comparable** (§2, BG-14).
+  /// It is a floor on the rendered glyphs, so a text scale never pushes
+  /// through it from the other side.
+  static const double floor = 11;
 
   /// **Which groups carry the weight**, and it is one rule with two renderers.
   ///

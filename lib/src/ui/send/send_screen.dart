@@ -15,7 +15,10 @@ import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
 import '../widgets/kv_check.dart';
 import '../widgets/kv_chrome.dart';
+import '../widgets/kv_contact.dart';
+import '../widgets/kv_fiat.dart';
 import '../widgets/kv_glyph.dart';
+import '../widgets/kv_rows.dart';
 import '../widgets/kv_two_pane.dart';
 import '../widgets/kv_keypad.dart';
 import '../widgets/kv_status_chip.dart';
@@ -51,16 +54,13 @@ import 'signing_ceremony.dart';
 ///    scanner into its own sitting (2026-09-04) because a camera is a new
 ///    dependency and a new permission; §8 forbids a control that answers a tap
 ///    and does nothing, so the seat stays empty until it works.
-///  * **No Recent / Contacts card, and no "Save as contact".** `S6a` and `S6b`
-///    draw both. Neither is buildable: `ActivityRecord` carries no counterparty
-///    (§9.15 — the bridge field rides UX-R3) and the only contact store in the
-///    app is the messaging one, whose join the messages group owns. A list of
-///    names the wallet cannot actually produce is worse than no list.
-///  * **No fiat under the figure.** `S6` draws `≈ $0.34`. BG-5 puts fiat under
-///    a balance or beside history and **never on a spend** — the number being
-///    typed is money leaving, and a second figure beside it, from a rate that
-///    can be stale, can only compete with the one that matters. This is one of
-///    §0's four clauses that do not bend to taste.
+///  * **No `RECENT` tab on the contacts card, and no "you last sent here"
+///    date.** `S6a` heads the card `RECENT` with a `Contacts` link opposite and
+///    `S6b` dates the match. Both need a counterparty on `ActivityRecord`
+///    (§9.15/§9.31/§9.32), which does not exist — and a date is exactly the
+///    corroborating detail that must not be invented on a surface a user is
+///    about to trust with money. The card itself, *Save as contact* and the
+///    match line all ship (D-268).
 ///  * **No fee tier.** `S6` draws `Network fee · Standard ›` with a chevron.
 ///    The bridge prices one fee — the Generator's — and there is no tier to
 ///    pick, so the row is a **reading** and not a control: no chevron, no tap.
@@ -81,6 +81,8 @@ class SendScreen extends StatefulWidget {
     this.prepareSweep,
     this.explorerUrl,
     this.openUrl,
+    this.fiat,
+    this.contacts,
   });
 
   /// Spendable (mature) balance, for the informational "available" line and
@@ -142,6 +144,25 @@ class SendScreen extends StatefulWidget {
   /// result means no floor is known, and then nothing is ever blocked by one —
   /// the Generator on `prepare` stays the single authority either way.
   final Future<BigInt?> Function()? minimumSendable;
+
+  /// The `≈` restatement under the figure being typed (`S6`), and under the
+  /// ceremony's restatement of it (`S7`).
+  ///
+  /// **Fiat on a spend surface is a founder ruling** (2026-09-04) that
+  /// withdrew BG-5's *"never on a spend"* clause. The clause existed because a
+  /// second figure beside the one that matters can only compete with it; what
+  /// answers that is subordination, which `KvFiatLine` carries on every seat
+  /// — half the scale, `inkMeta`, and its age the moment it could mislead.
+  /// The safety half of BG-5 is untouched: fiat never prices a fee, never
+  /// sizes a spend, and is never what a signature commits to.
+  ///
+  /// Null ⇒ no rate seam is wired and no line is drawn.
+  final FiatScope? fiat;
+
+  /// The address book (`S6a` · `S6b`). Null ⇒ no contacts card, no name on the
+  /// recipient row, and no *Save as contact* — every one of which is an
+  /// addition to the screen, so its absence costs nothing that was there.
+  final ContactsScope? contacts;
 
   /// The amount field. Named because the screen now has two text fields and a
   /// test must be able to say which one it means.
@@ -256,6 +277,7 @@ class _SendScreenState extends State<SendScreen> {
   @override
   void initState() {
     super.initState();
+    unawaited(widget.contacts?.refresh() ?? Future<void>.value());
     _address.addListener(_onChanged);
     _addressFocus.addListener(_onChanged);
     _amountFocus.addListener(() => setState(() {}));
@@ -448,6 +470,41 @@ class _SendScreenState extends State<SendScreen> {
     }
   }
 
+  /// Fill the field from the address book (`S6a`).
+  ///
+  /// It **fills the field rather than skipping to step 2**, deliberately. The
+  /// contact row is a shortcut for typing 67 characters, not a shortcut past
+  /// checking them: the address lands in the field, the checked line and its
+  /// mark appear over it exactly as they do for a paste, and Continue is still
+  /// a deliberate tap. A tap that jumped straight to the keypad would make a
+  /// stale or poisoned book the last word on where money goes.
+  void _pickContact(String address) {
+    _address.text = address;
+    _addressFocus.unfocus();
+  }
+
+  /// Name the address currently in the field (`S6b`'s *Save as contact*), or
+  /// rename one that already has a name.
+  Future<void> _saveContact() async {
+    final scope = widget.contacts;
+    if (scope == null) return;
+    final address = _destination;
+    final name = await showContactNameSheet(
+      context,
+      address: address,
+      initial: scope.nameFor(address),
+    );
+    if (name == null || !mounted) return;
+    try {
+      await scope.save(address, name);
+    } catch (e) {
+      // A failed save is a failed save — it is not a send, and it must not
+      // read like one. The screen's own error slot says so and the address in
+      // the field is untouched.
+      if (mounted) setState(() => _error = displayError(e));
+    }
+  }
+
   Future<void> _review() async {
     final amountSompi = _amountSompi;
     if (amountSompi == null || amountSompi <= BigInt.zero) return;
@@ -499,6 +556,11 @@ class _SendScreenState extends State<SendScreen> {
         onLeftInFlight: () => leftInFlight = true,
         explorerUrl: widget.explorerUrl,
         openUrl: widget.openUrl,
+        // The ceremony draws the same price and the same name this screen
+        // does — one scope, forwarded, so the two surfaces cannot disagree
+        // about who the recipient is or what the amount is worth.
+        fiat: widget.fiat,
+        contacts: widget.contacts,
         onSendAnother: () {
           another = true;
           _sendAnother();
@@ -675,7 +737,11 @@ class _SendScreenState extends State<SendScreen> {
               ),
               const SizedBox(height: KvSpace.sm),
               if (valid)
-                const _ValidLine()
+                _CheckedLine(
+                  address: _destination,
+                  contacts: widget.contacts,
+                  onSave: _saveContact,
+                )
               else
                 const Text(
                   // The render promises that a `kaspa:` link with an amount
@@ -704,6 +770,40 @@ class _SendScreenState extends State<SendScreen> {
                   maxLines: null,
                 ),
               ],
+              // **The address book** (`S6a`). Hidden while an address is being
+              // checked: the card is a way of FILLING the field, and a list of
+              // other people to send to, sitting under an address the user is
+              // in the middle of verifying, is an invitation to tap the wrong
+              // one.
+              // **This screen's error slot, on the step that can produce one.**
+              // `_saveContact` writes `_error` and only `_amountStep` rendered
+              // it, so a failed *Save as contact* on step 1 was a control that
+              // answered a tap and did nothing — §8's one outright prohibition
+              // (`ux-auditor`, UX-R2B).
+              if (_error != null) ...[
+                const SizedBox(height: KvSpace.sm),
+                KvStatusChip(
+                  tone: KvLampTone.warn,
+                  words: _error!,
+                  plated: true,
+                  maxLines: null,
+                ),
+              ],
+              // It arrives and leaves on the one easing (BG-24): a 240 dp card
+              // cutting in when the read answers, or out on the first
+              // keystroke, is exactly the change this rule exists to account
+              // for.
+              AnimatedSize(
+                duration: KvMotion.calm,
+                curve: KvMotion.curve,
+                alignment: Alignment.topCenter,
+                child: !valid && _address.text.trim().isEmpty
+                    ? _ContactsCard(
+                        contacts: widget.contacts,
+                        onPick: _pickContact,
+                      )
+                    : const SizedBox(width: double.infinity),
+              ),
               const SizedBox(height: KvSpace.l),
             ],
           ),
@@ -730,6 +830,12 @@ class _SendScreenState extends State<SendScreen> {
   Widget _amountStep(BigInt? mature, {required bool stale}) {
     final block = _amountBlock(mature, stale: stale);
     final gutter = KvWindow.of(context).gutter;
+    // **Keyed off the KEYBOARD, not off focus**: Back dismisses the IME without
+    // dropping focus, so a `hasFocus` predicate left the pad hidden with the
+    // keyboard already gone — a dead void where the digits should be (found on
+    // glass). `viewInsetsOf` also rebuilds as the IME animates, so the pad
+    // yields the moment it starts rising rather than after it has arrived.
+    final imeUp = MediaQuery.viewInsetsOf(context).bottom > 0;
     return Column(
       children: [
         Expanded(
@@ -738,14 +844,28 @@ class _SendScreenState extends State<SendScreen> {
             padding: EdgeInsets.symmetric(horizontal: gutter),
             children: [
               const SizedBox(height: KvSpace.s),
-              _RecipientRow(address: _destination, onEdit: _back),
+              _RecipientRow(
+                address: _destination,
+                contacts: widget.contacts,
+                onEdit: _back,
+              ),
               const SizedBox(height: KvSpace.xl),
               // **The figure is the subject of this screen**, and it is being
               // typed: mono 56 (`S6`, measured — cap 41.0 dp against the
               // keypad's 22 dp calibration), which is a step above the balance
               // hero because a balance is read and this is written.
               _TypedAmount(controller: _amountField, focusNode: _amountFocus),
-              const SizedBox(height: KvSpace.s20),
+              const SizedBox(height: KvSpace.s10),
+              // The `≈` price, under the figure it restates (`S6`, founder
+              // 2026-09-04). It reads the typed amount, so the two can never
+              // disagree, and it renders nothing at all when no rate is wired
+              // or the user has switched fiat off.
+              KvFiatLine(
+                fiat: widget.fiat,
+                sompi: _amountSompi,
+                alignment: MainAxisAlignment.center,
+              ),
+              const SizedBox(height: KvSpace.m),
               _Shares(
                 mature: widget.mature,
                 stale: _stale,
@@ -755,23 +875,19 @@ class _SendScreenState extends State<SendScreen> {
                 },
                 onMax: widget.prepareSweep == null ? null : _reviewSweep,
               ),
-              // **The fee, priced by the Generator over the real coins**, as
-              // the amount is typed — so the cost is on the glass BEFORE
-              // Review, not after it. It appears only when there is a
-              // transaction to price and vanishes the instant the amount
-              // changes, so the figure on screen is never one built for a
-              // different amount.
+              // **The cost section keeps its seat whether or not there is a
+              // cost yet** (founder, on glass 2026-09-04: *"let network fee
+              // card have its own section"*).
               //
-              // No `≈`, and that is earned rather than asserted: the probe
-              // runs the SAME two-shape build and the same `shipped_shape`
-              // decision `prepare_send` runs, so the ceremony prints this
-              // number. The first cut priced one shape and claimed the same
-              // thing, and was wrong by up to 0.001118 KAS on the founder's
-              // own wallet (`consensus-auditor`, UX-4B).
-              if (_fee != null) ...[
-                const SizedBox(height: KvSpace.m),
-                _FeeRow(sompi: _fee!),
-              ],
+              // It used to appear only once a fee had been priced, which put a
+              // 52 dp row in and out of the layout as the user typed — and
+              // because the keypad sat in the same scroll, every appearance
+              // shoved the digits down and every disappearance pulled them
+              // back. The keys moved under the thumb. Two changes fix it and
+              // both are structural: the row is always here, and the pad now
+              // lives outside the scroll entirely.
+              const SizedBox(height: KvSpace.m),
+              _FeeRow(sompi: _fee),
               if (block?.notice != null) ...[
                 const SizedBox(height: KvSpace.sm),
                 KvStatusChip(
@@ -790,49 +906,47 @@ class _SendScreenState extends State<SendScreen> {
                   maxLines: null,
                 ),
               ],
-              // **The pad steps aside for the system keyboard and comes back
-              // when it closes** (founder, 2026-08-30). Two keyboards at once
-              // is not a layout.
-              //
-              // **Keyed off the KEYBOARD, not off focus**: Back dismisses the
-              // IME without dropping focus, so a `hasFocus` predicate left the
-              // pad hidden with the keyboard already gone — a dead void where
-              // the digits should be (found on glass). `viewInsetsOf` also
-              // rebuilds as the IME animates, so the pad yields the moment it
-              // starts rising rather than after it has arrived.
-              AnimatedSize(
-                duration: KvMotion.calm,
-                curve: KvMotion.curve,
-                alignment: Alignment.topCenter,
-                child: MediaQuery.viewInsetsOf(context).bottom > 0
-                    ? const SizedBox(width: double.infinity)
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const SizedBox(height: KvSpace.l),
-                          KvKeypad.amount(
-                            onChar: _key,
-                            onBackspace: _backspace,
-                          ),
-                        ],
-                      ),
-              ),
               const SizedBox(height: KvSpace.m),
             ],
           ),
+        ),
+        // **The pad is furniture, not content** (`S6`, and the founder's own
+        // complaint about it moving). Below the scroll, so nothing that
+        // appears above it — a fee, an amber notice, an error — can shift a
+        // key out from under the thumb it is already travelling to.
+        //
+        // **The pad steps aside for the system keyboard and comes back when it
+        // closes** (founder, 2026-08-30). Two keyboards at once is not a
+        // layout.
+        AnimatedSize(
+          duration: KvMotion.calm,
+          curve: KvMotion.curve,
+          alignment: Alignment.bottomCenter,
+          child: imeUp
+              ? const SizedBox(width: double.infinity)
+              : Padding(
+                  padding: EdgeInsets.fromLTRB(gutter, KvSpace.s, gutter, 0),
+                  child: KvKeypad.amount(onChar: _key, onBackspace: _backspace),
+                ),
         ),
         _Foot(
           gutter: gutter,
           child: KvAction(
             // Names the action and its object (BG-11). The figure is the
-            // user's own string, so D-210's trim governs it — BG-6's fixed
-            // eight belong to the surface that restates what was BUILT, and
-            // this screen has built nothing.
-            label: _amount.isEmpty ? 'Review this send' : 'Review $_amount KAS',
+            // user's own string, and D-210's trim governs it — as it now
+            // governs the surface that restates what was BUILT too (D-267),
+            // so the label here and the restatement there print one form.
+            // **The trimmed form, not the raw field text.** Typing `12.4`
+            // used to give `Review 12.4 KAS` over a ceremony restating `12.40`
+            // and a pill reading `Hold to send 12.40 KAS` — one amount in two
+            // printed forms, one tap apart (`ux-auditor`, UX-R2B).
+            label: _amountSompi == null
+                ? 'Review this send'
+                : 'Review ${_trimmed(_amountSompi!)} KAS',
             primary: !_building,
             inlineReason: true,
             disabledReason: _building
-                ? 'Building your transaction…'
+                ? 'Building your transaction\u2026'
                 : block?.reason,
             onTap: _review,
           ),
@@ -911,46 +1025,229 @@ class _ValidLine extends StatelessWidget {
   );
 }
 
-/// The destination, restated at the head of step 2 as a settled fact.
+/// The checked address, and what the wallet knows about it (`S6b`).
 ///
-/// **No name and no avatar initial**, because the wallet has neither: contacts
-/// live in the messaging store and the join that would reach them belongs to
-/// the messages group (§9.15). The disc is §4's *stranger* — `chip` with an
-/// `inkMeta` glyph — which claims nothing about who the address belongs to.
-class _RecipientRow extends StatelessWidget {
-  const _RecipientRow({required this.address, required this.onEdit});
+/// The mark and its sentence are [_ValidLine]; this adds the two things that
+/// depend on the address book — the offer to name a stranger, and the
+/// statement that this one is not a stranger.
+///
+/// **Both halves matter and they are not symmetric.** *Save as contact* is a
+/// convenience. The match card is a **safety** signal: a user who pasted an
+/// address they have used before is told so, and one who expected a match and
+/// does not get it has just learned something worth stopping for — which is
+/// the honest half of what a contacts feature buys on a spend screen.
+class _CheckedLine extends StatelessWidget {
+  const _CheckedLine({
+    required this.address,
+    required this.contacts,
+    required this.onSave,
+  });
 
   final String address;
-  final VoidCallback onEdit;
+  final ContactsScope? contacts;
+  final VoidCallback onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = contacts;
+    if (scope == null) return const _ValidLine();
+    return ValueListenableBuilder<List<ContactDto>>(
+      valueListenable: scope.contacts,
+      builder: (context, _, _) {
+        final name = scope.nameFor(address);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Expanded(child: _ValidLine()),
+                if (name == null)
+                  KvContactAction(label: 'Save as contact', onTap: onSave),
+              ],
+            ),
+            if (name != null) ...[
+              const SizedBox(height: KvSpace.s),
+              _MatchCard(name: name),
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// *This matches **Mara** in your contacts.* (`S6b`)
+///
+/// **`S6b` also says "You last sent here 12 Aug" and this does not.**
+/// `ActivityRecord` carries no counterparty (§9.15), so the wallet cannot say
+/// when it last sent anywhere in particular — and a date is exactly the kind
+/// of corroborating detail that must not be invented on a surface a user is
+/// about to trust with money. **Trigger:** the counterparty field crossing the
+/// FFI.
+class _MatchCard extends StatelessWidget {
+  const _MatchCard({required this.name});
+
+  final String name;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: KvSpace.control,
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
+      padding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.m,
+        vertical: KvSpace.sm,
+      ),
+      decoration: BoxDecoration(
+        color: KvColor.plate,
+        borderRadius: BorderRadius.circular(KvRadius.notice),
+      ),
+      child: Row(
+        children: [
+          KvContactAvatar(name: name, size: 36),
+          const SizedBox(width: KvSpace.sm),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  const TextSpan(text: 'This matches '),
+                  TextSpan(
+                    text: name,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontVariations: KvWeight.w700,
+                      color: KvColor.ink,
+                    ),
+                  ),
+                  const TextSpan(text: ' in your contacts.'),
+                ],
+              ),
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 14,
+                height: 20 / 14,
+                color: KvColor.inkDim,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The address book, on the screen that routes money (`S6a`).
+///
+/// **`S6a` heads the card `RECENT` with a `Contacts` tab opposite, and this
+/// ships only the contacts half.** "Recent" means the addresses you last sent
+/// to, and `ActivityRecord` carries no counterparty (§9.15) — so the wallet
+/// cannot build that list, and a tab that switches to nothing is §8's
+/// prohibition with a second name. One heading, no toggle, until the field
+/// exists. **Trigger:** the counterparty field crossing the FFI.
+///
+/// Renders nothing at all when the book is empty: an empty card headed
+/// CONTACTS teaches a first-time user that the feature is broken rather than
+/// unused, and there is nowhere on this screen to add one from scratch — the
+/// door is *Save as contact*, one address later.
+class _ContactsCard extends StatelessWidget {
+  const _ContactsCard({required this.contacts, required this.onPick});
+
+  final ContactsScope? contacts;
+  final void Function(String address) onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = contacts;
+    if (scope == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<List<ContactDto>>(
+      valueListenable: scope.contacts,
+      builder: (context, list, _) {
+        if (list.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: KvSpace.l),
+          // **`KvRowContainer`, not a hand-rolled plate.** The first cut
+          // painted `plate` + `KvRadius.plate` + a caps header + a hairline
+          // between rows — which is that widget, spelled out, differing only
+          // in its gutter. Two implementations of one container is L143 with
+          // a different name (`ux-auditor`, UX-R2B).
+          child: KvRowContainer(
+            header: const Padding(
+              padding: EdgeInsets.only(top: KvSpace.s10, bottom: KvSpace.xs),
+              child: _Caps('CONTACTS'),
+            ),
+            children: [
+              for (final c in list)
+                KvContactRow(
+                  name: c.name,
+                  address: c.address,
+                  onTap: () => onPick(c.address),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The destination, restated at the head of step 2 as a settled fact (`S6`).
+///
+/// **The name never replaces the address** (BG-15). `S6` draws `M · Mara ·
+/// kaspa:qr7m…gfx9t · Edit`, and the compact address is the half that carries
+/// the safety: a contact name is exactly what an address-poisoning attack
+/// wants to be trusted, so the row shows who the wallet *thinks* this is and
+/// the characters that decide it, side by side.
+///
+/// An address with no name keeps §4's *stranger* disc — `chip` with an
+/// `inkMeta` glyph — which claims nothing about who it belongs to.
+class _RecipientRow extends StatelessWidget {
+  const _RecipientRow({
+    required this.address,
+    required this.contacts,
+    required this.onEdit,
+  });
+
+  final String address;
+  final ContactsScope? contacts;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = contacts;
+    if (scope == null) return _row(null);
+    return ValueListenableBuilder<List<ContactDto>>(
+      valueListenable: scope.contacts,
+      builder: (context, _, _) => _row(scope.nameFor(address)),
+    );
+  }
+
+  Widget _row(String? name) {
+    return Container(
+      constraints: const BoxConstraints(minHeight: KvSpace.control),
+      padding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.s,
+        vertical: KvSpace.s,
+      ),
       decoration: BoxDecoration(
         color: KvColor.plate,
         borderRadius: BorderRadius.circular(KvRadius.control),
       ),
       child: Row(
         children: [
-          Container(
-            width: KvSpace.rowDisc,
-            height: KvSpace.rowDisc,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: KvColor.chip,
-            ),
-            child: const Center(
-              child: KvGlyphIcon(
-                KvGlyph.identity,
-                size: 18,
-                tone: KvColor.inkMeta,
-              ),
-            ),
-          ),
+          KvContactAvatar(name: name),
           const SizedBox(width: KvSpace.s14),
-          Expanded(child: KvAddress(address)),
+          Expanded(
+            child: name == null
+                ? KvAddress(address)
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      KvContactName(name: name, size: 15),
+                      const SizedBox(height: 1),
+                      KvAddress(address, fontSize: 12),
+                    ],
+                  ),
+          ),
           const SizedBox(width: KvSpace.s),
           GestureDetector(
             behavior: HitTestBehavior.opaque,
@@ -1120,24 +1417,38 @@ class _Share extends StatelessWidget {
                       color: tone,
                     ),
                   ),
-                  Opacity(
-                    // The 45 % dim is a LARGE-TEXT device (BG-8 as narrowed,
-                    // D-257) and 13 dp is not large text — so a stale figure
-                    // here says so by its word, not by fading under AA.
-                    opacity: 1,
-                    child: Text(
-                      stale ? '$figure · last known' : figure!,
+                  // The 45 % dim is a LARGE-TEXT device (BG-8 as narrowed,
+                  // D-257) and 13 dp is not large text — so a stale figure
+                  // here says so by its word, not by fading under AA. (The
+                  // `Opacity(1)` that used to wrap this was a no-op left
+                  // behind by that narrowing.)
+                  Text(
+                    figure!,
+                    style: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      fontWeight: FontWeight.w500,
+                      fontVariations: KvWeight.w500,
+                      color: tone,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  // **The qualifier is a WORD, so it is Jakarta** (BG-30):
+                  // mono carries figures and never a sentence, and
+                  // `last known` was riding the figure's own run.
+                  if (stale)
+                    Text(
+                      ' · last known',
                       style: TextStyle(
-                        fontFamily: KvFont.mono,
+                        fontFamily: KvFont.ui,
                         fontSize: 13,
                         height: 18 / 13,
                         fontWeight: FontWeight.w500,
                         fontVariations: KvWeight.w500,
                         color: tone,
-                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
-                  ),
                 ],
               ],
             ),
@@ -1148,20 +1459,54 @@ class _Share extends StatelessWidget {
   }
 }
 
-/// The fee, as a **reading** (`S6`).
+/// The fee, as a **reading** (`S6`) — and a seat that is always occupied.
 ///
 /// `S6` draws it as a row with a chevron — a fee-tier picker. The bridge prices
 /// one fee, the Generator's, so there is no tier to pick and the chevron is not
 /// drawn: a control that answers a tap and does nothing is §8's one outright
 /// prohibition. **Trigger:** a fee-estimate surface on the bridge.
+///
+/// ## Why the row is here before there is a fee
+///
+/// The founder's complaint, on glass: the row appearing and vanishing as an
+/// amount was typed *"messes with the UX of the placement of the keypad"*. It
+/// did — the pad shared this scroll, so a 52 dp row entering the layout pushed
+/// every key down and leaving pulled them back, under a thumb already moving.
+/// The pad has since left the scroll, and this keeps its seat regardless, so
+/// the section above the pad has one shape.
+///
+/// ## What the empty seat says, and what it must not
+///
+/// **A dash, not `0.00000000`.** The founder asked for the zeros
+/// (*"i want the network fee to appear as 0.000.. ish"*) and the reason —
+/// layout stability — is fully answered by the constant seat above. The zeros
+/// are not, because they state a *fee of zero* on the one screen where a user
+/// decides what a send costs: type an amount, let the node be slow, and
+/// `0.00000000 KAS` is a wallet claiming this transaction is free. BG-8 gives
+/// an unknown value the dash precisely so it cannot be read as an answer, and
+/// a fee is the value on this screen most worth not guessing. The dash costs
+/// one character of the look and keeps the row unable to mislead.
+///
+/// ## The arrival
+///
+/// **Crossfaded, never counted up.** The founder asked for the figure to
+/// *"stream in a ease in, ease change way"*, and the entrance is eased — but
+/// `KvStreamingCount`'s fourth law is that **money never streams**: a counter
+/// tweening 0 → 0.0001 renders fee values the Generator never quoted, on a
+/// funds surface, which is the one thing that primitive asserts against. So
+/// the row eases the figure *in*, and every frame of it shows either a number
+/// Rust priced or no number at all.
 class _FeeRow extends StatelessWidget {
   const _FeeRow({required this.sompi});
 
-  final BigInt sompi;
+  /// Null while there is nothing buildable to price.
+  final BigInt? sompi;
 
   @override
   Widget build(BuildContext context) {
+    final fee = sompi;
     return Container(
+      constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
       padding: const EdgeInsets.symmetric(
         horizontal: KvSpace.s20,
         vertical: KvSpace.sm,
@@ -1184,21 +1529,63 @@ class _FeeRow extends StatelessWidget {
           const Spacer(),
           // **A `KvAmount`, not a formatted string** (D-230), so BG-23's
           // emphasis rule reaches the screen the number is first read on and
-          // not only the ceremony. Trimmed rather than padded to eight: this
-          // is a live datum under the precision law (D-210), not BG-6's
-          // restatement of what was built.
+          // not only the ceremony. Trimmed rather than padded to eight —
+          // which is now every surface's rule, not this one's exception
+          // (founder, 2026-09-04).
           //
           // `trailingMax` in spirit: the figure is the non-flex child under a
           // stated cap, so a large fee cannot starve the label and cannot
           // paint past the gutter (L131).
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 200),
-            child: KvAmount(
-              sompi,
-              role: KvAmountRole.row,
-              size: 13,
-              showUnit: true,
-              emphasis: KvAmountEmphasis.significant,
+            child: AnimatedSwitcher(
+              duration: KvMotion.calm,
+              switchInCurve: KvMotion.curve,
+              switchOutCurve: KvMotion.curve,
+              // Rise-and-fade, so the figure reads as *arriving* rather than
+              // blinking (BG-24). The outgoing child sizes nothing, so a
+              // change of width happens once, with the fade that explains it.
+              layoutBuilder: (current, previous) => Stack(
+                alignment: Alignment.centerRight,
+                clipBehavior: Clip.none,
+                children: [
+                  for (final old in previous)
+                    Positioned(right: 0, top: 0, bottom: 0, child: old),
+                  ?current,
+                ],
+              ),
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.4),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: child,
+                ),
+              ),
+              child: fee == null
+                  ? const Text(
+                      // BG-8's dash for a datum nobody has yet.
+                      '\u2014',
+                      key: ValueKey<String>('fee-unknown'),
+                      style: TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontSize: 13,
+                        height: 20 / 13,
+                        fontWeight: FontWeight.w500,
+                        fontVariations: KvWeight.w500,
+                        color: KvColor.inkMeta,
+                      ),
+                    )
+                  : KvAmount(
+                      fee,
+                      key: ValueKey<BigInt>(fee),
+                      role: KvAmountRole.row,
+                      size: 13,
+                      showUnit: true,
+                      emphasis: KvAmountEmphasis.significant,
+                    ),
             ),
           ),
         ],
@@ -1209,10 +1596,10 @@ class _FeeRow extends StatelessWidget {
 
 /// A KAS figure for this screen's copy.
 ///
-/// **Every significant digit and no trailing zeros** (D-210). BG-6's fixed
-/// eight belong to a signing surface, and this screen signs nothing — its own
-/// header says so — while the padding is noise a user has to read past to find
-/// where the number ends.
+/// **Every significant digit and no trailing zeros** (D-210, and since D-267
+/// the rule on every surface including the one that signs — there is no longer
+/// a second form to be consistent with). The padding is noise a user has to
+/// read past to find where the number ends.
 ///
 /// A shortfall keeps every digit that carries value either way, because
 /// [trimFraction] only ever removes zeros: *"you are 0.00001994 KAS short"*

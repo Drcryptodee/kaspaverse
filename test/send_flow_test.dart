@@ -17,7 +17,12 @@ import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
+import 'package:kaspaverse/src/services/rate_service.dart' show KvRateQuote;
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_fiat.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_hold.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
@@ -206,6 +211,8 @@ Widget _sendScreen({
   Future<BigInt?> Function()? minimumSendable,
   Future<SendOutcomeDto> Function(BigInt)? commit,
   Future<void> Function()? abandon,
+  ContactsScope? contacts,
+  FiatScope? fiat,
 }) => _host(
   SendScreen(
     mature: ValueNotifier<BigInt?>(
@@ -220,6 +227,66 @@ Widget _sendScreen({
         prepareSweep ??
         (_) async => _summary(kind: SignableKind.sweep, utxoCount: 1),
     minimumSendable: minimumSendable,
+    contacts: contacts,
+    fiat: fiat,
+  ),
+);
+
+/// An address book with [names] in it, and a record of what was saved.
+///
+/// A plain scope over a `ValueNotifier`: the bridge read and write are the
+/// service's, and the screens only ever see this shape — so a contacts test
+/// needs no native library and no messaging hub.
+({ContactsScope scope, List<(String, String)> saved}) _book([
+  Map<String, String> names = const {},
+]) {
+  final list = ValueNotifier<List<ContactDto>>([
+    for (final e in names.entries) ContactDto(address: e.key, name: e.value),
+  ]);
+  final saved = <(String, String)>[];
+  return (
+    scope: ContactsScope(
+      contacts: list,
+      refresh: () async {},
+      save: (address, name) async {
+        saved.add((address, name));
+        list.value = [
+          for (final c in list.value)
+            if (c.address != address) c,
+          if (name.isNotEmpty) ContactDto(address: address, name: name),
+        ];
+      },
+    ),
+    saved: saved,
+  );
+}
+
+/// Hold the pill until it fires, then settle to whatever the ceremony becomes.
+///
+/// It pumps past the founder's 200 ms completion beat (2026-09-04) — the badge
+/// shows its check before the foot hands over — so a caller that wants the
+/// receipt gets the receipt.
+Future<void> _hold(WidgetTester tester) async {
+  final gesture = await tester.startGesture(
+    tester.getCenter(find.byType(KvHold)),
+  );
+  await tester.pump();
+  await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+  await gesture.up();
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 220));
+  await tester.pumpAndSettle();
+}
+
+/// A rate seam that is switched on and answering, for the `≈` line.
+FiatScope _rate({double usdPerKas = 0.0274, bool on = true}) => FiatScope(
+  enabled: ValueNotifier<bool?>(on),
+  quote: ValueNotifier<KvRateQuote?>(
+    KvRateQuote(
+      usdPerKas: usdPerKas,
+      fetchedAt: DateTime.now(),
+      source: 'test',
+    ),
   ),
 );
 
@@ -359,7 +426,7 @@ void main() {
       expect(_reviewReason(tester), isNull, reason: 'live once valid');
       // BG-11: the control names the action AND its object, and the object is
       // the figure the user typed.
-      expect(find.text('Review 12.4 KAS'), findsOneWidget);
+      expect(find.text('Review 12.40 KAS'), findsOneWidget);
     });
 
     testWidgets('the keypad refuses a ninth decimal rather than taking it and '
@@ -440,8 +507,10 @@ void main() {
       expect(find.text('6172.50'), findsOneWidget);
       expect(_reviewReason(tester), isNull);
       // And the eye still reads it grouped where grouping belongs — on the
-      // control that restates it, never in the field.
-      expect(find.text('Review 6172.50 KAS'), findsOneWidget);
+      // control that restates it, never in the field. The pill prints the
+      // CANONICAL trimmed figure now, so it and the ceremony's restatement
+      // are one string (`ux-auditor`, UX-R2B) — grouping included.
+      expect(find.text('Review 6,172.50 KAS'), findsOneWidget);
     });
 
     testWidgets('a stale balance is not typed into a spend', (tester) async {
@@ -525,17 +594,37 @@ void main() {
       await _address(tester, _addr);
       await _type(tester, '1');
 
-      // Nothing yet: the probe is debounced, and an unknown fee shows nothing.
-      expect(find.text('Network fee'), findsNothing);
+      // **The ROW is always seated; the FIGURE is what is unknown.** The
+      // founder's call on 2026-09-04 fixed the row in place so the keypad
+      // under it cannot be shoved about — so the assertion moved from "is the
+      // row here" to "what does the row say", which is the property that
+      // actually mattered all along.
+      expect(find.text('Network fee'), findsOneWidget);
+      expect(_feeLine(tester), 'Network fee—');
 
       await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(KvMotion.calm + const Duration(milliseconds: 20));
       expect(_feeLine(tester), 'Network fee0.003154KAS');
 
       // A further keystroke clears the figure IMMEDIATELY — a fee left
       // standing beside a changed amount is a lie for as long as it stands.
+      // It clears to the DASH, never to a zero: BG-8's unknown cannot be read
+      // as "this send is free".
       await _type(tester, '2');
-      expect(find.text('Network fee'), findsNothing);
+      // **Asserted as the CURRENT child, not as the joined string.** The
+      // figure is dropped on the keystroke — that is the property, and it is
+      // true on this frame. What the string would also catch for the next
+      // 240 ms is the old figure *fading out* underneath the dash fading in,
+      // which is the crossfade BG-24 asks for rather than a stale number
+      // standing: the debounce is 250 ms, so any pump long enough to finish
+      // the fade has already fetched the next fee.
+      expect(
+        find.byKey(const ValueKey<String>('fee-unknown')),
+        findsOneWidget,
+        reason: 'the fee clears on the keystroke, not on the next answer',
+      );
       await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(KvMotion.calm + const Duration(milliseconds: 20));
       expect(_feeLine(tester), 'Network fee0.003154KAS');
 
       // One probe per pause, not one per keystroke.
@@ -543,18 +632,21 @@ void main() {
       expect(asked.last, BigInt.from(1200000000));
     });
 
-    testWidgets('a null fee renders nothing at all — never a guess', (
+    testWidgets('a null fee shows the DASH, never a fabricated zero', (
       tester,
     ) async {
       // `None` is a real answer: below the KIP-9 floor, more than the coins
-      // cover, or a covenant-fenced draw. The screen says nothing rather than
-      // showing a number nobody built.
+      // cover, or a covenant-fenced draw. The row says `—` rather than showing
+      // a number nobody built — and specifically not `0.00000000`, which on a
+      // spend screen reads as *this transaction is free* (BG-8).
       _phone(tester);
       await tester.pumpWidget(_sendScreen(feePreview: (_, _) async => null));
       await _address(tester, _addr);
       await _type(tester, '1');
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('Network fee'), findsNothing);
+      expect(find.text('Network fee'), findsOneWidget);
+      expect(_feeLine(tester), 'Network fee—');
+      expect(find.textContaining('0.00000000'), findsNothing);
     });
 
     testWidgets('an honest prepare error (not-yet-spendable) is surfaced', (
@@ -666,7 +758,20 @@ void main() {
       // The spendable figure rides the Max chip (`S6`, D-190: *`available` is
       // the number Send max means*), and BG-8's `—` is what it shows while the
       // balance has not arrived — never a fabricated zero.
-      expect(find.text('—'), findsOneWidget);
+      //
+      // Scoped to the chip: the always-seated fee row shows its own `—` for
+      // the same reason, so a bare `find.text('—')` now matches two honest
+      // unknowns.
+      expect(find.text('—'), findsNWidgets(2));
+      expect(
+        find.descendant(
+          of: find
+              .ancestor(of: find.text('Max'), matching: find.byType(Row))
+              .first,
+          matching: find.text('—'),
+        ),
+        findsOneWidget,
+      );
       await _type(tester, '12.4');
       expect(
         _reviewReason(tester),
@@ -695,8 +800,11 @@ void main() {
       // **The freshness is in WORDS, and it does not dim.** BG-8's 45 % dim is
       // a large-text device (D-257) and this reading is 13 dp: multiplying it
       // would put it under AA, which BG-14 does not permit. So the figure says
-      // its own state instead.
-      expect(find.text('10.00 · last known'), findsOneWidget);
+      // its own state instead — and the qualifier is a WORD, so it is Jakarta
+      // in its own run rather than riding the figure's mono (BG-30,
+      // `ux-auditor` UX-R2B).
+      expect(find.text('10.00'), findsOneWidget);
+      expect(find.text(' · last known'), findsOneWidget);
       // And the screen stops asserting a figure it cannot currently vouch for
       // — the P0.3 scar with a number attached.
       expect(_reviewReason(tester), isNull);
@@ -1083,8 +1191,10 @@ void main() {
       );
       await _address(tester, _addr);
       await _type(tester, '123456.78901234');
+      // Grouped and trimmed — the pill prints the canonical form since
+      // UX-R2B, so the string here is the one the ceremony restates.
       final label = tester.widget<Text>(
-        find.text('Review 123456.78901234 KAS'),
+        find.text('Review 123,456.78901234 KAS'),
       );
       expect(label.maxLines, isNull, reason: 'it wraps; it never truncates');
       expect(label.overflow, isNot(TextOverflow.ellipsis));
@@ -1140,7 +1250,7 @@ void main() {
 
       // The control's label carries the summary's amount (Rust's decode → the
       // value signed), not a form echo.
-      expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
+      expect(find.text('Hold to send 12.40 KAS'), findsOneWidget);
       // Amount + network fee + total each render through KvAmount (the exact
       // fee, never "≈ free").
       expect(find.byType(KvAmount), findsNWidgets(3));
@@ -1236,7 +1346,7 @@ void main() {
       // The raw self "To" address is dropped (D-069).
       expect(find.textContaining('kaspa:'), findsNothing);
       // The returning value is never quoted as the thing being sent.
-      expect(find.textContaining('Hold to send 12.40000000'), findsNothing);
+      expect(find.textContaining('Hold to send 12.40'), findsNothing);
       expect(find.text('Hold to send message'), findsOneWidget);
       // Kind-derived default title.
       expect(find.text('Confirm message'), findsOneWidget);
@@ -1325,7 +1435,7 @@ void main() {
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(find.text('Leaves your wallet'), findsOneWidget);
       expect(find.text('Confirm accept'), findsOneWidget);
-      expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
+      expect(find.text('Hold to send 12.40 KAS'), findsOneWidget);
     });
 
     testWidgets('a sweep confirms the whole-wallet exit in the DTO\'s own '
@@ -1339,7 +1449,7 @@ void main() {
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(find.textContaining('all 7 spendable coins move'), findsOneWidget);
       expect(find.text('Leaves your wallet'), findsOneWidget);
-      expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
+      expect(find.text('Hold to send 12.40 KAS'), findsOneWidget);
     });
 
     testWidgets('a merge renders as returning value with the savings pair '
@@ -1365,8 +1475,8 @@ void main() {
       // The savings sentence quotes the Generator's own probed fees, exact.
       expect(
         find.text(
-          'A typical send today costs 0.00427200 KAS in fees — after this, '
-          '0.00203600 KAS.',
+          'A typical send today costs 0.004272 KAS in fees — after this, '
+          '0.002036 KAS.',
         ),
         findsOneWidget,
       );
@@ -1484,7 +1594,7 @@ void main() {
       );
       // The label names the ACTION and its object (BG-11): a stake is not a
       // send, and the control that fires it must not call it one.
-      expect(find.text('Hold to stake 12.40000000 KAS'), findsOneWidget);
+      expect(find.text('Hold to stake 12.40 KAS'), findsOneWidget);
     });
 
     testWidgets('the ceremony is generalised across every mode, keyed off the '
@@ -1496,25 +1606,19 @@ void main() {
       // exhaustive switches, so a ninth [SignableKind] is a COMPILE error
       // before it can reach this test — this pins what the eight SAY.
       const expected = <SignableKind, (String, String)>{
-        SignableKind.payment: ('Confirm send', 'Hold to send 12.40000000 KAS'),
+        SignableKind.payment: ('Confirm send', 'Hold to send 12.40 KAS'),
         SignableKind.bond: (
           'Confirm contact request',
-          'Hold to send 12.40000000 KAS',
+          'Hold to send 12.40 KAS',
         ),
-        SignableKind.bondRefund: (
-          'Confirm accept',
-          'Hold to send 12.40000000 KAS',
-        ),
+        SignableKind.bondRefund: ('Confirm accept', 'Hold to send 12.40 KAS'),
         SignableKind.selfSendFrame: ('Confirm message', 'Hold to send message'),
-        SignableKind.stake: ('Confirm stake', 'Hold to stake 12.40000000 KAS'),
+        SignableKind.stake: ('Confirm stake', 'Hold to stake 12.40 KAS'),
         SignableKind.bcast: (
           'Confirm broadcast',
-          'Hold to broadcast 12.40000000 KAS',
+          'Hold to broadcast 12.40 KAS',
         ),
-        SignableKind.sweep: (
-          'Confirm send all',
-          'Hold to send 12.40000000 KAS',
-        ),
+        SignableKind.sweep: ('Confirm send all', 'Hold to send 12.40 KAS'),
         SignableKind.consolidate: ('Confirm merge', 'Hold to merge 2 coins'),
       };
       expect(
@@ -1575,12 +1679,17 @@ void main() {
 
     Future<void> signIt(WidgetTester tester) async {
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
       await gesture.up();
       await tester.pump();
+      // **The founder's completion beat** (2026-09-04): the badge shows its
+      // check for 200 ms before the foot hands over to the staged wait. The
+      // broadcast is already in flight throughout — only the swap waits.
+      await tester.pump(const Duration(milliseconds: 220));
+      await tester.pump(KvMotion.calm);
     }
 
     testWidgets('names each stage in order, and marks none of them complete', (
@@ -1677,7 +1786,7 @@ void main() {
         ),
       );
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
@@ -1740,13 +1849,18 @@ void main() {
       // receipt arrives in the settle above, so its own resolve lands in the
       // next one.
       await tester.pumpAndSettle();
-      expect(find.text('View on explorer.kaspa.org'), findsOneWidget);
+      // **The receipt wears the exit's COMPACT register** (`S8`, founder
+      // 2026-09-04: *"let it just say `<icon> Explorer`"*). The button is the
+      // width of its label and sits beside *Copy ID* — and the disclosure came
+      // with it, shrunk rather than dropped, because D-192 is what put it
+      // there: a departure you cannot name is not one you consented to.
+      expect(find.text('Explorer'), findsOneWidget);
+      expect(find.text('Copy ID'), findsOneWidget);
       expect(
-        find.text('Shares the transaction ID and your IP address'),
+        find.text('opens explorer.kaspa.org · shares the id and your IP'),
         findsOneWidget,
       );
-      // And the host is named ONCE — the disclosure says "it", because the
-      // control above it already said which "it" (BG-19).
+      // And the host is named ONCE.
       expect(find.textContaining('explorer.kaspa.org'), findsOneWidget);
 
       await tester.tap(find.byType(KvExplorerExit));
@@ -1778,11 +1892,9 @@ void main() {
         },
       );
       await tester.pumpAndSettle();
-      expect(find.text('The explorer link cannot be used'), findsOneWidget);
-      expect(
-        find.text('the explorer link is empty — set it in Settings'),
-        findsOneWidget,
-      );
+      // The third face survives the compact register: not a link, and it says
+      // what to fix (BG-12/BG-20).
+      expect(find.text('link unusable · set it in Settings'), findsOneWidget);
       await tester.tap(find.byType(KvExplorerExit));
       await tester.pumpAndSettle();
       expect(opened, isFalse, reason: 'a refused link is not a live control');
@@ -1808,7 +1920,7 @@ void main() {
         ),
       );
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
@@ -1871,7 +1983,7 @@ void main() {
         ),
       );
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
@@ -2093,7 +2205,7 @@ void main() {
       await tester.pump();
 
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
@@ -2147,7 +2259,7 @@ void main() {
 
       Future<void> holdIt(WidgetTester tester) async {
         final gesture = await tester.startGesture(
-          tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+          tester.getCenter(find.text('Hold to send 12.40 KAS')),
         );
         await tester.pump();
         await tester.pump(
@@ -2197,7 +2309,7 @@ void main() {
         ),
       );
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40000000 KAS')),
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
@@ -2560,7 +2672,7 @@ void main() {
       ),
     );
 
-    const label = 'Hold to send 12.40000000 KAS';
+    const label = 'Hold to send 12.40 KAS';
 
     testWidgets('a quick tap does NOT sign (no double-tap path)', (
       tester,
@@ -2745,6 +2857,485 @@ void main() {
         await tester.pumpAndSettle();
       },
     );
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The address book (`S6a` · `S6b` · `S7` · `S8`) — founder, 2026-09-04
+  // ───────────────────────────────────────────────────────────────────────
+
+  group('contacts', () {
+    testWidgets('the card lists the book, and a tap FILLS the field rather '
+        'than skipping the check', (tester) async {
+      _phone(tester);
+      final book = _book({_addr: 'Mara'});
+      await tester.pumpWidget(_sendScreen(contacts: book.scope));
+      await tester.pump();
+
+      // `S6a`: the disc wears the initial, the name is over its own address.
+      expect(find.text('CONTACTS'), findsOneWidget);
+      expect(find.text('Mara'), findsOneWidget);
+      expect(find.text('M'), findsOneWidget);
+
+      await tester.tap(find.byType(KvContactRow));
+      await tester.pump();
+
+      // **Step 1, not step 2.** The row is a shortcut for typing 67
+      // characters, never a shortcut past checking them — the checked line
+      // appears over the filled field and Continue is still a deliberate tap.
+      expect(find.text('Valid Kaspa address · Mainnet'), findsOneWidget);
+      expect(find.text('Continue to amount'), findsOneWidget);
+    });
+
+    testWidgets('an empty book draws no card at all', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen(contacts: _book().scope));
+      await tester.pump();
+      expect(find.text('CONTACTS'), findsNothing);
+      expect(find.byType(KvContactRow), findsNothing);
+    });
+
+    testWidgets('the card stands down while an address is being checked', (
+      tester,
+    ) async {
+      // A list of other people to send to, under an address the user is in the
+      // middle of verifying, is an invitation to tap the wrong one.
+      _phone(tester);
+      final book = _book({'kaspa:${'q' * 60}': 'Jonas'});
+      await tester.pumpWidget(_sendScreen(contacts: book.scope));
+      await tester.pump();
+      expect(find.text('CONTACTS'), findsOneWidget);
+      await _address(tester, _addr, advance: false);
+      expect(find.text('CONTACTS'), findsNothing);
+    });
+
+    testWidgets('Save as contact is offered for a stranger and NOT for a name '
+        'the book already has (`S6b`)', (tester) async {
+      _phone(tester);
+      final book = _book();
+      await tester.pumpWidget(_sendScreen(contacts: book.scope));
+      await _address(tester, _addr, advance: false);
+      expect(find.text('Save as contact'), findsOneWidget);
+      expect(find.textContaining('in your contacts'), findsNothing);
+
+      // Name it through the sheet the receipt uses too — one binding site.
+      await tester.tap(find.text('Save as contact'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save as contact'), findsWidgets); // the sheet's title
+      await tester.enterText(find.byType(TextField).last, 'Mara');
+      await tester.pump();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(book.saved, [(_addr, 'Mara')]);
+      // The offer is gone and the MATCH is stated — which is the safety half:
+      // a user who expected a match and does not get one has learned something
+      // worth stopping for.
+      expect(find.text('Save as contact'), findsNothing);
+      // The name rides a `TextSpan` inside the sentence, so the monogram is
+      // what a plain text finder can see of it.
+      expect(find.textContaining('This matches '), findsOneWidget);
+      expect(find.text('M'), findsOneWidget);
+    });
+
+    testWidgets('the name NEVER replaces the address, on any funds surface '
+        '(BG-15)', (tester) async {
+      _phone(tester);
+      final book = _book({_addr: 'Mara'});
+      await tester.pumpWidget(
+        _sendScreen(contacts: book.scope, prepare: (_, _) async => _summary()),
+      );
+      await _address(tester, _addr);
+
+      // Step 2's recipient row: the monogram and the name, and the address
+      // under it — a saved name is exactly what address-poisoning wants to be
+      // trusted, so the characters that decide are always on the row.
+      expect(find.text('Mara'), findsOneWidget);
+      expect(find.byType(KvAddress), findsWidgets);
+
+      await _type(tester, '12.4');
+      await tester.tap(find.text('Review 12.40 KAS'));
+      await tester.pumpAndSettle();
+
+      // The sheet: `To` left, the name right — and all 67 characters below it.
+      // Two names now, because the sheet FLOATS over the form it was built on
+      // and the recipient row is still behind it (D-264).
+      expect(find.text('To'), findsOneWidget);
+      expect(find.text('Mara'), findsNWidgets(2));
+      final chunked = tester
+          .widgetList<KvAddress>(find.byType(KvAddress))
+          .where((a) => a.form == KvAddressForm.chunked);
+      expect(
+        chunked.length,
+        1,
+        reason: 'the ceremony restates the address in full, name or no name',
+      );
+      expect(chunked.single.address, _addr);
+    });
+
+    testWidgets('the receipt says "To Mara", or offers to make one (`S8`)', (
+      tester,
+    ) async {
+      _phone(tester);
+      final book = _book({_addr: 'Mara'});
+      await tester.pumpWidget(_sendScreen(contacts: book.scope));
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      await tester.tap(find.text('Review 12.40 KAS'));
+      await tester.pumpAndSettle();
+      await _hold(tester);
+      expect(find.text('To Mara'), findsOneWidget);
+    });
+
+    testWidgets('an unnamed recipient gets the offer, never the word '
+        '"Unknown"', (tester) async {
+      _phone(tester);
+      final book = _book();
+      await tester.pumpWidget(_sendScreen(contacts: book.scope));
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      await tester.tap(find.text('Review 12.40 KAS'));
+      await tester.pumpAndSettle();
+      await _hold(tester);
+      expect(find.textContaining('Unknown'), findsNothing);
+      expect(find.text('Save as contact'), findsOneWidget);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The price beside the figure (BG-5 as amended, founder 2026-09-04)
+  // ───────────────────────────────────────────────────────────────────────
+
+  group('the ≈ price', () {
+    testWidgets('rides under the typed amount AND under the ceremony\'s '
+        'restatement of it', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen(fiat: _rate()));
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      // 12.4 KAS at 0.0274 → $0.34, which is `S6`'s own figure.
+      expect(find.text('≈ \$0.34'), findsOneWidget);
+
+      await tester.tap(find.text('Review 12.40 KAS'));
+      await tester.pumpAndSettle();
+      // Two: the sheet floats over the form, so the screen's own line is still
+      // behind it (D-264). Both restate the same sompi.
+      expect(find.text('≈ \$0.34'), findsNWidgets(2));
+    });
+
+    testWidgets('is absent entirely when no seam is wired', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen());
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      expect(find.textContaining('≈'), findsNothing);
+    });
+
+    testWidgets('is absent entirely when the user has fiat switched off', (
+      tester,
+    ) async {
+      // A separate test rather than a second `pumpWidget`: swapping the
+      // balance seam under a mounted SendScreen trips the V4 seam law, which
+      // is the assert doing its job.
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen(fiat: _rate(on: false)));
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      expect(find.textContaining('≈'), findsNothing);
+    });
+
+    testWidgets('an unknown amount restates as a dash, never as \$0.00', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen(fiat: _rate()));
+      await _address(tester, _addr);
+      // Nothing typed: there is no amount, so there is no value.
+      expect(find.text('≈ —'), findsOneWidget);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The keypad does not move (founder, on glass 2026-09-04)
+  // ───────────────────────────────────────────────────────────────────────
+
+  group('the pad holds still', () {
+    testWidgets('a fee arriving and an amber notice appearing do not move a '
+        'single key', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _sendScreen(
+          mature: BigInt.from(1000000000), // 10 KAS — 12.4 will not fit
+          feePreview: (_, _) async => BigInt.from(315400),
+        ),
+      );
+      await _address(tester, _addr);
+
+      Offset keyAt() => tester.getCenter(
+        find.descendant(of: find.byType(KvKeypad), matching: find.text('7')),
+      );
+
+      await _type(tester, '1');
+      final before = keyAt();
+
+      // The fee lands…
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(KvMotion.calm + const Duration(milliseconds: 20));
+      expect(_feeLine(tester), 'Network fee0.003154KAS');
+      expect(keyAt(), before);
+
+      // …and an amber shortfall notice appears above it.
+      await _type(tester, '2.4');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(KvMotion.calm + const Duration(milliseconds: 20));
+      expect(find.textContaining('short'), findsOneWidget);
+      expect(
+        keyAt(),
+        before,
+        reason: 'the pad is furniture below the scroll, not content inside it',
+      );
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The ceremony's own beats (founder, on glass 2026-09-04)
+  // ───────────────────────────────────────────────────────────────────────
+
+  group('the signing beats', () {
+    testWidgets('the ring completing turns the fingerprint into a check, and '
+        'the wait waits 200 ms for it to be seen', (tester) async {
+      _phone(tester);
+      final hanging = Completer<SendOutcomeDto>();
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) => hanging.future,
+            abandon: () async {},
+          ),
+        ),
+      );
+
+      // Before the hold: the fingerprint, and no check anywhere in the badge.
+      KvHold hold() => tester.widget<KvHold>(find.byType(KvHold));
+      expect(hold().signed, isFalse);
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(KvHold)),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
+      await tester.pump();
+
+      // The ring is full: the badge has swapped, and the staged wait has NOT
+      // arrived yet — that is the beat the founder asked for.
+      expect(hold().signed, isTrue);
+      expect(find.text('Signing on this device'), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 220));
+      await tester.pump(KvMotion.calm);
+      expect(find.text('Signing on this device'), findsOneWidget);
+
+      hanging.complete(_ok());
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('the beat is VISUAL — the broadcast does not wait for it', (
+      tester,
+    ) async {
+      // The check is a receipt for the HOLD, never for the send. What must not
+      // happen is the 200 ms being charged to the network round-trip.
+      _phone(tester);
+      var committed = false;
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) async {
+              committed = true;
+              return _ok();
+            },
+            abandon: () async {},
+          ),
+        ),
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(KvHold)),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+
+      // The ring has just filled. The transaction is ALREADY Rust's — the
+      // 200 ms is charged to the foot's hand-over, never to the network.
+      expect(
+        committed,
+        isTrue,
+        reason: 'the commit starts when the ring completes, not 200 ms later',
+      );
+      expect(find.text('Signing on this device'), findsNothing);
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('Cancel wears the risk hue on the one sheet it describes', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(_ceremony(_summary()));
+      expect(
+        tester.widget<Text>(find.text('Cancel')).style!.color,
+        KvColor.risk,
+        reason: 'the way out of an irreversible commitment (BG-7)',
+      );
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The receipt's new rows (`S8`)
+  // ───────────────────────────────────────────────────────────────────────
+
+  group('the receipt states where it stands', () {
+    Future<void> settle(
+      WidgetTester tester, {
+      Future<TxStatusDto?> Function(String)? status,
+    }) async {
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            key: UniqueKey(),
+            summary: _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            acceptanceStatus: status,
+          ),
+        ),
+      );
+      await _hold(tester);
+    }
+
+    testWidgets('the transaction id is on the card, and Copy ID still copies '
+        'every character of it', (tester) async {
+      _phone(tester);
+      await settle(tester);
+      expect(find.text('Transaction ID'), findsOneWidget);
+      // Middle-elided: a txid is compared by both ends.
+      expect(find.text('aaaaaaaa…aaaaaaaa'), findsOneWidget);
+      expect(find.text('a' * 64), findsNothing);
+    });
+
+    testWidgets('Status streams the node-read depth and crosses to Confirmed '
+        'at the ratified threshold, with no number typed here', (tester) async {
+      _phone(tester);
+      var depth = 42;
+      await settle(
+        tester,
+        status: (_) async => TxStatusDto(
+          kind: TxStatusKind.accepted,
+          blueDepth: BigInt.from(depth),
+        ),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Status'), findsOneWidget);
+      expect(find.text('Seen 42'), findsOneWidget);
+
+      // **`KvBurial.safe`, read — never a `100` typed into `lib/`.** The
+      // ladder, its words and its thresholds live in one place (D-192/D-249),
+      // which is what makes this row buildable before R3's vocabulary
+      // migration.
+      depth = KvBurial.safe;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Confirmed'), findsOneWidget);
+    });
+
+    testWidgets('a STALLED send says so — it does not wear a healthy rung', (
+      tester,
+    ) async {
+      // The defect two auditors caught at UX-R2B: the row hardcoded
+      // `TxChipState.accepted` and read only the depth, so `Stalled` — which
+      // arrives with `blue_depth: None` — fell to the `seen` rung and printed
+      // `Seen —`, glyph for glyph what a healthy just-submitted send shows, on
+      // the surface a user consults to decide whether to send again.
+      _phone(tester);
+      await settle(
+        tester,
+        status: (_) async => TxStatusDto(
+          kind: TxStatusKind.stalled,
+          waitedMs: BigInt.from(90000),
+        ),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Not accepted yet'), findsOneWidget);
+      expect(find.text('Seen —'), findsNothing);
+    });
+
+    testWidgets('a DISPLACED send names what happened, and borrows no rung', (
+      tester,
+    ) async {
+      // The accepting block left the chain. The burial ladder measures how deep
+      // an ACCEPTED transaction is, so a displaced one has no rung to sit on —
+      // and `Seen —` would say the chain still holds it. The sentence is the
+      // thread's own, so the wallet says this in one wording (BG-21).
+      _phone(tester);
+      await settle(
+        tester,
+        status: (_) async => TxStatusDto(kind: TxStatusKind.displaced),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Displaced by the network'), findsOneWidget);
+      expect(find.text('Seen —'), findsNothing);
+      expect(find.textContaining('Confirmed'), findsNothing);
+    });
+
+    testWidgets('no answer from the tracker means no Status row at all', (
+      tester,
+    ) async {
+      _phone(tester);
+      await settle(tester, status: (_) async => null);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Status'), findsNothing);
+    });
+
+    testWidgets('every value on the card ends on ONE right edge', (
+      tester,
+    ) async {
+      // The founder's note from the glass: *"let the details infront of them
+      // move to the other edge of the screen"*. `S8` measured all four values
+      // ending at 347.5 dp.
+      _phone(tester);
+      await settle(
+        tester,
+        status: (_) async =>
+            TxStatusDto(kind: TxStatusKind.accepted, blueDepth: BigInt.from(7)),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+
+      double rightOf(String label) {
+        final row = find
+            .ancestor(of: find.text(label), matching: find.byType(Row))
+            .first;
+        return tester.getRect(row).right;
+      }
+
+      final edges = [
+        // `Left your wallet` left the receipt at UX-R2B: the head states what
+        // left, so a third printing of two numbers went (`ux-auditor`). The
+        // sheet still carries it — this is the receipt's grid.
+        for (final l in ['Amount', 'Network fee', 'Status', 'Transaction ID'])
+          rightOf(l),
+      ];
+      expect(
+        edges.toSet().length,
+        1,
+        reason: 'the rows share one grid: $edges',
+      );
+    });
   });
 }
 

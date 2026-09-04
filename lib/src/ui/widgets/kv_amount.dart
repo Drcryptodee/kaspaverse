@@ -20,9 +20,12 @@ enum KvAmountRole {
   hero,
 
   /// **A screen-level amount at the moment of commitment**: the ceremony's
-  /// headline. All eight decimals, because BG-6 restates the built transaction
-  /// in full and a trimmed figure is a different string from the one being
-  /// signed — D-210's one exception.
+  /// headline. Significant decimals with the trailing zeros trimmed, to a
+  /// minimum of two — the same precision law every other role takes, since
+  /// the founder withdrew D-210's exception on 2026-09-04. `12.40000000`
+  /// reads `12.40`; `0.00010000` reads `0.0001`; a figure that genuinely runs
+  /// to eight places still shows all eight, because the trim removes only
+  /// zeros.
   ///
   /// It used to say *"a detail's value"* as well, and that reading is what put
   /// the fixed eight on a surface where nothing is being signed. A record takes
@@ -80,8 +83,8 @@ enum KvMoneyDirection {
 ///
 ///  * **floors toward zero**, never rounds a balance up (via [kasParts]);
 ///  * **`—` when unknown** — never a fabricated zero;
-///  * **`0.00000000` for a real zero** at [KvAmountRole.screen], and a real
-///    zero at every role — a synced empty wallet is not unknown;
+///  * **`0.00` for a real zero** at every role, [KvAmountRole.screen] included
+///    since D-267 — a synced empty wallet is not unknown;
 ///  * **every significant decimal, and not one more** — the precision law
 ///    (founder, 2026-08-27). A balance shows each digit that carries value and
 ///    stops: `21.12345678` reads in full because the last digit is a digit;
@@ -94,9 +97,16 @@ enum KvMoneyDirection {
 ///    decimals, so eight is where KAS stops; a token that carries six stops at
 ///    six. The rule is "significant digits up to the unit's precision", which
 ///    is why it survives the token surface unchanged rather than needing a
-///    second law written for it. A signing surface is the one exception and
-///    keeps its fixed eight: BG-6 restates what was BUILT, and a trimmed
-///    figure is a different string from the one that was signed;
+///    second law written for it. **The signing surface takes the same rule**
+///    (founder, 2026-09-04: *"only 2 zeros show if the amount has no decimals,
+///    and if it has decimals that is more than 2, it shows like this;
+///    `1.004 KAS` instead of `1.00400000`"*), which withdraws D-210's one
+///    exception. It is safe to withdraw because **trimming a trailing zero is
+///    lossless**: `1.00400000` and `1.004` are the same number, no digit that
+///    carries value is dropped, and nothing rounds — the trim only ever
+///    removes zeros. What BG-6 actually needs from a restatement is that no
+///    digit be *hidden*, and eight fixed places hid the end of the number
+///    behind five zeros the user had to count past;
 ///  * **a non-zero balance never renders as zero.** Where a caller pins a
 ///    fixed width that would erase the whole figure, the pin is lifted — a
 ///    concession to type size is not a licence to tell someone holding dust
@@ -159,12 +169,14 @@ class KvAmount extends StatelessWidget {
   final double? size;
 
   /// Fixed count of fractional digits. Null trims trailing zeros to a minimum
-  /// of two. Defaults per role: **hero and row trimmed, screen 8.**
+  /// of two. **Every role defaults to the trim since D-267** — the signing
+  /// surface's fixed eight is withdrawn. A caller may still pin a width; the
+  /// money plate is the only one that does.
   ///
   /// The hero used to fix at 4 and D-210 retired that — a hero stopping at
   /// four decimals told a user holding `21.12345678` that they held `21.1234`.
-  /// The screen role keeps its fixed eight because BG-6 restates a built
-  /// transaction in full.
+  /// The screen role kept a fixed eight until D-267 retired that too, for the
+  /// same reason read the other way: padding is not precision.
   final int? fractionDigits;
 
   /// Null shows the unit on [KvAmountRole.hero] and [KvAmountRole.screen], and
@@ -254,8 +266,10 @@ class KvAmount extends StatelessWidget {
       fractionDigits ??
       switch (role) {
         // Null means "trim": show every digit that carries value and stop.
+        // **Every role, including the signing surface** (founder, 2026-09-04)
+        // — see the precision law in the class doc.
         KvAmountRole.hero => null,
-        KvAmountRole.screen => 8,
+        KvAmountRole.screen => null,
         KvAmountRole.row => null,
       };
 
@@ -353,11 +367,14 @@ class KvAmount extends StatelessWidget {
             );
       // Spoken naturally — "1,284.5 KAS", not "1,284.5027000 KAS" (§4). The
       // padding that makes a column of digits line up is a VISUAL job; read
-      // aloud it is noise. A signing surface is the exception and keeps all
-      // eight, because BG-6 restates the built transaction in full.
-      final saidFraction = role == KvAmountRole.screen
-          ? fraction
-          : trimFraction(fraction, min: 0);
+      // aloud it is noise.
+      //
+      // **The signing surface is no longer an exception** (founder,
+      // 2026-09-04, withdrawing D-210's carve-out): it prints the trimmed
+      // figure, so it speaks the trimmed figure, and what is heard is what is
+      // on the glass. A surface whose spoken and printed forms differ is two
+      // statements of one fact.
+      final saidFraction = trimFraction(fraction, min: 0);
       final spoken =
           '$_spokenSign${parts.integer}'
           '${saidFraction.isEmpty ? '' : '.$saidFraction'} KAS';

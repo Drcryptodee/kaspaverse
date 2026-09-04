@@ -106,6 +106,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WalletSnapshot dco_decode_box_autoadd_wallet_snapshot(dynamic raw);
 
   @protected
+  ContactDto dco_decode_contact_dto(dynamic raw);
+
+  @protected
   ContactRouteDto dco_decode_contact_route_dto(dynamic raw);
 
   @protected
@@ -152,6 +155,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ActivityRecord> dco_decode_list_activity_record(dynamic raw);
+
+  @protected
+  List<ContactDto> dco_decode_list_contact_dto(dynamic raw);
 
   @protected
   List<ConversationDto> dco_decode_list_conversation_dto(dynamic raw);
@@ -374,6 +380,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ContactDto sse_decode_contact_dto(SseDeserializer deserializer);
+
+  @protected
   ContactRouteDto sse_decode_contact_route_dto(SseDeserializer deserializer);
 
   @protected
@@ -426,6 +435,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ActivityRecord> sse_decode_list_activity_record(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<ContactDto> sse_decode_list_contact_dto(SseDeserializer deserializer);
 
   @protected
   List<ConversationDto> sse_decode_list_conversation_dto(
@@ -705,6 +717,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_contact_dto(ContactDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_contact_route_dto(
     ContactRouteDto self,
     SseSerializer serializer,
@@ -770,6 +785,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_activity_record(
     List<ActivityRecord> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_contact_dto(
+    List<ContactDto> self,
     SseSerializer serializer,
   );
 

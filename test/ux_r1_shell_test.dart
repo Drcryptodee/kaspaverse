@@ -59,12 +59,21 @@ void main() {
         'lib/src/ui/widgets/kv_burial_gauge.dart':
             'a gauge must measure its own track to place ticks — BG-22 ink '
             '(L145). Removing it would CREATE a Lie Factor defect',
+        'lib/src/ui/widgets/kv_address.dart':
+            'compares the width it was GIVEN against the 11 dp floor, to '
+            'decide whether the compact run may keep scaling or must reflow '
+            'to two lines — a legibility floor, never a layout chosen from a '
+            'width (UX-R2B)',
         'lib/src/ui/widgets/kv_rows.dart':
             'intrinsic sizing inside a row; no width is read',
         'lib/src/ui/widgets/kv_drawer.dart':
             'rounds the rail\'s scroll viewport DOWN to a whole number of '
             'sockets so a clip never falls through a glyph — a HEIGHT it was '
             'given, never a width',
+        'lib/src/ui/send/signing_ceremony.dart':
+            'the fact grid measures the row it was GIVEN, to bound the value '
+            'so a whole-supply figure fits instead of starving the label — a '
+            'share of the space, never a layout chosen from a width (UX-R2B)',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

@@ -29,6 +29,7 @@ class KvSheet extends StatelessWidget {
     this.title,
     this.onCancel,
     this.cancelLabel = 'Cancel',
+    this.cancelTone,
     this.foot,
     this.onDismiss,
   });
@@ -43,6 +44,18 @@ class KvSheet extends StatelessWidget {
   /// control.
   final VoidCallback? onCancel;
   final String cancelLabel;
+
+  /// The cancel action's ink. Defaults to `inkDim` — a quiet exit on a sheet
+  /// that is merely asking something.
+  ///
+  /// **The signing sheet passes `risk`** (founder, on glass 2026-09-04: *"let
+  /// the cancel on the signing sheet be red"*). BG-7 gives red to money
+  /// leaving or at risk, and on that one sheet the word is the way out of an
+  /// irreversible commitment — so the hue is doing BG-7's job rather than
+  /// decorating an exit. It stays opt-in for exactly that reason: red on every
+  /// sheet's Cancel would spend the strongest hue in the system on the
+  /// commonest control and leave nothing for the case that matters.
+  final Color? cancelTone;
 
   /// Pinned below the scroll. See the class doc.
   final Widget? foot;
@@ -107,9 +120,32 @@ class KvSheet extends StatelessWidget {
                   borderRadius: BorderRadius.circular(grabber.height),
                 ),
               ),
-              if (title != null) _SheetHead(title!, onCancel, cancelLabel),
+              if (title != null)
+                _SheetHead(title!, onCancel, cancelLabel, cancelTone),
               Flexible(child: child),
               ?foot,
+              // **The keyboard's inset, added below the foot** (BG-12/BG-14).
+              //
+              // A sheet that holds a text field opens with the IME already up
+              // — the naming sheet focuses its field in `initState` — and this
+              // route consumed no `viewInsets`, so the foot and the address the
+              // sheet exists to bind sat *behind* the keyboard with nothing to
+              // scroll them into view: measured at 393×851 with a 320 dp IME,
+              // the Save control landed at y 783 against a 531 dp viewport
+              // (`ux-auditor`, UX-R2B, driven under the preview harness).
+              //
+              // Fixed here rather than in the one sheet, so every sheet that
+              // ever takes a field inherits it — and animated on the same
+              // reading as the IME so the panel rises with the keyboard rather
+              // than jumping after it.
+              AnimatedPadding(
+                duration: KvMotion.fast,
+                curve: KvMotion.curve,
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.viewInsetsOf(context).bottom,
+                ),
+                child: const SizedBox(width: double.infinity),
+              ),
               const SizedBox(height: KvSpace.l),
             ],
           ),
@@ -155,11 +191,17 @@ class KvSheet extends StatelessWidget {
 }
 
 class _SheetHead extends StatelessWidget {
-  const _SheetHead(this.title, this.onCancel, this.cancelLabel);
+  const _SheetHead(
+    this.title,
+    this.onCancel,
+    this.cancelLabel,
+    this.cancelTone,
+  );
 
   final String title;
   final VoidCallback? onCancel;
   final String cancelLabel;
+  final Color? cancelTone;
 
   @override
   Widget build(BuildContext context) {
@@ -203,13 +245,13 @@ class _SheetHead extends StatelessWidget {
                   ),
                   child: Text(
                     cancelLabel,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: KvFont.ui,
                       fontSize: 14,
                       height: 18 / 14,
                       fontWeight: FontWeight.w600,
                       fontVariations: KvWeight.w600,
-                      color: KvColor.inkDim,
+                      color: cancelTone ?? KvColor.inkDim,
                     ),
                   ),
                 ),

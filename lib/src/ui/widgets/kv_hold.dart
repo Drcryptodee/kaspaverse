@@ -33,7 +33,7 @@ class KvGlowPill extends StatelessWidget {
   /// amount, and at 320 dp / 1.3× the whole-supply figure needs three lines in
   /// the width the badge leaves it. A fixed box clips the last string a user
   /// reads before an irreversible transaction; this one grows instead (BG-14,
-  /// and the measurement that found it: `"Hold to send 12.40000000 KAS"` in
+  /// and the measurement that found it: `"Hold to send 12.40 KAS"` in
   /// 151.0 × 52.0 dp).
   final double height;
 
@@ -96,9 +96,10 @@ class KvHold extends StatelessWidget {
     required this.onDown,
     required this.onUp,
     this.height = KvSpace.control,
+    this.signed = false,
   });
 
-  /// Names the action **and its object** (BG-11) — "Hold to send 12.40000000
+  /// Names the action **and its object** (BG-11) — "Hold to send 12.40
   /// KAS", never "Confirm".
   final String label;
 
@@ -110,6 +111,20 @@ class KvHold extends StatelessWidget {
   final void Function(TapDownDetails) onDown;
   final void Function([Object?]) onUp;
   final double height;
+
+  /// **The hold completed** — the badge swaps the fingerprint for a check
+  /// (founder, on glass 2026-09-04: *"once the ring fill completes, let there
+  /// be a mark that replaces the fingerprint icon, so the feel is
+  /// satisfying"*).
+  ///
+  /// **It marks the HOLD, not the send.** The ring finishing means the user's
+  /// deliberate press was accepted and the transaction has gone to Rust to be
+  /// signed and broadcast — which is 1.3–3.8 s short of the network accepting
+  /// it. So the check is teal, the colour of *a control that fired*, and not
+  /// `ok` green, which BG-7 reserves for confirmed: a green tick here would be
+  /// the badge claiming an acceptance the wallet has not been told about, one
+  /// beat before the staged wait admits it is still waiting.
+  final bool signed;
 
   /// §4: the badge's outer diameter.
   static const double badge = 46;
@@ -168,11 +183,34 @@ class KvHold extends StatelessWidget {
                             color: KvColor.plate,
                           ),
                           child: Center(
-                            child: KvGlyphIcon(
-                              KvGlyph.fingerprint,
-                              size: glyph,
-                              tone: t > 0 ? KvColor.primary : KvColor.inkDim,
-                              stroke: KvGlyphSpec.strokeIllustrative,
+                            // The swap crosses, it does not cut (BG-24): the
+                            // fingerprint dissolves into the check on the one
+                            // easing, which is the beat the founder asked for.
+                            child: AnimatedSwitcher(
+                              duration: KvMotion.fast,
+                              switchInCurve: KvMotion.curve,
+                              switchOutCurve: KvMotion.curve,
+                              child: signed
+                                  ? const KvGlyphIcon(
+                                      KvGlyph.check,
+                                      key: ValueKey<bool>(true),
+                                      size: glyph,
+                                      tone: KvColor.primary,
+                                      // §2a: **3** for the check inside the
+                                      // hold badge — `strokeCheck`'s 3.5 is
+                                      // `KvCheck`'s 12 dp glyph in a 22 disc,
+                                      // a different seat.
+                                      stroke: 3,
+                                    )
+                                  : KvGlyphIcon(
+                                      KvGlyph.fingerprint,
+                                      key: const ValueKey<bool>(false),
+                                      size: glyph,
+                                      tone: t > 0
+                                          ? KvColor.primary
+                                          : KvColor.inkDim,
+                                      stroke: KvGlyphSpec.strokeIllustrative,
+                                    ),
                             ),
                           ),
                         ),

@@ -88,7 +88,10 @@ void main() {
         _host(KvAmount(BigInt.zero, role: KvAmountRole.screen)),
       );
       expect(find.text('0'), findsOneWidget);
-      expect(find.text('.00000000'), findsOneWidget);
+      // `.00`, not `.00000000` — the founder withdrew D-210's signing-surface
+      // exception on 2026-09-04 and the trim now governs every role. A zero
+      // is still a zero and still not the dash.
+      expect(find.text('.00'), findsOneWidget);
       expect(find.text('—'), findsNothing);
     });
 
@@ -151,7 +154,7 @@ void main() {
       expect(find.text('.00'), findsOneWidget);
     });
 
-    testWidgets('a row trims to two, a signing surface shows all eight', (
+    testWidgets('EVERY role trims to two — the signing surface included', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -159,18 +162,50 @@ void main() {
       );
       expect(find.text('.50'), findsOneWidget);
 
+      // **The founder withdrew the exception** (2026-09-04): *"only 2 zeros
+      // show if the amount has no decimals, and if it has decimals that is
+      // more than 2, it shows like this; `1.004 KAS` instead of
+      // `1.00400000`"*. It is safe on a signing surface because the trim is
+      // LOSSLESS — it removes only zeros, so no digit that carries value is
+      // dropped and nothing rounds. What BG-6 needs is that no digit be
+      // hidden, and eight fixed places hid the end of the number behind five
+      // zeros the eye had to count past.
+      //
       // **Concatenated across runs, not matched as one string.** A signing
-      // surface takes `significant` emphasis (D-230), so `0.50000000` renders
-      // as a quiet `0.` and a strong `50000000` — the eight decimals BG-6
-      // requires are all present, in two `Text`s instead of one. Asserting the
-      // joined figure is what the law actually says; asserting a single run was
-      // asserting an implementation detail, which is why this went red on a
-      // change that shows every digit it always did (L143's sibling: a string
-      // comparison cannot testify about a render).
+      // surface takes `significant` emphasis (D-230), so the figure renders
+      // as a quiet `0.` and a strong `50`. Asserting the joined figure is
+      // what the law actually says; asserting a single run asserts an
+      // implementation detail (L143's sibling: a string comparison cannot
+      // testify about a render).
       await tester.pumpWidget(
         _host(KvAmount(BigInt.from(50000000), role: KvAmountRole.screen)),
       );
-      expect(_joinedFigure(tester), '0.50000000');
+      expect(_joinedFigure(tester), '0.50');
+    });
+
+    testWidgets('the trim removes zeros and NEVER a significant digit', (
+      tester,
+    ) async {
+      // 1.00400000 → `1.004`, which is the founder's own example. The third
+      // decimal survives; the five zeros behind it do not.
+      await tester.pumpWidget(
+        _host(KvAmount(BigInt.from(100400000), role: KvAmountRole.screen)),
+      );
+      expect(_joinedFigure(tester), '1.004');
+
+      // A figure that genuinely runs to eight places still shows all eight —
+      // the trim has nothing to take.
+      await tester.pumpWidget(
+        _host(KvAmount(BigInt.from(112345678), role: KvAmountRole.screen)),
+      );
+      expect(_joinedFigure(tester), '1.12345678');
+
+      // And a fee: the shape the founder singled out — `0.00412`, not
+      // `0.00412000`.
+      await tester.pumpWidget(
+        _host(KvAmount(BigInt.from(412000), role: KvAmountRole.screen)),
+      );
+      expect(_joinedFigure(tester), '0.00412');
     });
 
     testWidgets('direction rides sign, colour and weight at once (BG-7)', (
@@ -326,12 +361,13 @@ void main() {
       expect(find.bySemanticsLabel('12.4 KAS'), findsOneWidget);
       expect(find.text('.40'), findsOneWidget);
 
-      // A signing surface is the exception: BG-6 restates the built
-      // transaction in full, spoken included.
+      // The signing surface is no longer an exception (founder, 2026-09-04):
+      // it speaks the same trimmed figure it prints, so what is read aloud and
+      // what is on the glass are one string.
       await tester.pumpWidget(
         _host(KvAmount(BigInt.from(1240000000), role: KvAmountRole.screen)),
       );
-      expect(find.bySemanticsLabel('12.40000000 KAS'), findsOneWidget);
+      expect(find.bySemanticsLabel('12.4 KAS'), findsOneWidget);
 
       // A whole number says nothing after the point at all.
       await tester.pumpWidget(_host(KvAmount(BigInt.from(300000000))));
@@ -458,14 +494,13 @@ void main() {
       expect(rendered, isNot(startsWith('kaspa:q…')));
     });
 
-    testWidgets('compact keeps its TAIL in a narrow box — it scales down', (
-      tester,
-    ) async {
+    testWidgets('compact keeps its TAIL in a moderately narrow box — it '
+        'scales down', (tester) async {
       // The device caught the ellipsis version of this: a compact address
       // re-ellipsized by its row, deleting the eight characters that identify
       // it. Clipping loses exactly the same eight, just without the tell — so
       // the answer is neither, and the text shrinks instead.
-      await tester.pumpWidget(_host(const KvAddress(_address), width: 80));
+      await tester.pumpWidget(_host(const KvAddress(_address), width: 160));
       final text = tester.widget<Text>(find.byType(Text));
       expect(text.overflow, TextOverflow.clip);
       expect(text.softWrap, isFalse);
@@ -474,10 +509,38 @@ void main() {
       // The whole compact string is laid out; the box scales it, and the last
       // eight payload characters are still in it.
       final laid = tester.renderObject<RenderBox>(find.byType(Text));
-      expect(laid.size.width, greaterThan(80));
+      expect(laid.size.width, greaterThan(160));
       expect(
         text.textSpan!.toPlainText(),
         endsWith(_address.substring(_address.length - 8)),
+      );
+    });
+
+    testWidgets('...but the scaling STOPS at the 11 dp floor and wraps '
+        'instead', (tester) async {
+      // The scale had no floor, and this widget's own doc has claimed one
+      // since it shipped. On the receipt's head row at 320 dp / 1.3× it
+      // reached **7.52 dp** — an address rendered below the size at which it
+      // can be compared, on the surface whose whole job is comparing it
+      // (`ux-auditor`, UX-R2B). Below the floor it now breaks to a second
+      // line: a break is legible, 7 dp is not, and the break falls at the
+      // scheme so both weighted ends stay whole.
+      await tester.pumpWidget(_host(const KvAddress(_address), width: 80));
+      final text = tester.widget<Text>(find.byType(Text));
+      expect(find.byType(FittedBox), findsNothing);
+      expect(text.softWrap, isTrue);
+      expect(text.maxLines, 2);
+      // Every character still present — the reflow costs a line, never a
+      // character (BG-15).
+      expect(
+        text.textSpan!.toPlainText(),
+        endsWith(_address.substring(_address.length - 8)),
+      );
+      final laid = tester.renderObject<RenderBox>(find.byType(Text));
+      expect(
+        laid.size.height,
+        greaterThan(22),
+        reason: 'it took a second line rather than a smaller size',
       );
     });
 
