@@ -53,7 +53,10 @@ SignableSummaryDto _summary() => SignableSummaryDto(
   txCount: 1,
   utxoCount: 2,
   payloadLen: 0,
-  payloadKind: 'none',
+  // Null, not `'none'`: a payment carries no payload, and a fixture that
+  // says `none` puts a line on the ceremony that the shipped path never
+  // draws — a preview lying about the surface it exists to show.
+  payloadKind: null,
   nonce: BigInt.one,
   resultingCoins: 1,
   feeStrategy: FeeStrategyKind.senderPays,
@@ -230,28 +233,102 @@ Future<void> _summonDrawer(WidgetTester tester) async {
 
 /// Types an amount on the pad and pastes a destination — the state in which the
 /// send screen actually has a fee, an address review and a live Review button.
-Future<void> _typeASend(WidgetTester tester) async {
+/// Paste a destination and walk to step 2 (UX-R2 — Send is two steps now).
+Future<void> _pasteDestination(WidgetTester tester) async {
   tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
     SystemChannels.platform,
     (call) async => call.method == 'Clipboard.getData'
         ? <String, dynamic>{'text': _addr}
         : null,
   );
-  // Scoped to the pad: an unscoped `find.text('.')` matches whatever
-  // else on the screen happens to render that glyph, and at the floor
-  // geometry it typed `124` instead of `12.4` — a harness artifact that
-  // would have read as a screen defect.
-  for (final key in ['1', '2', '.', '4']) {
-    await tester.tap(
-      find.descendant(of: find.byType(KvKeypad), matching: find.text(key)),
-    );
-    await tester.pump();
-  }
   await tester.tap(
     find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvGlyph.paste),
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 600));
+}
+
+/// Step 1 with a destination in it, checked — `S6b`.
+Future<void> _checkedDestination(WidgetTester tester) async {
+  await _pasteDestination(tester);
+}
+
+/// Step 2 with a figure on the pad — `S6`.
+Future<void> _typeASend(WidgetTester tester) async {
+  await _pasteDestination(tester);
+  await tester.tap(find.text('Continue to amount'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.enter);
+  // Scoped to the pad: an unscoped `find.text('.')` matches whatever else on
+  // the screen happens to render that glyph, and at the floor geometry it
+  // typed `124` instead of `12.4` — a harness artifact that would have read as
+  // a screen defect.
+  // A short window leaves the pad below the fold AND outside the cache
+  // extent, so it is not built at all — `ensureVisible` cannot reach a widget
+  // that does not exist. Jump the list first, then scroll to each key.
+  final scroll = tester.state<ScrollableState>(
+    find
+        .descendant(
+          of: find.byKey(SendScreen.scrollTarget),
+          matching: find.byType(Scrollable),
+        )
+        .first,
+  );
+  scroll.position.jumpTo(scroll.position.maxScrollExtent);
+  await tester.pump();
+  for (final key in ['1', '2', '.', '4']) {
+    final cap = find.descendant(
+      of: find.byType(KvKeypad),
+      matching: find.text(key),
+    );
+    // A short window puts the pad below the fold; a catalogue frame is a
+    // rendering exercise and must not fail because a key needed scrolling to.
+    await tester.ensureVisible(cap);
+    await tester.pump();
+    await tester.tap(cap);
+    await tester.pump();
+  }
+  await tester.pump(const Duration(milliseconds: 600));
+}
+
+/// The ceremony **over the page it was built on** (`S7`), composed rather than
+/// navigated: a catalogue frame is a rendering exercise, and driving three
+/// steps and a push through five window classes fails for reasons that are
+/// about the harness rather than about the design. The layering is the point,
+/// and this shows exactly it — the scrimmed, blurred Send screen under a
+/// floating sheet.
+Widget _ceremonyOverSend() => Stack(
+  children: [
+    _sendScreen(),
+    SigningCeremony(
+      summary: _summary(),
+      commit: (_) async => _sent(),
+      abandon: () async {},
+    ),
+  ],
+);
+
+/// All the way to the receipt (`S8`).
+Future<void> _completeASend(WidgetTester tester) async {
+  final gesture = await tester.startGesture(
+    tester.getCenter(find.textContaining('Hold to send')),
+  );
+  await tester.pump();
+  await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+  await gesture.up();
+  await tester.pumpAndSettle();
+}
+
+/// The hold, part-way round — the one state a still frame cannot reach by
+/// waiting, and the one BG-6 is about.
+Future<void> _armTheHold(WidgetTester tester) async {
+  final gesture = await tester.startGesture(
+    tester.getCenter(find.textContaining('Hold to send')),
+  );
+  addTearDown(() async => gesture.up());
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 340));
 }
 
 Widget _node() => NodeScreen(
@@ -412,11 +489,16 @@ void main() {
         sentence: 'Not built yet. The arcade will live here.',
       ),
     );
-    surface('receive__address', () => ReceiveScreen(fetch: () async => _addr));
+    // **Receive, in all four frames** (`S5`, UX-R2): the card, the tile, the
+    // address that copies on tap, and the two actions at the foot.
+    framedSurface(
+      'receive__address',
+      () => ReceiveScreen(fetch: () async => _addr, share: (_) async => true),
+    );
 
-    // **The failed state, at the same footprint** — the composition UX-5 owes
-    // (BG-20), and the one no happy-path preview can show.
-    surface(
+    // **The failed state, at the same footprint** (BG-20) — the one no
+    // happy-path preview can show.
+    framedSurface(
       'receive__failed',
       () => ReceiveScreen(
         fetch: () async => throw const AppError(message: 'the vault is locked'),
@@ -424,22 +506,19 @@ void main() {
     );
     surface('node__connected', _node);
     surface('settings__root', _settings);
-    surface('send__empty', _sendScreen);
 
-    // **The send screen doing its job**, which no preview has ever shown: an
-    // amount typed on the pad, a destination pasted, the chunked address
-    // review, the live fee and Review enabled. `send__empty` renders the one
-    // state where none of that exists.
-    surface('send__typed', _sendScreen, act: _typeASend);
+    // **Send, both steps, in all four frames** (`S6a` · `S6b` · `S6`).
+    framedSurface('send__recipient', _sendScreen);
+    framedSurface('send__checked', _sendScreen, act: _checkedDestination);
+    framedSurface('send__amount', _sendScreen, act: _typeASend);
 
-    surface(
-      'ceremony__confirm',
-      () => SigningCeremony(
-        summary: _summary(),
-        commit: (_) async => _sent(),
-        abandon: () async {},
-      ),
-    );
+    // **The ceremony as a sheet over the page it was built on** (`S7`) — and
+    // the hold part-way round, which is the state BG-6 is about.
+    framedSurface('ceremony__review', _ceremonyOverSend);
+    framedSurface('ceremony__holding', _ceremonyOverSend, act: _armTheHold);
+
+    // **The receipt** (`S8`): a place, not a modal.
+    framedSurface('ceremony__sent', _ceremonyOverSend, act: _completeASend);
 
     surface(
       'address__chunked',

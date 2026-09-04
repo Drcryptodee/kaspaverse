@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,17 +7,20 @@ import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../error_text.dart';
 import '../format.dart';
-import '../theme/kv_page_route.dart';
+import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
+import '../widgets/kv_check.dart';
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_explorer_exit.dart';
 import '../widgets/kv_glyph.dart';
+import '../widgets/kv_hold.dart';
+import '../widgets/kv_sheet.dart';
 import '../widgets/kv_status_chip.dart';
-import '../widgets/kv_surface.dart';
+import '../widgets/kv_two_pane.dart';
 
 /// THE signing ceremony (consensus B7, BG-6) — **one surface for every mode**:
 /// paying, accepting, staking, merging, emptying, messaging.
@@ -35,12 +37,23 @@ import '../widgets/kv_surface.dart';
 /// trailing-zero trim does **not** apply, because a trimmed figure is a
 /// different string from the one that was signed.
 ///
-/// **It is a screen, not a sheet** (UX-4, promoting the device-proven
-/// prototype). A ceremony that scrolls its own primary action out of reach is
-/// not a ceremony: the hold is pinned below the scroll, so the control that
-/// signs is always under the thumb whatever the text scale. Back always
-/// cancels safely — leaving without a completed hold calls [abandon] and drops
-/// the unsigned plan stashed in Rust.
+/// **A sheet while it is a question, a screen once it is an answer** (`S7` →
+/// `S8`, UX-R2). The review floats over the Send screen the user built it on,
+/// so Cancel visibly returns them to their own form; the moment something has
+/// actually happened the surface becomes a full-page receipt, because a receipt
+/// is a destination and not a modal.
+///
+/// D-221 §1 made this a full screen on the argument that *a ceremony which can
+/// scroll its own primary action out of reach is not a ceremony* — BG-6's
+/// restatement is taller than any viewport at 320 dp / 1.3×. **That objection
+/// is answered rather than waived**: [KvSheet.foot] is laid out below the
+/// scroll and outside it, so the hold is under the thumb at every text scale
+/// and only the restatement above it moves. The half of the ruling that was
+/// load-bearing is kept; the half that was a container is what the founder's
+/// approved render decides (D-259).
+///
+/// Back always cancels safely — leaving without a completed hold calls
+/// [abandon] and drops the unsigned plan stashed in Rust.
 class SigningCeremony extends StatefulWidget {
   const SigningCeremony({
     super.key,
@@ -53,6 +66,7 @@ class SigningCeremony extends StatefulWidget {
     this.onLeftInFlight,
     this.explorerUrl,
     this.openUrl,
+    this.onSendAnother,
   });
 
   final SignableSummaryDto summary;
@@ -101,6 +115,14 @@ class SigningCeremony extends StatefulWidget {
 
   final Future<bool> Function(String url)? openUrl;
 
+  /// *Send another* on the receipt (`S8`). It pops the ceremony like **Done**
+  /// does and then tells the caller not to leave — the send screen resets its
+  /// own form instead of popping to home.
+  ///
+  /// Null hides the action, which is what every non-payment caller gets: there
+  /// is no "another" of a merge or a handshake bond.
+  final VoidCallback? onSendAnother;
+
   @override
   State<SigningCeremony> createState() => _SigningCeremonyState();
 }
@@ -124,9 +146,14 @@ Future<SendOutcomeDto?> showSigningCeremony(
   VoidCallback? onLeftInFlight,
   Future<String> Function(String txid)? explorerUrl,
   Future<bool> Function(String url)? openUrl,
+  VoidCallback? onSendAnother,
 }) {
   return Navigator.of(context).push(
-    KvPageRoute<SendOutcomeDto>(
+    // **A sheet route, so the page underneath stays on screen** — scrimmed and
+    // blurred at 6 dp, which is the only job the blur has (§1.8). The route
+    // itself is transparent; the surface decides whether it is floating a sheet
+    // or covering the window with a receipt.
+    KvSheetRoute<SendOutcomeDto>(
       builder: (_) => SigningCeremony(
         summary: summary,
         commit: commit,
@@ -137,6 +164,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
         onLeftInFlight: onLeftInFlight,
         explorerUrl: explorerUrl,
         openUrl: openUrl,
+        onSendAnother: onSendAnother,
       ),
     ),
   );
@@ -380,108 +408,264 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // Back always cancels SAFELY (BG-6) — and while the broadcast is in
       // flight there is nothing left to cancel, so the exit closes instead of
       // dropping the user out of a money operation whose result has not landed
-      // yet. The same reasoning as the preparing card's non-dismissible
-      // barrier, one beat later: nothing is at risk before the hold completes,
-      // and after it the screen owes the user its answer.
-      canPop: !_sending || _mayLeave,
+      // yet. Nothing is at risk before the hold completes, and after it the
+      // screen owes the user its answer.
+      // **Every door is the same door** (`wallet-security-auditor`, UX-R2).
+      //
+      // `canPop` used to be `!_sending || _mayLeave`, which let the system
+      // back gesture pop the route itself — and a system pop carries no
+      // result, so a *settled* receipt returned `null`. `null` is what a
+      // dismissal-without-signing returns, so `_reviewWith` did not leave the
+      // send screen, and the user landed back on step 2 holding the
+      // destination and the amount of the send that had just gone out: one
+      // tap and one hold from a duplicate. The same UX-4 hazard `onLeftInFlight`
+      // exists for, arriving through the exit that bypassed it — and newly
+      // self-contradictory here, because *Send another* deliberately clears
+      // that form while back left it armed.
+      //
+      // So the route never pops itself. Back runs `_close()`, which is the
+      // same call the sheet's Cancel and the receipt's Done make, and the
+      // outcome reaches the caller whichever door was used.
+      canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop && _sending) widget.onLeftInFlight?.call();
+        if (didPop) return;
+        if (_sending && !_mayLeave) return;
+        _close();
       },
-      child: Scaffold(
-        backgroundColor: KvColor.abyss,
-        body: SafeArea(
-          top: false,
+      // **A crossfade, because nothing appears without the motion that
+      // accounts for it** (BG-24). The sheet does not cut to the receipt: the
+      // page rises through it on the one curve, which is also what makes the
+      // change of *kind* — a question becoming an answer — legible.
+      child: AnimatedSwitcher(
+        duration: KvMotion.enter,
+        switchInCurve: KvMotion.curve,
+        switchOutCurve: KvMotion.curve,
+        child: KeyedSubtree(
+          key: ValueKey<bool>(_settled),
+          child: _settled ? _receipt(context) : _review(context, s),
+        ),
+      ),
+    );
+  }
+
+  /// **The one exit.** Cancel, Done, Send another and the system back gesture
+  /// all arrive here, so the outcome reaches the caller whichever door was
+  /// used and the in-flight signal fires exactly once from any of them — the
+  /// "provably complete rather than probably" property the rail's chevron used
+  /// to get from `canPop` and the system gesture never did.
+  void _close() {
+    if (_sending) widget.onLeftInFlight?.call();
+    Navigator.of(context).pop(_outcome);
+  }
+
+  /// `S7` — the review, floating over the form it was built on.
+  Widget _review(BuildContext context, SignableSummaryDto s) {
+    // Null while the broadcast is in flight: nothing is left to cancel, and a
+    // closed exit reads as closed rather than looking live and ignoring the
+    // tap (BG-12).
+    final exit = _sending && !_mayLeave ? null : _close;
+    return KvSheet(
+      title: widget.title ?? _defaultTitle(s.kind),
+      onCancel: exit,
+      onDismiss: exit,
+      foot: Padding(
+        padding: const EdgeInsets.fromLTRB(KvSpace.l, KvSpace.m, KvSpace.l, 0),
+        // The foot changes shape when the hold fires; `AnimatedSize` on the
+        // one easing makes it read as the control handing over rather than
+        // blinking out (BG-24).
+        child: AnimatedSize(
+          duration: KvMotion.calm,
+          curve: KvMotion.curve,
+          alignment: Alignment.topCenter,
+          child: _sending
+              ? _StagedWait(stage: _stage, mayLeave: _mayLeave)
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    KvHold(
+                      label: _holdLabel(s),
+                      progress: _hold,
+                      enabled: true,
+                      onDown: _down,
+                      onUp: _release,
+                    ),
+                    const SizedBox(height: KvSpace.sm),
+                    // One line of instruction (§5), and it names all three
+                    // outcomes of a press so the gesture cannot be guessed
+                    // wrongly: what it takes, what a release does, and what a
+                    // tap does not do.
+                    Text(
+                      'Hold for '
+                      '${(KvMotion.deliberate.inMilliseconds / 1000).toStringAsFixed(1)} s — the ring fills clockwise · '
+                      'release early to cancel · nothing signs on a tap',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 13,
+                        height: 18 / 13,
+                        color: KvColor.inkMeta,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+      // `shrinkWrap`, so a short restatement makes a short sheet and a long one
+      // scrolls inside the 90 % cap — the height is the content's, never the
+      // window's.
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(horizontal: KvSpace.l),
+        children: _truthRows(context),
+      ),
+    );
+  }
+
+  /// `S8` — once something has happened, the surface is a receipt and a
+  /// receipt is a place, not a modal.
+  Widget _receipt(BuildContext context) {
+    final o = _outcome;
+    final v = _verdictFor(o, _error);
+    final txid = o?.finalTxid;
+    final s = widget.summary;
+    final selfSend = s.kind == SignableKind.selfSendFrame;
+    final consolidate = s.kind == SignableKind.consolidate;
+    final returnsToSelf = selfSend || consolidate;
+    final gutter = KvWindow.of(context).gutter;
+    return Scaffold(
+      // **A `Scaffold`, not a bare `ColoredBox`.** The receipt is a full page
+      // on a transparent route, and everything a page assumes — a `Material`
+      // for ink, a `ScaffoldMessenger` for the copy acknowledgement, and the
+      // theme's own `DefaultTextStyle` instead of `WidgetsApp`'s underlined
+      // fallback (§9's drawer defect, one layer down) — arrives with it.
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        // **One column, clamped at 560 and centred** (BG-33) — the same clamp
+        // Send and Receive take. A receipt is a full page like any other, and
+        // a 1132 dp `Done` pill at `expanded` was exactly the stretch the law
+        // forbids (`ux-auditor`, measured off the 1180 frame).
+        child: KvColumn(
+          gutter: false,
           child: Column(
             children: [
-              const SizedBox(height: KvSpace.statusBarReserve),
-              KvTopBar(
-                // **Once it is settled the rail says what HAPPENED**, not what
-                // the screen was for. Leaving it at *"Confirm send"* over a
-                // completed send is the whole screen still reading as a
-                // confirm form with a note stuck to the bottom — founder, on
-                // glass, 2026-08-30.
-                title: _settled
-                    ? _verdictFor(_outcome, _error).head
-                    : (widget.title ?? _defaultTitle(s.kind)),
-                // Null while the broadcast is in flight: nothing is left to
-                // cancel, and the chevron reads as closed rather than looking
-                // live and ignoring the tap (BG-12).
-                // No `onLeftInFlight` call here — `PopScope` above already
-                // makes it, for BOTH exits. `Navigator.pop` is not a silent
-                // exit: it reaches `onPopInvokedWithResult` synchronously in
-                // the same call, so calling it here as well fired the callback
-                // TWICE on the rail and once on the system back — two exits
-                // disagreeing about how many times an event happened
-                // (`wallet-security-auditor`, UX-4, measured).
-                //
-                // The collapse is provably complete rather than probably:
-                // `onBack` is non-null exactly when `!(_sending && !_mayLeave)`,
-                // which is the same expression as `canPop`, so whenever this
-                // target is tappable the pop is permitted and the `PopScope`
-                // arm always runs.
-                onBack: _sending && !_mayLeave
-                    ? null
-                    : () => Navigator.of(context).pop(_outcome),
-              ),
               Expanded(
                 child: ListView(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: KvSpace.gutter,
-                  ),
+                  padding: EdgeInsets.symmetric(horizontal: gutter),
                   children: [
-                    const SizedBox(height: KvSpace.m),
-                    ..._truthRows(context),
-                    if (_sending) ...[
-                      const SizedBox(height: KvSpace.l),
-                      _StagedWait(stage: _stage, mayLeave: _mayLeave),
-                    ],
-                    // **The verdict sits BELOW the figures, not above them**
-                    // (founder, on glass 2026-08-30 — he tried it at the top
-                    // and preferred it where it was). What the rebuild keeps
-                    // is everything else: the rail speaks the outcome, the
-                    // verb block is past tense, the caution is gone, and the
-                    // reference number closes the receipt.
-                    if (_settled) ...[
-                      const SizedBox(height: KvSpace.l),
-                      _OutcomeHead(
-                        outcome: _outcome,
-                        error: _error,
+                    const SizedBox(height: KvSpace.xl),
+                    Center(
+                      // **A tick for the good outcome, a lamp for the
+                      // exceptions.** Green means confirmed (BG-7), so a green
+                      // mark over an unconfirmed send would be an overclaim; the
+                      // check says *this step completed* and claims nothing about
+                      // depth. Only the exception is marked (founder, on glass,
+                      // 2026-08-30).
+                      child: v.tone == KvLampTone.ok
+                          ? const KvCheck(
+                              disc: KvCheck.receipt,
+                              semanticLabel: 'Sent',
+                            )
+                          : KvLamp(v.tone),
+                    ),
+                    const SizedBox(height: KvSpace.l),
+                    Text(
+                      v.head,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 30,
+                        height: 34 / 30,
+                        letterSpacing: -0.75,
+                        fontWeight: FontWeight.w800,
+                        fontVariations: KvWeight.w800,
+                        color: KvColor.ink,
+                      ),
+                    ),
+                    const SizedBox(height: KvSpace.sm),
+                    Text(
+                      v.body,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 15,
+                        height: 21 / 15,
+                        color: KvColor.inkDim,
+                      ),
+                    ),
+                    // Rust's own reason, then the Dart-caught one.
+                    // `SendOutcomeDto.error` was once read as a BOOLEAN and
+                    // rendered nowhere, so a vault that locked between prepare
+                    // and commit and a node that rejected the transaction both
+                    // came out as a bare "Send failed" — on the one surface where
+                    // the user most needs to know which (run 1, F8).
+                    for (final line in [o?.error, _error])
+                      if (line != null && line.isNotEmpty) ...[
+                        const SizedBox(height: KvSpace.sm),
+                        Text(
+                          line,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 13,
+                            height: 19 / 13,
+                            color: KvColor.inkDim,
+                          ),
+                        ),
+                      ],
+                    const SizedBox(height: KvSpace.l),
+                    _ReceiptCard(
+                      summary: s,
+                      returnsToSelf: returnsToSelf,
+                      acceptedAt: _acceptedAt,
+                      txid: txid,
+                    ),
+                    if (v.landed && txid != null) ...[
+                      const SizedBox(height: KvSpace.m),
+                      _ReceiptActions(
+                        txid: txid,
                         explorerUrl: widget.explorerUrl,
                         openUrl: widget.openUrl,
                       ),
                     ],
-                    if (_settled && _outcome?.finalTxid != null)
-                      _Receipt(txid: _outcome!.finalTxid!),
                     const SizedBox(height: KvSpace.l),
                   ],
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  KvSpace.gutter,
-                  0,
-                  KvSpace.gutter,
-                  KvSpace.m,
-                ),
-                child: _settled
-                    ? KvAction(
-                        label: 'Done',
-                        primary: true,
-                        onTap: () => Navigator.of(context).pop(_outcome),
-                      )
-                    : _HoldToSign(
-                        // While the broadcast is in flight the control is
-                        // inert, so it stops asking for a hold: a lit control
-                        // commanding an action that no longer applies is the
-                        // same defect as a disabled one that will not say why
-                        // (BG-12). "Sending" is the one word true of every
-                        // stage the wait can be on.
-                        label: _sending ? 'Sending…' : _holdLabel(s),
-                        progress: _hold,
-                        enabled: !_sending,
-                        onDown: _down,
-                        onUp: _release,
+                padding: EdgeInsets.fromLTRB(gutter, 0, gutter, KvSpace.m),
+                child: Column(
+                  children: [
+                    KvAction(label: 'Done', primary: true, onTap: _close),
+                    if (widget.onSendAnother != null && v.landed) ...[
+                      const SizedBox(height: KvSpace.s),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          widget.onSendAnother!.call();
+                          _close();
+                        },
+                        child: Semantics(
+                          button: true,
+                          // 52 dp (BG-12) — `s14` around an 18 dp line is 46.
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(vertical: KvSpace.s),
+                            child: Text(
+                              'Send another',
+                              style: TextStyle(
+                                fontFamily: KvFont.ui,
+                                fontSize: 14,
+                                height: 18 / 14,
+                                fontWeight: FontWeight.w600,
+                                fontVariations: KvWeight.w600,
+                                color: KvColor.inkDim,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
+                    ],
+                  ],
+                ),
               ),
             ],
           ),
@@ -515,29 +699,15 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // because the wallet does not know whether it went and a past-tense
       // label there would claim it did not. Same reasoning that deleted the
       // funds-safe sentence.
-      KvRuledLabel(
-        _verdictFor(_outcome, _error).landed
-            ? (returnsToSelf ? 'Cost you' : 'Sent')
-            : (returnsToSelf ? 'Costs you' : 'Sending'),
-      ),
+      // The review is never the settled surface any more — `S8`'s receipt is
+      // — so the label states the intent in the present tense and the past
+      // tense lives on the receipt card.
+      KvRuledLabel(returnsToSelf ? 'Costs you' : 'Sending'),
       const SizedBox(height: KvSpace.xs),
       KvAmount(
         returnsToSelf ? s.feeSompi : s.amountSompi,
         role: KvAmountRole.screen,
       ),
-
-      // A self-send (message or merge) goes to our OWN address — showing that
-      // raw address reads as "sending to a stranger". Drop it; the thread (or
-      // the wallet itself) is the destination.
-      if (!returnsToSelf) ...[
-        const SizedBox(height: KvSpace.l),
-        const KvRuledLabel('To'),
-        const SizedBox(height: KvSpace.xs),
-        // Groups of four with the first and last weighted: an address-poisoning
-        // attack buys a prefix and a suffix that LOOK right, so the eye is put
-        // exactly where the attack has to succeed (BG-15).
-        KvAddress(s.destination, form: KvAddressForm.chunked),
-      ],
 
       // Kind-derived plain-English lines, each citing only the DTO's own
       // built-tx numbers (B7: the summary stays the single source).
@@ -593,34 +763,6 @@ class _SigningCeremonyState extends State<SigningCeremony>
         ),
       ],
 
-      const SizedBox(height: KvSpace.l),
-      // The exact costs — never "≈ free" (the relay floor prices compute +
-      // transient bytes; a payload is never free, and KIP-9 storage gates what
-      // BUILDS). For a self-send the "Total" is replaced by the returning
-      // value, stated as a return, not a cost.
-      const _FactRule(),
-      _FactRow(label: 'Network fee', sompi: s.feeSompi),
-      const _FactRule(),
-      if (returnsToSelf)
-        _FactRow(label: 'Returns to you', sompi: s.amountSompi)
-      else
-        _FactRow(label: 'Total', sompi: s.totalSompi),
-      const _FactRule(),
-
-      // **The accepting BLOCK's own timestamp** — `TxStatusDto.acceptedUnixMs`,
-      // carried across the FFI for exactly this line. Neither `DateTime.now()`
-      // nor the wallet's fold time will do: both are this device's observation
-      // of an acceptance rather than the acceptance, wrong by the poll latency
-      // on a live link and by hours on a catch-up replay (`ffi-leak-auditor`
-      // caught the second of those in this field's first cut).
-      //
-      // It appears only once there is an acceptance to stamp; a send still
-      // waiting has no time to show and shows none.
-      if (_acceptedAt != null) ...[
-        _StampRow(label: 'Accepted', at: _acceptedAt!),
-        const _FactRule(),
-      ],
-
       if (selfSend) ...[
         const SizedBox(height: KvSpace.sm),
         _Note(
@@ -653,14 +795,54 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // **And it disappears the moment the send settles**, because by then it
       // is both redundant — the verdict plate says what happened — and wrong
       // in tense: *"Once this is signed"* over an already-signed transaction.
-      if (!_settled) ...[
-        const SizedBox(height: KvSpace.l),
-        const KvStatusChip(
-          tone: KvLampTone.warn,
-          words: 'Once this is signed it cannot be reversed.',
-          maxLines: null,
-        ),
-      ],
+      const SizedBox(height: KvSpace.l),
+      // **The truth card** (`S7`, §5): destination, fee and what leaves, in
+      // one `chip` inner card. Every information-bearing sub-line inside it is
+      // `inkDim` — `inkMeta` is 4.30 on `chip` and §1.4 forbids it there.
+      _TruthCard(
+        children: [
+          // A self-send (message or merge) goes to our OWN address — showing
+          // that raw address reads as "sending to a stranger". Drop it; the
+          // thread (or the wallet itself) is the destination.
+          if (!returnsToSelf) ...[
+            const _CardLabel('To'),
+            const SizedBox(height: KvSpace.s),
+            // One mono run with the first and last groups weighted: an
+            // address-poisoning attack buys a prefix and a suffix that LOOK
+            // right, so the eye is put exactly where the attack has to
+            // succeed (BG-15).
+            KvAddress(
+              s.destination,
+              form: KvAddressForm.chunked,
+              plated: false,
+            ),
+            const SizedBox(height: KvSpace.s),
+            const _FactRule(),
+          ],
+          _FactRow(label: 'Network fee', sompi: s.feeSompi),
+          const _FactRule(),
+          // **What leaves, in `risk`, with its sign** (`S7`, §5, BG-7). The
+          // label was `Total`, which names an arithmetic rather than a
+          // consequence: the number a user must check before signing is what
+          // will be gone from the wallet, and the hue, the word and the sign
+          // all say the same thing so the meaning survives greyscale.
+          if (returnsToSelf)
+            _FactRow(label: 'Returns to you', sompi: s.amountSompi)
+          else
+            _FactRow(
+              label: 'Leaves your wallet',
+              sompi: s.totalSompi,
+              direction: KvMoneyDirection.outgoing,
+            ),
+        ],
+      ),
+
+      const SizedBox(height: KvSpace.l),
+      const KvStatusChip(
+        tone: KvLampTone.warn,
+        words: 'Once this is signed it cannot be reversed.',
+        maxLines: null,
+      ),
     ];
   }
 }
@@ -707,10 +889,19 @@ class _FactRule extends StatelessWidget {
 /// It is the cure `_AvailableLine` took one screen over, for the same reason:
 /// **the cure is width, not scale** (`ux-auditor`, UX-4).
 class _FactRow extends StatelessWidget {
-  const _FactRow({required this.label, required this.sompi});
+  const _FactRow({
+    required this.label,
+    required this.sompi,
+    this.direction = KvMoneyDirection.internal,
+  });
 
   final String label;
   final BigInt sompi;
+
+  /// BG-7: a figure with a direction takes that direction's hue, its sign and
+  /// its weight. A fee has none — it is a cost, not a movement — and *what
+  /// leaves* has all three.
+  final KvMoneyDirection direction;
 
   @override
   Widget build(BuildContext context) {
@@ -724,6 +915,8 @@ class _FactRow extends StatelessWidget {
         children: [
           Text(
             label,
+            // `inkDim`, not `inkMeta`: this row lives on a `chip` inner card,
+            // where `inkMeta` is 4.30 and under AA (§1.4, BG-14).
             style: const TextStyle(
               fontFamily: KvFont.ui,
               fontSize: 13,
@@ -740,6 +933,7 @@ class _FactRow extends StatelessWidget {
           KvAmount(
             sompi,
             role: KvAmountRole.row,
+            direction: direction,
             fractionDigits: 8,
             showUnit: true,
             // **A fact row states a COST, and a cost is read for its digits**
@@ -1015,401 +1209,223 @@ _Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
   return (tone: tone, head: head, body: body, landed: (o?.submitted ?? 0) > 0);
 }
 
-/// The verdict — what happened, in the three beats §7 requires, under the
-/// figures it concludes.
-class _OutcomeHead extends StatelessWidget {
-  const _OutcomeHead({
-    required this.outcome,
-    required this.error,
-    this.explorerUrl,
-    this.openUrl,
+/// The `chip` inner card the restatement lives in (`S7`, §5).
+///
+/// **A card inside a sheet is `chip`, one step above the sheet's `plate`**
+/// (§1.1) — and that one step is why every information-bearing line inside it
+/// is `inkDim`: `inkMeta` measures 4.30 on `chip` and BG-14 does not bend.
+class _TruthCard extends StatelessWidget {
+  const _TruthCard({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(
+      horizontal: KvSpace.s20,
+      vertical: KvSpace.s14,
+    ),
+    decoration: BoxDecoration(
+      color: KvColor.chip,
+      borderRadius: BorderRadius.circular(KvRadius.inner),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    ),
+  );
+}
+
+/// A label inside the truth card.
+class _CardLabel extends StatelessWidget {
+  const _CardLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    text,
+    style: const TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 13,
+      height: 19 / 13,
+      color: KvColor.inkDim,
+    ),
+  );
+}
+
+/// The receipt's card (`S8`): what was sent, what it cost, where it stands and
+/// when — on the same ruled grid the review used, so the two read as one
+/// document rather than two designs of the same facts (BG-21).
+///
+/// **The status row is deliberately absent.** `S8` draws `Settling · 1 of 10`,
+/// which is the retired vocabulary *and* a threshold typed into the UI. D-249
+/// requires both lifecycle thresholds to cross the FFI from `NetworkParams`,
+/// and UX-R3 owns that migration at T2 — so this receipt states the acceptance
+/// it can actually vouch for (the accepting block's own timestamp) and says
+/// nothing about depth until the seam exists.
+class _ReceiptCard extends StatelessWidget {
+  const _ReceiptCard({
+    required this.summary,
+    required this.returnsToSelf,
+    required this.acceptedAt,
+    required this.txid,
   });
 
-  final SendOutcomeDto? outcome;
-  final String? error;
-  final Future<String> Function(String txid)? explorerUrl;
-  final Future<bool> Function(String url)? openUrl;
+  final SignableSummaryDto summary;
+  final bool returnsToSelf;
+  final DateTime? acceptedAt;
+  final String? txid;
 
   @override
   Widget build(BuildContext context) {
-    final o = outcome;
-    final txid = o?.finalTxid;
-    final v = _verdictFor(outcome, error);
-    final tone = v.tone;
-    final head = v.head;
-    final body = v.body;
-
-    return KvSurface(
+    final s = summary;
+    return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(KvSpace.m),
+      padding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.s20,
+        vertical: KvSpace.s,
+      ),
+      decoration: BoxDecoration(
+        color: KvColor.plate,
+        borderRadius: BorderRadius.circular(KvRadius.plate),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              // **A tick for the good outcome, a lamp for the exceptions.**
-              // Green means confirmed (BG-7), so a green lamp on `Sent` while
-              // the chain had confirmed nothing was an overclaim; a tick says
-              // *this step completed* and claims nothing about depth. The
-              // exceptions keep the lamp, because only the exception is marked
-              // (founder, on glass 2026-08-30).
-              if (tone == KvLampTone.ok)
-                const KvGlyphIcon(KvGlyph.check, size: 18, tone: KvColor.ok)
-              else
-                KvLamp(tone),
-              const SizedBox(width: KvSpace.s),
-              Expanded(
-                child: Text(
-                  head,
-                  style: const TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 17,
-                    height: 22 / 17,
-                    fontWeight: FontWeight.w600,
-                    color: KvColor.ink,
-                  ),
-                ),
+          if (!returnsToSelf) ...[
+            const SizedBox(height: KvSpace.s),
+            const Text(
+              'To',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 13,
+                height: 19 / 13,
+                color: KvColor.inkMeta,
               ),
-            ],
-          ),
-          const SizedBox(height: KvSpace.s),
-          _Note(body),
-          // Rust's own reason, then the Dart-caught one. `SendOutcomeDto.error`
-          // was once read as a BOOLEAN and rendered nowhere, so a vault that
-          // locked between prepare and commit and a node that rejected the
-          // transaction both came out as a bare "Send failed" — on the one
-          // surface where the user most needs to know which (run 1, F8).
-          for (final line in [o?.error, error])
-            if (line != null && line.isNotEmpty) ...[
-              const SizedBox(height: KvSpace.sm),
-              Text(
-                line,
-                style: const TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 13,
-                  height: 19 / 13,
-                  color: KvColor.inkDim,
-                ),
-              ),
-            ],
-          // **The explorer exit, and the suspended law is discharged.**
-          //
-          // This was a control that did nothing, which BG-12 forbids outright.
-          // The founder allowed the exception in terms — *"even if its a
-          // placeholder that is breaking a law. i alllow it"* — and named UX-5
-          // as its trigger (D-223). It is now the real exit, and it is the
-          // **same widget** the transaction detail uses: one rendering of "this
-          // goes to a third party, here is which one and here is what it will
-          // see" (BG-21). It disappears entirely when the seams are absent,
-          // which is what a control with nowhere to go should do.
-          if (v.landed && txid != null && explorerUrl != null) ...[
-            const SizedBox(height: KvSpace.m),
-            KvExplorerExit(
-              subject: txid,
-              resolve: explorerUrl!,
-              open: openUrl ?? (_) async => false,
+            ),
+            const SizedBox(height: KvSpace.xs),
+            KvAddress(
+              s.destination,
+              form: KvAddressForm.chunked,
+              plated: false,
+            ),
+            const SizedBox(height: KvSpace.s),
+            const _FactRule(),
+          ],
+          _FactRow(label: 'Amount', sompi: s.amountSompi),
+          const _FactRule(),
+          _FactRow(label: 'Network fee', sompi: s.feeSompi),
+          if (!returnsToSelf) ...[
+            const _FactRule(),
+            _FactRow(
+              label: 'Left your wallet',
+              sompi: s.totalSompi,
+              direction: KvMoneyDirection.outgoing,
             ),
           ],
+          // **The accepting BLOCK's own timestamp** — `TxStatusDto
+          // .acceptedUnixMs`, carried across the FFI for exactly this line.
+          // Neither `DateTime.now()` nor the wallet's fold time will do: both
+          // are this device's observation of an acceptance rather than the
+          // acceptance, wrong by the poll latency on a live link and by hours
+          // on a catch-up replay (`ffi-leak-auditor` caught the second of
+          // those in this field's first cut).
+          //
+          // It appears only once there is an acceptance to stamp; a send still
+          // waiting has no time to show and shows none.
+          if (acceptedAt != null) ...[
+            const _FactRule(),
+            _StampRow(label: 'Accepted', at: acceptedAt!),
+          ],
+          const SizedBox(height: KvSpace.s),
         ],
       ),
     );
   }
 }
 
-/// The receipt's reference number, at the FOOT of the receipt where a
-/// reference number goes — not stacked on top of the amount it refers to.
-class _Receipt extends StatelessWidget {
-  const _Receipt({required this.txid});
+/// Copy ID · Explorer (`S8`) — the two quiet things worth doing with a
+/// transaction that has landed.
+class _ReceiptActions extends StatelessWidget {
+  const _ReceiptActions({
+    required this.txid,
+    required this.explorerUrl,
+    required this.openUrl,
+  });
 
   final String txid;
+  final Future<String> Function(String txid)? explorerUrl;
+  final Future<bool> Function(String url)? openUrl;
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      const SizedBox(height: KvSpace.l),
-      const KvRuledLabel('Transaction id'),
-      const SizedBox(height: KvSpace.xs),
-      // **Tap to copy** (founder, 2026-08-30). A `SelectableText` made the
-      // whole 64 characters reachable only through a long-press-and-drag,
-      // which is the wrong gesture for the one string on this screen a user
-      // wants to take somewhere else. The tap copies ALL of it — a truncated
-      // txid is as useless as a truncated address — and says so, because a
-      // copy with no acknowledgement leaves the user tapping twice.
-      Semantics(
-        button: true,
-        label: 'Copy the transaction id',
-        child: InkWell(
-          onTap: () async {
-            await Clipboard.setData(ClipboardData(text: txid));
-            KvHaptic.selection();
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Transaction id copied'),
-                  duration: KvMotion.toast,
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Center(
+          child: Semantics(
+            button: true,
+            label: 'Copy the transaction id',
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () async {
+                // The tap copies ALL of it — a truncated txid is as useless as
+                // a truncated address — and says so, because a copy with no
+                // acknowledgement leaves the user tapping twice.
+                await Clipboard.setData(ClipboardData(text: txid));
+                KvHaptic.selection();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Transaction id copied'),
+                      duration: KvMotion.toast,
+                    ),
+                  );
+                }
+              },
+              child: const Padding(
+                // 52 dp (BG-12) — `s14` around an 18 dp line is 46.
+                padding: EdgeInsets.symmetric(
+                  horizontal: KvSpace.sm,
+                  vertical: KvSpace.s,
                 ),
-              );
-            }
-          },
-          borderRadius: BorderRadius.circular(KvRadius.plate),
-          child: KvSurface(
-            tone: KvSurfaceTone.well,
-            width: double.infinity,
-            padding: const EdgeInsets.all(KvSpace.sm),
-            child: Text(
-              txid,
-              style: const TextStyle(
-                fontFamily: KvFont.mono,
-                fontSize: 13,
-                height: 20 / 13,
-                color: KvColor.ink,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    KvGlyphIcon(KvGlyph.copy, size: 18, tone: KvColor.inkDim),
+                    SizedBox(width: KvSpace.s),
+                    Text(
+                      'Copy ID',
+                      style: TextStyle(
+                        fontFamily: KvFont.ui,
+                        fontSize: 14,
+                        height: 18 / 14,
+                        fontWeight: FontWeight.w600,
+                        fontVariations: KvWeight.w600,
+                        color: KvColor.inkDim,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
         ),
-      ),
-    ],
-  );
-}
-
-/// BG-6 hold-to-sign: press and hold; the ring fills over [KvMotion.deliberate]
-/// on the one decelerating easing; **only completing the hold signs**, and
-/// there is no tap path to broadcast. Releasing early reverses — nothing
-/// happens. The threshold lands with `mediumImpact` (§6).
-class _HoldToSign extends StatelessWidget {
-  const _HoldToSign({
-    required this.label,
-    required this.progress,
-    required this.enabled,
-    required this.onDown,
-    required this.onUp,
-  });
-
-  final String label;
-  final Animation<double> progress;
-  final bool enabled;
-  final void Function(TapDownDetails) onDown;
-  final void Function([Object?]) onUp;
-
-  /// The ring, inset one grid step inside the control on each side.
-  static const double _ringSize = KvSpace.control - KvSpace.s * 2;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      // DESCRIPTIVE ONLY — no `onTap`, and that omission is the design.
-      //
-      // This node once reported `isButton=false` with no hint, so a
-      // screen-reader user met an unlabelled control that says nothing about
-      // what it needs and does nothing when activated (ux-auditor +
-      // wallet-security-auditor, 2026-08-24 fix wave). `button: true` plus a
-      // hint naming the gesture at least makes the control state its
-      // requirement.
-      //
-      // What is deliberately NOT done here: wiring `SemanticsAction.tap` or
-      // `longPress` to the commit. A semantics activation is ONE discrete
-      // action, so it would collapse the 800 ms hold to an instant — the exact
-      // F1 defect that same sitting fixed, wearing an accessibility badge. The
-      // control therefore remains unsignable via TalkBack, which is a real and
-      // recorded defect (D-178) awaiting an accessible ceremony that KEEPS the
-      // friction, not a shortcut past it.
-      button: true,
-      hint:
-          'Press and hold for ${KvMotion.deliberate.inMilliseconds} '
-          'milliseconds to sign',
-      child: GestureDetector(
-        onTapDown: enabled ? onDown : null,
-        onTapUp: enabled ? onUp : null,
-        onTapCancel: enabled ? () => onUp() : null,
-        child: AnimatedBuilder(
-          animation: progress,
-          builder: (context, _) {
-            // **LINEAR IN BOTH DIRECTIONS** — the gauge is a reading, and
-            // BG-22 exempts a reading from BG-9's curve (D-229).
-            //
-            // Forward, the reasoning is old: on `Cubic(0.2, 0, 0, 1)` the ring
-            // reads 61% closed at 200ms and 93% at 480ms, so the last 320ms of
-            // safety friction — 40% of it — renders as the final 7% of the arc,
-            // indistinguishable from done.
-            //
-            // **The fall used to take the curve**, on the argument that it is
-            // motion rather than a reading. That argument is wrong and
-            // `ux-auditor` found why: the controller does not reset on release,
-            // so a re-press RESUMES from wherever the fall reached. The value
-            // is live the whole way down, the arc is still reporting how much
-            // hold is banked, and the eased version overstated it by 1.76x at
-            // the midpoint — then dropped 38 points in one frame the instant a
-            // thumb came back. A gauge that is resumable is a reading in both
-            // directions.
-            //
-            // The forgiveness an early release needs lives in
-            // `reverseDuration` (240ms against the 800ms climb), which is
-            // untouched: the fall is still fast, it is simply honest while it
-            // falls.
-            final t = progress.value;
-            return Container(
-              // The §3 control height, and the same one `KvAction` takes — so
-              // the footer does not change size when the ceremony settles and
-              // the hold is replaced by *Done*. A MINIMUM rather than a fixed
-              // height, because the label below is allowed a second line at
-              // the floor geometry and a fixed box would clip it.
-              constraints: const BoxConstraints(minHeight: KvSpace.control),
-              decoration: BoxDecoration(
-                // No teal fill. §1.5 permits exactly three emitting things,
-                // and on this screen the emission is spent on the ring — the
-                // one that is literally the sign ring BG-2 names. A filled
-                // teal pill behind it would be a second.
-                color: KvColor.control,
-                borderRadius: BorderRadius.circular(KvRadius.control),
-                border: Border.all(
-                  color: t > 0 ? KvColor.primaryMuted : KvColor.edgeHi,
-                ),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    // DERIVED from the control it sits in, not chosen: one
-                    // step of the grid inset on each side. A number picked by
-                    // eye is a number nobody can re-check (L121).
-                    width: _ringSize,
-                    height: _ringSize,
-                    child: CustomPaint(painter: _RingPainter(t)),
-                  ),
-                  const SizedBox(width: KvSpace.sm),
-                  // **It WRAPS; it does not shrink.** The label is a sentence
-                  // carrying an amount, and BG-14 forbids only the NUMBER from
-                  // reflowing — the wrap falls at a space, so the figure and
-                  // its unit stay together on one line whatever happens.
-                  // Fitted instead, a whole-supply amount put the last string
-                  // a user reads before an irreversible transaction at 9.6dp
-                  // against an 11dp law (`ux-auditor`, UX-4). It never
-                  // ellipsizes and never clips: the control grows instead.
-                  Flexible(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
-                      child: Text(
-                        label,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontFamily: KvFont.ui,
-                          fontSize: 15,
-                          height: 20 / 15,
-                          fontWeight: FontWeight.w600,
-                          color: enabled ? KvColor.ink : KvColor.inkMeta,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: KvSpace.sm),
-                ],
-              ),
-            );
-          },
-        ),
-      ),
+        // **The explorer exit, and the suspended law discharged.** It is the
+        // same widget the transaction detail uses: one rendering of *"this
+        // goes to a third party, here is which one and here is what it will
+        // see"* (BG-21). It disappears entirely when the seams are absent,
+        // which is what a control with nowhere to go should do (BG-12).
+        if (explorerUrl != null) ...[
+          const SizedBox(height: KvSpace.s),
+          KvExplorerExit(
+            subject: txid,
+            resolve: explorerUrl!,
+            open: openUrl ?? (_) async => false,
+          ),
+        ],
+      ],
     );
   }
-}
-
-/// The sign ring: a track, the arrow of the thing this control does, and the
-/// filling arc.
-///
-/// **The arc sweeps under reduced animations too, and that is BG-9's
-/// carve-out** (D-229). BG-9 and §3 both read *"reduced motion collapses
-/// everything to opacity, **except the hold**"*, and this painter used to
-/// collapse it anyway: it drew a COMPLETE circle for the whole 800 ms with only
-/// its opacity carrying `t`. At 100 ms of the hold the gauge read *closed* in
-/// the strongest channel it has — **BG-22's Lie Factor of 8, rising without
-/// bound as t approaches 0** — on the control that broadcasts an irreversible
-/// transaction, for exactly the users least able to compensate for it.
-///
-/// The exception had been half-discharged: D-177 fixed the *duration* half
-/// (`AnimationBehavior.preserve`, so 800 ms never becomes 40 ms) and nobody
-/// went back for the *extent* half. Both halves now hold.
-///
-/// **And a filling arc is not what reduced motion is for.** It translates
-/// nothing and parallaxes nothing; it is the direct reading of a control the
-/// user's own thumb is holding down. The opacity ramp it replaced was itself
-/// motion — a fade — so the old branch traded a readable channel for an
-/// unreadable one and bought nothing. There is now one rendering, which is also
-/// why BG-19 gets no second encoding to complain about.
-class _RingPainter extends CustomPainter {
-  const _RingPainter(this.t);
-
-  final double t;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final c = size.center(Offset.zero);
-    final r = size.width / 2 - 3;
-    canvas.drawCircle(
-      c,
-      r,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.5
-        ..color = KvColor.edgeHi,
-    );
-
-    // The arrow of the thing this control does, sitting inside the ring it
-    // fills. Teal, because the sign ring is one of exactly three things in the
-    // app that emit (BG-2) — and this is that same emission, not a second one.
-    // Smaller than the ring it sits in: the ring is the mechanism, the arrow
-    // is only its label.
-    final k = (size.width * 0.56) / KvGlyphSpec.grid;
-    canvas.save();
-    canvas.translate(size.width * 0.22, size.height * 0.22);
-    final arrow = Paint()
-      ..color = KvColor.primary
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = KvGlyphSpec.stroke * k
-      ..strokeCap = KvGlyphSpec.cap
-      ..strokeJoin = StrokeJoin.miter;
-    canvas.drawPath(
-      Path()
-        ..moveTo(12 * k, 17 * k)
-        ..lineTo(12 * k, 7 * k)
-        ..moveTo(8 * k, 11 * k)
-        ..lineTo(12 * k, 7 * k)
-        ..lineTo(16 * k, 11 * k),
-      arrow,
-    );
-    canvas.restore();
-
-    if (t <= 0) return;
-    // Fat enough to read as a gauge closing rather than a hairline creeping —
-    // this is the last thing that happens before money leaves, and it should
-    // feel like a mechanism seating.
-    final fill = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 4.5
-      // **BUTT, not round or square — and this is BG-22, not taste**
-      // (`ux-auditor`, D-229). A round or square cap paints half a stroke width
-      // PAST each end of the arc: 2 x 2.25dp on a 106.81dp circumference is
-      // **4.21% of the ring added to every reading**, so the gauge showed 16.7%
-      // at a true 12.5% — Lie Factor 1.34 at 100ms, and unbounded as t
-      // approaches 0. The house cap is ROUND (`KvGlyphSpec.cap`, 2.5dp since
-      // v4.2 — it was square under Black Glass) because a glyph is a mark; a
-      // gauge is a measurement, and a measurement may not overhang its own
-      // value. **The house cap changing is exactly why this one is written as a
-      // literal `StrokeCap.butt` and not as a token**: a measuring stroke does
-      // not follow the mark language, in either direction.
-      ..strokeCap = StrokeCap.butt
-      ..color = KvColor.primary;
-    // BG-22: the swept angle IS the reading, so it is `t` and nothing else —
-    // no easing in either direction (see the caller), no substitute channel
-    // under reduced motion, and no cap painting past the end.
-    canvas.drawArc(
-      Rect.fromCircle(center: c, radius: r),
-      -math.pi / 2,
-      2 * math.pi * t,
-      false,
-      fill,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_RingPainter old) => old.t != t;
 }

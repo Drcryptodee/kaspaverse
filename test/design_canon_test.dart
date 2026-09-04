@@ -8,6 +8,8 @@ import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_hold.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
@@ -63,7 +65,7 @@ void main() {
           .widgetList<CustomPaint>(find.byType(CustomPaint))
           .map((w) => w.painter)
           .whereType<CustomPainter>()
-          .where((p) => p.runtimeType.toString() == '_RingPainter');
+          .whereType<KvHoldRing>();
       expect(
         painted,
         isNotEmpty,
@@ -72,7 +74,8 @@ void main() {
             'unless it found the painter it is measuring',
       );
       for (final p in painted) {
-        p.paint(spy, const Size(40, 40));
+        // The badge's own footprint (§4): a 46 dp ring around a 38 dp disc.
+        p.paint(spy, const Size(KvHold.badge, KvHold.badge));
       }
       return spy.arcs.map((a) => a.inkedFractionOfCircle).toList();
     }
@@ -529,8 +532,11 @@ void main() {
 
 // ---------------------------------------------------------------------------
 
+/// `KvWindow` above the `Navigator`, exactly as `main.dart` mounts it — the
+/// ceremony is a sheet now and a sheet reads the window class (BG-33).
 Widget _host(Widget child) => MaterialApp(
   theme: kvDarkTheme(),
+  builder: (context, page) => KvWindow(child: page!),
   home: Scaffold(
     backgroundColor: KvColor.abyss,
     body: Center(child: child),

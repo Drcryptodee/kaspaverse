@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 
 import '../rust/api/error.dart';
 import '../rust/api/vault.dart' as vault_api;
+import '../ui/format.dart';
 import '../ui/secret/bip39_wordlist.dart';
 
 /// Owns the app's single subscription to the bridge vault-status stream and
@@ -313,6 +314,36 @@ class VaultService with WidgetsBindingObserver {
   /// device, not a failure, and the caller says so plainly.
   Future<bool> openUrl(String url) async =>
       await ceremony.invokeMethod<bool>('openUrl', {'url': url}) ?? false;
+
+  /// **Hand a public string to another app** — the receive address, and
+  /// nothing else in this codebase calls it.
+  ///
+  /// It sits beside [openUrl] on the ceremony channel for the same reason: one
+  /// intent, no new plugin on the custody path (INV-7). The native side opens a
+  /// chooser rather than a remembered default, so a share target chosen once
+  /// cannot silently own every later share.
+  ///
+  /// **A secret never reaches here.** INV-1/3 govern secret material and this
+  /// takes a `String`; the one caller is Receive, and its payload is the same
+  /// public address the QR already encodes for anyone pointing a camera at the
+  /// screen. Returns false when the phone has nothing that accepts text.
+  Future<bool> shareText(String text) async {
+    // **The seam checks the payload rather than trusting its caller**
+    // (`wallet-security-auditor`, UX-R2). `openUrl`'s native side re-checks
+    // `https://` and `KvAddress.copyFull` asserts it copies all 67 characters;
+    // both make the rule structural instead of a habit. This is an unbounded
+    // egress to every app on the device, so the same discipline applies here:
+    // only a mainnet address may leave, whatever a future caller believes it
+    // is handing over.
+    final address = text.trim();
+    if (!looksLikeMainnetAddress(address)) {
+      throw const AppError(
+        message: 'Only a Kaspa address can be shared from this wallet.',
+      );
+    }
+    return await ceremony.invokeMethod<bool>('shareText', {'text': address}) ??
+        false;
+  }
 
   /// Run a native ceremony that may pause Flutter, with the §0.11 auto-lock held
   /// open across it and **resolved honestly afterwards**.

@@ -13,15 +13,17 @@ import 'package:kaspaverse/src/ui/send/confirm_send_flow.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 
 import 'support/preview_harness.dart';
 import 'support/finders.dart';
@@ -68,7 +70,15 @@ SignableSummaryDto _summary({
 SendOutcomeDto _ok() =>
     SendOutcomeDto(finalTxid: 'a' * 64, submitted: 1, total: 1, partial: false);
 
-Widget _host(Widget child) => MaterialApp(theme: kvDarkTheme(), home: child);
+/// **`KvWindow` above the `Navigator`**, exactly as `main.dart` mounts it —
+/// the ceremony arrives on a route now, and a sheet reads the window class to
+/// decide whether it is full-width or floating (BG-33). A host without it is a
+/// host that cannot build the surface under test.
+Widget _host(Widget child) => MaterialApp(
+  theme: kvDarkTheme(),
+  builder: (context, page) => KvWindow(child: page!),
+  home: child,
+);
 
 Widget _ceremony(SignableSummaryDto summary, {String? title}) => _host(
   SigningCeremony(
@@ -130,29 +140,58 @@ Future<void> _type(WidgetTester tester, String keys) async {
   }
 }
 
-/// Put the destination in, then hand focus back to the amount pad the way a
-/// user does — by tapping the figure.
-Future<void> _address(WidgetTester tester, String address) async {
+/// **Step 1, then step 2** (UX-R2). Put the destination in and walk through to
+/// the amount, the way a user does. Leaving [advance] false stays on step 1 —
+/// for the tests that are about what the address field itself says.
+Future<void> _address(
+  WidgetTester tester,
+  String address, {
+  bool advance = true,
+}) async {
+  // Step 2 → back to the destination, the way Edit does it. The step swap is
+  // an `AnimatedSwitcher` on `enter`, so both steps are in the tree until it
+  // finishes — the pump has to clear it before a finder means one step.
+  if (find.text('Edit').evaluate().isNotEmpty) {
+    await tester.tap(find.text('Edit'));
+    await tester.pump();
+    await tester.pump(KvMotion.enter);
+    await tester.pump(KvMotion.enter);
+  }
   if (find.byKey(SendScreen.addressTarget).evaluate().isEmpty) {
-    // The floor geometry can leave the field above the fold after the pad has
-    // been scrolled to.
+    // The floor geometry can leave the field above the fold.
     final position = _sendList(tester).position;
     position.jumpTo(position.minScrollExtent);
     await tester.pump();
   }
+  if (find.byKey(SendScreen.addressTarget).evaluate().isEmpty) {
+    // The field RENDERS a valid address rather than editing it (`S6b`);
+    // tapping it puts the caret back.
+    await tester.tap(find.byType(KvAddress).first);
+    await tester.pump();
+    await tester.pump();
+  }
   await tester.enterText(find.byKey(SendScreen.addressTarget), address);
   await tester.pump();
-  // Drop the address field's focus so the pad comes back. Tapping the figure
-  // would raise the AMOUNT keyboard now, which hides the pad just the same.
   FocusManager.instance.primaryFocus?.unfocus();
   await tester.pump();
   await tester.pump(KvMotion.calm);
+  if (!advance) return;
+  final go = find.widgetWithText(KvAction, 'Continue to amount');
+  if (go.evaluate().isEmpty) return;
+  await tester.tap(go);
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.enter);
 }
 
-/// The reason printed under a disabled Review, or null when it is live.
-String? _reviewReason(WidgetTester tester) => tester
-    .widget<KvAction>(find.widgetWithText(KvAction, 'Review this send'))
-    .disabledReason;
+/// The foot control of whichever step is on screen — one pill per step, and
+/// the label carries the amount now, so the finder is by position rather than
+/// by string.
+KvAction _foot(WidgetTester tester) =>
+    tester.widgetList<KvAction>(find.byType(KvAction)).last;
+
+/// The reason a disabled foot control gives, or null when it is live.
+String? _reviewReason(WidgetTester tester) => _foot(tester).disabledReason;
 
 /// Sentinel, so a test can pass an explicit `null` balance and mean *unknown*
 /// rather than *defaulted*.
@@ -177,7 +216,9 @@ Widget _sendScreen({
     prepare: prepare ?? (_, _) async => _summary(),
     commit: commit ?? (_) async => _ok(),
     abandon: abandon ?? () async {},
-    prepareSweep: prepareSweep,
+    prepareSweep:
+        prepareSweep ??
+        (_) async => _summary(kind: SignableKind.sweep, utxoCount: 1),
     minimumSendable: minimumSendable,
   ),
 );
@@ -197,16 +238,16 @@ Future<void> _pumpTypedSend(WidgetTester tester) async {
   await tester.pumpWidget(
     _sendScreen(feePreview: (_, _) async => BigInt.from(315400)),
   );
-  for (final key in ['1', '2', '.', '4']) {
-    await tester.tap(
-      find.descendant(of: find.byType(KvKeypad), matching: find.text(key)),
-    );
-    await tester.pump();
-  }
+  // The destination first: it is step 1, and the fee cannot be priced without
+  // it either way.
   await tester.tap(
     find.byWidgetPredicate((w) => w is KvGlyphIcon && w.mark == KvGlyph.paste),
   );
   await tester.pump();
+  await tester.tap(find.widgetWithText(KvAction, 'Continue to amount'));
+  await tester.pump();
+  await tester.pump(KvMotion.calm);
+  await _type(tester, '12.4');
   await tester.pump(const Duration(milliseconds: 600));
 }
 
@@ -223,7 +264,7 @@ String _feeLine(WidgetTester tester) => tester
     .widgetList<Text>(
       find.descendant(
         of: find
-            .ancestor(of: find.text('network fee '), matching: find.byType(Row))
+            .ancestor(of: find.text('Network fee'), matching: find.byType(Row))
             .first,
         matching: find.byType(Text),
       ),
@@ -245,6 +286,8 @@ void main() {
       // amount is not one, and the passphrase surfaces have no such handover.
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
+      // The pad lives on step 2 (UX-R2), so the destination comes first.
+      await _address(tester, _addr);
       expect(find.byType(KvKeypad), findsOneWidget);
 
       // The IME is driven through `viewInsets` rather than inferred from
@@ -276,6 +319,7 @@ void main() {
       // a second point, a ninth decimal, or a figure past the u64 ceiling.
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
+      await _address(tester, _addr);
       final field = find.byKey(SendScreen.amountTarget);
 
       await tester.enterText(field, '1.2345678');
@@ -300,30 +344,31 @@ void main() {
     ) async {
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
+      // **One reason per step** (UX-R2): each step asks for one thing, so the
+      // disabled control names that one thing instead of listing the form.
       expect(
         _reviewReason(tester),
-        'Enter an amount and a destination',
+        'Enter an address to continue',
         reason: 'BG-12: a disabled control always says why',
       );
 
-      await _type(tester, '12.4');
-      expect(_reviewReason(tester), 'Enter a destination address');
-
       await _address(tester, _addr);
+      expect(_reviewReason(tester), 'Enter an amount');
+
+      await _type(tester, '12.4');
       expect(_reviewReason(tester), isNull, reason: 'live once valid');
-      expect(
-        find.text('Nothing is signed until you hold to send.'),
-        findsOneWidget,
-      );
+      // BG-11: the control names the action AND its object, and the object is
+      // the figure the user typed.
+      expect(find.text('Review 12.4 KAS'), findsOneWidget);
     });
 
     testWidgets('the keypad refuses a ninth decimal rather than taking it and '
         'rejecting the amount later', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
+      await _address(tester, _addr);
       await _type(tester, '1.123456789');
       expect(find.text('1.12345678'), findsOneWidget);
-      await _address(tester, _addr);
       expect(_reviewReason(tester), isNull);
     });
 
@@ -348,22 +393,14 @@ void main() {
         ),
       );
 
-      // The exit is on screen and TAPPABLE even while both fields are empty —
-      // a wallet the anti-dust floor has trapped types no amount at all, and a
-      // control that greyed out silently would not say what it needs. That
-      // rule travelled with the affordance when D-190 moved it beside
-      // `available`.
-      await tester.tap(find.text('Send max'));
-      await tester.pump();
-      expect(sweepPrepares, 0, reason: 'no address yet — nothing prepared');
-      expect(
-        find.textContaining('Enter the destination address first'),
-        findsOneWidget,
-        reason: 'the chip answers with words, never a silent grey',
-      );
-
+      // **The chip is never greyed, and now it cannot be reached without an
+      // address at all** — step 2 is only reachable through a destination that
+      // parses, so D-190's *"a trapped user must never meet a control that
+      // will not say what it needs"* is satisfied by construction rather than
+      // by a sentence. The guard in `_reviewSweep` stands behind it.
       await _address(tester, _addr);
-      await tester.tap(find.text('Send max'));
+      expect(sweepPrepares, 0, reason: 'nothing prepared by arriving');
+      await tester.tap(find.text('Max'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(sweepPrepares, 1);
@@ -371,6 +408,101 @@ void main() {
       expect(sweptTo, _addr);
       // The one signing surface opened over the sweep summary.
       expect(find.text('Confirm send all'), findsOneWidget);
+    });
+
+    testWidgets('the share chips write a CANONICAL figure, at a balance big '
+        'enough to be grouped', (tester) async {
+      // **`kasParts().integer` is grouped for the eye and `sompiFromKas`
+      // rejects a comma** (`consensus-auditor`, UX-R2). A grouped write put a
+      // figure plainly on screen that parsed to null: Review greyed out beside
+      // it, no fee was priced, and `_AmountGrammar` then refused every
+      // keystroke *including deletion*, because the value being edited did not
+      // parse either — a dead money-entry control on the spend path.
+      //
+      // It needs ≥ 1,000 KAS in the field to appear at all, which is why the
+      // fixtures never saw it. This one holds 12,345 KAS, so 25 % is
+      // `3,086.25` under the old write.
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen(mature: BigInt.from(1234500000000)));
+      await _address(tester, _addr);
+
+      await tester.tap(find.text('25%'));
+      await tester.pump();
+      expect(find.text('3086.25'), findsOneWidget);
+      expect(
+        _reviewReason(tester),
+        isNull,
+        reason: 'a figure on screen that will not parse is a dead control',
+      );
+
+      await tester.tap(find.text('50%'));
+      await tester.pump();
+      expect(find.text('6172.50'), findsOneWidget);
+      expect(_reviewReason(tester), isNull);
+      // And the eye still reads it grouped where grouping belongs — on the
+      // control that restates it, never in the field.
+      expect(find.text('Review 6172.50 KAS'), findsOneWidget);
+    });
+
+    testWidgets('a stale balance is not typed into a spend', (tester) async {
+      // `_amountBlock` yields when the reading is last-known — *a fabricated
+      // certainty about someone's money* — and the Max chip annotates its
+      // figure. A quarter of an unvouched figure, typed silently, is the same
+      // claim (`consensus-auditor`, UX-R2).
+      _phone(tester);
+      final stale = ValueNotifier<bool>(true);
+      addTearDown(stale.dispose);
+      await tester.pumpWidget(
+        _sendScreen(mature: BigInt.from(1234500000000), balanceStale: stale),
+      );
+      await _address(tester, _addr);
+      await tester.tap(find.text('25%'));
+      await tester.pump();
+      expect(
+        find.text('3086.25'),
+        findsNothing,
+        reason: 'the chips are inert while the balance cannot be vouched for',
+      );
+      // Max stays live: Rust solves the sweep, so no figure of ours is
+      // asserted by tapping it.
+      expect(find.textContaining('last known'), findsOneWidget);
+
+      stale.value = false;
+      await tester.pump();
+      await tester.tap(find.text('25%'));
+      await tester.pump();
+      expect(find.text('3086.25'), findsOneWidget);
+    });
+
+    testWidgets('Send another clears the form rather than leaving it armed', (
+      tester,
+    ) async {
+      // The one new commit-adjacent seam (`wallet-security-auditor`, UX-R2):
+      // what stands between the user and a re-send-armed form after a send has
+      // just gone out.
+      _phone(tester);
+      await tester.pumpWidget(_sendScreen());
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      await tester.tap(find.textContaining('Review '));
+      await tester.pump();
+      await tester.pump();
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.textContaining('Hold to send')),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(find.text('Sent'), findsOneWidget);
+
+      await tester.tap(find.text('Send another'));
+      await tester.pumpAndSettle();
+      // Back on step 1, empty — not on step 2 holding the destination and the
+      // amount of the send that just landed.
+      expect(find.text('Send'), findsOneWidget);
+      expect(_reviewReason(tester), 'Enter an address to continue');
+      expect(find.textContaining('12.4'), findsNothing);
     });
 
     testWidgets('the live fee is the Generator\'s, debounced, and never a stale '
@@ -394,17 +526,17 @@ void main() {
       await _type(tester, '1');
 
       // Nothing yet: the probe is debounced, and an unknown fee shows nothing.
-      expect(find.textContaining('network fee'), findsNothing);
+      expect(find.text('Network fee'), findsNothing);
 
       await tester.pump(const Duration(milliseconds: 300));
-      expect(_feeLine(tester), 'network fee 0.003154');
+      expect(_feeLine(tester), 'Network fee0.003154KAS');
 
       // A further keystroke clears the figure IMMEDIATELY — a fee left
       // standing beside a changed amount is a lie for as long as it stands.
       await _type(tester, '2');
-      expect(find.textContaining('network fee'), findsNothing);
+      expect(find.text('Network fee'), findsNothing);
       await tester.pump(const Duration(milliseconds: 300));
-      expect(_feeLine(tester), 'network fee 0.003154');
+      expect(_feeLine(tester), 'Network fee0.003154KAS');
 
       // One probe per pause, not one per keystroke.
       expect(asked.length, 2);
@@ -422,7 +554,7 @@ void main() {
       await _address(tester, _addr);
       await _type(tester, '1');
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.textContaining('network fee'), findsNothing);
+      expect(find.text('Network fee'), findsNothing);
     });
 
     testWidgets('an honest prepare error (not-yet-spendable) is surfaced', (
@@ -435,9 +567,9 @@ void main() {
               throw const AppError(message: 'not yet spendable — confirming'),
         ),
       );
-      await _type(tester, '12.4');
       await _address(tester, _addr);
-      await tester.tap(find.text('Review this send'));
+      await _type(tester, '12.4');
+      await tester.tap(find.textContaining('Review '));
       await tester.pump();
       await tester.pump();
       expect(find.textContaining('not yet spendable'), findsOneWidget);
@@ -452,8 +584,8 @@ void main() {
         ),
       );
       await tester.pump(); // resolve the probe future
-      await _type(tester, '0.00000042');
       await _address(tester, _addr);
+      await _type(tester, '0.00000042');
 
       // The exact number, not "too small" — the floor AND the shortfall.
       expect(
@@ -473,34 +605,40 @@ void main() {
       );
     });
 
-    testWidgets('a below-floor amount does not unlock Review on a form with '
-        'no address', (tester) async {
+    testWidgets('the advisory floor cannot reach the destination\'s own '
+        'ladder', (tester) async {
       // The floor WARNS and never blocks — but an advisory branch that
-      // `return`s is an early exit for every blocking check after it, and this
-      // one skipped all three address checks. Found by `consensus-auditor`;
-      // the existing floor test always typed an address, so it could not see
-      // it.
+      // `return`s is an early exit for every blocking check after it, and the
+      // one-screen form's version skipped all three address checks
+      // (`consensus-auditor`). **The two steps now have two ladders**, so that
+      // class of defect is structurally unreachable; this pins the structure
+      // rather than the symptom.
       _phone(tester);
       await tester.pumpWidget(
         _sendScreen(minimumSendable: () async => BigInt.from(2036)),
       );
       await tester.pump();
+      await _address(tester, _addr);
       await _type(tester, '0.00000042');
       expect(
         _reviewReason(tester),
-        'Enter a destination address',
-        reason: 'the advisory floor must not unlock a form with no address',
+        isNull,
+        reason: 'the probed floor advises; Rust decides',
       );
-      // And the floor's own sentence is still shown alongside it.
       expect(find.textContaining('will not relay less than'), findsOneWidget);
+
+      // Back to a destination that does not parse: its own ladder blocks, and
+      // the amount step's advisory has no say in it.
+      await _address(tester, 'kaspa:qpzt3vw8x2mne4ka0000', advance: false);
+      expect(_reviewReason(tester), 'Check the destination address');
     });
 
     testWidgets('no minimum provider ⇒ no floor notice', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
       await tester.pump();
-      await _type(tester, '0.00000042');
       await _address(tester, _addr);
+      await _type(tester, '0.00000042');
       expect(find.textContaining('will not relay less than'), findsNothing);
       expect(_reviewReason(tester), isNull);
     });
@@ -511,8 +649,8 @@ void main() {
       await tester.pumpWidget(
         _sendScreen(mature: BigInt.from(1000000000)), // 10 KAS
       );
-      await _type(tester, '12.4');
       await _address(tester, _addr);
+      await _type(tester, '12.4');
       expect(
         find.text('You have 10.00 KAS spendable. You are 2.40 KAS short.'),
         findsOneWidget,
@@ -524,9 +662,12 @@ void main() {
         '(BG-8)', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_sendScreen(mature: null));
-      expect(find.text('available —'), findsOneWidget);
-      await _type(tester, '12.4');
       await _address(tester, _addr);
+      // The spendable figure rides the Max chip (`S6`, D-190: *`available` is
+      // the number Send max means*), and BG-8's `—` is what it shows while the
+      // balance has not arrived — never a fabricated zero.
+      expect(find.text('—'), findsOneWidget);
+      await _type(tester, '12.4');
       expect(
         _reviewReason(tester),
         isNull,
@@ -534,31 +675,28 @@ void main() {
       );
     });
 
-    testWidgets('a LAST-KNOWN balance dims, says so, and is never quoted back '
-        'as a fact (BG-8)', (tester) async {
+    testWidgets('a LAST-KNOWN balance says so in words, and is never quoted '
+        'back as a fact (BG-8)', (tester) async {
       _phone(tester);
       final stale = ValueNotifier<bool>(false);
       addTearDown(stale.dispose);
       await tester.pumpWidget(
         _sendScreen(mature: BigInt.from(1000000000), balanceStale: stale),
       );
-      await _type(tester, '12.4');
       await _address(tester, _addr);
+      await _type(tester, '12.4');
       // Live: the shortfall is a fact the wallet can vouch for, so it says it.
-      expect(find.text('available 10.00'), findsOneWidget);
+      expect(find.text('10.00'), findsOneWidget);
       expect(_reviewReason(tester), 'More than you can spend');
 
       stale.value = true;
       await tester.pump();
-      await tester.pump(KvMotion.instant);
-      // Dimmed, and the freshness is in WORDS as well as opacity so it
-      // survives greyscale and a screen reader.
-      expect(find.text('available 10.00'), findsOneWidget);
-      expect(find.text('not live — last known'), findsOneWidget);
-      final opacity = tester
-          .widgetList<AnimatedOpacity>(find.byType(AnimatedOpacity))
-          .map((w) => w.opacity);
-      expect(opacity, contains(KvFreshness.opacityStale));
+      await tester.pump(KvMotion.calm);
+      // **The freshness is in WORDS, and it does not dim.** BG-8's 45 % dim is
+      // a large-text device (D-257) and this reading is 13 dp: multiplying it
+      // would put it under AA, which BG-14 does not permit. So the figure says
+      // its own state instead.
+      expect(find.text('10.00 · last known'), findsOneWidget);
       // And the screen stops asserting a figure it cannot currently vouch for
       // — the P0.3 scar with a number attached.
       expect(_reviewReason(tester), isNull);
@@ -569,8 +707,7 @@ void main() {
         'has', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
-      await _type(tester, '12.4');
-      await _address(tester, 'kaspa:qpzt3vw8x2mne4ka0000');
+      await _address(tester, 'kaspa:qpzt3vw8x2mne4ka0000', advance: false);
       expect(
         find.text(
           'That is 26 characters. A mainnet address is 67 — or 69 for the '
@@ -584,8 +721,11 @@ void main() {
     testWidgets('an address with the wrong scheme says so', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_sendScreen());
-      await _type(tester, '12.4');
-      await _address(tester, 'bitcoincash:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq');
+      await _address(
+        tester,
+        'bitcoincash:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+        advance: false,
+      );
       expect(
         find.text('A mainnet Kaspa address starts with "kaspa:".'),
         findsOneWidget,
@@ -604,6 +744,7 @@ void main() {
       _phone(tester);
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(_sendScreen());
+      await _address(tester, _addr);
       await _type(tester, '12.4');
       final node = tester.getSemantics(
         find.descendant(
@@ -637,21 +778,22 @@ void main() {
       }
 
       await tester.pumpWidget(_sendScreen());
+      await _address(tester, _addr);
       expect(find.byType(KvKeypad), findsOneWidget, reason: 'nothing focused');
 
-      // Typing the address raises the IME: the pad steps aside.
-      await tester.enterText(find.byKey(SendScreen.addressTarget), _addr);
+      // Tapping the figure raises the IME: the pad steps aside.
+      await tester.tap(find.byKey(SendScreen.amountTarget));
       keyboard(up: true);
       await tester.pump();
       expect(find.byType(KvKeypad), findsNothing);
 
-      // BACK closes the IME and the address field KEEPS focus. The pad must
-      // still come back — this is the assertion the old focus-based test could
-      // not make, and the defect it could not see.
+      // BACK closes the IME and the field KEEPS focus. The pad must still come
+      // back — the assertion a focus-based test could not make, and the defect
+      // it could not see.
       keyboard(up: false);
       await tester.pump();
       expect(
-        find.byKey(SendScreen.addressTarget),
+        find.byKey(SendScreen.amountTarget),
         findsOneWidget,
         reason: 'the field is still there and still focused',
       );
@@ -660,15 +802,6 @@ void main() {
         findsOneWidget,
         reason: 'keyboard down means the pad is back, focus or no focus',
       );
-
-      // And the amount field behaves the same way.
-      await tester.tap(find.byKey(SendScreen.amountTarget));
-      keyboard(up: true);
-      await tester.pump();
-      expect(find.byType(KvKeypad), findsNothing);
-      keyboard(up: false);
-      await tester.pump();
-      expect(find.byType(KvKeypad), findsOneWidget);
     });
   });
 
@@ -879,10 +1012,15 @@ void main() {
         ),
       );
       await tester.pump();
+      // **Both steps, at the floor.** Step 1 carries the field, the check and
+      // the helper prose; step 2 carries the figure, the shares, the fee and
+      // the pad. Neither is measured by measuring the other.
+      await _address(tester, _addr, advance: false);
+      await measureThroughTheScroll(tester);
+      await _address(tester, _addr);
       // A below-floor amount, so the longest amber sentence on this screen is
       // on it while it is measured.
       await _type(tester, '0.00000042');
-      await _address(tester, _addr);
       await tester.pump();
       await measureThroughTheScroll(tester);
     });
@@ -902,7 +1040,13 @@ void main() {
       await tester.pumpWidget(
         squeeze(
           _sendScreen(
-            mature: BigInt.from(123456789012345),
+            // **Above the amount typed below, deliberately.** With a smaller
+            // balance the block ladder disables Review, `inlineReason` swaps
+            // the label out, and the guard measures a reason instead of the
+            // figure it exists to measure — L126, the pressure off
+            // (`ux-auditor`, UX-R2). Keeping the pill LIT is what puts
+            // `Review 9999999999.99999999 KAS` on the control at 320 / 1.3×.
+            mature: BigInt.parse('2870000000000000000'),
             prepareSweep: (_) async =>
                 _summary(kind: SignableKind.sweep, utxoCount: 1),
             minimumSendable: () async => BigInt.from(2036),
@@ -910,10 +1054,41 @@ void main() {
         ),
       );
       await tester.pump();
-      await _type(tester, '9999999999.99999999');
       await _address(tester, _addr);
+      await _type(tester, '9999999999.99999999');
+      expect(
+        _reviewReason(tester),
+        isNull,
+        reason: 'the guard must measure a LIT pill carrying the figure',
+      );
       await tester.pump();
       await measureThroughTheScroll(tester);
+    });
+
+    testWidgets('a primary pill never ellipsizes the figure in its label', (
+      tester,
+    ) async {
+      // **BG-5's one prohibition, on the control rather than in a readout.**
+      // `KvAction`'s label was `maxLines: 1, overflow: ellipsis`, and Send
+      // feeds it `Review <amount> KAS`: at 320 dp / 1.3× the pill's inner
+      // width is 288 dp and the string passes it from about 100,000 KAS — so a
+      // money figure was cut mid-number by a control (`ux-auditor`, UX-R2).
+      // The pill wraps and grows now, exactly as `KvHold` does with the same
+      // string.
+      tester.view.physicalSize = const Size(320, 568);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        squeeze(_sendScreen(mature: BigInt.parse('2870000000000000000'))),
+      );
+      await _address(tester, _addr);
+      await _type(tester, '123456.78901234');
+      final label = tester.widget<Text>(
+        find.text('Review 123456.78901234 KAS'),
+      );
+      expect(label.maxLines, isNull, reason: 'it wraps; it never truncates');
+      expect(label.overflow, isNot(TextOverflow.ellipsis));
+      expectNothingClipped(tester);
     });
 
     testWidgets('the ceremony, in every mode, at the widest amount', (
@@ -979,35 +1154,57 @@ void main() {
       );
     });
 
-    testWidgets('the destination is restated in full, chunked in fours with '
-        'the LAST FIVE together, first and last weighted', (tester) async {
+    testWidgets('the destination is restated in full as ONE run, first four '
+        'and last five weighted (BG-15)', (tester) async {
       _phone(tester);
       await tester.pumpWidget(_ceremony(_summary()));
-      // **D-223, ratified by the founder.** Chunking purely in fours left a
-      // 61-character payload ending `… c6jz qunt h`: a one-character final
-      // group, weighted bold, alone. The weighting exists so the eye lands
-      // where an address-poisoning attack has to succeed, and one stranded
-      // character is the weakest place to put it. The tail is five now, and
-      // the payload reads as 14 fours plus the five.
-      final payload = _addr.substring(_addr.indexOf(':') + 1);
-      final head = payload.substring(0, payload.length - 5);
-      final groups = <String>[
-        for (var i = 0; i < head.length; i += 4)
-          head.substring(i, i + 4 > head.length ? head.length : i + 4),
-        payload.substring(payload.length - 5),
-      ];
-      expect(groups.length, 15);
-      expect(groups.last.length, 5);
-      for (final g in groups) {
-        expect(find.text(g), findsOneWidget, reason: 'group "$g" is missing');
+      // **BG-15 as amended, landed at UX-R2.** The full form is *one mono run
+      // wrapping on word-break* — never spaced fours on a phone width. Fours
+      // survive as the weighting boundary and as what a screen reader speaks;
+      // they no longer print a space, because line breaks that move with the
+      // text scale make the same address look different every time it is
+      // shown, on the one form whose job is comparing it against a source.
+      //
+      // **D-223's tail of five stands**: chunking purely in fours left a
+      // 61-character payload ending `… c6jz qunt h` — one stranded character,
+      // weighted bold, which is the weakest place to put the eye.
+      final spans = <InlineSpan>[];
+      tester
+          .widget<Text>(
+            find
+                .descendant(
+                  of: find.byType(KvAddress),
+                  matching: find.byType(Text),
+                )
+                .first,
+          )
+          .textSpan!
+          .visitChildren((span) {
+            spans.add(span);
+            return true;
+          });
+      // scheme + 14 fours + the five.
+      expect(spans.length, 16);
+      expect(
+        spans.map((s) => (s as TextSpan).text).join(),
+        _addr,
+        reason: 'every character of the address is on screen, in order',
+      );
+      final head = spans[1] as TextSpan;
+      final tail = spans.last as TextSpan;
+      expect(head.text!.length, 4);
+      expect(tail.text!.length, 5);
+      // **The MERGED axis, not the enum** (L150): on a variable face
+      // `fontWeight` is a hint and `FontVariation('wght')` is the ink.
+      for (final checkpoint in [head, tail]) {
+        expect(checkpoint.style!.fontWeight, FontWeight.w700);
+        expect(checkpoint.style!.fontVariations, KvWeight.w700);
+        expect(checkpoint.style!.color, KvColor.ink);
       }
-      for (final i in [0, groups.length - 1]) {
-        final style = tester.widget<Text>(find.text(groups[i])).style!;
-        expect(style.fontWeight, FontWeight.w600);
-        expect(style.color, KvColor.ink);
-      }
-      final middle = tester.widget<Text>(find.text(groups[1])).style!;
-      expect(middle.fontWeight, FontWeight.w400);
+      final middle = (spans[2] as TextSpan).style!;
+      expect(middle.fontWeight, FontWeight.w500);
+      expect(middle.fontVariations, KvWeight.w500);
+      expect(middle.color, KvColor.inkDim);
     });
 
     testWidgets('a chained send tells the user it is multiple transactions', (
@@ -1103,7 +1300,7 @@ void main() {
       // A bond pays the counterparty: To shown, amount headline, Total row.
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(findRuledLabel('Sending'), findsOneWidget);
-      expect(find.text('Total'), findsOneWidget);
+      expect(find.text('Leaves your wallet'), findsOneWidget);
       expect(find.text('Confirm contact request'), findsOneWidget);
     });
 
@@ -1126,7 +1323,7 @@ void main() {
       expect(find.text('Returns to you'), findsNothing);
       expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.textContaining('kaspa:'), findsOneWidget);
-      expect(find.text('Total'), findsOneWidget);
+      expect(find.text('Leaves your wallet'), findsOneWidget);
       expect(find.text('Confirm accept'), findsOneWidget);
       expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
     });
@@ -1141,7 +1338,7 @@ void main() {
       expect(findRuledLabel('Sending'), findsOneWidget);
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(find.textContaining('all 7 spendable coins move'), findsOneWidget);
-      expect(find.text('Total'), findsOneWidget);
+      expect(find.text('Leaves your wallet'), findsOneWidget);
       expect(find.text('Hold to send 12.40000000 KAS'), findsOneWidget);
     });
 
@@ -1331,7 +1528,7 @@ void main() {
         await tester.pumpWidget(_ceremony(_summary(kind: kind)));
         final (heading, label) = entry.value;
         expect(
-          tester.widget<KvTopBar>(find.byType(KvTopBar)).title,
+          tester.widget<KvSheet>(find.byType(KvSheet)).title,
           heading,
           reason: '$kind heading',
         );
@@ -1449,7 +1646,10 @@ void main() {
       landed.complete(_ok());
       await tester.pumpAndSettle();
       expect(find.text('Signing on this device'), findsNothing);
-      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).title, 'Sent');
+      // The sheet is gone: a settled ceremony is a receipt, and a receipt is a
+      // place rather than a modal (`S8`).
+      expect(find.byType(KvSheet), findsNothing);
+      expect(find.text('Sent'), findsOneWidget);
     });
   });
 
@@ -1493,17 +1693,12 @@ void main() {
       // the label too.
       _phone(tester);
       await settleWith(tester, (_) async => _ok());
-      expect(
-        tester.widget<KvTopBar>(find.byType(KvTopBar)).title,
-        'Sent',
-        reason: 'the rail still names the question, not the answer',
-      );
-      // Three deliberate places: the rail, the verdict head, the ruled label.
-      // The ruled label is now set in capitals, so it is counted by the widget
-      // rather than by the string — which is the more precise assertion anyway,
-      // because it names WHICH of the three each one is.
-      expect(find.text('Sent'), findsNWidgets(2));
-      expect(findRuledLabel('Sent'), findsOneWidget);
+      // **The whole surface is the answer now** (`S8`): the sheet is gone, an
+      // 84 dp `KvCheck` stands over a 30 dp `display`, and the verdict's body
+      // sits under it. Three places became one place that is unmistakable.
+      expect(find.byType(KvSheet), findsNothing);
+      expect(find.byType(KvCheck), findsOneWidget);
+      expect(find.text('Sent'), findsOneWidget);
       expect(find.text('The network accepted it.'), findsOneWidget);
       // **No waiting language** — Kaspa accepts in about a second, and telling
       // a user to expect minutes is a false impression built from true words.
@@ -1514,7 +1709,11 @@ void main() {
       expect(find.text('View in explorer'), findsNothing);
       expect(find.text('coming next'), findsNothing);
       expect(find.byType(KvExplorerExit), findsNothing);
-      expect(find.text('a' * 64), findsOneWidget);
+      // **The reference number is a control, not a run of text** (`S8`, §5):
+      // Copy ID takes all 64 characters, and the transaction detail is where
+      // the id is read. A 64-character hash printed on a receipt is a string
+      // nobody checks by eye and everybody copies.
+      expect(find.text('Copy ID'), findsOneWidget);
       expect(find.textContaining('Your funds are safe'), findsNothing);
     });
 
@@ -1536,6 +1735,10 @@ void main() {
           return true;
         },
       );
+      await tester.pumpAndSettle();
+      // The exit resolves its URL after the frame that mounts it — the
+      // receipt arrives in the settle above, so its own resolve lands in the
+      // next one.
       await tester.pumpAndSettle();
       expect(find.text('View on explorer.kaspa.org'), findsOneWidget);
       expect(
@@ -1680,7 +1883,7 @@ void main() {
       // below would pass on a screen that simply never got anywhere. Two
       // matches, not one: the rail and the outcome head both speak the verdict,
       // which is the point of deriving both from `_verdictFor`.
-      expect(find.text('Partly sent'), findsNWidgets(2));
+      expect(find.text('Partly sent'), findsOneWidget);
 
       // Well past the 1 s poll the complete path uses.
       await tester.pump(const Duration(seconds: 2));
@@ -1707,15 +1910,12 @@ void main() {
 
       await settleWith(tester, (_) async => _ok());
       expect(
-        find.descendant(
-          of: find.byType(KvSurface),
-          matching: find.byType(KvLamp),
-        ),
+        find.byType(KvLamp),
         findsNothing,
         reason: 'a successful verdict must not carry a lamp',
       );
-      expect(find.text('Sent'), findsNWidgets(2));
-      expect(findRuledLabel('Sent'), findsOneWidget);
+      expect(find.byType(KvCheck), findsOneWidget);
+      expect(find.text('Sent'), findsOneWidget);
 
       // The exceptions keep theirs.
       await settleWith(
@@ -1782,8 +1982,12 @@ void main() {
         (_) async =>
             SendOutcomeDto(submitted: 0, total: 1, partial: false, error: 'x'),
       );
-      expect(findRuledLabel('Sending'), findsOneWidget);
+      // The tense lives in the verdict now (`S8`): the receipt's head names
+      // what is known, and *"Not confirmed"* claims neither that it went nor
+      // that it did not.
+      expect(find.text('Not confirmed'), findsOneWidget);
       expect(find.text('Sent'), findsNothing);
+      expect(find.byType(KvCheck), findsNothing);
     });
 
     testWidgets('partial says what landed and what did not', (tester) async {
@@ -1797,11 +2001,14 @@ void main() {
           finalTxid: 'b' * 64,
         ),
       );
-      // The rail and the verdict head both say it.
-      expect(find.text('Partly sent'), findsNWidgets(2));
+      // One place, unmistakable: the receipt's own head.
+      expect(find.text('Partly sent'), findsOneWidget);
       expect(
-        tester.widget<KvTopBar>(find.byType(KvTopBar)).title,
-        'Partly sent',
+        find.byType(KvCheck),
+        findsNothing,
+        reason:
+            'a partial send is an exception, and only the exception is '
+            'marked — a check would claim the whole thing landed',
       );
       expect(
         find.textContaining('Broadcast 1 of 2 transactions'),
@@ -1833,7 +2040,7 @@ void main() {
           error: 'orphan transaction rejected by the node',
         ),
       );
-      expect(find.text('Not confirmed'), findsNWidgets(2));
+      expect(find.text('Not confirmed'), findsOneWidget);
       expect(
         find.textContaining('Your funds are safe'),
         findsNothing,
@@ -1879,9 +2086,9 @@ void main() {
           ),
         ),
       );
-      await _type(tester, '12.4');
       await _address(tester, _addr);
-      await tester.tap(find.text('Review this send'));
+      await _type(tester, '12.4');
+      await tester.tap(find.textContaining('Review '));
       await tester.pump();
       await tester.pump();
 
@@ -1893,12 +2100,7 @@ void main() {
       await gesture.up();
       await tester.pump(const Duration(seconds: 7));
 
-      await tester.tap(
-        find.descendant(
-          of: find.byType(KvTopBar),
-          matching: find.byType(InkWell),
-        ),
-      );
+      await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(
         popped,
@@ -1958,12 +2160,7 @@ void main() {
       // The rail's back target.
       await open(tester);
       await holdIt(tester);
-      await tester.tap(
-        find.descendant(
-          of: find.byType(KvTopBar),
-          matching: find.byType(InkWell),
-        ),
-      );
+      await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(fires, 1, reason: 'the rail exit signalled more than once');
 
@@ -1979,12 +2176,7 @@ void main() {
       // exit and must say nothing.
       fires = 0;
       await open(tester);
-      await tester.tap(
-        find.descendant(
-          of: find.byType(KvTopBar),
-          matching: find.byType(InkWell),
-        ),
-      );
+      await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(fires, 0, reason: 'nothing was in flight');
     });
@@ -2013,11 +2205,11 @@ void main() {
       await tester.pump();
 
       // Sealed while the wait still looks normal.
-      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).onBack, isNull);
+      expect(tester.widget<KvSheet>(find.byType(KvSheet)).onCancel, isNull);
       expect(find.textContaining('You can leave'), findsNothing);
 
       await tester.pump(const Duration(seconds: 7));
-      expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).onBack, isNotNull);
+      expect(tester.widget<KvSheet>(find.byType(KvSheet)).onCancel, isNotNull);
       expect(find.textContaining('leaving cancels nothing'), findsOneWidget);
       // And it claims nothing about where the transaction has GOT to — the
       // reasoning that deleted the funds-safe sentence applies here too.
@@ -2032,7 +2224,7 @@ void main() {
         (_) async =>
             throw const AppError(message: 'the wallet locked mid-send'),
       );
-      expect(find.text('Not confirmed'), findsNWidgets(2));
+      expect(find.text('Not confirmed'), findsOneWidget);
       expect(find.text('the wallet locked mid-send'), findsOneWidget);
       expect(
         find.textContaining('Your funds are safe'),
@@ -2045,15 +2237,11 @@ void main() {
   });
 
   group('runConfirmSend (the slow-prepare card)', () {
-    /// The ceremony is a full screen now; leaving it is the rail's back
-    /// target, which is the only InkWell KvTopBar draws.
+    /// The ceremony is a sheet now (UX-R2, `S7`); leaving it is the sheet
+    /// head's Cancel, which is the door BG-6 asks for — one that says in a
+    /// word that nothing was signed.
     Future<void> leaveCeremony(WidgetTester tester) async {
-      await tester.tap(
-        find.descendant(
-          of: find.byType(KvTopBar),
-          matching: find.byType(InkWell),
-        ),
-      );
+      await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
     }
 
@@ -2320,7 +2508,7 @@ void main() {
         tester,
       ) async {
         await _pumpTypedSend(tester);
-        final fee = find.textContaining('network fee');
+        final fee = find.text('Network fee');
         expect(fee, findsOneWidget, reason: 'no fee to place');
         final feeY = tester.getTopLeft(fee).dy;
         final addressY = tester.getTopLeft(find.byType(KvAddress).first).dy;

@@ -19,9 +19,20 @@ import 'kv_glyph.dart';
 /// centred. Nothing is painted in the status bar's 52dp (BG-14) — the caller
 /// reserves that above this.
 class KvTopBar extends StatelessWidget {
-  const KvTopBar({super.key, required this.title, required this.onBack});
+  const KvTopBar({
+    super.key,
+    required this.title,
+    required this.onBack,
+    this.trailing,
+  });
 
   final String title;
+
+  /// An optional reading at the right of the bar — `S6`'s step counter, and
+  /// nothing that acts. It is laid out in a box at least [KvSpace.touchTarget]
+  /// wide, which is the same box that balances the back target, so the title
+  /// stays centred whether or not anything is in it.
+  final Widget? trailing;
 
   /// Null ⇒ **the way out is closed right now**, and the chevron says so
   /// rather than looking live and doing nothing (BG-12). The ceremony uses it
@@ -82,17 +93,28 @@ class KvTopBar extends StatelessWidget {
               title,
               textAlign: TextAlign.center,
               maxLines: 2,
+              // §2 `barTitle` — **18 / 700 in `ink`**, measured off `S6a`
+              // (cap 14.0 dp against the `caps` label's calibration). It was
+              // 15 / 600 `inkDim`, which is the `rowTitle` role wearing a
+              // bar's job: a screen's own name should not be quieter than the
+              // rows underneath it (UX-R2).
               style: const TextStyle(
                 fontFamily: KvFont.ui,
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                fontVariations: KvWeight.w600,
-                color: KvColor.inkDim,
+                fontSize: 18,
+                height: 22 / 18,
+                letterSpacing: -0.18,
+                fontWeight: FontWeight.w700,
+                fontVariations: KvWeight.w700,
+                color: KvColor.ink,
               ),
             ),
           ),
-          // Balances the back target so the title sits centred.
-          const SizedBox(width: KvSpace.touchTarget),
+          // Balances the back target so the title sits centred, and seats the
+          // optional reading.
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: KvSpace.touchTarget),
+            child: Center(child: trailing ?? const SizedBox.shrink()),
+          ),
         ],
       ),
     );
@@ -205,12 +227,20 @@ class KvAction extends StatefulWidget {
   /// ([KvSpace.controlThumb], §4).
   final double height;
 
+  /// A vertical breathing space so a wrapped label does not touch the pill's
+  /// edge. Zero-cost on the common one-line case, because the pill's height is
+  /// a minimum and one line never reaches it.
+  static const double labelPad = KvSpace.s;
+
   /// **The reason inside the pill, not beneath it.** For a control whose
   /// footprint must stay constant — the money screen's foot bar, which the
   /// ledger card stops exactly short of (D-262). The disabled pill then reads
-  /// the reason in `etch` where its verb was, at 12 / 500 on two lines at
-  /// most, and draws nothing under itself. BG-12 is met either way: the
-  /// reason is in words, on the control.
+  /// the reason in **`inkDim`** where its verb was, at 12 / 500 on two lines
+  /// at most, and draws nothing under itself. §4 says `etch` for a sleeping
+  /// pill's LABEL and §1.4 says `etch` carries no information anywhere; the
+  /// reason is information, so it takes the step that is AA on `shelf`
+  /// (9.03:1). BG-12 is met either way: the reason is in words, on the
+  /// control.
   final bool inlineReason;
 
   /// The glyph's box (§4).
@@ -256,7 +286,15 @@ class _KvActionState extends State<KvAction> {
             child: AnimatedContainer(
               duration: KvMotion.fast,
               curve: KvMotion.curve,
-              height: widget.height,
+              // **A MINIMUM, not a fixed height** (`ux-auditor`, UX-R2). The
+              // label names the action *and its object* (BG-11), and on Send
+              // that object is a figure: `Review 123456.78901234 KAS` needs
+              // 300 dp against the 288 a 320 dp / 1.3× pill has. A single
+              // ellipsized line cut a money figure mid-number, which BG-5
+              // forbids outright — *scales down before it clips, never
+              // ellipsizes*. The pill grows instead, exactly as `KvHold`
+              // does with the same string.
+              constraints: BoxConstraints(minHeight: widget.height),
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: fill,
@@ -271,39 +309,46 @@ class _KvActionState extends State<KvAction> {
                     const SizedBox(width: KvSpace.s),
                   ],
                   Flexible(
-                    child: inline && disabled
-                        ? Text(
-                            widget.disabledReason!,
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontFamily: KvFont.ui,
-                              fontSize: 12,
-                              height: 16 / 12,
-                              fontWeight: FontWeight.w500,
-                              fontVariations: KvWeight.w500,
-                              // `inkDim`, not `etch`: the reason is
-                              // information and `etch` carries none (§1.4).
-                              color: KvColor.inkDim,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: KvAction.labelPad,
+                      ),
+                      child: inline && disabled
+                          ? Text(
+                              widget.disabledReason!,
+                              maxLines: 2,
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontFamily: KvFont.ui,
+                                fontSize: 12,
+                                height: 16 / 12,
+                                fontWeight: FontWeight.w500,
+                                fontVariations: KvWeight.w500,
+                                // `inkDim`, not `etch`: the reason is
+                                // information and `etch` carries none (§1.4).
+                                color: KvColor.inkDim,
+                              ),
+                            )
+                          : Text(
+                              widget.label,
+                              textAlign: TextAlign.center,
+                              // Unbounded: it wraps at a space, so a figure and
+                              // its unit stay together on one line whatever
+                              // happens (BG-5, BG-14).
+                              style: TextStyle(
+                                fontFamily: KvFont.ui,
+                                // §2 `button`: 16, and 15 on a 52-high control.
+                                fontSize: widget.height >= KvSpace.control
+                                    ? 16
+                                    : 15,
+                                height: 20 / 16,
+                                fontWeight: FontWeight.w600,
+                                fontVariations: KvWeight.w600,
+                                color: ink,
+                              ),
                             ),
-                          )
-                        : Text(
-                            widget.label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontFamily: KvFont.ui,
-                              // §2 `button`: 16, and 15 on a 52-high control.
-                              fontSize: widget.height >= KvSpace.control
-                                  ? 16
-                                  : 15,
-                              height: 20 / 16,
-                              fontWeight: FontWeight.w600,
-                              fontVariations: KvWeight.w600,
-                              color: ink,
-                            ),
-                          ),
+                    ),
                   ),
                 ],
               ),

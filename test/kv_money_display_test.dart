@@ -509,11 +509,44 @@ void main() {
       // character by character, so it must be the WHOLE payload.
       expect(groups.join(), _address.substring(_address.indexOf(':') + 1));
 
-      expect(_styleOf(tester, groups.first).fontWeight, FontWeight.w600);
-      expect(_styleOf(tester, groups.first).color, KvColor.ink);
-      expect(_styleOf(tester, groups[1]).fontWeight, FontWeight.w400);
-      expect(_styleOf(tester, groups[1]).color, KvColor.inkDim);
-      expect(find.text('kaspa:'), findsOneWidget);
+      // **One run, not spaced fours** (BG-15 as amended; landed at UX-R2).
+      // The groups survive as the weighting boundary and as what a screen
+      // reader speaks — they simply no longer print a space, because line
+      // breaks that move with the text scale make the same address look
+      // different every time it is shown.
+      final spans = <InlineSpan>[];
+      tester
+          .widget<Text>(
+            find
+                .descendant(
+                  of: find.byType(KvAddress),
+                  matching: find.byType(Text),
+                )
+                .first,
+          )
+          .textSpan!
+          .visitChildren((span) {
+            spans.add(span);
+            return true;
+          });
+      expect(
+        spans.map((s) => (s as TextSpan).text).join(),
+        _address,
+        reason: 'every character, in order, with nothing inserted',
+      );
+      final scheme = spans.first as TextSpan;
+      expect(scheme.text, 'kaspa:');
+      expect(scheme.style!.color, KvColor.inkMeta);
+      // §2's checkpoints are 700, and the MERGED axis is the ink (L150).
+      final head = spans[1] as TextSpan;
+      expect(head.text, groups.first);
+      expect(head.style!.fontWeight, FontWeight.w700);
+      expect(head.style!.fontVariations, KvWeight.w700);
+      expect(head.style!.color, KvColor.ink);
+      final middle = spans[2] as TextSpan;
+      expect(middle.style!.fontWeight, FontWeight.w500);
+      expect(middle.style!.fontVariations, KvWeight.w500);
+      expect(middle.style!.color, KvColor.inkDim);
     });
 
     testWidgets('copy copies all 67 characters — there is one copy path', (

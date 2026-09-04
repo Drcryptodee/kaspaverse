@@ -530,6 +530,25 @@ abstract final class KvGlass {
 
   /// Under reduced transparency the blur is off and the scrim rises to this.
   static const double reducedScrimOpacity = 0.80;
+
+  /// §1.8 `armedGlow` — `0 0 0 4px rgba(73,234,203,.14)` plus
+  /// `0 0 24px rgba(73,234,203,.25)`. The armed edge of a glow pill, and one
+  /// of exactly two things in the app that glow (BG-32).
+  static const List<BoxShadow> armedGlow = [
+    BoxShadow(color: KvColor.armedGlowRing, spreadRadius: 4),
+    BoxShadow(color: KvColor.armedGlowBloom, blurRadius: 24),
+  ];
+
+  /// §1.8 `layerShadow` — `0 12px 32px rgba(0,0,0,.55)`. **A sheet only**: the
+  /// drawer lost it by founder ruling (D-260), and nothing else in the app
+  /// floats.
+  static const List<BoxShadow> layerShadow = [
+    BoxShadow(
+      color: KvColor.layerShadow,
+      blurRadius: 32,
+      offset: Offset(0, 12),
+    ),
+  ];
 }
 
 /// §3a.3 — Layout constants (BG-33). **Widgets read [KvWindowClass], never raw

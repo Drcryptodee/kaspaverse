@@ -242,6 +242,53 @@ String groupTypedAmount(String typed) {
   return '${groupThousands(typed.substring(0, dot))}${typed.substring(dot)}';
 }
 
+/// **The mainnet address lengths, derived from the pinned crate rather than
+/// remembered**: `Version::public_key_len` is 32 bytes for `PubKey` and
+/// `ScriptHash` and 33 for `PubKeyECDSA` (`crypto/addresses/src/lib.rs:164` at
+/// `cfafeb4`); a version byte joins the payload, the whole is base32 at 5 bits
+/// a character, and an 8-character checksum follows — 53 + 8 and 55 + 8
+/// payload characters, plus `kaspa:`.
+///
+/// **This is a SHAPE check and never a checksum.** Dart validates nothing about
+/// an address's contents: `send_prepare` calls `validate_mainnet_address`,
+/// which is the pinned crate's own parse, and that verdict is the one that
+/// decides (INV-9 — consensus logic is never re-implemented here).
+///
+/// It lives here, with the other address rules, because it is now read from
+/// two places — the Send form and the share seam — and **a rule stated twice
+/// is a rule that will be corrected once** (L83, recorded against this exact
+/// constant).
+const Set<int> mainnetAddressLengths = {67, 69};
+
+/// Whether [address] has the shape of a mainnet Kaspa address. Shape only —
+/// see [mainnetAddressLengths].
+bool looksLikeMainnetAddress(String address) =>
+    address.startsWith('kaspa:') &&
+    mainnetAddressLengths.contains(address.length) &&
+    !hasInnerWhitespace(address);
+
+/// **The canonical, ungrouped string for a sompi amount** — what
+/// [sompiFromKas] parses, and the only shape that may be written into the
+/// amount field.
+///
+/// `kasParts().integer` is **display**: it runs through [groupThousands], and
+/// `sompiFromKas` rejects a grouping comma outright. Writing a grouped string
+/// into the field therefore produces a figure that is plainly on screen and
+/// parses to `null` — Review greys out beside it, no fee is priced, and
+/// `_AmountGrammar` then refuses every keystroke *including deletion*, because
+/// the value it would be editing does not parse either. A dead money-entry
+/// control on the spend path, and it needs ≥ 1,000 KAS in the field to appear
+/// at all (`consensus-auditor`, UX-R2).
+///
+/// So the canonical/display split gets a name instead of a comment. Anything
+/// that writes to the field calls this; anything that draws for the eye calls
+/// [groupTypedAmount].
+String kasCanonical(BigInt sompi, {int minFraction = 2}) {
+  final parts = kasParts(sompi);
+  final integer = parts.integer.replaceAll(',', '');
+  return '$integer.${trimFraction(parts.fraction, min: minFraction)}';
+}
+
 /// A wall-clock stamp for a receipt — `30 Aug 2026, 02:48`.
 ///
 /// **Local time, from the chain's own moment.** The caller passes the unix

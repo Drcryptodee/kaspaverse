@@ -39,6 +39,7 @@ class KvAddress extends StatelessWidget {
     this.fontSize = 13,
     this.selectable = false,
     this.onTap,
+    this.plated = true,
   });
 
   /// The full address, scheme included.
@@ -55,6 +56,15 @@ class KvAddress extends StatelessWidget {
   /// selection is never bought by giving up the thing the form exists for.
   /// Ignored by the compact form. `copyFull` remains the sanctioned copy path.
   final bool selectable;
+
+  /// **Whether the chunked form paints its own plate.**
+  ///
+  /// True is the shipped behaviour and what every surface built before UX-R2
+  /// expects. The three Deep V6 surfaces that show an address in full — Receive
+  /// inside its `chip` row, the ceremony inside its inner card, Send inside its
+  /// field — place it in a container they already own, and a plate inside a
+  /// plate is a second boundary saying nothing (BG-4).
+  final bool plated;
 
   /// Tapping the rendered address fires this. It rides `SelectableText`'s own
   /// `onTap` in the selectable form rather than a wrapping `GestureDetector`,
@@ -192,83 +202,84 @@ class KvAddress extends StatelessWidget {
   /// one channel doing the work of two, on the control that exists to make
   /// substitution visible.
   ///
-  /// §2 and `ux-auditor` item 17 ask for **700** on the checkpoints; this stays
-  /// at 600, because raising it is a composition change on a surface **UX-R2**
-  /// audits. Recorded there rather than taken in passing.
+  /// §2 and `ux-auditor` item 17 ask for **700** on the checkpoints and **500**
+  /// on the middle, and **UX-R2 landed it** — the sitting §9 parked it for. The
+  /// renders `S5`, `S6b` and `S7` all draw the two ends heavier than the run
+  /// between them, and the merged axis is asserted rather than the enum.
   TextStyle _groupStyle(TextStyle base, int i, int count) => base.copyWith(
-    fontWeight: isWeightedGroup(i, count) ? FontWeight.w600 : FontWeight.w400,
-    fontVariations: isWeightedGroup(i, count) ? KvWeight.w600 : KvWeight.w400,
+    fontWeight: isWeightedGroup(i, count) ? FontWeight.w700 : FontWeight.w500,
+    fontVariations: isWeightedGroup(i, count) ? KvWeight.w700 : KvWeight.w500,
     color: isWeightedGroup(i, count) ? KvColor.ink : KvColor.inkDim,
   );
 
+  /// **One mono run, wrapping — never spaced fours** (BG-15 as amended,
+  /// D-223).
+  ///
+  /// The spaced-four rendering this replaces was the *v3* full form: on a phone
+  /// width 61 payload characters in groups of four wrap into a ragged block
+  /// whose line breaks move with the text scale, so the same address looks
+  /// different every time it is shown — which is the one thing a form for
+  /// **comparing against a source** may not do. A continuous run breaks at
+  /// whatever character the width allows and the two weighted ends stay where
+  /// the eye was taught to look. `S5`, `S6b` and `S7` all draw it this way.
+  ///
+  /// The groups survive as the *weighting* boundaries and as what a screen
+  /// reader speaks; they simply no longer print a space.
   Widget _chunked() {
     final groups = groupsOf(address);
     final base = TextStyle(
       fontFamily: KvFont.mono,
       fontSize: fontSize,
-      height: 20 / 13,
+      height: 19 / 13,
     );
-    final Widget body;
-    if (selectable) {
-      // `SelectableText.rich` rather than the `Wrap` below, because a surface
-      // whose job is comparing against a source wants hand-selection — and it
-      // must not have to give up the weighting to keep it. The Receive screen
-      // used to buy selection with a plain `SelectableText` over a flat string,
-      // which is a string and therefore cannot carry per-group weight: it
-      // rendered all 67 characters at one weight, on the one screen most likely
-      // to be read character by character. The spans below carry the same rule
-      // the `Wrap` uses, from the same predicate.
-      body = SelectableText.rich(
+    // **The scheme takes `inkDim` when the caller owns the container**, and
+    // that is §1.4's one standing obligation rather than a preference: the
+    // unplated form is placed inside someone else's card, and every card that
+    // hosts it is `chip`, where `inkMeta` measures **4.30** — under AA. The
+    // labels beside it were moved for exactly this reason and the scheme was
+    // the line left behind (`ux-auditor`, UX-R2).
+    final schemeTone = plated ? KvColor.inkMeta : KvColor.inkDim;
+    final spans = <TextSpan>[
+      if (_scheme.isNotEmpty)
         TextSpan(
-          children: [
-            if (_scheme.isNotEmpty)
-              TextSpan(
-                text: _scheme,
-                style: base.copyWith(color: KvColor.inkMeta),
-              ),
-            for (var i = 0; i < groups.length; i++)
-              TextSpan(
-                text: i == groups.length - 1 ? groups[i] : '${groups[i]} ',
-                style: _groupStyle(base, i, groups.length),
-              ),
-          ],
+          text: _scheme,
+          style: base.copyWith(color: schemeTone),
         ),
-        onTap: onTap,
-      );
-    } else {
-      body = Wrap(
-        spacing: KvSpace.s,
-        runSpacing: KvSpace.xs,
-        children: [
-          if (_scheme.isNotEmpty)
-            Text(_scheme, style: base.copyWith(color: KvColor.inkMeta)),
-          for (var i = 0; i < groups.length; i++)
-            Text(groups[i], style: _groupStyle(base, i, groups.length)),
-        ],
-      );
-    }
-    return Semantics(
+      for (var i = 0; i < groups.length; i++)
+        TextSpan(text: groups[i], style: _groupStyle(base, i, groups.length)),
+    ];
+    final Widget body = selectable
+        // `SelectableText.rich` rather than `Text.rich`, because a surface
+        // whose job is comparing against a source wants hand-selection — and
+        // it must not have to give up the weighting to keep it. A plain
+        // `SelectableText` over a flat string cannot carry per-group weight,
+        // which is how this screen once rendered all 67 characters at one
+        // weight. Tapping copies; a long press still selects.
+        ? SelectableText.rich(TextSpan(children: spans), onTap: onTap)
+        : Text.rich(TextSpan(children: spans));
+    final wrapped = Semantics(
       label: _spokenFull,
       button: onTap != null,
       excludeSemantics: true,
-      child: KvSurface(
-        tone: KvSurfaceTone.well,
-        width: double.infinity,
-        padding: const EdgeInsets.all(KvSpace.m),
-        // The non-selectable form has no gesture of its own to compete with,
-        // so it takes the tap on the whole plate rather than on the glyphs:
-        // the target is the surface a thumb actually aims at. `opaque` so the
-        // padding counts, not only the ink. **The selectable form is excluded
-        // deliberately** — `SelectableText` already carries the tap above, and
-        // wrapping it too would put two recognisers on one pointer.
-        child: (onTap == null || selectable)
-            ? body
-            : GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onTap,
-                child: body,
-              ),
-      ),
+      // The non-selectable form has no gesture of its own to compete with, so
+      // it takes the tap on its whole footprint rather than on the glyphs.
+      // **The selectable form is excluded deliberately** — `SelectableText`
+      // carries the tap above, and wrapping it too would put two recognisers
+      // on one pointer.
+      child: (onTap == null || selectable)
+          ? body
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: body,
+            ),
+    );
+    if (!plated) return wrapped;
+    return KvSurface(
+      tone: KvSurfaceTone.well,
+      width: double.infinity,
+      padding: const EdgeInsets.all(KvSpace.m),
+      child: wrapped,
     );
   }
 }

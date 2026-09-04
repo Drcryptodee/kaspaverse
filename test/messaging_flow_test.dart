@@ -11,6 +11,7 @@ import 'package:kaspaverse/src/ui/error_text.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 import 'support/finders.dart';
 
@@ -432,7 +433,8 @@ void main() {
       MessagingService.threadSinceFn = (_, _) async =>
           delta([message('tx1', text: '', attachment: file())]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -457,7 +459,8 @@ void main() {
         ),
       ]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -475,7 +478,8 @@ void main() {
         message('tx1', text: '', attachment: file(broken: true, text: null)),
       ]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -503,7 +507,8 @@ void main() {
       MessagingService.threadSinceFn = (_, _) async =>
           delta([message('tx1', text: '', attachment: file())]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -546,7 +551,8 @@ void main() {
         ),
       ]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -581,7 +587,8 @@ void main() {
         ),
       ]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -611,7 +618,8 @@ void main() {
       MessagingService.threadSinceFn = (_, _) async =>
           delta([message('tx1', text: '', attachment: file())]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(conversationId: 'c1', contactLabel: 'them'),
         ),
       );
@@ -627,7 +635,9 @@ void main() {
 
   group('ContactsScreen', () {
     testWidgets('empty state invites a contact add', (tester) async {
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pump();
       expect(find.textContaining('No conversations yet'), findsOneWidget);
       expect(find.byIcon(Icons.person_add_alt), findsOneWidget);
@@ -641,7 +651,9 @@ void main() {
       // then let the screen's own initState pull them.
       MessagingService.gapAgeFn = () async =>
           GapAgeDto(gapMinutes: BigInt.from(235), beyondHorizon: false);
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       expect(find.textContaining('may be missing'), findsOneWidget);
@@ -684,7 +696,9 @@ void main() {
     testWidgets('the history sheet is reachable with NO gap (visible toggle)', (
       tester,
     ) async {
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
       expect(find.textContaining('may be missing'), findsNothing);
       await tester.tap(find.byIcon(Icons.history));
@@ -709,7 +723,9 @@ void main() {
       };
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(FloatingActionButton));
@@ -750,7 +766,9 @@ void main() {
         conversation('c1', status: 'pending_in'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(FloatingActionButton));
@@ -776,7 +794,9 @@ void main() {
         handshakes++;
         return summary();
       };
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(FloatingActionButton));
@@ -802,7 +822,9 @@ void main() {
         handshakes++;
         return summary();
       };
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(FloatingActionButton));
@@ -826,7 +848,9 @@ void main() {
         conversation('c1', contactName: 'Alice'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Alice'), findsOneWidget);
@@ -844,7 +868,9 @@ void main() {
       };
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -866,7 +892,9 @@ void main() {
         conversation('c1', status: 'pending_in'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
       await openRequests(tester);
 
@@ -887,7 +915,9 @@ void main() {
         conversation('c3', status: 'pending_out'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       // Chats: the two you can open. No Accept button — a card that spends
@@ -918,7 +948,9 @@ void main() {
         conversation('new'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       // It is named, not merely dimmed — and only the replaced one is.
@@ -943,7 +975,8 @@ void main() {
     ) async {
       MessagingService.threadSinceFn = (_, _) async => delta([message('t1')]);
       await tester.pumpWidget(
-        const MaterialApp(
+        MaterialApp(
+          builder: _kvWindow,
           home: ThreadScreen(
             conversationId: 'old',
             contactLabel: 'kaspa:qq…',
@@ -989,7 +1022,9 @@ void main() {
         conversation('c2'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(PopupMenuButton<String>));
@@ -1038,7 +1073,9 @@ void main() {
       );
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(PopupMenuButton<String>));
@@ -1069,7 +1106,9 @@ void main() {
       };
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -1114,7 +1153,9 @@ void main() {
       };
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -1143,7 +1184,9 @@ void main() {
         conversation('c1', status: 'pending_in'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
       await openRequests(tester);
 
@@ -1179,7 +1222,9 @@ void main() {
       );
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(PopupMenuButton<String>));
@@ -1203,7 +1248,9 @@ void main() {
       );
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -1233,7 +1280,9 @@ void main() {
       MessagingService.prepareHandshakeFn = (_) async => summary();
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -1264,7 +1313,9 @@ void main() {
       );
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(PopupMenuButton<String>));
@@ -1291,7 +1342,9 @@ void main() {
       );
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(PopupMenuButton<String>));
@@ -1309,7 +1362,9 @@ void main() {
         conversation('old', superseded: true),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Replaced'));
@@ -1322,7 +1377,9 @@ void main() {
     ) async {
       MessagingService.conversationsFn = () async => const [];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       expect(find.textContaining('No conversations yet'), findsOneWidget);
@@ -1340,7 +1397,9 @@ void main() {
         conversation('c1', status: 'pending_in'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
       await openRequests(tester);
 
@@ -1362,7 +1421,9 @@ void main() {
         String? hidden;
         MessagingService.hideFn = (id) async => hidden = id;
         await MessagingService.instance.refresh();
-        await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+        await tester.pumpWidget(
+          MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+        );
         await tester.pumpAndSettle();
         await openRequests(tester);
 
@@ -1394,7 +1455,9 @@ void main() {
         conversation('c1', status: 'pending_in'),
       ];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
       await openRequests(tester);
 
@@ -1416,7 +1479,9 @@ void main() {
         return summary();
       };
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
       await openRequests(tester);
 
@@ -1435,7 +1500,9 @@ void main() {
     testWidgets('active rows open the thread', (tester) async {
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Active'));
@@ -1450,7 +1517,9 @@ void main() {
       MessagingService.hideFn = (id) async => hidden = id;
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -1483,7 +1552,9 @@ void main() {
       MessagingService.hideFn = (_) async => hideCalls++;
       MessagingService.conversationsFn = () async => [conversation('c1')];
       await MessagingService.instance.refresh();
-      await tester.pumpWidget(const MaterialApp(home: ContactsScreen()));
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
       await tester.pumpAndSettle();
 
       await tester.longPress(find.text('Active'));
@@ -1498,7 +1569,8 @@ void main() {
   });
 
   group('ThreadScreen', () {
-    Widget screen() => const MaterialApp(
+    Widget screen() => MaterialApp(
+      builder: _kvWindow,
       home: ThreadScreen(
         conversationId: 'c1',
         contactLabel: 'kaspa:qz7u…j43pf',
@@ -1834,7 +1906,8 @@ void main() {
   });
 
   group('ThreadScreen — V2 chips, ghost & incremental merge', () {
-    Widget screen() => const MaterialApp(
+    Widget screen() => MaterialApp(
+      builder: _kvWindow,
       home: ThreadScreen(
         conversationId: 'c1',
         contactLabel: 'kaspa:qz7u…j43pf',
@@ -2039,7 +2112,8 @@ void main() {
   });
 
   group('ThreadScreen — kv:1: game frames (the safety spine)', () {
-    Widget screen() => const MaterialApp(
+    Widget screen() => MaterialApp(
+      builder: _kvWindow,
       home: ThreadScreen(
         conversationId: 'c1',
         contactLabel: 'kaspa:qz7u…j43pf',
@@ -2224,3 +2298,8 @@ void main() {
     });
   });
 }
+
+/// `KvWindow` above the `Navigator`, exactly as `main.dart` mounts it — a
+/// pushed sheet reads the window class to decide whether it is full-width or
+/// floating (BG-33), so a host without it cannot build the route under test.
+Widget _kvWindow(BuildContext context, Widget? page) => KvWindow(child: page!);

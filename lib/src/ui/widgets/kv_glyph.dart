@@ -103,6 +103,24 @@ enum KvGlyph {
 
   /// Shift, on the secret keyboard. Lucide `arrow-big-up`, one closed stroke.
   shift,
+
+  /// Copy this — an address, a transaction id. Lucide `copy`.
+  copy,
+
+  /// This leaves the app. Lucide `external-link`.
+  external,
+
+  /// Hand this to another app. Lucide `share-2`.
+  share,
+
+  /// The hold's badge, and biometrics. Lucide `fingerprint` (shipped in this
+  /// Lucide build under the name `fingerprint-pattern`). **Illustrative**, so
+  /// it takes [KvGlyphSpec.strokeIllustrative] rather than the 2.5 default —
+  /// nine contours at 2.5 in a 20 dp box read as a smudge (§2a, weights by job).
+  fingerprint,
+
+  /// Dismiss, clear, close. Lucide `x`.
+  close,
 }
 
 /// One glyph, painted.
@@ -356,6 +374,35 @@ class KvGlyphPainter extends CustomPainter {
               '1.207 0 0 1 1.707 0l6.835 6.835a1 1 0 0 1-.75 1.811H16a1 1 0 0 '
               '0-1 1v6a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1z',
         ]);
+      case KvGlyph.copy:
+        rect(8, 8, 14, 14, 2);
+        path(const ['M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2']);
+      case KvGlyph.external:
+        path(const [
+          'M15 3h6v6',
+          'M10 14 21 3',
+          'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
+        ]);
+      case KvGlyph.share:
+        circle(18, 5, 3);
+        circle(6, 12, 3);
+        circle(18, 19, 3);
+        line(8.59, 13.51, 15.42, 17.49);
+        line(15.41, 6.51, 8.59, 10.49);
+      case KvGlyph.fingerprint:
+        path(const [
+          'M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4',
+          'M14 13.12c0 2.38 0 6.38-1 8.88',
+          'M17.29 21.02c.12-.6.43-2.3.5-3.02',
+          'M2 12a10 10 0 0 1 18-6',
+          'M2 16h.01',
+          'M21.8 16c.2-2 .131-5.354 0-6',
+          'M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2',
+          'M8.65 22c.21-.66.45-1.32.57-2',
+          'M9 6.8a6 6 0 0 1 9 5.2v2',
+        ]);
+      case KvGlyph.close:
+        path(const ['M18 6 6 18', 'm6 6 12 12']);
     }
   }
 

@@ -235,6 +235,45 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
 
+                    // **Hand a public string to another app** — the receive
+                    // address, and nothing else the app ever shares.
+                    //
+                    // `ACTION_SEND` with a chooser, for the same reason
+                    // `openFile` forces one: a share target set as a default
+                    // would silently own every later share with no way back
+                    // from inside the app, and unlike a browser Android offers
+                    // no first-class setting to change it.
+                    //
+                    // **It carries no secret and cannot be made to.** INV-1
+                    // governs secret material; a receive address is public data
+                    // whose whole purpose is to be handed to a stranger. The
+                    // caller is the Receive screen and the payload is the same
+                    // string the QR encodes.
+                    "shareText" -> {
+                        val text = call.argument<String>("text")
+                        if (text.isNullOrEmpty()) {
+                            result.error(CODE_SAVE_FAILED, "nothing to share", null)
+                        } else {
+                            try {
+                                val send = Intent(Intent.ACTION_SEND)
+                                    .setType("text/plain")
+                                    .putExtra(Intent.EXTRA_TEXT, text)
+                                startActivity(
+                                    Intent.createChooser(send, null)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                                result.success(true)
+                            } catch (e: android.content.ActivityNotFoundException) {
+                                // A phone with nothing that takes text. A fact
+                                // about the device, not a failure — answered as
+                                // `false` so the caller says so in words.
+                                result.success(false)
+                            } catch (e: Exception) {
+                                result.error(CODE_SAVE_FAILED, e.message, null)
+                            }
+                        }
+                    }
+
                     // App-private files dir for the Rust vault store (INV-3).
                     // Keeps path_provider (a plugin on the custody path) out.
                     "getFilesDir" -> result.success(filesDir.absolutePath)

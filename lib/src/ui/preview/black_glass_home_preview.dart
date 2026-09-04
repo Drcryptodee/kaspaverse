@@ -30,7 +30,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
-import '../receive/qr_tile.dart';
+import '../widgets/kv_qr.dart';
 import '../theme/tokens.dart';
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_glyph.dart';
@@ -2864,7 +2864,11 @@ class _Tile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (state == ReceiveState.ready) {
-      return const QrTile(data: _receiveAddress, size: side);
+      return const SizedBox(
+        width: side,
+        height: side,
+        child: KvQr(data: _receiveAddress),
+      );
     }
     return Container(
       width: side,

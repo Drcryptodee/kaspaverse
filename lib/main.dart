@@ -191,7 +191,10 @@ WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
       wallet: WalletSettingsScope(
         receiveAddress: vaultReceiveAddress,
         deepScan: deepScan,
-        receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
+        receiveRoute: (_) => ReceiveScreen(
+          fetch: vaultReceiveAddress,
+          share: VaultService.instance.shareText,
+        ),
         consolidate: wallet.prepareConsolidate,
         commitSend: wallet.commitSend,
         abandonSend: wallet.abandonSend,
@@ -272,7 +275,10 @@ class _MoneyShellState extends State<_MoneyShell> {
       // the service surfaces its own errors.
       MessagingService.instance.start();
     },
-    receiveRoute: (_) => ReceiveScreen(fetch: vaultReceiveAddress),
+    receiveRoute: (_) => ReceiveScreen(
+      fetch: vaultReceiveAddress,
+      share: VaultService.instance.shareText,
+    ),
     sendRoute: (_, balanceStale) => SendScreen(
       mature: widget.wallet.mature,
       balanceStale: balanceStale,

@@ -75,3 +75,42 @@ class KvTwoPane extends StatelessWidget {
     );
   }
 }
+
+/// **One content column, clamped and centred** — the enforceable half of BG-33
+/// for a single-column screen.
+///
+/// A content column is `min(available, 560)` in every class, and a wider window
+/// gains *columns with jobs*, never a wider column: a 700 dp keypad and a
+/// full-width address row are the stretch the law forbids. The outer gutter
+/// comes from [KvWindowMetrics.gutter] — 16 · 32 · 40 · 48 — so the class
+/// decides the margin and nothing below the root reads a width.
+///
+/// `KvTwoPane` is its sibling for screens that genuinely have two columns; this
+/// is for the ones that have one and must stop growing.
+class KvColumn extends StatelessWidget {
+  const KvColumn({super.key, required this.child, this.gutter = true});
+
+  final Widget child;
+
+  /// Whether to apply the class's outer gutter. False where the caller already
+  /// pads (a `ListView` with its own horizontal padding, say) and only the
+  /// clamp is wanted.
+  final bool gutter;
+
+  @override
+  Widget build(BuildContext context) {
+    final metrics = KvWindow.of(context);
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: KvLayout.columnMax),
+        child: gutter
+            ? Padding(
+                padding: EdgeInsets.symmetric(horizontal: metrics.gutter),
+                child: child,
+              )
+            : child,
+      ),
+    );
+  }
+}

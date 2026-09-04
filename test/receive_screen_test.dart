@@ -3,10 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
-import 'package:kaspaverse/src/ui/receive/qr_tile.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_qr.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
@@ -18,15 +18,24 @@ import 'support/preview_harness.dart';
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
 
-Widget _host(Widget child, {double textScale = 1}) => MediaQuery(
-  data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
-  child: MaterialApp(theme: kvDarkTheme(), home: child),
+/// `KvWindow` above the `Navigator`, exactly as `main.dart` mounts it —
+/// **and `fromView`, never a bare `MediaQueryData`**, which replaces the whole
+/// data and leaves `size` at zero (the UX-R1 harness defect, §9).
+Widget _host(Widget child, {double textScale = 1}) => MaterialApp(
+  theme: kvDarkTheme(),
+  builder: (context, page) => MediaQuery(
+    data: MediaQuery.of(
+      context,
+    ).copyWith(textScaler: TextScaler.linear(textScale)),
+    child: KvWindow(child: page!),
+  ),
+  home: child,
 );
 
 void main() {
   setUpAll(loadBundledFonts);
 
-  group('QrTile', () {
+  group('KvQr', () {
     test('the encoder produces a non-empty matrix for an address', () {
       final image = QrImage(
         QrCode(
@@ -59,32 +68,36 @@ void main() {
           errorCorrectLevel: QrErrorCorrectLevel.medium,
         ),
       ).moduleCount;
-      final quiet = QrTile.quietZone(modules, QrTile.side);
-      final cell = (QrTile.side - 2 * quiet) / modules;
-      expect(
-        quiet,
-        greaterThanOrEqualTo(4 * cell - 1e-9),
-        reason: 'a QR with less than four modules of margin fails scanners',
-      );
-      expect(quiet, greaterThanOrEqualTo(KvSpace.m), reason: 'BG-15 floor');
+      // **Four modules at ANY tile side**, because the painter divides the
+      // side into `modules + 8` cells and spends four a side. That is the
+      // property a fixed dp margin cannot have: `S5` draws an 18 dp pad on a
+      // 256 dp tile, which for this address is 3.03 modules — under spec.
+      for (final side in [KvQrFrame.maxSide, 180.0, 120.0]) {
+        final quiet = KvQr.quietZone(modules, side);
+        final cell = (side - 2 * quiet) / modules;
+        expect(
+          quiet,
+          closeTo(4 * cell, 1e-9),
+          reason: 'a QR with less than four modules of margin fails scanners',
+        );
+      }
 
-      // And it holds for a matrix denser than any address produces, which is
-      // the case a fixed 16 dp would have failed.
+      // And it holds for a matrix denser than any address produces.
       const dense = 101;
-      final denseQuiet = QrTile.quietZone(dense, QrTile.side);
+      final denseQuiet = KvQr.quietZone(dense, KvQrFrame.maxSide);
       expect(
         denseQuiet,
-        greaterThanOrEqualTo(4 * (QrTile.side - 2 * denseQuiet) / dense - 1e-9),
+        closeTo(4 * (KvQrFrame.maxSide - 2 * denseQuiet) / dense, 1e-9),
       );
     });
 
     testWidgets('renders on a light tile regardless of the dark theme (DS-8)', (
       tester,
     ) async {
-      await tester.pumpWidget(_host(const Center(child: QrTile(data: _addr))));
+      await tester.pumpWidget(_host(const Center(child: KvQr(data: _addr))));
       // The tile is the deliberately-out-of-palette light colour, never themed.
       final lightTile = find.descendant(
-        of: find.byType(QrTile),
+        of: find.byType(KvQr),
         matching: find.byWidgetPredicate(
           (w) =>
               w is Container &&
@@ -101,7 +114,7 @@ void main() {
       await tester.pumpWidget(_host(ReceiveScreen(fetch: () async => _addr)));
       await tester.pumpAndSettle();
 
-      expect(find.byType(QrTile), findsOneWidget);
+      expect(find.byType(KvQr), findsOneWidget);
       expect(tester.widget<KvTopBar>(find.byType(KvTopBar)).title, 'Receive');
 
       // The verification surface shows the FULL address, chunked, and it is
@@ -111,9 +124,12 @@ void main() {
       // reached it AND a flat string carried no weighting at all.
       final full = tester.widget<SelectableText>(find.byType(SelectableText));
       final span = full.textSpan!;
-      expect(span.toPlainText(), chunkAddress(_addr));
+      // **One run, no spaces** (BG-15 as amended, landed at UX-R2): the
+      // address reads exactly as it is, so a line break that moves with the
+      // text scale cannot make the same address look different twice.
+      expect(span.toPlainText(), _addr);
       // The tail is five characters, together — never a stranded final char.
-      expect(span.toPlainText(), endsWith(' cd692'));
+      expect(span.toPlainText(), endsWith('cd692'));
 
       // And the eye is steered: first and last groups carry the weight, the
       // middle does not. This is the assertion the sitting was missing — the
@@ -128,9 +144,13 @@ void main() {
           .where((t) => !(t.text ?? '').startsWith('kaspa:'))
           .toList();
       expect(groups.length, KvAddress.groupsOf(_addr).length);
-      expect(groups.first.style?.fontWeight, FontWeight.w600);
-      expect(groups.last.style?.fontWeight, FontWeight.w600);
-      expect(groups[groups.length ~/ 2].style?.fontWeight, FontWeight.w400);
+      // §2's checkpoints are **700**, and the merged axis is what the
+      // rasteriser reads (L150) — never the enum alone.
+      expect(groups.first.style?.fontWeight, FontWeight.w700);
+      expect(groups.first.style?.fontVariations, KvWeight.w700);
+      expect(groups.last.style?.fontWeight, FontWeight.w700);
+      expect(groups.last.style?.fontVariations, KvWeight.w700);
+      expect(groups[groups.length ~/ 2].style?.fontWeight, FontWeight.w500);
     });
 
     testWidgets('BG-19 · the address is not stated twice', (tester) async {
@@ -159,25 +179,30 @@ void main() {
       final gate = Completer<String>();
       await tester.pumpWidget(_host(ReceiveScreen(fetch: () => gate.future)));
       await tester.pump();
+      // The tile itself, not the `Center` that holds it: the frame takes the
+      // width it is given up to [KvQrFrame.maxSide] and is square inside it.
       double slot() => tester
           .getSize(
-            find.byWidgetPredicate(
-              (w) => w is SizedBox && w.width == QrTile.side,
-            ),
+            find
+                .descendant(
+                  of: find.byType(KvQrFrame),
+                  matching: find.byType(AspectRatio),
+                )
+                .first,
           )
           .width;
-      expect(find.byType(QrTile), findsNothing);
+      expect(find.byType(KvQr), findsNothing);
       final waiting = slot();
 
       gate.complete(_addr);
       await tester.pumpAndSettle();
-      expect(find.byType(QrTile), findsOneWidget);
+      expect(find.byType(KvQr), findsOneWidget);
       expect(
         slot(),
         waiting,
         reason: 'the slot the QR lands in is the slot that was already there',
       );
-      expect(waiting, QrTile.side);
+      expect(waiting, KvQrFrame.maxSide);
     });
 
     testWidgets('BG-24 · the QR arrives through a transition', (tester) async {
@@ -195,7 +220,7 @@ void main() {
           .widget<FadeTransition>(
             find
                 .ancestor(
-                  of: find.byType(QrTile),
+                  of: find.byType(KvQr),
                   matching: find.byType(FadeTransition),
                 )
                 .first,
@@ -206,6 +231,9 @@ void main() {
       gate.complete(_addr);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 60));
+      // The switch's first tick is the frame after the child appears, so the
+      // crossfade is read one frame in rather than on the mounting frame.
+      await tester.pump(const Duration(milliseconds: 40));
       expect(
         tileOpacity(),
         allOf(greaterThan(0.0), lessThan(1.0)),
@@ -240,24 +268,27 @@ void main() {
         );
         // Rust's own words, not the type name — `displayError`, not toString.
         expect(find.text('the vault is locked'), findsOneWidget);
-        expect(find.byType(QrTile), findsNothing);
+        expect(find.byType(KvQr), findsNothing);
         // Still the same square: a failed state must not be a shorter screen.
         expect(
           tester
               .getSize(
-                find.byWidgetPredicate(
-                  (w) => w is SizedBox && w.width == QrTile.side,
-                ),
+                find
+                    .descendant(
+                      of: find.byType(KvQrFrame),
+                      matching: find.byType(AspectRatio),
+                    )
+                    .first,
               )
               .width,
-          QrTile.side,
+          KvQrFrame.maxSide,
         );
 
         // BG-11: an error that does not say what to do is not an error message.
         await tester.tap(find.text('Try again'));
         await tester.pumpAndSettle();
         expect(attempts, 2);
-        expect(find.byType(QrTile), findsOneWidget);
+        expect(find.byType(KvQr), findsOneWidget);
       },
     );
 
@@ -292,7 +323,7 @@ void main() {
     // job is handing it over. Both of these route to `copyFull` too, so a
     // second copy path cannot drift narrower than the sanctioned one (L143).
     for (final (name, target) in <(String, Finder Function())>[
-      ('the QR tile', () => find.byType(QrTile)),
+      ('the QR tile', () => find.byType(KvQr)),
       ('the address itself', () => find.byType(KvAddress)),
     ]) {
       testWidgets('tapping $name copies the FULL address', (tester) async {

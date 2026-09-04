@@ -95,7 +95,7 @@ void main() {
     tester.view.physicalSize = const Size(1000, 2400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
-    await tester.pumpWidget(MaterialApp(home: s));
+    await tester.pumpWidget(MaterialApp(builder: _kvWindow, home: s));
     await tester.pumpAndSettle();
   }
 
@@ -749,3 +749,8 @@ Future<void> openDrawer(WidgetTester tester) async {
   await tester.pump(KvMotion.enter);
   await tester.pump(KvMotion.enter);
 }
+
+/// `KvWindow` above the `Navigator`, exactly as `main.dart` mounts it — a
+/// pushed sheet reads the window class to decide whether it is full-width or
+/// floating (BG-33), so a host without it cannot build the route under test.
+Widget _kvWindow(BuildContext context, Widget? page) => KvWindow(child: page!);
