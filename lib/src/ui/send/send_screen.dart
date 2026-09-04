@@ -237,8 +237,27 @@ class _SendScreenState extends State<SendScreen> {
   BigInt? _minSompi;
 
   /// The Generator's fee for what is currently typed, or null when there is
-  /// nothing buildable to price.
+  /// nothing buildable to price **or while a fresh probe is in flight**.
   BigInt? _fee;
+
+  /// **The last fee the Generator actually quoted**, held across a re-price so
+  /// the row can keep showing a figure while the next one is being priced.
+  ///
+  /// The row used to clear to `—` on every keystroke and fill in 250 ms later,
+  /// which is what the founder saw and objected to twice: *"it disappears and
+  /// comes back withing tiny milliseconds."* No animation could fix that,
+  /// because the figure genuinely left.
+  ///
+  /// **It is not shown as if it were current.** While `_fee` is null and this
+  /// is not, the row dims the figure — the value drops to the tone of its own
+  /// label — so what is on screen is visibly *not the answer to what you just
+  /// typed*. When the answer lands the figure brightens and its digits roll
+  /// to the new ones, which is the arrival the founder asked for and also the
+  /// only moment the row claims to be current.
+  ///
+  /// It is cleared the instant there is nothing to price, so an emptied field
+  /// shows the dash rather than the fee of an amount that no longer exists.
+  BigInt? _lastFee;
   Timer? _feeDebounce;
 
   /// Guards against an out-of-order answer overwriting a newer one: every
@@ -261,13 +280,26 @@ class _SendScreenState extends State<SendScreen> {
     final token = ++_feeToken;
     if (_fee != null) setState(() => _fee = null);
     final amount = _amountSompi;
-    if (probe == null || amount == null || amount <= BigInt.zero) return;
-    if (!_addressLooksValid) return;
+    if (probe == null || amount == null || amount <= BigInt.zero) {
+      // Nothing to price at all: the row goes back to BG-8's dash rather than
+      // holding a figure for an amount that no longer exists.
+      if (_lastFee != null) setState(() => _lastFee = null);
+      return;
+    }
+    if (!_addressLooksValid) {
+      if (_lastFee != null) setState(() => _lastFee = null);
+      return;
+    }
     final destination = _destination;
     _feeDebounce = Timer(_feeDebounceFor, () async {
       try {
         final fee = await probe(destination, amount);
-        if (mounted && token == _feeToken) setState(() => _fee = fee);
+        if (mounted && token == _feeToken) {
+          setState(() {
+            _fee = fee;
+            _lastFee = fee;
+          });
+        }
       } catch (_) {
         // No fee is a real answer; a failed probe is not a number.
       }
@@ -895,7 +927,7 @@ class _SendScreenState extends State<SendScreen> {
               // both are structural: the row is always here, and the pad now
               // lives outside the scroll entirely.
               const SizedBox(height: KvSpace.s14),
-              _FeeRow(sompi: _fee),
+              _FeeRow(sompi: _fee ?? _lastFee, pending: _fee == null),
               if (block?.notice != null) ...[
                 const SizedBox(height: KvSpace.s),
                 KvStatusChip(
@@ -1505,10 +1537,15 @@ class _Share extends StatelessWidget {
 /// the row eases the figure *in*, and every frame of it shows either a number
 /// Rust priced or no number at all.
 class _FeeRow extends StatelessWidget {
-  const _FeeRow({required this.sompi});
+  const _FeeRow({required this.sompi, this.pending = false});
 
-  /// Null while there is nothing buildable to price.
+  /// The figure to show: the current quote, or the last one while a fresh
+  /// probe is in flight. Null only when there is nothing to price at all.
   final BigInt? sompi;
+
+  /// A probe is running and [sompi] is the PREVIOUS quote — so the figure is
+  /// dimmed to say it is not the answer to what was just typed.
+  final bool pending;
 
   @override
   Widget build(BuildContext context) {
@@ -1569,13 +1606,23 @@ class _FeeRow extends StatelessWidget {
                 // one and the new one, both quoted by the Generator — exist
                 // in a slot while it does. Nothing is interpolated, so
                 // `KvStreamingCount`'s "money never streams" is untouched.
-                : KvAmount(
-                    fee,
-                    role: KvAmountRole.row,
-                    size: 13,
-                    showUnit: true,
-                    emphasis: KvAmountEmphasis.significant,
-                    rolling: true,
+                : AnimatedOpacity(
+                    duration: KvMotion.fast,
+                    curve: KvMotion.curve,
+                    // Down to its own label's weight while it is not the
+                    // answer; back to full when it is. `ink` at 60 % on
+                    // `plate` measures ~10:1, so this stays well clear of AA
+                    // — D-257 narrowed the 45 % dim because `inkMeta` fell
+                    // under the floor, and that is a different tone.
+                    opacity: pending ? 0.6 : 1,
+                    child: KvAmount(
+                      fee,
+                      role: KvAmountRole.row,
+                      size: 13,
+                      showUnit: true,
+                      emphasis: KvAmountEmphasis.significant,
+                      rolling: true,
+                    ),
                   ),
           ),
         ],

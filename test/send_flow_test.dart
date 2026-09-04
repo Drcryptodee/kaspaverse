@@ -616,7 +616,11 @@ void main() {
       // row here" to "what does the row say", which is the property that
       // actually mattered all along.
       expect(find.text('Network fee'), findsOneWidget);
-      expect(_feeLine(tester), 'Network fee—');
+      expect(
+        _feeLine(tester),
+        'Network fee—',
+        reason: 'nothing has ever been priced, so there is nothing to hold',
+      );
 
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pump(KvMotion.calm + const Duration(milliseconds: 20));
@@ -627,17 +631,26 @@ void main() {
       // It clears to the DASH, never to a zero: BG-8's unknown cannot be read
       // as "this send is free".
       await _type(tester, '2');
-      // **Asserted as the CURRENT child, not as the joined string.** The
-      // figure is dropped on the keystroke — that is the property, and it is
-      // true on this frame. What the string would also catch for the next
-      // 240 ms is the old figure *fading out* underneath the dash fading in,
-      // which is the crossfade BG-24 asks for rather than a stale number
-      // standing: the debounce is 250 ms, so any pump long enough to finish
-      // the fade has already fetched the next fee.
+      await tester.pump();
+      // **The figure is held, and marked as not-current while it is held.**
+      //
+      // It used to clear to the dash on every keystroke and fill in 250 ms
+      // later — which the founder rejected twice as *"it disappears and comes
+      // back"*, and no animation could fix, because the figure genuinely left.
+      // So the row keeps the last quote the Generator actually gave and
+      // **dims it** until the next one lands: what is on screen is visibly not
+      // the answer to what was just typed, which is the honesty the clearing
+      // was buying, without the blink.
+      final held = tester.widget<AnimatedOpacity>(
+        find.ancestor(
+          of: find.byType(KvAmount),
+          matching: find.byType(AnimatedOpacity),
+        ),
+      );
       expect(
-        find.byKey(const ValueKey<String>('fee-unknown')),
-        findsOneWidget,
-        reason: 'the fee clears on the keystroke, not on the next answer',
+        held.opacity,
+        lessThan(1),
+        reason: 'a figure priced for a different amount is not shown as live',
       );
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pump(KvMotion.calm + const Duration(milliseconds: 20));
@@ -3461,6 +3474,34 @@ void main() {
       fee = BigInt.from(354600);
       await _type(tester, '2');
       await tester.pump(const Duration(milliseconds: 300));
+
+      // **Mid-roll: both glyphs are present, both solid, both moving.** This
+      // is the assertion the two rejected cuts would have failed — *"it
+      // disappears and comes back"* is what an opacity animation looks like,
+      // and there is none here.
+      await tester.pump(const Duration(milliseconds: 60));
+      final rolls = find.descendant(
+        of: find.byType(KvRollingText),
+        matching: find.byType(FractionalTranslation),
+      );
+      expect(rolls, findsWidgets, reason: 'the glyphs travel');
+      expect(
+        find.descendant(
+          of: find.byType(KvRollingText),
+          matching: find.byType(FadeTransition),
+        ),
+        findsNothing,
+        reason: 'nothing fades — a fade reads as a blink, not as a change',
+      );
+      // Clipped, so exactly one glyph is in view at rest.
+      expect(
+        find.descendant(
+          of: find.byType(KvRollingText),
+          matching: find.byType(ClipRect),
+        ),
+        findsWidgets,
+      );
+
       await tester.pumpAndSettle();
       expect(
         tester.element(find.text('0').first),

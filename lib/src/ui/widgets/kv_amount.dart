@@ -210,14 +210,18 @@ class KvAmount extends StatelessWidget {
 
   static double _rampSize(KvAmountRole role) => switch (role) {
     // §2 as amended by Deep V6: `balanceHero` 48/52 (fraction 24),
-    // `amountRow` 16/20. **`screen` is still v3.1's 32 and that is
-    // deliberate**: §2 puts `amountScreen` at 44/48, but the only surface
-    // wearing it is the signing ceremony, whose composition belongs to UX-R2
-    // — changing the figure's size there is a re-skin of a funds surface by a
-    // sitting that is not auditing it. The *law* below (hue and weight)
-    // applies to every role now, because that is a law and not a composition.
+    // `amountRow` 16/20.
+    //
+    // **`screen` is 40 since 2026-09-04** — the founder raised it from 32 on
+    // glass: *"make the total amount number larger in the center its in. its
+    // kinda small and not giving main thing."* `S7` measures 32 and his eye
+    // outranks the render (D-262); the figure earned the weight when the rule
+    // label above it was removed and it became the whole amount leaving the
+    // wallet, centred, with nothing else in that region. It stays a step under
+    // §2's `amountScreen` 44, which is a record read at a glance rather than a
+    // commitment being checked.
     KvAmountRole.hero => 48,
-    KvAmountRole.screen => 32,
+    KvAmountRole.screen => 40,
     KvAmountRole.row => 16,
   };
 
