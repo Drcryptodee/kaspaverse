@@ -18,9 +18,19 @@ class KvIconButton extends StatefulWidget {
     required this.mark,
     required this.label,
     required this.onTap,
+    this.quarterTurns = 0,
+    this.tone,
   });
 
   final KvGlyph mark;
+
+  /// Quarter-turns applied to the mark. The back chevron is `chevron` turned
+  /// twice — one glyph, two directions, rather than a second path (BG-25).
+  final int quarterTurns;
+
+  /// The mark's ink. Null takes `ink` — the bar passes `inkNav`, and `etch`
+  /// where the way out is closed.
+  final Color? tone;
 
   /// What a screen reader says. Verb plus object (BG-11).
   final String label;
@@ -58,7 +68,14 @@ class _KvIconButtonState extends State<KvIconButton> {
       alignment: Alignment.center,
       children: [
         disc,
-        KvGlyphIcon(widget.mark, size: glyph, tone: KvColor.ink),
+        RotatedBox(
+          quarterTurns: widget.quarterTurns,
+          child: KvGlyphIcon(
+            widget.mark,
+            size: glyph,
+            tone: widget.tone ?? KvColor.ink,
+          ),
+        ),
       ],
     );
     final tap = widget.onTap;

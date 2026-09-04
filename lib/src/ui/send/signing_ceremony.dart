@@ -304,6 +304,27 @@ class _SigningCeremonyState extends State<SigningCeremony>
   TxStatusDto? _status;
   Timer? _depthPoll;
 
+  /// **The DAG has actually taken it.** Set by the first poll that answers
+  /// `accepted` or `confirmed`, and it is what releases the sheet.
+  ///
+  /// It also gates the `Displaced` reading: a tracker that says *displaced*
+  /// before it ever said *accepted* is describing a transaction it cannot
+  /// find, not one whose accepting block left the chain — and the founder saw
+  /// exactly that flash by on a healthy send.
+  bool _acceptSeen = false;
+
+  /// The sheet has handed over to the receipt. One flag, set in one place.
+  bool _settledNow = false;
+
+  Timer? _acceptCeiling;
+
+  /// **How long the sheet will wait for an acceptance before showing the
+  /// receipt anyway.** Measured submit→accepted is 1.3–3.8 s, so this is
+  /// comfortably past a healthy send and short enough that a dead link does
+  /// not hold someone on a sheet — and the way out has been open since 6 s
+  /// either way (`_reopenExitAfter`).
+  static const Duration _acceptCeilingAfter = Duration(seconds: 15);
+
   /// One second, which is what makes the count STREAM rather than step. The
   /// depth is recomputed at read from the live sink blue score, so each poll
   /// is a fresh node-read rather than a cached number ticking on a clock.
@@ -347,7 +368,19 @@ class _SigningCeremonyState extends State<SigningCeremony>
     Future<void> tick() async {
       try {
         final status = await probe(txid);
-        if (mounted) setState(() => _status = status);
+        if (!mounted) return;
+        setState(() {
+          _status = status;
+          // **The first real acceptance is what releases the sheet.** Until
+          // the DAG has taken it there is no depth to show, and a receipt
+          // shown before that flashes `Seen —` for a second — which is what
+          // the founder watched happen and asked to stop.
+          if (status?.kind == TxStatusKind.accepted ||
+              status?.kind == TxStatusKind.confirmed) {
+            _acceptSeen = true;
+          }
+        });
+        if (_acceptSeen) _settle();
       } catch (_) {
         // A failed read is not a depth. Leave the last honest answer alone
         // rather than blanking a number the chain did give us.
@@ -429,6 +462,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
     _stageTwo?.cancel();
     _exitTimer?.cancel();
     _signedBeat?.cancel();
+    _acceptCeiling?.cancel();
     _depthPoll?.cancel();
     _hold.dispose();
     super.dispose();
@@ -493,12 +527,44 @@ class _SigningCeremonyState extends State<SigningCeremony>
     } finally {
       _stageOne?.cancel();
       _stageTwo?.cancel();
-      _exitTimer?.cancel();
-      if (mounted) setState(() => _sending = false);
+      // **The exit timer is NOT cancelled here any more.** It is what gives
+      // the way out back at 6 s, and the wait it guards now continues past
+      // the commit.
+      if (mounted) {
+        // A failure, or a send the DAG will never be asked about (partial, or
+        // no tracker wired), has nothing to wait for: the answer is already
+        // the whole answer.
+        if (_error != null ||
+            !_isFullyBroadcast ||
+            widget.acceptanceStatus == null) {
+          _settle();
+        } else {
+          // Otherwise the staged wait stays up, on its last named stage —
+          // *Waiting for a node to accept it* — which is now literally true
+          // rather than a label the screen wore for a beat. A ceiling keeps
+          // it from being a trap: past it the receipt shows whatever is
+          // known, and the exit has been open since 6 s regardless.
+          _acceptCeiling = Timer(_acceptCeilingAfter, () {
+            if (mounted) _settle();
+          });
+        }
+      }
     }
   }
 
-  bool get _settled => _outcome != null || _error != null;
+  /// **Hand over to the receipt.** One place, so the sheet cannot be released
+  /// by two paths that disagree about what it is waiting for.
+  void _settle() {
+    if (!mounted || _settledNow) return;
+    _acceptCeiling?.cancel();
+    _exitTimer?.cancel();
+    setState(() {
+      _settledNow = true;
+      _sending = false;
+    });
+  }
+
+  bool get _settled => _settledNow;
 
   /// When the chain accepted this send, or null while there is no acceptance
   /// to stamp. Never the device's clock.
@@ -747,6 +813,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
                       acceptedAt: _acceptedAt,
                       txid: txid,
                       status: _status,
+                      acceptSeen: _acceptSeen,
                       contacts: widget.contacts,
                       onSaveContact: _saveContact,
                     ),
@@ -1619,6 +1686,7 @@ class _ReceiptCard extends StatelessWidget {
     required this.acceptedAt,
     required this.txid,
     required this.status,
+    required this.acceptSeen,
     required this.contacts,
     required this.onSaveContact,
   });
@@ -1630,6 +1698,11 @@ class _ReceiptCard extends StatelessWidget {
 
   /// The tracker's latest answer, or null while there is nothing to ask about.
   final TxStatusDto? status;
+
+  /// Whether an acceptance has ever been observed for this send. A `Displaced`
+  /// answer before one is the tracker saying *I cannot find this*, not *its
+  /// block left the chain*, and it must not be printed as the second.
+  final bool acceptSeen;
 
   final ContactsScope? contacts;
   final VoidCallback onSaveContact;
@@ -1694,7 +1767,7 @@ class _ReceiptCard extends StatelessWidget {
               // `consensus` at UX-R2B; the mapper it should have used
               // (`chipStateOfAcceptance`) was already imported *beside* it,
               // which is L143 in one line.
-              value: status!.kind == TxStatusKind.displaced
+              value: status!.kind == TxStatusKind.displaced && acceptSeen
                   // **Displaced is not a rung, so it does not borrow one.**
                   // The burial ladder measures how deep an accepted
                   // transaction is; a displaced one has no depth to be at, and

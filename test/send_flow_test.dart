@@ -3302,6 +3302,86 @@ void main() {
       expect(find.text('Confirmed'), findsOneWidget);
     });
 
+    testWidgets('the sheet HOLDS until the DAG accepts — the receipt never '
+        'opens on `Seen —`', (tester) async {
+      // The founder, watching a real send: the broadcasting stages showed for
+      // *"just a tiny miliseconds"*, the receipt opened on `Seen —`, and the
+      // depth started climbing a second later. The wait was ending at the
+      // BROADCAST — which is a node taking the transaction into its mempool,
+      // not the DAG accepting it — so the receipt had nothing to show yet.
+      _phone(tester);
+      TxStatusDto? answer;
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            acceptanceStatus: (_) async => answer,
+          ),
+        ),
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(KvHold)),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 220));
+      await tester.pump(KvMotion.calm);
+
+      // Broadcast has returned and the tracker has nothing yet: the sheet
+      // stays, on its last named stage, which is now literally true.
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Sent'), findsNothing);
+      expect(find.text('Waiting for a node to accept it'), findsOneWidget);
+      expect(find.text('Seen —'), findsNothing);
+
+      // The DAG takes it — and only now does the receipt open, with a depth
+      // already in hand.
+      answer = TxStatusDto(
+        kind: TxStatusKind.accepted,
+        blueDepth: BigInt.from(4),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('Sent'), findsOneWidget);
+      expect(find.text('Seen 4'), findsOneWidget);
+      expect(find.text('Seen —'), findsNothing);
+    });
+
+    testWidgets('and it is not a trap: a link that never answers still hands '
+        'over', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            acceptanceStatus: (_) async => null,
+          ),
+        ),
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(KvHold)),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 220));
+      await tester.pump(const Duration(seconds: 8));
+      // The way out is already back at 6 s, whatever the tracker is doing.
+      expect(find.text('Cancel'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Sent'),
+        findsOneWidget,
+        reason: 'past the ceiling the receipt shows what is known',
+      );
+    });
+
     testWidgets('a STALLED send says so — it does not wear a healthy rung', (
       tester,
     ) async {
@@ -3332,10 +3412,17 @@ void main() {
       // and `Seen —` would say the chain still holds it. The sentence is the
       // thread's own, so the wallet says this in one wording (BG-21).
       _phone(tester);
+      // **Accepted first, then displaced** — which is the only order the chain
+      // can produce, and now the only order the receipt will believe: a
+      // tracker that says *displaced* before it ever said *accepted* is
+      // describing a transaction it cannot find, and the founder watched that
+      // reading flash by on a healthy send.
+      var kind = TxStatusKind.accepted;
       await settle(
         tester,
-        status: (_) async => TxStatusDto(kind: TxStatusKind.displaced),
+        status: (_) async => TxStatusDto(kind: kind, blueDepth: BigInt.from(3)),
       );
+      kind = TxStatusKind.displaced;
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       expect(find.text('Displaced by the network'), findsOneWidget);

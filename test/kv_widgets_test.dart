@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_datum.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_empty_state.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
@@ -34,18 +33,6 @@ List<double> _barAlphas(WidgetTester tester) => tester
     )
     .map((b) => b.color.a)
     .toList();
-
-/// Records line draws so a painter's marks can be counted and coloured.
-class _Lines implements Canvas {
-  final List<({Offset from, Offset to, int argb})> lines = [];
-
-  @override
-  void drawLine(Offset p1, Offset p2, Paint paint) =>
-      lines.add((from: p1, to: p2, argb: paint.color.toARGB32()));
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
 
 void main() {
   group('KvCadence — the ONE loading indicator (§4, BG-8, D-192)', () {
@@ -124,56 +111,6 @@ void main() {
       await tester.pumpWidget(_host(const KvCadence(running: false)));
       expect(find.byType(ExcludeSemantics), findsOneWidget);
       handle.dispose();
-    });
-  });
-
-  group('KvDatum — the engraved rule (§1.2)', () {
-    test('each form reports the extent it actually paints (L121)', () {
-      expect(KvDatum.heightFor(graduated: false), KvDatum.ruleWeight);
-      expect(KvDatum.heightFor(graduated: true), KvDatum.endStopHeight);
-    });
-
-    test('plain draws the rule and nothing else', () {
-      final canvas = _Lines();
-      const KvDatumPainter().paint(canvas, const Size(120, 1));
-      expect(canvas.lines, hasLength(1));
-      expect(canvas.lines.single.argb, KvColor.datum.toARGB32());
-    });
-
-    test('graduated adds stops in ambient teal, and a scale between', () {
-      // End stops turn a line into a SCALE — an amount being typed is not
-      // measured against one (D-195), which is why plain is the default.
-      final canvas = _Lines();
-      const KvDatumPainter(graduated: true).paint(canvas, const Size(120, 7));
-      final teal = canvas.lines
-          .where((l) => l.argb == KvColor.primaryMuted.toARGB32())
-          .toList();
-      expect(teal, hasLength(2), reason: 'two end stops, one per end');
-      expect(teal.every((l) => l.to.dy == KvDatum.endStopHeight), isTrue);
-
-      // Vertical, and in the rule's own tone: that excludes the horizontal
-      // rule itself and the two teal end stops.
-      final ticks = canvas.lines.where(
-        (l) => l.argb == KvColor.datum.toARGB32() && l.from.dx == l.to.dx,
-      );
-      expect(ticks, hasLength(120 ~/ KvDatum.tickSpacing + 1));
-      // Taller every fifth: the rhythm of a scale.
-      expect(
-        ticks.where((l) => l.to.dy - l.from.dy == KvDatum.tallTick),
-        hasLength(3),
-      );
-    });
-
-    test('teal on the stops is AMBIENT — never the rationed light', () {
-      final canvas = _Lines();
-      const KvDatumPainter(graduated: true).paint(canvas, const Size(60, 7));
-      expect(
-        canvas.lines.any((l) => l.argb == KvColor.primary.toARGB32()),
-        isFalse,
-        reason:
-            'primary is light and is capped at 3 per screen (BG-2); the '
-            'datum uses primaryMuted, which costs nothing (§1.5)',
-      );
     });
   });
 

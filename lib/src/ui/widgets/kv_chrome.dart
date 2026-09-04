@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 import 'kv_glyph.dart';
+import 'kv_icon_button.dart';
 
 /// The furniture every full-screen surface shares: the top bar it hangs
 /// under, the label that names a section, and the pill it ends on.
@@ -47,43 +48,22 @@ class KvTopBar extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(KvSpace.m, KvSpace.s, KvSpace.m, 0),
       child: Row(
         children: [
-          Semantics(
-            button: true,
-            enabled: onBack != null,
+          // **§4's icon button, not a disc drawn here.** The back chevron in
+          // its `plate` disc (`S6a`·`S6`·`S8`, founder on glass) is exactly
+          // that component — 44 dp of disc inside a 52 dp target with a 20 dp
+          // mark — and hand-rolling it was a second implementation of a §4
+          // seat that already existed, unused, in the tree (L143). Using it
+          // also brings the pressed state the hand-rolled one had no reason
+          // to grow.
+          KvIconButton(
+            mark: KvGlyph.chevron,
+            quarterTurns: 2,
+            // `etch` is the disabled tone: decorative by design, and it never
+            // carries information alone — what the exit is waiting for is on
+            // the screen in words beneath it.
+            tone: onBack == null ? KvColor.etch : KvColor.inkNav,
             label: 'Back',
-            child: InkWell(
-              onTap: onBack,
-              borderRadius: BorderRadius.circular(KvRadius.control),
-              child: SizedBox(
-                width: KvSpace.touchTarget,
-                height: KvSpace.touchTarget,
-                child: Center(
-                  // **The chevron sits in a disc** (founder, on glass
-                  // 2026-09-04; `S6a`·`S6`·`S8` all draw one). §4's icon
-                  // button, at its own 44: the target stays 52 around it, so
-                  // the disc is what is seen and the box is what is hit.
-                  child: Container(
-                    width: KvSpace.iconButton,
-                    height: KvSpace.iconButton,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: KvColor.plate,
-                    ),
-                    alignment: Alignment.center,
-                    child: RotatedBox(
-                      quarterTurns: 2,
-                      child: KvGlyphIcon(
-                        KvGlyph.chevron,
-                        // `etch` is the disabled tone: decorative by design, and
-                        // it never carries information alone — what the exit is
-                        // waiting for is on the screen in words beneath it.
-                        tone: onBack == null ? KvColor.etch : KvColor.inkNav,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+            onTap: onBack,
           ),
           // Expanded rather than two Spacers: at 1.3x on a 320dp screen a
           // title can be wider than what is left between two 48dp targets, and
