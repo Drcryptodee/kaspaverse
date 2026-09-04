@@ -131,6 +131,28 @@ fn is_deceptive_format(ch: char) -> bool {
 mod tests {
     use super::*;
 
+    /// **A name already in the store may predate the filter that cleans it.**
+    ///
+    /// `is_deceptive_format` landed one commit after the store did, so a name
+    /// written in that window carries only control-character filtering. Both
+    /// readers re-run `sanitize_name` for that reason — the Send screen's
+    /// `transport_contact_names` and the conversation join — and this pins the
+    /// property they rely on: cleaning is idempotent, and it removes a
+    /// bidi override from a string that was stored raw.
+    #[test]
+    fn cleaning_is_idempotent_and_catches_what_an_old_write_let_through() {
+        // A right-to-left override inside a name reorders the sentence drawn
+        // around it — `This matches <name> in your contacts.`
+        let raw = "Ma\u{202E}ra";
+        let once = sanitize_name(raw);
+        assert_eq!(once, "Mara");
+        assert_eq!(sanitize_name(&once), once, "cleaning twice changes nothing");
+
+        // And a name that is nothing but format characters cleans to empty,
+        // which every reader treats as "no name" rather than a blank row.
+        assert!(sanitize_name("\u{200B}\u{FEFF}").is_empty());
+    }
+
     fn dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kv-names-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -5654,7 +5654,17 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
         .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
         .map(|c| ConversationDto {
             invite_expired: invite_expired(c.status, c.created_unix_ms, now),
-            contact_name: names.get(&c.contact_address).map(str::to_string),
+            // **Cleaned on read, like `transport_contact_names`.** The
+            // deceptive-format filter (bidi overrides, zero-width, the BOM)
+            // landed one commit AFTER the store, so a name written in that
+            // window carries only control-character filtering and nothing
+            // re-cleans it — and this join feeds the conversation list and the
+            // thread header. Empty after cleaning means no usable name, which
+            // is `None` rather than a blank row.
+            contact_name: names
+                .get(&c.contact_address)
+                .map(kaspaverse_chain::sanitize_name)
+                .filter(|n| !n.is_empty()),
             superseded: store.superseded_by(&c.conversation_id).is_some(),
             conversation_id: c.conversation_id,
             contact_address: c.contact_address,

@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/transport.dart';
+import 'package:kaspaverse/src/services/contacts_service.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
 import 'package:kaspaverse/src/ui/error_text.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
@@ -1045,9 +1046,25 @@ void main() {
       expect(find.textContaining('Asking them to start it'), findsOneWidget);
       expect(wiped, isFalse, reason: 'opening the sheet must delete nothing');
 
+      // The address book's cache is mirrored state: the wipe clears
+      // `contact.names` as a side file, so the service must re-read rather
+      // than keep painting names the wipe destroyed on the next Send screen.
+      var reRead = false;
+      ContactsService.readFn = () async {
+        reRead = true;
+        return const <ContactDto>[];
+      };
+      addTearDown(() => ContactsService.readFn = transportContactNames);
+
       await tester.tap(find.text('Delete 3 conversations'));
       await tester.pumpAndSettle();
       expect(wiped, isTrue);
+      expect(
+        reRead,
+        isTrue,
+        reason: 'a wipe drops the contacts cache with the store it mirrors',
+      );
+      expect(ContactsService.instance.contacts.value, isEmpty);
       expect(find.textContaining('Deleted 3 conversations'), findsOneWidget);
     });
 

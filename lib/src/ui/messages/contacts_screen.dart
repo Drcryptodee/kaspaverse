@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
+import '../../services/contacts_service.dart';
 import '../../services/messaging_service.dart';
 import '../format.dart';
 import '../send/confirm_send_flow.dart';
@@ -322,6 +323,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (confirmed != true) return;
     try {
       final report = await _messaging.wipeAll();
+      // **The address book's cache goes with the store it mirrors.** The wipe
+      // clears `contact.names` as a side file, but `ContactsService` holds the
+      // last read in memory — so the first frames of the next Send screen
+      // would paint contacts the wipe destroyed, which is the exact "claim
+      // about data that no longer exists" `WipeReportDto` documents itself
+      // against (`wallet-security-auditor`, UX-R2B).
+      await ContactsService.instance.refresh();
       if (!mounted) return;
       final deleted =
           'Deleted ${report.conversations} conversation'
