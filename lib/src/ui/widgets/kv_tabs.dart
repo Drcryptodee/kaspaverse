@@ -48,7 +48,18 @@ class KvTabs extends StatelessWidget {
       children: [
         for (var i = 0; i < tabs.length; i++) ...[
           if (i > 0) const SizedBox(width: KvSpace.l),
-          _Tab(tab: tabs[i], active: i == index, onTap: () => onSelect(i)),
+          // Flexible, because the tab row now shares its line with the `All`
+          // action (render `S1`, D-261): at 320 dp / 2.0× the two words and
+          // the action overran the row by 24 dp. A word ellipsizes before the
+          // row overflows (BG-14 asks the row to survive the scale, not that
+          // every word stay whole at twice its size).
+          Flexible(
+            child: _Tab(
+              tab: tabs[i],
+              active: i == index,
+              onTap: () => onSelect(i),
+            ),
+          ),
         ],
       ],
     );
@@ -92,22 +103,26 @@ class _Tab extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.baseline,
                     textBaseline: TextBaseline.alphabetic,
                     children: [
-                      Text(
-                        tab.label,
-                        style: TextStyle(
-                          fontFamily: KvFont.ui,
-                          fontSize: 14,
-                          height: 20 / 14,
-                          fontWeight: active
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                          // Both channels: on a variable face the enum is a
-                          // hint and the axis is the ink, and an inline style
-                          // inherits the ambient axis (L150).
-                          fontVariations: active
-                              ? KvWeight.w600
-                              : KvWeight.w400,
-                          color: active ? KvColor.ink : KvColor.inkMeta,
+                      Flexible(
+                        child: Text(
+                          tab.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 14,
+                            height: 20 / 14,
+                            fontWeight: active
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                            // Both channels: on a variable face the enum is a
+                            // hint and the axis is the ink, and an inline style
+                            // inherits the ambient axis (L150).
+                            fontVariations: active
+                                ? KvWeight.w600
+                                : KvWeight.w400,
+                            color: active ? KvColor.ink : KvColor.inkMeta,
+                          ),
                         ),
                       ),
                       if (count != null) ...[

@@ -230,8 +230,8 @@ class _KvRowState extends State<KvRow> {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontFamily: KvFont.ui,
-                      fontSize: 15,
-                      height: 20 / 15,
+                      fontSize: 16,
+                      height: 20 / 16,
                       fontWeight: FontWeight.w600,
                       fontVariations: KvWeight.w600,
                       color: KvColor.ink,

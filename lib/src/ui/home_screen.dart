@@ -1,9 +1,9 @@
 import 'dart:async';
+
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 
 import '../rust/api/wallet.dart';
 import '../services/rate_service.dart' show KvRateQuote, RateService;
@@ -17,6 +17,7 @@ import 'widgets/kv_amount.dart';
 import 'widgets/kv_breath.dart';
 import 'widgets/kv_burial_mark.dart';
 import 'widgets/kv_cadence.dart';
+import 'widgets/kv_chrome.dart';
 import 'widgets/kv_coming_soon.dart';
 import 'widgets/kv_drawer.dart';
 import 'widgets/kv_empty_state.dart';
@@ -343,41 +344,17 @@ class _HomeScreenState extends State<HomeScreen> {
   /// relative ages are live by design) — but never on a balance change.
   late final Listenable _feedInputs;
 
-  /// The pinned plate's extent, and the section rule's.
-  ///
-  /// **Both are measured, never stated.** A [SliverPersistentHeader] demands a
-  /// height it cannot work out for itself, and a hand-written number under a
-  /// comment claiming it was measured is exactly what cost `L121` — it goes
-  /// stale on the next padding change and nothing reddens. So the real
-  /// subtree lays out under a relaxed height constraint, reports its natural
-  /// height through [_MeasuredHeight], and the header adopts it. It cannot be
-  /// wrong and it cannot drift: change the plate, or the text scale, and the
-  /// number follows.
-  ///
-  /// Seeded at **1dp, and 1dp is not a claim about anything** — it is the
-  /// smallest value that makes the measurement possible at all. A pinned
-  /// `SliverPersistentHeader` whose extent is zero never builds its child, so
-  /// a zero seed is a deadlock rather than a cautious start: nothing lays out,
-  /// nothing reports, and the header stays at zero forever. That deadlock is
-  /// what the C7 link-state tests caught within a minute of the rewrite, which
-  /// is the argument for measuring in a test rather than by eye.
-  ///
-  /// The real number lands on the next frame, behind [Entrance]'s own fade —
-  /// so the bootstrap frame is not one a user can see.
-  double _plateExtent = 1;
+  /// **The ledger has the screen** (founder, on glass 2026-09-04, D-262).
+  /// Closed, the card ends just above the Receive · Send bar with its own
+  /// rounded foot and the rows sit still inside it. Open — `All`, or the
+  /// first upward scroll on the rows — the card drops under the bar and the
+  /// rows scroll beneath the fixed tabs. `Less` snaps it back. **The plate
+  /// never moves and never minimises**: the founder ruled that out.
+  bool _expanded = false;
 
-  /// The height of the pinned band's **sheddable tail** — which, since BG-28,
-  /// is the transient strip and nothing else. Subtracted from the band to get
-  /// the block that must survive a squeeze, so the pinned floor is a
-  /// measurement rather than a fraction somebody liked the look of.
-  ///
-  /// **Nothing inside the plate sheds**, because BG-28 admits only what is
-  /// always true into it and each of those things is load-bearing. What sheds
-  /// is the trust *sentence*; the trust *signal* — the amber lamp and the
-  /// figure's 45% dimming — is inside the plate and stays. That is the honest
-  /// reading of A3's risk note, and `money_screen_test.dart` measures it at
-  /// 320x568 / 1.3x rather than this comment asserting it (L121).
-  double _tailExtent = 0;
+  /// The rows' own scroll position, kept across the open/closed swap so the
+  /// gesture that opened the card is the same gesture that keeps scrolling it.
+  final ScrollController _ledgerScroll = ScrollController();
 
   @override
   void initState() {
@@ -478,6 +455,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _ticker?.cancel();
+    _ledgerScroll.dispose();
     widget.fiat?.detach?.call();
     // Chained deriveds unhook in reverse dependency order.
     _balance.dispose();
@@ -679,13 +657,13 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: KvColor.abyss,
       floatingActionButton: widget.floatingActionButton,
       body: SafeArea(
-        top: false,
+        // The real status bar inset and nothing more (founder, on glass
+        // 2026-09-04, D-262): the 52 dp reserve left a band of ground above
+        // the title on the V60, and the title now sits close under the bar.
+        top: true,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // BG-14: the top 52dp belongs to the real system status bar and
-            // nothing is painted there.
-            const SizedBox(height: KvSpace.statusBarReserve),
             // **The title sits over its own column, not over the window.**
             // Left at the page edge it started 28 dp inboard of the plate in
             // `expanded` and 40 dp of it in `medium` — a heading that does not
@@ -694,7 +672,8 @@ class _HomeScreenState extends State<HomeScreen> {
             _columnAligned(
               metrics,
               _Header(
-                title: 'Wallet · Main',
+                title: 'Wallet',
+                scope: 'Main',
                 // `_columnAligned` has already applied the outer gutter in a
                 // two-pane window, so the header must not apply it twice.
                 inset: metrics.isTwoPane ? 0 : null,
@@ -754,12 +733,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// The money column: the plate pinned, the ledger scrolling under it.
+  /// The money column: **the plate fixed, the strip under it, the ledger card
+  /// filling the rest, and the Receive · Send bar over the card's foot**
+  /// (founder, on glass 2026-09-04, D-262). Nothing above the card scrolls.
   Widget _moneyColumn(KvWindowMetrics metrics) {
     // **`short` is the only collapse there is** (BG-33). A phone on its side
     // has 412 dp of height and the ledger is what it was turned for, so the
-    // plate becomes a 56 dp bar and the fraction goes one tap away.
-    final Widget plate = metrics.collapseMoneyPlate
+    // plate becomes a 56 dp bar carrying the two verbs (R5) and there is no
+    // foot bar.
+    final short = metrics.collapseMoneyPlate;
+    final Widget plate = short
         ? ValueListenableBuilder<_BalanceView>(
             valueListenable: _balance,
             builder: (context, b, _) => KvMoneyBar(
@@ -788,22 +771,108 @@ class _HomeScreenState extends State<HomeScreen> {
                 dimmed: _dimmed,
               ),
               indicator: _indicator(),
+            ),
+          );
+    final gutter = metrics.isTwoPane ? 0.0 : KvSpace.gutter;
+    // The foot bar's whole footprint — its pills, the 12 above and the 16
+    // below — which is what the closed card stops short of and what the open
+    // card's last row scrolls clear of. The bar's height is constant: a
+    // blocked Send says why INSIDE its pill (`KvAction.inlineReason`), so the
+    // footprint never grows under the card.
+    final foot = short ? 0.0 : _ActionBar.footprint;
+    final expanded = short || _expanded;
+    final band = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(gutter, KvSpace.xs, gutter, KvSpace.m),
+          child: Entrance(child: plate),
+        ),
+        _StatusStrip(balance: _balance, trust: _trust, gutter: gutter),
+      ],
+    );
+    final refresh = widget.wallet.onRefreshActivity;
+    final column = LayoutBuilder(
+      // Measures the height it was given; chooses nothing from a width
+      // (BG-33).
+      builder: (context, box) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // **The band above the card is capped, and scrolls inside its cap.**
+          // The plate and the strip do not scroll on a phone — they fit. At
+          // the floor (320 × 568 / 1.3×, or the 2.0× accessibility scale)
+          // they do not, and the card keeps at least [_Ledger.minHeight]
+          // while the band clips: the trust *sentence* is what a squeeze
+          // takes, as it was under the pinned band (A3), never the balance
+          // and never the ledger. **Pull-to-refresh lives here too** (D-194:
+          // it works FROM the balance), as well as on the rows.
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: math.max(
+                0.0,
+                box.maxHeight - _Ledger.minHeight - foot,
+              ),
+            ),
+            child: _refreshable(
+              refresh,
+              SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(
+                  parent: ClampingScrollPhysics(),
+                ),
+                child: band,
+              ),
+            ),
+          ),
+          // The feed's counters and relative ages are live by design, so it
+          // listens to the clock and the chain — but a balance tick never
+          // lands here (and the feed never rebuilds the plate).
+          Expanded(
+            child: ListenableBuilder(
+              listenable: _feedInputs,
+              builder: (context, _) => _Ledger(
+                records: widget.wallet.activity.value,
+                now: _now.value,
+                virtualDaaScore: widget.chain.virtualDaaScore.value,
+                stale: _dimmed.value,
+                gutter: gutter,
+                selected: metrics.isTwoPane ? _selected : null,
+                expanded: expanded,
+                foot: foot,
+                controller: _ledgerScroll,
+                onRefresh: refresh,
+                // `All` has nothing to do on a window that is already short —
+                // the card is already open — so the action is absent there
+                // rather than inert (§8).
+                onExpand: short ? null : _toggleLedger,
+                onOpen: widget.detailRoute == null
+                    ? null
+                    : (txid) => _open(txid, metrics),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (short) return column;
+    return Stack(
+      children: [
+        Positioned.fill(child: column),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: ValueListenableBuilder<_BalanceView>(
+            valueListenable: _balance,
+            builder: (context, b, _) => _ActionBar(
+              gutter: gutter,
               onSend: _sendTap(),
               onReceive: _receiveTap(),
               sendDisabledReason: _sendBlocked(b),
             ),
-          );
-    return _scroller(
-      Padding(
-        padding: EdgeInsets.fromLTRB(
-          metrics.isTwoPane ? 0 : KvSpace.gutter,
-          KvSpace.s,
-          metrics.isTwoPane ? 0 : KvSpace.gutter,
-          KvSpace.sm,
+          ),
         ),
-        child: plate,
-      ),
-      metrics,
+      ],
     );
   }
 
@@ -900,101 +969,10 @@ class _HomeScreenState extends State<HomeScreen> {
   /// drag on the scrollable, so the refresh gesture is reachable from the one
   /// place a hand goes first. A plate outside the viewport would emit no
   /// scroll notification and the gesture would die on it.
-  Widget _scroller(Widget plate, KvWindowMetrics metrics) {
-    // The viewport's own height is what bounds the pinned plate, so the scroll
-    // view is built inside a `LayoutBuilder` rather than beside one. This
-    // measures the space it was given; it does not choose a layout from a
-    // width, which is the thing BG-33 forbids.
-    return LayoutBuilder(
-      builder: (context, box) => _viewport(plate, box.maxHeight, metrics),
-    );
-  }
-
-  Widget _viewport(Widget plate, double viewportHeight, KvWindowMetrics m) {
-    final refresh = widget.wallet.onRefreshActivity;
-    // **What the pinned band keeps when it cannot keep everything.**
-    //
-    // BG-28 changed the shed order and it must be stated rather than
-    // discovered: the plate now holds *only what is always true*, and the
-    // transient strip — pending, in flight, the trust line — sits BENEATH it.
-    // So the strip is the sheddable tail, and the honesty line is what goes
-    // first under a squeeze. A3's risk note called this, and it is real.
-    //
-    // **What does not go is the signal.** The plate itself carries the live
-    // dot and the figure's own BG-8 dimming, so a squeezed screen still shows
-    // an amber lamp over a 45% balance — the user can never read a bright
-    // confident number with nothing to say it is old. The sentence scrolls;
-    // the state does not. Measured at 320x568 / 1.3x in
-    // `money_screen_test.dart`, which is where the number lives rather than
-    // in this comment (L121).
-    //
-    // Half the viewport is the one POLICY number here: a header that owns most
-    // of the screen has stopped being a header, and the whole plate is one
-    // scroll-to-top away regardless. Never below the 1dp bootstrap — a pinned
-    // sliver at zero extent does not build its child, so a degenerate viewport
-    // would deadlock the measurement rather than squeeze it.
-    //
-    // **The band sheds ONLY under pressure.** If the whole band fits inside
-    // the cap, the whole band pins and nothing moves (founder, on glass).
-    final cap = viewportHeight / 2;
-    final essential = _plateExtent - _tailExtent;
-    final pinned = _plateExtent <= cap
-        ? _plateExtent
-        : math.max(1.0, math.min(essential, cap));
-    final scroll = CustomScrollView(
-      // Always scrollable, so the pull gesture exists even when the ledger is
-      // short or empty.
-      physics: const AlwaysScrollableScrollPhysics(),
-      slivers: [
-        SliverPersistentHeader(
-          pinned: true,
-          delegate: _PinnedHeader(
-            extent: _plateExtent,
-            minimum: pinned,
-            onMeasured: (h) => setState(() => _plateExtent = h),
-            // **The strip rides INSIDE the pinned band, under the plate.**
-            // As a sliver of its own it scrolled beneath the pinned plate and
-            // vanished — measured at 320x568, where it started 27dp above the
-            // header's own bottom edge.
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Entrance(child: plate),
-                _MeasuredHeight(
-                  onMeasured: (h) {
-                    if (_tailExtent != h) setState(() => _tailExtent = h);
-                  },
-                  child: _StatusStrip(
-                    balance: _balance,
-                    trust: _trust,
-                    gutter: m.isTwoPane ? 0 : KvSpace.gutter,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        // The feed's counters and relative ages are live by design, so it
-        // listens to the clock and the chain — but a balance tick never lands
-        // here (and the feed never rebuilds the plate).
-        ListenableBuilder(
-          listenable: _feedInputs,
-          builder: (context, _) => _Ledger(
-            records: widget.wallet.activity.value,
-            now: _now.value,
-            virtualDaaScore: widget.chain.virtualDaaScore.value,
-            stale: _dimmed.value,
-            gutter: m.isTwoPane ? 0 : KvSpace.gutter,
-            selected: m.isTwoPane ? _selected : null,
-            onOpen: widget.detailRoute == null
-                ? null
-                : (txid) => _open(txid, m),
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: KvSpace.l)),
-      ],
-    );
-    if (refresh == null) return scroll;
+  /// The pull gesture over a scrollable, or the scrollable alone when there
+  /// is nothing to pull for.
+  static Widget _refreshable(Future<void> Function()? refresh, Widget child) {
+    if (refresh == null) return child;
     return RefreshIndicator(
       onRefresh: refresh,
       // Not teal: a refresh is a mechanism, not the one primary action (BG-2).
@@ -1003,131 +981,44 @@ class _HomeScreenState extends State<HomeScreen> {
       color: KvColor.ink,
       backgroundColor: KvColor.plate,
       strokeWidth: 2,
-      child: scroll,
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Pinned headers, and the measurement that makes their extents facts.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Pins a subtree while the ledger scrolls beneath it.
-///
-/// It paints the ground itself, so rows passing underneath never show through —
-/// a transparent pinned header is how a sticky plate ends up with text sliding
-/// across it.
-///
-/// The child lays out under a **relaxed** height constraint so it reports its
-/// natural size no matter what [extent] currently says; [onMeasured] carries
-/// that number back and the delegate adopts it next frame. The seam is why the
-/// extent can never be a stale claim (`L121`).
-class _PinnedHeader extends SliverPersistentHeaderDelegate {
-  const _PinnedHeader({
-    required this.extent,
-    required this.minimum,
-    required this.onMeasured,
-    required this.child,
-  });
-
-  /// The subtree's measured height — what the header takes when it can.
-  final double extent;
-
-  /// The most it may keep when the viewport cannot hold [extent]. Equal to
-  /// [extent] for a header that can never outgrow the screen.
-  final double minimum;
-
-  final ValueChanged<double> onMeasured;
-  final Widget child;
-
-  @override
-  double get minExtent => minimum;
-
-  @override
-  double get maxExtent => extent;
-
-  @override
-  Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
-    // **`ClipRect` is load-bearing, not tidiness.** The `OverflowBox` exists so
-    // the child lays out at its natural height whatever the current extent
-    // says — that is what makes the measurement possible — but an unclipped
-    // overflow keeps PAINTING past the sliver's band, with no ground behind
-    // it, straight over the ledger rows (`ux-auditor`, UX-3).
-    return ClipRect(
-      child: Container(
-        color: KvColor.abyss,
-        child: OverflowBox(
-          alignment: Alignment.topLeft,
-          minHeight: 0,
-          maxHeight: double.infinity,
-          child: _MeasuredHeight(onMeasured: onMeasured, child: child),
-        ),
-      ),
+      child: child,
     );
   }
 
-  @override
-  bool shouldRebuild(_PinnedHeader old) =>
-      old.extent != extent || old.minimum != minimum || old.child != child;
-}
-
-/// Reports its child's laid-out height, once per change.
-///
-/// A render object rather than a second invisible copy of the subtree: the
-/// prototype measured a duplicate plate, which works but pays for a whole
-/// extra widget tree — including a second animation controller — on the most
-/// frequently rebuilt region of the app. This measures the real thing.
-class _MeasuredHeight extends SingleChildRenderObjectWidget {
-  const _MeasuredHeight({
-    required this.onMeasured,
-    required Widget super.child,
-  });
-
-  final ValueChanged<double> onMeasured;
-
-  @override
-  RenderObject createRenderObject(BuildContext context) =>
-      _RenderMeasuredHeight(onMeasured);
-
-  @override
-  void updateRenderObject(BuildContext context, _RenderMeasuredHeight box) =>
-      box.onMeasured = onMeasured;
-}
-
-class _RenderMeasuredHeight extends RenderProxyBox {
-  _RenderMeasuredHeight(this.onMeasured);
-
-  ValueChanged<double> onMeasured;
-  double? _reported;
-
-  @override
-  void performLayout() {
-    super.performLayout();
-    final h = size.height;
-    if (_reported == h) return;
-    _reported = h;
-    // Never during layout: the report drives a `setState`, and mutating the
-    // tree mid-layout is illegal. It lands at the end of THIS frame, so the
-    // corrected extent is in place for the next one.
-    WidgetsBinding.instance.addPostFrameCallback((_) => onMeasured(h));
+  /// `All` opens the card; `Less` snaps it back and returns the rows to the
+  /// top, so the closed card always shows the newest rows.
+  void _toggleLedger() {
+    setState(() => _expanded = !_expanded);
+    if (!_expanded && _ledgerScroll.hasClients) {
+      _ledgerScroll.animateTo(
+        0,
+        duration: KvMotion.calm,
+        curve: KvMotion.curve,
+      );
+    }
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The header — who this wallet is, and the way into the app (§5).
+// The header.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The K avatar that summons the drawer, and the screen's own name.
-///
-/// **There is no scan button**, and §5 lists one. A scanner does not exist in
-/// this build — no camera permission, no decoder, no call site — so the icon
-/// would be a control that responds and does nothing, which is the one thing
-/// §8 forbids outright. It is recorded in the register rather than rendered
-/// as a stub.
 class _Header extends StatelessWidget {
-  const _Header({required this.title, required this.onOpenDrawer, this.inset});
+  const _Header({
+    required this.title,
+    required this.scope,
+    required this.onOpenDrawer,
+    this.inset,
+  });
 
+  /// "Wallet" — `pageTitle`, 22 / 700 in `ink` (render `S1`, measured: the
+  /// title takes the wordmark's size, not §2's 20).
   final String title;
+
+  /// "Main" — which wallet, 16 / 500 in `inkMeta`, one word-space after the
+  /// title with **no separator** (render `S1`, D-261; the first build set
+  /// `Wallet · Main` at one weight from §2's transcription).
+  final String scope;
 
   /// The horizontal inset. Null takes the class's own gutter; a pane that has
   /// already been inset passes 0.
@@ -1143,9 +1034,10 @@ class _Header extends StatelessWidget {
       // The avatar's own 52 dp target overhangs the gutter by 4 dp on each
       // side, so the glyph inside it lands on the gutter rather than beside
       // it — the same trick the plate's label row uses.
+      // 4 above, not 8: the title sits close under the status bar (D-262).
       padding: EdgeInsets.fromLTRB(
         inset ?? (onOpenDrawer == null ? KvSpace.gutter : KvSpace.s20),
-        KvSpace.s,
+        KvSpace.xs,
         inset ?? KvSpace.gutter,
         KvSpace.s,
       ),
@@ -1156,15 +1048,30 @@ class _Header extends StatelessWidget {
             const SizedBox(width: KvSpace.sm),
           ],
           Expanded(
-            child: Text(
-              title,
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(text: title),
+                  TextSpan(
+                    text: ' $scope',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                      fontVariations: KvWeight.w500,
+                      letterSpacing: 0,
+                      color: KvColor.inkMeta,
+                    ),
+                  ),
+                ],
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              // §2 `pageTitle`: a drawer-header screen, not a back-button one.
+              semanticsLabel: '$title, $scope',
+              // §2 `pageTitle` as amended (D-261): a drawer-header screen.
               style: const TextStyle(
                 fontFamily: KvFont.ui,
-                fontSize: 20,
-                height: 24 / 20,
+                fontSize: 22,
+                height: 26 / 22,
                 fontWeight: FontWeight.w700,
                 fontVariations: KvWeight.w700,
                 letterSpacing: -0.2,
@@ -1267,8 +1174,10 @@ class _NetworkChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // `S1` measures 34 tall with a 14 dp word; the founder asked for a little
+    // less on glass (D-262): 30 tall, the word at 13 / 500 in `ink`.
     final chip = Container(
-      height: 32,
+      height: 30,
       padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
       decoration: BoxDecoration(
         color: KvColor.chip,
@@ -1288,17 +1197,16 @@ class _NetworkChip extends StatelessWidget {
             'Mainnet',
             style: TextStyle(
               fontFamily: KvFont.ui,
-              fontSize: 11,
-              height: 16 / 11,
-              fontWeight: FontWeight.w600,
-              fontVariations: KvWeight.w600,
-              // `inkMeta` fails AA on `chip` (§1.4), and this is information.
-              color: KvColor.inkDim,
+              fontSize: 13,
+              height: 18 / 13,
+              fontWeight: FontWeight.w500,
+              fontVariations: KvWeight.w500,
+              color: KvColor.ink,
             ),
           ),
           if (onTap != null) ...[
-            const SizedBox(width: KvSpace.xs),
-            const KvGlyphIcon(KvGlyph.chevron, size: 12, tone: KvColor.etch),
+            const SizedBox(width: KvSpace.s),
+            const KvGlyphIcon(KvGlyph.chevron, size: 14, tone: KvColor.inkMeta),
           ],
         ],
       ),
@@ -1370,34 +1278,41 @@ class _ChainClock extends StatelessWidget {
           builder: (context, score, _) => KvStreamingCount(
             value: score,
             stalled: stale,
-            builder: (context, shown) => Text.rich(
-              TextSpan(
-                children: [
-                  const TextSpan(
-                    text: 'DAA ',
-                    style: TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontWeight: FontWeight.w600,
-                      fontVariations: KvWeight.w600,
-                      letterSpacing: 1.1,
-                    ),
+            // Render `S1`, measured: `DAA` as a `caps` label in `inkMeta`,
+            // a 12 dp gap, the figure in `fact`-weight mono at 16 in
+            // `inkDim` — a reading, one step under the balance, not a
+            // footnote at 11.
+            builder: (context, shown) => Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                const Text(
+                  'DAA',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 11,
+                    height: 16 / 11,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    letterSpacing: 1.1,
+                    color: KvColor.inkMeta,
                   ),
-                  TextSpan(
-                    text: formatScore(shown),
-                    style: const TextStyle(
-                      fontFamily: KvFont.mono,
-                      fontWeight: FontWeight.w500,
-                      fontVariations: KvWeight.w500,
-                      fontFeatures: [FontFeature.tabularFigures()],
-                    ),
+                ),
+                const SizedBox(width: KvSpace.sm),
+                Text(
+                  formatScore(shown),
+                  // 14, one down from `S1`'s 16 (founder, on glass, D-262).
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: 14,
+                    height: 20 / 14,
+                    fontWeight: FontWeight.w500,
+                    fontVariations: KvWeight.w500,
+                    color: KvColor.inkDim,
+                    fontFeatures: [FontFeature.tabularFigures()],
                   ),
-                ],
-              ),
-              style: const TextStyle(
-                fontSize: 11,
-                height: 16 / 11,
-                color: KvColor.inkMeta,
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1472,10 +1387,11 @@ class _FiatLine extends StatelessWidget {
                   children: [
                     Text(
                       figure,
+                      // 15, not `fact`'s 13 (render `S1`, measured, D-261).
                       style: const TextStyle(
                         fontFamily: KvFont.mono,
-                        fontSize: 13,
-                        height: 18 / 13,
+                        fontSize: 15,
+                        height: 20 / 15,
                         fontWeight: FontWeight.w500,
                         fontVariations: KvWeight.w500,
                         // Subordinate by scale AND tone (BG-5): KAS is the
@@ -1546,20 +1462,35 @@ const int kActivityFeedCap = 100;
 /// will occupy, which is the founder's own acceptance condition: the shape of
 /// what is missing is visible rather than tracked.
 ///
-/// **There is no `All` ghost action**, and §5 lists one. It would need a full
-/// history to open, and paging is a deliberate non-feature (D-175) — the feed
-/// arrives from Rust already capped at [kActivityFeedCap] and there is nothing
-/// behind the word. A ghost action that does nothing is §8's anti-pattern, so
-/// it is recorded in the register instead of rendered.
+/// **The ledger card** (render `S1`; founder, on glass 2026-09-04, D-262).
+///
+/// One plate with the Activity · Tokens tabs **fixed at its head** and the
+/// rows scrolling beneath them. Two states, one gesture apart:
+///
+///  * **closed** — the card ends just above the Receive · Send bar with its
+///    own rounded foot; the rows fill it and stop.
+///  * **open** — `All`, or the first upward scroll on the rows: the card drops
+///    under the bar (the last row scrolls clear of it) and the rows scroll.
+///    `Less` snaps it back and returns the rows to the top.
+///
+/// The same `ListView` serves both — the scroll that opens the card is the
+/// scroll that keeps going — so nothing jumps and nothing is rebuilt. The
+/// swap animates the card's foot on `calm` (BG-24). The plate above never
+/// moves.
 class _Ledger extends StatefulWidget {
   const _Ledger({
     required this.records,
     required this.now,
     required this.gutter,
+    required this.foot,
+    required this.controller,
     this.virtualDaaScore,
     this.stale = false,
     this.selected,
     this.onOpen,
+    this.onRefresh,
+    this.expanded = false,
+    this.onExpand,
   });
 
   final List<ActivityRecord> records;
@@ -1567,6 +1498,12 @@ class _Ledger extends StatefulWidget {
 
   /// The screen gutter, or 0 in a pane that is already inset.
   final double gutter;
+
+  /// The foot bar's footprint: the closed card stops that far above the
+  /// column's end, and the open card's rows scroll that far clear of it.
+  final double foot;
+
+  final ScrollController controller;
 
   /// BG-8: a stale link must not stream a frozen counter at full presence —
   /// counters fall back to their static words until the link is live again.
@@ -1581,6 +1518,19 @@ class _Ledger extends StatefulWidget {
   /// Opens one row. Null ⇒ the rows are not controls at all.
   final void Function(String txid)? onOpen;
 
+  /// Pull-to-refresh on the rows. Null ⇒ no pull.
+  final Future<void> Function()? onRefresh;
+
+  /// The card is open: it runs under the foot bar and the rows scroll.
+  final bool expanded;
+
+  /// Null ⇒ the action is absent (a `short` window is already open).
+  final VoidCallback? onExpand;
+
+  /// The least the card is ever given: its head, one row and its 6 dp foot.
+  /// Below this the band above yields instead (see `_moneyColumn`).
+  static const double minHeight = 62 + KvSpace.row + 6;
+
   @override
   State<_Ledger> createState() => _LedgerState();
 }
@@ -1588,30 +1538,73 @@ class _Ledger extends StatefulWidget {
 class _LedgerState extends State<_Ledger> {
   int _tab = 0;
 
+  /// The first upward scroll opens the card (D-262): a user reaching for
+  /// more rows gets them, without finding `All` first. Only ever from
+  /// closed to open — the way back is `Less`, so a scroll can never snap the
+  /// card shut under a thumb.
+  bool _onScroll(ScrollNotification n) {
+    if (widget.expanded || widget.onExpand == null) return false;
+    final dragging = switch (n) {
+      ScrollUpdateNotification(:final dragDetails, :final scrollDelta) =>
+        dragDetails != null && (scrollDelta ?? 0) > 0,
+      OverscrollNotification(:final dragDetails, :final overscroll) =>
+        dragDetails != null && overscroll > 0,
+      _ => false,
+    };
+    if (dragging) widget.onExpand!();
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
     final header = Padding(
-      padding: const EdgeInsets.only(bottom: KvSpace.xs),
-      child: KvTabs(
-        tabs: const [KvTab('Activity'), KvTab('Tokens')],
-        index: _tab,
-        onSelect: (i) => setState(() => _tab = i),
+      padding: EdgeInsets.fromLTRB(
+        KvRowContainer.padding.left,
+        6,
+        KvRowContainer.padding.right,
+        KvSpace.xs,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: KvTabs(
+              tabs: const [KvTab('Activity'), KvTab('Tokens')],
+              index: _tab,
+              onSelect: (i) => setState(() => _tab = i),
+            ),
+          ),
+          if (widget.onExpand != null)
+            _QuietAction(
+              label: widget.expanded ? 'Less' : 'All',
+              onTap: widget.onExpand!,
+            ),
+        ],
       ),
     );
-    final Widget body;
+    Widget body;
     if (_tab == 1) {
-      body = const Padding(
-        padding: EdgeInsets.only(bottom: KvSpace.sm),
-        child: KvComingSoon(
+      body = Padding(
+        padding: EdgeInsets.fromLTRB(
+          KvRowContainer.padding.left,
+          0,
+          KvRowContainer.padding.right,
+          KvSpace.sm,
+        ),
+        child: const KvComingSoon(
           mark: KvGlyph.assets,
           name: 'Assets',
           sentence: 'Not built yet. Your tokens will live here.',
         ),
       );
     } else if (widget.records.isEmpty) {
-      body = const Padding(
-        padding: EdgeInsets.only(bottom: KvSpace.sm),
-        child: KvEmptyState(
+      body = Padding(
+        padding: EdgeInsets.fromLTRB(
+          KvRowContainer.padding.left,
+          0,
+          KvRowContainer.padding.right,
+          KvSpace.sm,
+        ),
+        child: const KvEmptyState(
           mark: KvGlyph.diamond,
           // Shipped copy, verbatim (D-196): the redesign is a change of form,
           // not of voice.
@@ -1620,47 +1613,44 @@ class _LedgerState extends State<_Ledger> {
         ),
       );
     } else {
-      body = const SizedBox.shrink();
+      body = NotificationListener<ScrollNotification>(
+        onNotification: _onScroll,
+        child: _HomeScreenState._refreshable(widget.onRefresh, _rows()),
+      );
     }
-    // **One container, headed by the tabs.** The rows are built lazily inside
-    // it: a `SliverList` under a `DecoratedSliver` keeps the plate behind a
-    // hundred rows without building a hundred rows, which a `Column` in a
-    // `SliverToBoxAdapter` would.
-    final rows = _tab == 0 && widget.records.isNotEmpty;
-    return SliverPadding(
-      padding: EdgeInsets.symmetric(horizontal: widget.gutter),
-      sliver: DecoratedSliver(
+    if (_tab == 1 || widget.records.isEmpty) {
+      // A plate that does not fit the card's floor height scrolls inside it
+      // rather than overflowing — measured at 320 × 568 / 1.3× the empty
+      // state was 26 dp over the room the card had left.
+      body = SingleChildScrollView(
+        physics: const ClampingScrollPhysics(),
+        child: body,
+      );
+    }
+    return Padding(
+      padding: EdgeInsets.fromLTRB(widget.gutter, 0, widget.gutter, 0),
+      // The foot moves on `calm`: closed, a 12 dp gap above the bar and a
+      // rounded foot; open, none and none — the card runs under the bar.
+      child: AnimatedContainer(
+        duration: KvMotion.calm,
+        curve: KvMotion.curve,
+        margin: EdgeInsets.only(bottom: widget.expanded ? 0 : widget.foot),
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: KvColor.plate,
-          borderRadius: BorderRadius.circular(KvRadius.plate),
+          borderRadius: widget.expanded
+              ? const BorderRadius.vertical(
+                  top: Radius.circular(KvRadius.plate),
+                )
+              : BorderRadius.circular(KvRadius.plate),
         ),
-        sliver: SliverMainAxisGroup(
-          slivers: [
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(
-                KvRowContainer.padding.left,
-                6,
-                KvRowContainer.padding.right,
-                rows ? 0 : 6,
-              ),
-              sliver: SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [header, body],
-                ),
-              ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            header,
+            Expanded(
+              child: Align(alignment: Alignment.topCenter, child: body),
             ),
-            if (rows)
-              SliverPadding(
-                padding: EdgeInsets.fromLTRB(
-                  KvRowContainer.padding.left,
-                  0,
-                  KvRowContainer.padding.right,
-                  6,
-                ),
-                sliver: _rows(),
-              ),
           ],
         ),
       ),
@@ -1671,7 +1661,18 @@ class _LedgerState extends State<_Ledger> {
     // The list arrives already truncated by Rust, so "full" is the only signal
     // the glass gets that anything was cut (F29).
     final atCap = widget.records.length >= kActivityFeedCap;
-    return SliverList.builder(
+    return ListView.builder(
+      controller: widget.controller,
+      // Always scrollable, so the pull gesture exists even when the rows are
+      // few — and so the first upward drag is a notification the card can
+      // open on.
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: EdgeInsets.fromLTRB(
+        KvRowContainer.padding.left,
+        0,
+        KvRowContainer.padding.right,
+        6 + (widget.expanded ? widget.foot : 0),
+      ),
       // +1 for the bound's own caption when the feed is full (F29).
       itemCount: widget.records.length + (atCap ? 1 : 0),
       itemBuilder: (context, i) {
@@ -1840,43 +1841,82 @@ class _LedgerRow extends StatelessWidget {
                 : KvGlyphSpec.strokeArrow,
           ),
           title: title,
-          subWidget: KvBurialMark(
-            state: _chipState(),
-            confirmations: confirmations,
-            maturity: record.maturity,
+          // **One sub-line: the lifecycle word, a middle dot, the time**
+          // (render `S1`: `Final · 2 h ago`, D-261). The time used to sit in
+          // `metaMono` under the amount; the render puts it beside the word,
+          // which frees the trailing column for the figure alone.
+          //
+          // **`inkDim` on a selected row.** §1.4's one standing obligation:
+          // `inkMeta` is 4.30 on `chip` and may not carry information there.
+          // A selection is persistent, not a press, so the row cannot borrow
+          // a pressed state's licence.
+          //
+          // **A `Wrap`, not a `Row`** — the parent `KvBurialMark` was written
+          // against (its own comment says so), and L160's scar: in a bare
+          // `Row` the mark's self-bound left with the flex parent and the
+          // sub-line overflowed by 77 dp at 320 dp / 1.3×; as two `Flexible`s
+          // both halves ellipsized (`Seen… · just …`) at the same frame. A
+          // `Wrap` lets the time drop to a second line at the floor instead —
+          // the row is a minimum, not a clamp (BG-14) — and nothing is cut.
+          subWidget: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              KvBurialMark(
+                state: _chipState(),
+                confirmations: confirmations,
+                maturity: record.maturity,
+                fontSize: 13,
+              ),
+              if (time != null)
+                Text.rich(
+                  // **Digits in mono, words in Jakarta** (BG-30, and `S1`
+                  // sets `Yesterday, 09:14` exactly so) — a ticking age must
+                  // not jiggle, and a face is not something a seat change
+                  // gets to drop (`ux-auditor`, UX-R1B).
+                  _ageSpans(' · ${_relativeAge(now, time)}'),
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 13,
+                    height: 18 / 13,
+                    color: selected ? KvColor.inkDim : KvColor.inkMeta,
+                  ),
+                ),
+            ],
           ),
           trailing: KvAmount(
             record.valueSompi,
             role: KvAmountRole.row,
             direction: direction,
           ),
-          trailingMeta: time == null
-              ? null
-              : Text(
-                  _relativeAge(now, time),
-                  maxLines: 1,
-                  // A timestamp is tabular (§2/BG-30), so a ticking age does
-                  // not jiggle the row.
-                  //
-                  // **`inkDim` on a selected row.** §1.4's one standing
-                  // obligation: `inkMeta` is 4.30 on `chip` and may not carry
-                  // information there. A selection is persistent, not a press,
-                  // so the row cannot borrow a pressed state's licence.
-                  style: TextStyle(
-                    fontFamily: KvFont.mono,
-                    fontSize: 11,
-                    height: 16 / 11,
-                    fontWeight: FontWeight.w500,
-                    fontVariations: KvWeight.w500,
-                    color: selected ? KvColor.inkDim : KvColor.inkMeta,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
           semanticLabel: '$title, details',
           onTap: open == null ? null : () => open(record.txid),
         ),
       ),
     );
+  }
+
+  /// Every run of digits in [text] set in tabular mono, the rest inherited
+  /// (BG-30: speak and count in different faces).
+  static TextSpan _ageSpans(String text) {
+    final spans = <TextSpan>[];
+    for (final m in RegExp(r'\d+|\D+').allMatches(text)) {
+      final run = m.group(0)!;
+      spans.add(
+        RegExp(r'^\d').hasMatch(run)
+            ? TextSpan(
+                text: run,
+                style: const TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontWeight: FontWeight.w500,
+                  fontVariations: KvWeight.w500,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              )
+            : TextSpan(text: run),
+      );
+    }
+    return TextSpan(children: spans);
   }
 
   /// "2 m ago" / "just now" — floors, never overstates (BG-8).
@@ -1885,6 +1925,129 @@ class _LedgerRow extends StatelessWidget {
     final age = now.difference(at);
     if (age.inSeconds < 5) return 'just now';
     return '${formatAge(age)} ago';
+  }
+}
+
+/// **Receive · Send, pinned at the foot** (render `S1`, D-261).
+///
+/// Two 60 dp pills across the gutter with a 10 dp gap, **Send lit** — the
+/// screen's one primary, and it is the money door (BG-2). Each wears its
+/// arrow: `↙ Receive`, `↗ Send` — the same two marks the ledger's discs use,
+/// beside their words (§2a rule 1 as amended). Receive is raised. A blocked
+/// Send says why beneath itself (BG-12, `KvAction`).
+///
+/// Absent in `short`, where the collapsed bar carries the same two verbs
+/// (`R5`) and 60 dp of a 412 dp window is the ledger's.
+class _ActionBar extends StatelessWidget {
+  const _ActionBar({
+    required this.gutter,
+    required this.onSend,
+    required this.onReceive,
+    required this.sendDisabledReason,
+  });
+
+  final double gutter;
+  final VoidCallback? onSend;
+  final VoidCallback? onReceive;
+  final String? sendDisabledReason;
+
+  /// The render's foot pills: 60, not `control`'s 56 (S1, measured).
+  static const double height = 60;
+
+  /// The bar's whole footprint, and it is **constant**: the pills, 12 above,
+  /// 16 below. A blocked Send says why inside its pill rather than beneath
+  /// it, so the ledger card can stop exactly this far short of the column's
+  /// end and never be overrun (D-262).
+  static const double footprint = height + KvSpace.sm + KvSpace.m;
+
+  @override
+  Widget build(BuildContext context) {
+    if (onSend == null && onReceive == null) return const SizedBox.shrink();
+    return Padding(
+      padding: EdgeInsets.fromLTRB(gutter, KvSpace.sm, gutter, KvSpace.m),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (onReceive != null)
+            Expanded(
+              child: KvAction.raised(
+                label: 'Receive',
+                mark: KvGlyph.arrowIn,
+                height: height,
+                onTap: onReceive!,
+              ),
+            ),
+          if (onReceive != null && onSend != null)
+            const SizedBox(width: KvSpace.s10),
+          if (onSend != null)
+            Expanded(
+              child: KvAction(
+                label: 'Send',
+                primary: true,
+                mark: KvGlyph.arrowOut,
+                height: height,
+                disabledReason: sendDisabledReason,
+                inlineReason: true,
+                onTap: onSend!,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A quiet text action with a chevron — `All ›` beside the tabs (render `S1`:
+/// 14 / 600 in **`inkDim`**, not the `primary` ghost §4 gave it; the render
+/// spends no teal on it, D-261).
+class _QuietAction extends StatelessWidget {
+  const _QuietAction({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          // A 52 dp target both ways (BG-12): the word and its chevron are
+          // ~44 wide, so the box is held open to the target and the ink sits
+          // at its right edge, flush with the rows' figures.
+          child: Container(
+            height: KvSpace.touchTarget,
+            constraints: const BoxConstraints(minWidth: KvSpace.touchTarget),
+            alignment: Alignment.centerRight,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 14,
+                    height: 20 / 14,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.inkDim,
+                  ),
+                ),
+                const SizedBox(width: 2),
+                const KvGlyphIcon(
+                  KvGlyph.chevron,
+                  size: 16,
+                  tone: KvColor.inkDim,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

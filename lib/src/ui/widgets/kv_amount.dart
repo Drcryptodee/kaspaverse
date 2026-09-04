@@ -110,7 +110,9 @@ enum KvMoneyDirection {
 /// integer and the unit 33%, **floored at 11dp** — the unit is information a
 /// user must read, and 33% of the screen role would land under the floor.
 ///
-/// The unit is [KvColor.primaryMuted]: ambient teal on structure, which is
+/// The unit is [KvColor.primaryMuted] — **teal, by founder ruling on glass**
+/// (2026-09-04, D-262: *"let the KAS be in teal"*), reversing D-261's reading
+/// of `S1`, which sets it in the meta grey. Ambient teal on structure, which
 /// **not an emission** and costs nothing against BG-2's cap of three (§1.5).
 /// It is most of what makes the figure read as money rather than as telemetry.
 class KvAmount extends StatelessWidget {
@@ -173,7 +175,10 @@ class KvAmount extends StatelessWidget {
   /// `balanceHero` 48 with a 24 fraction and `amountScreen` 44 with 22 — one
   /// half in both cases, so the ratio is derived rather than chosen.
   static const double fractionRatio = 0.5;
-  static const double unitRatio = 0.33;
+
+  /// The unit at 0.3 of the hero is 14.4 dp — the render's `KAS` measures a
+  /// 10.5 dp cap height beside the 48 figure, which is a 14 dp face (D-261).
+  static const double unitRatio = 0.3;
 
   /// 11dp is the floor for anything a user must read (§2/BG-14).
   static const double readableFloor = 11;
@@ -467,7 +472,7 @@ class KvAmount extends StatelessWidget {
                     fontWeight: FontWeight.w500,
                     fontVariations: KvWeight.w500,
                     letterSpacing: 0.6,
-                    color: KvColor.primaryMuted,
+                    color: KvColor.inkMeta,
                   ),
                 ),
               ),

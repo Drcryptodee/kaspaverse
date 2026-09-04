@@ -358,7 +358,7 @@ void main() {
       );
     });
 
-    testWidgets('the unit is ambient teal and never falls below 11dp', (
+    testWidgets('the unit is the meta grey and never falls below 11dp', (
       tester,
     ) async {
       for (final role in [KvAmountRole.hero, KvAmountRole.screen]) {
@@ -366,7 +366,10 @@ void main() {
           _host(KvAmount(BigInt.from(100000000), role: role)),
         );
         final unit = _styleOf(tester, 'KAS');
-        expect(unit.color, KvColor.primaryMuted, reason: '$role');
+        // `inkMeta`, not `primaryMuted`: the render sets `KAS` in the meta
+        // grey beside the figure (S1, D-261), and teal beside the one green
+        // lamp on the plate was competing with it.
+        expect(unit.color, KvColor.inkMeta, reason: '$role');
         expect(
           unit.fontSize,
           greaterThanOrEqualTo(KvAmount.readableFloor),

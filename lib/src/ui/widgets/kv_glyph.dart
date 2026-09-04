@@ -1,12 +1,18 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// Every glyph the app draws (§2). The set is **drawn, not imported**: there is
-/// no icon package, and Material's `Icons.*` is not the answer either — the
-/// call, and the case against it, is **D-205**.
+/// Every glyph the app draws (§2, §2a). The set is **drawn, not imported**:
+/// there is no icon package, and Material's `Icons.*` is not the answer either
+/// — the call, and the case against it, is **D-205**.
+///
+/// **The geometry is Lucide's, transcribed** (§2a, founder ruling 2026-09-04,
+/// D-259/D-261: *"the icons used as seen in the screenshots, exactly"*). Every
+/// mark below carries the Lucide name it was taken from and its path data
+/// verbatim, so a reviewer can put it beside lucide.dev and see one shape. The
+/// three tweaks §2a names are applied at paint time, never to the data: stroke
+/// 2.5 instead of 2, round caps and joins, and no fill — a dot is a zero-length
+/// round-capped stroke (`h.01`), exactly as Lucide draws it.
 ///
 /// **`Icons.*` has not been swept out of `lib/` yet, and this file does not
 /// claim otherwise.** Fifty-two Material icons are still live across sixteen
@@ -14,99 +20,98 @@ import '../theme/tokens.dart';
 /// composition change and every one of those screens is having its
 /// composition rebuilt anyway (`design_system.md` §9.3, divergence 3).
 ///
-/// Adding a glyph is one enum case plus one `case` arm in [KvGlyphPainter],
-/// which is deliberately the whole cost: this file is the single place a glyph
-/// is chosen, so the decision stays one file wide **in both directions** — if
-/// D-205 is ever reversed, this is the only file that changes.
+/// Adding a glyph is one enum case plus one `case` arm in [KvGlyphPainter] —
+/// the Lucide outline, pasted — which is deliberately the whole cost: this file
+/// is the single place a glyph is chosen, so the decision stays one file wide
+/// **in both directions**.
 enum KvGlyph {
-  /// Money arriving.
+  /// Money arriving. Lucide `arrow-down-left`.
   arrowIn,
 
-  /// Money leaving.
+  /// Money leaving. Lucide `arrow-up-right`.
   arrowOut,
 
-  /// A self-send: value that never leaves the wallet.
+  /// A self-send: value that never leaves the wallet. Lucide `repeat`.
   selfSend,
 
-  /// The nav trigger — a 2×2 dot field, never a hamburger (§4).
-  navDots,
-
-  /// The one empty-state mark.
+  /// The one empty-state mark. Lucide `gem`.
   diamond,
 
-  /// "This goes somewhere." Rotate it for a back affordance.
+  /// "This goes somewhere." Lucide `chevron-right`; rotate it for back.
   chevron,
 
-  /// Destination: money.
+  /// Destination: the wallet. Lucide `wallet` — the billfold with a clasp
+  /// (render `S2 · Drawer`).
   money,
 
-  /// Destination: messages.
+  /// Destination: messages. Lucide `message-circle`.
   chat,
 
-  /// Destination: games.
+  /// Destination: games. Lucide `gamepad-2`.
   games,
 
-  /// Destination: contracts.
+  /// Destination: contracts. Lucide `file-text`.
   contracts,
 
-  /// Destination: finance.
+  /// Destination: finance. Lucide `chart-line`.
   finance,
 
-  /// Destination: assets.
+  /// Tokens. Lucide `coins`.
   assets,
 
-  /// Destination: settings.
+  /// Destination: settings. Lucide `sliders-horizontal` — three rails with a
+  /// thumb on each, which is what a setting is; a cog is a machine.
   settings,
 
   /// Destination: identity — **who you are to other people**, as distinct
-  /// from [settings], which is how the app behaves. Lucide's `user`: a head
-  /// and a pair of shoulders, two strokes.
-  ///
-  /// It is drawn rather than shared with [settings] because the drawer seats
-  /// both, and two rows wearing one mark is a mark that has stopped
-  /// identifying anything (BG-25, and Kare's own law).
+  /// from [settings], which is how the app behaves. Lucide `user-round`: a
+  /// head and a pair of shoulders (render `S2 · Drawer`).
   identity,
 
-  /// The lock, and locking.
+  /// Destination: the node and the link. Lucide `radio`.
+  network,
+
+  /// Destination: security; a trust statement. Lucide `shield-check`.
+  shield,
+
+  /// Destination: help. Lucide `circle-question-mark`.
+  help,
+
+  /// The lock, and locking. Lucide `lock`.
   lock,
 
-  /// Paste into a field.
+  /// Paste into a field. Lucide `clipboard`.
   paste,
 
-  /// Scan a code into a field.
+  /// Open the camera. Lucide `scan-line` (render `S1 · Home`, top right).
   scan,
 
-  /// History, and anything that reaches backwards in time.
+  /// History, and anything that reaches backwards in time. Lucide `history`.
   history,
 
-  /// Overflow.
+  /// Overflow. Lucide `ellipsis` — three dots, each a zero-length stroke.
   kebab,
 
-  /// Done. Two strokes on the 24dp grid, drawn at the same weight as every
-  /// other mark — a machined tick, not a celebration (§7: the vault register
-  /// does not cheer).
+  /// Done. Lucide `check`, drawn at the same weight as every other mark — a
+  /// machined tick, not a celebration (§7: the vault register does not cheer).
   check,
 
-  /// Delete the character to the left. The wedge with a cross — the form every
-  /// keyboard on earth uses, so it needs no learning — and **drawn rather than
-  /// borrowed** (BG-25, D-229). It replaced the string `'⌫'`, which the amount
-  /// pad rendered in `KvFont.mono`: `JetBrainsMono-Variable.ttf` has no U+232B,
-  /// so the app's own bundled faces could not draw the cap on the key that
-  /// corrects a wrong amount.
+  /// Delete the character to the left. Lucide `delete` — the wedge with a
+  /// cross, the form every keyboard on earth uses — and **drawn rather than
+  /// borrowed** (BG-25, D-229): `JetBrainsMono-Variable.ttf` has no U+232B.
   backspace,
 
-  /// Shift, on the secret keyboard. The outlined up-arrow, one closed stroke.
-  /// Also drawn rather than borrowed: `'⇧'` did render (Inter carries it), from
-  /// a face chosen by a text style rather than by a decision (BG-25).
+  /// Shift, on the secret keyboard. Lucide `arrow-big-up`, one closed stroke.
   shift,
 }
 
 /// One glyph, painted.
 ///
-/// **1–3 strokes on a 24dp grid at 1.75dp with square caps** (§2). The stroke
-/// scales with [size] because a glyph rendered smaller is a scaled 24dp glyph,
-/// not a thinner one — at the 24dp grid size the stroke is exactly the 1.75dp
-/// the law names, and [strokeFor] is where any other size gets its number.
+/// **Lucide geometry on the 24 dp grid at 2.5 dp with round caps** (§2, §2a).
+/// The stroke scales with [size] because a glyph rendered smaller is a scaled
+/// 24 dp glyph, not a thinner one — at the grid size the stroke is exactly the
+/// 2.5 dp the law names, and [strokeFor] is where any other size gets its
+/// number.
 ///
 /// Decorative by default: without [semanticLabel] the glyph is excluded from
 /// the semantics tree, because the control around it is what a screen reader
@@ -144,9 +149,9 @@ class KvGlyphIcon extends StatelessWidget {
   final double? stroke;
 
   /// The rendered stroke width at a given glyph [size] — [KvGlyphSpec.stroke]
-  /// scaled off the 24 dp grid (2.5 dp round-capped since v4.2, BG-25). Exposed so a caller that must line a glyph up with a
-  /// rule can ask rather than guess (item 0: geometry is computed, never
-  /// asserted in a comment).
+  /// scaled off the 24 dp grid (2.5 dp round-capped since v4.2, BG-25).
+  /// Exposed so a caller that must line a glyph up with a rule can ask rather
+  /// than guess (item 0: geometry is computed, never asserted).
   static double strokeFor(double size, {double? stroke}) =>
       (stroke ?? KvGlyphSpec.stroke) * (size / KvGlyphSpec.grid);
 
@@ -187,255 +192,170 @@ class KvGlyphPainter extends CustomPainter {
       ..strokeCap = KvGlyphSpec.cap
       ..strokeJoin = KvGlyphSpec.join;
 
-    // Every glyph is a list of polylines on the 24dp grid: [x0,y0, x1,y1, …].
-    Path path(List<List<double>> polylines) {
-      final path = Path();
-      for (final seg in polylines) {
-        path.moveTo(seg[0] * s, seg[1] * s);
-        for (var i = 2; i < seg.length; i += 2) {
-          path.lineTo(seg[i] * s, seg[i + 1] * s);
-        }
+    // One Lucide `<path d>` (or several, one contour each), stroked.
+    void path(List<String> data) {
+      for (final d in data) {
+        canvas.drawPath(kvSvgPath(d, s), p);
       }
-      return path;
     }
 
-    // A filled dot is still one "stroke" in the §2 sense — it is a mark, not a
-    // shape with an outline, and outlining a 2dp dot at 1.75dp is a blob.
-    Paint filled() => Paint()..color = tone;
+    // A Lucide `<circle>`, stroked — never filled (§2a rule 4).
+    void circle(double cx, double cy, double r) =>
+        canvas.drawCircle(Offset(cx * s, cy * s), r * s, p);
 
-    switch (mark) {
-      case KvGlyph.arrowIn:
-        canvas.drawPath(
-          path([
-            [12, 4, 12, 15],
-            [7, 10, 12, 15, 17, 10],
-            [5, 20, 19, 20],
-          ]),
-          p,
-        );
-      case KvGlyph.arrowOut:
-        canvas.drawPath(
-          path([
-            [12, 20, 12, 9],
-            [7, 14, 12, 9, 17, 14],
-            [5, 4, 19, 4],
-          ]),
-          p,
-        );
-      case KvGlyph.selfSend:
-        canvas.drawPath(
-          path([
-            [5, 8, 16, 8],
-            [13, 5, 16, 8, 13, 11],
-            [19, 16, 8, 16],
-            [11, 19, 8, 16, 11, 13],
-          ]),
-          p,
-        );
-      case KvGlyph.navDots:
-        final dot = filled();
-        for (final c in const [
-          Offset(7.5, 7.5),
-          Offset(16.5, 7.5),
-          Offset(7.5, 16.5),
-          Offset(16.5, 16.5),
-        ]) {
-          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.5 * s, dot);
-        }
-      case KvGlyph.money:
-        // A note, not a coin: a circle with strokes through it reads as a
-        // symbol to be decoded, and a glyph you decode has already failed.
-        canvas.drawPath(
-          path([
-            [3.5, 6.5, 20.5, 6.5, 20.5, 17.5, 3.5, 17.5, 3.5, 6.5],
-          ]),
-          p,
-        );
-        canvas.drawCircle(Offset(12 * s, 12 * s), 2.6 * s, p);
-      case KvGlyph.chat:
-        canvas.drawPath(
-          path([
-            [4.5, 5.5, 19.5, 5.5, 19.5, 15.5, 9.5, 15.5, 5.5, 19.5, 5.5, 5.5],
-          ]),
-          p,
-        );
-      case KvGlyph.games:
-        canvas.drawPath(
-          path([
-            [5, 5, 19, 5, 19, 19, 5, 19, 5, 5],
-          ]),
-          p,
-        );
-        final dot = filled();
-        for (final c in const [
-          Offset(9, 9),
-          Offset(15, 9),
-          Offset(9, 15),
-          Offset(15, 15),
-        ]) {
-          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 1.4 * s, dot);
-        }
-      case KvGlyph.contracts:
-        canvas.drawPath(
-          path([
-            [7, 4, 17, 4, 17, 20, 7, 20, 7, 4],
-            [10, 9, 14, 9],
-            [10, 13, 14, 13],
-          ]),
-          p,
-        );
-      case KvGlyph.finance:
-        // A trend on a baseline. The export's three-bar mark read as "++".
-        canvas.drawPath(
-          path([
-            [4, 19, 20, 19],
-            [5, 15, 9.5, 10.5, 13.5, 13.5, 19, 7],
-            [15, 7, 19, 7, 19, 11],
-          ]),
-          p,
-        );
-      case KvGlyph.assets:
-        canvas.drawPath(
-          path([
-            [12, 4, 20, 8.5, 20, 15.5, 12, 20, 4, 15.5, 4, 8.5, 12, 4],
-          ]),
-          p,
-        );
-      case KvGlyph.settings:
-        // Sliders. A cross-haired dot is a target, not a setting.
-        canvas.drawPath(
-          path([
-            [4, 7, 20, 7],
-            [4, 12, 20, 12],
-            [4, 17, 20, 17],
-          ]),
-          p,
-        );
-        final knob = filled();
-        for (final c in const [Offset(9, 7), Offset(15, 12), Offset(11, 17)]) {
-          canvas.drawCircle(Offset(c.dx * s, c.dy * s), 2.1 * s, knob);
-        }
-      case KvGlyph.identity:
-        canvas.drawCircle(Offset(12 * s, 8 * s), 4 * s, p);
-        canvas.drawPath(
-          Path()..addArc(
-            Rect.fromCircle(center: Offset(12 * s, 20 * s), radius: 7 * s),
-            math.pi,
-            math.pi,
+    // A Lucide `<rect rx>`, stroked.
+    void rect(double x, double y, double w, double h, double rx) =>
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromLTWH(x * s, y * s, w * s, h * s),
+            Radius.circular(rx * s),
           ),
           p,
         );
-      case KvGlyph.lock:
-        canvas.drawPath(
-          path([
-            [6, 11, 18, 11, 18, 20, 6, 20, 6, 11],
-          ]),
-          p,
-        );
-        final shackle = Path()
-          ..addArc(
-            Rect.fromCircle(center: Offset(12 * s, 11 * s), radius: 4 * s),
-            math.pi,
-            math.pi,
-          );
-        canvas.drawPath(shackle, p);
-      case KvGlyph.paste:
-        canvas.drawPath(
-          path([
-            [6, 6, 18, 6, 18, 20, 6, 20, 6, 6],
-            [9.5, 3.5, 14.5, 3.5, 14.5, 7.5, 9.5, 7.5, 9.5, 3.5],
-          ]),
-          p,
-        );
-      case KvGlyph.scan:
-        // A viewfinder: four corners and nothing between them.
-        canvas.drawPath(
-          path([
-            [4, 9, 4, 4, 9, 4],
-            [15, 4, 20, 4, 20, 9],
-            [20, 15, 20, 20, 15, 20],
-            [9, 20, 4, 20, 4, 15],
-          ]),
-          p,
-        );
-      case KvGlyph.history:
-        canvas.drawPath(
-          path([
-            [12, 7, 12, 12, 16, 14],
-            [4, 8, 4, 4, 8, 8],
-          ]),
-          p,
-        );
-        canvas.drawArc(
-          Rect.fromCircle(center: Offset(12 * s, 12 * s), radius: 8 * s),
-          -2.5,
-          5.4,
-          false,
-          p,
-        );
-      case KvGlyph.kebab:
-        final d = filled();
-        for (final y in const [6.5, 12.0, 17.5]) {
-          canvas.drawCircle(Offset(12 * s, y * s), 1.7 * s, d);
-        }
-      case KvGlyph.chevron:
-        canvas.drawPath(
-          path([
-            [9, 5, 16, 12, 9, 19],
-          ]),
-          p,
-        );
+
+    // A Lucide `<line>`.
+    void line(double x1, double y1, double x2, double y2) =>
+        canvas.drawLine(Offset(x1 * s, y1 * s), Offset(x2 * s, y2 * s), p);
+
+    switch (mark) {
+      case KvGlyph.arrowIn:
+        path(const ['M17 7 7 17', 'M17 17H7V7']);
+      case KvGlyph.arrowOut:
+        path(const ['M7 7h10v10', 'M7 17 17 7']);
+      case KvGlyph.selfSend:
+        path(const [
+          'm17 2 4 4-4 4',
+          'M3 11v-1a4 4 0 0 1 4-4h14',
+          'm7 22-4-4 4-4',
+          'M21 13v1a4 4 0 0 1-4 4H3',
+        ]);
       case KvGlyph.diamond:
-        canvas.drawPath(
-          path([
-            [12, 4, 20, 12, 12, 20, 4, 12, 12, 4],
-          ]),
-          p,
-        );
+        path(const [
+          'M10.5 3 8 9l4 13 4-13-2.5-6',
+          'M17 3a2 2 0 0 1 1.6.8l3 4a2 2 0 0 1 .013 2.382l-7.99 10.986a2 2 0 '
+              '0 1-3.247 0l-7.99-10.986A2 2 0 0 1 2.4 7.8l2.998-3.997A2 2 0 0 '
+              '1 7 3z',
+          'M2 9h20',
+        ]);
+      case KvGlyph.chevron:
+        path(const ['m9 18 6-6-6-6']);
+      case KvGlyph.money:
+        path(const [
+          'M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 '
+              '0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1',
+          'M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4',
+        ]);
+      case KvGlyph.chat:
+        path(const [
+          'M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 '
+              '1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719',
+        ]);
+      case KvGlyph.games:
+        line(6, 11, 10, 11);
+        line(8, 9, 8, 13);
+        line(15, 12, 15.01, 12);
+        line(18, 10, 18.01, 10);
+        path(const [
+          'M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 '
+              '9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 '
+              '2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 '
+              '3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017'
+              '-.151A4 4 0 0 0 17.32 5z',
+        ]);
+      case KvGlyph.contracts:
+        path(const [
+          'M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 '
+              '3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z',
+          'M14 2v5a1 1 0 0 0 1 1h5',
+          'M10 9H8',
+          'M16 13H8',
+          'M16 17H8',
+        ]);
+      case KvGlyph.finance:
+        path(const ['M3 3v16a2 2 0 0 0 2 2h16', 'm19 9-5 5-4-4-3 3']);
+      case KvGlyph.assets:
+        path(const [
+          'M13.744 17.736a6 6 0 1 1-7.48-7.48',
+          'M15 6h1v4',
+          'm6.134 14.768.866-.5 2 3.464',
+        ]);
+        circle(16, 8, 6);
+      case KvGlyph.settings:
+        path(const [
+          'M10 5H3',
+          'M12 19H3',
+          'M14 3v4',
+          'M16 17v4',
+          'M21 12h-9',
+          'M21 19h-5',
+          'M21 5h-7',
+          'M8 10v4',
+          'M8 12H3',
+        ]);
+      case KvGlyph.identity:
+        circle(12, 8, 5);
+        path(const ['M20 21a8 8 0 0 0-16 0']);
+      case KvGlyph.network:
+        path(const [
+          'M16.247 7.761a6 6 0 0 1 0 8.478',
+          'M19.075 4.933a10 10 0 0 1 0 14.134',
+          'M4.925 19.067a10 10 0 0 1 0-14.134',
+          'M7.753 16.239a6 6 0 0 1 0-8.478',
+        ]);
+        circle(12, 12, 2);
+      case KvGlyph.shield:
+        path(const [
+          'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 '
+              '13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 '
+              '0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z',
+          'm9 12 2 2 4-4',
+        ]);
+      case KvGlyph.help:
+        circle(12, 12, 10);
+        path(const ['M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01']);
+      case KvGlyph.lock:
+        rect(3, 11, 18, 11, 2);
+        path(const ['M7 11V7a5 5 0 0 1 10 0v4']);
+      case KvGlyph.paste:
+        rect(8, 2, 8, 4, 1);
+        path(const [
+          'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 '
+              '2-2h2',
+        ]);
+      case KvGlyph.scan:
+        path(const [
+          'M3 7V5a2 2 0 0 1 2-2h2',
+          'M17 3h2a2 2 0 0 1 2 2v2',
+          'M21 17v2a2 2 0 0 1-2 2h-2',
+          'M7 21H5a2 2 0 0 1-2-2v-2',
+          'M7 12h10',
+        ]);
+      case KvGlyph.history:
+        path(const [
+          'M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8',
+          'M3 3v5h5',
+          'M12 7v5l4 2',
+        ]);
+      case KvGlyph.kebab:
+        // Lucide's own r = 1 circles, stroked — the pin, not a reading of it.
+        circle(12, 12, 1);
+        circle(19, 12, 1);
+        circle(5, 12, 1);
       case KvGlyph.check:
-        canvas.drawPath(
-          path([
-            [5, 12.5, 10, 17.5, 19, 6.5],
-          ]),
-          p,
-        );
+        path(const ['M20 6 9 17l-5-5']);
       case KvGlyph.backspace:
-        // Three strokes: the wedge, then the cross inside it. The cross spans
-        // five grid units so it survives the smallest size this cap ships at
-        // (BG-25's legibility half) — a two-unit cross would close up into a
-        // blob at 1.75dp before it ever reached a phone.
-        canvas.drawPath(
-          path([
-            [2, 12, 8.5, 5, 22, 5, 22, 19, 8.5, 19, 2, 12],
-            [12.5, 9, 18, 15],
-            [18, 9, 12.5, 15],
-          ]),
-          p,
-        );
+        path(const [
+          'M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 '
+              '5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z',
+          'm12 9 6 6',
+          'm18 9-6 6',
+        ]);
       case KvGlyph.shift:
-        canvas.drawPath(
-          path([
-            [
-              12,
-              4,
-              4.5,
-              11.5,
-              8.5,
-              11.5,
-              8.5,
-              19,
-              15.5,
-              19,
-              15.5,
-              11.5,
-              19.5,
-              11.5,
-              12,
-              4,
-            ],
-          ]),
-          p,
-        );
+        path(const [
+          'M9 13a1 1 0 0 0-1-1H5.061a1 1 0 0 1-.75-1.811l6.836-6.835a1.207 '
+              '1.207 0 0 1 1.707 0l6.835 6.835a1 1 0 0 1-.75 1.811H16a1 1 0 0 '
+              '0-1 1v6a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1z',
+        ]);
     }
   }
 
@@ -443,3 +363,136 @@ class KvGlyphPainter extends CustomPainter {
   bool shouldRepaint(KvGlyphPainter old) =>
       old.mark != mark || old.tone != tone || old.stroke != stroke;
 }
+
+/// **SVG path data → [Path]**, scaled by [scale], for the subset Lucide uses:
+/// `M L H V C S A Z` in absolute and relative forms. It exists so a mark can
+/// be carried as the string lucide.dev publishes rather than as a hand
+/// re-typed polyline — the transcription is then a copy, not an interpretation
+/// (§2a rule 5), and a wrong glyph is a diff against one public string.
+///
+/// Arcs map onto [Path.arcToPoint] one-to-one (SVG's sweep flag is Flutter's
+/// `clockwise`). Not supported, because Lucide never emits them: `Q T`
+/// quadratics.
+@visibleForTesting
+Path kvSvgPath(String d, double scale) {
+  final path = Path();
+  final tokens = _svgTokens.allMatches(d).map((m) => m.group(0)!).toList();
+  var i = 0;
+  var cmd = '';
+  // Current point, subpath start and the last cubic control point (for `S`).
+  var x = 0.0, y = 0.0, sx = 0.0, sy = 0.0;
+  double? cx, cy;
+  double num() => double.parse(tokens[i++]);
+  bool more() => i < tokens.length && !_isCommand(tokens[i]);
+
+  while (i < tokens.length) {
+    if (_isCommand(tokens[i])) cmd = tokens[i++];
+    final rel = cmd == cmd.toLowerCase() && cmd != 'z' && cmd != 'Z';
+    double ax(double v) => rel ? x + v : v;
+    double ay(double v) => rel ? y + v : v;
+    switch (cmd.toUpperCase()) {
+      case 'M':
+        x = ax(num());
+        y = ay(num());
+        sx = x;
+        sy = y;
+        path.moveTo(x * scale, y * scale);
+        cx = cy = null;
+        // Subsequent pairs after a moveto are implicit linetos.
+        while (more()) {
+          x = ax(num());
+          y = ay(num());
+          path.lineTo(x * scale, y * scale);
+        }
+      case 'L':
+        do {
+          x = ax(num());
+          y = ay(num());
+          path.lineTo(x * scale, y * scale);
+        } while (more());
+        cx = cy = null;
+      case 'H':
+        do {
+          x = ax(num());
+          path.lineTo(x * scale, y * scale);
+        } while (more());
+        cx = cy = null;
+      case 'V':
+        do {
+          y = ay(num());
+          path.lineTo(x * scale, y * scale);
+        } while (more());
+        cx = cy = null;
+      case 'C':
+        do {
+          final x1 = ax(num()), y1 = ay(num());
+          final x2 = ax(num()), y2 = ay(num());
+          final ex = ax(num()), ey = ay(num());
+          path.cubicTo(
+            x1 * scale,
+            y1 * scale,
+            x2 * scale,
+            y2 * scale,
+            ex * scale,
+            ey * scale,
+          );
+          cx = x2;
+          cy = y2;
+          x = ex;
+          y = ey;
+        } while (more());
+      case 'S':
+        do {
+          // The first control point reflects the previous cubic's second
+          // control point through the current point; absent one, it is the
+          // current point (SVG 1.1 §8.3.6).
+          final x1 = cx == null ? x : 2 * x - cx;
+          final y1 = cy == null ? y : 2 * y - cy;
+          final x2 = ax(num()), y2 = ay(num());
+          final ex = ax(num()), ey = ay(num());
+          path.cubicTo(
+            x1 * scale,
+            y1 * scale,
+            x2 * scale,
+            y2 * scale,
+            ex * scale,
+            ey * scale,
+          );
+          cx = x2;
+          cy = y2;
+          x = ex;
+          y = ey;
+        } while (more());
+      case 'A':
+        do {
+          final rx = num(), ry = num();
+          final rotation = num();
+          final large = num() != 0;
+          final sweep = num() != 0;
+          final ex = ax(num()), ey = ay(num());
+          path.arcToPoint(
+            Offset(ex * scale, ey * scale),
+            radius: Radius.elliptical(rx * scale, ry * scale),
+            rotation: rotation,
+            largeArc: large,
+            clockwise: sweep,
+          );
+          x = ex;
+          y = ey;
+        } while (more());
+        cx = cy = null;
+      case 'Z':
+        path.close();
+        x = sx;
+        y = sy;
+        cx = cy = null;
+      default:
+        throw ArgumentError.value(d, 'd', 'unsupported path command $cmd');
+    }
+  }
+  return path;
+}
+
+final RegExp _svgTokens = RegExp(r'[MmLlHhVvCcSsAaZz]|-?(?:\d+\.?\d*|\.\d+)');
+
+bool _isCommand(String t) => t.length == 1 && RegExp('[A-Za-z]').hasMatch(t);

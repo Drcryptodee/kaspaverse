@@ -200,26 +200,23 @@ Widget _shell(Widget home, {int selected = 0}) => KvNav(
   destinations: [
     KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
     KvDestination(mark: KvGlyph.chat, label: 'Messages', onTap: () {}),
-    const KvDestination(
-      mark: KvGlyph.games,
-      label: 'Games',
-      tag: 'Coming soon',
-    ),
-    const KvDestination(
-      mark: KvGlyph.finance,
-      label: 'Finance',
-      tag: 'Coming soon',
-    ),
-    const KvDestination(
-      mark: KvGlyph.identity,
-      label: 'Identity',
-      tag: 'Coming soon',
-    ),
+    KvDestination(mark: KvGlyph.games, label: 'Games', onTap: () {}),
+    const KvDestination(mark: KvGlyph.finance, label: 'Finance'),
+    const KvDestination(mark: KvGlyph.identity, label: 'Identity'),
   ],
-  footer: [
+  // The render's second group and its foot (`S2 · Drawer`, D-261).
+  secondary: [
     KvDestination(mark: KvGlyph.settings, label: 'Settings', onTap: () {}),
-    KvDestination(mark: KvGlyph.lock, label: 'Lock', onTap: () {}),
+    KvDestination(
+      mark: KvGlyph.network,
+      label: 'Network',
+      live: ValueNotifier(true),
+      onTap: () {},
+    ),
+    KvDestination(mark: KvGlyph.shield, label: 'Security', onTap: () {}),
+    KvDestination(mark: KvGlyph.help, label: 'Help', onTap: () {}),
   ],
+  footer: [KvDestination(mark: KvGlyph.lock, label: 'Lock', onTap: () {})],
   child: home,
 );
 
@@ -406,6 +403,15 @@ void main() {
     framedSurface('home__funded', () => _shell(_home()));
     framedSurface('home__status', () => _shell(_homeStatus()));
     framedSurface('home__drawer', () => _shell(_home()), act: _summonDrawer);
+    // A drawer destination without a feature behind it (D-261).
+    framedSurface(
+      'coming_soon_page',
+      () => const KvComingSoonPage(
+        mark: KvGlyph.games,
+        name: 'Games',
+        sentence: 'Not built yet. The arcade will live here.',
+      ),
+    );
     surface('receive__address', () => ReceiveScreen(fetch: () async => _addr));
 
     // **The failed state, at the same footprint** — the composition UX-5 owes

@@ -164,9 +164,14 @@ class KvBurialMark extends StatefulWidget {
     required this.state,
     required this.confirmations,
     required this.maturity,
+    this.fontSize = 11,
   });
 
   final TxChipState state;
+
+  /// `metaMono`'s 11 by default; the ledger row passes `sub`'s 13, because
+  /// the render sets `Final · 2 h ago` as one 13 dp line (S1, D-261).
+  final double fontSize;
   final int? confirmations;
   final MaturityState maturity;
 
@@ -288,6 +293,7 @@ class _KvBurialMarkState extends State<KvBurialMark> {
           // is.
           words: KvBurial.words(rung, depth: depth),
           mono: rung == KvBurialRung.seen && depth != null,
+          fontSize: widget.fontSize,
         ),
       ),
     );
@@ -296,7 +302,14 @@ class _KvBurialMarkState extends State<KvBurialMark> {
 
 /// A dot and a word — or, past the final mark, a word alone.
 class _Mark extends StatelessWidget {
-  const _Mark({this.tone, required this.words, this.mono = false});
+  const _Mark({
+    this.tone,
+    required this.words,
+    this.mono = false,
+    this.fontSize = 11,
+  });
+
+  final double fontSize;
 
   /// Null draws no dot at all: `final` never changes again, so it has nothing
   /// to indicate.
@@ -330,8 +343,8 @@ class _Mark extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontFamily: mono ? KvFont.mono : KvFont.ui,
-              fontSize: 11,
-              height: 15 / 11,
+              fontSize: fontSize,
+              height: 18 / 13,
               fontWeight: FontWeight.w500,
               // The dot carries the hue; the words do not (§1.5).
               color: KvColor.inkDim,

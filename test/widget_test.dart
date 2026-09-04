@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
@@ -100,9 +101,16 @@ void main() {
     // The screen names itself; the wordmark moved to the drawer's header
     // (§4/§5) — this surface is mounted bare, without `KvNav`, so what is
     // asserted here is the page title rather than the brand.
-    expect(find.text('Wallet · Main'), findsOneWidget);
+    // `Wallet` bold with `Main` beside it in the meta grey — one rich text,
+    // no separator (render `S1`, D-261).
+    expect(find.text('Wallet Main'), findsOneWidget);
     expect(find.text('finding a node…'), findsOneWidget); // C7 copy
-    expect(find.text('—'), findsOneWidget);
+    // The balance's own dash; the chain clock now prints a second `—` of
+    // its own beneath it (D-256, D-261), so the finder is scoped.
+    expect(
+      find.descendant(of: find.byType(KvAmount), matching: find.text('—')),
+      findsOneWidget,
+    );
     expect(find.text('No recent activity'), findsOneWidget);
 
     // A live, EMPTY synced wallet: a real 0.00000000 KAS, never `—`/skeleton.
@@ -117,7 +125,7 @@ void main() {
     // **The chain clock reads under the balance** (A4, founder ruling D-256).
     // BG-8 is amended to seat it: a chain counter that stops IS the stale
     // signal, so its motion is the reading rather than decoration.
-    expect(find.textContaining('DAA 458,174,109'), findsOneWidget);
+    expect(find.text('458,174,109'), findsOneWidget);
 
     // Funds arrive (matured + pending) with an incoming, still-pending row.
     mature.value = BigInt.parse('123456789012'); // 1,234.56789012 KAS
@@ -312,7 +320,9 @@ void main() {
         ),
       ),
     );
-    expect(find.text('2 m ago'), findsOneWidget);
+    // The time rides the sub-line after the lifecycle word (`Final · 2 m
+    // ago`, render `S1`, D-261).
+    expect(find.textContaining('2 m ago'), findsOneWidget);
 
     // A minute passes on the wall clock, but the 1 s ticker never fires
     // (zero-duration pumps) — only the balance notifies.
@@ -323,7 +333,7 @@ void main() {
 
     // The panel repainted (new number), the feed did not (old age line).
     expectFigure('3', '00');
-    expect(find.text('2 m ago'), findsOneWidget);
+    expect(find.textContaining('2 m ago'), findsOneWidget);
     expect(find.text('3 m ago'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
@@ -708,6 +718,12 @@ void main() {
     await tester.scrollUntilVisible(
       find.text('Showing the $kActivityFeedCap most recent.'),
       300,
+      // The rows' own scrollable — the band above the card scrolls too now
+      // (D-262), so the finder must say which.
+      scrollable: find.descendant(
+        of: find.byType(ListView),
+        matching: find.byType(Scrollable),
+      ),
     );
     expect(
       find.text('Showing the $kActivityFeedCap most recent.'),

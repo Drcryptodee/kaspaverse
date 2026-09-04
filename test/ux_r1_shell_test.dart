@@ -204,24 +204,24 @@ void main() {
       );
     });
 
-    testWidgets('an unbuilt destination wears a tag and takes NO tap (§8)', (
-      tester,
-    ) async {
+    testWidgets('a destination without a tap is a record, not a dead button '
+        '(§8), and wears no tag (S2, D-261)', (tester) async {
+      final semantics = tester.ensureSemantics();
       await pumpShell(tester, const Size(1180, 800));
+      // The fixture leaves these three without a tap. The render shows no
+      // tag on any row, so what §8 requires is that an untappable row is not
+      // announced as a button — never that it carries a label saying so.
       for (final unbuilt in const ['Games', 'Finance', 'Identity']) {
-        final row = find.ancestor(
-          of: find.text(unbuilt),
-          matching: find.byType(KvRow),
-        );
-        expect(row, findsOneWidget, reason: unbuilt);
+        expect(find.text(unbuilt), findsOneWidget, reason: unbuilt);
+        final node = tester.getSemantics(find.text(unbuilt));
         expect(
-          tester.widget<KvRow>(row).onTap,
-          isNull,
+          node.flagsCollection.isButton,
+          isFalse,
           reason: '$unbuilt is a dead button if it answers a tap',
         );
       }
-      // The tag itself, in the seat the feature will occupy.
-      expect(find.text('Coming soon'), findsNWidgets(3));
+      expect(find.text('Coming soon'), findsNothing);
+      semantics.dispose();
     });
 
     testWidgets('every destination §4 names is seated, in §4\'s order', (
@@ -275,23 +275,40 @@ void main() {
   group('KvMoneyPlate / KvMoneyBar (BG-28, BG-33)', () {
     testWidgets('the plate holds only what is always true', (tester) async {
       await pumpShell(tester, const Size(393, 851));
-      // Label, figure, fiat slot, live dot, the raised pair — and nothing
-      // transient inside the plate itself.
+      // Label, figure, fiat slot, live dot, the chain clock — and nothing
+      // transient inside the plate itself. **Send and Receive are not in it**
+      // (render `S1`, D-261): they are the bar at the foot.
       final plate = find.byType(KvMoneyPlate);
       expect(plate, findsOneWidget);
-      for (final always in const ['Receive', 'Send']) {
+      for (final verb in const ['Receive', 'Send']) {
         expect(
-          find.descendant(of: plate, matching: find.text(always)),
-          findsOneWidget,
-          reason: always,
+          find.descendant(of: plate, matching: find.text(verb)),
+          findsNothing,
+          reason: '$verb left the plate for the foot bar',
         );
+        expect(find.text(verb), findsOneWidget, reason: verb);
       }
       expect(
         find.descendant(of: plate, matching: find.byType(KvLamp)),
         findsOneWidget,
         reason: 'the live dot is IN the plate (§4)',
       );
-      // The pair is 52 high and raised — not the screen's one primary fill.
+      expect(
+        find.descendant(of: plate, matching: find.text('DAA')),
+        findsOneWidget,
+        reason: 'the chain clock is IN the plate (D-256)',
+      );
+      // The foot pills are 60 high (S1, measured), Send lit, Receive raised,
+      // and the plate's bottom edge sits above the bar's top.
+      final send = tester.widget<AnimatedContainer>(
+        find
+            .ancestor(
+              of: find.text('Send'),
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
+      );
+      expect((send.decoration! as BoxDecoration).color, KvColor.primary);
       expect(
         tester
             .getSize(
@@ -303,7 +320,11 @@ void main() {
                   .first,
             )
             .height,
-        KvSpace.controlThumb,
+        60,
+      );
+      expect(
+        tester.getRect(plate).bottom,
+        lessThan(tester.getRect(find.text('Send')).top),
       );
     });
 
@@ -564,47 +585,50 @@ void main() {
       await tester.pump();
       await tester.pump(KvMotion.enter);
 
-      final viewport = tester.getRect(find.byType(CustomScrollView));
-      await tester.drag(find.byType(CustomScrollView), const Offset(0, -600));
-      await tester.pump();
-
-      final header = tester
-          .renderObjectList<RenderSliverPersistentHeader>(
-            find.byType(SliverPersistentHeader),
-          )
-          .first;
-      final pinned = header.geometry!.paintExtent;
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'nothing overflows at the floor',
+      );
       final plate = tester.getRect(find.byType(KvMoneyPlate));
-      final strip = tester.getRect(
-        find.textContaining('node has no UTXO index'),
+      final tabs = tester.getRect(find.byType(KvTabs));
+      // The band above the card — the plate and the strip — is capped so the
+      // card keeps its head and a row; whatever the band cannot show inside
+      // its cap is one pull away inside it (D-262).
+      final band = tester.state<ScrollableState>(
+        find
+            .descendant(
+              of: find.byType(SingleChildScrollView),
+              matching: find.byType(Scrollable),
+            )
+            .first,
       );
       // The numbers, printed so the record carries a measurement rather than
       // an adjective (L121).
       debugPrint(
-        'A3 @ 320x568/1.3x — viewport ${viewport.height.toStringAsFixed(1)} · '
-        'cap ${(viewport.height / 2).toStringAsFixed(1)} · '
-        'pinned ${pinned.toStringAsFixed(1)} · '
-        'plate ${plate.height.toStringAsFixed(1)} · '
-        'sentence bottom ${(strip.bottom - viewport.top).toStringAsFixed(1)}',
+        'A3 @ 320x568/1.3x — plate ${plate.height.toStringAsFixed(1)} · '
+        'band overflow ${band.position.maxScrollExtent.toStringAsFixed(1)} · '
+        'tabs top ${tabs.top.toStringAsFixed(1)}',
       );
 
       // **The cost, asserted rather than described.** At this geometry the
-      // band wants 309 dp against a 234.5 dp cap, so it pins at the plate
-      // (221.2) and the strip below it is clipped: the trust SENTENCE is what
-      // a squeeze takes. That is A3's risk note realised, and it is stated
-      // here so a later reader finds a measurement instead of an opinion.
+      // band's content exceeds its cap, and the strip's trust SENTENCE is
+      // what falls outside it. That is A3's risk note realised, and it is
+      // stated here so a later reader finds a measurement instead of an
+      // opinion.
       expect(
-        strip.bottom - viewport.top,
-        greaterThan(pinned),
+        band.position.maxScrollExtent,
+        greaterThan(0),
         reason: 'A3: the sentence sheds — say so out loud, do not discover it',
       );
 
       // **The plate survives the squeeze whole.** Every part of it is
-      // load-bearing under BG-28, so none of it is sheddable.
+      // load-bearing under BG-28, so none of it is sheddable: it sits
+      // entirely above the card's head.
       expect(
         plate.bottom,
-        lessThanOrEqualTo(viewport.top + pinned + 0.5),
-        reason: 'the plate itself must never be clipped by the pinned band',
+        lessThanOrEqualTo(tabs.top + 0.5),
+        reason: 'the plate itself must never be clipped',
       );
       // The signal is inside it, and stays.
       expect(
@@ -663,13 +687,15 @@ void main() {
         .length;
 
     // The money column spends teal on **the ledger's active tab underline
-    // alone**, since the founder corrected the link dot to `ok` green (D-259).
+    // and the lit Send pill** — the money door, at the foot (render `S1`,
+    // D-261) — since the founder corrected the link dot to `ok` green
+    // (D-259). Two of three.
     expect(
       emissionsIn(find.byType(HomeScreen)),
       lessThanOrEqualTo(3),
       reason: 'ration the light and its arrival still means something',
     );
-    expect(emissionsIn(find.byType(HomeScreen)), 1);
+    expect(emissionsIn(find.byType(HomeScreen)), 2);
     // **The navigation column spends nothing now** (D-260): the orb and the
     // wordmark are gone, and the header is the wallet's own identity — a
     // `tealTint` avatar with a `primaryMuted` initial, both ambient and
@@ -784,28 +810,22 @@ Future<void> pumpShell(
         destinations: [
           KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
           KvDestination(mark: KvGlyph.chat, label: 'Messages', onTap: () {}),
-          const KvDestination(
-            mark: KvGlyph.games,
-            label: 'Games',
-            tag: 'Coming soon',
-          ),
-          const KvDestination(
-            mark: KvGlyph.finance,
-            label: 'Finance',
-            tag: 'Coming soon',
-          ),
-          const KvDestination(
-            mark: KvGlyph.identity,
-            label: 'Identity',
-            tag: 'Coming soon',
-          ),
+          const KvDestination(mark: KvGlyph.games, label: 'Games'),
+          const KvDestination(mark: KvGlyph.finance, label: 'Finance'),
+          const KvDestination(mark: KvGlyph.identity, label: 'Identity'),
         ],
-        footer: [
+        // The render's second group and its foot (`S2 · Drawer`, D-261).
+        secondary: [
           KvDestination(
             mark: KvGlyph.settings,
             label: 'Settings',
             onTap: () {},
           ),
+          KvDestination(mark: KvGlyph.network, label: 'Network', onTap: () {}),
+          KvDestination(mark: KvGlyph.shield, label: 'Security', onTap: () {}),
+          KvDestination(mark: KvGlyph.help, label: 'Help', onTap: () {}),
+        ],
+        footer: [
           KvDestination(mark: KvGlyph.lock, label: 'Lock', onTap: () {}),
         ],
         child: HomeScreen(

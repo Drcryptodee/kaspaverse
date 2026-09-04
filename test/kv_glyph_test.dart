@@ -20,6 +20,9 @@ class _RecordingCanvas implements Canvas {
   void drawLine(Offset p1, Offset p2, Paint paint) => paints.add(paint);
 
   @override
+  void drawRRect(RRect rrect, Paint paint) => paints.add(paint);
+
+  @override
   void drawArc(
     Rect rect,
     double startAngle,
@@ -58,6 +61,9 @@ class _Census implements Canvas {
 
   @override
   void drawLine(Offset p1, Offset p2, Paint paint) => contours += 1;
+
+  @override
+  void drawRRect(RRect rrect, Paint paint) => contours += 1;
 
   @override
   void drawArc(Rect r, double s, double sw, bool useCenter, Paint paint) =>
@@ -136,17 +142,17 @@ void main() {
     });
 
     test('no mark drifts into an illustration', () {
-      // §2 says "1–3 strokes", and that is a design judgement a device settles
-      // — `selfSend` is two arrows a person reads as one gesture and four
-      // polylines a canvas reads as four. So this does NOT pretend to check
-      // the law. It is a **drift ceiling**, set one step above where the
-      // set actually sits today (max 4 contours, max 4 dots), so a glyph that
-      // grows a fifth line reds here and gets looked at on glass.
+      // The set is Lucide's own geometry, transcribed (§2a, D-261), so the
+      // ceiling is where Lucide sits: `sliders-horizontal` is nine strokes and
+      // is the densest mark the renders use. This does NOT pretend to check a
+      // law. It is a **drift ceiling**, one step above the set today (max 9
+      // contours, max 4 dots), so a glyph that grows past it reds here and
+      // gets looked at on glass.
       for (final mark in KvGlyph.values) {
         final census = _censusOf(mark);
         expect(
           census.contours + census.arcs,
-          lessThanOrEqualTo(4),
+          lessThanOrEqualTo(10),
           reason:
               '$mark draws ${census.contours} lines and ${census.arcs} '
               'arcs — take it back to the device before raising this',

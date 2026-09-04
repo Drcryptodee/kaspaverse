@@ -344,7 +344,10 @@ abstract final class KvColor {
   static const Color glassFill = Color(0x08FFFFFF);
 }
 
-/// §3 — Spacing. 4 dp grid; the only permitted steps. Screen gutter 24 dp.
+/// §3 — Spacing. 4 dp grid; the only permitted steps. Screen gutter **16 dp**
+/// in `compact` (founder ruling 2026-09-04, D-261: the content stood too far
+/// from the edges on a 360 dp phone and read as narrow; the plates now run
+/// close to the glass).
 abstract final class KvSpace {
   static const double xs = 4;
   static const double s = 8;
@@ -361,8 +364,11 @@ abstract final class KvSpace {
   /// @Deprecated — not a Deep V6 step; nearest is [xl].
   static const double xxl = 48;
 
-  /// Screen edge gutter in `compact`. Wider classes use [KvLayout.gutterFor].
-  static const double gutter = 24;
+  /// Screen edge gutter in `compact`. Wider classes use [KvLayout.gutters].
+  /// **16, not 24** (D-261): the intake render `S1 · Home` keeps 24 on a
+  /// 393 dp frame, and on the 360 dp glass the same 24 left a column the
+  /// founder read as narrow. Amended in the Bible (§3), not argued away here.
+  static const double gutter = 16;
 
   /// Minimum touch target — **raised from 48 to 52 in v4.2** (BG-12). A
   /// smaller *visual* is permitted inside a target this size only if the code
@@ -552,7 +558,7 @@ abstract final class KvLayout {
   static const double columnGap = 24;
 
   /// Outer gutter per width class: compact · medium · expanded · wide.
-  static const List<double> gutters = [24, 32, 40, 48];
+  static const List<double> gutters = [KvSpace.gutter, 32, 40, 48];
 
   /// A floating sheet's width in `medium` and above.
   static const double sheetFloatingWidth = 560;

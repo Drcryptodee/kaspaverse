@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
+import 'kv_chrome.dart';
 import 'kv_glyph.dart';
 
 /// **A feature that exists in the product's intent but not in the build**
@@ -136,6 +138,68 @@ class _Tag extends StatelessWidget {
             // inkDim, not inkMeta: this sits on `chip`, where inkMeta measures
             // 4.30 and fails AA (§1.4, BG-14).
             color: KvColor.inkDim,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **A destination that is not built yet, as a page** (D-261, render `S2 ·
+/// Drawer`).
+///
+/// The render seats Games, Finance, Identity and Help as ordinary rows — no
+/// tag, the same weight as the rows beside them. §8 still forbids a control
+/// that answers a tap and does nothing, so the row does not go dead: it opens
+/// this, which is [KvComingSoon] standing exactly where the feature will
+/// stand, with the bar the feature will have. The user learns two true things
+/// — that the seat exists, and that nothing is behind it yet — instead of one
+/// false one.
+class KvComingSoonPage extends StatelessWidget {
+  const KvComingSoonPage({
+    super.key,
+    required this.mark,
+    required this.name,
+    this.sentence = 'Not built yet. It will live here.',
+  });
+
+  final KvGlyph mark;
+  final String name;
+  final String sentence;
+
+  @override
+  Widget build(BuildContext context) {
+    // The class's own gutter and the one-column cap (BG-33, §3a.2): a page
+    // pushed at 1180 dp is a 560 column, not an 1148 dp plate.
+    final metrics = KvWindow.of(context);
+    return Scaffold(
+      body: SafeArea(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: KvLayout.columnMax),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                KvTopBar(
+                  title: name,
+                  onBack: () => Navigator.of(context).pop(),
+                ),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    metrics.gutter,
+                    KvSpace.m,
+                    metrics.gutter,
+                    0,
+                  ),
+                  child: KvComingSoon(
+                    mark: mark,
+                    name: name,
+                    sentence: sentence,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

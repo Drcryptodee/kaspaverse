@@ -13,6 +13,7 @@ import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/finders.dart';
 
@@ -198,26 +199,28 @@ void main() {
       // underline — and on a proven zero the statement is not a brighter
       // Receive but a Send that is disabled and says why (BG-12), which is
       // the stronger of the two.
+      // **Send is disabled and says why INSIDE its pill** (BG-12, D-262): the
+      // foot bar's footprint is constant, so the reason replaces the verb on
+      // a `shelf` pill. Receive is raised, never the one primary fill.
       expect(find.text('Nothing to send yet'), findsOneWidget);
-      for (final pill in const ['Receive', 'Send']) {
-        final box = tester.widget<AnimatedContainer>(
-          find
-              .ancestor(
-                of: find.text(pill),
-                matching: find.byType(AnimatedContainer),
-              )
-              .first,
-        );
-        expect(
-          (box.decoration! as BoxDecoration).color,
-          isNot(KvColor.primary),
-          reason: '$pill is raised, never the one primary fill',
-        );
-      }
+      expect(find.text('Send'), findsNothing);
+      final receive = tester.widget<AnimatedContainer>(
+        find
+            .ancestor(
+              of: find.text('Receive'),
+              matching: find.byType(AnimatedContainer),
+            )
+            .first,
+      );
+      expect(
+        (receive.decoration! as BoxDecoration).color,
+        isNot(KvColor.primary),
+        reason: 'Receive is raised, never the one primary fill',
+      );
       final send = tester.widget<AnimatedContainer>(
         find
             .ancestor(
-              of: find.text('Send'),
+              of: find.text('Nothing to send yet'),
               matching: find.byType(AnimatedContainer),
             )
             .first,
@@ -225,7 +228,7 @@ void main() {
       expect(
         (send.decoration! as BoxDecoration).color,
         KvColor.shelf,
-        reason: 'a disabled pill is `shelf` with an `etch` label (§4)',
+        reason: 'a disabled pill is `shelf`, its reason in words on it (§4)',
       );
 
       await tester.pumpWidget(const SizedBox());
@@ -309,7 +312,9 @@ void main() {
       expect(find.text('1,284'), findsOneWidget);
       expect(find.text('.5027'), findsOneWidget);
       expect(find.text('KAS'), findsWidgets);
-      expect(styleOf(tester, 'KAS').color, KvColor.primaryMuted);
+      // `inkMeta`, not teal: the render sets the unit in the meta grey
+      // (S1, D-261).
+      expect(styleOf(tester, 'KAS').color, KvColor.inkMeta);
 
       // **The chain clock reads under the balance** (A4, founder ruling
       // D-256). It came off at UX-R1 on a reading of BG-8 and went back on
@@ -318,7 +323,10 @@ void main() {
       // the stale signal. BG-8 is amended to seat it rather than worked
       // around. `DAA` is a word and takes Jakarta; the score is a figure and
       // takes mono (BG-30).
-      expect(find.textContaining('DAA 2,000'), findsOneWidget);
+      // The label and the figure are two runs now (render `S1`: `DAA` as a
+      // caps label, the score in 16 dp mono beside it, D-261).
+      expect(find.text('DAA'), findsOneWidget);
+      expect(find.text('2,000'), findsOneWidget);
       // The fiat slot rendering the honest unknown.
       expect(find.text('≈ —'), findsOneWidget);
       expect(find.text('no rate yet'), findsOneWidget);
@@ -758,10 +766,10 @@ void main() {
     /// top of the ledger.** Asserted rather than the number itself, because a
     /// number is exactly the claim `L121` says goes stale.
     void expectNoOverlap(WidgetTester tester) {
-      // Measured off the LAST thing inside the pinned band. Since BG-28 that
-      // is the plate's own Send / Receive pair, not the chain clock — the DAA
-      // readout moved to the network surface at UX-R1.
-      final plateBottom = tester.getRect(find.text('Receive')).bottom;
+      // Measured off the plate itself. Send · Receive left it for the foot
+      // bar (D-261), so the plate's own bottom edge is the last thing in the
+      // pinned band before the strip.
+      final plateBottom = tester.getRect(find.byType(KvMoneyPlate)).bottom;
       final rowTop = tester.getRect(find.text('Received')).top;
       expect(
         plateBottom,
@@ -823,38 +831,16 @@ void main() {
     testWidgets('it never swallows the viewport, however tall it grows', (
       tester,
     ) async {
-      // The failure this is written against, measured: at 320x568 with 1.3x
-      // text in the degraded state the plate is 446.8dp against a 406.0dp
-      // viewport. With `minExtent` set to the measured height and nothing
-      // else, the header pinned at the FULL viewport at every scroll offset —
-      // the ledger was laid out beneath it, painted over by its opaque ground
-      // and un-hit-testable behind it. 360x640 at 1.3x measured 437.6 against
-      // 478.0, one caption line from the same failure on the founder's own
-      // device (`ux-auditor`, this sitting).
-      //
-      // Every state test before this one ran at 850dp tall, so none of them
-      // could see it. Height is an input now.
-      // 320x568 and 360x640 are real phones (the second is the founder's own
-      // bucket); 320x400 is a phone in split-screen, which Android supports and
-      // which is where the clamp actually has to bind.
-      //
-      // The third column is whether the honesty line is PROMISED to fit inside
-      // the band. It is, at every phone the app claims to support. It is not
-      // at 320x400 — a 240dp viewport cannot hold the essential block, and at
-      // that size something has to give; the whole plate stays one
-      // scroll-to-top away. Recorded as a bounded promise rather than dropped,
-      // because a promise that quietly excludes the tight cases is the kind
-      // this audit has already caught twice.
-      //
-      // **320x400 is also `short`** (BG-33's height class is `< 480`), so it
-      // is the geometry where the plate collapses to `KvMoneyBar` and the
-      // plate-shaped assertions below do not apply to it. That is the law's
-      // own answer to a viewport this tight, and the fourth column says which
-      // of the two shapes is on the glass.
-      for (final (w, h, clamped, fits, short) in const [
-        (320.0, 568.0, false, true, false),
-        (360.0, 640.0, false, true, false),
-        (320.0, 400.0, true, false, true),
+      // **The plate is fixed above the ledger card now** (D-262), and the
+      // band it sits in is capped so the card always keeps its head and one
+      // row: the band clips inside its cap rather than pushing the ledger
+      // off the glass. 320x568 and 360x640 are real phones; 320x400 is a
+      // phone in split-screen, and it is also `short` (BG-33), where the
+      // plate is the 56 dp bar. Height is an input.
+      for (final (w, h, short) in const [
+        (320.0, 568.0, false),
+        (360.0, 640.0, false),
+        (320.0, 400.0, true),
       ]) {
         await pump(
           tester,
@@ -876,18 +862,8 @@ void main() {
           height: h,
           textScale: 1.3,
         );
-
-        final viewport = tester.getRect(find.byType(CustomScrollView));
-        await tester.drag(find.byType(CustomScrollView), const Offset(0, -600));
-        await tester.pump();
-
-        final header = tester
-            .renderObjectList<RenderSliverPersistentHeader>(
-              find.byType(SliverPersistentHeader),
-            )
-            .first;
-        final pinned = header.geometry!.paintExtent;
         final where = '${w.toInt()}x${h.toInt()}';
+        expect(tester.takeException(), isNull, reason: '$where overflowed');
         // **The one collapse there is** (BG-33): a `short` window trades the
         // plate for the 56 dp bar, and nothing else on the screen changes.
         expect(
@@ -901,125 +877,18 @@ void main() {
           short ? findsNothing : findsOneWidget,
           reason: where,
         );
-        if (clamped) {
-          expect(
-            pinned,
-            lessThanOrEqualTo(viewport.height / 2 + 0.5),
-            reason:
-                '$where: the plate is taller than the viewport can spare, '
-                'so it must yield to half — unclamped it pins at the full '
-                'viewport and the ledger becomes unreachable',
-          );
-        }
-        // **What the plate KEEPS is the argued half of this.** The header
-        // sheds its bottom, so the order of the plate decides what a squeeze
-        // takes — and it must never take the sentence that says the number
-        // above it may be wrong. The fiat line and the chain clock sit below
-        // the rule for exactly this reason; the honesty line sits above it and
-        // is asserted inside the surviving band.
-        //
-        // **Asserted as a FIT inside the band, not as a widget ordering.** The
-        // first version of this compared `trust.bottom <= fiat.top <= daa.top`
-        // — which is true by construction from the `Column` and so could not
-        // fail while the widget order stood, exactly the property that was
-        // failing. What the band keeps is the thing to measure: at 320x568 and
-        // 360x640 at 1.3x the honesty line was 72 of 77dp and 21 of 52dp
-        // outside it, clipped rather than dimmed, while a full-brightness
-        // figure stayed pinned above (`ux-auditor`, measured).
-        final trust = tester.getRect(
-          find.textContaining('node has no UTXO index'),
-        );
-        // **The honesty line is no longer promised inside the band**, and that
-        // is a deliberate, recorded cost. The founder moved the fiat line above
-        // the rule and the trust line below it (2026-08-27, on glass), which
-        // puts the honesty back in the shed zone at the geometries where the
-        // plate cannot fit. What makes it tolerable is the other half of that
-        // change: the plate now sheds ONLY under pressure, so on every screen
-        // where the plate fits, nothing is shed and the sentence is always
-        // there. See the A3 risk note in `2026-08-27_UI-UX_…TODO.md`.
-        // The honesty line moved out of the plate and into the status strip
-        // beneath the card (founder, device sitting 2026-08-31). **That did
-        // NOT retire the shed cost** — an earlier version of this comment
-        // claimed it did, and the measurement says otherwise: the strip rides
-        // inside the pinned band, so at the geometries where the band is
-        // smaller than its content the strip is clipped exactly as the line
-        // was before. At 320x568 it fits (header 72..303, strip 246..303);
-        // at the tightest it does not. The A3 risk note stands unchanged.
-        if (fits) {
-          expect(
-            find.textContaining('node has no UTXO index'),
-            findsOneWidget,
-            reason: '$where: the sentence must at least still be rendered',
-          );
-        }
-        // **BG-28's order, pinned so a later edit cannot shuffle it back**:
-        // the plate holds only what is always true — figure, then its `≈`
-        // restatement, then the raised pair — and everything transient is
-        // beneath it. The chain clock is not in this comparison any more
-        // because it is not on this screen any more (UX-R1).
-        if (!short) {
-          final fiat = tester.getRect(find.text('≈ —'));
-          final pair = tester.getRect(find.text('Receive'));
-          expect(
-            fiat.bottom,
-            lessThanOrEqualTo(pair.top + 0.5),
-            reason: '$where: the fiat restatement belongs with the figure',
-          );
-        }
-        // The link sentence sits below the CARD, not below the chain clock:
-        // it is no longer inside the plate at all, so the ordering that
-        // matters is that it clears the pinned band. Comparing it against the
-        // DAA line would compare it against a widget the squeeze has clipped
-        // out of sight, which is how this assertion first failed.
-        // The link sentence sits below the CARD — it is not inside the plate
-        // any more, so the ordering that matters is that it clears the card's
-        // own bottom edge. Comparing it against the DAA line would compare it
-        // against a widget the squeeze has clipped out of sight, which is how
-        // this assertion first failed.
-        final card = tester.getRect(
-          short ? find.byType(KvMoneyBar) : find.byType(KvMoneyPlate),
-        );
+        // The card keeps its head and its first row on the glass, whatever
+        // the band above it wanted.
         expect(
-          trust.top,
-          greaterThanOrEqualTo(card.bottom - 0.5),
-          reason: '$where: the status strip belongs under the card',
+          tester.getRect(find.byType(KvTabs)).bottom,
+          lessThanOrEqualTo(h),
+          reason: '$where: the tabs are on the glass',
         );
-        // Deliberately NOT asserted here: that the strip lands inside the
-        // pinned band. It does at 320x568 (header 72..303, strip 246..303) and
-        // it does not at the tightest geometry, where the band is smaller than
-        // its own content and the tail is shed — which is the same cost the
-        // trust line already carried inside the plate. Two drafts of this
-        // assertion claimed otherwise and the measurement refused both.
-
-        // The paint half cannot be observed off-golden: an `OverflowBox`
-        // overflowing by design throws nothing, and `getRect` reports the
-        // unclipped box either way. This is the structural stand-in — the
-        // clip's absence is what let the plate paint its trust line and its
-        // chain clock straight over the ledger rows at both geometries above.
+        expect(find.text('Received'), findsOneWidget, reason: where);
         expect(
-          find.descendant(
-            of: find.byType(SliverPersistentHeader).first,
-            matching: find.byType(ClipRect),
-          ),
-          findsWidgets,
-          reason: '$where: the pinned header paints unbounded',
-        );
-
-        // The property that actually matters to a user, at every size: a row
-        // is on the glass, BELOW the plate, not behind it. An over-tall pinned
-        // header lays the rows out and then paints its own opaque ground over
-        // them, which no `findsOneWidget` can see.
-        final row = tester.getRect(find.text('Received'));
-        expect(row.top, greaterThanOrEqualTo(viewport.top), reason: where);
-        expect(
-          row.bottom,
-          lessThanOrEqualTo(viewport.bottom + 0.5),
-          reason: where,
-        );
-        expect(
-          row.top,
-          greaterThanOrEqualTo(viewport.top + pinned - 1),
-          reason: '$where: the row is painted behind the pinned plate',
+          tester.getRect(find.text('Received')).bottom,
+          lessThanOrEqualTo(h),
+          reason: '$where: the first row is on the glass',
         );
       }
       await tester.pumpWidget(const SizedBox());

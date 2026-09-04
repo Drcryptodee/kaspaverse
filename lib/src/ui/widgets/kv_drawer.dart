@@ -1,6 +1,9 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
+import '../../app_version.dart';
 
 import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
@@ -9,30 +12,38 @@ import 'kv_address.dart';
 import 'kv_mark.dart';
 import 'kv_rows.dart';
 
-/// One place the app can go, or one place it will be able to go.
+/// One place the app can go.
 ///
-/// **An unbuilt destination is not a disabled one** (§8). It renders with a
-/// `chipLabel` tag saying so and takes no tap at all, because a control that
-/// responds and does nothing teaches distrust of every other control on the
-/// screen. [onTap] null *is* the unbuilt state — the two cannot drift apart
-/// because they are one field.
+/// **Every row in the render is a live row** (`S2 · Drawer`, D-261): no tag,
+/// no muted "coming soon" state. A destination whose feature is unbuilt opens
+/// `KvComingSoonPage` — the seat, honestly empty — rather than dying under the
+/// thumb (§8). [onTap] may still be null for a fixture, and then the row is a
+/// record rather than a control and says so to a screen reader.
 @immutable
 class KvDestination {
   const KvDestination({
     required this.mark,
     required this.label,
     this.onTap,
-    this.tag,
+    this.count,
+    this.live,
   });
 
   final KvGlyph mark;
   final String label;
 
-  /// Null ⇒ **not built yet**; [tag] is what the row says instead.
+  /// Null ⇒ not a control.
   final VoidCallback? onTap;
 
-  /// The `chipLabel` a destination wears when it has nowhere to go.
-  final String? tag;
+  /// A count riding at the row's right edge — `metaMono` in `primary`
+  /// (render: Messages · `2`). Null shows nothing; **a count is never faked**,
+  /// so a surface without a real source passes null.
+  final int? count;
+
+  /// A 6 dp status lamp at the row's right edge (render: Network · dot). `ok`
+  /// while true, `warn` while false — the same reading as the plate's lamp,
+  /// and it is a listenable so the row cannot disagree with the plate.
+  final ValueListenable<bool>? live;
 
   bool get built => onTap != null;
 }
@@ -82,16 +93,21 @@ class KvNav extends StatefulWidget {
     required this.footer,
     required this.selected,
     required this.child,
+    this.secondary = const [],
     this.header,
   });
 
   /// Wallet · Messages · Games · Finance · Identity (§4).
   final List<KvDestination> destinations;
 
+  /// The second group, after a gap: Settings · Network · Security · Help
+  /// (render `S2 · Drawer`, D-261).
+  final List<KvDestination> secondary;
+
   /// The wallet's identity block, at the head of the panel (D-260).
   final Widget? header;
 
-  /// Settings and Lock, at the foot.
+  /// Lock, at the foot, beside the version.
   final List<KvDestination> footer;
 
   /// Index into [destinations] of the page currently showing.
@@ -161,6 +177,7 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
           children: [
             KvRail(
               destinations: widget.destinations,
+              secondary: widget.secondary,
               footer: widget.footer,
               selected: widget.selected,
             ),
@@ -178,6 +195,7 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
               width: KvNav.width,
               child: KvDrawer(
                 destinations: widget.destinations,
+                secondary: widget.secondary,
                 footer: widget.footer,
                 selected: widget.selected,
                 header: widget.header,
@@ -230,6 +248,7 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
                     TickerMode(enabled: _push.value > 0, child: panel!),
                 child: KvDrawer(
                   destinations: widget.destinations,
+                  secondary: widget.secondary,
                   footer: widget.footer,
                   selected: widget.selected,
                   header: widget.header,
@@ -286,9 +305,6 @@ class _PushedPage extends StatelessWidget {
   final GestureDragUpdateCallback onDragUpdate;
   final GestureDragEndCallback onDragEnd;
   final Widget child;
-
-  /// The band an edge swipe starts in. `compact` only (§3a.2).
-  static const double edge = 20;
 
   @override
   Widget build(BuildContext context) {
@@ -349,18 +365,24 @@ class _PushedPage extends StatelessWidget {
       // drawer on the platform answers to, and it costs nothing.
       onTap: onDismiss,
     );
-    // **Closed, the gesture lives in a 20 dp band at the left edge; open, it
-    // is the whole page.** A horizontal drag detector across a closed page
-    // would claim every sideways gesture the app will ever add (a segmented
-    // control, a carousel, a swipe on a row) and would not be an *edge* swipe
-    // at all, which is the only thing §3a.2 grants.
+    // **The drag lives on the whole page, closed or open** (founder, on glass
+    // 2026-09-04, D-262: *"a swipe to the right on the home screen naturally
+    // brings the side nav, very fluid, just a natural gesture"*). Closed, the
+    // detector carries ONLY the horizontal drag — no tap — so every button on
+    // the page keeps its tap and the ledger keeps its vertical scroll; the
+    // arena hands a sideways movement here and everything else to the page.
+    // Open, it also takes the tap that puts the page back. §3a.2's 20 dp edge
+    // band is superseded.
+    final closedDrag = GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragStart: onDragStart,
+      onHorizontalDragUpdate: onDragUpdate,
+      onHorizontalDragEnd: onDragEnd,
+    );
     return Stack(
       children: [
         page,
-        if (t == 0)
-          Positioned(top: 0, bottom: 0, left: 0, width: edge, child: drag)
-        else
-          Positioned.fill(child: drag),
+        Positioned.fill(child: t == 0 ? closedDrag : drag),
       ],
     );
   }
@@ -376,12 +398,18 @@ class KvDrawer extends StatelessWidget {
     required this.footer,
     required this.selected,
     required this.standing,
+    this.secondary = const [],
     this.onNavigate,
     this.header,
   });
 
   final List<KvDestination> destinations;
+  final List<KvDestination> secondary;
   final List<KvDestination> footer;
+
+  /// The panel's inner gutter (render `S2`: glyphs start at 32, the count and
+  /// the lamp end at 296 − 32).
+  static const double inset = KvSpace.xl;
   final int selected;
 
   /// `expanded`+ tall: opaque, no scrim, a hairline right edge as its only
@@ -409,26 +437,31 @@ class KvDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // **Bare rows on the ground, two groups and a gap** (render `S2`). The
+    // 40 dp sockets §4 gave every row are gone from the drawer — the render
+    // draws the glyph alone, and the active row is the glyph in `primary`
+    // with its label in `ink` — and they stay in the rail, where the render
+    // keeps them (`R5`).
     return _NavGround(
       standing: standing,
       child: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: KvSpace.s),
             if (header != null)
               Padding(
+                // 8 above, not 24: the wallet's name sits close under the
+                // status bar, like the page title (founder, on glass, D-262).
                 padding: const EdgeInsets.fromLTRB(
-                  KvSpace.s20,
-                  KvSpace.m,
-                  KvSpace.s20,
                   KvSpace.l,
+                  KvSpace.s,
+                  KvSpace.l,
+                  KvSpace.xl,
                 ),
                 child: header!,
               ),
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -438,32 +471,33 @@ class KvDrawer extends StatelessWidget {
                         active: i == selected,
                         onNavigate: onNavigate,
                       ),
+                    if (secondary.isNotEmpty) ...[
+                      // A gap, never a line: the render separates the two
+                      // groups with 28 dp of ground and nothing drawn.
+                      const SizedBox(height: KvSpace.s28),
+                      for (final d in secondary)
+                        _DestinationRow(
+                          destination: d,
+                          active: false,
+                          secondary: true,
+                          onNavigate: onNavigate,
+                        ),
+                    ],
                   ],
                 ),
               ),
             ),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: KvSpace.s20),
-              child: SizedBox(
-                height: 1,
-                child: ColoredBox(color: KvColor.hairline),
+            // The version belongs to the foot, not to each row of it: it
+            // rides the last row only (BG-19 — stated once).
+            for (final f in footer)
+              _DestinationRow(
+                destination: f,
+                active: false,
+                secondary: true,
+                onNavigate: onNavigate,
+                trailing: identical(f, footer.last) ? const _Version() : null,
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final f in footer)
-                    _DestinationRow(
-                      destination: f,
-                      active: false,
-                      onNavigate: onNavigate,
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(height: KvSpace.s),
+            const SizedBox(height: KvSpace.m),
           ],
         ),
       ),
@@ -513,29 +547,171 @@ class _DestinationRow extends StatelessWidget {
     required this.destination,
     required this.active,
     required this.onNavigate,
+    this.secondary = false,
+    this.trailing,
   });
 
   final KvDestination destination;
   final bool active;
+
+  /// The second group and the foot: 15 / 400 in `inkDim`, one step quieter
+  /// than the five primary destinations at 16 / 500 (render `S2`, measured).
+  final bool secondary;
+
   final VoidCallback? onNavigate;
+
+  /// Something at the right edge that is not a count or a lamp — the
+  /// version, beside Lock.
+  final Widget? trailing;
+
+  /// The row's height, every row (render: a 52 dp pitch — one touch target).
+  static const double height = KvSpace.touchTarget;
+
+  /// The bare glyph, and the gap to its word.
+  static const double glyph = 20;
 
   @override
   Widget build(BuildContext context) {
     final tap = destination.onTap;
-    return KvRow(
-      leading: active
-          ? KvRowDisc.ours(mark: destination.mark, ring: KvColor.tealTintEdge)
-          : KvRowDisc.neutral(mark: destination.mark),
-      title: destination.label,
-      trailing: destination.built ? null : _Tag(destination.tag ?? 'Next'),
-      onTap: tap == null
-          ? null
-          : () {
-              onNavigate?.call();
-              tap();
-            },
+    final tone = active ? KvColor.primary : KvColor.inkDim;
+    final count = destination.count;
+    final live = destination.live;
+    final body = SizedBox(
+      height: height,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: KvDrawer.inset),
+        child: Row(
+          children: [
+            KvGlyphIcon(destination.mark, size: glyph, tone: tone),
+            const SizedBox(width: KvSpace.s14),
+            Expanded(
+              child: Text(
+                destination.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: secondary ? 15 : 16,
+                  height: 20 / 15,
+                  fontWeight: active
+                      ? FontWeight.w600
+                      : (secondary ? FontWeight.w400 : FontWeight.w500),
+                  fontVariations: active
+                      ? KvWeight.w600
+                      : (secondary ? KvWeight.w400 : KvWeight.w500),
+                  color: active ? KvColor.ink : KvColor.inkDim,
+                ),
+              ),
+            ),
+            if (count != null) ...[
+              const SizedBox(width: KvSpace.s),
+              Text(
+                '$count',
+                style: const TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  fontWeight: FontWeight.w500,
+                  fontVariations: KvWeight.w500,
+                  color: KvColor.primary,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+            if (live != null) ...[
+              const SizedBox(width: KvSpace.s),
+              ValueListenableBuilder<bool>(
+                valueListenable: live,
+                builder: (context, up, _) => Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    // The same two readings as the plate's lamp (BG-7 as
+                    // amended: `ok` = link healthy): a dot in `ok` while the
+                    // link is up, `warn` while it is not. Never a third state.
+                    color: up ? KvColor.ok : KvColor.warn,
+                  ),
+                ),
+              ),
+            ],
+            if (trailing != null) ...[
+              const SizedBox(width: KvSpace.s),
+              trailing!,
+            ],
+          ],
+        ),
+      ),
+    );
+    if (tap == null) {
+      return Semantics(
+        label: destination.label,
+        child: ExcludeSemantics(child: body),
+      );
+    }
+    return Semantics(
+      button: true,
+      selected: active,
+      label: count == null ? destination.label : '${destination.label}, $count',
+      child: ExcludeSemantics(
+        child: _Pressable(
+          onTap: () {
+            onNavigate?.call();
+            tap();
+          },
+          child: body,
+        ),
+      ),
     );
   }
+}
+
+/// A row that lifts one step while pressed (§1.1) — a `GestureDetector`, not
+/// an `InkWell`, because the panel sits above every `Material`.
+class _Pressable extends StatefulWidget {
+  const _Pressable({required this.onTap, required this.child});
+
+  final VoidCallback onTap;
+  final Widget child;
+
+  @override
+  State<_Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends State<_Pressable> {
+  bool _down = false;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTap: widget.onTap,
+    onTapDown: (_) => setState(() => _down = true),
+    onTapUp: (_) => setState(() => _down = false),
+    onTapCancel: () => setState(() => _down = false),
+    child: ColoredBox(
+      color: _down ? KvColor.chipPressed : Colors.transparent,
+      child: widget.child,
+    ),
+  );
+}
+
+/// `v0.2.0` in `metaMono` beside Lock (render `S2`), from [kAppVersion].
+class _Version extends StatelessWidget {
+  const _Version();
+
+  @override
+  Widget build(BuildContext context) => const Text(
+    'v$kAppVersion',
+    style: TextStyle(
+      fontFamily: KvFont.mono,
+      fontSize: 12,
+      height: 16 / 12,
+      fontWeight: FontWeight.w500,
+      fontVariations: KvWeight.w500,
+      color: KvColor.inkMeta,
+      fontFeatures: [FontFeature.tabularFigures()],
+    ),
+  );
 }
 
 /// **The wallet you are standing in** — the drawer's header (D-260).
@@ -590,18 +766,20 @@ class KvWalletIdentity extends StatelessWidget {
                 name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                // Render `S2`: a 16 dp face at 600 over a 13 dp mono address
+                // in `inkMeta` — measured, not the 17 / 700 the first cut had.
                 style: const TextStyle(
                   fontFamily: KvFont.ui,
-                  fontSize: 17,
-                  height: 22 / 17,
-                  fontWeight: FontWeight.w700,
-                  fontVariations: KvWeight.w700,
+                  fontSize: 16,
+                  height: 20 / 16,
+                  fontWeight: FontWeight.w600,
+                  fontVariations: KvWeight.w600,
                   color: KvColor.ink,
                 ),
               ),
               if (addr != null) ...[
                 const SizedBox(height: 2),
-                KvAddress(addr, fontSize: 12),
+                KvAddress(addr, fontSize: 13),
               ],
             ],
           ),
@@ -609,37 +787,6 @@ class KvWalletIdentity extends StatelessWidget {
       ],
     );
   }
-}
-
-/// A `chipLabel` tag on a destination that has nowhere to go yet (§4, §8).
-/// [KvColor.inkDim] on [KvColor.chip] — `inkMeta` fails AA there (§1.4).
-class _Tag extends StatelessWidget {
-  const _Tag(this.words);
-
-  final String words;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(
-      horizontal: KvSpace.s10,
-      vertical: KvSpace.xs,
-    ),
-    decoration: BoxDecoration(
-      color: KvColor.chip,
-      borderRadius: BorderRadius.circular(KvRadius.control),
-    ),
-    child: Text(
-      words,
-      style: const TextStyle(
-        fontFamily: KvFont.ui,
-        fontSize: 11,
-        height: 16 / 11,
-        fontWeight: FontWeight.w600,
-        fontVariations: KvWeight.w600,
-        color: KvColor.inkDim,
-      ),
-    ),
-  );
 }
 
 /// **The 80 dp standing rail** (§3a.1) — `medium` at any height, and
@@ -655,9 +802,11 @@ class KvRail extends StatelessWidget {
     required this.destinations,
     required this.footer,
     required this.selected,
+    this.secondary = const [],
   });
 
   final List<KvDestination> destinations;
+  final List<KvDestination> secondary;
   final List<KvDestination> footer;
   final int selected;
 
@@ -712,6 +861,8 @@ class KvRail extends StatelessWidget {
                                   destination: destinations[i],
                                   active: i == selected,
                                 ),
+                              for (final d in secondary)
+                                _RailSocket(destination: d, active: false),
                             ],
                           ),
                         ),
@@ -771,9 +922,7 @@ class _RailSocket extends StatelessWidget {
                 height: 16 / 11,
                 fontWeight: FontWeight.w600,
                 fontVariations: KvWeight.w600,
-                // An unbuilt destination is quieter than a built one, and there
-                // is no room out here for the tag the drawer's row carries.
-                color: destination.built ? KvColor.inkDim : KvColor.inkMeta,
+                color: KvColor.inkDim,
               ),
             ),
           ],
@@ -783,7 +932,7 @@ class _RailSocket extends StatelessWidget {
     final tap = destination.onTap;
     if (tap == null) {
       return Semantics(
-        label: '${destination.label}. ${destination.tag ?? 'Not built yet'}',
+        label: destination.label,
         child: ExcludeSemantics(child: body),
       );
     }

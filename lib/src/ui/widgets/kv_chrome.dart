@@ -166,6 +166,7 @@ class KvAction extends StatefulWidget {
     this.disabledReason,
     this.mark,
     this.height = KvSpace.control,
+    this.inlineReason = false,
   });
 
   /// The raised form: `chip` fill, `ink` label. Sugar for `primary: false`,
@@ -204,6 +205,14 @@ class KvAction extends StatefulWidget {
   /// ([KvSpace.controlThumb], §4).
   final double height;
 
+  /// **The reason inside the pill, not beneath it.** For a control whose
+  /// footprint must stay constant — the money screen's foot bar, which the
+  /// ledger card stops exactly short of (D-262). The disabled pill then reads
+  /// the reason in `etch` where its verb was, at 12 / 500 on two lines at
+  /// most, and draws nothing under itself. BG-12 is met either way: the
+  /// reason is in words, on the control.
+  final bool inlineReason;
+
   /// The glyph's box (§4).
   static const double glyph = 18;
 
@@ -217,6 +226,7 @@ class _KvActionState extends State<KvAction> {
   @override
   Widget build(BuildContext context) {
     final disabled = widget.disabledReason != null;
+    final inline = widget.inlineReason;
     final lit = widget.primary && !disabled;
     // Every control is a stadium (§3): the `KvAction` 8 dp trial is closed.
     const radius = KvRadius.control;
@@ -256,32 +266,51 @@ class _KvActionState extends State<KvAction> {
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  if (widget.mark != null) ...[
+                  if (widget.mark != null && !(inline && disabled)) ...[
                     KvGlyphIcon(widget.mark!, size: KvAction.glyph, tone: ink),
                     const SizedBox(width: KvSpace.s),
                   ],
                   Flexible(
-                    child: Text(
-                      widget.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: KvFont.ui,
-                        // §2 `button`: 16, and 15 on a 52-high control.
-                        fontSize: widget.height >= KvSpace.control ? 16 : 15,
-                        height: 20 / 16,
-                        fontWeight: FontWeight.w600,
-                        fontVariations: KvWeight.w600,
-                        color: ink,
-                      ),
-                    ),
+                    child: inline && disabled
+                        ? Text(
+                            widget.disabledReason!,
+                            maxLines: 2,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontFamily: KvFont.ui,
+                              fontSize: 12,
+                              height: 16 / 12,
+                              fontWeight: FontWeight.w500,
+                              fontVariations: KvWeight.w500,
+                              // `inkDim`, not `etch`: the reason is
+                              // information and `etch` carries none (§1.4).
+                              color: KvColor.inkDim,
+                            ),
+                          )
+                        : Text(
+                            widget.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontFamily: KvFont.ui,
+                              // §2 `button`: 16, and 15 on a 52-high control.
+                              fontSize: widget.height >= KvSpace.control
+                                  ? 16
+                                  : 15,
+                              height: 20 / 16,
+                              fontWeight: FontWeight.w600,
+                              fontVariations: KvWeight.w600,
+                              color: ink,
+                            ),
+                          ),
                   ),
                 ],
               ),
             ),
           ),
         ),
-        if (disabled) ...[
+        if (disabled && !inline) ...[
           const SizedBox(height: KvSpace.xs),
           Text(
             widget.disabledReason!,

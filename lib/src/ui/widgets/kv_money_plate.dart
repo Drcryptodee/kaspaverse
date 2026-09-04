@@ -2,13 +2,20 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 import 'kv_amount.dart';
-import 'kv_chrome.dart';
+import 'kv_glyph.dart';
 
-/// **The money plate** (§4, BG-28).
+/// **The money plate** (§4, BG-28, render `S1 · Home`).
 ///
 /// `plateHero` 32 on [KvColor.plate]: a `caps` label with the live indicator
 /// nested into the opposite corner, the balance at `balanceHero`, its `≈` fiat
-/// restatement, and the Send / Receive **raised** pair at 52 in the thumb arc.
+/// restatement, then a **hairline** and the chain clock beneath it — the one
+/// internal division the plate has, and the render draws it (D-261).
+///
+/// **Send and Receive are not in the plate.** The render pins them as a bar at
+/// the foot of the screen, Send lit; UX-R1 built them as a raised pair inside
+/// the plate on §4's transcription (D-255), and the render outranks the
+/// transcription (D-259). The plate is now a reading, not a control surface —
+/// which is also what BG-28 was asking for.
 ///
 /// **It holds only what is always true.** Pending money, money in flight and
 /// the trust line are transient news and arrive in a strip *beneath* it
@@ -16,11 +23,6 @@ import 'kv_chrome.dart';
 /// where the news usually is not, and letting them grow it moved the balance
 /// three times for events the user did not cause.
 ///
-/// **Neither pill is primary.** §4 gives the pair the raised form, so this
-/// screen's emissions are the live dot and the ledger's active tab underline
-/// — two of BG-2's three. UX-2's flip (the light moving to Receive on an empty
-/// wallet) is superseded by that: on a proven zero, Send is *disabled and says
-/// why*, which is the stronger statement and the one BG-12 asks for.
 class KvMoneyPlate extends StatelessWidget {
   const KvMoneyPlate({
     super.key,
@@ -29,9 +31,6 @@ class KvMoneyPlate extends StatelessWidget {
     required this.indicator,
     this.fiat,
     this.chainClock,
-    this.onSend,
-    this.onReceive,
-    this.sendDisabledReason,
   });
 
   /// The `caps` label, top left. Sentence given in normal case; the widget
@@ -62,16 +61,11 @@ class KvMoneyPlate extends StatelessWidget {
   /// or a meter — none of which carry a value.
   final Widget? chainClock;
 
-  final VoidCallback? onSend;
-  final VoidCallback? onReceive;
-
-  /// Non-null ⇒ Send is disabled and this is what it says (BG-12).
-  final String? sendDisabledReason;
-
-  /// The plate's own padding (§3: 18–22 inside a plate).
+  /// The plate's own padding (§3: 18–22 inside a plate). 12 at the top because
+  /// the indicator chip's 44 dp target overhangs its 34 dp body.
   static const EdgeInsets padding = EdgeInsets.fromLTRB(
     KvSpace.s20,
-    KvSpace.s,
+    KvSpace.sm,
     KvSpace.s20,
     KvSpace.s20,
   );
@@ -103,17 +97,23 @@ class KvMoneyPlate extends StatelessWidget {
             ),
             const SizedBox(height: KvSpace.s),
             figure,
-            if (fiat != null) ...[const SizedBox(height: KvSpace.xs), fiat!],
+            if (fiat != null) ...[const SizedBox(height: KvSpace.s), fiat!],
             if (chainClock != null) ...[
-              const SizedBox(height: KvSpace.xs),
+              // The render's one line inside the plate: 16 under the fiat,
+              // 14 over the clock, `hairline` the whole inner width (S1,
+              // measured at 264 dp on the 393 frame).
+              const SizedBox(height: KvSpace.m),
+              // `controlEdge` (12% white), not `hairline` (7%): at 7% the
+              // line did not read on the V60 at all — the founder asked for
+              // the line the render draws, which measures 19 units over the
+              // plate, and 12% lands there (D-262).
+              const SizedBox(
+                height: 1,
+                child: ColoredBox(color: KvColor.controlEdge),
+              ),
+              const SizedBox(height: KvSpace.s14),
               chainClock!,
             ],
-            const SizedBox(height: KvSpace.s20),
-            _Pair(
-              onSend: onSend,
-              onReceive: onReceive,
-              sendDisabledReason: sendDisabledReason,
-            ),
           ],
         ),
       ),
@@ -121,52 +121,11 @@ class KvMoneyPlate extends StatelessWidget {
   }
 }
 
-/// Send and Receive, raised, 52 high, in the thumb arc (§4, BG-12).
-class _Pair extends StatelessWidget {
-  const _Pair({
-    required this.onSend,
-    required this.onReceive,
-    required this.sendDisabledReason,
-  });
-
-  final VoidCallback? onSend;
-  final VoidCallback? onReceive;
-  final String? sendDisabledReason;
-
-  @override
-  Widget build(BuildContext context) {
-    if (onSend == null && onReceive == null) return const SizedBox.shrink();
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (onReceive != null)
-          Expanded(
-            child: KvAction.raised(
-              label: 'Receive',
-              height: KvSpace.controlThumb,
-              onTap: onReceive!,
-            ),
-          ),
-        if (onReceive != null && onSend != null)
-          const SizedBox(width: KvSpace.sm),
-        if (onSend != null)
-          Expanded(
-            child: KvAction.raised(
-              label: 'Send',
-              height: KvSpace.controlThumb,
-              disabledReason: sendDisabledReason,
-              onTap: onSend!,
-            ),
-          ),
-      ],
-    );
-  }
-}
-
 /// **The `short` collapse, and the only one there is** (BG-33).
 ///
 /// A 56 dp bar: the integer figure, the live indicator, and Send · Receive as
-/// 44 dp pills. **The fraction returns on tap** — it is not deleted, it is put
+/// 44 dp pills wearing their arrows (render `R5 · expanded · short`: both
+/// raised, `↗ Send` then `↙ Receive`). **The fraction returns on tap** — it is not deleted, it is put
 /// one tap away, because a phone on its side has 412 dp of height and the
 /// ledger is what the user turned it for.
 class KvMoneyBar extends StatefulWidget {
@@ -291,8 +250,16 @@ class _KvMoneyBarState extends State<KvMoneyBar> {
               // over by grouping the runs (`ux-auditor`, UX-R1).
               if (!_full) ...[const SizedBox(width: KvSpace.s), const _Unit()],
               const SizedBox(width: KvSpace.sm),
+              // **`Receive · Send`, the foot bar's order (S1).** R5 draws the
+              // bar the other way round; a phone turned on its side must not
+              // swap the two verbs' seats (BG-21), so S1's order rules in
+              // every class and R5's is recorded as superseded (§9.21).
               if (widget.onReceive != null)
-                _BarPill(label: 'Receive', onTap: widget.onReceive!),
+                _BarPill(
+                  label: 'Receive',
+                  mark: KvGlyph.arrowIn,
+                  onTap: widget.onReceive!,
+                ),
               if (widget.onReceive != null && widget.onSend != null)
                 const SizedBox(width: KvSpace.s),
               // **A pill that cannot act is replaced by the reason, not
@@ -312,6 +279,7 @@ class _KvMoneyBarState extends State<KvMoneyBar> {
                       ? _BarPill(
                           key: const ValueKey('send'),
                           label: 'Send',
+                          mark: KvGlyph.arrowOut,
                           onTap: widget.onSend!,
                         )
                       : Padding(
@@ -346,9 +314,15 @@ class _KvMoneyBarState extends State<KvMoneyBar> {
 /// **There is no disabled form**: a control that cannot act has nowhere in a
 /// 56 dp bar to say why, so the bar omits it instead (BG-12).
 class _BarPill extends StatelessWidget {
-  const _BarPill({super.key, required this.label, required this.onTap});
+  const _BarPill({
+    super.key,
+    required this.label,
+    required this.mark,
+    required this.onTap,
+  });
 
   final String label;
+  final KvGlyph mark;
   final VoidCallback onTap;
 
   @override
@@ -368,17 +342,24 @@ class _BarPill extends StatelessWidget {
               color: KvColor.chip,
               borderRadius: BorderRadius.circular(KvRadius.control),
             ),
-            child: Text(
-              label,
-              maxLines: 1,
-              style: const TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 15,
-                height: 20 / 15,
-                fontWeight: FontWeight.w600,
-                fontVariations: KvWeight.w600,
-                color: KvColor.ink,
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                KvGlyphIcon(mark, size: 16, tone: KvColor.ink),
+                const SizedBox(width: KvSpace.s),
+                Text(
+                  label,
+                  maxLines: 1,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.ink,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -413,7 +394,8 @@ class _Truncated extends StatelessWidget {
 }
 
 /// The unit, kept outside the figure's fit so it never scales under the 11 dp
-/// readable floor — the same reason [KvAmount] keeps its own outside.
+/// readable floor — the same reason [KvAmount] keeps its own outside. `inkMeta`
+/// like the plate's (D-261): the render never sets the unit in teal.
 class _Unit extends StatelessWidget {
   const _Unit();
 
@@ -426,7 +408,7 @@ class _Unit extends StatelessWidget {
       height: 16 / 11,
       fontWeight: FontWeight.w600,
       fontVariations: KvWeight.w600,
-      color: KvColor.primaryMuted,
+      color: KvColor.inkMeta,
     ),
   );
 }

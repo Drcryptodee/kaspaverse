@@ -29,6 +29,7 @@ import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
@@ -334,10 +335,12 @@ class _MoneyShellState extends State<_MoneyShell> {
         builder: (context, snap) =>
             KvWalletIdentity(name: 'Main wallet', address: snap.data),
       ),
-      // §4's five, in §4's order. An unbuilt one carries a `chipLabel` tag and
-      // takes no tap at all — never a dead button (§8).
+      // The render's nine, in the render's two groups (`S2 · Drawer`, D-261).
+      // Every row is live: an unbuilt destination opens its own seat, honestly
+      // empty, rather than dying under the thumb (§8).
       destinations: [
         KvDestination(mark: KvGlyph.money, label: 'Wallet', onTap: () {}),
+        // No count: there is no unread source yet, and a count is never faked.
         KvDestination(
           mark: KvGlyph.chat,
           label: 'Messages',
@@ -345,29 +348,75 @@ class _MoneyShellState extends State<_MoneyShell> {
         ),
         // The arcade waits on P4's covenant engine, swaps on an engine that
         // does not exist, and identity on a scope nobody has named yet
-        // (register §4, D-1). Each says so where it will live.
-        const KvDestination(
+        // (register §4, D-1, D-256). Each says so where it will live.
+        KvDestination(
           mark: KvGlyph.games,
           label: 'Games',
-          tag: 'Coming soon',
+          onTap: () => _push(
+            (_) => const KvComingSoonPage(
+              mark: KvGlyph.games,
+              name: 'Games',
+              sentence: 'Not built yet. The arcade will live here.',
+            ),
+          ),
         ),
-        const KvDestination(
+        KvDestination(
           mark: KvGlyph.finance,
           label: 'Finance',
-          tag: 'Coming soon',
+          onTap: () => _push(
+            (_) => const KvComingSoonPage(
+              mark: KvGlyph.finance,
+              name: 'Finance',
+              sentence: 'Not built yet. Swaps and offers will live here.',
+            ),
+          ),
         ),
-        const KvDestination(
+        KvDestination(
           mark: KvGlyph.identity,
           label: 'Identity',
-          tag: 'Coming soon',
+          onTap: () => _push(
+            (_) => const KvComingSoonPage(
+              mark: KvGlyph.identity,
+              name: 'Identity',
+              sentence: 'Not built yet. Who you are to others will live here.',
+            ),
+          ),
         ),
       ],
-      footer: [
+      secondary: [
         KvDestination(
           mark: KvGlyph.settings,
           label: 'Settings',
           onTap: () => _push(_settingsRoute(widget.chain, widget.wallet)),
         ),
+        // The lamp is the chain's own `connected` — the reading the plate's
+        // lamp is derived from, so the two cannot disagree.
+        KvDestination(
+          mark: KvGlyph.network,
+          label: 'Network',
+          live: widget.chain.connected,
+          onTap: () => _push(_nodeRoute(widget.chain)),
+        ),
+        // Security's rows live inside Settings until `T2 · Security` is built
+        // as its own surface; the row opens where those rows are today.
+        KvDestination(
+          mark: KvGlyph.shield,
+          label: 'Security',
+          onTap: () => _push(_settingsRoute(widget.chain, widget.wallet)),
+        ),
+        KvDestination(
+          mark: KvGlyph.help,
+          label: 'Help',
+          onTap: () => _push(
+            (_) => const KvComingSoonPage(
+              mark: KvGlyph.help,
+              name: 'Help',
+              sentence: 'Not built yet. Answers will live here.',
+            ),
+          ),
+        ),
+      ],
+      footer: [
         // **Lock is a discard, not a pause** (BG-13): 0 ms, and the shell
         // routes to the locked surface on the vault's own status stream, so
         // nothing here has to navigate.
