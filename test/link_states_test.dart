@@ -10,6 +10,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
+import 'support/maturity.dart';
 
 /// C7 (D-091 ruling 1) — the honest link states, ON GLASS.
 ///
@@ -89,6 +90,7 @@ void main() {
         reconnecting: reconnecting,
       ),
       wallet: WalletScope(
+        maturity: kTestMaturity,
         mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
         pending: ValueNotifier<BigInt?>(null),
         activity: ValueNotifier<List<ActivityRecord>>(const []),
@@ -416,7 +418,8 @@ void main() {
       await tester.tap(find.text('Mainnet'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Node & connection'), findsOneWidget);
+      // `T5`'s title — the drawer's own word for this destination (D-266).
+      expect(find.text('Network'), findsOneWidget);
     }
 
     testWidgets('one frame after the tap the surface is visibly busy', (
@@ -527,6 +530,9 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: kvDarkTheme(),
+          // The screen clamps its column with `KvColumn` since UX-R3, and
+          // `KvWindow.of` asserts rather than falling back (UX-R1's law).
+          builder: (context, page) => KvWindow(child: page!),
           home: NodeScreen(
             clock: () => now,
             scope: nodeScope(

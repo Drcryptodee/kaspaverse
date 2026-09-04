@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../rust/api/send.dart';
+import '../../rust/api/wallet.dart' show ActivityDirection, MaturityState;
 import '../../rust/api/transport.dart';
 import '../error_text.dart';
 import '../format.dart';
@@ -14,8 +14,8 @@ import '../widgets/haptics.dart';
 import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
 import '../widgets/kv_check.dart';
-import '../../rust/api/wallet.dart' show MaturityState;
 import '../widgets/kv_burial_mark.dart';
+import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_contact.dart';
 import '../widgets/kv_fiat.dart';
 import '../widgets/tx_status_chip.dart' show chipStateOfAcceptance;
@@ -74,6 +74,7 @@ class SigningCeremony extends StatefulWidget {
     this.title,
     this.contextNote,
     this.acceptanceStatus,
+    this.maturity,
     this.fiat,
     this.contacts,
     this.onLeftInFlight,
@@ -105,6 +106,13 @@ class SigningCeremony extends StatefulWidget {
   /// nothing at all**: unwatched, pruned or tracker-unavailable are all states
   /// where the honest output is silence, never a zero.
   final Future<TxStatusDto?> Function(String txid)? acceptanceStatus;
+
+  /// **The pin's maturity thresholds** (D-249) — required wherever
+  /// [acceptanceStatus] is wired, because the Status row plots a rung and a
+  /// rung needs a ceiling. Null draws no rung at all rather than assuming one:
+  /// the two seams travel together, and a receipt that had the depth but not
+  /// the threshold would be guessing at the only thing it is there to say.
+  final KvMaturity? maturity;
 
   /// The `≈` price under the restatement (`S7`, founder 2026-09-04). Null ⇒
   /// no rate seam is wired and no line is drawn. It restates the KAS figure
@@ -169,6 +177,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
   String? title,
   String? contextNote,
   Future<TxStatusDto?> Function(String txid)? acceptanceStatus,
+  KvMaturity? maturity,
   VoidCallback? onLeftInFlight,
   Future<String> Function(String txid)? explorerUrl,
   Future<bool> Function(String url)? openUrl,
@@ -189,6 +198,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
         title: title,
         contextNote: contextNote,
         acceptanceStatus: acceptanceStatus,
+        maturity: maturity,
         onLeftInFlight: onLeftInFlight,
         explorerUrl: explorerUrl,
         openUrl: openUrl,
@@ -808,6 +818,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
                       ],
                     const SizedBox(height: KvSpace.l),
                     _ReceiptCard(
+                      maturity: widget.maturity,
                       summary: s,
                       returnsToSelf: returnsToSelf,
                       acceptedAt: _acceptedAt,
@@ -1110,165 +1121,6 @@ class _FactRule extends StatelessWidget {
       Container(height: 1, color: KvColor.hairline);
 }
 
-/// **One grid, and every value ends on the same right edge.**
-///
-/// `S7` and `S8` were measured and they agree to a decimal: every value on the
-/// card — the fee, what leaves, the name, the stamp, the status — ends at
-/// 348.5 dp on the sheet and 347.5 dp on the receipt, with the labels on one
-/// left edge. The founder's note said the same thing from the glass: *"let the
-/// numbers move to the right edge instead of the position you put them so its
-/// not clunky."*
-///
-/// **Why the old construction drifted.** It was a `Wrap` with
-/// `spaceBetween`, chosen so a very wide figure could take a run of its own
-/// instead of being squeezed under the 11 dp floor. That works for the squeeze
-/// and fails for the alignment: the instant a value wrapped it became the only
-/// child of its run, and `spaceBetween` start-aligns a lone child — so the
-/// figure landed on the LEFT, under its own label.
-///
-/// This keeps both properties. The label is `Expanded`, so it takes whatever
-/// the value does not and wraps rather than pushing; the value is measured
-/// against a share of the row and `KvAmount` fits itself inside that, keeping
-/// its unit outside the fit so the 11 dp floor survives. The value cannot
-/// drift left because it is the last child of a full-width row.
-class _FactLine extends StatelessWidget {
-  const _FactLine({
-    required this.label,
-    required this.value,
-    this.valueText,
-    // `S7` draws `Network fee` and `Leaves your wallet` both inline at the
-    // reference width; 0.62 stacked the second of them there (`ux-auditor`,
-    // measured off the 393 frame). 0.45 restores the render's grid and still
-    // leaves a whole-supply figure room to fit itself.
-    this.valueShare = 0.45,
-    this.strongLabel = false,
-  });
-
-  final String label;
-  final Widget value;
-
-  /// **What [value] will print, for MEASUREMENT only.**
-  ///
-  /// A widget's intrinsic width cannot be asked for before layout, and the row
-  /// has to decide its arrangement before it lays anything out — so the caller
-  /// that knows the string hands it over. It is never rendered from here, so a
-  /// small inaccuracy costs a stack-or-not decision and never a wrong figure.
-  ///
-  /// Null means "assume it fits": the row then only protects the label.
-  final String? valueText;
-
-  /// The most of the row the value may take before it starts fitting itself
-  /// down. The label wraps into the rest.
-  final double valueShare;
-
-  /// `Leaves your wallet` is the row a user must not miss (`S7` sets it in
-  /// `ink` at 600 while its neighbours stay `inkDim`).
-  final bool strongLabel;
-
-  /// `inkDim`, not `inkMeta`: these rows live on a `chip` inner card, where
-  /// `inkMeta` is 4.30 and under AA (§1.4, BG-14).
-  TextStyle get _labelStyle => TextStyle(
-    fontFamily: KvFont.ui,
-    fontSize: 13,
-    height: 19 / 13,
-    fontWeight: strongLabel ? FontWeight.w600 : FontWeight.w400,
-    fontVariations: strongLabel ? KvWeight.w600 : KvWeight.w400,
-    color: strongLabel ? KvColor.ink : KvColor.inkDim,
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    final scaler = MediaQuery.textScalerOf(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth;
-          // **What the label needs to stay one word.** Measured, not guessed:
-          // at 320 dp / 1.3× the value's share left `Accepted` about 70 dp,
-          // which is under the width of the word — so Flutter did the only
-          // thing left and broke it, rendering `Accepte` over `d` on a
-          // receipt (found in the floor frame, not argued).
-          final painter = TextPainter(
-            text: TextSpan(text: label, style: _labelStyle),
-            textDirection: TextDirection.ltr,
-            textScaler: scaler,
-          )..layout();
-          final needed = painter.maxIntrinsicWidth;
-          painter.dispose();
-          final room = width * (1 - valueShare) - KvSpace.m;
-
-          final text = Text(label, style: _labelStyle);
-          // **The value gets everything the label does not need**, floored at
-          // its share so a long label cannot starve it either way.
-          //
-          // A flat `width * valueShare` was wrong in both directions and the
-          // suite caught the second: at 0.62 it stacked `Leaves your wallet`
-          // at the 393 reference where `S7` draws it inline; tightened to 0.45
-          // it scaled a whole-supply figure to **6.71 dp** at 320 dp / 1.3×,
-          // under BG-14's floor, because the share was capping a value the
-          // short label beside it was not using.
-          final valueRoom = math.max(
-            width * valueShare,
-            width - needed - KvSpace.m,
-          );
-          final bounded = ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: valueRoom),
-            child: value,
-          );
-
-          // **And the VALUE gets the same protection as the label.** A figure
-          // that cannot fit beside its label scales itself down, and nothing
-          // bounded that shrink: at 320 dp / 1.3× a whole-supply amount beside
-          // `Returns to you` rendered at **7.34 dp**, under BG-14's floor. So
-          // the row asks whether the figure fits in the room it would get, and
-          // stacks when it does not — where it gets the whole width and needs
-          // no scaling at all.
-          var valueFits = true;
-          final printed = valueText;
-          if (printed != null) {
-            final vp = TextPainter(
-              text: TextSpan(
-                text: printed,
-                style: const TextStyle(fontFamily: KvFont.mono, fontSize: 13),
-              ),
-              textDirection: TextDirection.ltr,
-              textScaler: scaler,
-            )..layout();
-            valueFits = vp.width <= valueRoom;
-            vp.dispose();
-          }
-
-          // **Tight: stack, and keep the right edge.** Wrapping the label into
-          // a column beneath is what the space allows; what must NOT change is
-          // where the value sits, because one right edge down the card is the
-          // whole point of this widget (`S7`/`S8` measured, founder's own
-          // note). So the fallback is a column whose value is still hard
-          // right, never a run that drifts back to the left.
-          if (needed > room || !valueFits) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                text,
-                const SizedBox(height: KvSpace.xs),
-                Align(alignment: Alignment.centerRight, child: value),
-              ],
-            );
-          }
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(child: text),
-              const SizedBox(width: KvSpace.m),
-              bounded,
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
 /// One exact cost line: label left, amount hard right (BG-5).
 ///
 /// **Trailing zeros trimmed, on the signing surface too** (founder,
@@ -1292,7 +1144,7 @@ class _FactRow extends StatelessWidget {
   /// leaves* has all three.
   final KvMoneyDirection direction;
 
-  /// What [KvAmount] will print, rebuilt here for [_FactLine.valueText].
+  /// What [KvAmount] will print, rebuilt here for [KvFactLine.valueText].
   /// Measurement only — see that field.
   String get _printed {
     final parts = kasParts(sompi);
@@ -1302,7 +1154,7 @@ class _FactRow extends StatelessWidget {
 
   @override
   @override
-  Widget build(BuildContext context) => _FactLine(
+  Widget build(BuildContext context) => KvFactLine(
     label: label,
     valueText: _printed,
     strongLabel: direction == KvMoneyDirection.outgoing,
@@ -1338,7 +1190,7 @@ class _StampRow extends StatelessWidget {
   final DateTime at;
 
   @override
-  Widget build(BuildContext context) => _FactLine(
+  Widget build(BuildContext context) => KvFactLine(
     label: label,
     valueText: formatStamp(at),
     value: Text(
@@ -1663,7 +1515,7 @@ class _CardLabel extends StatelessWidget {
 /// two read as one document rather than two designs of the same facts (BG-21).
 ///
 /// **Every value ends on one right edge** (`S8`, measured: 347.5 dp for all
-/// four rows, labels at 45.5). That is [_FactLine]'s job and the founder's
+/// four rows, labels at 45.5). That is [KvFactLine]'s job and the founder's
 /// note from the glass — *"let the details infront of them move to the other
 /// edge of the screen"*.
 ///
@@ -1687,6 +1539,7 @@ class _ReceiptCard extends StatelessWidget {
     required this.txid,
     required this.status,
     required this.acceptSeen,
+    required this.maturity,
     required this.contacts,
     required this.onSaveContact,
   });
@@ -1698,6 +1551,9 @@ class _ReceiptCard extends StatelessWidget {
 
   /// The tracker's latest answer, or null while there is nothing to ask about.
   final TxStatusDto? status;
+
+  /// The pin's thresholds. Null draws no rung — see [SigningCeremony.maturity].
+  final KvMaturity? maturity;
 
   /// Whether an acceptance has ever been observed for this send. A `Displaced`
   /// answer before one is the tracker saying *I cannot find this*, not *its
@@ -1747,9 +1603,9 @@ class _ReceiptCard extends StatelessWidget {
           // receipt and the ledger cannot disagree about one transaction
           // (BG-21). It appears once the tracker has answered at all; before
           // that there is nothing to say and it says nothing.
-          if (status != null) ...[
+          if (status != null && maturity != null) ...[
             const _FactRule(),
-            _FactLine(
+            KvFactLine(
               label: 'Status',
               valueShare: 0.55,
               // **The tracker's own kind decides the reading — this surface
@@ -1780,12 +1636,25 @@ class _ReceiptCard extends StatelessWidget {
                   : KvBurialMark(
                       state: chipStateOfAcceptance(status!.kind),
                       confirmations: status!.blueDepth?.toInt(),
-                      // **`pending`, so an unknown depth reads `Seen —`.** The
-                      // rung arithmetic only consults maturity when there is no
-                      // depth to consult, and claiming `Confirmed` off a
-                      // missing reading is the exact overclaim BG-20 exists to
-                      // stop.
-                      maturity: MaturityState.pending,
+                      // **The tracker's kind IS the maturity here**, and under
+                      // D-248's vocabulary it needs no translation: `submitted`
+                      // is a spend the DAG has not accepted, which is exactly
+                      // `Pending`; anything else the tracker will answer has
+                      // been accepted, and the rung then follows the depth.
+                      //
+                      // This replaces a hardcoded `MaturityState.pending`
+                      // whose only job was to stop an unknown depth reading as
+                      // the terminal word. The direction now carries that: a
+                      // spend with no depth reads `Accepted —` by the
+                      // arithmetic rather than by a fixed argument.
+                      maturity: status!.kind == TxStatusKind.submitted
+                          ? MaturityState.pending
+                          : MaturityState.confirmed,
+                      // A receipt is always our own spend, and a spend is never
+                      // a coinbase.
+                      direction: ActivityDirection.outgoing,
+                      isCoinbase: false,
+                      thresholds: maturity!,
                       fontSize: 13,
                     ),
             ),
@@ -1809,7 +1678,7 @@ class _ReceiptCard extends StatelessWidget {
           // and *Copy ID* below copies every character of it.
           if (txid != null) ...[
             const _FactRule(),
-            _FactLine(
+            KvFactLine(
               label: 'Transaction ID',
               valueShare: 0.66,
               valueText: _shortId(txid!),
@@ -1966,7 +1835,7 @@ class _ReceiptHead extends StatelessWidget {
         //
         // So the row asks the question rather than assuming an answer, and
         // when the answer is no it puts the figure on its own line — the same
-        // fallback `_FactLine` takes, and it keeps the right edge.
+        // fallback `KvFactLine` takes, and it keeps the right edge.
         final scaler = MediaQuery.textScalerOf(context);
         double widthOf(String text, double size) {
           final painter = TextPainter(

@@ -51,7 +51,8 @@ pub use transport_store::{
     StoredKind, TransportStore, WipeReport,
 };
 pub use wallet_sync::{
-    ActivityDirection, ActivityMaturity, WalletActivityRecord, WalletEngine, WalletEvent,
+    maturity_params, ActivityDirection, ActivityMaturity, MaturityParams, WalletActivityRecord,
+    WalletEngine, WalletEvent,
 };
 // Re-export so downstream crates (bridge) name network types, addresses and the
 // shared wRPC handle from one place.

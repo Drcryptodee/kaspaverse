@@ -760,6 +760,53 @@ where
     }
 }
 
+/// **The one network this wallet is on** (P1: mainnet, fixed for the install).
+///
+/// Named once because two readers must never disagree: the engine that folds
+/// maturity is started on it, and [`maturity_thresholds`] reads the pin's
+/// `NetworkParams` for it. Two literals here would let the glass quote devnet
+/// thresholds over a mainnet balance, which is precisely the class of split
+/// D-249 caught in the UI.
+fn wallet_network_id() -> NetworkId {
+    NetworkId::new(NetworkType::Mainnet)
+}
+
+/// The maturity thresholds the wallet applies, crossing the FFI as **data**.
+///
+/// D-249: UX-R3 **must not hardcode** 100 or 1,000. Both live on the pinned
+/// side (`user_transaction_maturity_period_daa`,
+/// `coinbase_transaction_maturity_period_daa`) and reach the glass through
+/// here, so the burial ladder's rungs and the gauge's ceiling are the
+/// library's numbers on every build rather than a transcription of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaturityParamsDto {
+    /// Depth at which a payment from someone else becomes spendable — the
+    /// `Settled` rung for an ordinary row.
+    pub user_daa: u64,
+    /// Depth at which a mined coinbase output matures — the `Settled` rung for
+    /// a coinbase row, and the gauge's ceiling when `is_coinbase` is set.
+    pub coinbase_daa: u64,
+    // **The stasis window does not cross.** `MaturityParams` carries it on the
+    // Rust side, where a reader of the struct can see the third number without
+    // looking it up — but nothing in `lib/` renders it, and a field on the FFI
+    // surface that nobody reads is surface for its own sake
+    // (`consensus-auditor`, UX-R3).
+}
+
+/// Read the pin's maturity thresholds for this wallet's network.
+///
+/// Synchronous and I/O-free by construction (the library answers from its own
+/// statics), so the app can seed the ladder before it paints a first frame and
+/// no surface ever has to render a rung against a threshold it does not have.
+#[flutter_rust_bridge::frb(sync)]
+pub fn maturity_thresholds() -> Result<MaturityParamsDto, AppError> {
+    let params = kaspaverse_chain::maturity_params(wallet_network_id()).map_err(AppError::chain)?;
+    Ok(MaturityParamsDto {
+        user_daa: params.user_daa,
+        coinbase_daa: params.coinbase_daa,
+    })
+}
+
 /// Direction of an activity row (mapped from the wallet framework's typed
 /// transaction data). Receive-only at P1.5; outgoing/change rows arrive with
 /// send (P1.6).
@@ -803,6 +850,17 @@ pub struct ActivityRecord {
     pub accepted_daa_score: Option<u64>,
     pub direction: ActivityDirection,
     pub is_coinbase: bool,
+    /// **Who this spend paid**, in bech32 — the single output of our own
+    /// transaction that is not our change. `None` on a receive, on a
+    /// multi-recipient send, and on a compounding leg; the chain layer's
+    /// `counterparty_of` documents why a receive can never carry one. Public
+    /// chain data (INV-3): an address, never a name — the address book joins
+    /// a name to it on the Dart side, and BG-15 keeps the address visible.
+    pub counterparty_address: Option<String>,
+    /// The network fee this transaction paid, in sompi — `None` on a receive,
+    /// which did not pay it. See the chain layer's field for why that is an
+    /// absence rather than a zero.
+    pub fee_sompi: Option<u64>,
     pub maturity: MaturityState,
     /// V2 chip honesty: the tracker has seen no acceptance for this SUBMITTED
     /// txid past the stall threshold (Send-sourced watches only — V1 signal
@@ -914,6 +972,8 @@ fn map_activity(record: WalletActivityRecord) -> ActivityRecord {
             ChainDirection::Change => ActivityDirection::Change,
         },
         is_coinbase: record.is_coinbase,
+        counterparty_address: record.counterparty_address,
+        fee_sompi: record.fee_sompi,
         maturity: match record.maturity {
             ChainMaturity::Pending => MaturityState::Pending,
             ChainMaturity::Confirmed => MaturityState::Confirmed,
@@ -1019,7 +1079,7 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                 vault::derive_wallet_addresses(receive_count, change_count)?;
             let engine = WalletEngine::new(
                 monitor.rpc(),
-                NetworkId::new(NetworkType::Mainnet),
+                wallet_network_id(),
                 vault::wallet_store_path()?,
             )
             .map_err(AppError::chain)?;
@@ -1704,6 +1764,8 @@ mod tests {
             direction: ChainDirection::Incoming,
             is_coinbase: false,
             maturity: ChainMaturity::Pending,
+            counterparty_address: None,
+            fee_sompi: None,
         }
     }
 

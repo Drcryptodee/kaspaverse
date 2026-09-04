@@ -11,6 +11,7 @@ import '../error_text.dart';
 import '../format.dart';
 import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
+import '../widgets/kv_burial_mark.dart' show KvMaturity;
 import '../widgets/kv_address.dart';
 import '../widgets/kv_amount.dart';
 import '../widgets/kv_check.dart';
@@ -77,6 +78,7 @@ class SendScreen extends StatefulWidget {
     this.balanceStale,
     this.feePreview,
     this.acceptanceStatus,
+    this.maturity,
     this.minimumSendable,
     this.prepareSweep,
     this.explorerUrl,
@@ -89,6 +91,11 @@ class SendScreen extends StatefulWidget {
   /// the shortfall arithmetic. The authoritative check (incl. the KIP-9 fee)
   /// is Rust's `prepare`.
   final ValueListenable<BigInt?> mature;
+
+  /// The pin's maturity thresholds, forwarded to the ceremony's receipt so its
+  /// Status row can plot a rung (D-249). Travels with [acceptanceStatus]: the
+  /// depth and the ceiling it is measured against are one seam.
+  final KvMaturity? maturity;
 
   /// Whether [mature] is a **last-known** figure rather than a live one — the
   /// money plate's own `_dimmed` bit, handed down rather than re-derived
@@ -585,6 +592,7 @@ class _SendScreenState extends State<SendScreen> {
         commit: widget.commit,
         abandon: widget.abandon,
         acceptanceStatus: widget.acceptanceStatus,
+        maturity: widget.maturity,
         onLeftInFlight: () => leftInFlight = true,
         explorerUrl: widget.explorerUrl,
         openUrl: widget.openUrl,

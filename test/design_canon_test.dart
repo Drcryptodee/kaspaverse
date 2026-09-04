@@ -16,6 +16,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
+import 'support/maturity.dart';
 
 /// **The teeth of the six-legend canon** (`design_system.md` §0, BG-19…BG-25,
 /// D-229). Every test here fails against the code as it stood before the law
@@ -27,7 +28,7 @@ import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 /// | Law | Pins | Was |
 /// |:--|:--|:--|
 /// | **BG-22** | the hold ring's swept angle IS its progress | a full circle under reduced motion — the first sample read 100% against a true 25%, Lie Factor 4, rising to 8 at 100 ms and without bound as t → 0 |
-/// | **BG-24** | a burial rung crossing crossfades | a hard cut at the amber→green boundary |
+/// | **BG-24** | a burial rung crossing crossfades | a hard cut at the green→blue boundary |
 /// | **BG-25** | every cap is a drawn mark or ASCII | `'⌫'`, which JetBrains Mono has no glyph for |
 ///
 /// The two laws NOT pinned here are pinned by `ux-auditor` lines instead, and
@@ -274,13 +275,16 @@ void main() {
                 state: TxChipState.accepted,
                 confirmations: confirmations,
                 maturity: MaturityState.pending,
+                direction: ActivityDirection.outgoing,
+                isCoinbase: false,
+                thresholds: kTestMaturity,
               );
             },
           ),
         ),
       );
-      expect(find.textContaining('Seen'), findsOneWidget);
-      expect(find.text('Confirmed'), findsNothing);
+      expect(find.textContaining('Accepted'), findsOneWidget);
+      expect(find.text('Settled'), findsNothing);
 
       rebuild(() => confirmations = 150);
       // Half of `fast`: mid-crossing, where both rungs must be on screen at
@@ -289,21 +293,21 @@ void main() {
       await tester.pump(KvMotion.fast ~/ 2);
 
       expect(
-        find.text('Confirmed'),
+        find.text('Settled'),
         findsOneWidget,
         reason: 'the arriving rung is not there',
       );
       expect(
-        find.textContaining('Seen'),
+        find.textContaining('Accepted'),
         findsOneWidget,
         reason:
             'the leaving rung vanished instantly — the crossing is a cut, and '
-            'the user never saw the money become safe',
+            'the user never saw the money become spendable',
       );
 
       await tester.pumpAndSettle();
-      expect(find.textContaining('Seen'), findsNothing);
-      expect(find.text('Confirmed'), findsOneWidget);
+      expect(find.textContaining('Accepted'), findsNothing);
+      expect(find.text('Settled'), findsOneWidget);
     });
 
     testWidgets('the crossing takes its geometry immediately, not at the end', (
@@ -315,7 +319,7 @@ void main() {
       // mark jumped 54 dp at the END of a transition that had already finished
       // visually (`ux-auditor`, D-229). The width must land on the FIRST frame,
       // where the fade explains it.
-      var confirmations = 150;
+      var confirmations = 60;
       late void Function(void Function()) rebuild;
       await tester.pumpWidget(
         _host(
@@ -330,6 +334,9 @@ void main() {
                       state: TxChipState.accepted,
                       confirmations: confirmations,
                       maturity: MaturityState.accepted,
+                      direction: ActivityDirection.outgoing,
+                      isCoinbase: false,
+                      thresholds: kTestMaturity,
                     );
                   },
                 ),
@@ -341,18 +348,19 @@ void main() {
       double width() => tester.getSize(find.byType(KvBurialMark)).width;
       final before = width();
 
-      rebuild(() => confirmations = 1500); // Confirmed -> final, a shrink
+      // `Accepted 60` -> `Settled`, which is a shrink: the count goes away.
+      rebuild(() => confirmations = 400);
       await tester.pump();
       // **Walk to the CROSSING, not to the arrival.** Since UX-5 the rung is
       // derived from the streamed depth rather than from the newest reading —
-      // so a reading of 1500 landing over a row at 150 replays the interval
-      // first and the rung changes when the COUNT passes a thousand, which is
+      // so a reading of 400 landing over a row at 60 replays the interval first
+      // and the rung changes when the COUNT passes the pin's ceiling, which is
       // also the frame the words change on. Measuring 20 ms after the reading
       // arrived measured a row that had not crossed anything yet.
       double? atStart;
       for (var i = 0; i < 80 && atStart == null; i++) {
         await tester.pump(const Duration(milliseconds: 20));
-        if (find.text('final').evaluate().isNotEmpty) atStart = width();
+        if (find.text('Settled').evaluate().isNotEmpty) atStart = width();
       }
       await tester.pumpAndSettle();
       final settled = width();
@@ -377,7 +385,7 @@ void main() {
       // reorg, and — far more often — a depth reading arriving after a maturity
       // flag already said `Confirmed`. Crossfaded, that superimposes
       // `Confirmed` over `Seen 50` for 160 ms, which is BG-20 (`ux-auditor`).
-      var confirmations = 1500;
+      var confirmations = 400;
       late void Function(void Function()) rebuild;
       await tester.pumpWidget(
         _host(
@@ -388,22 +396,25 @@ void main() {
                 state: TxChipState.accepted,
                 confirmations: confirmations,
                 maturity: MaturityState.accepted,
+                direction: ActivityDirection.outgoing,
+                isCoinbase: false,
+                thresholds: kTestMaturity,
               );
             },
           ),
         ),
       );
-      expect(find.text('final'), findsOneWidget);
+      expect(find.text('Settled'), findsOneWidget);
 
       rebuild(() => confirmations = 50);
       await tester.pump();
       await tester.pump(KvMotion.fast ~/ 2);
       expect(
-        find.text('final'),
+        find.text('Settled'),
         findsNothing,
         reason: 'the retired rung is still on screen half a beat into a REORG',
       );
-      expect(find.textContaining('Seen'), findsOneWidget);
+      expect(find.textContaining('Accepted'), findsOneWidget);
     });
 
     testWidgets('a streaming depth does NOT crossfade its own digits', (
@@ -423,6 +434,9 @@ void main() {
                 state: TxChipState.accepted,
                 confirmations: confirmations,
                 maturity: MaturityState.pending,
+                direction: ActivityDirection.outgoing,
+                isCoinbase: false,
+                thresholds: kTestMaturity,
               );
             },
           ),
@@ -432,7 +446,7 @@ void main() {
       await tester.pump();
       await tester.pump(KvMotion.fast ~/ 2);
       expect(
-        find.textContaining('Seen'),
+        find.textContaining('Accepted'),
         findsOneWidget,
         reason: 'two marks alive means the rung key is reading the digits',
       );

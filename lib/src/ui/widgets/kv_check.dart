@@ -27,7 +27,12 @@ import 'kv_glyph.dart';
 ///  * tick = 55 % of the disc, stroked at [KvGlyphSpec.strokeCheck] on the
 ///    24 dp grid — 1.75 dp of ink at the 22 rung, 6.7 at 84.
 class KvCheck extends StatelessWidget {
-  const KvCheck({super.key, this.disc = small, this.semanticLabel});
+  const KvCheck({
+    super.key,
+    this.disc = small,
+    this.semanticLabel,
+    this.ground = KvColor.okTint,
+  });
 
   /// The mark beside a validated field, on a selected row (§4, `S6b`).
   static const double small = 22;
@@ -49,6 +54,20 @@ class KvCheck extends StatelessWidget {
   /// it from semantics — normally the words next to it carry the meaning.
   final String? semanticLabel;
 
+  /// **The ground the ring blends into.**
+  ///
+  /// The ring's whole job is to separate the `ok` disc from what is behind it,
+  /// so it has to BE what is behind it — and it was hardcoded to [KvColor.okTint],
+  /// which is right on every seat that existed until UX-R3 and wrong the moment
+  /// one did not. The transaction detail's lifecycle chip is a `settledTint`
+  /// pill at the terminal rung (D-248 spends the fourth hue there), and an
+  /// `okTint` ring on it drew a green halo around a blue pill.
+  ///
+  /// **The disc and the tick do not move**: BG-29 and D-248 both say the mark
+  /// means *yes*, not *which rung*, so `KvCheck` stays `ok` wherever it appears.
+  /// Only the ring follows its ground.
+  final Color ground;
+
   /// Ring thickness, derived (see the class doc).
   double get ring => math.min(10, math.max(3, disc * 0.12));
 
@@ -63,10 +82,7 @@ class KvCheck extends StatelessWidget {
     final mark = Container(
       width: outer,
       height: outer,
-      decoration: const BoxDecoration(
-        shape: BoxShape.circle,
-        color: KvColor.okTint,
-      ),
+      decoration: BoxDecoration(shape: BoxShape.circle, color: ground),
       child: Center(
         child: Container(
           width: disc,

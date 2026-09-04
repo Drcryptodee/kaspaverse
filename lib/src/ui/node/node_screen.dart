@@ -9,6 +9,12 @@ import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_cadence.dart';
+import '../theme/kv_window.dart';
+import '../widgets/kv_fact_line.dart';
+import '../widgets/kv_glyph.dart';
+import '../widgets/kv_hold.dart' show KvGlowPill;
+import '../widgets/kv_latency.dart';
+import '../widgets/kv_two_pane.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_status_chip.dart';
 import '../widgets/kv_streaming_count.dart';
@@ -35,6 +41,7 @@ class NodeScope {
     this.onReconnect,
     this.refreshConfig,
     this.blockAgeSecs,
+    this.probeLink,
   });
 
   final ValueListenable<bool> connected;
@@ -105,6 +112,17 @@ class NodeScope {
   /// have lost the most precise liveness signal the app has by the surface
   /// being merged rather than by anyone deciding to remove it.
   final Future<int?> Function()? blockAgeSecs;
+
+  /// **One honest round trip and the node's peer count**, polled while this
+  /// screen is open (`T5`'s connection card).
+  ///
+  /// A pull rather than a stream, and on its own slower cadence, for the same
+  /// reason [blockAgeSecs] is: it costs two real RPC calls, and the money
+  /// screen's link tick must not start paying for a card it never draws.
+  ///
+  /// Null ⇒ the seam is not wired, and the card renders the readings as absent
+  /// rather than as zeros (BG-8). A widget test gets exactly that.
+  final Future<({int? latencyMs, int? peers})> Function()? probeLink;
 }
 
 /// Where a transaction or an address opens when a link leads out of the
@@ -261,6 +279,22 @@ class _NodeScreenState extends State<NodeScreen> {
   bool _haveBlockAge = false;
   Timer? _poll;
 
+  /// `T5`'s two live readings. Null is *no reading*, and it stays null until a
+  /// probe actually answers — never a zero, and never the last good number
+  /// still standing after the link died (BG-8).
+  int? _latencyMs;
+  int? _peers;
+
+  /// **One probe in flight at a time** (`consensus-auditor`, UX-R3).
+  ///
+  /// Without it a stalled node stacked a probe every 2 s, and two overlapping
+  /// ones could land out of order — an older slow reading overwriting a newer
+  /// fast one through last-writer-wins `setState`, which is exactly the
+  /// confidently-wrong-number the probe exists to prevent (BG-8). Rust carries
+  /// its own deadline under the cadence as well, so this is belt AND braces on
+  /// a reading a user reads as *how far away is this node*.
+  bool _probing = false;
+
   @override
   void initState() {
     super.initState();
@@ -304,12 +338,45 @@ class _NodeScreenState extends State<NodeScreen> {
   /// unchanged). Absent seam ⇒ no poll and no line, never a fabricated age.
   void _startScanPoll() {
     final read = widget.scope.blockAgeSecs;
-    if (read == null) return;
+    final probe = widget.scope.probeLink;
+    if (read == null && probe == null) return;
     unawaited(_refreshScan());
-    _poll = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => unawaited(_refreshScan()),
-    );
+    unawaited(_refreshProbe());
+    _poll = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_refreshScan());
+      unawaited(_refreshProbe());
+    });
+  }
+
+  /// **The link probe, on the screen's own cadence.**
+  ///
+  /// A failed probe **clears** the readings rather than leaving the last good
+  /// pair standing — the opposite of what `_refreshScan` does with the block
+  /// age, and deliberately so. A block age that stops advancing is itself the
+  /// signal, and the line says how old it is; a latency is a measurement of
+  /// *this* round trip, so a stale 42 ms beside a dead socket would be a
+  /// confident wrong number rather than an old true one (BG-8, and the P0.3
+  /// scar in its original shape).
+  Future<void> _refreshProbe() async {
+    final probe = widget.scope.probeLink;
+    if (probe == null || _probing) return;
+    _probing = true;
+    try {
+      final reading = await probe();
+      if (!mounted) return;
+      setState(() {
+        _latencyMs = reading.latencyMs;
+        _peers = reading.peers;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _latencyMs = null;
+        _peers = null;
+      });
+    } finally {
+      _probing = false;
+    }
   }
 
   Future<void> _refreshScan() async {
@@ -456,55 +523,72 @@ class _NodeScreenState extends State<NodeScreen> {
             // BG-14: the top 52dp belongs to the real system status bar.
             const SizedBox(height: KvSpace.statusBarReserve),
             KvTopBar(
-              title: 'Node & connection',
+              // **`Network`** (`T5`) — the drawer's own word for this
+              // destination, and the one the founder reads on the row that
+              // opens it. `Node & connection` named two things where the
+              // screen is one place (BG-21).
+              title: 'Network',
               onBack: () => Navigator.of(context).maybePop(),
             ),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(
-                  KvSpace.gutter,
-                  KvSpace.m,
-                  KvSpace.gutter,
-                  KvSpace.xxl,
+              // **BG-33's enforceable half for a one-column screen** (`KvColumn`):
+              // `min(available, 560)` with the class's own gutter. Without it a
+              // 1180 dp window drew one 1,148 dp column of settings rows — the
+              // *wider column* BG-33 forbids, rather than columns with jobs.
+              // The gutter comes from the window class, so `compact` keeps
+              // D-261's 16 and the wider classes take 32 · 40 · 48.
+              child: KvColumn(
+                gutter: false,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    KvWindow.of(context).gutter,
+                    KvSpace.m,
+                    KvWindow.of(context).gutter,
+                    KvSpace.xxl,
+                  ),
+                  children: [
+                    // **`T5`'s connection card**: the caps label and the tier
+                    // word on one row, the measured latency and its staircase
+                    // under them, then the three readings that say what the link
+                    // actually is.
+                    _connectionPlate(),
+                    const SizedBox(height: KvSpace.m),
+                    // The node itself, and the one control that changes it.
+                    _servingPlate(),
+                    const SizedBox(height: KvSpace.sm),
+                    // BG-17 / ux-auditor 30: every endpoint row states what that
+                    // endpoint can see and what it can lie about. A node is the
+                    // strongest of the three because its answers are checked —
+                    // and saying so is what makes the other two labels mean
+                    // something by contrast.
+                    const _TrustLabel(
+                      'A node hands you blocks and takes your signed '
+                      'transactions. It can go quiet or fall behind, and it sees '
+                      'the addresses you ask about — it cannot forge a balance, '
+                      'change an amount, or spend anything.',
+                    ),
+                    const SizedBox(height: KvSpace.l),
+                    const KvRuledLabel('Use my own node'),
+                    const SizedBox(height: KvSpace.s),
+                    _picker(),
+                    ..._explorerSection(),
+                    ..._rateSection(),
+                    const SizedBox(height: KvSpace.l),
+                    // The F9d fix (D-207 clause a): the shipped line read
+                    // *"KaspaVerse talks to public Kaspa nodes directly — no
+                    // middlemen, no trackers"*, which was true of the money and
+                    // false of the page it now shares with a price source. An
+                    // unqualified promise beside two named egresses is the
+                    // census contradicting itself.
+                    const _TrustLabel(
+                      'Nothing else reaches out. Your balance, your history and '
+                      'your sends go to a Kaspa node and nowhere else — the '
+                      'price source and the explorer above are the only other '
+                      'places this app can reach, and both are yours to change '
+                      'or switch off.',
+                    ),
+                  ],
                 ),
-                children: [
-                  const KvRuledLabel('Serving you'),
-                  const SizedBox(height: KvSpace.s),
-                  _servingPlate(),
-                  _reconnect(),
-                  const SizedBox(height: KvSpace.sm),
-                  // BG-17 / ux-auditor 30: every endpoint row states what that
-                  // endpoint can see and what it can lie about. A node is the
-                  // strongest of the three because its answers are checked —
-                  // and saying so is what makes the other two labels mean
-                  // something by contrast.
-                  const _TrustLabel(
-                    'A node hands you blocks and takes your signed '
-                    'transactions. It can go quiet or fall behind, and it sees '
-                    'the addresses you ask about — it cannot forge a balance, '
-                    'change an amount, or spend anything.',
-                  ),
-                  const SizedBox(height: KvSpace.l),
-                  const KvRuledLabel('Use my own node'),
-                  const SizedBox(height: KvSpace.s),
-                  _picker(),
-                  ..._explorerSection(),
-                  ..._rateSection(),
-                  const SizedBox(height: KvSpace.l),
-                  // The F9d fix (D-207 clause a): the shipped line read
-                  // *"KaspaVerse talks to public Kaspa nodes directly — no
-                  // middlemen, no trackers"*, which was true of the money and
-                  // false of the page it now shares with a price source. An
-                  // unqualified promise beside two named egresses is the
-                  // census contradicting itself.
-                  const _TrustLabel(
-                    'Nothing else reaches out. Your balance, your history and '
-                    'your sends go to a Kaspa node and nowhere else — the '
-                    'price source and the explorer above are the only other '
-                    'places this app can reach, and both are yours to change '
-                    'or switch off.',
-                  ),
-                ],
               ),
             ),
           ],
@@ -575,25 +659,74 @@ class _NodeScreenState extends State<NodeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // **`T5`'s node row**: a tinted disc, the heading, and the
+              // endpoint under it in mono. The disc is `network` — the drawer's
+              // own glyph for this destination, so the row and the door that
+              // opens it wear one mark (BG-21/BG-25) — in the link's own tone,
+              // which makes a dark link visible before a word is read.
               Row(
                 children: [
-                  Expanded(
-                    child: Text(
-                      endpoint ?? 'not connected',
-                      maxLines: 2,
-                      overflow: TextOverflow.clip,
-                      style: TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 13,
-                        height: 18 / 13,
-                        color: endpoint == null ? KvColor.inkMeta : KvColor.ink,
+                  Container(
+                    width: KvSpace.rowDisc,
+                    height: KvSpace.rowDisc,
+                    decoration: BoxDecoration(
+                      color: tone.ring,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Center(
+                      child: KvGlyphIcon(
+                        KvGlyph.network,
+                        tone: tone.color,
+                        size: 20,
                       ),
+                    ),
+                  ),
+                  const SizedBox(width: KvSpace.sm),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          connected ? 'Connected to' : 'Not connected',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 15,
+                            height: 20 / 15,
+                            fontWeight: FontWeight.w600,
+                            fontVariations: KvWeight.w600,
+                            color: KvColor.ink,
+                          ),
+                        ),
+                        // **The endpoint is an identifier and never truncates
+                        // to nothing** (BG-15's reasoning, one layer over): a
+                        // node URL is compared character by character, so it
+                        // wraps to a second line rather than losing its tail.
+                        // `T5` clips it with an ellipsis at the reference
+                        // width; two lines at the floor is the honest version
+                        // of the same picture.
+                        if (endpoint != null)
+                          Text(
+                            endpoint,
+                            maxLines: 2,
+                            overflow: TextOverflow.clip,
+                            style: const TextStyle(
+                              fontFamily: KvFont.mono,
+                              fontSize: 13,
+                              height: 18 / 13,
+                              color: KvColor.inkDim,
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                   const SizedBox(width: KvSpace.s),
                   // Motion means something is happening (D-192): the meter runs
                   // while the link is being hunted and freezes the rest of the
-                  // time, including on a healthy screen.
+                  // time, including on a healthy screen. It is the loading
+                  // meter, not the latency staircase above — two instruments,
+                  // two jobs (see `KvLatency`'s class doc).
                   KvCadence(running: hunting || (!connected && !offline)),
                 ],
               ),
@@ -601,33 +734,13 @@ class _NodeScreenState extends State<NodeScreen> {
               KvStatusChip(tone: tone, words: words, maxLines: null),
               const SizedBox(height: KvSpace.sm),
               Container(height: 1, color: KvColor.plateDivider),
-              // BG-8, all three states. `ChainService` deliberately KEEPS the
-              // last-known score when a dropped link emits nulls — which is
-              // only honest if the screen dims it and says how old it is. A
-              // disconnected reading at full brightness is the P0.3 scar.
-              // **Streamed, not stepped** (BG-18 / D-226) — the same law as
-              // the money plate's chain clock. It was MISSED here in the first
-              // pass: the fix went to the surface being looked at rather than
-              // to every surface that renders a DAA, which is L83's shape, and
-              // the founder caught it on glass. `formatScore` still renders
-              // DS-1's dash when there is no reading at all.
-              KvStreamingCount(
-                value: s.virtualDaaScore.value,
-                stalled: !connected,
-                builder: (context, shown) => _Reading(
-                  label: 'DAA',
-                  value: formatScore(shown),
-                  stale: !connected,
-                  age: connected ? null : _ageLabel(),
-                ),
-              ),
-              // The sheet's scan line, carried across intact. *Live* is a
-              // claim about the LINK, not about the age alone: this line
+              // The sheet's scan line, carried across intact (UX-3). *Live* is
+              // a claim about the LINK, not about the age alone: this line
               // rides a 2 s poll while the link notifiers are pushed, so a
               // just-dropped socket could otherwise read "live — scanning
-              // every block" beside a status chip saying the phone is
-              // offline. The link decides whether the scan may claim
-              // liveness; the age only refines the claim (C7).
+              // every block" beside a status chip saying the phone is offline.
+              // The link decides whether the scan may claim liveness; the age
+              // only refines the claim (C7).
               if (s.blockAgeSecs != null)
                 _Reading(
                   label: 'Transport scan',
@@ -647,6 +760,15 @@ class _NodeScreenState extends State<NodeScreen> {
                 ),
               if (pinned != null)
                 _Reading(label: 'You pinned', value: pinned, wrap: true),
+              // **`T5`'s `Switch node`** — a [KvGlowPill], which is the form §4
+              // gives a deliberate, weighty action, and the first real caller
+              // of it outside the hold. A second rendering of this pill is
+              // `ux-auditor` item 33, so it is the component or nothing.
+              //
+              // Absent when the seam is not wired, rather than present and
+              // dead: BG-12 forbids a disabled control with no stated reason,
+              // and "no callback" is not a reason anyone can act on.
+              ?_switchNode(hunting: hunting),
             ],
           ),
         );
@@ -654,40 +776,130 @@ class _NodeScreenState extends State<NodeScreen> {
     );
   }
 
-  /// The user's own "try now", under the plate that says who is answering.
+  /// **`T5`'s connection card** — the measurement, then what the link is.
   ///
-  /// Absent when the seam is not wired, rather than present and dead: BG-12
-  /// forbids a disabled control with no stated reason, and "no callback" is
-  /// not a reason anyone can act on.
-  Widget _reconnect() {
+  /// It is a *separate plate from the node row* because they answer different
+  /// questions: this one is *how good is the connection*, the one below is
+  /// *which node, and can I change it*. The render draws them as two cards for
+  /// exactly that reason.
+  Widget _connectionPlate() {
     final s = widget.scope;
-    final tap = s.onReconnect;
-    if (tap == null) return const SizedBox.shrink();
     return AnimatedBuilder(
       animation: Listenable.merge([
         s.connected,
-        s.pinnedNode,
-        if (s.searching != null) s.searching!,
-        if (s.reconnecting != null) s.reconnecting!,
+        s.activeEndpoint,
+        s.virtualDaaScore,
+        if (s.osOffline != null) s.osOffline!,
       ]),
       builder: (context, _) {
-        // The busy state rides the HUNT, not the dispatch: `reconnecting`
-        // clears the instant the race is spawned (tens of ms, by design since
-        // R0), and a label that lives less than a frame is a label nobody
-        // reads. `searching` lasts as long as the search actually does — the
-        // same bit the money plate's cadence renders.
-        final hunting =
-            (s.searching?.value ?? false) || (s.reconnecting?.value ?? false);
-        return Padding(
-          padding: const EdgeInsets.only(top: KvSpace.sm),
-          child: _Reconnect(
-            hunting: hunting,
-            connected: s.connected.value,
-            pinned: s.pinnedNode.value != null,
-            onTap: () => unawaited(tap()),
+        final connected = s.connected.value;
+        // **A latency reading belongs to a live socket, and only to one.**
+        // The probe clears itself on a failure, but the poll runs at 2 s while
+        // the notifiers are pushed — so a socket that dropped a moment ago
+        // could still be holding the last good number for one tick. Gating on
+        // `connected` closes that window without waiting for the probe.
+        final latency = connected ? _latencyMs : null;
+        return KvSurface(
+          padding: const EdgeInsets.all(KvSpace.s20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // **A `Wrap`, not a `Row`** — and it is L160's fix, one screen
+              // over. Side by side at the reference width, exactly as `T5`
+              // draws them; at 320 dp / 1.3× the flex left the caps label about
+              // 90 dp and Flutter did the only thing left, breaking the word
+              // as `CONNECTI / ON`. A section label is chrome and never breaks;
+              // the tier word drops to its own line instead, which costs a row
+              // of height and no meaning. Found in the floor frame, not argued.
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: KvSpace.s,
+                runSpacing: KvSpace.xs,
+                children: [
+                  const KvRuledLabel('Connection', tight: true),
+                  KvLatencyWord(milliseconds: latency),
+                ],
+              ),
+              const SizedBox(height: KvSpace.sm),
+              KvLatency(milliseconds: latency),
+              const SizedBox(height: KvSpace.sm),
+              Container(height: 1, color: KvColor.plateDivider),
+              // BG-8, all three states. `ChainService` deliberately KEEPS the
+              // last-known score when a dropped link emits nulls — which is
+              // only honest if the screen dims it and says how old it is. A
+              // disconnected reading at full brightness is the P0.3 scar.
+              // **Streamed, not stepped** (BG-18 / D-226) — the same law as
+              // the money plate's chain clock. `formatScore` still renders
+              // DS-1's dash when there is no reading at all.
+              KvStreamingCount(
+                value: s.virtualDaaScore.value,
+                stalled: !connected,
+                builder: (context, shown) => KvFactLine(
+                  label: connected ? 'DAA · streaming' : 'DAA',
+                  valueText: formatScore(shown),
+                  value: _CardValue(
+                    formatScore(shown),
+                    lamp: connected,
+                    stale: !connected,
+                    age: connected ? null : _ageLabel(),
+                  ),
+                ),
+              ),
+              Container(height: 1, color: KvColor.plateDivider),
+              // **Read off the live endpoint, never asserted.** `wRPC` and
+              // `borsh` are what this client is built as (`link.rs` dials
+              // `WrpcEncoding::Borsh`); whether the transport is encrypted is a
+              // property of the URL the socket actually bound, so a `ws://`
+              // node reads `wRPC · borsh` and says nothing it cannot show.
+              KvFactLine(
+                label: 'Transport',
+                valueText: _transportLine(s.activeEndpoint.value),
+                value: _CardValue(_transportLine(s.activeEndpoint.value)),
+              ),
+              Container(height: 1, color: KvColor.plateDivider),
+              // **The NODE's peers, and the label says so.** A light wallet has
+              // exactly one peer — this node — so the useful number is how well
+              // connected the node it trusts is (BG-11: a reading names what it
+              // is a reading of). `—` where the node declines the call.
+              KvFactLine(
+                label: "Node's peers",
+                valueText: _peersLine(connected),
+                value: _CardValue(_peersLine(connected)),
+              ),
+            ],
           ),
         );
       },
+    );
+  }
+
+  /// `wRPC · borsh` plus `TLS` only where the bound socket actually has it.
+  static String _transportLine(String? endpoint) {
+    const base = 'wRPC · borsh';
+    if (endpoint == null) return base;
+    return endpoint.startsWith('wss://') ? '$base · TLS' : base;
+  }
+
+  String _peersLine(bool connected) {
+    final n = _peers;
+    if (!connected || n == null) return '—';
+    return '$n';
+  }
+
+  /// `T5`'s `Switch node` pill — the hunt, in the form §4 gives a deliberate
+  /// action. Null where the seam is unwired.
+  Widget? _switchNode({required bool hunting}) {
+    final tap = widget.scope.onReconnect;
+    if (tap == null) return null;
+    return Padding(
+      padding: const EdgeInsets.only(top: KvSpace.sm),
+      child: _Reconnect(
+        hunting: hunting,
+        connected: widget.scope.connected.value,
+        pinned: widget.scope.pinnedNode.value != null,
+        onTap: () => unawaited(tap()),
+      ),
     );
   }
 
@@ -1056,13 +1268,114 @@ class _NodeScreenState extends State<NodeScreen> {
 
 /// A label and its reading. Mono and tabular on the value, because every value
 /// on this screen is an identifier or a counter.
+/// A value in the connection card's right column — `T5` puts every one of them
+/// hard right, on the same edge, which is what makes three readings a table
+/// rather than three sentences.
+///
+/// It is a `_CardValue` and not a bare [Text] for two reasons the render asks
+/// for: the DAA row carries a live lamp beside its figure, and a dimmed reading
+/// owes a visible age (BG-8). Both belong to the value, not to the row.
+class _CardValue extends StatelessWidget {
+  const _CardValue(
+    this.text, {
+    this.lamp = false,
+    this.stale = false,
+    this.age,
+  });
+
+  /// The ramp this value is set at — named once, so the dim gate below and the
+  /// style cannot drift (item 0 / L121).
+  static const double figureSize = 13;
+
+  final String text;
+
+  /// `T5` draws a green dot beside the streaming DAA — the same fact the row's
+  /// own label states in words, in a second channel (BG-7's redundancy).
+  final bool lamp;
+
+  /// Dims to [KvFreshness.opacityStale] — dimmed cached truth beats a shimmer,
+  /// and beats a confident number nobody can vouch for (BG-8).
+  final bool stale;
+
+  /// How old the reading is, in words. BG-8 requires this whenever [stale].
+  final String? age;
+
+  @override
+  Widget build(BuildContext context) {
+    assert(
+      !stale || age != null,
+      'A dimmed reading carries a visible age (BG-8) — dimming alone says '
+      '"old" without saying how old, which is the half-truth the law names.',
+    );
+    // **A body-size reading does not dim** (BG-14 as narrowed by D-257).
+    // `inkMeta` is 4.75:1 at full strength, so any multiply at all puts it under
+    // the 4.5 body bar — 13 dp mono fell to **4.22** and the 12 dp age line to
+    // **1.94**, destroying the very string BG-8 requires beside a dimmed
+    // reading (`ux-auditor`, UX-R3). [KvFreshness.staleDimFloor] is WCAG's own
+    // boundary between the body bar and the large-text bar, and `KvAmount`
+    // already gates on it; this call site was ignoring both.
+    //
+    // Staleness is still carried, the ways BG-8 itself provides: the counter
+    // **stops**, and the age is printed underneath.
+    const dims = figureSize >= KvFreshness.staleDimFloor;
+    return Opacity(
+      opacity: stale && dims ? KvFreshness.opacityStale : 1,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (lamp) ...[
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: const BoxDecoration(
+                    color: KvColor.ok,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: KvSpace.s),
+              ],
+              Flexible(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontSize: figureSize,
+                    height: 18 / figureSize,
+                    color: KvColor.ink,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (age != null)
+            Text(
+              age!,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                height: 17 / 12,
+                color: KvColor.inkMeta,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _Reading extends StatelessWidget {
   const _Reading({
     required this.label,
     required this.value,
     this.wrap = false,
-    this.stale = false,
-    this.age,
     this.numeric = true,
   });
 
@@ -1082,20 +1395,8 @@ class _Reading extends StatelessWidget {
   /// measured: 27 characters at 0.60 em needs 210.6dp against 176dp).
   final bool numeric;
 
-  /// Dims to [KvFreshness.opacityStale] — dimmed cached truth beats a shimmer,
-  /// and beats a confident number nobody can vouch for (BG-8).
-  final bool stale;
-
-  /// How old the reading is, in words. BG-8 requires this whenever [stale].
-  final String? age;
-
   @override
   Widget build(BuildContext context) {
-    assert(
-      !stale || age != null,
-      'A dimmed reading carries a visible age (BG-8) — dimming alone says '
-      '"old" without saying how old, which is the half-truth the law names.',
-    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
       child: Row(
@@ -1114,34 +1415,16 @@ class _Reading extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Opacity(
-              opacity: stale ? KvFreshness.opacityStale : 1,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    value,
-                    maxLines: numeric ? (wrap ? 3 : 1) : null,
-                    overflow: TextOverflow.clip,
-                    style: const TextStyle(
-                      fontFamily: KvFont.mono,
-                      fontSize: 13,
-                      height: 18 / 13,
-                      color: KvColor.ink,
-                      fontFeatures: [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  if (age != null)
-                    Text(
-                      age!,
-                      style: const TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 12,
-                        height: 17 / 12,
-                        color: KvColor.inkMeta,
-                      ),
-                    ),
-                ],
+            child: Text(
+              value,
+              maxLines: numeric ? (wrap ? 3 : 1) : null,
+              overflow: TextOverflow.clip,
+              style: const TextStyle(
+                fontFamily: KvFont.mono,
+                fontSize: 13,
+                height: 18 / 13,
+                color: KvColor.ink,
+                fontFeatures: [FontFeature.tabularFigures()],
               ),
             ),
           ),
@@ -1374,7 +1657,7 @@ class _Pick extends StatelessWidget {
 /// The copy was the retired network sheet's, verbatim (D-196), for as long as
 /// both surfaces existed; UX-3 collapsed the sheet into this screen, so this is
 /// now the single site and the phrasing answers to the engine instead.
-class _Reconnect extends StatelessWidget {
+class _Reconnect extends StatefulWidget {
   const _Reconnect({
     required this.hunting,
     required this.connected,
@@ -1388,7 +1671,18 @@ class _Reconnect extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_Reconnect> createState() => _ReconnectState();
+}
+
+class _ReconnectState extends State<_Reconnect> {
+  /// A hand is on it — [KvGlowPill]'s `armed` half.
+  bool _armed = false;
+
+  @override
   Widget build(BuildContext context) {
+    final hunting = widget.hunting;
+    final connected = widget.connected;
+    final pinned = widget.pinned;
     // **One control, three states, and until P0b the copy was identical in
     // all of them** — including the one where a tap was the only input in the
     // app that could turn a working wallet into a five-minute outage.
@@ -1416,7 +1710,7 @@ class _Reconnect extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _button(label),
+        _button(label, hunting: hunting),
         if (caption != null) ...[
           const SizedBox(height: KvSpace.xs),
           Text(
@@ -1433,12 +1727,16 @@ class _Reconnect extends StatelessWidget {
     );
   }
 
-  Widget _button(String label) {
+  Widget _button(String label, {required bool hunting}) {
     return Semantics(
       button: true,
       label: label,
       child: ExcludeSemantics(
-        child: InkWell(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => setState(() => _armed = true),
+          onTapCancel: () => setState(() => _armed = false),
+          onTapUp: (_) => setState(() => _armed = false),
           // **Never disabled while hunting** — a tap mid-search IS C4's kick,
           // and greying the control out deletes that affordance exactly when
           // the user most wants it. Repeat taps are already harmless:
@@ -1452,27 +1750,39 @@ class _Reconnect extends StatelessWidget {
           // that "proved" the swallow had codified the regression.
           onTap: () {
             KvHaptic.selection();
-            onTap();
+            widget.onTap();
           },
-          borderRadius: BorderRadius.circular(KvRadius.control),
-          child: KvSurface.control(
-            width: double.infinity,
-            height: KvSpace.control,
-            alignment: Alignment.center,
-            // **No meter here.** The serving plate twelve lines above already
-            // runs a cadence for this exact fact, and BG-2 counts emitting
-            // objects: with one on the plate, one on the pin field's failure
-            // state and a lamp, a second here took the screen to four against
-            // a cap of three (`ux-auditor`, measured). The label swapping to
-            // `Searching…` is the signal, and it says more than a meter can.
-            child: Text(
-              label,
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 15,
-                height: 20 / 15,
-                fontWeight: FontWeight.w600,
-                color: hunting ? KvColor.inkMeta : KvColor.inkBright,
+          // **§4's glow pill, which is what this control has always been
+          // specified as** — *"the form for a deliberate, weighty action — the
+          // hold, **Switch node**, a control committing an edit"*. It shipped as
+          // a bare `KvSurface.control` with a comment claiming the component,
+          // which is a second rendering of a §4 seat (`ux-auditor` item 33 /
+          // L143) and a false measured claim (item 0). It glows only while a
+          // hand is on it, so it spends nothing against BG-2's ambient cap —
+          // the reasoning below about the meter is untouched.
+          child: KvGlowPill(
+            armed: _armed,
+            child: SizedBox(
+              width: double.infinity,
+              height: KvSpace.control,
+              child: Center(
+                // **No meter here.** The serving plate twelve lines above already
+                // runs a cadence for this exact fact, and BG-2 counts emitting
+                // objects: with one on the plate, one on the pin field's failure
+                // state and a lamp, a second here took the screen to four against
+                // a cap of three (`ux-auditor`, measured). The label swapping to
+                // `Searching…` is the signal, and it says more than a meter can.
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: hunting ? KvColor.inkMeta : KvColor.inkBright,
+                  ),
+                ),
               ),
             ),
           ),

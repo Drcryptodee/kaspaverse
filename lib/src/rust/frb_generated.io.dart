@@ -149,6 +149,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  LinkProbeDto dco_decode_link_probe_dto(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
@@ -177,6 +180,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ThreadMessageDto> dco_decode_list_thread_message_dto(dynamic raw);
+
+  @protected
+  MaturityParamsDto dco_decode_maturity_params_dto(dynamic raw);
 
   @protected
   MaturityState dco_decode_maturity_state(dynamic raw);
@@ -427,6 +433,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  LinkProbeDto sse_decode_link_probe_dto(SseDeserializer deserializer);
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
@@ -465,6 +474,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ThreadMessageDto> sse_decode_list_thread_message_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MaturityParamsDto sse_decode_maturity_params_dto(
     SseDeserializer deserializer,
   );
 
@@ -778,6 +792,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_link_probe_dto(LinkProbeDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
@@ -828,6 +845,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_thread_message_dto(
     List<ThreadMessageDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_maturity_params_dto(
+    MaturityParamsDto self,
     SseSerializer serializer,
   );
 

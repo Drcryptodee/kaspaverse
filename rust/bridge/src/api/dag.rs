@@ -381,6 +381,39 @@ pub fn dag_status() -> DagStatusDto {
     }
 }
 
+/// **The connection card's two live readings** (`T5`).
+///
+/// A separate pull rather than two more fields on [`DagStatusDto`], and that is
+/// deliberate: `dag_status` is documented to take **no I/O in its steady
+/// state** and is polled by the money screen's link tick, while these two cost
+/// a real round trip each. Putting them on the status poll would have put two
+/// RPC calls a second behind every surface in the app to serve one card.
+///
+/// So this is called only while the node surface is open, on its own slower
+/// cadence, exactly as the transport-scan age already is.
+#[derive(Clone, Copy, Default)]
+pub struct LinkProbeDto {
+    /// Round-trip time of a `ping` on the bound socket, in milliseconds.
+    /// `None` = the node did not answer, and the surface says so rather than
+    /// showing a stale figure (BG-8).
+    pub latency_ms: Option<u64>,
+    /// How many peers **the node** is connected to. `None` where the call was
+    /// refused or unanswered — some nodes disable it, and an absent reading is
+    /// its own face rather than a zero.
+    pub peers: Option<u32>,
+}
+
+/// Probe the live link — see [`LinkProbeDto`]. Returns an empty probe rather
+/// than an error when there is no monitor yet: a surface opened during the cold
+/// window has nothing to read, which is not a failure.
+pub async fn dag_probe_link() -> LinkProbeDto {
+    let Some(monitor) = MONITOR.get() else {
+        return LinkProbeDto::default();
+    };
+    let (latency_ms, peers) = monitor.probe_link().await;
+    LinkProbeDto { latency_ms, peers }
+}
+
 /// The user's node choice (D-187) — the INV-8 escape hatch made reachable.
 ///
 /// `url` is what they chose; `active_url` is what the link is actually bound

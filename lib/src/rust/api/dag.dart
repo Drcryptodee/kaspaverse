@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `escalation_task`, `fold`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `tracker_handle`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
 /// harness and the debug screen poll it; nothing streams.
@@ -29,6 +29,12 @@ Future<void> dagResume() => RustLib.instance.api.crateApiDagDagResume();
 /// monitor so a silently dead socket (still `connected` in the snapshot) is
 /// caught by a growing block-age.
 Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
+
+/// Probe the live link — see [`LinkProbeDto`]. Returns an empty probe rather
+/// than an error when there is no monitor yet: a surface opened during the cold
+/// window has nothing to read, which is not a failure.
+Future<LinkProbeDto> dagProbeLink() =>
+    RustLib.instance.api.crateApiDagDagProbeLink();
 
 /// Read the node choice (file-backed; defaults to discovery).
 Future<NodeConfigDto> dagNodeConfig() =>
@@ -239,6 +245,44 @@ class DagStatusDto {
           osOffline == other.osOffline &&
           pinnedNode == other.pinnedNode &&
           pinDropped == other.pinDropped;
+}
+
+/// **The connection card's two live readings** (`T5`).
+///
+/// A separate pull rather than two more fields on [`DagStatusDto`], and that is
+/// deliberate: `dag_status` is documented to take **no I/O in its steady
+/// state** and is polled by the money screen's link tick, while these two cost
+/// a real round trip each. Putting them on the status poll would have put two
+/// RPC calls a second behind every surface in the app to serve one card.
+///
+/// So this is called only while the node surface is open, on its own slower
+/// cadence, exactly as the transport-scan age already is.
+class LinkProbeDto {
+  /// Round-trip time of a `ping` on the bound socket, in milliseconds.
+  /// `None` = the node did not answer, and the surface says so rather than
+  /// showing a stale figure (BG-8).
+  final BigInt? latencyMs;
+
+  /// How many peers **the node** is connected to. `None` where the call was
+  /// refused or unanswered — some nodes disable it, and an absent reading is
+  /// its own face rather than a zero.
+  final int? peers;
+
+  const LinkProbeDto({this.latencyMs, this.peers});
+
+  static Future<LinkProbeDto> default_() =>
+      RustLib.instance.api.crateApiDagLinkProbeDtoDefault();
+
+  @override
+  int get hashCode => latencyMs.hashCode ^ peers.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LinkProbeDto &&
+          runtimeType == other.runtimeType &&
+          latencyMs == other.latencyMs &&
+          peers == other.peers;
 }
 
 /// The user's node choice (D-187) — the INV-8 escape hatch made reachable.

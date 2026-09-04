@@ -5,6 +5,7 @@ import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
@@ -13,6 +14,9 @@ import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
 
 import 'support/preview_harness.dart';
 import 'support/finders.dart';
+import 'support/maturity.dart';
+import 'package:kaspaverse/src/rust/api/transport.dart' show ContactDto;
+import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 
 const _txid =
     'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34';
@@ -23,10 +27,33 @@ const _txid =
 /// `TxStatusDto.acceptedUnixMs` and it reaches the ceremony, not this screen.
 const int _recordedMs = 1788058080000;
 
+/// A counterparty the fixture can name.
+const _payee =
+    'kaspa:qr7m4h6xk2f9v0s8d3n5t1w7y2b4c6e8g0j2l4n6p8r0t2v4x6z8a0c2e4g6';
+
+/// A one-entry address book.
+ContactsScope _book(String address, String name) => ContactsScope(
+  contacts: ValueNotifier<List<ContactDto>>([
+    ContactDto(address: address, name: name),
+  ]),
+  refresh: () async {},
+  save: (_, _) async {},
+);
+
+/// What `S9` prints for the id — first eight, ellipsis, last eight.
+final String _shownTxid = '${_txid.substring(0, 8)}…${_txid.substring(56)}';
+
 /// A send accepted at DAA 458,174,000.
+/// **`confirmed`, because that is what the chain layer actually emits for it.**
+/// `wallet_sync.rs` derives a spend's maturity from `accepted_daa_score
+/// .is_some()`, and this record carries one — so `pending` here would be a
+/// fixture the production path can never produce, and every assertion built on
+/// it would be proving something about a state that does not exist.
 ActivityRecord _sent({
-  MaturityState maturity = MaturityState.pending,
+  MaturityState maturity = MaturityState.confirmed,
   BigInt? value,
+  String? counterparty,
+  BigInt? fee,
 }) => ActivityRecord(
   txid: _txid,
   valueSompi: value ?? BigInt.from(1240000000),
@@ -35,6 +62,8 @@ ActivityRecord _sent({
   acceptedDaaScore: BigInt.from(458174000),
   direction: ActivityDirection.outgoing,
   isCoinbase: false,
+  counterpartyAddress: counterparty,
+  feeSompi: fee,
   maturity: maturity,
   stalled: false,
 );
@@ -74,15 +103,23 @@ void main() {
     double textScale = 1,
     Future<String> Function(String txid)? explorerUrl,
     Future<bool> Function(String url)? openUrl,
+    ContactsScope? contacts,
   }) => MediaQuery(
     data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
     child: MaterialApp(
       theme: kvDarkTheme(),
+      // The screen clamps its column with `KvColumn`, which reads the window
+      // class — so the window has to be mounted here exactly as the app mounts
+      // it at its root (UX-R1's law; `KvWindow.of` asserts rather than falling
+      // back, so a missing one is a failure and not a silent phone layout).
+      builder: (context, page) => KvWindow(child: page!),
       home: TxDetailScreen(
         txid: _txid,
         activity: s.activity,
         virtualDaaScore: s.daa,
         stale: s.stale,
+        maturity: kTestMaturity,
+        contacts: contacts,
         explorerUrl: explorerUrl,
         openUrl: openUrl,
       ),
@@ -102,12 +139,15 @@ void main() {
     // The gauge is the register the balance gave up, and it is the ONE thing
     // on this surface that states the burial.
     expect(find.byType(KvBurialGauge), findsOneWidget);
-    expect(find.text('Seen 42'), findsOneWidget);
-    // The axis is named by the `DEPTH` heading now, not beside the reading
+    // **The chip carries the word, the gauge carries the number** (`S9`,
+    // BG-19). Two registers of one fact; one printing of the count.
+    expect(find.text('Accepted'), findsOneWidget);
+    expect(find.text('42'), findsOneWidget);
+    expect(find.text('of ${kTestMaturity.userDaa} DAA'), findsOneWidget);
+    // The axis is named by the `DEPTH` heading, not beside the reading
     // (founder, device sitting). BG-22 asks for a named axis, not an inline
-    // one; the spoken form still carries `blocks deep`, asserted in
+    // one; the spoken form carries the ceiling, asserted in
     // `burial_gauge_test`.
-    expect(find.text(KvBurialGauge.axisName), findsNothing);
     expect(findRuledLabel('Depth'), findsOneWidget);
     // **The record's own moment, under a label that does not overclaim it.**
     // `unixtimeMsec` is wallet-core's recording time (or a node's DAA→time
@@ -118,17 +158,21 @@ void main() {
     // rather than looking plausible.
     // A `_Fact` row, not a ruled heading — the lower half of this screen is a
     // table now, so the labels are set in caps by the row itself.
-    expect(find.text('TIME'), findsOneWidget);
+    // **The verb IS the label** (`S9`): the plate opens by naming what
+    // happened rather than repeating a generic `Time`, and the word comes from
+    // the shared `kvActivityFace` so this screen and the ledger row cannot name
+    // one transaction two ways (BG-21).
     expect(find.text('ACCEPTED'), findsNothing);
-    expect(find.text('Accepted'), findsNothing);
     // The accepting score is on the glass beside it, so a reader can check the
     // gauge's arithmetic rather than trust it.
-    expect(find.text('DAA'), findsOneWidget);
+    expect(find.text('DAA score'), findsOneWidget);
     expect(
       find.text(formatStamp(DateTime.fromMillisecondsSinceEpoch(_recordedMs))),
       findsOneWidget,
     );
-    expect(find.text(_txid), findsOneWidget);
+    // **Recognition on the glass, the whole thing on the clipboard** (`S9`
+    // truncates it). The copy is asserted below.
+    expect(find.text(_shownTxid), findsOneWidget);
   });
 
   testWidgets('BG-23 · a sub-1 record does not light its leading zero', (
@@ -136,7 +180,7 @@ void main() {
   ) async {
     // `KvAmountRole.hero` defaults to `magnitude`, which is right for a
     // balance — the integer is what you own, even at `0`. A record can be
-    // 0.005 KAS, and then the one bright 32 dp character is a `0` that is `0`
+    // 0.005 KAS, and then the one bright 44 dp character is a `0` that is `0`
     // for every such record while the digits that ARE the amount sit at 15 dp:
     // §8's named anti-pattern, and the identical defect D-231 corrected for
     // the live fee. At or above 1 the two rules agree exactly.
@@ -147,7 +191,7 @@ void main() {
     final runs = tester
         .widgetList<Text>(find.byType(Text))
         .where((t) => t.style?.fontFamily == KvFont.mono)
-        .where((t) => (t.style?.fontSize ?? 0) >= 32)
+        .where((t) => (t.style?.fontSize ?? 0) >= 44)
         .map((t) => t.data ?? '')
         .toList();
     expect(runs, isNotEmpty, reason: 'no run took the emphasis at all');
@@ -174,7 +218,7 @@ void main() {
           .map((t) => t.data ?? '')
           .where((d) => d != _txid && d.contains('42'))
           .toList();
-      expect(printed, ['Seen 42']);
+      expect(printed, ['42']);
     },
   );
 
@@ -184,19 +228,20 @@ void main() {
     final s = seams(depth: 42);
     await tester.pumpWidget(host(s));
     await tester.pumpAndSettle();
-    expect(find.text('Seen 42'), findsOneWidget);
+    expect(find.text('42'), findsOneWidget);
 
     // The screen is opened precisely because the number is going to change.
     s.daa.value = BigInt.from(458174000 + 90);
     await tester.pump();
     await tester.pump(const Duration(seconds: 1)); // the streamed interval
-    expect(find.text('Seen 90'), findsOneWidget);
+    expect(find.text('90'), findsOneWidget);
 
-    // And across the safe threshold the words change with it.
+    // And across the pin's own threshold the word changes with it — the chip
+    // says `Settled` while the fill lands on the ceiling in the same frame.
     s.daa.value = BigInt.from(458174000 + 400);
     await tester.pump();
     await tester.pumpAndSettle();
-    expect(find.text('Confirmed'), findsOneWidget);
+    expect(find.text('Settled'), findsOneWidget);
   });
 
   testWidgets('a stale link stops counting and says so (BG-8/BG-20)', (
@@ -209,7 +254,7 @@ void main() {
     s.stale.value = true;
     await tester.pumpAndSettle();
     expect(
-      find.text('Seen —'),
+      find.text('—'),
       findsOneWidget,
       reason:
           'a frozen last-known DAA must not read live, and the absence of a '
@@ -253,9 +298,10 @@ void main() {
         null,
       ),
     );
+    phone(tester);
     await tester.pumpWidget(host(seams()));
     await tester.pumpAndSettle();
-    await tester.tap(find.text(_txid));
+    await tester.tap(find.text(_shownTxid));
     await tester.pump();
     expect(copied, _txid, reason: 'a truncated txid is as useless as none');
     await tester.pumpAndSettle();
@@ -287,10 +333,14 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('View on kaspa.stream'), findsOneWidget);
+      // **The compact register** (`S9` draws it as one of two buttons on a
+      // fixed bar). D-192's disclosure moved to where the explorer is actually
+      // chosen — the Network screen's Explorer section — and the spoken label
+      // still carries the host and the IP in full.
+      expect(find.text('Explorer'), findsOneWidget);
       expect(
         find.text('Shares the transaction ID and your IP address'),
-        findsOneWidget,
+        findsNothing,
       );
       await tester.tap(find.byType(KvExplorerExit));
       await tester.pumpAndSettle();
@@ -318,7 +368,6 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('View on '), findsNothing);
-      expect(find.text('The explorer link cannot be used'), findsOneWidget);
       await tester.tap(find.byType(KvExplorerExit));
       await tester.pumpAndSettle();
       expect(opened, isFalse);
@@ -369,11 +418,70 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('The explorer link cannot be used'), findsOneWidget);
       await tester.tap(find.byType(KvExplorerExit));
       await tester.pumpAndSettle();
       expect(opened, isFalse);
     });
+  });
+
+  testWidgets('every tap target on the record clears 52 dp (BG-12)', (
+    tester,
+  ) async {
+    // **Measured, not asserted.** All three of these shipped under the floor —
+    // `Explorer` at 34.0, "Copy the address" at 22.0, "Copy the transaction id"
+    // at 20.0 — and one of them carried a comment claiming "52 dp (BG-12)"
+    // while painting `8 + 18 + 8` (`ux-auditor`, UX-R3). A comment is not a
+    // measurement; this is.
+    phone(tester);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      host(
+        seams(records: [_sent(counterparty: _payee)]),
+        explorerUrl: (txid) async => 'https://explorer.kaspa.org/txs/$txid',
+        openUrl: (_) async => true,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    for (final label in const ['Copy the address', 'Copy the transaction id']) {
+      // The `Semantics` widget itself, not the merged node — the node's label
+      // absorbs its descendants, so a lookup by the exact string finds nothing.
+      final finder = find.byWidgetPredicate(
+        (w) => w is Semantics && w.properties.label == label,
+      );
+      expect(finder, findsOneWidget, reason: '$label is not on the screen');
+      expect(
+        tester.getSize(finder).height,
+        greaterThanOrEqualTo(KvSpace.touchTarget),
+        reason: '"$label" is a ${tester.getSize(finder).height} dp target',
+      );
+    }
+    expect(
+      tester.getSize(find.byType(KvExplorerExit)).height,
+      greaterThanOrEqualTo(KvSpace.touchTarget),
+      reason:
+          'the explorer exit is the third one, and it claimed 52 in a '
+          'comment while painting 34',
+    );
+    handle.dispose();
+  });
+
+  testWidgets('the counterparty name is stated ONCE, in the chip (BG-19)', (
+    tester,
+  ) async {
+    // `S9`'s `To` row is the address and a copy glyph — no name. Rendering the
+    // name there too put it twice above the fold, and the address is what that
+    // row is for (BG-15).
+    phone(tester);
+    await tester.pumpWidget(
+      host(
+        seams(records: [_sent(counterparty: _payee)]),
+        contacts: _book(_payee, 'Mara'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Mara'), findsOneWidget);
+    expect(find.textContaining('sent to Mara'), findsOneWidget);
   });
 
   testWidgets('nothing renders under the readable floor at 1.3x / 320dp', (

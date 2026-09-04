@@ -24,15 +24,72 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use kaspa_addresses::Address;
+use kaspa_addresses::{Address, Prefix};
+use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wallet_core::events::Events;
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wallet_core::storage::transaction::{TransactionData, TransactionId, TransactionRecord};
-use kaspa_wallet_core::utxo::{Maturity, UtxoContext, UtxoContextBinding, UtxoProcessor};
-use kaspa_wrpc_client::prelude::NetworkId;
+use kaspa_wallet_core::utxo::{
+    Maturity, NetworkParams, UtxoContext, UtxoContextBinding, UtxoProcessor,
+};
+use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::error::{ChainError, Result};
+
+/// **The maturity thresholds this wallet actually applies**, read from the
+/// pinned wallet framework's own `NetworkParams` for the network in hand.
+///
+/// INV-9 in its plainest form: `100` and `1,000` are **not** typed anywhere in
+/// this project. They are `user_transaction_maturity_period_daa` and
+/// `coinbase_transaction_maturity_period_daa`, both `AtomicU64` fields the
+/// library exposes per network (`wallet/core/src/utxo/settings.rs`), and both
+/// are read here so that a re-pin which changes either one changes what the
+/// glass says on the same build. D-249 made this a bridge concern precisely
+/// because the UI had been carrying its own copies of the pair.
+///
+/// The pin's devnet values (`10 / 100`) are a live reminder of why: they are
+/// exactly the numbers D-248 mistook for arbitrary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaturityParams {
+    /// A payment someone else sends us is excluded from the spendable balance
+    /// and from coin selection until it is this many DAA deep (D-251: this is
+    /// wallet-core's client-side policy, not a consensus rule).
+    pub user_daa: u64,
+    /// A mined coinbase output matures at this depth — and this one IS
+    /// consensus (`coinbase_maturity`), mirrored by the library.
+    pub coinbase_daa: u64,
+    /// The window before a coinbase is even counted as pending. Carried so a
+    /// reader of this struct never has to look the third number up separately.
+    pub coinbase_stasis_daa: u64,
+}
+
+/// Read [`MaturityParams`] for a network. Pure, no I/O, no lock held across an
+/// await — the library's own statics answer it.
+///
+/// **A testnet id without a supported suffix is refused here rather than left
+/// to a caller's discipline** (`consensus-auditor`, UX-R3): `NetworkParams::from`
+/// `panic!`s on it, and this is a `pub fn` reached from a `#[frb(sync)]` bridge
+/// entry point — a panic must never cross that boundary (INV-2). Unreachable
+/// today, since the wallet is mainnet-only, and that is exactly when a guard is
+/// cheap to add and expensive to have skipped.
+pub fn maturity_params(network_id: NetworkId) -> Result<MaturityParams> {
+    let supported = match network_id.network_type {
+        NetworkType::Testnet => matches!(network_id.suffix, Some(10) | Some(12)),
+        _ => true,
+    };
+    if !supported {
+        return Err(ChainError::Message(format!(
+            "no maturity parameters for network {network_id}"
+        )));
+    }
+    let params = NetworkParams::from(network_id);
+    Ok(MaturityParams {
+        user_daa: params.user_transaction_maturity_period_daa(),
+        coinbase_daa: params.coinbase_transaction_maturity_period_daa(),
+        coinbase_stasis_daa: params.coinbase_transaction_stasis_period_daa(),
+    })
+}
 
 /// Most rows the feed carries — "recent activity", not full history (§0.10).
 const ACTIVITY_CAP: usize = 100;
@@ -82,6 +139,16 @@ pub struct WalletActivityRecord {
     pub direction: ActivityDirection,
     pub is_coinbase: bool,
     pub maturity: ActivityMaturity,
+    /// **Who the money went to** — the one output of OUR OWN spend that is not
+    /// our change, in bech32. `None` on a receive, and that absence is a fact
+    /// about the pin rather than a gap in this code: see [`counterparty_of`].
+    pub counterparty_address: Option<String>,
+    /// **What the network charged for this transaction**, in sompi — the pin's
+    /// own `fees` field on a spend we originated. `None` on a receive, because
+    /// a receive did not pay it: the sender did, and the amount that reached us
+    /// is already net of it. Rendering `0` there would be a confident wrong
+    /// number about someone's money (`S9` draws the row on a spend).
+    pub fee_sompi: Option<u64>,
 }
 
 /// A folded wallet event. Values are absolute (like [`crate::DagEvent`]), so the
@@ -138,6 +205,25 @@ fn is_incoming_data(record: &TransactionRecord) -> bool {
     )
 }
 
+/// A spend shape that carries the network **fee** on the pin's own typed data.
+///
+/// `TransactionData::Change` is the odd one out and it is the *terminal* shape
+/// of every send that returns change: at acceptance the processor emits BOTH a
+/// fresh `Outgoing` (`handle_utxo_removed` → `new_outgoing`) and a `Change`
+/// (`handle_utxo_added` → `new_change`), and `new_change` has **no `fees`
+/// field**. Letting the second overwrite the first therefore erased the fee at
+/// the moment the send was accepted, and — because the replayed log holds the
+/// `Change` — no historical send ever showed one again (`consensus-auditor`,
+/// UX-R3).
+fn carries_fee(record: &TransactionRecord) -> bool {
+    matches!(
+        record.transaction_data(),
+        TransactionData::Outgoing { .. }
+            | TransactionData::Batch { .. }
+            | TransactionData::TransferOutgoing { .. }
+    )
+}
+
 /// A record wallet-core classifies as a spend WE originated. If we already hold
 /// a txid in one of these shapes, that txid is ours — a later incoming
 /// re-report of it is stale context, never a new deposit ([`ActivityStore::upsert`]).
@@ -171,6 +257,85 @@ fn is_own_change(record: &TransactionRecord, change_set: &HashSet<Address>) -> b
     all_change_addresses(&addresses, change_set)
 }
 
+/// **Who the money went to, for a spend WE originated** — or `None`, honestly.
+///
+/// ## Which output is "to", and the premise that was wrong
+///
+/// **Every output that is not at one of OUR OWN addresses is a payment, and
+/// there must be exactly one of them.**
+///
+/// The first cut of this said *"not at one of our own **change** addresses"*,
+/// reasoning that change is the only output a send makes to itself. **D-067
+/// broke that construction and `consensus-auditor` caught it**:
+/// `payment_change_address()` is `Branch::Receive, 0` — this wallet's change
+/// goes *home* to the receive branch so the address stays funded for the next
+/// `input[0]` — while `change_set` is built from the change branch alone
+/// (`derive_wallet_addresses` returns `(receive ++ change, change)`). So an
+/// ordinary payment presented **two** non-change outputs, the loop found a
+/// second payment and returned `None`, and the field was empty on every
+/// ordinary send. The tests missed it because they paid change to a change-set
+/// address — a shape production never produces.
+///
+/// Classifying against the **whole watched window** fixes it whichever branch
+/// change lands on, and it is the set that actually means *ours*.
+///
+/// Two payment outputs is a send with two recipients and has no single
+/// counterparty; zero means every output came home, which is a send that paid
+/// nobody outside this wallet. Both answer `None` rather than picking a
+/// favourite — a row that names the wrong recipient is worse than one that
+/// names none, because the name is what a user checks a repeat send against.
+///
+/// ## Why a receive carries none
+///
+/// A receive's counterparty would be an **input**, and the *record* does not
+/// hold one: `TransactionData::Incoming` / `External` carry `utxo_entries`,
+/// which are the outputs paid **to us**. So it cannot be answered from the
+/// record the way a spend's can, and this function says nothing rather than
+/// guessing.
+///
+/// **That is a limit of the record, not of the app** (`consensus-auditor`): the
+/// node can answer it — `resolve_return_address` already asks
+/// `get_utxo_return_address` for `input[0]`'s previous-output address at the
+/// accepting chain block, and `WalletEngine::activity_daa_score` exists to feed
+/// it exactly that. Naming a sender is therefore a *second lookup* someone may
+/// choose to spend, not a door that is closed. It is not spent here.
+///
+/// The address is derived with `extract_script_pub_key_address` — the same call
+/// the receive scan and `send.rs` use — at the prefix of the record's **own**
+/// `network_id`, never a prefix assumed here.
+fn counterparty_of(record: &TransactionRecord, ours: &HashSet<Address>) -> Option<String> {
+    let transaction = match record.transaction_data() {
+        TransactionData::Outgoing { transaction, .. }
+        | TransactionData::TransferOutgoing { transaction, .. }
+        | TransactionData::Change { transaction, .. } => transaction,
+        // Batch is the compounding leg of a chained send: it pays no one but
+        // the next leg, so naming a recipient for it would be a fiction.
+        // Incoming / External / Reorg / Stasis carry no inputs at all.
+        _ => return None,
+    };
+    let prefix = Prefix::from(record.network_id().network_type);
+    let mut payment: Option<String> = None;
+    for output in transaction.outputs.iter() {
+        let address = match extract_script_pub_key_address(&output.script_public_key, prefix) {
+            Ok(address) => address,
+            // A script we cannot render as an address is not a counterparty we
+            // can name. It is also not proof there is only one payment, so it
+            // counts as one: an unnamed second recipient must still collapse
+            // the answer to `None`.
+            Err(_) => return None,
+        };
+        if ours.contains(&address) {
+            continue;
+        }
+        if payment.is_some() {
+            // Two recipients on one transaction — no single counterparty.
+            return None;
+        }
+        payment = Some(address.to_string());
+    }
+    payment
+}
+
 /// Project a wallet-core record onto a row, classifying with the record's own
 /// helpers (INV-9). `current_daa_score` drives maturity — pass the processor's
 /// live DAA so a reloaded Pending row promotes the instant the chain advances.
@@ -178,7 +343,11 @@ fn is_own_change(record: &TransactionRecord, change_set: &HashSet<Address>) -> b
 /// [`ActivityMaturity::Unknown`], never a guessed Pending (finding 13: the
 /// cold-start confirmation storm was `unwrap_or(0)` here — with DAA 0 every
 /// settled receive re-pended and the glass streamed its huge DAA distance).
-fn map_record(record: &TransactionRecord, current_daa_score: Option<u64>) -> WalletActivityRecord {
+fn map_record(
+    record: &TransactionRecord,
+    current_daa_score: Option<u64>,
+    ours: &HashSet<Address>,
+) -> WalletActivityRecord {
     // A transaction the wallet ORIGINATED (a send) reaches us as TWO records on
     // one txid: an `Outgoing` (pending, on submit) and — when the change UTXO
     // confirms — a `Change` record (wallet-core, context.rs:handle_utxo_added).
@@ -188,6 +357,20 @@ fn map_record(record: &TransactionRecord, current_daa_score: Option<u64>) -> Wal
     // — NOT when its change UTXO separately matures (that left sends stuck on
     // "Pending" until the next event). `record.value()` (= change for a `Change`
     // record) is wrong for this row; we read the typed data instead.
+    // The fee is on the typed data for every shape we originated, and on none
+    // of the shapes we merely received (INV-9 — read, never computed here: an
+    // inputs-minus-outputs subtraction would be a second implementation of a
+    // number the library already holds).
+    let fee_sompi = match record.transaction_data() {
+        TransactionData::Outgoing { fees, .. }
+        | TransactionData::Batch { fees, .. }
+        | TransactionData::TransferOutgoing { fees, .. } => Some(*fees),
+        // `Change` is the same txid re-reported once its change UTXO confirms
+        // and it carries no `fees` field at the pin — so a send whose feed row
+        // arrives in that shape has no fee to state, and says nothing rather
+        // than a zero.
+        _ => None,
+    };
     let (direction, value_sompi, spend_accepted, accepted_daa_score) =
         match record.transaction_data() {
             TransactionData::Outgoing {
@@ -256,6 +439,8 @@ fn map_record(record: &TransactionRecord, current_daa_score: Option<u64>) -> Wal
         direction,
         is_coinbase: record.is_coinbase(),
         maturity,
+        counterparty_address: counterparty_of(record, ours),
+        fee_sompi,
     }
 }
 
@@ -368,6 +553,28 @@ impl ActivityStore {
                 }
             }
         }
+        // **Fee guard (UX-R3, `consensus-auditor`): a `Change` never overwrites
+        // a richer shape for the same txid.**
+        //
+        // `Change` carries the same `transaction`, `payment_value`,
+        // `change_value` and `accepted_daa_score` as the `Outgoing` it follows,
+        // and one field less — `fees`. Both arrive from a single
+        // `handle_utxo_changed` at acceptance, removed-then-added, so the held
+        // record is already the accepted one and is strictly the better of the
+        // two. Refusing the downgrade keeps the fee without recomputing it,
+        // which is what INV-9 asks for: an inputs-minus-outputs subtraction here
+        // would be a second implementation of a number the library holds.
+        //
+        // A send discovered only by a cold re-scan still arrives as a bare
+        // `Change` with nothing held, is stored normally, and honestly has no
+        // fee to state — the row says nothing rather than zero.
+        if matches!(record.transaction_data(), TransactionData::Change { .. }) {
+            if let Some(existing) = self.records.get(record.id()) {
+                if carries_fee(existing) {
+                    return Ok(false);
+                }
+            }
+        }
         self.append(&StoreFrame::Upsert(Box::new(record.clone())))?;
         self.records.insert(*record.id(), record);
         Ok(true)
@@ -384,10 +591,16 @@ impl ActivityStore {
     /// (`None` — no live DAA yet — resolves receives as Unknown, finding 13).
     /// Hides any record that is our own returning change misfiled as an incoming
     /// (cleans entries a pre-fix restart re-scan may have already persisted).
+    /// `change_set` decides which rows are our own misfiled change; `ours` — the
+    /// **whole** watched window — decides which output of a spend is the payee.
+    /// They are different sets on purpose and the difference is load-bearing:
+    /// this wallet's change comes home to a RECEIVE address (D-067), so the
+    /// change subset cannot tell a payee from our own change.
     fn list(
         &self,
         current_daa_score: Option<u64>,
         change_set: &HashSet<Address>,
+        ours: &HashSet<Address>,
     ) -> Vec<WalletActivityRecord> {
         let mut records: Vec<&TransactionRecord> = self
             .records
@@ -402,7 +615,7 @@ impl ActivityStore {
         records
             .into_iter()
             .take(ACTIVITY_CAP)
-            .map(|record| map_record(record, current_daa_score))
+            .map(|record| map_record(record, current_daa_score, ours))
             .collect()
     }
 }
@@ -751,12 +964,19 @@ impl WalletEngine {
 
     fn emit_activity(&self, change_set: &HashSet<Address>) {
         let daa = self.current_daa();
+        // **The whole watched window, not the change subset** — see
+        // [`counterparty_of`]. Built here rather than held in `Inner` because
+        // `watch` widens mid-session (`extend_watch`) and a cached set would go
+        // stale exactly when discovery found the addresses that matter; the
+        // build is a few dozen clones beside a fold that already re-derives an
+        // address per output.
+        let ours: HashSet<Address> = self.watched().iter().cloned().collect();
         let list = self
             .inner
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .list(daa, change_set);
+            .list(daa, change_set, &ours);
         self.emit(WalletEvent::Activity(list));
     }
 
@@ -993,6 +1213,255 @@ mod tests {
         }
     }
 
+    /// An Outgoing record whose transaction pays the given addresses.
+    fn outgoing_paying(id_byte: u8, to: &[(&Address, u64)]) -> TransactionRecord {
+        use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
+        use kaspa_consensus_core::tx::{Transaction as CoreTx, TransactionOutput};
+        use kaspa_txscript::pay_to_address_script;
+        let outputs: Vec<TransactionOutput> = to
+            .iter()
+            .map(|(a, v)| TransactionOutput::new(*v, pay_to_address_script(a)))
+            .collect();
+        let tx = CoreTx::new(0, vec![], outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        record(
+            id_byte,
+            1_000,
+            10,
+            TransactionData::Outgoing {
+                fees: 1234,
+                aggregate_input_value: 10_000,
+                aggregate_output_value: 9_000,
+                transaction: tx,
+                payment_value: Some(1_000),
+                change_value: 8_000,
+                accepted_daa_score: Some(10),
+                utxo_entries: vec![],
+            },
+        )
+    }
+
+    fn mainnet_address(tag: u8) -> Address {
+        Address::new(
+            Prefix::Mainnet,
+            kaspa_addresses::Version::PubKey,
+            &[tag; 32],
+        )
+    }
+
+    #[test]
+    fn maturity_params_are_the_pin_s_own_numbers() {
+        // INV-9 in its plainest form: these are read from the library's
+        // `NetworkParams`, not typed by us. Mainnet is 100 / 1,000 (+500
+        // stasis); devnet's 10 / 100 is the pair D-248 mistook for arbitrary.
+        let mainnet = maturity_params(NetworkId::new(NetworkType::Mainnet)).unwrap();
+        assert_eq!(mainnet.user_daa, 100);
+        assert_eq!(mainnet.coinbase_daa, 1_000);
+        assert_eq!(mainnet.coinbase_stasis_daa, 500);
+
+        let devnet = maturity_params(NetworkId::new(NetworkType::Devnet)).unwrap();
+        assert_eq!(devnet.user_daa, 10);
+        assert_eq!(devnet.coinbase_daa, 100);
+        assert_ne!(
+            mainnet.user_daa, devnet.user_daa,
+            "the read must vary by network, or it is a constant with extra steps"
+        );
+
+        // **A testnet suffix the library has no parameters for is REFUSED, not
+        // panicked through a `#[frb(sync)]` boundary** (INV-2). `NetworkId::new`
+        // panics on a bare testnet before we are reached at all, so the case
+        // this guard actually owns is a well-formed id with an unsupported
+        // suffix — which is what `NetworkParams::from` panics on.
+        assert!(maturity_params(NetworkId::with_suffix(NetworkType::Testnet, 99)).is_err());
+        assert!(maturity_params(NetworkId::with_suffix(NetworkType::Testnet, 10)).is_ok());
+    }
+
+    #[test]
+    fn counterparty_is_the_one_output_that_is_not_ours() {
+        let payee = mainnet_address(1);
+        let change = mainnet_address(2);
+        let ours: HashSet<Address> = [change.clone()].into_iter().collect();
+
+        let rec = outgoing_paying(9, &[(&payee, 1_000), (&change, 8_000)]);
+        assert_eq!(
+            counterparty_of(&rec, &ours),
+            Some(payee.to_string()),
+            "the payment output is the counterparty; our own output is not"
+        );
+    }
+
+    #[test]
+    fn change_coming_home_to_a_receive_address_is_still_ours() {
+        // **The defect `consensus-auditor` BLOCKed, as a test.** D-067 sends
+        // this wallet's change HOME to `receive/0`, so the change-branch subset
+        // does not contain it — classifying against that subset left an
+        // ordinary payment with two "non-change" outputs and no counterparty at
+        // all. This is the production shape: change at a RECEIVE address, and a
+        // change subset that does not mention it.
+        let payee = mainnet_address(1);
+        let receive_zero = mainnet_address(7);
+        let change_branch = mainnet_address(2);
+
+        let ours: HashSet<Address> = [receive_zero.clone(), change_branch.clone()]
+            .into_iter()
+            .collect();
+        let change_subset: HashSet<Address> = [change_branch].into_iter().collect();
+        assert!(
+            !change_subset.contains(&receive_zero),
+            "precondition: change comes home OUTSIDE the change branch (D-067)"
+        );
+
+        let rec = outgoing_paying(15, &[(&payee, 1_000), (&receive_zero, 8_000)]);
+        assert_eq!(
+            counterparty_of(&rec, &ours),
+            Some(payee.to_string()),
+            "an ordinary send must name its payee"
+        );
+        assert_eq!(
+            counterparty_of(&rec, &change_subset),
+            None,
+            "and this is what the change subset alone would have answered"
+        );
+    }
+
+    #[test]
+    fn two_recipients_have_no_single_counterparty() {
+        let a = mainnet_address(1);
+        let b = mainnet_address(3);
+        let change = mainnet_address(2);
+        let ours: HashSet<Address> = [change.clone()].into_iter().collect();
+
+        let rec = outgoing_paying(10, &[(&a, 500), (&b, 500), (&change, 8_000)]);
+        assert_eq!(
+            counterparty_of(&rec, &ours),
+            None,
+            "a row that names the WRONG recipient is worse than one that names none"
+        );
+    }
+
+    #[test]
+    fn a_send_entirely_to_our_own_addresses_names_nobody() {
+        // Every output came home. There is no counterparty outside this wallet
+        // to name, and inventing one from our own address set would be a row
+        // claiming a payee that does not exist.
+        let mine = mainnet_address(7);
+        let change = mainnet_address(2);
+        let ours: HashSet<Address> = [mine.clone(), change.clone()].into_iter().collect();
+        let rec = outgoing_paying(16, &[(&mine, 1_000), (&change, 8_000)]);
+        assert_eq!(counterparty_of(&rec, &ours), None);
+    }
+
+    #[test]
+    fn a_sweep_that_kept_nothing_back_has_no_change_and_one_payee() {
+        let payee = mainnet_address(1);
+        let rec = outgoing_paying(11, &[(&payee, 9_000)]);
+        assert_eq!(
+            counterparty_of(&rec, &HashSet::new()),
+            Some(payee.to_string()),
+        );
+    }
+
+    #[test]
+    fn a_receive_has_no_counterparty_and_that_is_the_pin_s_shape() {
+        // `TransactionData::Incoming` holds the outputs paid TO US; the funding
+        // inputs are not in the record at any point, so the sender is not
+        // knowable from the RECORD. (The node can answer it — see the doc.)
+        let rec = incoming(12, 500, 10);
+        assert_eq!(counterparty_of(&rec, &HashSet::new()), None);
+    }
+
+    /// A `Change` record for the SAME txid as an `Outgoing` — the terminal
+    /// shape wallet-core emits when the change UTXO confirms. It carries no
+    /// `fees` field at the pin.
+    fn change_leg(id_byte: u8, to: &[(&Address, u64)]) -> TransactionRecord {
+        use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
+        use kaspa_consensus_core::tx::{Transaction as CoreTx, TransactionOutput};
+        use kaspa_txscript::pay_to_address_script;
+        let outputs: Vec<TransactionOutput> = to
+            .iter()
+            .map(|(a, v)| TransactionOutput::new(*v, pay_to_address_script(a)))
+            .collect();
+        let tx = CoreTx::new(0, vec![], outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        record(
+            id_byte,
+            1_000,
+            10,
+            TransactionData::Change {
+                aggregate_input_value: 10_000,
+                aggregate_output_value: 9_000,
+                transaction: tx,
+                payment_value: Some(1_000),
+                change_value: 8_000,
+                accepted_daa_score: Some(10),
+                utxo_entries: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn a_change_leg_never_erases_the_fee_of_the_send_it_follows() {
+        // **The defect `consensus-auditor` found, as a test.** At acceptance the
+        // processor emits an `Outgoing` (carrying `fees`) and then a `Change`
+        // (carrying none) for one txid, both through `handle_utxo_changed`. With
+        // the later one overwriting the earlier, the fee showed for the mempool
+        // window and vanished at exactly the moment the send was accepted — and
+        // because the replayed log held the `Change`, no historical send ever
+        // showed a fee again.
+        let payee = mainnet_address(1);
+        let dir = std::env::temp_dir().join(format!("kv-wsync-fee-{}", std::process::id()));
+        let path = dir.join("activity.kvlog");
+        let _ = std::fs::remove_file(&path);
+        let mut store = ActivityStore::load(path.clone()).unwrap();
+
+        assert!(store
+            .upsert(outgoing_paying(0xF1, &[(&payee, 1_000)]))
+            .unwrap());
+        assert!(
+            !store.upsert(change_leg(0xF1, &[(&payee, 1_000)])).unwrap(),
+            "the poorer terminal shape is refused, not written"
+        );
+
+        let rows = store.list(Some(50), &HashSet::new(), &HashSet::new());
+        assert_eq!(rows.len(), 1, "one send, one row");
+        assert_eq!(rows[0].fee_sompi, Some(1234), "the fee survives acceptance");
+        assert_eq!(
+            rows[0].counterparty_address,
+            Some(payee.to_string()),
+            "and so does everything else the richer record carried"
+        );
+
+        // A send discovered ONLY by a cold re-scan arrives as a bare `Change`
+        // with nothing held: it is stored normally and honestly has no fee.
+        let _ = std::fs::remove_file(&path);
+        let mut cold = ActivityStore::load(path).unwrap();
+        assert!(cold.upsert(change_leg(0xF2, &[(&payee, 1_000)])).unwrap());
+        let rows = cold.list(Some(50), &HashSet::new(), &HashSet::new());
+        assert_eq!(
+            rows[0].fee_sompi, None,
+            "nothing to state, so it states nothing"
+        );
+    }
+
+    #[test]
+    fn the_fee_is_the_pin_s_own_field_and_a_receive_has_none() {
+        let payee = mainnet_address(1);
+        let spend = map_record(
+            &outgoing_paying(13, &[(&payee, 1_000)]),
+            Some(50),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            spend.fee_sompi,
+            Some(1234),
+            "read from TransactionData::Outgoing::fees, never recomputed"
+        );
+        let deposit = map_record(&incoming(14, 500, 10), Some(50), &HashSet::new());
+        assert_eq!(
+            deposit.fee_sompi, None,
+            "a receive did not pay the fee — the sender did, and a zero here \
+             would be a confident wrong number"
+        );
+    }
+
     #[test]
     fn replay_applies_upserts_and_tombstones() {
         let a = incoming(1, 100, 10);
@@ -1037,7 +1506,7 @@ mod tests {
         // Mainnet user-tx maturity period is 100 DAA (utxo/settings.rs).
         let rec = incoming(3, 1_234, 1_000);
 
-        let pending = map_record(&rec, Some(1_050));
+        let pending = map_record(&rec, Some(1_050), &HashSet::new());
         assert_eq!(pending.direction, ActivityDirection::Incoming);
         assert_eq!(pending.maturity, ActivityMaturity::Pending);
         assert_eq!(pending.value_sompi, 1_234);
@@ -1045,13 +1514,13 @@ mod tests {
         assert_eq!(pending.block_daa_score, 1_000);
         assert_eq!(pending.txid.len(), 64, "txid is 32-byte hash hex");
 
-        let confirmed = map_record(&rec, Some(1_200));
+        let confirmed = map_record(&rec, Some(1_200), &HashSet::new());
         assert_eq!(confirmed.maturity, ActivityMaturity::Confirmed);
 
         // Finding 13 (the cold-start confirmation storm): NO live DAA must
         // resolve a receive as Unknown — never a guessed Pending that lets
         // hours-settled history stream in-flight counters at boot.
-        let unknown = map_record(&rec, None);
+        let unknown = map_record(&rec, None, &HashSet::new());
         assert_eq!(unknown.maturity, ActivityMaturity::Unknown);
     }
 
@@ -1195,7 +1664,7 @@ mod tests {
             "a fresh external txid is written, never provenance-refused"
         );
 
-        let rows = store.list(Some(2_050), &change_set);
+        let rows = store.list(Some(2_050), &change_set, &change_set);
         assert_eq!(rows.len(), 1, "the deposit renders");
         assert_eq!(rows[0].direction, ActivityDirection::Incoming);
         assert_eq!(rows[0].value_sompi, 500_000_000);
@@ -1216,7 +1685,7 @@ mod tests {
         store.upsert(incoming(2, 20, 10)).unwrap();
         store.upsert(incoming(3, 30, 20)).unwrap();
 
-        let rows = store.list(Some(1_000_000), &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].block_daa_score, 30);
         assert_eq!(rows[1].block_daa_score, 20);
@@ -1264,7 +1733,7 @@ mod tests {
             "the STORE keeps everything — only the feed is bounded"
         );
 
-        let rows = store.list(Some(1_000_000), &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
         assert_eq!(rows.len(), ACTIVITY_CAP, "the feed is cut to the cap");
         assert_eq!(
             rows[0].block_daa_score,
@@ -1298,13 +1767,13 @@ mod tests {
         store.upsert(incoming(7, 4_000, 120)).unwrap();
 
         // The row stays our outgoing send — not a phantom deposit.
-        let rows = store.list(Some(1_000_000), &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].direction, ActivityDirection::Outgoing);
 
         // A genuine deposit under a DIFFERENT txid is untouched by the guard.
         store.upsert(incoming(9, 50_000, 130)).unwrap();
-        let rows = store.list(Some(1_000_000), &HashSet::new());
+        let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
         let deposit = rows
             .iter()
             .find(|r| r.direction == ActivityDirection::Incoming);

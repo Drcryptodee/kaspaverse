@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -11,163 +12,249 @@ import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 
+import 'support/maturity.dart';
 import 'support/preview_harness.dart';
 
-/// **The burial gauge under BG-22**, and every assertion here measures the
-/// **ink** rather than an argument the code handed the canvas.
+/// **The burial ladder under BG-21 and BG-22**, rebuilt at UX-R3 on D-248's
+/// ratified vocabulary (`Pending · Accepted · Settled`) with D-249's thresholds
+/// crossing the FFI instead of being typed here.
 ///
-/// That distinction is L145, and it is the scar the canon session produced
-/// about its own first guard: the sign ring's guard recorded `drawArc`'s
-/// `sweepAngle` parameter and was structurally blind to a `StrokeCap.round`
-/// painting 4.21% of the circle past every reading. So [_Ink] below replays the
-/// real painter onto a spy canvas and reconstructs what the eye would cover —
-/// rectangles by their bounds, strokes by their length plus whatever their cap
-/// adds — and the painter is deliberately given **the depth** rather than a
-/// pre-computed fraction, so there is no intermediate number for a test to
-/// confirm instead of the drawing.
-///
-/// Each group names the defect it was proven red against; the falsification
-/// runs are recorded in the session summary.
+/// Every assertion measures the **ink** rather than an argument the code handed
+/// the canvas. That distinction is L145, and it is the scar the canon session
+/// produced about its own first guard: the sign ring's guard recorded
+/// `drawArc`'s `sweepAngle` parameter and was structurally blind to a
+/// `StrokeCap.round` painting 4.21% of the circle past every reading. So [_Ink]
+/// below replays the real painter onto a spy canvas and reconstructs what the
+/// eye would cover — rectangles by their bounds, strokes by their length plus
+/// whatever their cap adds — and the painter is deliberately given **the depth
+/// and the ceiling** rather than a pre-computed fraction, so there is no
+/// intermediate number for a test to confirm instead of the drawing.
 void main() {
   setUpAll(loadBundledFonts);
 
-  group('BG-22 · the declared scale', () {
-    test(
-      'every graduation is a decade of the ratified ladder, plus its origin',
-      () {
-        // The LABELLED ladder is `0 · 10 · 100 · 1,000` (founder, device
-        // sitting). `1` became a sub-mark: it is still drawn, and still has
-        // somewhere to be, but naming every decade in a third of the track
-        // crowded the labels the eye actually navigates by.
-        expect(KvBurialGauge.graduations, [0, 10, 100, 1000]);
-        // And the sub-marks are the subdivisions of the very decades the
-        // labels name — never arbitrary ink between them.
-        // Every labelled mark lands exactly on the sub-mark grid, which is
-        // what makes the ruler one even rhythm instead of a major scale with
-        // a minor one laid over it at a different pitch.
-        for (final n in KvBurialGauge.graduations) {
-          final steps =
-              KvBurialGauge.positionFor(n) * KvBurialGauge.subDivisions;
-          expect(
-            (steps - steps.roundToDouble()).abs(),
-            lessThan(1e-9),
-            reason: '$n sits between two sub-marks instead of on one',
-          );
+  group('D-249 · the thresholds are READ, never remembered', () {
+    test('no threshold literal survives anywhere in lib/', () {
+      // **The acceptance criterion, as a guard.** D-249: *"UX-R3 must not
+      // hardcode 100 or 1,000. Both live on the pinned side and cross the FFI
+      // from `NetworkParams::from(network_id)`."* The shipped ladder carried
+      // `safe = 100` / `settled = 1000` as constants and was right by accident
+      // — they are wallet-core's **mainnet** pair, while `10 / 100` is its
+      // **devnet** pair, so a re-pin or a different network would have left the
+      // glass quoting numbers the balance no longer used.
+      //
+      // Searched as a declaration, not as the digits: `100` appears legitimately
+      // as a percentage, a duration and a mass all over the tree. What must not
+      // exist is a *named threshold* holding one.
+      final offenders = <String>[];
+      final pattern = RegExp(
+        r'(safe|settled|maturity|threshold|confirmations?|depth)\w*\s*=\s*'
+        r'(100|1000|1_000)\b',
+        caseSensitive: false,
+      );
+      for (final file in Directory('lib').listSync(recursive: true)) {
+        if (file is! File || !file.path.endsWith('.dart')) continue;
+        if (_exempt(file.path)) continue;
+        for (final (i, line) in file.readAsLinesSync().indexed) {
+          if (line.trimLeft().startsWith('//')) continue;
+          if (pattern.hasMatch(line)) {
+            offenders.add('${file.path}:${i + 1}  ${line.trim()}');
+          }
         }
-        // The two thresholds D-192 settled are marks on the axis, not thresholds
-        // the reader has to be told about somewhere else.
-        expect(KvBurialGauge.graduations, contains(KvBurial.safe));
-        expect(KvBurialGauge.graduations, contains(KvBurial.settled));
-      },
-    );
-
-    test('the marks sit where the PIECEWISE scale puts them', () {
-      // Superseded 2026-08-31 (device sitting): the marks used to be at even
-      // quarters. They are now `[0, 1/9, 2/9, 1/3, 1]` — three decades sharing
-      // the first third, one decade taking the other two.
-      final xs = KvBurialGauge.graduations
-          .map(KvBurialGauge.positionFor)
-          .toList();
-      expect(xs[0], 0);
-      expect(xs[1], closeTo(KvBurialGauge.tenAt, 1e-12));
-      expect(xs[2], closeTo(KvBurialGauge.safeAt, 1e-12));
-      expect(xs[3], 1);
-      // **`10` is the exact centre of `0 … 100`** (founder, device sitting).
-      expect(xs[1], closeTo(xs[2] / 2, 1e-12));
-    });
-
-    test('the decade that carries the decision gets two thirds', () {
-      // **The reason for the rescale, kept as arithmetic.** On the even-quarter
-      // scale `100 → 1,000` was a quarter of the track, and a real send
-      // measured on glass climbing 981 → 1,000 moved the fill TWO PIXELS. The
-      // decade a user is actually waiting through now owns the majority of the
-      // graphic.
-      final safeToFinal =
-          KvBurialGauge.positionFor(1000) -
-          KvBurialGauge.positionFor(KvBurial.safe);
-      expect(safeToFinal, closeTo(2 / 3, 1e-12));
-      // And the two below it split the remaining third evenly: `0 → 10` and
-      // `10 → 100` are one sixth each.
+      }
       expect(
-        KvBurialGauge.positionFor(10) - KvBurialGauge.positionFor(0),
-        closeTo(1 / 6, 1e-12),
-      );
-      expect(
-        KvBurialGauge.positionFor(100) - KvBurialGauge.positionFor(10),
-        closeTo(1 / 6, 1e-12),
+        offenders,
+        isEmpty,
+        reason:
+            'a maturity threshold is typed into lib/ instead of crossing the '
+            'FFI from NetworkParams (D-249):\n${offenders.join('\n')}',
       );
     });
 
-    test('the scale is MONOTONE across the break, and never steps back', () {
-      // A piecewise scale earns exactly one new way to be wrong: a
-      // discontinuity at the join. Walk the boundary and the whole range.
-      var previous = -1.0;
-      for (final n in [
-        0,
-        1,
-        2,
-        9,
-        10,
-        11,
-        98,
-        99,
-        100,
-        101,
-        102,
-        500,
-        998,
-        999,
-        1000,
-      ]) {
-        final x = KvBurialGauge.positionFor(n);
+    test('the ceiling branches on is_coinbase', () {
+      // D-249's last finding, which the shipped `rungFor` never read: a
+      // coinbase matures at `coinbase_transaction_maturity_period_daa`, not at
+      // the user period. At 150 it rendered green and settled while wallet-core
+      // still called it Pending and the balance excluded it — one row, two
+      // answers, and the wrong one was the reassuring one.
+      expect(kTestMaturity.ceilingFor(coinbase: false), kTestMaturity.userDaa);
+      expect(
+        kTestMaturity.ceilingFor(coinbase: true),
+        kTestMaturity.coinbaseDaa,
+      );
+      expect(kTestMaturity.coinbaseDaa, greaterThan(kTestMaturity.userDaa));
+    });
+
+    test('the whole scale moves when the pin hands it different numbers', () {
+      // The falsification of "read, not remembered". `10 / 100` is verbatim
+      // wallet-core's **devnet** pair, so a ladder that still lands `Settled`
+      // at 100 under these thresholds is one that ignored what it was given.
+      final ceiling = kTestDevnetMaturity.ceilingFor(coinbase: false);
+      expect(ceiling, 10);
+      expect(KvBurialGauge.positionFor(5, ceiling), closeTo(0.5, 1e-12));
+      expect(KvBurialGauge.positionFor(10, ceiling), 1);
+      expect(
+        KvBurial.rungFor(
+          TxChipState.accepted,
+          10,
+          MaturityState.confirmed,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestDevnetMaturity,
+        ),
+        KvBurialRung.settled,
+      );
+      // …and the same depth is only halfway up the mainnet track.
+      expect(
+        KvBurial.rungFor(
+          TxChipState.accepted,
+          10,
+          MaturityState.confirmed,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
+        ),
+        KvBurialRung.accepted,
+      );
+    });
+
+    testWidgets('a coinbase at 150 is NOT settled — the shipped defect', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          KvBurialGauge(
+            state: TxChipState.accepted,
+            confirmations: 150,
+            maturity: MaturityState.confirmed,
+            direction: ActivityDirection.incoming,
+            isCoinbase: true,
+            thresholds: kTestMaturity,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(
+        _Ink.of(tester).filledFraction,
+        closeTo(150 / kTestMaturity.coinbaseDaa, 0.002),
+        reason:
+            'a coinbase 150 deep is still Pending at the pin and excluded from '
+            'the balance — a gauge that does not branch would show it full '
+            '(D-249)',
+      );
+      expect(
+        _dotHue(tester),
+        isNot(KvColor.settled),
+        reason: 'the rung must not claim spendable either',
+      );
+      // The same depth on an ordinary payment is over the line.
+      await tester.pumpWidget(
+        _host(
+          KvBurialGauge(
+            key: const ValueKey('user'),
+            state: TxChipState.accepted,
+            confirmations: 150,
+            maturity: MaturityState.confirmed,
+            direction: ActivityDirection.incoming,
+            isCoinbase: false,
+            thresholds: kTestMaturity,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(_Ink.of(tester).filledFraction, closeTo(1, 0.002));
+      expect(_dotHue(tester), KvColor.settled);
+    });
+  });
+
+  group('BG-22 · the declared scale is linear', () {
+    test('it is a straight line from the origin to the ceiling', () {
+      // D-248 replaced the log/piecewise ruler with one decade drawn linearly,
+      // and D-249 gave it an honest referent: progress **inside** the Accepted
+      // rung toward spendable, which is a real quantity the wallet reads every
+      // second.
+      const ceiling = 100;
+      for (final d in const [0, 1, 25, 50, 75, 99, 100]) {
         expect(
-          x,
-          greaterThanOrEqualTo(previous),
-          reason: 'depth $n went BACKWARDS on the track',
+          KvBurialGauge.positionFor(d, ceiling),
+          closeTo(d / ceiling, 1e-12),
+          reason: 'depth $d is not where a linear scale puts it',
         );
+      }
+    });
+
+    test('it is monotone and never runs past its ceiling', () {
+      var previous = -1.0;
+      for (final n in const [0, 1, 2, 49, 50, 51, 99, 100, 101, 5000]) {
+        final x = KvBurialGauge.positionFor(n, 100);
+        expect(x, greaterThanOrEqualTo(previous), reason: 'depth $n went back');
         previous = x;
       }
-      // The join itself is continuous: 100 approached from either side is the
-      // same point, which is what stops the fill jumping as it crosses.
-      expect(
-        KvBurialGauge.positionFor(100),
-        closeTo(KvBurialGauge.safeAt, 1e-12),
-      );
-      expect(
-        KvBurialGauge.positionFor(101) - KvBurialGauge.positionFor(100),
-        lessThan(0.01),
-        reason: 'a visible step at the join would be a discontinuity',
-      );
+      expect(KvBurialGauge.positionFor(99, 100), lessThan(1));
+      expect(KvBurialGauge.positionFor(100, 100), 1);
+      expect(KvBurialGauge.positionFor(100000, 100), 1);
+      expect(KvBurialGauge.positionFor(0, 100), 0);
+      expect(KvBurialGauge.positionFor(-5, 100), 0);
     });
 
-    test('the scale ends where finality does, and never runs past it', () {
-      expect(KvBurialGauge.positionFor(999), lessThan(1));
-      expect(KvBurialGauge.positionFor(1000), 1);
-      expect(KvBurialGauge.positionFor(100000), 1);
-      expect(KvBurialGauge.positionFor(0), 0);
-      expect(KvBurialGauge.positionFor(-5), 0);
+    test('the tick hierarchy is §4\'s: 21 marks in three lengths', () {
+      // §4: **21 ticks** — 12 dp at 0 · 50 · 100, 8 dp every 10, 5 dp every 5.
+      // `S9` measured its own majors at 0 %, 50 % and 100 % of the track, so
+      // the render and the law agree here and neither had to be assumed.
+      expect(KvBurialGauge.subDivisions, 20, reason: '21 marks = 20 steps');
+      final lengths = [
+        for (var s = 0; s <= KvBurialGauge.subDivisions; s++)
+          KvBurialGaugePainter.tickLength(s),
+      ];
+      expect(lengths, hasLength(21));
+      expect(lengths.first, KvBurialGaugePainter.majorTick);
+      expect(lengths.last, KvBurialGaugePainter.majorTick);
+      expect(
+        lengths[10],
+        KvBurialGaugePainter.majorTick,
+        reason: 'the 50 mark',
+      );
+      // A step is 5 % of the ceiling, so an even step is a tenth and an odd
+      // one is a fifth.
+      expect(lengths[2], KvBurialGaugePainter.tenTick, reason: 'every tenth');
+      expect(lengths[1], KvBurialGaugePainter.fiveTick, reason: 'every fifth');
+      expect(
+        lengths.where((l) => l == KvBurialGaugePainter.majorTick).length,
+        3,
+        reason:
+            '§4 seats exactly three tall marks: 0, the midpoint, the ceiling',
+      );
+      expect(
+        KvBurialGaugePainter.fiveTick,
+        lessThan(KvBurialGaugePainter.tenTick),
+      );
+      expect(
+        KvBurialGaugePainter.tenTick,
+        lessThan(KvBurialGaugePainter.majorTick),
+      );
     });
   });
 
   group('BG-22 · the ink is the reading', () {
-    testWidgets('the painted fill IS the declared position, at every decade', (
+    testWidgets('the painted fill IS the declared position, at every step', (
       tester,
     ) async {
-      for (final depth in const [0, 1, 3, 10, 42, 100, 340, 999, 1000, 5000]) {
+      for (final depth in const [0, 1, 5, 25, 50, 99, 100, 340]) {
         await tester.pumpWidget(_host(_gauge(depth, key: ValueKey(depth))));
         // A fresh gauge snaps to its first reading, so one pump settles it.
         await tester.pump();
         final ink = _Ink.of(tester);
+        final declared = KvBurialGauge.positionFor(
+          depth,
+          kTestMaturity.userDaa,
+        );
         expect(
           ink.filledFraction,
-          closeTo(KvBurialGauge.positionFor(depth), 0.001),
+          closeTo(declared, 0.002),
           reason:
-              'at $depth blocks the gauge covers '
+              'at $depth DAA the gauge covers '
               '${(ink.filledFraction * 100).toStringAsFixed(1)}% of the track '
               'where the declared scale says '
-              '${(KvBurialGauge.positionFor(depth) * 100).toStringAsFixed(1)}% '
-              '— Lie Factor '
-              '${(ink.filledFraction / KvBurialGauge.positionFor(depth)).toStringAsFixed(2)}',
+              '${(declared * 100).toStringAsFixed(1)}%',
         );
       }
     });
@@ -176,7 +263,7 @@ void main() {
       await tester.pumpWidget(_host(_gauge(42)));
       await tester.pump();
       final ink = _Ink.of(tester);
-      expect(ink.lines, isNotEmpty, reason: 'the track was never drawn');
+      expect(ink.lines, isNotEmpty, reason: 'the ruler was never drawn');
       for (final line in ink.lines) {
         expect(
           line.cap,
@@ -192,10 +279,13 @@ void main() {
     testWidgets('nothing is filled for a depth nobody has', (tester) async {
       await tester.pumpWidget(
         _host(
-          const KvBurialGauge(
+          KvBurialGauge(
             state: TxChipState.accepted,
             confirmations: null,
             maturity: MaturityState.confirmed,
+            direction: ActivityDirection.outgoing,
+            isCoinbase: false,
+            thresholds: kTestMaturity,
           ),
         ),
       );
@@ -205,23 +295,32 @@ void main() {
         0,
         reason:
             'an extent drawn for an unknown quantity is a fabricated reading '
-            '(BG-8); the words carry the dash instead',
+            '(BG-8); the reading line carries the dash instead',
       );
+      expect(find.text('—'), findsOneWidget);
     });
 
     testWidgets('a stalled submit plots no depth', (tester) async {
       await tester.pumpWidget(
         _host(
-          const KvBurialGauge(
+          KvBurialGauge(
             state: TxChipState.stalled,
             confirmations: 40,
             maturity: MaturityState.pending,
+            direction: ActivityDirection.outgoing,
+            isCoinbase: false,
+            thresholds: kTestMaturity,
           ),
         ),
       );
       await tester.pump();
       expect(_Ink.of(tester).filledFraction, 0);
-      expect(find.text('Not accepted yet'), findsOneWidget);
+      expect(_reading('Not accepted yet'), findsNothing);
+      expect(
+        KvBurial.rungWord(KvBurialRung.stalled),
+        'Not accepted yet',
+        reason: 'the stall keeps its own sentence, carried by the chip',
+      );
     });
   });
 
@@ -233,8 +332,8 @@ void main() {
       await tester.pump();
       // A second reading arrives: the count replays the interval between two
       // observations, linearly, and the gauge is drawn at whatever integer the
-      // replay is on. Both readings sit inside the `seen` rung, which is where
-      // the words carry the depth — so the ink has something independent of
+      // replay is on. Both readings sit inside the `Accepted` rung, where the
+      // reading line prints the count — so the ink has something independent of
       // the painter to be checked against.
       await tester.pumpWidget(_host(_gauge(95)));
       await tester.pump();
@@ -244,16 +343,19 @@ void main() {
       for (var step = 0; step < 8; step++) {
         await tester.pump(const Duration(milliseconds: 100));
         final ink = _Ink.of(tester);
-        // **The reading is read off the WORDS, not off the painter.** The two
-        // registers are built from one value inside one builder; if the ink
-        // and the printed number ever disagree, one of them is lying.
+        // **The reading is read off the printed number, not off the painter.**
+        // The two registers are built from one value inside one builder; if the
+        // ink and the printed number ever disagree, one of them is lying.
         final shown = _shownDepth(tester);
         expect(
           ink.filledFraction,
-          closeTo(KvBurialGauge.positionFor(shown), 0.002),
+          closeTo(
+            KvBurialGauge.positionFor(shown, kTestMaturity.userDaa),
+            0.003,
+          ),
           reason:
               'the gauge reads ${(ink.filledFraction * 100).toStringAsFixed(1)}%'
-              ' while the line beside it says $shown blocks',
+              ' while the line beside it says $shown',
         );
         if ((ink.filledFraction - previous).abs() > 1e-9) moved++;
         previous = ink.filledFraction;
@@ -269,11 +371,11 @@ void main() {
     });
 
     testWidgets('a fall snaps rather than sliding backwards', (tester) async {
-      await tester.pumpWidget(_host(_gauge(500)));
+      await tester.pumpWidget(_host(_gauge(80)));
       await tester.pump();
       expect(
         _Ink.of(tester).filledFraction,
-        closeTo(KvBurialGauge.positionFor(500), 0.001),
+        closeTo(KvBurialGauge.positionFor(80, kTestMaturity.userDaa), 0.002),
       );
       // A reorg, or a depth reading arriving over a maturity flag. BG-18 says
       // a decrease snaps; a gauge that slid back would animate burial being
@@ -282,7 +384,7 @@ void main() {
       await tester.pump();
       expect(
         _Ink.of(tester).filledFraction,
-        closeTo(KvBurialGauge.positionFor(20), 0.001),
+        closeTo(KvBurialGauge.positionFor(20, kTestMaturity.userDaa), 0.002),
         reason: 'the fall must be on the new reading in one frame',
       );
     });
@@ -301,7 +403,7 @@ void main() {
       await tester.pump();
       expect(
         _Ink.of(tester).filledFraction,
-        closeTo(KvBurialGauge.positionFor(4), 0.001),
+        closeTo(KvBurialGauge.positionFor(4, kTestMaturity.userDaa), 0.002),
         reason:
             'the sign ring drew a COMPLETE circle under this flag with only '
             'its opacity carrying the reading (D-229) — the extent half of the '
@@ -309,57 +411,36 @@ void main() {
       );
       await tester.pumpAndSettle();
     });
-
-    testWidgets('nothing is ever drawn strictly between the 0 and 1 marks', (
-      tester,
-    ) async {
-      // A depth is a count of whole blocks and the streamed count passes
-      // through integers, so no frame may land inside the origin step.
-      await tester.pumpWidget(_host(_gauge(0)));
-      await tester.pump();
-      await tester.pumpWidget(_host(_gauge(30)));
-      await tester.pump();
-      for (var step = 0; step < 12; step++) {
-        final f = _Ink.of(tester).filledFraction;
-        expect(
-          f == 0 || f >= KvBurialGauge.positionFor(1) - 1e-9,
-          isTrue,
-          reason:
-              'the gauge showed ${(f * 100).toStringAsFixed(1)}%, which is '
-              'inside the unlabelled origin step — BG-22 forbids interpolating '
-              'between marks nothing names',
-        );
-        await tester.pump(const Duration(milliseconds: 80));
-      }
-      await tester.pumpAndSettle();
-    });
   });
 
   group('BG-20 · an unread scale does not look like a measured zero', () {
-    testWidgets('the ink differs between "0 blocks deep" and "no reading"', (
+    testWidgets('the ink differs between "0 deep" and "no reading"', (
       tester,
     ) async {
       // With the `0` origin labelled, an empty track reads as a measurement AT
       // zero. Both states fill nothing, so the graphic asserted the stronger of
-      // the two for a reading nobody has (`consensus-auditor`, UX-5). The words
-      // already differ — `Seen 0` against `Seen —` — and the ink now does too.
+      // the two for a reading nobody has (`consensus-auditor`, UX-5). The
+      // printed value already differs — `0` against `—` — and the ink does too.
       await tester.pumpWidget(_host(_gauge(0, key: const ValueKey('zero'))));
       await tester.pump();
-      expect(_reading('Seen 0'), findsOneWidget);
+      expect(find.text('0'), findsWidgets);
       final measured = _Ink.of(tester).tickTones;
 
       await tester.pumpWidget(
         _host(
-          const KvBurialGauge(
-            key: ValueKey('unknown'),
+          KvBurialGauge(
+            key: const ValueKey('unknown'),
             state: TxChipState.accepted,
             confirmations: null,
-            maturity: MaturityState.pending,
+            maturity: MaturityState.confirmed,
+            direction: ActivityDirection.outgoing,
+            isCoinbase: false,
+            thresholds: kTestMaturity,
           ),
         ),
       );
       await tester.pump();
-      expect(_reading('Seen —'), findsOneWidget);
+      expect(find.text('—'), findsOneWidget);
       final unread = _Ink.of(tester).tickTones;
 
       expect(measured, isNotEmpty);
@@ -376,176 +457,178 @@ void main() {
     });
   });
 
+  group('BG-21 · one vocabulary, and it is the bridge\'s own', () {
+    test('the words are Pending · Accepted · Settled', () {
+      // D-248, transcribed rather than improved: *"we will remove seen,
+      // confirmed and final. and make it only Pending, Accepted, and Settled"*.
+      expect(KvBurial.rungWord(KvBurialRung.pending), 'Pending');
+      expect(KvBurial.rungWord(KvBurialRung.accepted), 'Accepted');
+      expect(KvBurial.rungWord(KvBurialRung.settled), 'Settled');
+      // The measurement form composes from the bare word, so a chip and a
+      // gauge can never disagree about what a rung is called.
+      expect(KvBurial.words(KvBurialRung.accepted, depth: null), 'Accepted —');
+      expect(KvBurial.words(KvBurialRung.accepted, depth: 7), 'Accepted 7');
+      expect(KvBurial.words(KvBurialRung.settled), 'Settled');
+      // §9.17's case question, closed: the terminal word is capitalised like
+      // its siblings. `final` was lowercase because it read as an adjective;
+      // `Settled` is a rung name and rung names are capitalised.
+      expect(KvBurial.rungWord(KvBurialRung.settled), startsWith('S'));
+    });
+
+    test('the retired words are gone from every call site', () {
+      // BG-21's waiver named this sitting as its trigger, and half a migration
+      // is what the law forbids: two vocabularies on one fact, with the seam
+      // sitting exactly where a user checks whether their money is safe.
+      final offenders = <String>[];
+      final retired = RegExp(
+        r"""['"](Seen|Settling|Confirmed|final)( —| \$?\w+)?['"]""",
+      );
+      for (final file in Directory('lib').listSync(recursive: true)) {
+        if (file is! File || !file.path.endsWith('.dart')) continue;
+        if (_exempt(file.path)) continue;
+        for (final (i, line) in file.readAsLinesSync().indexed) {
+          final code = line.trimLeft();
+          // Prose about the migration is not a call site.
+          if (code.startsWith('//') || code.startsWith('///')) continue;
+          if (retired.hasMatch(line)) {
+            offenders.add('${file.path}:${i + 1}  ${line.trim()}');
+          }
+        }
+      }
+      expect(
+        offenders,
+        isEmpty,
+        reason:
+            'a retired lifecycle word still reaches the glass (BG-21, '
+            'D-248):\n${offenders.join('\n')}',
+      );
+    });
+
+    test('the rung reads the DIRECTION, because one flag means two things', () {
+      // D-249 correction (a). For a **spend**, `wallet_sync.rs` derives
+      // `Confirmed` from `accepted_daa_score.is_some()` — accepted at depth 0,
+      // not settled. For a **receive** it derives from `record.maturity(daa)`,
+      // so `Pending` means *on chain and under the maturity period*, never in a
+      // mempool. Read without the direction, an incoming deposit wore an amber
+      // `Pending` chip for its first ten seconds while it was already accepted.
+      KvBurialRung rung(ActivityDirection d, MaturityState m, {int? depth}) =>
+          KvBurial.rungFor(
+            TxChipState.accepted,
+            depth,
+            m,
+            direction: d,
+            isCoinbase: false,
+            thresholds: kTestMaturity,
+          );
+
+      // A receive under the maturity period is ON CHAIN — never `Pending`.
+      expect(
+        rung(ActivityDirection.incoming, MaturityState.pending),
+        KvBurialRung.accepted,
+      );
+      // A spend the DAG has not accepted is the one true `Pending`.
+      expect(
+        rung(ActivityDirection.outgoing, MaturityState.pending),
+        KvBurialRung.pending,
+      );
+      // A spend the DAG HAS accepted, with no depth to be read, is `Accepted —`
+      // rather than the terminal word: the depth is what earns that.
+      expect(
+        rung(ActivityDirection.outgoing, MaturityState.confirmed),
+        KvBurialRung.accepted,
+      );
+      // A receive the library itself calls mature is settled on its word.
+      expect(
+        rung(ActivityDirection.incoming, MaturityState.confirmed),
+        KvBurialRung.settled,
+      );
+    });
+
+    test('a computable depth outranks a stale Pending flag on a spend', () {
+      // The two inputs cannot honestly disagree — `depthOf` anchors a spend on
+      // `acceptedDaaScore` and `wallet_sync.rs` derives its maturity from the
+      // same field — so when they do, the raw score wins over the projection.
+      expect(
+        KvBurial.rungFor(
+          TxChipState.accepted,
+          42,
+          MaturityState.pending,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
+        ),
+        KvBurialRung.accepted,
+        reason:
+            'a screen actively counting a spend\'s burial must not print '
+            'Pending over it',
+      );
+    });
+
+    test('the mark and the gauge read one implementation of the ladder', () {
+      // BG-21: two registers, one law. If these ever diverge, the ledger row
+      // and the detail screen are two widgets disagreeing about one number.
+      for (final rung in KvBurialRung.values) {
+        expect(KvBurial.hueFor(rung), isNotNull);
+        expect(KvBurial.tintFor(rung), isNotNull);
+        expect(KvBurial.rungWord(rung), isNotEmpty);
+      }
+      // D-248 seats `settled` as a fourth value hue and spends it in exactly
+      // one place: the terminal rung. It is never a general status, which is
+      // why it is a colour here and not a fourth `KvLampTone`.
+      expect(KvBurial.hueFor(KvBurialRung.settled), KvColor.settled);
+      expect(KvBurial.hueFor(KvBurialRung.accepted), KvColor.ok);
+      expect(KvBurial.hueFor(KvBurialRung.pending), KvColor.warn);
+    });
+  });
+
   group('BG-24 · the crossings are accounted for', () {
     testWidgets('the word flips in the same frame the fill crosses the mark', (
       tester,
     ) async {
       // **The coherence property, and it is why the rung is derived from the
       // DRAWN depth.** It used to come from the newest reading, so a poll
-      // arriving at 150 over a wallet showing 99 printed `Confirmed`
-      // immediately and left the bar below the hundred mark for the rest of the
+      // arriving at 150 over a wallet showing 99 printed the terminal word
+      // immediately and left the bar below the ceiling for the rest of the
       // second — the word and the extent disagreeing about which side of the
-      // safe threshold the money was on, on the surface built to answer exactly
+      // threshold the money was on, on the surface built to answer exactly
       // that question.
       await tester.pumpWidget(_host(_gauge(60)));
       await tester.pump();
       await tester.pumpWidget(_host(_gauge(400)));
       await tester.pump();
 
-      var sawSeen = false;
-      var sawConfirmed = false;
-      final safeMark = KvBurialGauge.positionFor(KvBurial.safe);
+      // **Measured as ink against the PRINTED number**, not against a tween's
+      // current colour: the dot crossfades through intermediate hues by design
+      // (BG-24), and a guard that keyed on the exact end colour would be
+      // testing the animation rather than the coherence.
+      var sawUnder = false;
+      var sawOver = false;
       for (var step = 0; step < 14; step++) {
         final fill = _Ink.of(tester).filledFraction;
-        final confirmed = _reading('Confirmed').evaluate().isNotEmpty;
-        if (confirmed) {
-          sawConfirmed = true;
+        final shown = _shownDepth(tester);
+        if (shown >= kTestMaturity.userDaa) {
+          sawOver = true;
           expect(
             fill,
-            greaterThanOrEqualTo(safeMark - 1e-6),
+            greaterThanOrEqualTo(1 - 1e-6),
             reason:
-                'the words say the money is safe while the bar is still short '
-                'of the hundred mark',
+                'the line says $shown — past the ceiling — while the bar is '
+                'still short of it',
           );
         } else {
-          sawSeen = true;
+          sawUnder = true;
           expect(
             fill,
-            lessThan(safeMark),
-            reason:
-                'the bar is past the hundred mark while the words still count',
+            lessThan(1),
+            reason: 'the bar is full while the line still says $shown',
           );
         }
         await tester.pump(const Duration(milliseconds: 80));
       }
-      expect(sawSeen && sawConfirmed, isTrue, reason: 'the crossing never ran');
+      expect(sawUnder && sawOver, isTrue, reason: 'the crossing never ran');
+      // And when it has settled, the dot is the fourth hue D-248 seated.
       await tester.pumpAndSettle();
-    });
-
-    testWidgets('a rung crossing crossfades and a fall snaps', (tester) async {
-      await tester.pumpWidget(_host(_gauge(998)));
-      await tester.pump();
-      expect(_reading('Confirmed'), findsOneWidget);
-
-      // Up: both rungs are on the glass together while one hands over to the
-      // other. `KvBurialMark` has crossfaded since D-229 and the gauge cut.
-      await tester.pumpWidget(_host(_gauge(1400)));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 60));
-      expect(
-        _reading('Confirmed'),
-        findsOneWidget,
-        reason: 'the outgoing rung is still fading',
-      );
-      expect(_reading('final'), findsOneWidget);
-      await tester.pumpAndSettle();
-      expect(_reading('Confirmed'), findsNothing);
-
-      // Down: a reorg is not progress and must not animate as if it were.
-      await tester.pumpWidget(_host(_gauge(300)));
-      await tester.pump();
-      expect(
-        _reading('final'),
-        findsNothing,
-        reason: 'BG-18 wins over BG-24 on a decrease — it snaps',
-      );
-      expect(_reading('Confirmed'), findsOneWidget);
-    });
-  });
-
-  group('BG-22 · the thousand mark declares the end of the scale', () {
-    testWidgets('it is the tallest mark on the axis', (tester) async {
-      await tester.pumpWidget(_host(_gauge(42)));
-      await tester.pump();
-      final ink = _Ink.of(tester);
-      final ticks = ink.verticalTicks;
-      // Every labelled mark, plus every step of the sub-grid that is not
-      // already one of them. Derived from the constants so the count cannot
-      // drift from the drawing.
-      final majors = KvBurialGauge.graduations
-          .map(KvBurialGauge.positionFor)
-          .toList();
-      var subs = 0;
-      for (var i = 1; i < KvBurialGauge.subDivisions; i++) {
-        final at = i / KvBurialGauge.subDivisions;
-        if (!majors.any((m) => (m - at).abs() < 1e-9)) subs++;
-      }
-      expect(
-        ticks,
-        hasLength(KvBurialGauge.graduations.length + subs),
-        reason: 'every labelled mark and every sub-mark is drawn',
-      );
-      final last = ticks.last;
-      for (final tick in ticks.take(ticks.length - 1)) {
-        expect(
-          last.length,
-          greaterThan(tick.length),
-          reason: '1,000 is a taller labelled mark than every other decade',
-        );
-      }
-    });
-
-    testWidgets('the bracket closes only once the money is final', (
-      tester,
-    ) async {
-      await tester.pumpWidget(_host(_gauge(999)));
-      await tester.pump();
-      expect(
-        _Ink.of(tester).bracketArms,
-        1,
-        reason: 'below a thousand the bracket is open — a hook, not a bracket',
-      );
-
-      await tester.pumpWidget(_host(_gauge(1200)));
-      await tester.pumpAndSettle();
-      expect(
-        _Ink.of(tester).bracketArms,
-        2,
-        reason:
-            'finality is carried by the thousand mark CLOSING, never by a '
-            'fourth hue the palette does not have (§5)',
-      );
-      // Shape, not colour: with hue removed the two states must still differ
-      // (BG-25). The arm count is that difference.
-    });
-  });
-
-  group('BG-20 · every state has a face of its own', () {
-    testWidgets('an unknown depth never wears a measured one', (tester) async {
-      await tester.pumpWidget(
-        _host(
-          const KvBurialGauge(
-            state: TxChipState.accepted,
-            confirmations: null,
-            maturity: MaturityState.confirmed,
-          ),
-        ),
-      );
-      await tester.pump();
-      expect(
-        find.text('Confirmed —'),
-        findsOneWidget,
-        reason:
-            '`Confirmed` alone meant both "100–999 blocks deep" and "we cannot '
-            'tell", and the shared face wore the stronger of the two',
-      );
-      expect(find.text('Confirmed'), findsNothing);
-    });
-
-    testWidgets('a measured hundred says so without a dash', (tester) async {
-      await tester.pumpWidget(_host(_gauge(340)));
-      await tester.pump();
-      expect(find.text('Confirmed'), findsOneWidget);
-    });
-
-    test('the mark and the gauge read one implementation of the ladder', () {
-      // BG-21: two registers, one law. If these ever diverge, the ledger row
-      // and the detail screen are two widgets disagreeing about one number.
-      expect(KvBurialMark.safe, KvBurial.safe);
-      expect(KvBurialMark.settled, KvBurial.settled);
-      expect(KvBurial.words(KvBurialRung.seen, depth: null), 'Seen —');
-      expect(KvBurial.words(KvBurialRung.seen, depth: 7), 'Seen 7');
-      expect(KvBurial.words(KvBurialRung.settled), 'final');
+      expect(_dotHue(tester), KvColor.settled);
     });
   });
 
@@ -595,8 +678,8 @@ void main() {
       // compounding leg of a >100k-mass chained send — and Rust surfaces its
       // `accepted_daa_score` exactly as it does for a payment. Anchored on
       // `blockDaaScore` instead, a leg the DAG never accepted accrued 2,500
-      // blocks of burial off the wall clock and the gauge rendered `final`
-      // over a Pending record (`consensus-auditor`, UX-5).
+      // blocks of burial off the wall clock and the gauge rendered the terminal
+      // word over a Pending record (`consensus-auditor`, UX-5).
       expect(
         KvBurial.depthOf(row(ActivityDirection.change), tip, stale: false),
         isNull,
@@ -624,11 +707,11 @@ void main() {
       }
     });
 
-    testWidgets('and the gauge does not claim finality on a never-accepted leg', (
+    testWidgets('the gauge claims nothing on a never-accepted leg', (
       tester,
     ) async {
-      // The end-to-end shape of the same defect: the words and the closed
-      // bracket both asserted finality over a record wallet-core calls Pending.
+      // The end-to-end shape of the same defect: the words and the fill both
+      // asserted the terminal rung over a record wallet-core calls Pending.
       final record = row(ActivityDirection.change);
       final depth = KvBurial.depthOf(record, tip, stale: false);
       await tester.pumpWidget(
@@ -637,37 +720,43 @@ void main() {
             state: TxChipState.accepted,
             confirmations: depth,
             maturity: record.maturity,
+            direction: record.direction,
+            isCoinbase: record.isCoinbase,
+            thresholds: kTestMaturity,
           ),
         ),
       );
       await tester.pump();
-      expect(_reading('final'), findsNothing);
-      expect(_reading('Seen —'), findsOneWidget);
-      expect(_Ink.of(tester).bracketArms, 1);
+      expect(_Ink.of(tester).filledFraction, 0);
+      expect(find.text('—'), findsOneWidget);
     });
   });
 
   group('BG-21 · the ledger row reads the same law the gauge does', () {
-    testWidgets('the row s count does not stop short of the mark it crosses', (
+    testWidgets('the row\'s count does not stop short of the mark it crosses', (
       tester,
     ) async {
       // The mark used to take its rung from `widget.confirmations` while the
       // count streamed from the last reading, so a poll of 106 arriving over a
       // row showing 96 abandoned the streaming branch outright: the number
-      // stopped dead at 96 and was replaced by `Confirmed` — the row claiming
-      // to have crossed a hundred while the last figure it ever showed was
-      // ninety-six. Fixed on the gauge first; this is the second register, and
-      // a rule swept once is a rule swept nowhere (L144).
+      // stopped dead at 96 and was replaced by the terminal word — the row
+      // claiming to have crossed the ceiling while the last figure it ever
+      // showed was ninety-six. Fixed on the gauge first; this is the second
+      // register, and a rule swept once is a rule swept nowhere (L144).
       await tester.pumpWidget(_host(_mark(96)));
       await tester.pump();
-      expect(find.text('Seen 96'), findsOneWidget);
+      expect(find.text('Accepted 96'), findsOneWidget);
 
       await tester.pumpWidget(_host(_mark(106)));
       await tester.pump();
       var highest = 96;
       for (var i = 0; i < 20; i++) {
         for (final t in tester.widgetList<Text>(find.byType(Text))) {
-          final m = RegExp(r'^Seen (\d+)$').firstMatch(t.data ?? '');
+          // **The RENDERED run, not `data`.** The mark is a `Text.rich` since
+          // UX-R3 — word in Jakarta, digits in mono (BG-30) — so `data` is null
+          // on exactly the rows this measures.
+          final shown = t.data ?? t.textSpan?.toPlainText() ?? '';
+          final m = RegExp(r'^Accepted (\d+)$').firstMatch(shown);
           if (m != null) {
             highest = math.max(highest, int.parse(m.group(1)!));
           }
@@ -676,66 +765,78 @@ void main() {
       }
       expect(
         highest,
-        greaterThanOrEqualTo(KvBurial.safe - 1),
+        greaterThanOrEqualTo(kTestMaturity.userDaa - 1),
         reason:
             'the count stopped at $highest and the row then said it was past '
-            '${KvBurial.safe}',
+            '${kTestMaturity.userDaa}',
       );
       await tester.pumpAndSettle();
-      expect(find.text('Confirmed'), findsOneWidget);
+      expect(find.text('Settled'), findsOneWidget);
     });
   });
 
   group('BG-22 · the axis names itself', () {
-    testWidgets('a screen reader hears the depth even where the words drop it', (
+    testWidgets('a screen reader hears the depth and the ceiling', (
       tester,
     ) async {
-      // Past the safe mark the words carry no number and the FILL carries the
-      // reading — so a label built from the words gave a screen-reader user no
-      // depth at all exactly where a sighted user reads one off the track. It
-      // also dangled the axis into a sentence that does not take it:
-      // *"Confirmed blocks deep"* (`ux-auditor`, UX-5).
+      // Built from the DEPTH, not from the words: past the ceiling the words
+      // carry no number while the fill carries the reading, so a label built
+      // from the words gave a screen-reader user no depth at all exactly where
+      // a sighted user reads one off the track (`ux-auditor`, UX-5).
       final handle = tester.ensureSemantics();
-      await tester.pumpWidget(_host(_gauge(340, key: const ValueKey(340))));
+      await tester.pumpWidget(_host(_gauge(42, key: const ValueKey(42))));
       await tester.pump();
       expect(
-        _reading('Confirmed'),
+        find.bySemanticsLabel(RegExp(r'42 of 100 DAA deep')),
         findsOneWidget,
-        reason: 'precondition: the words print no number at this depth',
       );
       expect(
-        find.bySemanticsLabel(RegExp(r'340 blocks deep')),
+        find.bySemanticsLabel(RegExp(r'Spendable at 100')),
         findsOneWidget,
-        reason: 'the reading is inaudible where only the fill carries it',
       );
-      expect(find.bySemanticsLabel(RegExp(r'Confirmed blocks')), findsNothing);
-      // Disposed in the body, not in a tear-down: the framework verifies the
-      // handle at the END of the test body, before tear-downs run.
       handle.dispose();
     });
 
-    testWidgets('the name and every decade are on the glass', (tester) async {
+    testWidgets('the graduations are on the glass, ceiling named by its rung', (
+      tester,
+    ) async {
       await tester.pumpWidget(_host(_gauge(42)));
       await tester.pump();
-      // **The axis name is no longer drawn beside the reading** — the `DEPTH`
-      // section heading names it, louder and higher than a dimmed 11 dp label
-      // at the far end of the line ever did (founder's call, device sitting).
-      // BG-22 asks for a NAMED axis, not an inline one. It survives as the
-      // spoken form, asserted below, because a screen reader arriving at the
-      // gauge has no heading in earshot.
-      expect(find.text(KvBurialGauge.axisName), findsNothing);
-      for (final label in const ['0', '10', '100', '1,000']) {
+      // Origin, midpoint, ceiling. The midpoint is derived from the ceiling,
+      // so a coinbase row labels 0 · 500 · 1,000 without a second table.
+      for (final label in const ['0', '50', '100']) {
         expect(
           find.text(label),
-          findsOneWidget,
-          reason: 'a log scale is honest only where every decade is labelled',
+          findsWidgets,
+          reason: 'a scale is honest only where its graduations are labelled',
         );
       }
-      // Both thresholds are named where they fall (D-192, §5). `confirmed`
-      // rather than `safe` since the device sitting: the threshold now uses the
-      // same word the rung uses at that depth.
-      expect(find.text('confirmed'), findsOneWidget);
-      expect(find.text('final'), findsOneWidget);
+      // The ceiling is named with the rung it delivers — the same word the chip
+      // says at the same instant, which is BG-7's redundancy rather than
+      // BG-19's duplication: one is the axis, one is the reading.
+      expect(find.text('settled'), findsOneWidget);
+    });
+
+    testWidgets('a coinbase row labels its own ceiling', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          KvBurialGauge(
+            state: TxChipState.accepted,
+            confirmations: 42,
+            maturity: MaturityState.pending,
+            direction: ActivityDirection.incoming,
+            isCoinbase: true,
+            thresholds: kTestMaturity,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('1,000'), findsOneWidget);
+      expect(find.text('500'), findsOneWidget);
+      // **One integer, one format.** The reading and the graduation twenty dp
+      // beneath it both go through `formatScore` now; they used to print
+      // `of 1000 DAA` and `1,000` (`ux-auditor` item 33).
+      expect(find.text('of 1,000 DAA'), findsOneWidget);
     });
 
     testWidgets('every label clears the 11dp floor at 1.3x on a 320dp screen', (
@@ -763,29 +864,62 @@ void main() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// [key] is how a case asks for a **fresh** gauge. `pumpWidget` reuses the
-/// element tree, so a second call with a new depth is an UPDATE — the streamed
-/// count then replays the interval between the two readings and the first frame
-/// still shows the old one. That is exactly what the streaming cases want and
-/// exactly what a decade-by-decade sweep must not have (L140).
+/// **What the source guards above do not police, and why each one is out.**
+///
+///  * `lib/src/rust/` — generated bindings. That is Rust's own text, mirrored;
+///    the ladder's law is enforced on the Rust side by `NetworkParams` itself.
+///  * `lib/src/ui/preview/black_glass_home_preview.dart` — the **Black Glass
+///    prototype**, a debug-only feel test of a design language the app has
+///    since replaced twice. It is imported only by the dev launcher, imports
+///    nothing from the shipped screens, and is a frozen record of what the
+///    founder judged on glass in July. Migrating its vocabulary would make it a
+///    *worse* record of that, and its `kSafeDepth`/`kFinalDepth` are its own
+///    prototype constants rather than a threshold any user's money is measured
+///    against. **The exemption is scoped to that one file** — a second preview
+///    reaching for the retired words fails here.
+bool _exempt(String path) =>
+    path.contains('/rust/') ||
+    path.endsWith('preview/black_glass_home_preview.dart');
+
 /// The reading line's own words, told apart from the axis label that happens to
-/// carry the same threshold name. `final` is both a rung and a graduation, so a
-/// bare `find.text` matches two things that mean different things.
+/// carry the same name. `settled` is both a rung and a graduation, so a bare
+/// `find.text` matches two things that mean different things.
 Finder _reading(String words) => find.byWidgetPredicate(
   (w) => w is Text && w.data == words && (w.style?.fontSize ?? 0) > 11,
 );
 
+/// The rung's hue, read off the reading line's dot — the channel that carries
+/// the rung when the line prints only a number.
+Color? _dotHue(WidgetTester tester) {
+  for (final c in tester.widgetList<Container>(find.byType(Container))) {
+    final d = c.decoration;
+    if (d is BoxDecoration && d.shape == BoxShape.circle) return d.color;
+  }
+  return null;
+}
+
 Widget _mark(int depth) => KvBurialMark(
   state: TxChipState.accepted,
   confirmations: depth,
-  maturity: MaturityState.pending,
+  maturity: MaturityState.confirmed,
+  direction: ActivityDirection.outgoing,
+  isCoinbase: false,
+  thresholds: kTestMaturity,
 );
 
+/// [key] is how a case asks for a **fresh** gauge. `pumpWidget` reuses the
+/// element tree, so a second call with a new depth is an UPDATE — the streamed
+/// count then replays the interval between the two readings and the first frame
+/// still shows the old one. That is exactly what the streaming cases want and
+/// exactly what a step-by-step sweep must not have (L140).
 Widget _gauge(int depth, {Key? key}) => KvBurialGauge(
   key: key,
   state: TxChipState.accepted,
   confirmations: depth,
-  maturity: MaturityState.pending,
+  maturity: MaturityState.confirmed,
+  direction: ActivityDirection.outgoing,
+  isCoinbase: false,
+  thresholds: kTestMaturity,
 );
 
 Widget _host(Widget child, {double textScale = 1}) => MediaQuery(
@@ -804,15 +938,19 @@ Widget _host(Widget child, {double textScale = 1}) => MediaQuery(
 );
 
 /// The depth the READING LINE is currently printing — read off the rendered
-/// words, so the ink can be checked against something the painter did not
+/// figure, so the ink can be checked against something the painter did not
 /// produce.
 int _shownDepth(WidgetTester tester) {
-  final words = tester
-      .widgetList<Text>(find.byType(Text))
-      .map((t) => t.data ?? '')
-      .firstWhere((s) => s.startsWith('Seen ') || s.startsWith('Confirmed'));
-  final digits = RegExp(r'\d+').firstMatch(words);
-  return digits == null ? 0 : int.parse(digits.group(0)!);
+  for (final t in tester.widgetList<Text>(find.byType(Text))) {
+    final d = t.data ?? '';
+    // The reading is mono at 15; the graduations are mono at 11.
+    if (t.style?.fontFamily == KvFont.mono &&
+        (t.style?.fontSize ?? 0) > 11 &&
+        RegExp(r'^\d+$').hasMatch(d)) {
+      return int.parse(d);
+    }
+  }
+  return 0;
 }
 
 /// What the gauge actually painted, replayed onto a spy canvas at the size the
@@ -844,13 +982,17 @@ class _Ink {
 
   List<_Line> get lines => _spy.lines;
 
-  /// The tones the painter uses for **structure** — the track's rule and its
+  /// The tones the painter uses for **structure** — the track's ground and its
   /// graduations. Everything else it paints is a reading.
   ///
   /// The polarity is deliberate: ink the guard does not recognise counts
-  /// against the reading and fails loudly, rather than being quietly ignored.
-  /// Alpha is masked off so the thousand mark's fading arm is still structure.
-  static const List<Color> _structure = [KvColor.etch, KvColor.inkMetaLow];
+  /// against the reading and fails loudly, rather than being quietly ignored —
+  /// and it did exactly that when UX-R3 moved the structure off `etch`, which
+  /// is the guard doing its job rather than a test to be loosened. Both tones
+  /// clear WCAG 1.4.11's 3:1 floor now (`inkMeta` 4.75, `inkDim` 8.14 on
+  /// `plate`); `etch`'s 2.35 never did, on a comment that said 3.04 (L164).
+  /// Alpha is masked off so a mid-crossfade tone is still matched.
+  static const List<Color> _structure = [KvColor.inkMeta, KvColor.inkDim];
 
   static bool _isStructure(Color c) {
     final rgb = c.toARGB32() & 0x00FFFFFF;
@@ -858,11 +1000,17 @@ class _Ink {
   }
 
   /// How much of the track is covered in reading ink, as a fraction —
-  /// rectangles by their right edge, strokes by their end **plus whatever
-  /// their cap paints past it**.
+  /// rectangles by their right edge, strokes by their end **plus whatever their
+  /// cap paints past it**.
+  ///
+  /// **The track's own ground is a rectangle now**, so a guard that took the
+  /// rightmost rect would read 100% at every depth. It is excluded by TONE,
+  /// with the same polarity as the strokes: unrecognised ink counts as a
+  /// reading and fails loudly.
   double get filledFraction {
     var right = 0.0;
-    for (final rect in _spy.rects) {
+    for (final (rect, colour) in _spy.rects) {
+      if (_isStructure(colour)) continue;
       right = math.max(right, rect.right);
     }
     for (final line in _spy.lines) {
@@ -882,17 +1030,6 @@ class _Ink {
   List<_Line> get verticalTicks =>
       _spy.lines.where((l) => l.from.dx == l.to.dx).toList()
         ..sort((a, b) => a.from.dx.compareTo(b.from.dx));
-
-  /// Horizontal strokes at the right-hand end that sit below the band — the
-  /// bracket's arms. One is an open hook; two is a closed bracket.
-  int get bracketArms => _spy.lines
-      .where(
-        (l) =>
-            l.from.dy == l.to.dy &&
-            l.from.dx > _size.width / 2 &&
-            l.from.dy > KvBurialGaugePainter.band - 1,
-      )
-      .length;
 }
 
 class _Line {
@@ -910,14 +1047,14 @@ class _Line {
 /// Records every mark the painter makes and swallows the rest of `Canvas`.
 class _CanvasSpy implements Canvas {
   final List<_Line> lines = [];
-  final List<Rect> rects = [];
+  final List<(Rect, Color)> rects = [];
 
   @override
   void drawLine(Offset p1, Offset p2, Paint paint) =>
       lines.add(_Line(p1, p2, paint.strokeWidth, paint.strokeCap, paint.color));
 
   @override
-  void drawRect(Rect rect, Paint paint) => rects.add(rect);
+  void drawRect(Rect rect, Paint paint) => rects.add((rect, paint.color));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;

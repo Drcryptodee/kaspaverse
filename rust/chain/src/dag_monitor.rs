@@ -30,6 +30,13 @@ use crate::transport::{self, TransportEvent};
 /// Bounded like the old cached fast path (3 s) plus one health round-trip.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// **The deadline on one `probe_link` round trip.** Under the node surface's
+/// 2 s poll, so a stalled node cannot stack in-flight probes and a reading can
+/// never be older than the cadence that asked for it. Deliberately NOT
+/// [`PROBE_TIMEOUT`], which is the connect race's per-round budget: two
+/// different errands, two names (BG-21's shape one layer down).
+const LINK_PROBE_TIMEOUT: Duration = Duration::from_millis(1_800);
+
 /// Bind budget for the shared socket's dial to the race winner — the node
 /// answered a probe milliseconds ago, so a healthy bind is fast; a node that
 /// died in between just re-enters the race.
@@ -1072,6 +1079,52 @@ impl DagMonitor {
     /// the ctl is signalled only for events the identity gate accepted. That
     /// is what lets D-005 stay true while the client underneath rotates — and
     /// what keeps the L59 funds-visibility lanes off the re-plumb path.
+    /// **One honest round trip to the node, and what it is connected to.**
+    ///
+    /// `T5`'s connection card reads a latency in milliseconds and a peer count,
+    /// and neither may be invented — BG-8's rule is that the absence of a
+    /// reading is its own face, so both are `Option` and both come back `None`
+    /// the moment the call does not answer.
+    ///
+    /// **What the latency measures, exactly:** the wall time of a `ping` on the
+    /// bound wRPC socket — request out, response back. It is the same thing a
+    /// user means by *how far away is this node*, it costs one empty frame each
+    /// way, and it is measured rather than modelled. It is deliberately NOT
+    /// derived from block age: a node can be answering instantly while the DAG
+    /// is quiet, and the two would then contradict each other on one card.
+    ///
+    /// **Whose peers:** the node's, from `get_connected_peer_info` — a light
+    /// wallet has exactly one peer (this node), so the useful number is how
+    /// well connected the node we are trusting is. The surface says so.
+    ///
+    /// Called only while the node surface is open. It takes no lock, holds
+    /// nothing across the await, and never retries: a probe that papered over a
+    /// failure would be reporting the retry's latency, not the link's.
+    ///
+    /// **Both calls carry our own deadline** ([`LINK_PROBE_TIMEOUT`]), and that is a
+    /// correctness property rather than tidiness (`consensus-auditor`, UX-R3).
+    /// Unbounded, the only backstop was the transport's own 60 s default —
+    /// thirty times the surface's poll interval, and a dependency default this
+    /// project does not get to trust. A stalled node would then stack probes,
+    /// and two overlapping ones could land out of order, letting an older slow
+    /// reading overwrite a newer fast one: the confidently-wrong-number this
+    /// probe exists to prevent (BG-8). A probe that misses its cadence answers
+    /// `None`, which is a face the surface already draws.
+    pub async fn probe_link(&self) -> (Option<u64>, Option<u32>) {
+        let rpc = self.inner.link_rpc.clone();
+        let started = std::time::Instant::now();
+        let latency = match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.ping()).await {
+            Ok(Ok(())) => u64::try_from(started.elapsed().as_millis()).ok(),
+            _ => None,
+        };
+        let peers =
+            match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.get_connected_peer_info()).await {
+                Ok(Ok(info)) => u32::try_from(info.peer_info.len()).ok(),
+                _ => None,
+            };
+        (latency, peers)
+    }
+
     pub fn rpc(&self) -> Rpc {
         Rpc::new(self.inner.link_rpc.clone(), self.inner.monitor_ctl.clone())
     }

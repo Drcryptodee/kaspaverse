@@ -16,6 +16,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 
 import 'support/preview_harness.dart';
 import 'support/finders.dart';
+import 'support/maturity.dart';
 
 void main() {
   setUpAll(loadBundledFonts);
@@ -722,6 +723,7 @@ Widget _home({
             lastUpdate: ValueNotifier(lastUpdate),
           ),
           wallet: WalletScope(
+            maturity: kTestMaturity,
             mature: ValueNotifier(mature ?? BigInt.zero),
             pending: ValueNotifier(BigInt.zero),
             activity: ValueNotifier(const []),

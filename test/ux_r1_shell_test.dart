@@ -19,6 +19,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_two_pane.dart';
 
 import 'support/preview_harness.dart';
+import 'support/maturity.dart';
 
 /// **UX-R1 — the shell, the drawer, the money plate and the ledger, in Deep
 /// V6.** The guards for the parts this sitting built, and for the one law that
@@ -70,10 +71,18 @@ void main() {
             'rounds the rail\'s scroll viewport DOWN to a whole number of '
             'sockets so a clip never falls through a glyph — a HEIGHT it was '
             'given, never a width',
-        'lib/src/ui/send/signing_ceremony.dart':
+        'lib/src/ui/widgets/kv_fact_line.dart':
             'the fact grid measures the row it was GIVEN, to bound the value '
             'so a whole-supply figure fits instead of starving the label — a '
-            'share of the space, never a layout chosen from a width (UX-R2B)',
+            'share of the space, never a layout chosen from a width (UX-R2B). '
+            '**Promoted out of `signing_ceremony.dart` at UX-R3**, because `S9` '
+            'measures the transaction detail\'s values ending on the receipt\'s '
+            'own right edge and a second copy of this layout is how two funds '
+            'surfaces start disagreeing (L143)',
+        'lib/src/ui/send/signing_ceremony.dart':
+            'the receipt head bounds its own address run against the width it '
+            'was given — a legibility floor, never a layout chosen from a '
+            'width',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',
@@ -758,6 +767,7 @@ Widget _squeezed() {
         ),
       ),
       wallet: WalletScope(
+        maturity: kTestMaturity,
         mature: ValueNotifier<BigInt?>(BigInt.parse('128450270000')),
         pending: ValueNotifier<BigInt?>(BigInt.parse('128450270000')),
         outgoing: ValueNotifier<BigInt?>(BigInt.parse('128450270000')),
@@ -845,6 +855,7 @@ Future<void> pumpShell(
             lastUpdate: ValueNotifier<DateTime?>(now),
           ),
           wallet: WalletScope(
+            maturity: kTestMaturity,
             mature: ValueNotifier<BigInt?>(BigInt.from(128450270000)),
             pending: ValueNotifier<BigInt?>(BigInt.zero),
             activity: ValueNotifier(activity),

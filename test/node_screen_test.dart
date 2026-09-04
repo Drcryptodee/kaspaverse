@@ -14,6 +14,8 @@ import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
+import 'support/maturity.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 
 /// A stand-in for `ChainService`'s node seam. Nothing here talks to Rust; the
 /// screen's whole contract is these notifiers and this one call.
@@ -83,7 +85,23 @@ class _FakeSeam {
 
   /// The same scope, optionally carrying the block-age poll the collapse
   /// brought over from the retired sheet.
-  NodeScope scopeWith({Future<int?> Function()? blockAgeSecs}) => NodeScope(
+  /// `T5`'s probe, faked. `null` on either field is BG-8's absent reading;
+  /// [probeThrows] models a node that stopped answering mid-poll.
+  int? latencyMs;
+  int? peers;
+  bool probeThrows = false;
+  int probes = 0;
+
+  Future<({int? latencyMs, int? peers})> probe() async {
+    probes++;
+    if (probeThrows) throw StateError('the node went away');
+    return (latencyMs: latencyMs, peers: peers);
+  }
+
+  NodeScope scopeWith({
+    Future<int?> Function()? blockAgeSecs,
+    bool withProbe = false,
+  }) => NodeScope(
     connected: connected,
     activeEndpoint: activeEndpoint,
     virtualDaaScore: daa,
@@ -97,6 +115,7 @@ class _FakeSeam {
     lastUpdate: lastUpdate,
     refreshConfig: refresh,
     blockAgeSecs: blockAgeSecs,
+    probeLink: withProbe ? probe : null,
   );
 }
 
@@ -186,6 +205,7 @@ Future<void> _pumpScreen(
   _FakeExplorer? explorer,
   _FakeRate? rate,
   Future<int?> Function()? blockAge,
+  bool withProbe = false,
   double width = 393,
   // The screen grew two preference sections at UX-3, and a `ListView` only
   // builds what a viewport can reach. A test about the explorer needs the
@@ -212,8 +232,12 @@ Future<void> _pumpScreen(
         // passed a green suite (`ux-auditor`, this sitting). A test that
         // measures a layout under the fallback font is measuring Ahem.
         theme: kvDarkTheme(),
+        // The screen clamps its column with `KvColumn` since UX-R3, and
+        // `KvWindow.of` asserts rather than falling back — so the window is
+        // mounted here exactly as the app mounts it at its root (UX-R1's law).
+        builder: (context, page) => KvWindow(child: page!),
         home: NodeScreen(
-          scope: seam.scopeWith(blockAgeSecs: blockAge),
+          scope: seam.scopeWith(blockAgeSecs: blockAge, withProbe: withProbe),
           explorer: explorer?.scope,
           rate: rate?.scope,
           clock: () => DateTime(2026, 8, 27, 12),
@@ -260,6 +284,118 @@ void main() {
       expect(seam.refreshes, 1);
       expect(find.text('ws://public-1.kaspa.example:17110'), findsOneWidget);
       expect(find.text('523,216,421'), findsOneWidget);
+    });
+
+    group('`T5` — the connection card reads a measurement', () {
+      testWidgets('the latency, its tier and its bars come from the probe', (
+        tester,
+      ) async {
+        final seam = _FakeSeam()
+          ..latencyMs = 151
+          ..peers = 14;
+        // `settle: false`: a live latency reading breathes its dot, so the
+        // card never settles — the same reason the harness already documents
+        // for a dark link. Two pumps let the async probe's microtask land.
+        await _pumpScreen(tester, seam, withProbe: true, settle: false);
+        await tester.pump();
+        await tester.pump();
+
+        // The render's own reading: 151 ms, three amber bars, `Slow` — the
+        // `< 300` band exactly (§4, checked against `T5` rather than assumed).
+        expect(find.text('Slow'), findsOneWidget);
+        expect(find.text('ms'), findsOneWidget);
+        expect(
+          KvLatency.tierFor(151).bars,
+          3,
+          reason: 'the tier the card is drawing',
+        );
+        expect(find.text('14'), findsOneWidget, reason: "the node's peers");
+        expect(seam.probes, greaterThan(0));
+      });
+
+      testWidgets('a failed probe CLEARS the reading rather than holding it', (
+        tester,
+      ) async {
+        // The opposite of what the block-age poll does with its last value, and
+        // deliberately so: a block age that stops advancing is itself the
+        // signal and the line says how old it is, but a latency measures *this*
+        // round trip — so a stale 42 ms beside a dead socket would be a
+        // confident wrong number rather than an old true one (BG-8).
+        final seam = _FakeSeam()
+          ..latencyMs = 42
+          ..peers = 9;
+        // `settle: false`: a live latency reading breathes its dot, so the
+        // card never settles — the same reason the harness already documents
+        // for a dark link. Two pumps let the async probe's microtask land.
+        await _pumpScreen(tester, seam, withProbe: true, settle: false);
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Fast'), findsOneWidget);
+
+        seam.probeThrows = true;
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pump();
+        expect(find.text('Fast'), findsNothing);
+        expect(find.text('No reading'), findsOneWidget);
+        expect(find.text('9'), findsNothing, reason: 'the peer count went too');
+      });
+
+      testWidgets('a dropped link cannot leave a latency standing', (
+        tester,
+      ) async {
+        // The probe clears itself on a failure, but the poll runs at 2 s while
+        // the notifiers are pushed — so a socket that dropped a moment ago
+        // could hold the last good number for one tick. The card gates on
+        // `connected` to close that window without waiting for the probe.
+        final seam = _FakeSeam()..latencyMs = 42;
+        // `settle: false`: a live latency reading breathes its dot, so the
+        // card never settles — the same reason the harness already documents
+        // for a dark link. Two pumps let the async probe's microtask land.
+        await _pumpScreen(tester, seam, withProbe: true, settle: false);
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Fast'), findsOneWidget);
+
+        seam.connected.value = false;
+        await tester.pump();
+        expect(find.text('Fast'), findsNothing);
+        expect(find.text('No reading'), findsOneWidget);
+      });
+
+      testWidgets('with no probe seam the card is dashed, never zeroed', (
+        tester,
+      ) async {
+        await _pumpScreen(tester, _FakeSeam(), settle: false);
+        await tester.pump();
+        expect(find.text('No reading'), findsOneWidget);
+        expect(find.text('0'), findsNothing);
+        expect(
+          find.text('—'),
+          findsNWidgets(2),
+          reason: 'the latency figure and the peer count, both absent',
+        );
+      });
+
+      testWidgets('the transport line is READ off the bound socket', (
+        tester,
+      ) async {
+        // `wRPC` and `borsh` are what this client is built as; whether the
+        // transport is encrypted is a property of the URL the socket actually
+        // bound. A `ws://` node must not be reported as TLS.
+        final seam = _FakeSeam();
+        // `settle: false`: a live latency reading breathes its dot, so the
+        // card never settles — the same reason the harness already documents
+        // for a dark link. Two pumps let the async probe's microtask land.
+        await _pumpScreen(tester, seam, withProbe: true, settle: false);
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('wRPC · borsh'), findsOneWidget);
+        expect(find.textContaining('TLS'), findsNothing);
+
+        seam.activeEndpoint.value = 'wss://secure.kaspa.example:17110';
+        await tester.pump();
+        expect(find.text('wRPC · borsh · TLS'), findsOneWidget);
+      });
     });
 
     testWidgets('a healthy link is a STILL screen (BG-8 as amended, D-192)', (
@@ -325,7 +461,9 @@ void main() {
       seam.activeEndpoint.value = null;
       await _pumpScreen(tester, seam);
       expect(find.text('Your phone has no network.'), findsOneWidget);
-      expect(find.text('not connected'), findsOneWidget);
+      // `T5`'s node row states the link in words rather than printing a null
+      // endpoint: *Not connected*, in the same seat *Connected to* takes.
+      expect(find.text('Not connected'), findsOneWidget);
       // Not hunting: a cadence over a dead radio claims work nobody is doing.
       expect(_cadenceRunning(tester), isFalse);
     });
@@ -337,15 +475,38 @@ void main() {
       // link emits nulls, so the screen inherits the obligation: a
       // disconnected number at full brightness is a lie the user cannot
       // detect — the P0.3 scar.
+      //
+      // **And it discharges that obligation without dimming, because at this
+      // ramp dimming is forbidden** (BG-14 as narrowed by D-257). This test
+      // asserted the opacity and therefore *pinned a violation*: `inkMeta` is
+      // 4.75:1 at full strength, so the 45 % multiply put the 13 dp figure at
+      // **4.22** and the 12 dp age line at **1.94**, destroying the very string
+      // BG-8 requires beside a stale reading (`ux-auditor`, UX-R3).
+      // [KvFreshness.staleDimFloor] is where the dim becomes legal, and this
+      // reading is well under it.
+      //
+      // What BG-8 asks for is still all here, in the ways it names: the counter
+      // has **stopped**, and the age is printed underneath.
       final seam = _FakeSeam(connected: false);
       seam.activeEndpoint.value = null;
       await _pumpScreen(tester, seam, settle: false);
       expect(find.text('523,216,421'), findsOneWidget);
       expect(find.text('as of 3 m ago'), findsOneWidget);
-      final dimmed = tester
-          .widgetList<Opacity>(find.byType(Opacity))
-          .any((o) => o.opacity == KvFreshness.opacityStale);
-      expect(dimmed, isTrue);
+      for (final o in tester.widgetList<Opacity>(find.byType(Opacity))) {
+        if (o.opacity >= 1) continue;
+        for (final t in tester.widgetList<Text>(
+          find.descendant(of: find.byWidget(o), matching: find.byType(Text)),
+        )) {
+          expect(
+            t.style?.fontSize ?? 0,
+            greaterThanOrEqualTo(KvFreshness.staleDimFloor),
+            reason:
+                '"${t.data}" is dimmed at ${t.style?.fontSize} dp — under '
+                'D-257\'s floor no multiply is legal, because the tone is '
+                'already at the body bar',
+          );
+        }
+      }
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -362,7 +523,12 @@ void main() {
       final seam = _FakeSeam();
       seam.daa.value = null;
       await _pumpScreen(tester, seam);
-      expect(find.text('—'), findsOneWidget);
+      // **Three readings, three dashes, and that is the point.** `T5`'s
+      // connection card carries the DAA, the latency and the peer count, and a
+      // fixture with no probe seam has none of them — every one renders BG-8's
+      // dash rather than a fabricated zero. The count is asserted so a future
+      // reading that quietly defaults to `0` shows up here.
+      expect(find.text('—'), findsNWidgets(3));
       expect(find.text('0'), findsNothing);
     });
 
@@ -424,6 +590,11 @@ void main() {
         findsOneWidget,
       );
 
+      // `T5`'s connection card grew the screen, so the toggle can sit past an
+      // 800 dp viewport. Scroll to it the way a thumb would rather than
+      // widening the window — the tap must work on a real phone.
+      await tester.ensureVisible(find.text('Pin a node I run'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Pin a node I run'));
       await tester.pumpAndSettle();
       expect(seam.calls, [null]);
@@ -487,6 +658,8 @@ void main() {
       // stories: nothing was submitted anywhere, and the pin is still on.
       final seam = _FakeSeam(pinned: 'ws://10.0.0.5:17110', throws: 'busy');
       await _pumpScreen(tester, seam);
+      await tester.ensureVisible(find.text('Pin a node I run'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Pin a node I run'));
       await tester.pumpAndSettle();
 
@@ -513,6 +686,8 @@ void main() {
         throws: 'no monitor',
       )..pinsAnyway = true;
       await _pumpScreen(tester, seam);
+      await tester.ensureVisible(find.text('Pin a node I run'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Pin a node I run'));
       await tester.pumpAndSettle();
 
@@ -1118,7 +1293,24 @@ void main() {
       await tester.pumpAndSettle();
       // BG-5's own rendering of an unknown. Never a stale figure at full
       // confidence, and never a fabricated one.
-      expect(find.text('—'), findsOneWidget);
+      //
+      // **Scoped to the rate's own row**, because `T5`'s connection card
+      // carries three readings that are legitimately dashed on a fixture with
+      // no probe seam (DAA, latency, peers). A bare `findsOneWidget` here was
+      // counting them by accident and would have gone green again for the
+      // wrong reason.
+      expect(
+        find.descendant(
+          of: find
+              .ancestor(
+                of: find.text('Price, per KAS'),
+                matching: find.byType(Row),
+              )
+              .first,
+          matching: find.text('—'),
+        ),
+        findsOneWidget,
+      );
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -1317,7 +1509,7 @@ void main() {
       await tester.pump();
       await tester.pump(KvMotion.slow);
       expect(find.byType(NodeScreen), findsOneWidget);
-      expect(find.text('Node & connection'), findsOneWidget);
+      expect(find.text('Network'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -1366,6 +1558,7 @@ Widget _home({required NodeScope? node, required DateTime now}) => MaterialApp(
       lastUpdate: ValueNotifier<DateTime?>(now),
     ),
     wallet: WalletScope(
+      maturity: kTestMaturity,
       mature: ValueNotifier<BigInt?>(BigInt.from(123456789012)),
       pending: ValueNotifier<BigInt?>(null),
       activity: ValueNotifier<List<ActivityRecord>>(const []),

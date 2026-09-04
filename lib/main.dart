@@ -5,7 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:kaspaverse/src/rust/api/send.dart' show sendFeePreview;
 import 'package:kaspaverse/src/rust/api/transport.dart' show txAcceptanceStatus;
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
-import 'package:kaspaverse/src/rust/api/wallet.dart' show deepScan;
+import 'package:kaspaverse/src/rust/api/wallet.dart'
+    show deepScan, maturityThresholds;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/contacts_service.dart';
@@ -22,7 +23,7 @@ import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/preview/black_glass_home_preview.dart';
-import 'package:kaspaverse/src/rust/api/dag.dart' show dagStatus;
+import 'package:kaspaverse/src/rust/api/dag.dart' show dagProbeLink, dagStatus;
 import 'package:kaspaverse/src/rust/api/prefs.dart'
     show prefsExplorerConfig, prefsExplorerTxUrl, prefsSetExplorerConfig;
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
@@ -30,6 +31,7 @@ import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart' show KvMaturity;
 import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_contact.dart' show ContactsScope;
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
@@ -90,6 +92,15 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
   // The scan line the retired network sheet uniquely rendered, carried across
   // (UX-3). `dagStatus` is a poll that takes no I/O in its steady state.
   blockAgeSecs: () async => (await dagStatus()).lastBlockAgeSecs?.toInt(),
+  // `T5`'s connection card: one `ping` round trip and the node's peer count,
+  // polled only while that screen is open. Two real RPC calls, which is why
+  // they are a separate pull rather than two more fields on `dagStatus` — that
+  // one is documented to take no I/O in its steady state and every surface
+  // polls it.
+  probeLink: () async {
+    final probe = await dagProbeLink();
+    return (latencyMs: probe.latencyMs?.toInt(), peers: probe.peers);
+  },
 );
 
 /// The explorer choice, mapped off the bridge DTO. Dart moves strings; Rust
@@ -238,6 +249,18 @@ class _MoneyShell extends StatefulWidget {
 }
 
 class _MoneyShellState extends State<_MoneyShell> {
+  /// **The pin's maturity thresholds, read once** (D-249).
+  ///
+  /// `maturityThresholds()` is a sync FFI call into the library's own statics —
+  /// no I/O, no lock, no await — so it is resolved here at the composition root
+  /// and handed down as data. Reading it per surface would be three places for
+  /// one fact to be read differently; caching it here is what makes the ledger,
+  /// the receipt and the transaction detail provably quote the same numbers.
+  ///
+  /// **This is the only place in `lib/` that knows where 100 and 1,000 come
+  /// from, and it does not know what they are.**
+  late final KvMaturity _maturity = KvMaturity.from(maturityThresholds());
+
   /// The wallet's own receive address, for the drawer's identity header
   /// (D-260). Resolved once per mount; null until the vault answers, and the
   /// header renders the name alone rather than a placeholder.
@@ -266,6 +289,7 @@ class _MoneyShellState extends State<_MoneyShell> {
       activity: widget.wallet.activity,
       syncing: widget.wallet.syncing,
       utxoIndexMissing: widget.wallet.utxoIndexMissing,
+      maturity: _maturity,
       outgoing: widget.wallet.outgoing,
       discoveryIncomplete: widget.wallet.discoveryIncomplete,
       onRefreshActivity: widget.wallet.refreshNow,
@@ -287,6 +311,9 @@ class _MoneyShellState extends State<_MoneyShell> {
       // The tracker's live depth for the txid the ceremony just made —
       // node-read, polled once a second while the receipt is up.
       acceptanceStatus: (txid) => txAcceptanceStatus(txid: txid),
+      // The receipt's Status row plots a rung, and a rung needs the pin's
+      // ceiling — the two seams travel together (D-249).
+      maturity: _maturity,
       // The Generator's own fee for what is typed — signerless,
       // stash-free, priced over the live coins on every pause.
       feePreview: (destination, amount) =>
@@ -324,13 +351,30 @@ class _MoneyShellState extends State<_MoneyShell> {
     // Rust (validated template, identifier in the path, https only) and
     // opened by the platform channel the app already owns — no plugin,
     // and no URL built on this side (UX-5).
-    detailRoute: (_, txid, stale) => TxDetailScreen(
+    detailRoute: (context, txid, stale) => TxDetailScreen(
       txid: txid,
       activity: widget.wallet.activity,
       virtualDaaScore: widget.chain.virtualDaaScore,
       stale: stale,
+      maturity: _maturity,
       explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
       openUrl: VaultService.instance.openUrl,
+      // `S9` draws the `≈` line under the figure, and BG-5 permits it here:
+      // a record is history, and history is the seat fiat was always allowed.
+      fiat: FiatScope(
+        enabled: RateService.instance.enabled,
+        quote: RateService.instance.quote,
+        attach: RateService.instance.attach,
+        detach: RateService.instance.detach,
+      ),
+      // So the lifecycle chip can say *sent to Mara* where the book knows the
+      // address — and the To row still prints the address either way (BG-15).
+      contacts: ContactsScope(
+        contacts: ContactsService.instance.contacts,
+        refresh: ContactsService.instance.refresh,
+        save: ContactsService.instance.save,
+      ),
+      onShare: (id) => unawaited(VaultService.instance.shareText(id)),
     ),
     nodeRoute: _nodeRoute(widget.chain),
     // Read-only on this surface by construction: the plate shows a

@@ -21,7 +21,6 @@ import 'package:kaspaverse/src/services/rate_service.dart' show KvRateQuote;
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_fiat.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_hold.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rolling_text.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
@@ -32,6 +31,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
 import 'support/preview_harness.dart';
+import 'support/maturity.dart';
 
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
@@ -1959,6 +1959,7 @@ void main() {
             commit: (_) async => _ok(),
             abandon: () async {},
             acceptanceStatus: (_) async => answer,
+            maturity: kTestMaturity,
           ),
         ),
       );
@@ -2012,6 +2013,7 @@ void main() {
               partial: true,
             ),
             abandon: () async {},
+            maturity: kTestMaturity,
             acceptanceStatus: (_) async {
               asked++;
               return TxStatusDto(
@@ -3260,6 +3262,7 @@ void main() {
             commit: (_) async => _ok(),
             abandon: () async {},
             acceptanceStatus: status,
+            maturity: kTestMaturity,
           ),
         ),
       );
@@ -3290,22 +3293,23 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       expect(find.text('Status'), findsOneWidget);
-      expect(find.text('Seen 42'), findsOneWidget);
+      expect(find.text('Accepted 42'), findsOneWidget);
 
-      // **`KvBurial.safe`, read — never a `100` typed into `lib/`.** The
-      // ladder, its words and its thresholds live in one place (D-192/D-249),
-      // which is what makes this row buildable before R3's vocabulary
-      // migration.
-      depth = KvBurial.safe;
+      // **The threshold is the FIXTURE's, and the fixture is the pin's.** No
+      // `100` is typed here either: `kTestMaturity` names wallet-core's own
+      // mainnet `user_transaction_maturity_period_daa`, and the receipt was
+      // handed exactly that value — so this asserts the widget read what it was
+      // given rather than what it remembers (D-249).
+      depth = kTestMaturity.userDaa;
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
-      expect(find.text('Confirmed'), findsOneWidget);
+      expect(find.text('Settled'), findsOneWidget);
     });
 
     testWidgets('the sheet HOLDS until the DAG accepts — the receipt never '
-        'opens on `Seen —`', (tester) async {
+        'opens on `Accepted —`', (tester) async {
       // The founder, watching a real send: the broadcasting stages showed for
-      // *"just a tiny miliseconds"*, the receipt opened on `Seen —`, and the
+      // *"just a tiny miliseconds"*, the receipt opened on `Accepted —`, and the
       // depth started climbing a second later. The wait was ending at the
       // BROADCAST — which is a node taking the transaction into its mempool,
       // not the DAG accepting it — so the receipt had nothing to show yet.
@@ -3318,6 +3322,7 @@ void main() {
             commit: (_) async => _ok(),
             abandon: () async {},
             acceptanceStatus: (_) async => answer,
+            maturity: kTestMaturity,
           ),
         ),
       );
@@ -3335,7 +3340,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       expect(find.text('Sent'), findsNothing);
       expect(find.text('Waiting for a node to accept it'), findsOneWidget);
-      expect(find.text('Seen —'), findsNothing);
+      expect(find.text('Accepted —'), findsNothing);
 
       // The DAG takes it — and only now does the receipt open, with a depth
       // already in hand.
@@ -3346,8 +3351,8 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       expect(find.text('Sent'), findsOneWidget);
-      expect(find.text('Seen 4'), findsOneWidget);
-      expect(find.text('Seen —'), findsNothing);
+      expect(find.text('Accepted 4'), findsOneWidget);
+      expect(find.text('Accepted —'), findsNothing);
     });
 
     testWidgets('and it is not a trap: a link that never answers still hands '
@@ -3360,6 +3365,7 @@ void main() {
             commit: (_) async => _ok(),
             abandon: () async {},
             acceptanceStatus: (_) async => null,
+            maturity: kTestMaturity,
           ),
         ),
       );
@@ -3388,7 +3394,7 @@ void main() {
       // The defect two auditors caught at UX-R2B: the row hardcoded
       // `TxChipState.accepted` and read only the depth, so `Stalled` — which
       // arrives with `blue_depth: None` — fell to the `seen` rung and printed
-      // `Seen —`, glyph for glyph what a healthy just-submitted send shows, on
+      // `Accepted —`, glyph for glyph what a healthy just-submitted send shows, on
       // the surface a user consults to decide whether to send again.
       _phone(tester);
       await settle(
@@ -3401,7 +3407,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       expect(find.text('Not accepted yet'), findsOneWidget);
-      expect(find.text('Seen —'), findsNothing);
+      expect(find.text('Accepted —'), findsNothing);
     });
 
     testWidgets('a DISPLACED send names what happened, and borrows no rung', (
@@ -3409,7 +3415,7 @@ void main() {
     ) async {
       // The accepting block left the chain. The burial ladder measures how deep
       // an ACCEPTED transaction is, so a displaced one has no rung to sit on —
-      // and `Seen —` would say the chain still holds it. The sentence is the
+      // and `Accepted —` would say the chain still holds it. The sentence is the
       // thread's own, so the wallet says this in one wording (BG-21).
       _phone(tester);
       // **Accepted first, then displaced** — which is the only order the chain
@@ -3426,7 +3432,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
       expect(find.text('Displaced by the network'), findsOneWidget);
-      expect(find.text('Seen —'), findsNothing);
+      expect(find.text('Accepted —'), findsNothing);
       expect(find.textContaining('Confirmed'), findsNothing);
     });
 

@@ -9,6 +9,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 import 'support/finders.dart';
+import 'support/maturity.dart';
 
 /// Builds a [HomeScreen] from loose notifiers via the V5 scope objects —
 /// keeps the pre-V5 test shape while proving the scopes construct from
@@ -32,6 +33,7 @@ HomeScreen homeScreen({
     lastUpdate: lastUpdate,
   ),
   wallet: WalletScope(
+    maturity: kTestMaturity,
     mature: mature,
     pending: pending,
     activity: activity,
@@ -147,12 +149,12 @@ void main() {
     expect(find.text('No recent activity'), findsNothing);
     // V2 counter (founder request): an immature deposit streams its DAA
     // distance instead of a static "Pending".
-    // The burial mark: under 100 the WORD TRAVELS WITH THE NUMBER (founder, on
-    // glass 2026-08-30, revising the earlier density call). `Seen` used to step
-    // aside the moment a count arrived, so a row read `Seen` and then a bare
-    // `50` — the label vanishing exactly when it became meaningful, and a bare
-    // number does not say what it counts.
-    expect(find.text('Seen 50'), findsOneWidget);
+    // The burial mark: under the pin's ceiling the WORD TRAVELS WITH THE
+    // NUMBER (founder, on glass 2026-08-30, revising the earlier density call).
+    // The word used to step aside the moment a count arrived, so a row read a
+    // bare `50` — the label vanishing exactly when it became meaningful, and a
+    // bare number does not say what it counts.
+    expect(find.text('Accepted 50'), findsOneWidget);
     expect(find.textContaining('confirmations'), findsNothing);
 
     // V2 chip walk: acceptance lands (V1 overlay) → 'Accepted'; a settled
@@ -190,33 +192,41 @@ void main() {
       ),
     ];
     await tester.pump(const Duration(milliseconds: 400)); // chip crossfade
-    // **The burial vocabulary replaced the lifecycle words** (founder, on
-    // glass): a row now reads its DEPTH under 100, `Confirmed` from 100, and
-    // `final` from 1,000. `Accepted` is retired, and a terminal row is no
-    // longer silent — it says which side of the thresholds it is on.
-    expect(find.text('Accepted'), findsNothing);
+    // **D-248's vocabulary, and `Accepted` is REINSTATED** (founder ruling,
+    // 2026-09-03): a row reads `Pending` before the DAG has it, its depth
+    // inside `Accepted`, and `Settled` at the pin's own maturity threshold.
+    // A terminal row is not silent — it says which side of the threshold it
+    // is on.
+    //
+    // This send carries no `acceptedDaaScore`, so there is no depth to be
+    // read and the honest answer is `Accepted —`: the word the pin justifies,
+    // with BG-8's dash for the measurement nobody has. Reading `Settled` off
+    // a maturity flag alone is the overclaim BG-20 exists to stop.
     expect(find.text('Not accepted yet'), findsOneWidget); // stalled, honest
     expect(
-      find.byWidgetPredicate(
-        (w) =>
-            w is Text &&
-            (w.data == 'Confirmed' ||
-                w.data == 'Confirmed —' ||
-                w.data == 'final'),
-      ),
+      find.byWidgetPredicate((w) {
+        if (w is! Text) return false;
+        // **Read the RENDERED run, not `data`.** The mark is a `Text.rich`
+        // since UX-R3 — the word is Jakarta and the digits are mono (BG-30) —
+        // so `data` is null on exactly the rows this is about.
+        final shown = w.data ?? w.textSpan?.toPlainText() ?? '';
+        return shown == 'Accepted —' ||
+            shown == 'Settled' ||
+            shown.startsWith('Accepted ');
+      }),
       findsWidgets,
       reason: 'a settled row states its burial rather than going quiet',
     );
     // **And it does not overstate what it knows** (BG-20, UX-5). Both `b` and
     // `d` are outgoing sends with no acceptance DAA, so a depth cannot be
-    // computed for either: `Confirmed` is what wallet-core's maturity flag
+    // computed for either: `Accepted` is what the DAG's own acceptance
     // justifies, and the dash is the measurement nobody has. Before UX-5 these
-    // rendered identically to a row measured at three hundred blocks — two
-    // states that demand different actions wearing one face, and the face was
-    // the stronger of the two.
-    expect(find.text('Confirmed —'), findsNWidgets(2));
+    // rendered identically to a row measured deep — two states that demand
+    // different actions wearing one face, and the face was the stronger of the
+    // two.
+    expect(find.text('Accepted —'), findsNWidgets(2));
     expect(
-      find.text('Confirmed'),
+      find.text('Settled'),
       findsNothing,
       reason: 'nothing here has a depth, so nothing may claim a measured one',
     );
@@ -246,10 +256,10 @@ void main() {
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
     // **And the word says which one it is** (BG-20, UX-5): a stale link has no
-    // depth to report, so the row reads `Seen —` rather than a bare `Seen`
-    // that a reader could take for a measurement of zero.
+    // depth to report, so the row reads `Accepted —` rather than a bare
+    // `Accepted` that a reader could take for a measurement of zero.
     expect(find.textContaining('confirmations'), findsNothing);
-    expect(find.text('Seen —'), findsOneWidget);
+    expect(find.text('Accepted —'), findsOneWidget);
     expectFigure('1,234', '56789012'); // retained, dimmed — never blanked
 
     await tester.pumpWidget(const SizedBox()); // cancel the ticker
@@ -380,7 +390,7 @@ void main() {
       );
       // Accepted 7 DAA ago (1000 − 993) → streams a depth of 7, NOT the 500 the
       // submit-time blockDaaScore would have given. The word rides along.
-      expect(find.text('Seen 7'), findsOneWidget);
+      expect(find.text('Accepted 7'), findsOneWidget);
 
       // Deep past the ceiling (200 > 100) → the chip dissolves (Rams #5). The
       // AnimatedSwitcher out-transition takes `normal`; pump past it (a
@@ -429,6 +439,7 @@ void main() {
                 lastUpdate: lastUpdate,
               ),
               wallet: WalletScope(
+                maturity: kTestMaturity,
                 mature: mature,
                 pending: pending,
                 activity: activity,
@@ -576,6 +587,7 @@ void main() {
             lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
           ),
           wallet: WalletScope(
+            maturity: kTestMaturity,
             mature: mature,
             pending: ValueNotifier(BigInt.zero),
             outgoing: outgoing,
@@ -642,6 +654,7 @@ void main() {
             lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
           ),
           wallet: WalletScope(
+            maturity: kTestMaturity,
             // 100 KAS held, 30 KAS of it already spent and in flight.
             mature: ValueNotifier(BigInt.from(7000000000)),
             pending: ValueNotifier(BigInt.zero),

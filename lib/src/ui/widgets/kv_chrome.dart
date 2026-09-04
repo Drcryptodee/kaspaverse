@@ -117,12 +117,28 @@ class KvTopBar extends StatelessWidget {
 /// A tick, then a sentence-case label — where an instrument silk-screens the
 /// name of a section.
 class KvRuledLabel extends StatelessWidget {
-  const KvRuledLabel(this.text, {super.key});
+  const KvRuledLabel(this.text, {super.key, this.tight = false});
 
   final String text;
 
+  /// **Take only the width the words need.**
+  ///
+  /// The default is a full-width section heading, which is what every caller
+  /// wanted until `T5` put this label and a live reading on one line. A `Row`
+  /// is `MainAxisSize.max` by default, so inside a `Wrap` the label claimed the
+  /// whole run and pushed the reading onto a second line — at 700 dp, where the
+  /// two together used 206 dp of 454 available (measured off the frame, not
+  /// argued). It is the same family as the `SizedBox`-in-a-`Wrap` trap that
+  /// stacked three chips at UX-R2.
+  ///
+  /// A parameter rather than an `IntrinsicWidth` at the call site: the next
+  /// caller that needs a label beside something inherits the answer instead of
+  /// re-finding it (BG-21's shape at the widget layer).
+  final bool tight;
+
   @override
   Widget build(BuildContext context) => Row(
+    mainAxisSize: tight ? MainAxisSize.min : MainAxisSize.max,
     children: [
       Container(width: KvSpace.s, height: 1, color: KvColor.inkMeta),
       const SizedBox(width: KvSpace.s),

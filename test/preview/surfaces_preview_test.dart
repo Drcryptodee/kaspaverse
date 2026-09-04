@@ -29,6 +29,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 
 import '../support/preview_harness.dart';
+import '../support/maturity.dart';
 
 /// **The surface catalogue.** Every entry renders a REAL widget with fixture
 /// data — never the founder's wallet, so a preview carries no address, no
@@ -146,6 +147,7 @@ Widget _home() => HomeScreen(
     lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16, 29)),
   ),
   wallet: WalletScope(
+    maturity: kTestMaturity,
     mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
     pending: ValueNotifier<BigInt?>(BigInt.zero),
     activity: ValueNotifier(_activity()),
@@ -199,6 +201,7 @@ Widget _homeStatus() => HomeScreen(
     lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16, 29)),
   ),
   wallet: WalletScope(
+    maturity: kTestMaturity,
     mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
     pending: ValueNotifier<BigInt?>(BigInt.from(20035640)),
     outgoing: ValueNotifier<BigInt?>(BigInt.from(100000000)),
@@ -372,6 +375,13 @@ Widget _node() => NodeScreen(
     pinDropped: ValueNotifier(false),
     setPinnedNode: (_) async {},
     lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16)),
+    // **`T5`'s two live seats, wired** — the `Switch node` glow pill and the
+    // connection card's measured reading. Left unwired the frames showed a
+    // composition the design does not have: no pill at all, and `No reading`
+    // where the render draws `151 ms · Slow`. A preview fixture that omits a
+    // seam is a picture of the fallback, not of the screen.
+    onReconnect: () async {},
+    probeLink: () async => (latencyMs: 151, peers: 14),
   ),
 );
 
@@ -400,7 +410,12 @@ Future<Map<String, String>> _packageInfo() async => const {
 /// One send, forty-two blocks deep, with the explorer exit resolved to a
 /// plausible host. Fixture data only — no preview ever carries an address, a
 /// balance or a txid that belongs to anyone.
-Widget _txDetail() => TxDetailScreen(
+/// **The terminal rung, at the same footprint** (BG-20) — the state the
+/// happy-path still cannot show: the chip wears `S9`'s check on the blue pill
+/// D-248 seated, and the gauge's fill lands on its ceiling.
+Widget _txDetailSettled() => _txDetail(daa: 458174000 + 420);
+
+Widget _txDetail({int daa = 458174042}) => TxDetailScreen(
   txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',
   activity: ValueNotifier<List<ActivityRecord>>([
     ActivityRecord(
@@ -411,14 +426,28 @@ Widget _txDetail() => TxDetailScreen(
       acceptedDaaScore: BigInt.from(458174000),
       direction: ActivityDirection.outgoing,
       isCoinbase: false,
-      maturity: MaturityState.pending,
+      // `S9` draws a named counterparty and a fee; the fixture carries both so
+      // the still shows the composition the render does rather than a stripped
+      // version of it. Fixture data only — no preview ever carries an address,
+      // a balance or a txid that belongs to anyone.
+      counterpartyAddress:
+          'kaspa:qr7m4h6xk2f9v0s8d3n5t1w7y2b4c6e8g0j2l4n6p8r0t2v4x6z8a0c2e4g6',
+      feeSompi: BigInt.from(10000),
+      maturity: MaturityState.confirmed,
       stalled: false,
     ),
   ]),
-  virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(458174042)),
+  virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(daa)),
   stale: ValueNotifier<bool>(false),
+  maturity: kTestMaturity,
+  // `S9` draws the `≈` restatement under the figure, and BG-5 permits it on a record
+  // (D-267). Without a scope the line renders nothing at all, so a preview
+  // without one would show a composition the design does not have.
+  fiat: _fiat(),
   explorerUrl: (txid) async => 'https://explorer.kaspa.org/txs/$txid',
   openUrl: (_) async => true,
+  onSendAgain: (_) {},
+  onShare: (_) {},
 );
 
 /// The gauge at one reading per decade, so the declared scale can be read off
@@ -433,24 +462,36 @@ Widget _gaugeLadder() => const Scaffold(
           state: TxChipState.accepted,
           confirmations: 1,
           maturity: MaturityState.pending,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
         ),
         SizedBox(height: 32),
         KvBurialGauge(
           state: TxChipState.accepted,
           confirmations: 10,
           maturity: MaturityState.pending,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
         ),
         SizedBox(height: 32),
         KvBurialGauge(
           state: TxChipState.accepted,
           confirmations: 340,
           maturity: MaturityState.accepted,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
         ),
         SizedBox(height: 32),
         KvBurialGauge(
           state: TxChipState.accepted,
           confirmations: 4200,
           maturity: MaturityState.confirmed,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
         ),
       ],
     ),
@@ -536,7 +577,10 @@ void main() {
         fetch: () async => throw const AppError(message: 'the vault is locked'),
       ),
     );
-    surface('node__connected', _node);
+    // **`T5`, in all five frames** (UX-R3): the connection card, the node row
+    // and its `Switch node` pill. It clamps with `KvColumn` now, so the four
+    // spec frames say something rather than showing one stretched column.
+    framedSurface('node__connected', _node);
     surface('settings__root', _settings);
 
     // **Send, both steps, in all four frames** (`S6a` · `S6b` · `S6`).
@@ -616,7 +660,9 @@ void main() {
     // **The transaction detail and its gauge** — UX-5's new surface, and the
     // one place in the app where a declared logarithmic scale is drawn. A
     // still is exactly the right instrument for judging an axis.
-    surface('tx__detail', _txDetail);
+    // **`S9`, in all five frames** (UX-R3).
+    framedSurface('tx__detail', _txDetail);
+    surface('tx__detail_settled', _txDetailSettled);
 
     // The gauge alone, at four readings that sit on the four decades. Whether
     // a log axis reads as a scale rather than as a progress bar is a judgement
@@ -634,18 +680,27 @@ void main() {
                 state: TxChipState.accepted,
                 confirmations: 42,
                 maturity: MaturityState.pending,
+                direction: ActivityDirection.outgoing,
+                isCoinbase: false,
+                thresholds: kTestMaturity,
               ),
               SizedBox(height: 12),
               KvBurialMark(
                 state: TxChipState.accepted,
                 confirmations: 420,
                 maturity: MaturityState.accepted,
+                direction: ActivityDirection.outgoing,
+                isCoinbase: false,
+                thresholds: kTestMaturity,
               ),
               SizedBox(height: 12),
               KvBurialMark(
                 state: TxChipState.accepted,
                 confirmations: 4200,
                 maturity: MaturityState.confirmed,
+                direction: ActivityDirection.outgoing,
+                isCoinbase: false,
+                thresholds: kTestMaturity,
               ),
             ],
           ),

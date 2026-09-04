@@ -261,12 +261,23 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
   /// under the explorer button. no need for that as well"*).
   ///
   /// **This narrows D-192; it does not repeal it.** *A departure you cannot
-  /// name is not one you consented to* — and the naming still happens, in the
-  /// two places the departure is actually chosen: Settings, where the explorer
-  /// is picked, and the transaction detail, where this widget renders in its
-  /// full register with the host and the IP spelled out. What the receipt
-  /// carries is an act on a destination already chosen, so it inherits that
-  /// consent rather than re-asking for it under a button.
+  /// name is not one you consented to* — and the naming still happens, **where
+  /// the departure is actually chosen**: the Network screen's Explorer section,
+  /// whose trust label spells out that opening one *"hands that site the id you
+  /// are looking at and the network address you are looking from"* and is the
+  /// place the template is set. Every other seat carries an act on a
+  /// destination already chosen, so it inherits that consent rather than
+  /// re-asking for it under a button.
+  ///
+  /// *(UX-R3: **the transaction detail moved to this register too.** The
+  /// paragraph above used to name it as the surface that renders the full
+  /// disclosure — written when the exit sat in a card at the foot of a scroll.
+  /// `S9` draws it as one of two buttons on a fixed action bar, and the
+  /// argument that already covered the receipt covers it unchanged: the choice
+  /// and its naming live on the Network screen. Which register a seat takes is
+  /// design and the render governs it (D-259); **whether the disclosure exists
+  /// at all is function and D-192 still governs that** — which is why it moved
+  /// rather than went.)*
   ///
   /// **The sentence is not deleted, only unprinted**: the spoken label still
   /// carries the host and the IP in full, so a screen-reader user loses
@@ -287,14 +298,28 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: live ? _go : null,
-        child: Padding(
-          // 52 dp (BG-12) — the same target *Copy ID* takes beside it.
-          padding: const EdgeInsets.symmetric(
-            horizontal: KvSpace.sm,
-            vertical: KvSpace.s,
+        // **A real 52 dp target, not a claimed one** (BG-12, item 21).
+        //
+        // This box asserted "52 dp" in a comment while painting `8 + 18 + 8` =
+        // **34.0 dp**, measured off the built 393 dp frame — the class of false
+        // measured claim item 0 exists to catch, and it had been standing since
+        // the compact register shipped (`ux-auditor`, UX-R3). The height is now
+        // a constraint rather than an arithmetic accident, so the padding and
+        // the glyph can change without the target quietly shrinking again.
+        // **A raised pill, matching the action it sits beside** (`S9` draws
+        // two equal pills on its bar). It was a bare run of text, which made
+        // the left half of the bar read as a link and the right half as a
+        // button — and left the target at 34.0 dp.
+        child: Container(
+          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+          decoration: BoxDecoration(
+            color: KvColor.chip,
+            borderRadius: BorderRadius.circular(KvRadius.control),
           ),
+          padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
           child: Row(
             mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               KvGlyphIcon(
                 KvGlyph.external,

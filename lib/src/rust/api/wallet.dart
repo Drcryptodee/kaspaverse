@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `deadline`, `depth_for`, `discover_and_persist_window`, `discovery_proven`, `engine_handle`, `finish_scan`, `fold`, `latest_snapshot`, `map_activity`, `next_change_index`, `overlaid`, `persist_from_probe`, `publish`, `record_pass`, `republish_latest`, `republish_window`, `retry_discovery_if_unproven`, `run_discovery_pass`, `snapshots`, `wallet_signer`, `wallet_window`, `window_after_discovery`, `window_from`
+// These functions are ignored because they are not marked as `pub`: `apply_overrides`, `deadline`, `depth_for`, `discover_and_persist_window`, `discovery_proven`, `engine_handle`, `finish_scan`, `fold`, `latest_snapshot`, `map_activity`, `next_change_index`, `overlaid`, `persist_from_probe`, `publish`, `record_pass`, `republish_latest`, `republish_window`, `retry_discovery_if_unproven`, `run_discovery_pass`, `snapshots`, `wallet_network_id`, `wallet_signer`, `wallet_window`, `window_after_discovery`, `window_from`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Discovery`, `ScanReach`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Probe far deeper than an automatic pass will, at the user's explicit request —
 /// the "scan for more addresses" control.
@@ -44,6 +44,14 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// Track 2 — the first fix was correct and its regression guard could not fail).
 Future<DeepScanReport> deepScan() =>
     RustLib.instance.api.crateApiWalletDeepScan();
+
+/// Read the pin's maturity thresholds for this wallet's network.
+///
+/// Synchronous and I/O-free by construction (the library answers from its own
+/// statics), so the app can seed the ladder before it paints a first frame and
+/// no surface ever has to render a rung against a threshold it does not have.
+MaturityParamsDto maturityThresholds() =>
+    RustLib.instance.api.crateApiWalletMaturityThresholds();
 
 /// The latest folded snapshot as a PULL (V2 sitting: the founder's
 /// swipe-to-refresh; also the stream-freeze diagnostic — a pull that shows a
@@ -84,6 +92,19 @@ class ActivityRecord {
   final BigInt? acceptedDaaScore;
   final ActivityDirection direction;
   final bool isCoinbase;
+
+  /// **Who this spend paid**, in bech32 — the single output of our own
+  /// transaction that is not our change. `None` on a receive, on a
+  /// multi-recipient send, and on a compounding leg; the chain layer's
+  /// `counterparty_of` documents why a receive can never carry one. Public
+  /// chain data (INV-3): an address, never a name — the address book joins
+  /// a name to it on the Dart side, and BG-15 keeps the address visible.
+  final String? counterpartyAddress;
+
+  /// The network fee this transaction paid, in sompi — `None` on a receive,
+  /// which did not pay it. See the chain layer's field for why that is an
+  /// absence rather than a zero.
+  final BigInt? feeSompi;
   final MaturityState maturity;
 
   /// V2 chip honesty: the tracker has seen no acceptance for this SUBMITTED
@@ -100,6 +121,8 @@ class ActivityRecord {
     this.acceptedDaaScore,
     required this.direction,
     required this.isCoinbase,
+    this.counterpartyAddress,
+    this.feeSompi,
     required this.maturity,
     required this.stalled,
   });
@@ -113,6 +136,8 @@ class ActivityRecord {
       acceptedDaaScore.hashCode ^
       direction.hashCode ^
       isCoinbase.hashCode ^
+      counterpartyAddress.hashCode ^
+      feeSompi.hashCode ^
       maturity.hashCode ^
       stalled.hashCode;
 
@@ -128,6 +153,8 @@ class ActivityRecord {
           acceptedDaaScore == other.acceptedDaaScore &&
           direction == other.direction &&
           isCoinbase == other.isCoinbase &&
+          counterpartyAddress == other.counterpartyAddress &&
+          feeSompi == other.feeSompi &&
           maturity == other.maturity &&
           stalled == other.stalled;
 }
@@ -171,6 +198,36 @@ class DeepScanReport {
           receiveSeen == other.receiveSeen &&
           changeSeen == other.changeSeen &&
           widened == other.widened;
+}
+
+/// The maturity thresholds the wallet applies, crossing the FFI as **data**.
+///
+/// D-249: UX-R3 **must not hardcode** 100 or 1,000. Both live on the pinned
+/// side (`user_transaction_maturity_period_daa`,
+/// `coinbase_transaction_maturity_period_daa`) and reach the glass through
+/// here, so the burial ladder's rungs and the gauge's ceiling are the
+/// library's numbers on every build rather than a transcription of them.
+class MaturityParamsDto {
+  /// Depth at which a payment from someone else becomes spendable — the
+  /// `Settled` rung for an ordinary row.
+  final BigInt userDaa;
+
+  /// Depth at which a mined coinbase output matures — the `Settled` rung for
+  /// a coinbase row, and the gauge's ceiling when `is_coinbase` is set.
+  final BigInt coinbaseDaa;
+
+  const MaturityParamsDto({required this.userDaa, required this.coinbaseDaa});
+
+  @override
+  int get hashCode => userDaa.hashCode ^ coinbaseDaa.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MaturityParamsDto &&
+          runtimeType == other.runtimeType &&
+          userDaa == other.userDaa &&
+          coinbaseDaa == other.coinbaseDaa;
 }
 
 /// Maturity of an activity row. `Pending`/`Confirmed` come from wallet-core

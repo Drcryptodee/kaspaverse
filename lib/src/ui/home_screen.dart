@@ -227,6 +227,7 @@ class WalletScope {
     required this.activity,
     required this.syncing,
     required this.utxoIndexMissing,
+    required this.maturity,
     this.outgoing,
     this.discoveryIncomplete,
     this.onRefreshActivity,
@@ -247,6 +248,12 @@ class WalletScope {
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
+
+  /// **The pin's maturity thresholds** (D-249), read once at startup and
+  /// carried rather than assumed. Every ledger row's rung is decided against
+  /// these; there is deliberately no default, so a wallet that could not read
+  /// them fails to build instead of quietly quoting last year's numbers.
+  final KvMaturity maturity;
 
   /// No address-discovery pass has reached a node this session, so the balance
   /// is computed over the last known-good address window and **may be short**.
@@ -861,6 +868,7 @@ class _HomeScreenState extends State<HomeScreen> {
               listenable: _feedInputs,
               builder: (context, _) => _Ledger(
                 records: widget.wallet.activity.value,
+                maturity: widget.wallet.maturity,
                 now: _now.value,
                 virtualDaaScore: widget.chain.virtualDaaScore.value,
                 stale: _dimmed.value,
@@ -1396,6 +1404,7 @@ class _Ledger extends StatefulWidget {
     required this.gutter,
     required this.foot,
     required this.controller,
+    required this.maturity,
     this.virtualDaaScore,
     this.stale = false,
     this.selected,
@@ -1407,6 +1416,9 @@ class _Ledger extends StatefulWidget {
 
   final List<ActivityRecord> records;
   final DateTime now;
+
+  /// The pin's maturity thresholds, forwarded to every row's mark (D-249).
+  final KvMaturity maturity;
 
   /// The screen gutter, or 0 in a pane that is already inset.
   final double gutter;
@@ -1667,6 +1679,7 @@ class _LedgerState extends State<_Ledger> {
               now: widget.now,
               stale: widget.stale,
               selected: record.txid == widget.selected,
+              maturity: widget.maturity,
               confirmations: KvBurial.depthOf(
                 record,
                 widget.virtualDaaScore,
@@ -1689,12 +1702,12 @@ class _LedgerState extends State<_Ledger> {
 /// requires the row to survive the user's 1.3× font setting and a clamped row
 /// would clip instead of growing.
 ///
-/// The lifecycle mark still speaks `Seen · Confirmed · final`. That is
-/// **correct for this sitting**: D-248/D-249 rewrote the vocabulary to
-/// `Pending · Accepted · Settled` with its thresholds read from the pin, and
-/// UX-R3 rebuilds `KvBurialMark` at T2 with the bridge surface that carries
-/// them. Half-migrating the words here would put two vocabularies on one fact,
-/// which is the defect the amendment exists to remove.
+/// The lifecycle mark speaks D-248's ratified vocabulary — `Pending · Accepted
+/// · Settled` — against thresholds read from the pin rather than typed
+/// anywhere, which is what UX-R3 carried across the FFI (D-249). The row hands
+/// the mark its own `direction` and `isCoinbase` because one `MaturityState`
+/// means different things on a spend and on a receive, and a mined output
+/// matures at a different depth.
 class _LedgerRow extends StatelessWidget {
   const _LedgerRow({
     super.key,
@@ -1702,9 +1715,13 @@ class _LedgerRow extends StatelessWidget {
     required this.now,
     required this.stale,
     required this.selected,
+    required this.maturity,
     this.confirmations,
     this.onOpen,
   });
+
+  /// The pin's maturity thresholds, which decide this row's rung (D-249).
+  final KvMaturity maturity;
 
   final ActivityRecord record;
   final DateTime now;
@@ -1805,6 +1822,9 @@ class _LedgerRow extends StatelessWidget {
                 state: _chipState(),
                 confirmations: confirmations,
                 maturity: record.maturity,
+                direction: record.direction,
+                isCoinbase: record.isCoinbase,
+                thresholds: maturity,
                 fontSize: 13,
               ),
               if (time != null)

@@ -16,6 +16,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/finders.dart';
+import 'support/maturity.dart';
 
 /// **UX-2 — the money surface**, in the five states it has to hold
 /// (SCREEN_INVENTORY 7a–7e): first-run empty · live · syncing · in flight ·
@@ -132,6 +133,7 @@ void main() {
         lastUpdate: ValueNotifier<DateTime?>(lastUpdate ?? t0),
       ),
       wallet: WalletScope(
+        maturity: kTestMaturity,
         mature: ValueNotifier<BigInt?>(mature),
         pending: ValueNotifier<BigInt?>(pending),
         outgoing: ValueNotifier<BigInt?>(outgoing),

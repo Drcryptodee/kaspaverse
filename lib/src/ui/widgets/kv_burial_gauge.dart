@@ -1,89 +1,84 @@
 import 'package:flutter/material.dart';
 
 import '../../rust/api/wallet.dart';
+import '../format.dart';
 import '../theme/tokens.dart';
 import 'kv_burial_mark.dart';
-import 'kv_status_chip.dart';
 import 'kv_streaming_count.dart';
 import 'tx_status_chip.dart';
 
 /// **The burial gauge — the instrument register the balance gave up** (D-191),
 /// and the transaction detail's whole reason to exist.
 ///
-/// Kaspa runs at about ten blocks a second, so a hundred confirmations is a
-/// ten-second event and a thousand about a hundred seconds. Both are watchable,
-/// which is what makes a live gauge a feature here rather than a spinner.
+/// Kaspa runs at about ten blocks a second, so the hundred DAA a payment waits
+/// to become spendable is a ten-second event and a coinbase's thousand about a
+/// hundred seconds. Both are watchable, which is what makes a live gauge a
+/// feature here rather than a spinner.
 ///
-/// ## The scale, and why it declares itself (BG-22)
+/// ## The scale, and what it measures (BG-22 as amended by D-248/D-249)
 ///
-/// Depth is plotted **logarithmically**, so one confirmation is not invisible
-/// beside a thousand. A non-linear scale is permitted only where it declares
-/// itself: **the axis is named, every decade is a labelled graduation, and
-/// nothing interpolates unlabelled between marks.** Undeclared, this ladder's
-/// lie factor against a linear reading is 100× at n = 1,000.
-///
-/// So the axis is named (`blocks deep`), and it carries five labelled marks:
+/// **Linear, `0 → ceiling`, and the ceiling is the pin's own threshold for this
+/// row** — [KvMaturity.userDaa] normally, [KvMaturity.coinbaseDaa] when the row
+/// is a mined coinbase. The track runs **inside the `Accepted` rung** and
+/// measures progress toward *spendable*: a real quantity the wallet reads every
+/// second, and the honest referent the old scale never had.
 ///
 /// ```
-///   0    10   100                     1,000
-///   ├┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼]
-///        ^    confirmed                final
-///        the exact centre of 0 … 100
+///   0                    50                   100
+///   ├────┼────┼────┼────┼─┼──┼────┼────┼────┼────┤
+///        every 5 short · every 10 medium · ends and midpoint tall
 /// ```
 ///
-/// **The graduations are D-192's ratified ladder plus its origin.** 1 · 10 ·
-/// 100 · 1,000 are the ratified marks and the two thresholds — *100 is safe,
-/// 1,000 is final* — are named on the axis itself, which is where naming a
-/// threshold belongs. The **`0` is an addition**, and it is made deliberately
-/// rather than quietly: zero confirmations is a state the wallet genuinely
-/// reaches and is exactly the moment a user watches this screen, `log10(0)` has
-/// no position, and an origin the reader cannot see is an **undeclared** origin
-/// — which is the one thing BG-22 forbids outright. It touches neither
-/// threshold nor vocabulary.
-///
-/// **The decades are not evenly spaced, and that is the point.** The scale is
-/// piecewise: `0 … 100` shares the first third, and `100 … 1,000` takes the
-/// remaining two. Evenly spaced at quarters — the scale UX-5 shipped — the one
-/// decade that carries the decision occupied a quarter of the track, and it
-/// was measured on glass at the 2026-08-31 device sitting: a real send
-/// climbing from **981 to 1,000 moved the fill two pixels**. Nine hundred
-/// blocks of the journey from *confirmed* to *final* were visually
-/// indistinguishable on the surface built to show exactly that.
-///
-/// The rescale spends ink where the reading changes a decision, which is
-/// Tufte's argument rather than a departure from it, and it stays **declared**:
-/// every graduation is labelled, so a reader can see that `100 … 1,000` is
-/// wider than `10 … 100` and is not invited to interpolate. **Nothing ever
-/// renders strictly between `0` and `1`**: a depth is a count of whole blocks,
-/// and [KvStreamingCount] passes through the integers between two readings and
-/// never between two integers.
+/// **What this replaces, and why the replacement is not a simplification.**
+/// The shipped gauge was a piecewise-linear `0 · 10 · 100 · 1,000` ruler, and
+/// D-248 removed the thousand rung on the argument that *"past 100 nothing
+/// changes again"*. `consensus-auditor` caught that as false and D-249 recorded
+/// it: between 100 and 1,000 a **coinbase output matures and becomes
+/// spendable**. So the thousand is not deleted — it is *conditional*, and the
+/// condition is `is_coinbase`. A gauge that does not branch is a defect, not a
+/// simplification: a coinbase at 150 would fill its track and claim spendable
+/// over money wallet-core still excludes from the balance.
 ///
 /// ## The ink is the reading
 ///
 /// The fill is a **rectangle**, not a stroked line, so it has no cap to paint
 /// past the value it reports — the defect that added 4.21% of the circle to
 /// every reading of the sign ring. Its extent is computed from the **depth**
-/// and from nothing else: [positionFor] is a pure function of an integer, the
-/// crossfade controller drives colour and never geometry, and there is no
-/// curve anywhere on the path from a reading to a width. A gauge is never
-/// eased, in either direction (BG-22, BG-9's one exception).
+/// and from nothing else: [positionFor] is a pure function of an integer and a
+/// ceiling, the crossfade controller drives colour and never geometry, and
+/// there is no curve anywhere on the path from a reading to a width. A gauge is
+/// never eased, in either direction (BG-22, BG-9's one exception). The guard
+/// measures the **painted ink** through a spy canvas rather than the value the
+/// code handed the painter (L145).
 ///
 /// ## One fact, two registers, one implementation
 ///
-/// [KvBurialMark] renders this same chain fact in a ledger row. Both read
-/// their thresholds, rung arithmetic and words from [KvBurial], so the two
-/// cannot drift into disagreeing about one number (BG-21 / L143) — and this
-/// widget renders **its own** words rather than embedding the mark, because a
-/// second [KvStreamingCount] would start a second tween and the number beside
-/// the gauge could differ from the number the gauge was drawn at.
+/// [KvBurialMark] renders this same chain fact in a ledger row. Both read their
+/// rung arithmetic and words from [KvBurial] and their thresholds from the same
+/// [KvMaturity], so the two cannot drift into disagreeing about one number
+/// (BG-21 / L143) — and this widget renders **its own** words rather than
+/// embedding the mark, because a second [KvStreamingCount] would start a second
+/// tween and the number beside the gauge could differ from the number the gauge
+/// was drawn at.
 class KvBurialGauge extends StatefulWidget {
   const KvBurialGauge({
     super.key,
     required this.state,
     required this.confirmations,
     required this.maturity,
+    required this.direction,
+    required this.isCoinbase,
+    required this.thresholds,
+    this.heading,
     this.stalled = false,
   });
+
+  /// The section label, laid out on the **same row** as the reading — `S9`
+  /// draws `DEPTH` at the plate's left edge and `1,240 blocks deep` hard right,
+  /// on one line. It is the gauge's own row rather than the plate's, so the
+  /// axis name and the number it names cannot drift apart (BG-22 wants a named
+  /// axis; one widget owning both is what keeps the naming true).
+  final Widget? heading;
 
   final TxChipState state;
 
@@ -92,76 +87,39 @@ class KvBurialGauge extends StatefulWidget {
 
   final MaturityState maturity;
 
+  /// One `MaturityState` means different things on a spend and on a receive —
+  /// see [KvBurial.rungFor].
+  final ActivityDirection direction;
+
+  /// Branches the ceiling (D-249's last finding).
+  final bool isCoinbase;
+
+  /// The pin's own thresholds, crossed from `NetworkParams` (D-249).
+  final KvMaturity thresholds;
+
   /// The link is not live, so no reading is arriving and the counter stops
   /// where it last actually read (BG-8 applied to movement).
   final bool stalled;
 
-  /// The labelled graduations, in order. The ratified ladder plus its origin.
-  static const List<int> graduations = [0, 10, 100, KvBurial.settled];
-
-  /// **The sub-marks: the scale's own subdivisions, drawn and unlabelled.**
+  /// The track's own subdivisions, as fractions of the ceiling.
   ///
-  /// This is what makes the compression *visible* rather than merely declared.
-  /// A reader seeing nine ticks bunch toward `10` and nine more bunch toward
-  /// `100` can see the axis is logarithmic without being told; the labels then
-  /// only have to name the decades. It is the canonical log ruler, and it is a
-  /// stronger answer to BG-22's *no unlabelled interpolation* than blank track
-  /// was — blank track invites the eye to interpolate linearly, and a ruler
-  /// shows it exactly why it must not.
-  static const List<int> subGraduations = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, //
-    20, 30, 40, 50, 60, 70, 80, 90,
-    200, 300, 400, 500, 600, 700, 800, 900,
-  ];
+  /// §4: **21 ticks** — one every 5% — with three lengths, so the ruler has a
+  /// hierarchy a reader can use without a label on every mark: the two ends and
+  /// the midpoint stand tallest, every tenth stands next, and the fives only
+  /// graze the bar. It is one even rhythm across the whole track, which is what
+  /// a linear scale earns and the piecewise one could never have.
+  static const int subDivisions = 20;
 
-  /// The name of the axis, which is what turns four numerals into a scale.
-  static const String axisName = 'blocks deep';
-
-  /// **The declared scale**: `x(n) = (log10(n) + 1) / 4`, clamped to the track.
+  /// **The declared scale: linear, `0 → ceiling`.**
   ///
-  /// Pure, and public, so the guard that measures the painted ink can compare
-  /// it against the arithmetic instead of against another copy of the drawing
-  /// code. `0` maps to the origin; anything past a thousand is a full track,
-  /// because the scale ends where finality does.
-  /// Where `10` sits: **the exact centre of `0 … 100`** (founder, device
-  /// sitting). It is what makes the low end read as a ruler rather than as
-  /// three numbers crowded against the hundred mark.
-  static const double tenAt = 1 / 6;
-
-  /// Where the safe threshold sits. **One third**, so the decade that carries
-  /// the decision gets the other two.
-  static const double safeAt = 1 / 3;
-
-  /// The track is divided into this many equal steps, and every step that is
-  /// not already a labelled mark gets a sub-mark. **Thirty is not arbitrary:**
-  /// it is the smallest division on which all four labelled marks land exactly
-  /// — `0`, `10` at 5/30, `100` at 10/30, `1,000` at 30/30 — so the whole ruler
-  /// is one even rhythm with no tick out of step with its neighbours.
-  static const int subDivisions = 30;
-
-  /// **The declared scale: piecewise LINEAR, with labelled breakpoints.**
-  ///
-  /// `0 → 0`, `10 → 1/6`, `100 → 1/3`, `1,000 → 1`, straight lines between.
   /// Pure, and public, so the guard that measures the painted ink compares it
   /// against the arithmetic rather than against another copy of the drawing
-  /// code.
-  ///
-  /// Linear inside each segment is what lets the sub-marks be an even rhythm
-  /// and still mean something: an evenly spaced tick on a linear segment is an
-  /// even step of DEPTH. On the log scale this replaced, evenly spaced ticks
-  /// would have been decoration and clustered ticks were, in the founder's
-  /// words, "just not it".
-  static double positionFor(int depth) {
-    if (depth <= 0) return 0;
-    if (depth >= KvBurial.settled) return 1;
-    if (depth <= 10) return depth / 10 * tenAt;
-    if (depth <= KvBurial.safe) {
-      return tenAt + (depth - 10) / 90 * (safeAt - tenAt);
-    }
-    return safeAt +
-        (depth - KvBurial.safe) /
-            (KvBurial.settled - KvBurial.safe) *
-            (1 - safeAt);
+  /// code. Anything at or past the ceiling is a full track, because the scale
+  /// ends where spendability begins and no rung claims anything beyond it.
+  static double positionFor(int depth, int ceiling) {
+    if (depth <= 0 || ceiling <= 0) return 0;
+    if (depth >= ceiling) return 1;
+    return depth / ceiling;
   }
 
   @override
@@ -176,39 +134,13 @@ class _KvBurialGaugeState extends State<KvBurialGauge> {
   /// be recomputed in `didUpdateWidget` from `widget.confirmations` — the
   /// newest observation — while the fill was drawn at whatever integer the
   /// streamed replay was on. A reading arriving at 150 over a wallet showing 99
-  /// therefore printed `Confirmed` immediately and left the bar sitting below
-  /// the hundred mark for the rest of the second: the word and the extent
-  /// disagreeing about which side of the safe threshold the money was on, on
-  /// the surface built to answer exactly that. Deriving the rung from the
-  /// **drawn** depth makes the word flip in the same frame the fill crosses the
-  /// mark, by construction.
+  /// therefore printed the settled word immediately and left the bar sitting
+  /// below the ceiling for the rest of the second: the word and the extent
+  /// disagreeing about which side of the threshold the money was on, on the
+  /// surface built to answer exactly that. Deriving the rung from the **drawn**
+  /// depth makes the word flip in the same frame the fill crosses the mark, by
+  /// construction.
   KvBurialRung? _shown;
-
-  /// Bumped on a BACKWARD crossing, and it is the reading line's switcher key
-  /// — so the switcher is remounted rather than asked to animate in zero time,
-  /// which is the mechanism [KvBurialMark] uses and the reason
-  /// `duration: Duration.zero` is not it (the outgoing child is never
-  /// released). A rung that goes down is a reorg or a late reading, and BG-18
-  /// says a decrease snaps.
-  int _epoch = 0;
-
-  /// Amber runs only to safety. Past a hundred blocks a transaction is certain
-  /// enough to act on, and holding it amber for another fifteen minutes tells
-  /// the user to keep worrying about something already settled (§5). Finality
-  /// is carried by the thousand mark closing, never by a fourth hue the palette
-  /// does not have.
-  /// Every rung answers with a colour, including [KvBurialRung.stalled] —
-  /// **whether anything is drawn is the DEPTH's decision, never the tone's.** A
-  /// null here would also break the implicit crossfade outright: a
-  /// `TweenAnimationBuilder` asserts on a null `end`, and a stalled submit
-  /// would have rendered no gauge at all rather than an empty one.
-  static Color _fillFor(KvBurialRung rung) => switch (rung) {
-    // A stalled submit was never accepted, so there is no depth to plot — and
-    // `_body` passes a null depth for it, which is what stops the fill.
-    KvBurialRung.stalled => KvColor.warn,
-    KvBurialRung.seen => KvColor.warn,
-    KvBurialRung.confirmed || KvBurialRung.settled => KvColor.ok,
-  };
 
   @override
   Widget build(BuildContext context) {
@@ -224,185 +156,219 @@ class _KvBurialGaugeState extends State<KvBurialGauge> {
   }
 
   Widget _body(int? depth) {
-    final rung = KvBurial.rungFor(widget.state, depth, widget.maturity);
+    final ceiling = widget.thresholds.ceilingFor(coinbase: widget.isCoinbase);
+    final rung = KvBurial.rungFor(
+      widget.state,
+      depth,
+      widget.maturity,
+      direction: widget.direction,
+      isCoinbase: widget.isCoinbase,
+      thresholds: widget.thresholds,
+    );
     final previous = _shown;
     final backwards = previous != null && rung.index < previous.index;
-    if (backwards) _epoch++;
     _shown = rung;
 
     final words = KvBurial.words(rung, depth: depth);
-    final tone = KvBurial.toneFor(rung);
     // A decrease snaps; everything else crosses (BG-18 over BG-24).
     final crossing = backwards ? Duration.zero : KvMotion.fast;
     return Semantics(
       // Spoken as one reading. Without this a screen reader walks a bare row
-      // of numerals — 0, 1, 10, 100, 1,000 — which is the axis, not the value.
+      // of numerals — 0, 50, 100 — which is the axis, not the value.
       //
       // **Built from the DEPTH, not from the words**, for two reasons. The
-      // words dangled the axis into a sentence that does not take it —
-      // *"Confirmed blocks deep"* — and, past the safe mark, the words carry no
-      // number at all while the fill carries the reading: a screen-reader user
-      // got **no depth** exactly where a sighted user reads one off the track
-      // (`ux-auditor`, UX-5).
+      // words dangled the axis into a sentence that does not take it, and past
+      // the ceiling the words carry no number at all while the fill carries the
+      // reading: a screen-reader user got **no depth** exactly where a sighted
+      // user reads one off the track (`ux-auditor`, UX-5).
       label: depth == null
           ? '$words. Depth unknown.'
-          : '$words. $depth ${KvBurialGauge.axisName}. '
-                '${KvBurial.safe} is safe, ${KvBurial.settled} is final.',
+          : '$words. $depth of $ceiling DAA deep. '
+                'Spendable at $ceiling.',
       excludeSemantics: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // **The words cross, they do not cut** (BG-24). At the thousand mark
-          // the line went from 40 dp to 24 dp in one frame and the lamp dot
-          // vanished with nothing between, while the bar beneath it crossfaded
-          // for the full 160 ms — one state carried by two things that
-          // disagreed about when it changed (`ux-auditor`, UX-5). Keyed on the
-          // RUNG, so the depth streaming inside a rung updates in place instead
-          // of crossfading sixty times a second, and the outgoing child is
-          // `Positioned` so it sizes nothing — a crossfade whose layout still
-          // jumps has only relocated the cut.
-          AnimatedSwitcher(
-            key: ValueKey(_epoch),
-            duration: KvMotion.fast,
-            switchInCurve: KvMotion.out,
-            switchOutCurve: KvMotion.out,
-            layoutBuilder: (current, previous) => Stack(
-              alignment: Alignment.centerLeft,
-              clipBehavior: Clip.none,
-              children: [
-                for (final old in previous)
-                  Positioned(left: 0, right: 0, top: 0, bottom: 0, child: old),
-                ?current,
-              ],
-            ),
-            child: KeyedSubtree(
-              key: ValueKey(rung),
-              child: _ReadingLine(
-                words: words,
-                // Mono only where digits are actually printed — the same rule
-                // the ledger row's mark keeps, so one fact does not wear two
-                // faces.
-                mono: rung == KvBurialRung.seen && depth != null,
-                tone: tone,
-              ),
-            ),
-          ),
-          const SizedBox(height: KvSpace.s),
-          // **Implicit, and colour only.** The extent is a pure function of the
-          // depth below; these two builders carry the amber -> green crossing
-          // and the thousand mark's closing arm, which are the two things that
-          // genuinely appear. Nothing on the path from a reading to a width
-          // touches either of them (BG-22).
+          // **The rung crosses, it does not cut** (BG-24). What changes at a
+          // crossing is now a *hue* — the reading line prints the count and the
+          // ceiling, which are the same words either side of the mark — so the
+          // dot tweens exactly as the fill does, from the same rung, over the
+          // same duration. It used to be an `AnimatedSwitcher` keyed on the
+          // rung, which was right while the line printed the rung's word and
+          // became a switcher with nothing to switch once `S9` moved that word
+          // into the chip: two reading lines were mounted through every
+          // crossing, and the outgoing one still carried the old dot.
           TweenAnimationBuilder<Color?>(
-            tween: ColorTween(end: _fillFor(rung)),
+            tween: ColorTween(end: KvBurial.hueFor(rung)),
             duration: crossing,
             curve: KvMotion.out,
-            builder: (context, fill, _) => TweenAnimationBuilder<double>(
-              tween: Tween<double>(end: rung == KvBurialRung.settled ? 1 : 0),
-              duration: crossing,
-              curve: KvMotion.out,
-              builder: (context, seated, _) => CustomPaint(
-                size: const Size(double.infinity, KvBurialGaugePainter.extent),
-                painter: KvBurialGaugePainter(
-                  depth: rung == KvBurialRung.stalled ? null : depth,
-                  fill: fill,
-                  seated: seated,
-                ),
+            builder: (context, hue, _) => _ReadingLine(
+              heading: widget.heading,
+              depth: depth,
+              ceiling: ceiling,
+              hue: hue ?? KvBurial.hueFor(rung),
+            ),
+          ),
+          const SizedBox(height: KvSpace.sm),
+          // **Implicit, and colour only.** The extent is a pure function of the
+          // depth below; this builder carries the green -> blue crossing at the
+          // ceiling, which is the one thing that genuinely appears. Nothing on
+          // the path from a reading to a width touches it (BG-22).
+          TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: KvBurial.hueFor(rung)),
+            duration: crossing,
+            curve: KvMotion.out,
+            builder: (context, fill, _) => CustomPaint(
+              size: const Size(double.infinity, KvBurialGaugePainter.extent),
+              painter: KvBurialGaugePainter(
+                depth: rung == KvBurialRung.stalled ? null : depth,
+                ceiling: ceiling,
+                fill: fill,
               ),
             ),
           ),
           const SizedBox(height: KvSpace.xs),
-          const _Graduations(),
+          _Graduations(ceiling: ceiling),
         ],
       ),
     );
   }
 }
 
-/// The reading, in the detail's register: the lamp the rung wears, the words,
-/// and the axis the number is counted on.
+/// The reading, in the detail's register: the axis named at the left, the
+/// measurement hard right.
+///
+/// **It prints the number, never the rung's word.** `S9` puts the word in the
+/// lifecycle chip above and the count here, and BG-19 is why: the first cut
+/// printed `Accepted 42` in both and the suite caught it as one measurement
+/// stated twice on one surface. Two registers of one fact are permitted — a
+/// word, and a position on a declared scale — two printings of the count are
+/// not. The rung is still in this line's ink: the dot carries its hue.
 class _ReadingLine extends StatelessWidget {
   const _ReadingLine({
-    required this.words,
-    required this.tone,
-    required this.mono,
+    required this.heading,
+    required this.depth,
+    required this.ceiling,
+    required this.hue,
   });
 
-  final String words;
-  final KvLampTone? tone;
-  final bool mono;
+  final Widget? heading;
+  final int? depth;
+  final int ceiling;
+  final Color hue;
+
+  /// **One number, one format.** The reading printed `of 1000 DAA` while the
+  /// graduation twenty dp beneath it printed `1,000`, and every other chain
+  /// integer on the screen goes through `formatScore` (`ux-auditor`, item 33).
+  static String _grouped(int n) => formatScore(BigInt.from(n));
 
   @override
   Widget build(BuildContext context) {
-    final dot = tone;
+    final n = depth;
     return Row(
       children: [
-        if (dot != null) ...[
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: dot.color, shape: BoxShape.circle),
+        // **The heading is not the thing that gets eaten.** With the figure and
+        // the unit in fixed boxes and only the heading flexed, a nine-digit
+        // depth — a year-old row at 10 BPS — collapsed `DEPTH` from 54.6 dp to
+        // 16.5 at 320 dp / 1.3×, clipping the axis name BG-22 requires, with no
+        // overflow raised for a test to see (`ux-auditor`, UX-R3). Both sides
+        // flex now, and the heading keeps a floor it can actually be read at.
+        if (heading != null)
+          Flexible(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 56),
+              child: heading!,
+            ),
           ),
-          const SizedBox(width: KvSpace.s),
-        ],
-        Expanded(
+        if (heading == null) const Spacer(),
+        const SizedBox(width: KvSpace.s),
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: hue, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: KvSpace.s),
+        // **`—` for a depth nobody has** (BG-8): a stale link, a cold start, a
+        // row the live DAA cannot anchor. Never a zero, which is a reading.
+        Flexible(
           child: Text(
-            words,
+            n == null ? '—' : _grouped(n),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontFamily: mono ? KvFont.mono : KvFont.ui,
+            style: const TextStyle(
+              fontFamily: KvFont.mono,
               fontSize: 15,
               height: 20 / 15,
+              // **Declared AND painted** (L150): on a variable face the enum is
+              // only a hint, and a weight set without its axis paints at whatever
+              // the ambient one is.
               fontWeight: FontWeight.w500,
-              // The dot carries the hue; the words do not (§1.5).
+              fontVariations: KvWeight.w500,
               color: KvColor.ink,
-              fontFeatures: const [FontFeature.tabularFigures()],
+              fontFeatures: [FontFeature.tabularFigures()],
             ),
           ),
         ),
-        // **The axis is still named — by the section heading above it.**
-        // BG-22 requires a named axis, not an inline one, and `DEPTH` set in
-        // capitals at the head of the section names it louder than a dimmed
-        // 11 dp label sitting at the far end of the reading line ever did.
-        // [KvBurialGauge.axisName] survives as the spoken form, because a
-        // screen reader has no heading in earshot when it reaches the gauge.
+        const SizedBox(width: KvSpace.xs),
+        // The axis, inline and subordinate — `S9`'s `blocks deep`, in the unit
+        // D-249 corrected it to: `KvBurial.depthOf` computes a **DAA-score**
+        // delta, and at 10 BPS the wall-clock arithmetic is unchanged but the
+        // word must be true.
+        //
+        // **Two phrasings, because there are two questions.** Under the ceiling
+        // the reading is *progress* and `42 of 100 DAA` answers it. At or past
+        // it that question is closed, and `420 of 100 DAA` is arithmetic
+        // nonsense — so the scale drops away and the depth stands on its own,
+        // which is what `S9` itself does with `1,240 blocks deep`. The true
+        // number is printed either way: clamping it to the ceiling would hide
+        // how deep the money actually is, which is the one thing this surface
+        // exists to say. (Caught in a rendered frame of the settled state.)
+        Text(
+          n != null && n >= ceiling
+              ? 'DAA deep'
+              : 'of ${_grouped(ceiling)} DAA',
+          maxLines: 1,
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 13,
+            height: 18 / 13,
+            color: KvColor.inkMeta,
+          ),
+        ),
       ],
     );
   }
 }
 
-/// The labelled decades, each centred on the tick it names, with the two
-/// thresholds named where they fall.
+/// The labelled graduations — the origin, the midpoint and the ceiling, each
+/// centred on the tick it names, with the terminal rung's word under the mark
+/// it is reached at.
 ///
 /// Laid out against the track's own width rather than by dividing a `Row` into
 /// cells: the outer labels have to sit flush with the ends of the scale, and
-/// `1,000` at 1.3x text scale is wider than an eighth of a 320 dp screen.
+/// `1,000` at 1.3x text scale is wider than a third of a 320 dp screen.
 ///
 /// The row's height is **computed** from the two constants the labels
-/// themselves are styled with, rather than reserved by an invisible copy of
-/// the tallest label — a ghost `Text` would put a second `100` in the tree,
-/// which is a duplicate for every finder and every reader that walks it.
+/// themselves are styled with, rather than reserved by an invisible copy of the
+/// tallest label — a ghost `Text` would put a second numeral in the tree, which
+/// is a duplicate for every finder and every reader that walks it.
 class _Graduations extends StatelessWidget {
-  const _Graduations();
+  const _Graduations({required this.ceiling});
+
+  final int ceiling;
 
   /// The label ramp, named once and used by both the styles below and the
   /// height arithmetic, so the two cannot drift (item 0 / L121).
   static const double labelSize = 11;
   static const double labelLine = 15;
 
-  static String _numeral(int mark) => mark >= 1000 ? '1,000' : '$mark';
+  /// Thousands get a separator; the midpoint and the origin never need one.
+  /// The app's one grouping, so the axis and the reading above it cannot print
+  /// the same integer two ways (`ux-auditor` item 33: the reading said
+  /// `of 1000 DAA` while this label said `1,000`, twenty dp apart).
+  static String _numeral(int mark) => formatScore(BigInt.from(mark));
 
-  /// The two thresholds D-192 settled, named on the axis itself (§5).
-  static String? _threshold(int mark) => switch (mark) {
-    // `confirmed` rather than `safe`: it is the word the rung itself uses at
-    // this depth, so the threshold and the reading now say the same thing.
-    KvBurial.safe => 'confirmed',
-    KvBurial.settled => 'final',
-    _ => null,
-  };
-
-  static Widget _label(int mark) => Column(
+  static Widget _label(int mark, {String? word}) => Column(
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.center,
     children: [
@@ -417,7 +383,7 @@ class _Graduations extends StatelessWidget {
           fontFeatures: [FontFeature.tabularFigures()],
         ),
       ),
-      if (_threshold(mark) case final word?)
+      if (word != null)
         Text(
           word,
           maxLines: 1,
@@ -425,7 +391,7 @@ class _Graduations extends StatelessWidget {
             fontFamily: KvFont.ui,
             fontSize: labelSize,
             height: labelLine / labelSize,
-            color: KvColor.inkMetaLow,
+            color: KvColor.inkMeta,
           ),
         ),
     ],
@@ -433,9 +399,19 @@ class _Graduations extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const marks = KvBurialGauge.graduations;
-    // The tallest label is a numeral over a threshold word: two line boxes,
-    // each `labelLine / labelSize` of whatever the user's scaler makes of
+    // The origin, the midpoint and the ceiling. **The ceiling is named with the
+    // rung it delivers** — `settled`, the same word the reading line says at
+    // the same instant, which is BG-7's redundancy rather than BG-19's
+    // duplication: one is the axis, one is the reading. It is also the word,
+    // not a second one: naming the mark `spendable` would put two names on one
+    // fact, which is the BG-21 defect this whole rebuild exists to close.
+    final marks = <(int, String?)>[
+      (0, null),
+      (ceiling ~/ 2, null),
+      (ceiling, 'settled'),
+    ];
+    // The tallest label is a numeral over a word: two line boxes, each
+    // `labelLine / labelSize` of whatever the user's scaler makes of
     // `labelSize`.
     final rows =
         MediaQuery.textScalerOf(context).scale(labelSize) *
@@ -452,22 +428,19 @@ class _Graduations extends StatelessWidget {
               for (var i = 0; i < marks.length; i++)
                 Positioned(
                   // **The label sits where its own mark is drawn**, not where
-                  // its index falls. Even-index spacing was correct only while
-                  // the scale was even quarters; the moment the scale became
-                  // piecewise it made the numerals disagree with the ink they
-                  // name, which is the exact failure BG-22 exists to prevent.
-                  left: width * KvBurialGauge.positionFor(marks[i]),
+                  // its index falls — the rule that survived the rescale, and
+                  // the one BG-22 exists to enforce.
+                  left: width * KvBurialGauge.positionFor(marks[i].$1, ceiling),
                   top: 0,
                   child: FractionalTranslation(
                     // Flush at the ends, centred in between — so no label
-                    // overhangs the gutter and every inner one sits on its
-                    // tick.
+                    // overhangs the gutter and the middle one sits on its tick.
                     translation: Offset(switch (i) {
                       0 => 0,
                       _ when i == marks.length - 1 => -1,
                       _ => -0.5,
                     }, 0),
-                    child: _label(marks[i]),
+                    child: _label(marks[i].$1, word: marks[i].$2),
                   ),
                 ),
             ],
@@ -478,18 +451,19 @@ class _Graduations extends StatelessWidget {
   }
 }
 
-/// The track, the fill, the graduations and the thousand mark.
+/// The ticks above, the track, and the fill.
 ///
-/// **Public, and it takes the depth rather than a fraction**, so there is no
-/// intermediate argument for a guard to confirm instead of the drawing: hand
-/// it a reading, measure the ink, compare against [KvBurialGauge.positionFor].
-/// That is L145's lesson made structural — a guard that records the value the
-/// code handed it can only confirm that the code handed it that value.
+/// **Public, and it takes the depth and the ceiling rather than a fraction**, so
+/// there is no intermediate argument for a guard to confirm instead of the
+/// drawing: hand it a reading, measure the ink, compare against
+/// [KvBurialGauge.positionFor]. That is L145's lesson made structural — a guard
+/// that records the value the code handed it can only confirm that the code
+/// handed it that value.
 class KvBurialGaugePainter extends CustomPainter {
   const KvBurialGaugePainter({
     required this.depth,
+    required this.ceiling,
     required this.fill,
-    required this.seated,
   });
 
   /// The observed depth, or null when there is none. **A null draws no fill at
@@ -497,137 +471,118 @@ class KvBurialGaugePainter extends CustomPainter {
   /// BG-8 renders the unknown as a dash, which the words above already do.
   final int? depth;
 
+  /// The pin's threshold for this row: the scale's full extent.
+  final int ceiling;
+
   /// The rung's colour, mid-crossfade. It says what the fill would look like;
   /// **[depth] says whether there is one at all.**
   final Color? fill;
 
-  /// How far the thousand mark has closed, 0 → 1. **An opacity, never a
-  /// geometry**: the bracket's arms are drawn at fixed length and fade in.
-  final double seated;
+  /// The bar's thickness — **6 dp** (§4, and the render measures 6.0 exactly).
+  static const double band = 6;
 
-  /// The fill band's thickness, and the rule runs down its centre.
-  static const double band = 3;
+  /// Tick lengths above the band (§4): the ends and the midpoint stand tallest,
+  /// every tenth stands next, and every fifth only grazes the bar.
+  static const double majorTick = 12;
+  static const double tenTick = 8;
+  static const double fiveTick = 5;
 
-  /// Tick lengths below the band. The thousand mark is the tallest thing the
-  /// painter draws, which is what makes it read as the end of the scale.
-  /// A sub-mark is deliberately shorter than the shortest labelled tick, so
-  /// the hierarchy reads at a glance: named decades stand off the line, their
-  /// subdivisions only graze it.
-  static const double subTick = 2;
-
-  static const double shortTick = 3;
-  static const double safeTick = 5;
-  static const double finalTick = 8;
-
-  /// How far the bracket's arms reach back over the track.
-  static const double bracketArm = 4;
+  /// The gap between the tick row and the bar, so the ruler reads as a scale
+  /// standing over its reading rather than as fringe growing out of it.
+  static const double tickGap = 3;
 
   /// Total painted height, derived from the marks rather than asserted (L121).
-  static const double extent = band + finalTick;
+  static const double extent = majorTick + tickGap + band;
+
+  /// **Which length a graduation takes, from the step it lands on** — §4's
+  /// three lengths, expressed against the SUBDIVISION grid rather than against
+  /// the ceiling, so a coinbase row's 0 · 500 · 1,000 wears the same hierarchy
+  /// as a payment's 0 · 50 · 100 without a second table.
+  ///
+  /// Twenty steps span the track, so a step is 5 % of the ceiling: the ends and
+  /// the midpoint (steps 0 · 10 · 20) stand tallest, every second step is a
+  /// tenth and stands next, and the odd steps are the fifths that only graze
+  /// the bar.
+  static double tickLength(int step) {
+    const half = KvBurialGauge.subDivisions ~/ 2;
+    if (step == 0 || step == half || step == KvBurialGauge.subDivisions) {
+      return majorTick;
+    }
+    return step.isEven ? tenTick : fiveTick;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
+    final top = majorTick + tickGap;
+
+    // **The ticks, one even rhythm across the whole track.** A linear scale is
+    // what earns this: an evenly spaced tick is an even step of DEPTH, so the
+    // ruler means something rather than decorating. On the piecewise scale this
+    // replaced, evenly spaced ticks were decoration and clustered ticks were,
+    // in the founder's words, "just not it".
+    //
     // `isAntiAlias: false` keeps a 1px engraved rule one pixel wide instead of
     // two half-lit ones — the difference between machined and smudged.
+    //
+    // **An unread scale flattens.** An empty track at a live zero and an empty
+    // track at an unknown depth would otherwise be the same ink, so the graphic
+    // would assert *"measured at zero"* for a reading nobody has
+    // (`consensus-auditor`, UX-5). Without a reading the ticks drop to the
+    // track's own tone and the hierarchy an instrument has when it is live
+    // collapses.
+    //
+    // **Both tones clear WCAG 1.4.11's 3:1 floor, and until UX-R3 neither did.**
+    // This comment claimed `etch` measures 3.04:1; recomputed from the hexes it
+    // is **2.35 on `plate`, 2.53 on `abyss`** — a false measured claim that had
+    // been standing since the gauge shipped and that this sitting propagated to
+    // two more objects before `ux-auditor` caught it (item 0 / L121). The whole
+    // "no reading" face was under the floor. `inkMeta` is **4.75** and `inkDim`
+    // **8.14** on `plate`, so the machined hierarchy survives above the bar
+    // rather than below it.
+    final tick = Paint()
+      ..color = depth == null ? KvColor.inkMeta : KvColor.inkDim
+      ..strokeWidth = 1
+      ..isAntiAlias = false;
+    for (var step = 0; step <= KvBurialGauge.subDivisions; step++) {
+      final at = step / KvBurialGauge.subDivisions;
+      final x = (w * at).clamp(0.5, w - 0.5);
+      final len = tickLength(step);
+      canvas.drawLine(Offset(x, top - len), Offset(x, top), tick);
+    }
+
     // **The track has to READ as a track, and clear the 3:1 floor doing it.**
     // `datum` — the engraved rule a balance floats on — is 1.1:1 on the abyss
     // and vanished the moment the fill stopped, turning a reading on a scale
-    // into an unbounded bar. `tick` fixed the look and still measured 1.85:1,
-    // under WCAG 1.4.11's 3:1 for a non-text element that carries meaning
-    // (`ux-auditor`, UX-5 — recomputed from the render, not from this comment).
-    // So: `etch` at 3.04:1 for the axis, `inkMetaLow` at 5.32:1 for the marks,
-    // which keeps the machined hierarchy — the graduations stand off the line
-    // they sit on — with both tones above the floor.
-    final rule = Paint()
-      ..color = KvColor.etch
-      ..strokeWidth = 1
-      ..isAntiAlias = false;
-    canvas.drawLine(Offset(0, band / 2), Offset(w, band / 2), rule);
+    // into an unbounded bar. The track is what makes the fill a *fraction*
+    // rather than a bar, so it is meaningful non-text content and owes the
+    // floor: `inkMeta` at **4.75** on `plate`, with the graduations above it at
+    // `inkDim`'s **8.14** keeping the machined hierarchy.
+    canvas.drawRect(
+      Rect.fromLTWH(0, top, w, band),
+      Paint()..color = KvColor.inkMeta,
+    );
 
     // **The fill: a rectangle, so the ink ends where the reading does.** A
-    // stroked line with any cap but `butt` paints half a stroke width past
-    // both ends, which is a constant added to every value and an unbounded lie
-    // as the value goes to zero (BG-22).
+    // stroked line with any cap but `butt` paints half a stroke width past both
+    // ends, which is a constant added to every value and an unbounded lie as
+    // the value goes to zero (BG-22).
     final n = depth;
     final paintFill = fill;
     if (n != null && paintFill != null) {
-      final x = KvBurialGauge.positionFor(n) * w;
+      final x = KvBurialGauge.positionFor(n, ceiling) * w;
       if (x > 0) {
         canvas.drawRect(
-          Rect.fromLTWH(0, 0, x, band),
+          Rect.fromLTWH(0, top, x, band),
           Paint()
             ..color = paintFill
             ..style = PaintingStyle.fill,
         );
       }
     }
-
-    // **The graduations, and an unread scale flattens.** With the `0` origin
-    // labelled, an empty track at a live zero and an empty track at an unknown
-    // depth were the same ink — so the graphic asserted *"measured at zero"*
-    // for a reading nobody has (`consensus-auditor`, UX-5). The marks and the
-    // rule share one tone when there is nothing to read, which collapses the
-    // hierarchy an instrument has when it is live; with a reading they stand
-    // off the line they sit on. Both tones clear the 3:1 floor, and the words
-    // carry the dash either way.
-    final tick = Paint()
-      ..color = n == null ? KvColor.etch : KvColor.inkMetaLow
-      ..strokeWidth = 1
-      ..isAntiAlias = false;
-    // **The sub-marks: one even rhythm across the whole track.** Every step of
-    // `1 / subDivisions` that is not already a labelled mark gets a short tick,
-    // so the spacing is identical everywhere and the labelled marks sit ON the
-    // grid rather than beside it. Drawn first, so a major tick is never
-    // overdrawn by a minor one landing on the same pixel.
-    final majors = KvBurialGauge.graduations
-        .map(KvBurialGauge.positionFor)
-        .toList();
-    for (var i = 1; i < KvBurialGauge.subDivisions; i++) {
-      final at = i / KvBurialGauge.subDivisions;
-      if (majors.any((m) => (m - at).abs() < 1e-9)) continue;
-      final x = (w * at).clamp(0.5, w - 0.5);
-      canvas.drawLine(Offset(x, band), Offset(x, band + subTick), tick);
-    }
-    // **Every tick stands where the SCALE puts it, not where its index falls.**
-    // Index spacing was right only while the scale was even quarters; under a
-    // piecewise scale it drew a ruler that disagreed with its own fill.
-    const marks = KvBurialGauge.graduations;
-    for (var i = 0; i < marks.length - 1; i++) {
-      final x = (w * KvBurialGauge.positionFor(marks[i])).clamp(0.5, w - 0.5);
-      final len = marks[i] == KvBurial.safe ? safeTick : shortTick;
-      canvas.drawLine(Offset(x, band), Offset(x, band + len), tick);
-    }
-
-    // **The thousand mark, an open bracket that seats** (§5). Finality is not
-    // a fourth hue — it is this mark closing. Open, it is a hook: the upright
-    // and one arm. Seated, the second arm arrives and the bracket is shut, so
-    // the state is carried by the SHAPE and survives hue being removed
-    // (BG-25). The words say `final` at the same instant, which is BG-7's
-    // redundancy rather than BG-19's duplication: one is the mark, one is the
-    // reading.
-    final x = w - 0.5;
-    canvas.drawLine(Offset(x, band), Offset(x, band + finalTick), tick);
-    canvas.drawLine(
-      Offset(x - bracketArm, band + 0.5),
-      Offset(x, band + 0.5),
-      tick,
-    );
-    if (seated > 0) {
-      canvas.drawLine(
-        Offset(x - bracketArm, band + finalTick - 0.5),
-        Offset(x, band + finalTick - 0.5),
-        Paint()
-          ..color = (n == null ? KvColor.etch : KvColor.inkMetaLow).withValues(
-            alpha: seated.clamp(0, 1),
-          )
-          ..strokeWidth = 1
-          ..isAntiAlias = false,
-      );
-    }
   }
 
   @override
   bool shouldRepaint(KvBurialGaugePainter old) =>
-      old.depth != depth || old.fill != fill || old.seated != seated;
+      old.depth != depth || old.fill != fill || old.ceiling != ceiling;
 }
