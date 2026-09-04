@@ -103,12 +103,16 @@ class KvMoneyPlate extends StatelessWidget {
               // 14 over the clock, `hairline` the whole inner width (S1,
               // measured at 264 dp on the 393 frame).
               const SizedBox(height: KvSpace.m),
-              // `controlEdge` (12% white), not `hairline` (7%): at 7% the
-              // line did not read on the V60 at all — the founder asked for
-              // the line the render draws, which measures 19 units over the
-              // plate, and 12% lands there (D-262).
+              // **`width: double.infinity` is the whole fix.** The column is
+              // start-aligned, so a `SizedBox(height: 1)` with no width laid
+              // out at ZERO width and painted nothing — through `hairline`,
+              // then `controlEdge`, then two builds the founder looked at
+              // (D-263). Never a contrast problem; a geometry one. The tone
+              // is `controlEdge` (12% white): the render's own line measures
+              // `hairline`'s 7%, and the founder asked for one he can see.
               const SizedBox(
                 height: 1,
+                width: double.infinity,
                 child: ColoredBox(color: KvColor.controlEdge),
               ),
               const SizedBox(height: KvSpace.s14),

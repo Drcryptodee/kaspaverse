@@ -472,7 +472,10 @@ class KvAmount extends StatelessWidget {
                     fontWeight: FontWeight.w500,
                     fontVariations: KvWeight.w500,
                     letterSpacing: 0.6,
-                    color: KvColor.inkMeta,
+                    // Teal — the founder's ruling on glass (D-262), and it
+                    // shipped grey once because the revert was grepped and
+                    // not made (D-263). The test pins it now.
+                    color: KvColor.primaryMuted,
                   ),
                 ),
               ),

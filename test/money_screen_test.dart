@@ -312,9 +312,9 @@ void main() {
       expect(find.text('1,284'), findsOneWidget);
       expect(find.text('.5027'), findsOneWidget);
       expect(find.text('KAS'), findsWidgets);
-      // `inkMeta`, not teal: the render sets the unit in the meta grey
-      // (S1, D-261).
-      expect(styleOf(tester, 'KAS').color, KvColor.inkMeta);
+      // Teal, by the founder's ruling on glass (D-262) over the render's
+      // grey (S1).
+      expect(styleOf(tester, 'KAS').color, KvColor.primaryMuted);
 
       // **The chain clock reads under the balance** (A4, founder ruling
       // D-256). It came off at UX-R1 on a reading of BG-8 and went back on

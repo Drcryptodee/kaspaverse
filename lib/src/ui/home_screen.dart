@@ -1538,12 +1538,35 @@ class _Ledger extends StatefulWidget {
 class _LedgerState extends State<_Ledger> {
   int _tab = 0;
 
+  /// The two views side by side, so a sideways swipe on the card moves
+  /// between Activity and Tokens and the underline follows (founder, on
+  /// glass 2026-09-04, D-263). The card's own horizontal drag wins the arena
+  /// over the page's drawer swipe — innermost first — so the drawer is
+  /// summoned from the plate, the header or the bar, never from the rows.
+  late final PageController _pages = PageController();
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    super.dispose();
+  }
+
+  void _select(int i) {
+    setState(() => _tab = i);
+    if (_pages.hasClients) {
+      _pages.animateToPage(i, duration: KvMotion.calm, curve: KvMotion.curve);
+    }
+  }
+
   /// The first upward scroll opens the card (D-262): a user reaching for
   /// more rows gets them, without finding `All` first. Only ever from
   /// closed to open — the way back is `Less`, so a scroll can never snap the
   /// card shut under a thumb.
   bool _onScroll(ScrollNotification n) {
     if (widget.expanded || widget.onExpand == null) return false;
+    // The page swipe is a scroll too, and sideways; only the rows' own
+    // vertical motion opens the card.
+    if (n.metrics.axis != Axis.vertical) return false;
     final dragging = switch (n) {
       ScrollUpdateNotification(:final dragDetails, :final scrollDelta) =>
         dragDetails != null && (scrollDelta ?? 0) > 0,
@@ -1570,7 +1593,7 @@ class _LedgerState extends State<_Ledger> {
             child: KvTabs(
               tabs: const [KvTab('Activity'), KvTab('Tokens')],
               index: _tab,
-              onSelect: (i) => setState(() => _tab = i),
+              onSelect: _select,
             ),
           ),
           if (widget.onExpand != null)
@@ -1581,9 +1604,11 @@ class _LedgerState extends State<_Ledger> {
         ],
       ),
     );
-    Widget body;
-    if (_tab == 1) {
-      body = Padding(
+    // Page 1 — the tokens seat (§5's composition is a B1 carry; the seat
+    // shows the shape of what is missing).
+    final Widget tokens = SingleChildScrollView(
+      physics: const ClampingScrollPhysics(),
+      child: Padding(
         padding: EdgeInsets.fromLTRB(
           KvRowContainer.padding.left,
           0,
@@ -1595,38 +1620,43 @@ class _LedgerState extends State<_Ledger> {
           name: 'Assets',
           sentence: 'Not built yet. Your tokens will live here.',
         ),
-      );
-    } else if (widget.records.isEmpty) {
-      body = Padding(
-        padding: EdgeInsets.fromLTRB(
-          KvRowContainer.padding.left,
-          0,
-          KvRowContainer.padding.right,
-          KvSpace.sm,
-        ),
-        child: const KvEmptyState(
-          mark: KvGlyph.diamond,
-          // Shipped copy, verbatim (D-196): the redesign is a change of form,
-          // not of voice.
-          truth: 'No recent activity',
-          nudge: 'Payments you send and receive appear here.',
-        ),
-      );
-    } else {
-      body = NotificationListener<ScrollNotification>(
-        onNotification: _onScroll,
-        child: _HomeScreenState._refreshable(widget.onRefresh, _rows()),
-      );
-    }
-    if (_tab == 1 || widget.records.isEmpty) {
-      // A plate that does not fit the card's floor height scrolls inside it
-      // rather than overflowing — measured at 320 × 568 / 1.3× the empty
-      // state was 26 dp over the room the card had left.
-      body = SingleChildScrollView(
-        physics: const ClampingScrollPhysics(),
-        child: body,
-      );
-    }
+      ),
+    );
+    // Page 0 — the rows, or the one empty state.
+    final Widget activity = widget.records.isEmpty
+        // A plate that does not fit the card's floor height scrolls inside
+        // it rather than overflowing — measured at 320 × 568 / 1.3× the
+        // empty state was 26 dp over the room the card had left.
+        ? SingleChildScrollView(
+            physics: const ClampingScrollPhysics(),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                KvRowContainer.padding.left,
+                0,
+                KvRowContainer.padding.right,
+                KvSpace.sm,
+              ),
+              child: const KvEmptyState(
+                mark: KvGlyph.diamond,
+                // Shipped copy, verbatim (D-196): the redesign is a change of
+                // form, not of voice.
+                truth: 'No recent activity',
+                nudge: 'Payments you send and receive appear here.',
+              ),
+            ),
+          )
+        : NotificationListener<ScrollNotification>(
+            onNotification: _onScroll,
+            child: _HomeScreenState._refreshable(widget.onRefresh, _rows()),
+          );
+    final body = PageView(
+      controller: _pages,
+      physics: const ClampingScrollPhysics(),
+      onPageChanged: (i) {
+        if (i != _tab) setState(() => _tab = i);
+      },
+      children: [activity, tokens],
+    );
     return Padding(
       padding: EdgeInsets.fromLTRB(widget.gutter, 0, widget.gutter, 0),
       // The foot moves on `calm`: closed, a 12 dp gap above the bar and a
@@ -1648,9 +1678,7 @@ class _LedgerState extends State<_Ledger> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             header,
-            Expanded(
-              child: Align(alignment: Alignment.topCenter, child: body),
-            ),
+            Expanded(child: body),
           ],
         ),
       ),
