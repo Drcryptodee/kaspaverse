@@ -13,7 +13,6 @@ import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
-import 'support/finders.dart';
 
 ConversationDto conversation(
   String id, {
@@ -1848,7 +1847,10 @@ void main() {
       // value is shown as returning to you — not a cost.
       expect(find.text('Hold to send message'), findsOneWidget);
       expect(find.textContaining('Hold to send 0.12000000'), findsNothing);
-      expect(findRuledLabel('Costs you'), findsOneWidget);
+      // The `— COSTS YOU` rule label left the ceremony at UX-R2C — the figure
+      // is the subject of the sheet — so the fact this test is about is the
+      // ROW, which still names the returning value as returning rather than
+      // as spent.
       expect(find.text('Returns to you'), findsOneWidget);
     });
 

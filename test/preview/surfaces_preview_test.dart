@@ -91,8 +91,8 @@ ContactsScope _contacts() {
   );
 }
 
-Widget _sendScreen({bool book = true}) => SendScreen(
-  mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
+Widget _sendScreen({bool book = true, BigInt? mature}) => SendScreen(
+  mature: ValueNotifier<BigInt?>(mature ?? BigInt.from(2597792200)),
   prepare: (_, _) async => _summary(),
   commit: (_) async => _sent(),
   abandon: () async {},
@@ -543,6 +543,14 @@ void main() {
     framedSurface('send__recipient', _sendScreen);
     framedSurface('send__checked', _sendScreen, act: _checkedDestination);
     framedSurface('send__amount', _sendScreen, act: _typeASend);
+    // **The amber state, which is the one the founder asked to be able to
+    // read** (2026-09-04): a shortfall notice under the fee row, and it has to
+    // clear the pad rather than sitting half under it.
+    framedSurface(
+      'send__short',
+      () => _sendScreen(mature: BigInt.from(1000000000)),
+      act: _typeASend,
+    );
     // **The stranger's half of both steps** (UX-R2B): no card to pick from,
     // *Save as contact* on the checked line, and the recipient row wearing
     // §4's stranger disc instead of a monogram.

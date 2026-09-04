@@ -849,13 +849,21 @@ class _SendScreenState extends State<SendScreen> {
                 contacts: widget.contacts,
                 onEdit: _back,
               ),
-              const SizedBox(height: KvSpace.xl),
+              // **The block sits higher, so the amber notice has room above
+              // the pad** (founder, on glass 2026-09-04: *"shift the input
+              // amount up a tiny little bit alongside things below it… so
+              // that when the amber notice pops up, some parts of it below
+              // doesnt go below the keypad"*). 32 → 20 here, and the gaps
+              // under the figure tighten with it: the section is the same
+              // content in less height, which is the only way the notice
+              // gains room without the pad moving.
+              const SizedBox(height: KvSpace.s20),
               // **The figure is the subject of this screen**, and it is being
               // typed: mono 56 (`S6`, measured — cap 41.0 dp against the
               // keypad's 22 dp calibration), which is a step above the balance
               // hero because a balance is read and this is written.
               _TypedAmount(controller: _amountField, focusNode: _amountFocus),
-              const SizedBox(height: KvSpace.s10),
+              const SizedBox(height: KvSpace.s),
               // The `≈` price, under the figure it restates (`S6`, founder
               // 2026-09-04). It reads the typed amount, so the two can never
               // disagree, and it renders nothing at all when no rate is wired
@@ -865,7 +873,7 @@ class _SendScreenState extends State<SendScreen> {
                 sompi: _amountSompi,
                 alignment: MainAxisAlignment.center,
               ),
-              const SizedBox(height: KvSpace.m),
+              const SizedBox(height: KvSpace.s14),
               _Shares(
                 mature: widget.mature,
                 stale: _stale,
@@ -886,10 +894,10 @@ class _SendScreenState extends State<SendScreen> {
               // back. The keys moved under the thumb. Two changes fix it and
               // both are structural: the row is always here, and the pad now
               // lives outside the scroll entirely.
-              const SizedBox(height: KvSpace.m),
+              const SizedBox(height: KvSpace.s14),
               _FeeRow(sompi: _fee),
               if (block?.notice != null) ...[
-                const SizedBox(height: KvSpace.sm),
+                const SizedBox(height: KvSpace.s),
                 KvStatusChip(
                   tone: KvLampTone.warn,
                   words: block!.notice!,
@@ -898,7 +906,7 @@ class _SendScreenState extends State<SendScreen> {
                 ),
               ],
               if (_error != null) ...[
-                const SizedBox(height: KvSpace.sm),
+                const SizedBox(height: KvSpace.s),
                 KvStatusChip(
                   tone: KvLampTone.warn,
                   words: _error!,
@@ -906,7 +914,7 @@ class _SendScreenState extends State<SendScreen> {
                   maxLines: null,
                 ),
               ],
-              const SizedBox(height: KvSpace.m),
+              const SizedBox(height: KvSpace.sm),
             ],
           ),
         ),
@@ -1538,55 +1546,37 @@ class _FeeRow extends StatelessWidget {
           // paint past the gutter (L131).
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 200),
-            child: AnimatedSwitcher(
-              duration: KvMotion.calm,
-              switchInCurve: KvMotion.curve,
-              switchOutCurve: KvMotion.curve,
-              // Rise-and-fade, so the figure reads as *arriving* rather than
-              // blinking (BG-24). The outgoing child sizes nothing, so a
-              // change of width happens once, with the fade that explains it.
-              layoutBuilder: (current, previous) => Stack(
-                alignment: Alignment.centerRight,
-                clipBehavior: Clip.none,
-                children: [
-                  for (final old in previous)
-                    Positioned(right: 0, top: 0, bottom: 0, child: old),
-                  ?current,
-                ],
-              ),
-              transitionBuilder: (child, animation) => FadeTransition(
-                opacity: animation,
-                child: SlideTransition(
-                  position: Tween<Offset>(
-                    begin: const Offset(0, 0.4),
-                    end: Offset.zero,
-                  ).animate(animation),
-                  child: child,
-                ),
-              ),
-              child: fee == null
-                  ? const Text(
-                      // BG-8's dash for a datum nobody has yet.
-                      '\u2014',
-                      key: ValueKey<String>('fee-unknown'),
-                      style: TextStyle(
-                        fontFamily: KvFont.mono,
-                        fontSize: 13,
-                        height: 20 / 13,
-                        fontWeight: FontWeight.w500,
-                        fontVariations: KvWeight.w500,
-                        color: KvColor.inkMeta,
-                      ),
-                    )
-                  : KvAmount(
-                      fee,
-                      key: ValueKey<BigInt>(fee),
-                      role: KvAmountRole.row,
-                      size: 13,
-                      showUnit: true,
-                      emphasis: KvAmountEmphasis.significant,
+            child: fee == null
+                ? const Text(
+                    // BG-8's dash for a datum nobody has yet.
+                    '\u2014',
+                    key: ValueKey<String>('fee-unknown'),
+                    style: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 13,
+                      height: 20 / 13,
+                      fontWeight: FontWeight.w500,
+                      fontVariations: KvWeight.w500,
+                      color: KvColor.inkMeta,
                     ),
-            ),
+                  )
+                // **The digits change in place** (founder, on glass
+                // 2026-09-04): *"its the increment or decrement that user sees
+                // changing… not like the number and KAS is going out and
+                // coming in."* The first cut crossfaded the whole figure,
+                // which reads as a swap. Only the character slots that
+                // actually changed move now, and exactly two glyphs — the old
+                // one and the new one, both quoted by the Generator — exist
+                // in a slot while it does. Nothing is interpolated, so
+                // `KvStreamingCount`'s "money never streams" is untouched.
+                : KvAmount(
+                    fee,
+                    role: KvAmountRole.row,
+                    size: 13,
+                    showUnit: true,
+                    emphasis: KvAmountEmphasis.significant,
+                    rolling: true,
+                  ),
           ),
         ],
       ),

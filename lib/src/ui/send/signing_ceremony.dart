@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -378,8 +379,50 @@ class _SigningCeremonyState extends State<SigningCeremony>
   )..addStatusListener(_onHoldStatus);
   bool _fired = false;
 
+  /// **A tap when the sheet has fully arrived** (founder, on glass
+  /// 2026-09-04: *"add haptics when the signing sheet comes up… when the
+  /// signing sheet is fully transitioned in, at that moment is when the
+  /// haptics should land"*).
+  ///
+  /// Fired off the ROUTE's own animation rather than a timer, so it lands with
+  /// the last frame of the transition however long the transition takes —
+  /// including when the platform has animations scaled down, where a timed
+  /// haptic would fire into a sheet that arrived long ago.
+  ///
+  /// `selection`, not an impact: the sheet asking a question is not the money
+  /// moment. §6 keeps `mediumImpact` for the hold's threshold and
+  /// `heavyImpact` for a broadcast that landed, and a heavier tap here would
+  /// spend both before anything had happened.
+  void _tapOnArrival(AnimationStatus status) {
+    if (status != AnimationStatus.completed || _greeted) return;
+    _greeted = true;
+    KvHaptic.selection();
+  }
+
+  bool _greeted = false;
+  Animation<double>? _route;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final animation = ModalRoute.of(context)?.animation;
+    if (identical(animation, _route)) return;
+    _route?.removeStatusListener(_tapOnArrival);
+    _route = animation;
+    // **Attached unconditionally, and `_greeted` is what makes it once.**
+    //
+    // The obvious guard — skip if the animation already reads `completed` —
+    // is wrong here and silently disabled the whole thing: before a route's
+    // controller is attached, `ModalRoute.animation` is a `ProxyAnimation`
+    // over `kAlwaysCompleteAnimation`, so at `didChangeDependencies` it
+    // reports **completed**, and only then does it go `forward` → `completed`
+    // for real (proved by driving a `KvSheetRoute`, not assumed).
+    animation?.addStatusListener(_tapOnArrival);
+  }
+
   @override
   void dispose() {
+    _route?.removeStatusListener(_tapOnArrival);
     // Left without signing → release the stashed (unsigned) plan in Rust.
     if (!_committed) widget.abandon();
     _stageOne?.cancel();
@@ -807,19 +850,30 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // The review is never the settled surface any more — `S8`'s receipt is
       // — so the label states the intent in the present tense and the past
       // tense lives on the receipt card.
-      KvRuledLabel(returnsToSelf ? 'Costs you' : 'Sending'),
-      const SizedBox(height: KvSpace.xs),
-      KvAmount(
-        returnsToSelf ? s.feeSompi : s.amountSompi,
-        role: KvAmountRole.screen,
+      // **The headline is what LEAVES THE WALLET — amount plus fee — and it
+      // is centred under the title** (founder, on glass 2026-09-04: *"i want
+      // it that its the full amount that leaves the wallet… and not the input
+      // amount"*, *"let it be centered under 'confirm send' & 'Cancel'"*).
+      //
+      // The `— SENDING` rule label is gone with it: the figure is the subject
+      // of the sheet and needs nothing above it saying so, and the word it
+      // carried now labels the row that states the amount.
+      //
+      // A self-send's value returns as change, so its honest cost is still the
+      // fee alone (D-069) — the total would count money that never left.
+      Center(
+        child: KvAmount(
+          returnsToSelf ? s.feeSompi : s.totalSompi,
+          role: KvAmountRole.screen,
+        ),
       ),
-      // The `≈` price, under the figure it restates (`S7`, founder
-      // 2026-09-04). Subordinate in scale and tone, and it restates the same
-      // sompi the row above renders — never a second arithmetic.
+      // The `≈` price, centred under the figure it restates (`S7`, founder
+      // 2026-09-04) — the same sompi, never a second arithmetic.
       const SizedBox(height: KvSpace.xs),
       KvFiatLine(
         fiat: widget.fiat,
-        sompi: returnsToSelf ? s.feeSompi : s.amountSompi,
+        sompi: returnsToSelf ? s.feeSompi : s.totalSompi,
+        alignment: MainAxisAlignment.center,
       ),
 
       // Kind-derived plain-English lines, each citing only the DTO's own
@@ -945,12 +999,23 @@ class _SigningCeremonyState extends State<SigningCeremony>
           // consequence: the number a user must check before signing is what
           // will be gone from the wallet, and the hue, the word and the sign
           // all say the same thing so the meaning survives greyscale.
+          // **`Sending` — what the RECIPIENT gets** (founder, on glass
+          // 2026-09-04: *"where 'Leaves your wallet' was before, change it to
+          // 'Sending'"*).
+          //
+          // It states the amount rather than the total, and that is a reading
+          // rather than a transcription: the total moved up to the headline in
+          // the same breath, so leaving this row on the total would print one
+          // number twice and never print the other. With the amount here the
+          // card is complete and its arithmetic closes — `Sending` plus
+          // `Network fee` is the figure at the top — which is what BG-6 asks a
+          // restatement to show. Say the word and it becomes the total.
           if (returnsToSelf)
             _FactRow(label: 'Returns to you', sompi: s.amountSompi)
           else
             _FactRow(
-              label: 'Leaves your wallet',
-              sompi: s.totalSompi,
+              label: 'Sending',
+              sompi: s.amountSompi,
               direction: KvMoneyDirection.outgoing,
             ),
         ],
@@ -1020,6 +1085,7 @@ class _FactLine extends StatelessWidget {
   const _FactLine({
     required this.label,
     required this.value,
+    this.valueText,
     // `S7` draws `Network fee` and `Leaves your wallet` both inline at the
     // reference width; 0.62 stacked the second of them there (`ux-auditor`,
     // measured off the 393 frame). 0.45 restores the render's grid and still
@@ -1030,6 +1096,16 @@ class _FactLine extends StatelessWidget {
 
   final String label;
   final Widget value;
+
+  /// **What [value] will print, for MEASUREMENT only.**
+  ///
+  /// A widget's intrinsic width cannot be asked for before layout, and the row
+  /// has to decide its arrangement before it lays anything out — so the caller
+  /// that knows the string hands it over. It is never rendered from here, so a
+  /// small inaccuracy costs a stack-or-not decision and never a wrong figure.
+  ///
+  /// Null means "assume it fits": the row then only protects the label.
+  final String? valueText;
 
   /// The most of the row the value may take before it starts fitting itself
   /// down. The label wraps into the rest.
@@ -1073,10 +1149,45 @@ class _FactLine extends StatelessWidget {
           final room = width * (1 - valueShare) - KvSpace.m;
 
           final text = Text(label, style: _labelStyle);
+          // **The value gets everything the label does not need**, floored at
+          // its share so a long label cannot starve it either way.
+          //
+          // A flat `width * valueShare` was wrong in both directions and the
+          // suite caught the second: at 0.62 it stacked `Leaves your wallet`
+          // at the 393 reference where `S7` draws it inline; tightened to 0.45
+          // it scaled a whole-supply figure to **6.71 dp** at 320 dp / 1.3×,
+          // under BG-14's floor, because the share was capping a value the
+          // short label beside it was not using.
+          final valueRoom = math.max(
+            width * valueShare,
+            width - needed - KvSpace.m,
+          );
           final bounded = ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: width * valueShare),
+            constraints: BoxConstraints(maxWidth: valueRoom),
             child: value,
           );
+
+          // **And the VALUE gets the same protection as the label.** A figure
+          // that cannot fit beside its label scales itself down, and nothing
+          // bounded that shrink: at 320 dp / 1.3× a whole-supply amount beside
+          // `Returns to you` rendered at **7.34 dp**, under BG-14's floor. So
+          // the row asks whether the figure fits in the room it would get, and
+          // stacks when it does not — where it gets the whole width and needs
+          // no scaling at all.
+          var valueFits = true;
+          final printed = valueText;
+          if (printed != null) {
+            final vp = TextPainter(
+              text: TextSpan(
+                text: printed,
+                style: const TextStyle(fontFamily: KvFont.mono, fontSize: 13),
+              ),
+              textDirection: TextDirection.ltr,
+              textScaler: scaler,
+            )..layout();
+            valueFits = vp.width <= valueRoom;
+            vp.dispose();
+          }
 
           // **Tight: stack, and keep the right edge.** Wrapping the label into
           // a column beneath is what the space allows; what must NOT change is
@@ -1084,7 +1195,7 @@ class _FactLine extends StatelessWidget {
           // whole point of this widget (`S7`/`S8` measured, founder's own
           // note). So the fallback is a column whose value is still hard
           // right, never a run that drifts back to the left.
-          if (needed > room) {
+          if (needed > room || !valueFits) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -1131,9 +1242,19 @@ class _FactRow extends StatelessWidget {
   /// leaves* has all three.
   final KvMoneyDirection direction;
 
+  /// What [KvAmount] will print, rebuilt here for [_FactLine.valueText].
+  /// Measurement only — see that field.
+  String get _printed {
+    final parts = kasParts(sompi);
+    final sign = direction == KvMoneyDirection.outgoing ? '-' : '';
+    return '$sign${parts.integer}.${trimFraction(parts.fraction)} KAS';
+  }
+
+  @override
   @override
   Widget build(BuildContext context) => _FactLine(
     label: label,
+    valueText: _printed,
     strongLabel: direction == KvMoneyDirection.outgoing,
     // No `FittedBox`. `KvAmount` fits its own figure given a bounded width
     // and keeps the unit OUT of that fit so its 11dp floor survives — an
@@ -1169,6 +1290,7 @@ class _StampRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => _FactLine(
     label: label,
+    valueText: formatStamp(at),
     value: Text(
       formatStamp(at),
       textAlign: TextAlign.right,
@@ -1448,9 +1570,14 @@ class _TruthCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
     width: double.infinity,
+    // **Tighter, all round** (founder, on glass 2026-09-04: *"reduce the gap
+    // so the card is more rectangular in height to the currently three stuffs
+    // in it"*). The rows carry their own 12 dp of vertical air, so the card's
+    // own 14 was stacking a second gap on top of the first at the top and
+    // bottom edges — the loose base he pointed at under `Leaves your wallet`.
     padding: const EdgeInsets.symmetric(
-      horizontal: KvSpace.s20,
-      vertical: KvSpace.s14,
+      horizontal: KvSpace.m,
+      vertical: KvSpace.s,
     ),
     decoration: BoxDecoration(
       color: KvColor.chip,
@@ -1629,6 +1756,7 @@ class _ReceiptCard extends StatelessWidget {
             _FactLine(
               label: 'Transaction ID',
               valueShare: 0.66,
+              valueText: _shortId(txid!),
               value: Text(
                 _shortId(txid!),
                 textAlign: TextAlign.right,

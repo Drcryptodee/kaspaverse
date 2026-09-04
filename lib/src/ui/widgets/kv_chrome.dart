@@ -58,14 +58,27 @@ class KvTopBar extends StatelessWidget {
                 width: KvSpace.touchTarget,
                 height: KvSpace.touchTarget,
                 child: Center(
-                  child: RotatedBox(
-                    quarterTurns: 2,
-                    child: KvGlyphIcon(
-                      KvGlyph.chevron,
-                      // `etch` is the disabled tone: decorative by design, and
-                      // it never carries information alone — what the exit is
-                      // waiting for is on the screen in words beneath it.
-                      tone: onBack == null ? KvColor.etch : KvColor.inkNav,
+                  // **The chevron sits in a disc** (founder, on glass
+                  // 2026-09-04; `S6a`·`S6`·`S8` all draw one). §4's icon
+                  // button, at its own 44: the target stays 52 around it, so
+                  // the disc is what is seen and the box is what is hit.
+                  child: Container(
+                    width: KvSpace.iconButton,
+                    height: KvSpace.iconButton,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: KvColor.plate,
+                    ),
+                    alignment: Alignment.center,
+                    child: RotatedBox(
+                      quarterTurns: 2,
+                      child: KvGlyphIcon(
+                        KvGlyph.chevron,
+                        // `etch` is the disabled tone: decorative by design, and
+                        // it never carries information alone — what the exit is
+                        // waiting for is on the screen in words beneath it.
+                        tone: onBack == null ? KvColor.etch : KvColor.inkNav,
+                      ),
                     ),
                   ),
                 ),

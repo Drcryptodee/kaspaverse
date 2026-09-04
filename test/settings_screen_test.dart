@@ -639,7 +639,11 @@ void main() {
       // The same anti-blind-signing sheet every send uses (B7): kind-derived
       // title, fee-led headline, the absorbed count from the DTO.
       expect(find.text('Confirm merge'), findsOneWidget);
-      expect(findRuledLabel('Costs you'), findsOneWidget);
+      // The `— COSTS YOU` rule label left the ceremony at UX-R2C (founder,
+      // on glass): the figure is the subject of the sheet. A merge's headline
+      // is still the fee, and the row that names the returning value is what
+      // the reachability of this flow is actually about.
+      expect(find.text('Returns to you'), findsOneWidget);
       expect(find.textContaining('Merges 22 coins into one'), findsOneWidget);
     });
 

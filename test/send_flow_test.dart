@@ -23,15 +23,15 @@ import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_fiat.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_hold.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_rolling_text.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
 import 'support/preview_harness.dart';
-import 'support/finders.dart';
 
 const _addr =
     'kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692';
@@ -260,6 +260,19 @@ Widget _sendScreen({
     saved: saved,
   );
 }
+
+/// The sompi the ceremony's headline states.
+///
+/// **The `— SENDING` / `— COSTS YOU` rule label is gone** (founder, on glass
+/// 2026-09-04) — the figure is the subject of the sheet and needs nothing
+/// above it saying so — so the assertions that used to read the label read the
+/// figure instead, which is the fact those tests were really about: a payment
+/// heads with what LEAVES the wallet, and a flow whose value returns heads
+/// with the fee (D-069).
+BigInt _headline(WidgetTester tester) => tester
+    .widgetList<KvAmount>(find.byType(KvAmount))
+    .firstWhere((a) => a.role == KvAmountRole.screen)
+    .sompi!;
 
 /// Hold the pill until it fires, then settle to whatever the ceremony becomes.
 ///
@@ -1341,7 +1354,7 @@ void main() {
       );
 
       // Leads with the honest cost (the fee), never the returning value.
-      expect(findRuledLabel('Costs you'), findsOneWidget);
+      expect(_headline(tester), BigInt.from(2036));
       expect(find.text('Returns to you'), findsOneWidget);
       // The raw self "To" address is dropped (D-069).
       expect(find.textContaining('kaspa:'), findsNothing);
@@ -1407,10 +1420,11 @@ void main() {
         ),
         findsOneWidget,
       );
-      // A bond pays the counterparty: To shown, amount headline, Total row.
+      // A bond pays the counterparty: To shown, the TOTAL as the headline,
+      // and the amount on the `Sending` row.
       expect(find.textContaining('kaspa:'), findsOneWidget);
-      expect(findRuledLabel('Sending'), findsOneWidget);
-      expect(find.text('Leaves your wallet'), findsOneWidget);
+      expect(_headline(tester), BigInt.from(1240002036));
+      expect(find.text('Sending'), findsOneWidget);
       expect(find.text('Confirm contact request'), findsOneWidget);
     });
 
@@ -1429,11 +1443,10 @@ void main() {
       );
       // D-069 keeps bonds as REAL value to the counterparty: never the
       // self-send rendering.
-      expect(findRuledLabel('Costs you'), findsNothing);
       expect(find.text('Returns to you'), findsNothing);
-      expect(findRuledLabel('Sending'), findsOneWidget);
+      expect(_headline(tester), BigInt.from(1240002036));
       expect(find.textContaining('kaspa:'), findsOneWidget);
-      expect(find.text('Leaves your wallet'), findsOneWidget);
+      expect(find.text('Sending'), findsOneWidget);
       expect(find.text('Confirm accept'), findsOneWidget);
       expect(find.text('Hold to send 12.40 KAS'), findsOneWidget);
     });
@@ -1445,10 +1458,10 @@ void main() {
         _ceremony(_summary(kind: SignableKind.sweep, utxoCount: 7)),
       );
       expect(find.text('Confirm send all'), findsOneWidget);
-      expect(findRuledLabel('Sending'), findsOneWidget);
+      expect(_headline(tester), BigInt.from(1240002036));
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(find.textContaining('all 7 spendable coins move'), findsOneWidget);
-      expect(find.text('Leaves your wallet'), findsOneWidget);
+      expect(find.text('Sending'), findsOneWidget);
       expect(find.text('Hold to send 12.40 KAS'), findsOneWidget);
     });
 
@@ -1467,7 +1480,7 @@ void main() {
       );
       expect(find.text('Confirm merge'), findsOneWidget);
       // The honest headline is the fee; the value returns to us.
-      expect(findRuledLabel('Costs you'), findsOneWidget);
+      expect(_headline(tester), BigInt.from(2036));
       expect(find.text('Returns to you'), findsOneWidget);
       // Our own address is not rendered as a destination (D-069's rule).
       expect(find.textContaining('kaspa:'), findsNothing);
@@ -1583,7 +1596,7 @@ void main() {
         ),
       );
       expect(find.text('Confirm stake'), findsOneWidget);
-      expect(findRuledLabel('Sending'), findsOneWidget);
+      expect(_headline(tester), BigInt.from(1240002036));
       expect(find.textContaining('kaspa:'), findsOneWidget);
       expect(
         find.text(
@@ -2636,17 +2649,27 @@ void main() {
 
       testWidgets('and it shows the digits that ARE the fee', (tester) async {
         await _pumpTypedSend(tester);
-        final runs = tester
-            .widgetList<Text>(find.byType(Text))
-            .map((t) => t.data ?? '')
-            .toList();
+        // **Joined per run, because the fee's digits roll in place now**
+        // (founder, on glass 2026-09-04): each character is its own slot, so
+        // the emphasis boundary is read off the STYLE rather than off a
+        // single `Text.data`. Asserting the joined runs is what the law says;
+        // asserting one string per run was asserting how it happened to be
+        // drawn (L143).
+        final byWeight = <bool, String>{};
+        for (final t in tester.widgetList<Text>(find.byType(Text))) {
+          final style = t.style;
+          if (style?.fontFamily != KvFont.mono || (t.data ?? '').isEmpty) {
+            continue;
+          }
+          final strong = (style!.fontSize ?? 0) >= 13;
+          byWeight[strong] = (byWeight[strong] ?? '') + t.data!;
+        }
         expect(
-          runs,
-          containsAll(['0.00', '3154']),
+          byWeight.values.join(),
+          contains('0.003154'),
           reason:
-              'the fee renders as one run, so the weight is on a leading zero '
-              'here while the ceremony puts it on the digits: one figure, two '
-              'faces (BG-21)',
+              'every digit of the fee is on screen, in the two faces BG-23 '
+              'splits it into: $byWeight',
         );
       });
     },
@@ -3335,6 +3358,146 @@ void main() {
         1,
         reason: 'the rows share one grid: $edges',
       );
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // The founder's second glass pass (2026-09-04)
+  // ───────────────────────────────────────────────────────────────────────
+
+  group('the second glass pass', () {
+    testWidgets('the sheet heads with what LEAVES the wallet, and the card '
+        'states what the recipient gets', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(_ceremony(_summary()));
+
+      // *"i want it that its the full amount that leaves the wallet. the
+      // complete total amount with the fee summed up is what should show"* —
+      // so the headline is the total, and the amount lives on the row that
+      // used to say `Leaves your wallet`. The two together close the
+      // arithmetic: Sending + Network fee = the figure at the top.
+      expect(_headline(tester), BigInt.from(1240002036));
+      expect(find.text('Sending'), findsOneWidget);
+      expect(find.text('Network fee'), findsOneWidget);
+
+      // And the caps rule label is gone with it.
+      expect(find.text('SENDING'), findsNothing);
+      expect(find.text('COSTS YOU'), findsNothing);
+    });
+
+    testWidgets('the headline and its price are CENTRED under the title', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _host(
+          SigningCeremony(
+            summary: _summary(),
+            commit: (_) async => _ok(),
+            abandon: () async {},
+            fiat: _rate(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final sheet = tester.getRect(find.byType(KvSheet));
+      final figure = tester.getRect(
+        find.byWidgetPredicate(
+          (w) => w is KvAmount && w.role == KvAmountRole.screen,
+        ),
+      );
+      expect(
+        figure.center.dx,
+        closeTo(sheet.center.dx, 1.0),
+        reason: 'centred in the region the title and Cancel head',
+      );
+      final price = tester.getRect(find.textContaining('≈ '));
+      expect(
+        price.center.dx,
+        closeTo(figure.center.dx, 1.0),
+        reason: 'the price is centred to the figure it restates',
+      );
+    });
+
+    testWidgets('the fee\'s digits change IN PLACE — the figure is not '
+        'replaced', (tester) async {
+      // *"its the increment or decrement that user sees changing… not like the
+      // number and KAS is going out and coming in."* Each character is its own
+      // slot, so a digit that did not change is not rebuilt.
+      _phone(tester);
+      var fee = BigInt.from(315400);
+      await tester.pumpWidget(_sendScreen(feePreview: (_, _) async => fee));
+      await _address(tester, _addr);
+      await _type(tester, '1');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+
+      final rolling = find.descendant(
+        of: find.byType(KvAmount),
+        matching: find.byType(KvRollingText),
+      );
+      expect(rolling, findsWidgets, reason: 'the fee rolls');
+
+      // The slot for a digit that does not change keeps its element, so it
+      // never animates: that identity is the whole effect.
+      final before = tester.element(find.text('0').first);
+      fee = BigInt.from(354600);
+      await _type(tester, '2');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(
+        tester.element(find.text('0').first),
+        same(before),
+        reason: 'an unchanged slot is not rebuilt',
+      );
+    });
+
+    testWidgets('the sheet taps once when it has fully arrived', (
+      tester,
+    ) async {
+      // *"when the signing sheet is fully transitioned in, at that moment is
+      // when the haptics should land."* Off the route's own animation, so it
+      // lands with the last frame however long the transition takes.
+      final taps = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            taps.add('${call.arguments}');
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      _phone(tester);
+      await tester.pumpWidget(
+        _host(
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showSigningCeremony(
+                context,
+                summary: _summary(),
+                commit: (_) async => _ok(),
+                abandon: () async {},
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pump();
+      // Mid-transition: nothing yet.
+      await tester.pump(const Duration(milliseconds: 80));
+      expect(taps, isEmpty, reason: 'not while it is still arriving');
+      await tester.pumpAndSettle();
+      expect(taps.length, 1, reason: 'once, on arrival');
     });
   });
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../format.dart';
 import '../theme/tokens.dart';
+import 'kv_rolling_text.dart';
 
 /// Where an amount sits on the §2 ramp.
 enum KvAmountRole {
@@ -135,6 +136,7 @@ class KvAmount extends StatelessWidget {
     this.stale = false,
     this.size,
     this.fractionDigits,
+    this.rolling = false,
     this.showUnit,
   });
 
@@ -178,6 +180,17 @@ class KvAmount extends StatelessWidget {
   /// The screen role kept a fixed eight until D-267 retired that too, for the
   /// same reason read the other way: padding is not precision.
   final int? fractionDigits;
+
+  /// **The digits change in place instead of the figure being replaced**
+  /// (founder, on glass 2026-09-04). For a live readout that re-answers as
+  /// something else is typed — the Send screen's fee preview, and nothing else
+  /// yet. See [KvRollingText] for why this is not a counter and does not
+  /// break `KvStreamingCount`'s fourth law.
+  ///
+  /// **Never on a figure that is being committed.** The ceremony restates what
+  /// Rust built and that number does not change under the user; animating it
+  /// would suggest it might.
+  final bool rolling;
 
   /// Null shows the unit on [KvAmountRole.hero] and [KvAmountRole.screen], and
   /// hides it in a row, where the column heading carries it.
@@ -274,6 +287,12 @@ class KvAmount extends StatelessWidget {
       };
 
   bool get _unit => showUnit ?? (role != KvAmountRole.row);
+
+  /// One emphasised run — a plain `Text`, or a [KvRollingText] whose digits
+  /// change in place when [rolling] is set.
+  Widget _run(String text, TextStyle style) => rolling
+      ? KvRollingText(text, style: style)
+      : Text(text, maxLines: 1, style: style);
 
   /// Splits a figure into `(text, isStrong)` runs under the chosen [emphasis].
   ///
@@ -393,10 +412,9 @@ class KvAmount extends StatelessWidget {
             // the boundary sits exactly where it always did.
             for (final (text, strong) in _runs(parts.integer, fraction))
               if (text.isNotEmpty)
-                Text(
+                _run(
                   text,
-                  maxLines: 1,
-                  style: TextStyle(
+                  TextStyle(
                     fontFamily: KvFont.mono,
                     // A row is one run at one size: §2 gives `rowAmount` a
                     // single style, and 48% of 15dp would land under the 11dp

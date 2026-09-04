@@ -162,13 +162,19 @@ class KvStatusChip extends StatelessWidget {
     final warm = tone == KvLampTone.warn;
     return Container(
       width: double.infinity,
+      // **Slim** (founder, on glass 2026-09-04: *"that chip height is kinda
+      // fat but i would rather want it slim so there isnt unnecessary space in
+      // the backgound of the text"*). 10 dp of air around a 19 dp line is a
+      // notice; 12 with a 28 dp radius was a plate wearing a notice's job —
+      // and on Send it was pushing the amber line toward the keypad.
       padding: const EdgeInsets.symmetric(
-        horizontal: KvSpace.m,
-        vertical: KvSpace.sm,
+        horizontal: KvSpace.s14,
+        vertical: KvSpace.s10,
       ),
       decoration: BoxDecoration(
         color: warm ? KvColor.noticeWarnFill : KvColor.chip,
-        borderRadius: BorderRadius.circular(KvRadius.plate),
+        // §4's notice radius, not the plate's — the shape follows the box.
+        borderRadius: BorderRadius.circular(KvRadius.notice),
         border: Border.all(
           color: warm ? KvColor.noticeWarnEdge : KvColor.plateDivider,
         ),
