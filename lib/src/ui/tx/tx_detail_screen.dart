@@ -71,6 +71,7 @@ class TxDetailScreen extends StatefulWidget {
     this.contacts,
     this.onSendAgain,
     this.onShare,
+    this.receiveAddress,
   });
 
   /// The transaction this screen is about. The identity, not the snapshot.
@@ -115,11 +116,21 @@ class TxDetailScreen extends StatefulWidget {
   /// The bar's share action. Null hides the button rather than dimming it.
   final void Function(String txid)? onShare;
 
+  /// **The wallet's own address, for a receive's `To` row** (founder on glass,
+  /// 2026-09-05: *"'To' is missing"*). A receive carries no counterparty —
+  /// the chain layer says why — so the row names where the money landed, which
+  /// is this wallet's one address (`vaultReceiveAddress`). Null hides the row.
+  final Future<String> Function()? receiveAddress;
+
   @override
   State<TxDetailScreen> createState() => _TxDetailScreenState();
 }
 
 class _TxDetailScreenState extends State<TxDetailScreen> {
+  /// Asked once, for the facts plate — a `FutureBuilder` over a future made
+  /// in `build` would ask again on every rebuild and blink the row.
+  late final Future<String>? _own = widget.receiveAddress?.call();
+
   /// **This transaction's row, and nothing else in the feed.** The feed
   /// notifier fires on every list the wallet lane publishes; this fires only
   /// when the row for [TxDetailScreen.txid] is a different value — the
@@ -185,6 +196,7 @@ class _TxDetailScreenState extends State<TxDetailScreen> {
                     ? _Gone(txid: widget.txid)
                     : _Body(
                         record: record,
+                        own: _own,
                         depth: _depth,
                         stale: widget.stale,
                         maturity: widget.maturity,
@@ -217,6 +229,7 @@ class _Body extends StatelessWidget {
     required this.explorerUrl,
     required this.openUrl,
     required this.onSendAgain,
+    this.own,
   });
 
   final ActivityRecord record;
@@ -228,6 +241,9 @@ class _Body extends StatelessWidget {
   final Future<String> Function(String txid)? explorerUrl;
   final Future<bool> Function(String url)? openUrl;
   final void Function(String address)? onSendAgain;
+
+  /// This wallet's own address, for a receive's `To` (D-276).
+  final Future<String>? own;
 
   @override
   Widget build(BuildContext context) {
@@ -304,6 +320,7 @@ class _Body extends StatelessWidget {
                     record: record,
                     title: title,
                     counterparty: counterparty,
+                    own: own,
                   ),
                 ),
                 const SizedBox(height: KvSpace.l),
@@ -500,7 +517,17 @@ class _LifecycleChipState extends State<_LifecycleChip> {
         // state at 30. A minimum rather than a fixed height, so a two-line
         // name at the floor still wraps rather than clips (BG-14).
         constraints: const BoxConstraints(minHeight: _LifecycleChip.height),
-        padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+        // **The check sits in the pill's own end** (founder on glass,
+        // 2026-09-05): its 28 dp disc (`KvCheck.small` 22 in a 3 dp ring)
+        // inside the 30 dp pill leaves 1 dp — so the disc's curve and the
+        // pill's share a centre, and `Settled` sits beside it. The dot rungs
+        // keep the 12 dp they had; the padding tweens with the crossing.
+        padding: EdgeInsets.only(
+          left: rung == KvBurialRung.settled
+              ? (_LifecycleChip.height - 28) / 2
+              : KvSpace.sm,
+          right: KvSpace.sm,
+        ),
         decoration: BoxDecoration(
           color: KvBurial.tintFor(rung),
           borderRadius: BorderRadius.circular(KvRadius.control),
@@ -662,9 +689,13 @@ class _FactsPlate extends StatelessWidget {
     required this.record,
     required this.title,
     required this.counterparty,
+    this.own,
   });
 
   final ActivityRecord record;
+
+  /// This wallet's own address, for a receive's `To`.
+  final Future<String>? own;
 
   /// `Sent` / `Received` / `Mined` — the record's own verb (`kvActivityFace`).
   final String title;
@@ -688,6 +719,7 @@ class _FactsPlate extends StatelessWidget {
         ? null
         : formatStamp(DateTime.fromMillisecondsSinceEpoch(at.toInt()));
     final to = counterparty;
+    final incoming = record.direction == ActivityDirection.incoming;
     final score = formatScore(record.acceptedDaaScore ?? record.blockDaaScore);
     // **The home's row container** (founder on glass, 2026-09-05): `plate`,
     // radius 28, no border, and its own hairline between one fact and the next
@@ -715,11 +747,42 @@ class _FactsPlate extends StatelessWidget {
           _CounterpartyLine(
             address: to,
             onCopy: () => _copy(context, to, 'Address copied'),
+          )
+        else if (own != null && incoming)
+          // **A receive's `To` is this wallet** (D-276). The chain layer
+          // carries no counterparty for a receive; where the money landed
+          // is still a fact, and it is the wallet's own address.
+          FutureBuilder<String>(
+            future: own,
+            builder: (context, snap) {
+              final address = snap.data;
+              if (address == null) {
+                return _fact(
+                  label: 'To',
+                  valueText: '—',
+                  value: const _Value('—'),
+                );
+              }
+              return _CounterpartyLine(
+                address: address,
+                onCopy: () => _copy(context, address, 'Address copied'),
+              );
+            },
           ),
         if (record.feeSompi case final fee?)
           // Trailing zeros trimmed, like every other figure in the app
           // since D-267: `0.00010000` reads `0.0001`.
-          _FeeLine(sompi: fee),
+          _FeeLine(sompi: fee)
+        else if (incoming && !record.isCoinbase)
+          // **The fee row is present on a receive, and says who paid it**
+          // (D-276). The wallet cannot know the figure — the inputs were
+          // never its own — so the row states the one fact it has rather
+          // than a zero it does not (BG-8).
+          _fact(
+            label: 'Network fee',
+            valueText: 'Paid by the sender',
+            value: const _Note('Paid by the sender'),
+          ),
         // **The accepting score when the DAG has one, the containing
         // block's otherwise.** This is the number the depth is measured
         // against — `KvBurial.depthOf` subtracts exactly this from the
@@ -930,6 +993,28 @@ class _Target extends StatelessWidget {
 }
 
 /// A plain mono value in the facts plate's right column.
+/// A fact stated in words rather than a figure — `Paid by the sender` — in
+/// the plate's own face at the value's tone.
+class _Note extends StatelessWidget {
+  const _Note(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    text,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    textAlign: TextAlign.right,
+    style: const TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 13,
+      height: 20 / 13,
+      color: KvColor.inkDim,
+    ),
+  );
+}
+
 class _Value extends StatelessWidget {
   const _Value(this.text);
 

@@ -478,6 +478,8 @@ Widget _txDetail({
   bool named = false,
 }) => TxDetailScreen(
   txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',
+  // A receive's `To` is the wallet's own address (D-276).
+  receiveAddress: () async => _addr,
   activity: ValueNotifier<List<ActivityRecord>>([
     ActivityRecord(
       txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',

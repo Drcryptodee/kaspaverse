@@ -1537,7 +1537,21 @@ class _LedgerState extends State<_Ledger> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             header,
-            Expanded(child: body),
+            // **The ledger dims as a region while the link is not live**
+            // (D-276, founder on glass 2026-09-05: the activity did not say
+            // *not connected* while the balance above it did). 0.55, not the
+            // balance's 0.45 — the opacity at which the rows' small text
+            // still clears BG-14 (`KvFreshness.opacityStaleRegion`); the
+            // rows raise their quiet tones to `inkDim` under it. Eased, so a
+            // link that flaps does not blink the list (BG-24).
+            Expanded(
+              child: AnimatedOpacity(
+                opacity: widget.stale ? KvFreshness.opacityStaleRegion : 1,
+                duration: KvMotion.normal,
+                curve: KvMotion.out,
+                child: body,
+              ),
+            ),
           ],
         ),
       ),
@@ -1687,13 +1701,15 @@ class _LedgerRow extends StatelessWidget {
     };
     final time = record.unixtimeMsec;
     final open = onOpen;
-    // **A ledger row does not dim, and that is not a relaxation** (D-257).
-    // BG-8's dim is for a live *reading*; a row is a record of something that
-    // happened, and it did not become less true when the socket dropped. Its
-    // only live parts are the depth counter and the relative age, and both
-    // already stop on `stale`. Dimming the whole row put a 16 dp amount at
-    // **3.03:1** and an 11 dp time at **1.93** against BG-14's 4.5 — reading
-    // the past through a fog because the present is uncertain.
+    // **The row dims with its region, and keeps BG-14 doing it** (D-276,
+    // amending D-257). D-257 kept rows bright because a 16 dp hued amount
+    // under 0.45 measured 3.03:1 and an `inkMeta` time 1.93; the founder
+    // asked for the *not live* effect on the ledger (on glass, 2026-09-05),
+    // so the region dims to 0.55 and the row raises what would fall under
+    // the floor: the figure to `inkDim` with its sign kept (`muted`), the
+    // time to `inkDim`. The record is still the record; the fog says the
+    // link, not the past, is uncertain — and the balance's age above it
+    // says how long (BG-8).
     return RepaintBoundary(
       child: DecoratedBox(
         decoration: BoxDecoration(
@@ -1755,7 +1771,7 @@ class _LedgerRow extends StatelessWidget {
                     fontFamily: KvFont.ui,
                     fontSize: 13,
                     height: 18 / 13,
-                    color: selected ? KvColor.inkDim : KvColor.inkMeta,
+                    color: selected || stale ? KvColor.inkDim : KvColor.inkMeta,
                   ),
                 ),
             ],
@@ -1764,6 +1780,7 @@ class _LedgerRow extends StatelessWidget {
             record.valueSompi,
             role: KvAmountRole.row,
             direction: direction,
+            muted: stale,
           ),
           semanticLabel: '$title, details',
           onTap: open == null ? null : () => open(record.txid),

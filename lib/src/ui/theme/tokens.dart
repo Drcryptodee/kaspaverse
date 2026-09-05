@@ -604,6 +604,14 @@ abstract final class KvFreshness {
   /// A stale reading dims to this.
   static const double opacityStale = 0.45;
 
+  /// **A region of small text dims to 0.55, not 0.45** (D-276). The ledger
+  /// under a dark link dims as a whole so the screen says *not live* where
+  /// the money is listed (founder on glass, 2026-09-05) — and 0.55 is the
+  /// opacity at which `inkDim` on `plate` still clears BG-14's 4.5:1
+  /// (4.9, recomputed), which 0.45 does not (4.19). Hued figures under it
+  /// take `inkDim` (`KvAmount.muted`); `inkMeta` text is raised to `inkDim`.
+  static const double opacityStaleRegion = 0.55;
+
   /// **The size at or above which the 45% dim is permitted** — and below which
   /// it is a BG-14 violation *(amended 2026-09-04, D-257; the collision was
   /// measured, not argued)*.

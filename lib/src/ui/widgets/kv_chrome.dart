@@ -166,11 +166,17 @@ class KvRuledLabel extends StatelessWidget {
           // weight than lowercase at the same ramp — still clear of BG-14's
           // 11 dp floor.
           text.toUpperCase(),
+          // **A little weight** (founder on glass, 2026-09-05: *"they need
+          // to be just a little bit bold like the screenshots"*) — 600 on the
+          // axis, declared and painted (L150), for every caps label in the
+          // house at once.
           style: const TextStyle(
             fontFamily: KvFont.ui,
             fontSize: 12,
             height: 16 / 12,
             letterSpacing: 0.8,
+            fontWeight: FontWeight.w600,
+            fontVariations: KvWeight.w600,
             color: KvColor.inkDim,
           ),
         ),

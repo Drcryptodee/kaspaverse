@@ -90,8 +90,13 @@ void main() {
       // at 100 under these thresholds is one that ignored what it was given.
       final ceiling = kTestDevnetMaturity.ceilingFor(coinbase: false);
       expect(ceiling, 10);
-      expect(KvBurialGauge.positionFor(5, ceiling), closeTo(0.5, 1e-12));
-      expect(KvBurialGauge.positionFor(10, ceiling), 1);
+      // Halfway to the ceiling is halfway along the settling segment — the
+      // knee's two thirds — and the ceiling is the knee itself (D-276).
+      expect(
+        KvBurialGauge.positionFor(5, ceiling),
+        closeTo(KvBurialGauge.knee / 2, 1e-12),
+      );
+      expect(KvBurialGauge.positionFor(10, ceiling), KvBurialGauge.knee);
       expect(
         KvBurial.rungFor(
           10,
@@ -135,7 +140,10 @@ void main() {
       await tester.pump();
       expect(
         _Ink.of(tester).filledFraction,
-        closeTo(150 / kTestMaturity.coinbaseDaa, 0.002),
+        closeTo(
+          KvBurialGauge.positionFor(150, kTestMaturity.coinbaseDaa),
+          0.002,
+        ),
         reason:
             'a coinbase 150 deep is still Pending at the pin and excluded from '
             'the balance — a gauge that does not branch would show it full '
@@ -161,78 +169,136 @@ void main() {
         ),
       );
       await tester.pump();
-      expect(_Ink.of(tester).filledFraction, closeTo(1, 0.002));
-      // Settled: the track is full and green, and the reading line is gone.
-      expect(_dotHue(tester), isNull);
+      expect(
+        _Ink.of(tester).filledFraction,
+        closeTo(KvBurialGauge.positionFor(150, kTestMaturity.userDaa), 0.002),
+      );
+      // Settled: past the knee, in the terminal rung's hue, and the reading
+      // still counts the burial — `150 blocks deep` (D-276).
+      expect(_dotHue(tester), KvColor.ok);
+      expect(_shownDepth(tester), 150);
     });
   });
 
-  group('BG-22 · the declared scale is linear', () {
-    test('it is a straight line from the origin to the ceiling', () {
-      // D-248 replaced the log/piecewise ruler with one decade drawn linearly,
-      // and D-249 gave it an honest referent: progress **inside** the Accepted
-      // rung toward spendable, which is a real quantity the wallet reads every
-      // second.
-      const ceiling = 100;
-      for (final d in const [0, 1, 25, 50, 75, 99, 100]) {
-        expect(
-          KvBurialGauge.positionFor(d, ceiling),
-          closeTo(d / ceiling, 1e-12),
-          reason: 'depth $d is not where a linear scale puts it',
-        );
-      }
-    });
+  group('BG-22 · the declared scale is two straight segments (D-276)', () {
+    test(
+      'linear to the ceiling over the knee, linear again to ten ceilings',
+      () {
+        const ceiling = 100;
+        const end = 1000;
+        expect(KvBurialGauge.endFor(ceiling), end);
+        for (final d in const [0, 1, 25, 50, 75, 99, 100]) {
+          expect(
+            KvBurialGauge.positionFor(d, ceiling),
+            closeTo(KvBurialGauge.knee * d / ceiling, 1e-12),
+            reason: 'depth $d is not where the settling segment puts it',
+          );
+        }
+        for (final d in const [100, 150, 550, 999, 1000]) {
+          expect(
+            KvBurialGauge.positionFor(d, ceiling),
+            closeTo(
+              KvBurialGauge.knee +
+                  (1 - KvBurialGauge.knee) * (d - ceiling) / (end - ceiling),
+              1e-12,
+            ),
+            reason: 'depth $d is not where the burial segment puts it',
+          );
+        }
+      },
+    );
 
-    test('it is monotone and never runs past its ceiling', () {
+    test('it is monotone, meets at the knee, and never runs past the end', () {
       var previous = -1.0;
-      for (final n in const [0, 1, 2, 49, 50, 51, 99, 100, 101, 5000]) {
+      for (final n in const [
+        0,
+        1,
+        2,
+        49,
+        50,
+        51,
+        99,
+        100,
+        101,
+        999,
+        1000,
+        5000,
+      ]) {
         final x = KvBurialGauge.positionFor(n, 100);
         expect(x, greaterThanOrEqualTo(previous), reason: 'depth $n went back');
         previous = x;
       }
-      expect(KvBurialGauge.positionFor(99, 100), lessThan(1));
-      expect(KvBurialGauge.positionFor(100, 100), 1);
+      expect(KvBurialGauge.positionFor(99, 100), lessThan(KvBurialGauge.knee));
+      expect(KvBurialGauge.positionFor(100, 100), KvBurialGauge.knee);
+      expect(KvBurialGauge.positionFor(999, 100), lessThan(1));
+      expect(KvBurialGauge.positionFor(1000, 100), 1);
       expect(KvBurialGauge.positionFor(100000, 100), 1);
       expect(KvBurialGauge.positionFor(0, 100), 0);
       expect(KvBurialGauge.positionFor(-5, 100), 0);
     });
 
-    test('the tick hierarchy is §4\'s: 21 marks in three lengths', () {
-      // §4: **21 ticks** — 12 dp at 0 · 50 · 100, 8 dp every 10, 5 dp every 5.
-      // `S9` measured its own majors at 0 %, 50 % and 100 % of the track, so
-      // the render and the law agree here and neither had to be assumed.
-      expect(KvBurialGauge.subDivisions, 20, reason: '21 marks = 20 steps');
-      final lengths = [
-        for (var s = 0; s <= KvBurialGauge.subDivisions; s++)
-          KvBurialGaugePainter.tickLength(s),
-      ];
-      expect(lengths, hasLength(21));
-      expect(lengths.first, KvBurialGaugePainter.majorTick);
-      expect(lengths.last, KvBurialGaugePainter.majorTick);
+    test('every graduation stands on a round depth, at three ranks', () {
+      // At the reference width the settling segment subdivides by 50 (every
+      // 2 blocks) and the burial by 18 (every 50): 51 + 18 marks, each on a
+      // depth a reader could name; the tenths and the ceilings medium; the
+      // origin, the midpoint, the ceiling, five ceilings and the end major.
+      final marks = KvBurialGauge.graduationsFor(100, 330);
+      expect(marks.first, const KvGraduation(0, KvGraduationRank.major));
+      expect(marks.last, const KvGraduation(1000, KvGraduationRank.major));
       expect(
-        lengths[10],
-        KvBurialGaugePainter.majorTick,
-        reason: 'the 50 mark',
-      );
-      // A step is 5 % of the ceiling, so an even step is a tenth and an odd
-      // one is a fifth.
-      expect(lengths[2], KvBurialGaugePainter.tenTick, reason: 'every tenth');
-      expect(lengths[1], KvBurialGaugePainter.fiveTick, reason: 'every fifth');
-      expect(
-        lengths.where((l) => l == KvBurialGaugePainter.majorTick).length,
-        3,
-        reason:
-            '§4 seats exactly three tall marks: 0, the midpoint, the ceiling',
+        marks
+            .where((m) => m.rank == KvGraduationRank.major)
+            .map((m) => m.depth),
+        [0, 50, 100, 500, 1000],
       );
       expect(
-        KvBurialGaugePainter.fiveTick,
-        lessThan(KvBurialGaugePainter.tenTick),
+        marks
+            .where((m) => m.rank == KvGraduationRank.medium)
+            .map((m) => m.depth),
+        [10, 20, 30, 40, 60, 70, 80, 90, 200, 300, 400, 600, 700, 800, 900],
+      );
+      expect(marks, hasLength(51 + 18));
+      final depths = marks.map((m) => m.depth).toList();
+      expect(depths, orderedEquals([...depths]..sort()));
+      expect(depths.toSet(), hasLength(depths.length), reason: 'no mark twice');
+      // The finer marks are every 2 to the ceiling and every 50 past it.
+      expect(marks[1].depth, 2);
+      expect(marks[51].depth, 150);
+      expect(
+        KvBurialGaugePainter.minorTick,
+        lessThan(KvBurialGaugePainter.mediumTick),
       );
       expect(
-        KvBurialGaugePainter.tenTick,
+        KvBurialGaugePainter.mediumTick,
         lessThan(KvBurialGaugePainter.majorTick),
       );
     });
+
+    test(
+      'a narrow track takes the next coarser round step, never a smudge',
+      () {
+        // 320 dp at 1.3× leaves the bar about 250 wide: 50 divisions of the
+        // settling would stand 3.3 dp apart, under the floor, so the ruler
+        // steps to every 5 — still a round depth — and the burial to every 50.
+        final marks = KvBurialGauge.graduationsFor(100, 250);
+        expect(marks[1].depth, 5);
+        for (var i = 1; i < marks.length; i++) {
+          final gap =
+              (KvBurialGauge.positionFor(marks[i].depth, 100) -
+                  KvBurialGauge.positionFor(marks[i - 1].depth, 100)) *
+              250;
+          expect(gap, greaterThanOrEqualTo(KvBurialGauge.minTickGap - 1e-9));
+        }
+        // And a coinbase's thousand wears the same hierarchy, scaled.
+        final coinbase = KvBurialGauge.graduationsFor(1000, 330);
+        expect(
+          coinbase
+              .where((m) => m.rank == KvGraduationRank.major)
+              .map((m) => m.depth),
+          [0, 500, 1000, 5000, 10000],
+        );
+      },
+    );
   });
 
   group('BG-22 · the ink is the reading', () {
@@ -275,9 +341,15 @@ void main() {
       final ticks = ink.verticalTicks;
       final lit = ticks.where((t) => t.from.dx <= fillX).toList();
       final beyond = ticks.where((t) => t.from.dx > fillX).toList();
-      // 42 % of twenty steps: the origin and the eight fives up to 40 %.
-      expect(lit.length, 9);
-      expect(beyond.length, 12);
+      // Every mark at or under 42, and every mark past it, from the same
+      // ruler the painter drew (D-276: the ticks stand on round depths).
+      final marks = KvBurialGauge.graduationsFor(
+        kTestMaturity.userDaa,
+        ink._size.width,
+      );
+      expect(lit.length, marks.where((m) => m.depth <= 42).length);
+      expect(beyond.length, marks.where((m) => m.depth > 42).length);
+      expect(lit.length + beyond.length, marks.length);
       expect(lit.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.settled)});
       expect(beyond.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.inkDim)});
     });
@@ -290,7 +362,14 @@ void main() {
       expect(_Ink.of(tester).tickTones, {KvColor.inkDim.toARGB32() & 0xFFFFFF});
       await tester.pumpWidget(_host(_gauge(340, key: const ValueKey(340))));
       await tester.pump();
-      // Past the ceiling the reading wears the terminal rung's hue (D-248).
+      // Past the ceiling the lit ticks wear the terminal rung's hue (D-248),
+      // and the burial segment's marks beyond 340 are still unlit (D-276).
+      expect(_Ink.of(tester).tickTones, {
+        KvColor.ok.toARGB32() & 0xFFFFFF,
+        KvColor.inkDim.toARGB32() & 0xFFFFFF,
+      });
+      await tester.pumpWidget(_host(_gauge(5000, key: const ValueKey(5000))));
+      await tester.pump();
       expect(_Ink.of(tester).tickTones, {KvColor.ok.toARGB32() & 0xFFFFFF});
     });
 
@@ -666,17 +745,17 @@ void main() {
       for (var step = 0; step < 14; step++) {
         final fill = _Ink.of(tester).filledFraction;
         final shown = _shownDepth(tester);
-        // Past the ceiling the line prints nothing (founder, 2026-09-05: no
-        // streaming count on a settled transaction) — so "nothing printed"
-        // is the line's way of saying *landed*, and the bar must agree.
-        if (shown == 0 || shown >= kTestMaturity.userDaa) {
+        // At and past the ceiling the fill is on or past the knee (D-276:
+        // the burial segment carries it on), and the bar must agree with
+        // the printed number about which side of the mark it is on.
+        if (shown >= kTestMaturity.userDaa) {
           sawOver = true;
           expect(
             fill,
-            greaterThanOrEqualTo(1 - 1e-6),
+            greaterThanOrEqualTo(KvBurialGauge.knee - 1e-6),
             reason:
-                'the line says landed ($shown) while the bar is still short '
-                'of the ceiling',
+                'the line says settled ($shown) while the bar is still short '
+                'of the knee',
           );
         } else {
           sawUnder = true;
@@ -689,11 +768,11 @@ void main() {
         await tester.pump(const Duration(milliseconds: 80));
       }
       expect(sawUnder && sawOver, isTrue, reason: 'the crossing never ran');
-      // And when it has settled the reading is gone — the chip above and the
-      // full green track carry the fact; no dot, no count, nothing streaming.
+      // And when it has settled the reading counts the burial in the
+      // terminal rung's hue — `400 blocks deep` on the burial segment (D-276).
       await tester.pumpAndSettle();
-      expect(_dotHue(tester), isNull);
-      expect(_shownDepth(tester), 0);
+      expect(_dotHue(tester), KvColor.ok);
+      expect(_shownDepth(tester), 400);
     });
   });
 
@@ -798,6 +877,54 @@ void main() {
   });
 
   group('BG-21 · the ledger row reads the same law the gauge does', () {
+    testWidgets('the dot is a recency, and it holds while the link is dark', (
+      tester,
+    ) async {
+      // A row inside the window wears the dot; past it the word stands
+      // alone (founder, 2026-09-05). A link drop hands every row a null
+      // depth for a beat — the dot must not flash on a row that had none,
+      // nor vanish from one that had it (his second finding on glass).
+      Widget at(int? depth) => _host(
+        KvBurialMark(
+          key: const ValueKey('row'),
+          stalled: false,
+          confirmations: depth,
+          maturity: MaturityState.confirmed,
+          direction: ActivityDirection.outgoing,
+          isCoinbase: false,
+          thresholds: kTestMaturity,
+        ),
+      );
+      // The row's dot is a bare 6 dp disc, not §4's lamp (no bloom: BG-2).
+      bool dotted() => find
+          .byWidgetPredicate(
+            (w) =>
+                w is Container &&
+                w.decoration is BoxDecoration &&
+                (w.decoration! as BoxDecoration).shape == BoxShape.circle,
+          )
+          .evaluate()
+          .isNotEmpty;
+
+      await tester.pumpWidget(at(1200));
+      await tester.pumpAndSettle();
+      expect(find.text('Settled'), findsOneWidget);
+      expect(dotted(), isFalse, reason: 'past the window: the word alone');
+      await tester.pumpWidget(at(null));
+      await tester.pumpAndSettle();
+      expect(dotted(), isFalse, reason: 'a dark link must not light a dot');
+      await tester.pumpWidget(at(1300));
+      await tester.pumpAndSettle();
+      expect(dotted(), isFalse);
+
+      await tester.pumpWidget(at(500));
+      await tester.pumpAndSettle();
+      expect(dotted(), isTrue, reason: 'inside the window: recent money');
+      await tester.pumpWidget(at(null));
+      await tester.pumpAndSettle();
+      expect(dotted(), isTrue, reason: 'the last answer holds through a gap');
+    });
+
     testWidgets('the row\'s count does not stop short of the mark it crosses', (
       tester,
     ) async {
@@ -854,10 +981,7 @@ void main() {
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(_host(_gauge(42, key: const ValueKey(42))));
       await tester.pump();
-      expect(
-        find.bySemanticsLabel(RegExp(r'42 of 100 DAA deep')),
-        findsOneWidget,
-      );
+      expect(find.bySemanticsLabel(RegExp(r'42 blocks deep')), findsOneWidget);
       expect(
         find.bySemanticsLabel(RegExp(r'Spendable at 100')),
         findsOneWidget,
@@ -870,9 +994,9 @@ void main() {
     ) async {
       await tester.pumpWidget(_host(_gauge(42)));
       await tester.pump();
-      // Origin, midpoint, ceiling. The midpoint is derived from the ceiling,
-      // so a coinbase row labels 0 · 500 · 1,000 without a second table.
-      for (final label in const ['0', '50', '100']) {
+      // Origin, ceiling, end — `0 · 100 settled · 1,000+` (D-276); a
+      // coinbase row labels 0 · 1,000 · 10,000+ without a second table.
+      for (final label in const ['0', '100', '1,000+']) {
         expect(
           find.text(label),
           findsWidgets,
@@ -900,11 +1024,11 @@ void main() {
       );
       await tester.pump();
       expect(find.text('1,000'), findsOneWidget);
-      expect(find.text('500'), findsOneWidget);
-      // **One integer, one format.** The reading and the graduation twenty dp
-      // beneath it both go through `formatScore` now; they used to print
-      // `of 1000 DAA` and `1,000` (`ux-auditor` item 33).
-      expect(find.text('of 1,000 DAA'), findsOneWidget);
+      expect(find.text('10,000+'), findsOneWidget);
+      // **One integer, one format.** The reading and the graduation beneath
+      // it both go through `formatScore` (`ux-auditor` item 33), and the
+      // reading is the render's phrase (D-276).
+      expect(find.text('blocks deep'), findsOneWidget);
     });
 
     testWidgets('every label clears the 11dp floor at 1.3x on a 320dp screen', (

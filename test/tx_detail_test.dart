@@ -145,7 +145,8 @@ void main() {
     // BG-19). Two registers of one fact; one printing of the count.
     expect(find.text('Accepted'), findsOneWidget);
     expect(find.text('42'), findsOneWidget);
-    expect(find.text('of ${kTestMaturity.userDaa} DAA'), findsOneWidget);
+    // `S9`'s own phrase (D-276): the count, then `blocks deep`.
+    expect(find.text('blocks deep'), findsOneWidget);
     // The axis is named by the `DEPTH` heading, not beside the reading
     // (founder, device sitting). BG-22 asks for a named axis, not an inline
     // one; the spoken form carries the ceiling, asserted in

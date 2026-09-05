@@ -454,8 +454,9 @@ void pollLifecycleTests() {
         expect(tester.getSize(visual).height, closeTo(44, 1));
         final box = tester.widget<AnimatedContainer>(visual);
         expect((box.decoration! as BoxDecoration).color, KvColor.chip);
-        // And the endpoint still stands beside it, whole (BG-15's reasoning).
-        expect(find.text('public-1.kaspa.example:17110'), findsOneWidget);
+        // And the endpoint still stands beside it, whole — scheme and all
+        // (founder on glass, 2026-09-05: *"let the link be in full"*).
+        expect(find.text('ws://public-1.kaspa.example:17110'), findsOneWidget);
       },
     );
 
@@ -577,7 +578,7 @@ void main() {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
       expect(seam.refreshes, 1);
-      expect(find.text('public-1.kaspa.example:17110'), findsOneWidget);
+      expect(find.text('ws://public-1.kaspa.example:17110'), findsOneWidget);
       expect(find.text('523,216,421'), findsOneWidget);
     });
 

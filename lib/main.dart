@@ -375,6 +375,7 @@ class _MoneyShellState extends State<_MoneyShell> {
       virtualDaaScore: widget.chain.virtualDaaScore,
       stale: stale,
       maturity: _maturity,
+      receiveAddress: vaultReceiveAddress,
       explorerUrl: (id) => prefsExplorerTxUrl(txid: id),
       openUrl: VaultService.instance.openUrl,
       // `S9` draws the `≈` line under the figure, and BG-5 permits it here:

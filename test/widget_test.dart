@@ -7,6 +7,7 @@ import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'support/finders.dart';
 import 'support/maturity.dart';
 
@@ -727,5 +728,74 @@ void main() {
     expect(find.text('Activity'), findsOneWidget);
     expect(find.textContaining('most recent.'), findsNothing);
     await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('the ledger dims as a region while the link is dark (D-276)', (
+    tester,
+  ) async {
+    // The founder's finding on glass (2026-09-05): the balance dimmed and the
+    // activity under it did not, so the screen half-said *not connected*.
+    // The region dims to the opacity at which its small text still clears
+    // BG-14, and the row's hued figure takes `inkDim` with its sign kept.
+    final now = DateTime(2026, 9, 5, 12);
+    final connected = ValueNotifier<bool>(true);
+    final activity = ValueNotifier<List<ActivityRecord>>([
+      ActivityRecord(
+        txid: 'b' * 64,
+        valueSompi: BigInt.from(2500000000),
+        unixtimeMsec: BigInt.from(now.millisecondsSinceEpoch - 3600000),
+        blockDaaScore: BigInt.parse('458170000'),
+        acceptedDaaScore: BigInt.parse('458170000'),
+        direction: ActivityDirection.incoming,
+        isCoinbase: false,
+        maturity: MaturityState.confirmed,
+        stalled: false,
+      ),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
+        home: homeScreen(
+          connected: connected,
+          virtualDaaScore: ValueNotifier<BigInt?>(BigInt.parse('458174109')),
+          error: ValueNotifier<String?>(null),
+          lastUpdate: ValueNotifier<DateTime?>(now),
+          mature: ValueNotifier<BigInt?>(BigInt.from(2500000000)),
+          pending: ValueNotifier<BigInt?>(BigInt.zero),
+          activity: activity,
+          syncing: ValueNotifier<bool>(false),
+          utxoIndexMissing: ValueNotifier<bool>(false),
+          clock: () => now,
+        ),
+      ),
+    );
+    await tester.pump();
+    KvAmount row() => tester
+        .widgetList<KvAmount>(find.byType(KvAmount))
+        .firstWhere((a) => a.role == KvAmountRole.row);
+    AnimatedOpacity region() => tester.widget<AnimatedOpacity>(
+      find
+          .ancestor(
+            of: find.byWidget(row()),
+            matching: find.byType(AnimatedOpacity),
+          )
+          .first,
+    );
+    expect(region().opacity, 1, reason: 'live: the ledger is bright');
+    expect(row().muted, isFalse);
+
+    connected.value = false;
+    await tester.pump();
+    await tester.pump(KvMotion.normal);
+    expect(region().opacity, KvFreshness.opacityStaleRegion);
+    expect(row().muted, isTrue, reason: 'a hued figure under the dim');
+
+    connected.value = true;
+    await tester.pump();
+    await tester.pump(KvMotion.normal);
+    expect(region().opacity, 1);
+    expect(row().muted, isFalse);
+    await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
   });
 }

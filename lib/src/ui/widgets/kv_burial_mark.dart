@@ -376,6 +376,15 @@ class _KvBurialMarkState extends State<KvBurialMark> {
   /// went down does not stream down to meet it.
   int _epoch = 0;
 
+  /// Whether the last frame with a READING wore the dot — held across a
+  /// frame without one. A link drop hands every row a null depth for a beat
+  /// and the reconnect hands the reading back; deriving the dot from the null
+  /// put a green dot on a settled row for exactly that beat (founder on
+  /// glass, 2026-09-05: *"the green dot comes, and then goes"*). A settled row
+  /// with no reading yet wears no dot at all: the dot claims recency, and an
+  /// unknown depth cannot.
+  bool? _dotted;
+
   @override
   Widget build(BuildContext context) {
     final n = widget.confirmations;
@@ -407,6 +416,16 @@ class _KvBurialMarkState extends State<KvBurialMark> {
     final previous = _shown;
     if (previous != null && rung.index < previous.index) _epoch++;
     _shown = rung;
+    // The dot marks recent money; a row past the window is history and wears
+    // the word alone. A rung still counting keeps it; a settled rung keeps it
+    // only inside the window — and keeps its LAST answer while no reading is
+    // in hand, so a dropped link cannot flash it.
+    final dot = switch (depth) {
+      final d? =>
+        rung != KvBurialRung.settled || d < KvBurialMark.recentWindowDaa,
+      null => _dotted ?? rung != KvBurialRung.settled,
+    };
+    _dotted = dot;
 
     // **The rung change crosses, it does not cut** (BG-24, D-229). The
     // amber -> green -> blue crossings are the moments the money changes what
@@ -445,10 +464,7 @@ class _KvBurialMarkState extends State<KvBurialMark> {
           words: KvBurial.words(rung, depth: depth),
           mono: rung == KvBurialRung.accepted && depth != null,
           fontSize: widget.fontSize,
-          // The dot marks recent money; a row past the window is history and
-          // wears the word alone. An unknown depth keeps it — the state is
-          // still being watched.
-          dot: depth == null || depth < KvBurialMark.recentWindowDaa,
+          dot: dot,
         ),
       ),
     );

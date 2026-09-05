@@ -642,7 +642,7 @@ class _NodeScreenState extends State<NodeScreen> {
                 child: ListView(
                   padding: EdgeInsets.fromLTRB(
                     KvWindow.of(context).gutter,
-                    KvSpace.m,
+                    KvSpace.s,
                     KvWindow.of(context).gutter,
                     KvSpace.xxl,
                   ),
@@ -651,8 +651,11 @@ class _NodeScreenState extends State<NodeScreen> {
                     // density** (founder on glass, 2026-09-05): the connection
                     // card, the node row, the own-node card with its field,
                     // then SOURCES as one card of two rows that open sheets.
+                    // **Compact** (founder on glass, 2026-09-05, twice): the
+                    // whole screen sits in one view on the reference phone —
+                    // every section break is the header row's own air, and
+                    // nothing else is added between the cards.
                     _connectionPlate(),
-                    const SizedBox(height: KvSpace.sm),
                     // **`NODE`, with its circled-i** (founder on glass,
                     // 2026-09-05): the caps label sits at the card's upper
                     // left like `MY OWN NODE`, and the explainer — what a node
@@ -670,9 +673,7 @@ class _NodeScreenState extends State<NodeScreen> {
                           'nodes are found for you by the public node directory; '
                           'pin your own and nothing else is used.',
                     ),
-                    const SizedBox(height: KvSpace.l),
-                    const KvRuledLabel('My own node', rule: false),
-                    const SizedBox(height: KvSpace.s),
+                    const _SectionHeader('My own node'),
                     _picker(),
                     ..._sources(),
                   ],
@@ -823,7 +824,10 @@ class _NodeScreenState extends State<NodeScreen> {
             pinned != null;
         return KvRowContainer(
           divided: false,
-          inset: const EdgeInsets.all(KvSpace.s20),
+          inset: const EdgeInsets.symmetric(
+            horizontal: KvSpace.s20,
+            vertical: KvSpace.m,
+          ),
           children: [
             LayoutBuilder(
               builder: (context, constraints) {
@@ -861,7 +865,10 @@ class _NodeScreenState extends State<NodeScreen> {
                       tone: tone,
                       busy: hunting || (!connected && !offline),
                       title: title,
-                      endpoint: endpoint == null ? null : _hostOf(endpoint),
+                      // **In full** — `wss://host:port`, wrapping to a second
+                      // line rather than cut to a host (founder on glass,
+                      // 2026-09-05: *"let the link be in full"*).
+                      endpoint: endpoint,
                       trailing: beside ? pill : null,
                     ),
                     if (news) ...[
@@ -926,7 +933,7 @@ class _NodeScreenState extends State<NodeScreen> {
     return KvRowContainer(
       children: [
         Padding(
-          padding: const EdgeInsets.only(top: KvSpace.s10, bottom: KvSpace.sm),
+          padding: const EdgeInsets.only(top: KvSpace.s, bottom: KvSpace.s),
           child: ListenableBuilder(
             listenable: Listenable.merge([_latency, s.connected]),
             builder: (context, _) {
@@ -1230,11 +1237,16 @@ class _NodeScreenState extends State<NodeScreen> {
     final rate = widget.rate;
     if (explorer == null && rate == null) return const [];
     return [
-      // The header row is 44 dp with its words centred, so the gaps around it
-      // are what leave the title where `MY OWN NODE`'s sits (measured).
-      const SizedBox(height: KvSpace.sm),
       _SectionHeader('Sources', info: _sourcesInfo),
+      // **The host and the chevron sit close to the card's edge** (founder
+      // on glass, 2026-09-05): 12 on the right where the card's rule is 20.
       KvRowContainer(
+        inset: const EdgeInsets.fromLTRB(
+          KvSpace.s20,
+          KvSpace.xs,
+          KvSpace.sm,
+          KvSpace.xs,
+        ),
         children: [
           if (explorer != null)
             ValueListenableBuilder<ExplorerChoice?>(
@@ -1335,49 +1347,70 @@ class _SectionHeader extends StatelessWidget {
 
   final String label;
 
-  /// The explainer's open state; null draws no mark.
+  /// The explainer's open state; null draws no mark and no target.
   final ValueNotifier<bool>? info;
 
-  /// The row is the target — 44 dp tall, the mark and the words together —
-  /// so the glyph sits on the card's own left edge like `MY OWN NODE` does
-  /// and the caps title is as tappable as the circle before it (BG-12).
-  static const double height = 44;
+  /// A header that opens something is a target, and BG-12's floor is 52 —
+  /// so the row is 52 tall with its words set low in it (`Alignment` 0.25),
+  /// which puts the title 24 dp under the card above and 12 dp over the card
+  /// below: the render's own rhythm around `MY OWN NODE`, measured. A plain
+  /// header is not a control and takes only [plainHeight].
+  static const double height = 52;
+  static const double plainHeight = 36;
+
+  /// Where the words sit inside the row — low, so the air the target needs
+  /// falls above the title where the section break is.
+  static const Alignment _seat = Alignment(-1, 0.25);
 
   @override
   Widget build(BuildContext context) {
     final info = this.info;
-    if (info == null) return KvRuledLabel(label, rule: false);
+    final title = KvRuledLabel(label, tight: true, rule: false);
+    if (info == null) {
+      return SizedBox(
+        height: plainHeight,
+        child: Align(alignment: _seat, child: title),
+      );
+    }
     return ValueListenableBuilder<bool>(
       valueListenable: info,
-      builder: (context, open, _) => Align(
-        alignment: Alignment.centerLeft,
-        child: Semantics(
-          // Its own node, so a reader lands on one control and not on a
-          // label merged with the caps title beside it.
-          container: true,
-          button: true,
-          toggled: open,
-          label: 'About ${label.toLowerCase()}',
-          child: ExcludeSemantics(
-            child: InkWell(
-              onTap: () => info.value = !open,
-              borderRadius: BorderRadius.circular(KvRadius.pill),
-              highlightColor: KvColor.keyPressed,
-              splashFactory: NoSplash.splashFactory,
-              child: SizedBox(
-                height: height,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    KvGlyphIcon(
-                      KvGlyph.info,
-                      tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
-                      size: 16,
+      builder: (context, open, _) => SizedBox(
+        height: height,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Semantics(
+            // Its own node, so a reader lands on one control and not on a
+            // label merged with the caps title beside it.
+            container: true,
+            button: true,
+            toggled: open,
+            label: 'About ${label.toLowerCase()}',
+            child: ExcludeSemantics(
+              child: InkWell(
+                onTap: () => info.value = !open,
+                borderRadius: BorderRadius.circular(KvRadius.pill),
+                highlightColor: KvColor.keyPressed,
+                splashFactory: NoSplash.splashFactory,
+                child: SizedBox(
+                  height: height,
+                  child: Align(
+                    alignment: _seat,
+                    // **The mark follows the words** (founder on glass,
+                    // 2026-09-05: *"info marks should be after not before"*).
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        title,
+                        const SizedBox(width: KvSpace.s),
+                        KvGlyphIcon(
+                          KvGlyph.info,
+                          tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
+                          size: 16,
+                        ),
+                        const SizedBox(width: KvSpace.xs),
+                      ],
                     ),
-                    const SizedBox(width: KvSpace.s),
-                    KvRuledLabel(label, tight: true, rule: false),
-                    const SizedBox(width: KvSpace.s),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -2033,7 +2066,7 @@ class _SourceRow extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: KvSpace.s),
+                const SizedBox(width: KvSpace.xs),
                 const KvGlyphIcon(
                   KvGlyph.chevron,
                   tone: KvColor.inkMeta,

@@ -82,8 +82,11 @@ class KvFactLine extends StatelessWidget {
     fontFamily: KvFont.ui,
     fontSize: 13,
     height: 19 / 13,
-    fontWeight: strongLabel ? FontWeight.w600 : FontWeight.w400,
-    fontVariations: strongLabel ? KvWeight.w600 : KvWeight.w400,
+    // A fact's label carries a little weight — 500, the founder's own bar
+    // on glass (2026-09-05): *Sent · To · Network fee · Transaction ID* and
+    // the connection card's rows, all at once from here.
+    fontWeight: strongLabel ? FontWeight.w600 : FontWeight.w500,
+    fontVariations: strongLabel ? KvWeight.w600 : KvWeight.w500,
     color: strongLabel ? KvColor.ink : (labelColor ?? KvColor.inkDim),
   );
 

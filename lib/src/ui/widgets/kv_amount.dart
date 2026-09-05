@@ -134,6 +134,7 @@ class KvAmount extends StatelessWidget {
     this.emphasis,
     this.direction = KvMoneyDirection.internal,
     this.stale = false,
+    this.muted = false,
     this.size,
     this.fractionDigits,
     this.rolling = false,
@@ -164,6 +165,13 @@ class KvAmount extends StatelessWidget {
   /// beside a dimmed reading — that belongs to the line that vouches for the
   /// number, not to the number itself.
   final bool stale;
+
+  /// **The figure in `inkDim`, its sign and weight kept.** A ledger row under
+  /// a dark link dims as a region (D-276), and a hued figure at that opacity
+  /// falls under BG-14's floor while `inkDim` clears it — so the row asks for
+  /// the tone and keeps the sign, the arrow and the word carrying direction
+  /// (BG-7's other channels) until the link is back.
+  final bool muted;
 
   /// Overrides the ramp size for a composition that needs one (the plated
   /// balance reads one step down from the ramp because the unit now sits
@@ -237,11 +245,13 @@ class KvAmount extends StatelessWidget {
   /// The cost BG-26 named — hue grading the *size* of money — is answered by
   /// weight instead (see [_weight]): incoming 700, outgoing 500. A balance,
   /// a fee and a self-send carry no direction and stay [KvColor.ink].
-  Color get _digitTone => switch (direction) {
-    KvMoneyDirection.incoming => KvColor.ok,
-    KvMoneyDirection.outgoing => KvColor.risk,
-    KvMoneyDirection.internal => KvColor.ink,
-  };
+  Color get _digitTone => muted
+      ? KvColor.inkDim
+      : switch (direction) {
+          KvMoneyDirection.incoming => KvColor.ok,
+          KvMoneyDirection.outgoing => KvColor.risk,
+          KvMoneyDirection.internal => KvColor.ink,
+        };
 
   /// The quiet run. A directed figure is **one object in one hue** — splitting
   /// its fraction into a second colour would put two channels on one number —
