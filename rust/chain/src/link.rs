@@ -882,6 +882,9 @@ pub struct ProbeOutcome {
     /// The node's RPC API major — carried for forensics (winners' majors
     /// climbing is the early signal of a network-wide upgrade wave).
     pub rpc_api_version: u16,
+    /// Wall time of the `get_server_info` answer alone, in ms — the node's
+    /// own round trip, apart from the dial.
+    pub info_ms: u64,
 }
 
 /// Whether a node's RPC API major is servable by this pinned client. `<=`,
@@ -1106,6 +1109,9 @@ pub async fn probe_endpoint(
                 sanitize_node_text(&e.to_string())
             ))
         })?;
+        // Timed on its own, so a caller can report the node's answer time
+        // apart from the dial (`T5`'s `Test` prints it; the race ignores it).
+        let asked = std::time::Instant::now();
         let info = tokio::time::timeout(timeout, client.get_server_info())
             .await
             .map_err(|_| ChainError::Message(format!("probe info {url}: timeout")))?
@@ -1141,9 +1147,13 @@ pub async fn probe_endpoint(
         }
         Ok(ProbeOutcome {
             url: url.to_string(),
-            server_version: info.server_version,
+            // Node-originated text crosses the FFI and reaches the glass only
+            // through the crate's own filter — the same rule the error arms
+            // above already keep (`wallet-security` + `ffi-leak`, UX-R3).
+            server_version: sanitize_node_text(&info.server_version),
             virtual_daa_score: info.virtual_daa_score,
             rpc_api_version: info.rpc_api_version,
+            info_ms: u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
     }
     .await;

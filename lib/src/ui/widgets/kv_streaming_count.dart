@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../theme/tokens.dart';
 
@@ -62,10 +63,22 @@ class KvStreamingCount extends StatefulWidget {
   /// the first cut of this widget did to the money plate's `DAA —`.
   final Widget Function(BuildContext context, BigInt? shown) builder;
 
-  /// How long to take crossing one reading-to-reading gap. Match it to the
-  /// poll cadence so the tween lands just as the next reading arrives; a late
-  /// reading simply means the counter has already stopped, which is honest.
+  /// **The longest a crossing may take.** The tween actually crosses the gap
+  /// the readings themselves arrived in — measured on the frame clock between
+  /// the previous reading and this one, clamped to `[`[minInterval]`, this]` —
+  /// so the count lands on each reading as the next one arrives.
+  ///
+  /// A fixed interval was the first cut, and it was wrong the moment the bridge
+  /// started coalescing (UX-R3, second beat): readings at four a second against
+  /// a one-second tween restarted the crossing every 250 ms, so the counter
+  /// never landed and trailed reality by about seven DAA in steady state. A
+  /// late reading still simply means the counter has already stopped, which is
+  /// honest.
   final Duration interval;
+
+  /// The shortest crossing worth animating: two readings inside this are one
+  /// step, and a step is what a snap is for.
+  static const Duration minInterval = Duration(milliseconds: 100);
 
   /// The link is not live, so no reading is arriving. Motion stops.
   final bool stalled;
@@ -92,11 +105,34 @@ class _KvStreamingCountState extends State<KvStreamingCount>
   /// magnitudes where even the arithmetic below stops being cheap.
   static final BigInt _maxExact = BigInt.two.pow(53);
 
+  /// When the previous reading arrived, on the frame clock — the scheduler's
+  /// own stamp rather than the wall clock, so a test that pumps 250 ms
+  /// measures 250 ms and the crossing it drives is deterministic.
+  Duration? _arrivedAt;
+
+  /// The gap the newest reading arrived in, or the ceiling when there is no
+  /// previous arrival to measure from.
+  Duration _gap() {
+    final now = SchedulerBinding.instance.currentFrameTimeStamp;
+    final previous = _arrivedAt;
+    _arrivedAt = now;
+    if (previous == null) return widget.interval;
+    final gap = now - previous;
+    if (gap < KvStreamingCount.minInterval) return KvStreamingCount.minInterval;
+    if (gap > widget.interval) return widget.interval;
+    return gap;
+  }
+
   @override
   void initState() {
     super.initState();
     _to = widget.value;
     _from = widget.value;
+    // The first reading is an arrival too: without its stamp the second one
+    // had no gap to measure and crossed over the whole ceiling.
+    if (widget.value != null) {
+      _arrivedAt = SchedulerBinding.instance.currentFrameTimeStamp;
+    }
   }
 
   @override
@@ -121,6 +157,7 @@ class _KvStreamingCountState extends State<KvStreamingCount>
     final decreased = next < current;
     final tooBig = next.abs() > _maxExact || current.abs() > _maxExact;
     final reduced = MediaQuery.disableAnimationsOf(context);
+    final gap = _gap();
     if (_from == null || decreased || tooBig || reduced || widget.stalled) {
       _c.stop();
       setState(() {
@@ -134,7 +171,7 @@ class _KvStreamingCountState extends State<KvStreamingCount>
       _to = next;
     });
     _c
-      ..duration = widget.interval
+      ..duration = gap
       ..forward(from: 0);
   }
 

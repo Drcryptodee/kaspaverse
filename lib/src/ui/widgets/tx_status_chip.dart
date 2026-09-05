@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../../rust/api/transport.dart';
-import '../../rust/api/wallet.dart';
 import '../theme/tokens.dart';
 import 'kv_breath.dart';
 
@@ -10,42 +9,10 @@ import 'kv_breath.dart';
 /// marked; founder-nodded 2026-07-09).
 enum TxChipState { pending, accepted, stalled, none }
 
-/// The chip counter's rendering ceiling (founder-ruled 2026-07-10, finding
-/// 13): a feed chip streams its count only BELOW this depth — at or above it
-/// the chip renders nothing at all. A transaction that aged past display
-/// security has nothing left to stream (the cold-start ">19,000
-/// confirmations" storm dies here); the 100→1000 tail up to the tracker's
-/// Confirmed threshold is the future transaction-details screen's range.
-const int chipCounterCeiling = 100;
-
-/// Chip state for a wallet activity row: the V1 acceptance overlay
-/// (`maturity`) plus the V2 stall flag. `unknown` (V2b, finding 13 — a
-/// cold-start fold before the node spoke) renders QUIET, exactly like
-/// settled: an unresolvable row must claim nothing, and the first real fold
-/// or acceptance ping resolves it. Pure; tested.
-TxChipState chipStateOf(MaturityState maturity, {required bool stalled}) {
-  return switch (maturity) {
-    MaturityState.confirmed => TxChipState.none,
-    MaturityState.unknown when stalled => TxChipState.stalled,
-    MaturityState.unknown => TxChipState.none,
-    MaturityState.accepted => TxChipState.accepted,
-    MaturityState.pending when stalled => TxChipState.stalled,
-    MaturityState.pending => TxChipState.pending,
-  };
-}
-
-/// The depth gate (finding 13, part a): a counter at/above
-/// [chipCounterCeiling] extinguishes the chip regardless of state — deep
-/// enough is quiet, whatever lane the number came from (tracker blue depth
-/// or DAA distance). Stalled is exempt: it has no depth to count and must
-/// stay visible. Pure; tested.
-TxChipState gateByDepth(TxChipState state, int? confirmations) {
-  if (state == TxChipState.stalled) return state;
-  if (confirmations != null && confirmations >= chipCounterCeiling) {
-    return TxChipState.none;
-  }
-  return state;
-}
+// `chipStateOf`, `gateByDepth` and `chipCounterCeiling` lived here until
+// UX-R3's second beat. The burial ladder (`KvBurial.rungFor`) reads a plain
+// `stalled` bool now, and the ceiling — `100`, the last maturity threshold
+// typed into `lib/` — gated nothing on any remaining path (D-249).
 
 /// Chip state for a thread message from its tracker status. `null` (unwatched
 /// or horizon-pruned) and `confirmed` are both the quiet terminal; `displaced`

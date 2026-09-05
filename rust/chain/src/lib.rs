@@ -31,7 +31,7 @@ pub use acceptance::{
     pruning_horizon_ms, AcceptanceEvent, AcceptanceTracker, TxStatus, VccBatch, WatchSource,
 };
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
-pub use dag_monitor::{DagEvent, DagMonitor};
+pub use dag_monitor::{DagEvent, DagMonitor, LinkProbe, PROBE_TIMEOUT};
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};
 pub use node_config::NodeConfig;

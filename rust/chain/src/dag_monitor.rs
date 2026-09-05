@@ -28,7 +28,11 @@ use crate::transport::{self, TransportEvent};
 
 /// Per-candidate probe budget in the connect race (dial + `get_server_info`).
 /// Bounded like the old cached fast path (3 s) plus one health round-trip.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+/// **Public, because `T5`'s `Test` runs the same probe on a node the user
+/// typed** — one budget, so a node the test accepts is a node the race would
+/// accept, by construction rather than by two literals agreeing
+/// (`consensus-auditor`, UX-R3 second beat).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// **The deadline on one `probe_link` round trip.** Under the node surface's
 /// 2 s poll, so a stalled node cannot stack in-flight probes and a reading can
@@ -523,6 +527,17 @@ enum StallVerdict {
     Refuse { silent_secs: u64 },
     /// Not connected: there is no defendant. Kick the hunt (C4) instead.
     Hunting,
+}
+
+/// One reading of the bound link — see [`DagMonitor::probe_link`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkProbe {
+    /// Round trip of one `get_server_info` on the bound socket, in ms.
+    pub latency_ms: Option<u64>,
+    /// The node's own `is_synced`; `None` when it did not answer.
+    pub synced: Option<bool>,
+    /// The node's peer count; `None` when not asked for, or not answered.
+    pub peers: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -1079,23 +1094,32 @@ impl DagMonitor {
     /// the ctl is signalled only for events the identity gate accepted. That
     /// is what lets D-005 stay true while the client underneath rotates — and
     /// what keeps the L59 funds-visibility lanes off the re-plumb path.
-    /// **One honest round trip to the node, and what it is connected to.**
+    /// **One honest round trip to the node, its own word on whether it is
+    /// synced, and — when asked — how many peers it has.**
     ///
-    /// `T5`'s connection card reads a latency in milliseconds and a peer count,
-    /// and neither may be invented — BG-8's rule is that the absence of a
-    /// reading is its own face, so both are `Option` and both come back `None`
-    /// the moment the call does not answer.
+    /// `T5`'s connection card reads all three, and none may be invented —
+    /// BG-8's rule is that the absence of a reading is its own face, so every
+    /// field is an `Option` and comes back `None` the moment the call does not
+    /// answer.
     ///
-    /// **What the latency measures, exactly:** the wall time of a `ping` on the
-    /// bound wRPC socket — request out, response back. It is the same thing a
-    /// user means by *how far away is this node*, it costs one empty frame each
-    /// way, and it is measured rather than modelled. It is deliberately NOT
-    /// derived from block age: a node can be answering instantly while the DAG
-    /// is quiet, and the two would then contradict each other on one card.
+    /// **What the latency measures, exactly:** the wall time of one
+    /// `get_server_info` on the bound wRPC socket — request out, response back.
+    /// It costs what a `ping` costs (one small frame each way; the answer is a
+    /// version string and five scalars the node reads off its own state) and,
+    /// unlike a `ping`, it carries `is_synced`: the fact the connect race checks
+    /// once at candidacy and never again, on a bind that can stay up for days.
+    /// It is deliberately NOT derived from block age: a node can be answering
+    /// instantly while the DAG is quiet, and the two would then contradict each
+    /// other on one card.
     ///
-    /// **Whose peers:** the node's, from `get_connected_peer_info` — a light
-    /// wallet has exactly one peer (this node), so the useful number is how
-    /// well connected the node we are trusting is. The surface says so.
+    /// **Whose peers, and why they are optional:** the node's, from
+    /// `get_connections` — two integers, where `get_connected_peer_info`
+    /// serialises every peer's address, agent and timings to answer the same
+    /// question. A light wallet has exactly one peer (this node), so the useful
+    /// number is how well connected the node we are trusting is. It changes
+    /// over minutes while a latency changes over seconds, so the caller asks
+    /// for it on its own slower cadence and `None` means *not asked* as well
+    /// as *not answered* — the caller knows which.
     ///
     /// Called only while the node surface is open. It takes no lock, holds
     /// nothing across the await, and never retries: a probe that papered over a
@@ -1110,19 +1134,30 @@ impl DagMonitor {
     /// reading overwrite a newer fast one: the confidently-wrong-number this
     /// probe exists to prevent (BG-8). A probe that misses its cadence answers
     /// `None`, which is a face the surface already draws.
-    pub async fn probe_link(&self) -> (Option<u64>, Option<u32>) {
+    pub async fn probe_link(&self, with_peers: bool) -> LinkProbe {
         let rpc = self.inner.link_rpc.clone();
         let started = std::time::Instant::now();
-        let latency = match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.ping()).await {
-            Ok(Ok(())) => u64::try_from(started.elapsed().as_millis()).ok(),
-            _ => None,
-        };
-        let peers =
-            match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.get_connected_peer_info()).await {
-                Ok(Ok(info)) => u32::try_from(info.peer_info.len()).ok(),
-                _ => None,
+        let (latency_ms, synced) =
+            match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.get_server_info()).await {
+                Ok(Ok(info)) => (
+                    u64::try_from(started.elapsed().as_millis()).ok(),
+                    Some(info.is_synced),
+                ),
+                _ => (None, None),
             };
-        (latency, peers)
+        let peers = if with_peers {
+            match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.get_connections(false)).await {
+                Ok(Ok(connections)) => Some(u32::from(connections.peers)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        LinkProbe {
+            latency_ms,
+            synced,
+            peers,
+        }
     }
 
     pub fn rpc(&self) -> Rpc {

@@ -60,9 +60,27 @@ extension KvLampToneTokens on KvLampTone {
 /// survives greyscale, colour-blindness and a screen reader (BG-7). Decorative
 /// to semantics for exactly that reason.
 class KvLamp extends StatelessWidget {
-  const KvLamp(this.tone, {super.key});
+  const KvLamp(KvLampTone this.tone, {super.key}) : _color = null, _ring = null;
 
-  final KvLampTone tone;
+  /// **A lamp in a hue the three-signal vocabulary does not carry** — the
+  /// burial ladder's `settled` blue, and a rung's hue mid-crossfade. D-248
+  /// fences that hue out of [KvLampTone] on purpose (a fourth member is how
+  /// a fenced hue escapes), so the lamp takes a colour and its ring directly
+  /// rather than the ladder drawing a second lamp of its own (item 33).
+  const KvLamp.hued({super.key, required Color color, required Color ring})
+    : tone = null,
+      _color = color,
+      _ring = ring;
+
+  final KvLampTone? tone;
+  final Color? _color;
+  final Color? _ring;
+
+  /// The disc's colour.
+  Color get color => _color ?? tone!.color;
+
+  /// The ring's colour.
+  Color get ringColor => _ring ?? tone!.ring;
 
   /// The disc (§4).
   static const double size = 8;
@@ -79,15 +97,12 @@ class KvLamp extends StatelessWidget {
       child: Container(
         width: extent,
         height: extent,
-        decoration: BoxDecoration(shape: BoxShape.circle, color: tone.ring),
+        decoration: BoxDecoration(shape: BoxShape.circle, color: ringColor),
         child: Center(
           child: Container(
             width: size,
             height: size,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: tone.color,
-            ),
+            decoration: BoxDecoration(shape: BoxShape.circle, color: color),
           ),
         ),
       ),

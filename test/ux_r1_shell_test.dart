@@ -83,6 +83,13 @@ void main() {
             'the receipt head bounds its own address run against the width it '
             'was given — a legibility floor, never a layout chosen from a '
             'width',
+        'lib/src/ui/node/node_screen.dart':
+            'the node row measures the space it was GIVEN to decide whether '
+            'the `Switch node` pill can stand beside the title without breaking '
+            'a word, and stacks it under the sentence when it cannot — '
+            '`KvFactLine`\'s stack-when-tight, a legibility floor found in the '
+            '320 dp / 1.3× frame, never a layout chosen from a width (UX-R3, '
+            'second beat)',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

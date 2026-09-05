@@ -16,6 +16,7 @@ import 'widgets/kv_activity.dart';
 import 'widgets/kv_amount.dart';
 import 'widgets/kv_breath.dart';
 import 'widgets/kv_burial_mark.dart';
+import 'widgets/kv_derived.dart';
 import 'widgets/kv_cadence.dart';
 import 'widgets/kv_chrome.dart';
 import 'widgets/kv_coming_soon.dart';
@@ -29,7 +30,6 @@ import 'widgets/kv_streaming_count.dart';
 import 'widgets/kv_tabs.dart';
 import 'widgets/kv_two_pane.dart';
 import 'widgets/status_beacon.dart';
-import 'widgets/tx_status_chip.dart';
 
 /// `FiatScope` moved to `widgets/kv_fiat.dart` when a second and third
 /// surface began drawing a price (Send's amount, the signing sheet). Re-exported
@@ -75,7 +75,7 @@ export 'widgets/kv_fiat.dart' show FiatScope, KvFiatLine;
 /// arrives.
 ///
 /// V4 scoping is unchanged: each region listens only to what it renders
-/// (derived, value-gated notifiers — see [_Derived]). A balance tick never
+/// (derived, value-gated notifiers — see [KvDerived]). A balance tick never
 /// rebuilds the activity list, a DAA tick repaints only the chain-clock line
 /// and the feed, and the 1 s tick lands in the clock notifier, never a
 /// whole-screen `setState`. The injected listenables are the test seam and
@@ -270,7 +270,7 @@ class WalletScope {
 }
 
 /// The link, as the plate renders it. Records compare structurally, which is
-/// what lets [_Derived] swallow the no-op ticks.
+/// what lets [KvDerived] swallow the no-op ticks.
 typedef _LinkView = ({
   BeaconState state,
   String? error,
@@ -298,71 +298,6 @@ typedef _BalanceView = ({
   bool discoveryIncomplete,
 });
 
-/// The V4 scoping primitive: recomputes [_compute] whenever any source
-/// notifies, and — because [ValueNotifier] only notifies when the new value
-/// differs — swallows every tick that would not change pixels.
-///
-/// ## It survives its own disposal, and that is deliberate
-///
-/// `_dimmed` is **handed across route boundaries on purpose** — Send and the
-/// transaction detail are given this screen's own bit rather than deriving
-/// one of their own, so two surfaces can never disagree about whether the
-/// wallet is connected. That makes the consumers *outlive the owner* in one
-/// case the owner cannot control: a teardown of the whole authenticated stack
-/// (BG-13's discard on lock, or the app closing) disposes the element tree
-/// depth-first, so the money screen underneath can go first and a Send screen
-/// still mounted above it then unhooks from a dead notifier.
-///
-/// `ChangeNotifier` asserts on that — *"a _Derived&lt;bool&gt; was used after
-/// being disposed"*, which the founder hit on Send step 2 (2026-09-04). The
-/// error is debug-only and nothing was actually broken, but a red screen on a
-/// funds surface is a defect regardless.
-///
-/// So a disposed `_Derived` becomes **frozen rather than poisoned**: it stops
-/// listening to its sources and will never notify again, its last value stays
-/// readable, and hooking or unhooking is a no-op. A consumer tearing down
-/// after its owner gets the last honest reading instead of an assertion, and
-/// the *reason* the assertion exists — a notifier that keeps firing into dead
-/// widgets — is still impossible, because the sources are unhooked first.
-class _Derived<T> extends ValueNotifier<T> {
-  _Derived(this._sources, this._compute) : super(_compute()) {
-    for (final s in _sources) {
-      s.addListener(_recompute);
-    }
-  }
-
-  final List<Listenable> _sources;
-  final T Function() _compute;
-  bool _disposed = false;
-
-  void _recompute() {
-    if (_disposed) return;
-    value = _compute();
-  }
-
-  @override
-  void addListener(VoidCallback listener) {
-    if (_disposed) return;
-    super.addListener(listener);
-  }
-
-  @override
-  void removeListener(VoidCallback listener) {
-    if (_disposed) return;
-    super.removeListener(listener);
-  }
-
-  @override
-  void dispose() {
-    if (_disposed) return;
-    for (final s in _sources) {
-      s.removeListener(_recompute);
-    }
-    _disposed = true;
-    super.dispose();
-  }
-}
-
 class _HomeScreenState extends State<HomeScreen> {
   Timer? _ticker;
 
@@ -370,10 +305,10 @@ class _HomeScreenState extends State<HomeScreen> {
   /// time listen to THIS, so the tick never lands as a whole-screen setState.
   late final ValueNotifier<DateTime> _now;
 
-  late final _Derived<_LinkView> _link;
-  late final _Derived<bool> _dimmed;
-  late final _Derived<_TrustView> _trust;
-  late final _Derived<_BalanceView> _balance;
+  late final KvDerived<_LinkView> _link;
+  late final KvDerived<bool> _dimmed;
+  late final KvDerived<_TrustView> _trust;
+  late final KvDerived<_BalanceView> _balance;
 
   /// Everything the activity feed reads. The feed rebuilds on activity
   /// snapshots, depth ticks, DAA ticks and the 1 s clock (its counters and
@@ -402,7 +337,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // and not one moment longer (L5's ref-counted attach/detach).
     widget.fiat?.attach?.call();
     _now = ValueNotifier(widget.clock());
-    _link = _Derived([
+    _link = KvDerived([
       widget.chain.connected,
       widget.chain.error,
       widget.chain.lastUpdate,
@@ -415,17 +350,17 @@ class _HomeScreenState extends State<HomeScreen> {
     // BG-8 dimming is "not live", not "stale" specifically: since C7 a dark
     // link can read *finding a node…* or *phone offline* instead of stale, and
     // last-known data must never sit at full brightness through any of them.
-    _dimmed = _Derived([
+    _dimmed = KvDerived([
       _link,
     ], () => _link.value.state != BeaconState.connected);
-    _trust = _Derived([
+    _trust = KvDerived([
       _link,
       widget.wallet.syncing,
       widget.wallet.utxoIndexMissing,
       if (widget.wallet.discoveryIncomplete != null)
         widget.wallet.discoveryIncomplete!,
     ], _computeTrust);
-    _balance = _Derived(
+    _balance = KvDerived(
       [
         widget.wallet.mature,
         widget.wallet.pending,
@@ -1735,25 +1670,6 @@ class _LedgerRow extends StatelessWidget {
   /// Null ⇒ this row is a record, not a control.
   final void Function(String txid)? onOpen;
 
-  /// The chip state, with the finding-18 revival: a send whose base state is
-  /// the quiet terminal (`none` — wallet-core confirmed it at acceptance) but
-  /// which still has a live sub-ceiling acceptance-depth counts as `accepted`
-  /// (green, streaming), exactly like a maturing deposit; the depth gate
-  /// quiets it once deep. Pure display; the underlying maturity truth is
-  /// untouched.
-  TxChipState _chipState() {
-    final base = gateByDepth(
-      chipStateOf(record.maturity, stalled: record.stalled),
-      confirmations,
-    );
-    if (base == TxChipState.none &&
-        confirmations != null &&
-        record.direction == ActivityDirection.outgoing) {
-      return gateByDepth(TxChipState.accepted, confirmations);
-    }
-    return base;
-  }
-
   @override
   Widget build(BuildContext context) {
     // Direction rides FOUR ways at once — word, sign, colour and weight — so
@@ -1819,7 +1735,7 @@ class _LedgerRow extends StatelessWidget {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               KvBurialMark(
-                state: _chipState(),
+                stalled: record.stalled,
                 confirmations: confirmations,
                 maturity: record.maturity,
                 direction: record.direction,

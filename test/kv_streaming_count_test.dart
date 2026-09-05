@@ -31,6 +31,44 @@ Widget _host(
 
 void main() {
   group('KvStreamingCount — motion that cannot overstate the chain (D-226)', () {
+    testWidgets(
+      'the tween crosses the gap the readings arrived in, not a fixed second',
+      (tester) async {
+        // Coalesced readings land four times a second (UX-R3, second beat).
+        // Against a one-second tween the counter restarted every 250 ms and
+        // never landed — it trailed reality by about seven DAA in steady state.
+        await tester.pumpWidget(_host(BigInt.from(100)));
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pumpWidget(_host(BigInt.from(110)));
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pumpWidget(_host(BigInt.from(120)));
+        await tester.pump(); // frame 0 of the third crossing
+        expect(
+          _shown(tester),
+          110,
+          reason: 'it landed on the previous reading as the next one arrived',
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(_shown(tester), 120);
+      },
+    );
+
+    testWidgets('a sparse arrival still crosses within the ceiling', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_host(BigInt.from(100)));
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpWidget(_host(BigInt.from(130)));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(
+        _shown(tester),
+        inInclusiveRange(101, 129),
+        reason: 'the gap is clamped to `interval`, never three seconds',
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(_shown(tester), 130);
+    });
+
     testWidgets('the first reading SNAPS: there is no interval to replay', (
       tester,
     ) async {
@@ -47,6 +85,9 @@ void main() {
       // NOT reached, which is the wallet-clock defect in a new costume.
       await tester.pumpWidget(_host(BigInt.from(100)));
       expect(_shown(tester), 100);
+      // The readings arrive a poll apart: the tween crosses the observed
+      // gap, so a second reading in the same frame would cross in 100 ms.
+      await tester.pump(KvMotion.stream);
 
       await tester.pumpWidget(_host(BigInt.from(110)));
       await tester.pump(); // frame 0 of the tween
@@ -106,6 +147,9 @@ void main() {
       // dead is pure prediction, and it is the P0.3 scar's shape: a frozen
       // reading presented as a live one.
       await tester.pumpWidget(_host(BigInt.from(200)));
+      // The readings arrive a poll apart: the tween crosses the observed
+      // gap, so a second reading in the same frame would cross in 100 ms.
+      await tester.pump(KvMotion.stream);
       await tester.pumpWidget(_host(BigInt.from(220)));
       await tester.pump(const Duration(milliseconds: 200));
       expect(_shown(tester), lessThan(220));

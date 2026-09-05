@@ -92,15 +92,44 @@ class _FakeSeam {
   bool probeThrows = false;
   int probes = 0;
 
-  Future<({int? latencyMs, int? peers})> probe() async {
+  /// The node's own word on its sync, as the probe reports it.
+  bool? synced = true;
+
+  /// Which ticks asked for the peer count, in order.
+  final List<bool> peerAsks = <bool>[];
+
+  Future<({int? latencyMs, int? peers, bool? synced})> probe({
+    required bool peers,
+  }) async {
     probes++;
+    peerAsks.add(peers);
     if (probeThrows) throw StateError('the node went away');
-    return (latencyMs: latencyMs, peers: peers);
+    return (
+      latencyMs: latencyMs,
+      peers: peers ? this.peers : null,
+      synced: synced,
+    );
+  }
+
+  /// `T5`'s `Test`, faked: what a passing node answers, or the refusal Rust
+  /// would throw. The URLs tested land in [tests].
+  ({int latencyMs, String serverVersion, BigInt daa})? testAnswer;
+  Object? testRefuse;
+  final List<String> tests = <String>[];
+
+  Future<({int latencyMs, String serverVersion, BigInt daa})> testNode(
+    String url,
+  ) async {
+    tests.add(url);
+    if (testRefuse != null) throw testRefuse!;
+    return testAnswer ??
+        (latencyMs: 84, serverVersion: '1.0.1', daa: BigInt.from(528980542));
   }
 
   NodeScope scopeWith({
     Future<int?> Function()? blockAgeSecs,
     bool withProbe = false,
+    bool withTest = false,
   }) => NodeScope(
     connected: connected,
     activeEndpoint: activeEndpoint,
@@ -116,6 +145,7 @@ class _FakeSeam {
     refreshConfig: refresh,
     blockAgeSecs: blockAgeSecs,
     probeLink: withProbe ? probe : null,
+    testNode: withTest ? testNode : null,
   );
 }
 
@@ -199,6 +229,254 @@ class _FakeRate {
   );
 }
 
+/// **The poll runs only while the screen can be seen** (UX-R3, second beat).
+/// The first cut's `Timer.periodic` kept two real RPC calls going every two
+/// seconds with the app in the background and with another route covering
+/// this one.
+void pollLifecycleTests() {
+  group('the poll runs only while the screen can be seen', () {
+    testWidgets('backgrounded it stops asking; resumed it asks at once', (
+      tester,
+    ) async {
+      final seam = _FakeSeam()
+        ..latencyMs = 80
+        ..peers = 9;
+      await _pumpScreen(tester, seam, withProbe: true, settle: false);
+      await tester.pump();
+      expect(seam.probes, 1, reason: 'the open ticks at once');
+      await tester.pump(const Duration(seconds: 2));
+      expect(seam.probes, 2);
+
+      // The binding only accepts the transitions the OS makes: resumed →
+      // inactive → hidden → paused, and back the same way.
+      for (final state in const [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      expect(
+        seam.probes,
+        2,
+        reason: 'nothing while the app is in the background',
+      );
+
+      for (final state in const [
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pump();
+      expect(
+        seam.probes,
+        3,
+        reason: 'a returning user is looking at the glass NOW',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('covered by another route it stops; uncovered it resumes', (
+      tester,
+    ) async {
+      final seam = _FakeSeam()..latencyMs = 80;
+      await _pumpScreen(tester, seam, withProbe: true, settle: false);
+      await tester.pump();
+      expect(seam.probes, 1);
+
+      final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: SizedBox()),
+        ),
+      );
+      // Pumped by hand: the latency dot breathes for as long as there is a
+      // reading, so a settle would wait on an animation whose whole point is
+      // not to stop. The route's own transition is well inside 400 ms.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(seconds: 6));
+      expect(
+        seam.probes,
+        1,
+        reason: 'a covered screen asks the node for nothing',
+      );
+
+      navigator.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(seam.probes, 2, reason: 'and asks the moment it is back');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets(
+      'the peer count is asked for on the first tick and every fifth',
+      (tester) async {
+        final seam = _FakeSeam()
+          ..latencyMs = 80
+          ..peers = 9;
+        await _pumpScreen(tester, seam, withProbe: true, settle: false);
+        await tester.pump();
+        for (var i = 0; i < 9; i++) {
+          await tester.pump(const Duration(seconds: 2));
+        }
+        expect(seam.peerAsks, [
+          true,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          true,
+        ]);
+        // Between asks the last answer stands — a number that was not asked
+        // for is not a number that went missing.
+        expect(find.text('9'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  });
+
+  group('`T5` — `Test`, the render\'s own affordance', () {
+    testWidgets('it dials the typed node and says what answered', (
+      tester,
+    ) async {
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam, withTest: true);
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'ws://mine.local:17110');
+      await tester.pumpAndSettle();
+      expect(find.text('Test'), findsOneWidget);
+      await tester.tap(find.text('Test'));
+      await tester.pumpAndSettle();
+      // The URL reaches the seam verbatim; Rust validates it, never Dart.
+      expect(seam.tests, ['ws://mine.local:17110']);
+      // A rich run — the three figures in mono (BG-30) — so it is read back
+      // as plain text.
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is Text &&
+              (w.textSpan?.toPlainText() ?? '') ==
+                  'Answers in 84 ms · synced and indexed · kaspad 1.0.1 · '
+                      'DAA 528,980,542',
+        ),
+        findsOneWidget,
+      );
+      // A test is not a pin: nothing was committed.
+      expect(seam.calls, isEmpty);
+    });
+
+    testWidgets('a node the probe refuses says why, in amber', (tester) async {
+      final seam = _FakeSeam()
+        ..testRefuse = StateError('probe ws://mine.local:17110: not synced');
+      await _pumpScreen(tester, seam, withTest: true);
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'ws://mine.local:17110');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Test'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('not synced'), findsOneWidget);
+      expect(find.textContaining('Answers in'), findsNothing);
+    });
+
+    testWidgets('with nothing typed it dials nothing — the reason is already '
+        'on the glass, once', (tester) async {
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam, withTest: true);
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Test'));
+      await tester.pumpAndSettle();
+      expect(seam.tests, isEmpty);
+      // `Use this node`'s own reason, and no second copy of it (BG-19).
+      expect(find.text('Type the address of your node first.'), findsOneWidget);
+    });
+
+    testWidgets('without the seam there is no pill', (tester) async {
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam);
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
+      expect(find.text('Test'), findsNothing);
+    });
+  });
+
+  group('`T5` — the node row, second beat', () {
+    testWidgets(
+      'a node that says it is not synced is a warning on a live link',
+      (tester) async {
+        final seam = _FakeSeam()
+          ..latencyMs = 80
+          ..synced = false;
+        await _pumpScreen(tester, seam, withProbe: true, settle: false);
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Connected to'), findsOneWidget);
+        expect(find.textContaining('still syncing'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      '`Switch node` is the render\'s compact pill in a 52 dp target',
+      (tester) async {
+        final seam = _FakeSeam();
+        await _pumpScreen(tester, seam);
+        final pill = find.text('Switch node');
+        expect(pill, findsOneWidget);
+        // BG-12: the target, whatever the visual measures.
+        final target = find
+            .ancestor(of: pill, matching: find.byType(GestureDetector))
+            .first;
+        expect(
+          tester.getSize(target).height,
+          greaterThanOrEqualTo(KvSpace.touchTarget),
+        );
+        expect(
+          tester.getSize(target).width,
+          greaterThanOrEqualTo(KvSpace.touchTarget),
+        );
+        // The visual: `T5`'s `chip`-filled pill, measured at ~44 dp.
+        final visual = find
+            .ancestor(of: pill, matching: find.byType(AnimatedContainer))
+            .first;
+        expect(tester.getSize(visual).height, closeTo(44, 1));
+        final box = tester.widget<AnimatedContainer>(visual);
+        expect((box.decoration! as BoxDecoration).color, KvColor.chip);
+        // And the endpoint still stands beside it, whole (BG-15's reasoning).
+        expect(find.text('public-1.kaspa.example:17110'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'while hunting, the disc holds the cadence and the pill says so',
+      (tester) async {
+        final seam = _FakeSeam(connected: false);
+        seam.searching.value = true;
+        await _pumpScreen(tester, seam, settle: false);
+        expect(find.text('Searching…'), findsOneWidget);
+        expect(_cadenceRunning(tester), isTrue);
+        expect(
+          find.byType(KvCadence).evaluate().length,
+          1,
+          reason: 'one loading indicator, in the row\'s own status seat',
+        );
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  });
+}
+
 Future<void> _pumpScreen(
   WidgetTester tester,
   _FakeSeam seam, {
@@ -206,6 +484,7 @@ Future<void> _pumpScreen(
   _FakeRate? rate,
   Future<int?> Function()? blockAge,
   bool withProbe = false,
+  bool withTest = false,
   double width = 393,
   // The screen grew two preference sections at UX-3, and a `ListView` only
   // builds what a viewport can reach. A test about the explorer needs the
@@ -237,7 +516,11 @@ Future<void> _pumpScreen(
         // mounted here exactly as the app mounts it at its root (UX-R1's law).
         builder: (context, page) => KvWindow(child: page!),
         home: NodeScreen(
-          scope: seam.scopeWith(blockAgeSecs: blockAge, withProbe: withProbe),
+          scope: seam.scopeWith(
+            blockAgeSecs: blockAge,
+            withProbe: withProbe,
+            withTest: withTest,
+          ),
           explorer: explorer?.scope,
           rate: rate?.scope,
           clock: () => DateTime(2026, 8, 27, 12),
@@ -269,6 +552,7 @@ Future<void> loadBundledFonts() async {
 }
 
 void main() {
+  pollLifecycleTests();
   setUpAll(loadBundledFonts);
 
   /// A healthy link, which is the background every new UX-3 section is judged
@@ -282,7 +566,7 @@ void main() {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
       expect(seam.refreshes, 1);
-      expect(find.text('ws://public-1.kaspa.example:17110'), findsOneWidget);
+      expect(find.text('public-1.kaspa.example:17110'), findsOneWidget);
       expect(find.text('523,216,421'), findsOneWidget);
     });
 
@@ -411,8 +695,8 @@ void main() {
       // and the PNN resolver walk was the census's first unnamed row.
       expect(
         find.text(
-          'Answering — a public community node, found for you by the public '
-          'node directory.',
+          'A public community node, found for you by the public node '
+          'directory.',
         ),
         findsOneWidget,
       );
@@ -427,8 +711,8 @@ void main() {
       // same C7 split as overstating it, pointed the other way.
       expect(
         find.text(
-          'Answering — and looking for a different node. This one keeps '
-          'working until another answers.',
+          'Looking for a different node behind this one. It keeps working '
+          'until another answers.',
         ),
         findsOneWidget,
       );
@@ -460,10 +744,12 @@ void main() {
       seam.osOffline.value = true;
       seam.activeEndpoint.value = null;
       await _pumpScreen(tester, seam);
-      expect(find.text('Your phone has no network.'), findsOneWidget);
-      // `T5`'s node row states the link in words rather than printing a null
-      // endpoint: *Not connected*, in the same seat *Connected to* takes.
-      expect(find.text('Not connected'), findsOneWidget);
+      // `T5`'s row states the link in its title seat: the phone, not a node.
+      expect(find.text('Your phone has no network'), findsOneWidget);
+      expect(
+        find.text('Nothing can be reached until it is back.'),
+        findsOneWidget,
+      );
       // Not hunting: a cadence over a dead radio claims work nobody is doing.
       expect(_cadenceRunning(tester), isFalse);
     });
@@ -539,7 +825,7 @@ void main() {
       await _pumpScreen(tester, seam);
       expect(find.byType(TextField), findsNothing);
 
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsOneWidget);
       // Asking is not pinning: nothing has been sent to Rust yet.
@@ -551,7 +837,7 @@ void main() {
     ) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       expect(find.text('Type the address of your node first.'), findsOneWidget);
 
@@ -565,7 +851,7 @@ void main() {
     ) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '  ws://10.0.0.5:17110 ');
       await tester.pumpAndSettle();
@@ -593,9 +879,9 @@ void main() {
       // `T5`'s connection card grew the screen, so the toggle can sit past an
       // 800 dp viewport. Scroll to it the way a thumb would rather than
       // widening the window — the tap must work on a real phone.
-      await tester.ensureVisible(find.text('Pin a node I run'));
+      await tester.ensureVisible(find.text('Use my own node'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       expect(seam.calls, [null]);
       expect(seam.pinnedNode.value, isNull);
@@ -609,7 +895,7 @@ void main() {
         throws: 'node url must start with ws:// or wss://',
       );
       await _pumpScreen(tester, seam);
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'http://nope');
       await tester.pumpAndSettle();
@@ -633,7 +919,7 @@ void main() {
       // Telling the user "not accepted" here would be the opposite of true.
       final seam = _FakeSeam(throws: 'connection refused')..pinsAnyway = true;
       await _pumpScreen(tester, seam);
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'ws://10.0.0.9:17110');
       await tester.pumpAndSettle();
@@ -658,9 +944,9 @@ void main() {
       // stories: nothing was submitted anywhere, and the pin is still on.
       final seam = _FakeSeam(pinned: 'ws://10.0.0.5:17110', throws: 'busy');
       await _pumpScreen(tester, seam);
-      await tester.ensureVisible(find.text('Pin a node I run'));
+      await tester.ensureVisible(find.text('Use my own node'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('could not be cleared'), findsOneWidget);
@@ -686,9 +972,9 @@ void main() {
         throws: 'no monitor',
       )..pinsAnyway = true;
       await _pumpScreen(tester, seam);
-      await tester.ensureVisible(find.text('Pin a node I run'));
+      await tester.ensureVisible(find.text('Use my own node'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
 
       expect(seam.pinnedNode.value, isNull);
@@ -723,7 +1009,7 @@ void main() {
       // has to declare one — otherwise the only control on the INV-8 escape
       // hatch announces as a switch that cannot be activated.
       expect(
-        tester.getSemantics(find.bySemanticsLabel('Pin a node I run')),
+        tester.getSemantics(find.bySemanticsLabel('Use my own node')),
         isSemantics(
           hasTapAction: true,
           hasToggledState: true,
@@ -735,7 +1021,7 @@ void main() {
       // goes through the semantics tree the way TalkBack does, not through the
       // pointer — which is the only way to catch a control that looks tappable
       // to a sighted user and is inert to everyone else.
-      tester.semantics.tap(find.semantics.byLabel('Pin a node I run'));
+      tester.semantics.tap(find.semantics.byLabel('Use my own node'));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsOneWidget);
       handle.dispose();
@@ -791,17 +1077,17 @@ void main() {
       // wallet it no longer reconnects this node — the engine holds the live
       // link and hunts for a different one behind it, so "Reconnect" was
       // naming an action the code had stopped taking.
-      expect(find.text('Find a different node'), findsOneWidget);
+      expect(find.text('Switch node'), findsOneWidget);
       expect(find.text('Searching…'), findsNothing);
 
-      await tester.tap(find.text('Find a different node'));
+      await tester.tap(find.text('Switch node'));
       await tester.pump();
       expect(seam.kicks, 1);
       // The busy state rides the HUNT, not the dispatch — and the label swap
       // IS the signal, because BG-2 will not pay for a second meter on a
       // screen whose serving plate already runs one.
       expect(find.text('Searching…'), findsOneWidget);
-      expect(find.text('Find a different node'), findsNothing);
+      expect(find.text('Switch node'), findsNothing);
       expect(
         tester.widgetList<KvCadence>(find.byType(KvCadence)).length,
         lessThanOrEqualTo(1),
@@ -837,9 +1123,10 @@ void main() {
       // it gets told.
       final pinned = _FakeSeam(pinned: 'ws://mine.local:17110');
       await _pumpScreen(tester, pinned);
-      expect(find.text('Redial your node'), findsOneWidget);
+      expect(find.text('Redial'), findsOneWidget);
+      // The cost is stated in the row's own sentence, under the endpoint.
       expect(
-        find.text('Drops the link you have and dials your node again.'),
+        find.textContaining('drops the link you have and dials it again'),
         findsOneWidget,
       );
       await tester.pumpWidget(const SizedBox());
@@ -847,8 +1134,8 @@ void main() {
       // Unpinned and connected: no warning, because nothing is dropped.
       final unpinned = _FakeSeam();
       await _pumpScreen(tester, unpinned);
-      expect(find.text('Find a different node'), findsOneWidget);
-      expect(find.textContaining('Drops the link'), findsNothing);
+      expect(find.text('Switch node'), findsOneWidget);
+      expect(find.textContaining('drops the link'), findsNothing);
       await tester.pumpWidget(const SizedBox());
 
       // Dark: the label is the pre-P0b one, because there is no link to keep
@@ -856,7 +1143,7 @@ void main() {
       final dark = _FakeSeam(connected: false);
       await _pumpScreen(tester, dark, settle: false);
       expect(find.text('Reconnect'), findsOneWidget);
-      expect(find.textContaining('Drops the link'), findsNothing);
+      expect(find.textContaining('drops the link'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -893,7 +1180,7 @@ void main() {
       // so. The user then types a bad address and it is refused too.
       failing.pinDropped.value = true;
       await _pumpScreen(tester, failing);
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'http://nope');
       await tester.pumpAndSettle();
@@ -979,7 +1266,7 @@ void main() {
       // three either way, and would have measured nothing.
       busy.pinDropped.value = true;
       await _pumpScreen(tester, busy);
-      await tester.tap(find.text('Pin a node I run'));
+      await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'ws://mine.example:17110');
       await tester.pumpAndSettle();
@@ -1238,9 +1525,7 @@ void main() {
       expect(find.textContaining('must start with https://'), findsOneWidget);
       // The link's own state is a different fact and keeps its own line.
       expect(
-        find.textContaining(
-          'Answering — a public community node, found for you',
-        ),
+        find.textContaining('found for you by the public node directory'),
         findsOneWidget,
       );
       await tester.pumpWidget(const SizedBox());

@@ -76,6 +76,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AttachmentDto dco_decode_box_autoadd_attachment_dto(dynamic raw);
 
   @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
   ContactRouteDto dco_decode_box_autoadd_contact_route_dto(dynamic raw);
 
   @protected
@@ -196,10 +199,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NodeConfigDto dco_decode_node_config_dto(dynamic raw);
 
   @protected
+  NodeTestDto dco_decode_node_test_dto(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
   AttachmentDto? dco_decode_opt_box_autoadd_attachment_dto(dynamic raw);
+
+  @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
 
   @protected
   ContactRouteDto? dco_decode_opt_box_autoadd_contact_route_dto(dynamic raw);
@@ -342,6 +351,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AttachmentDto sse_decode_box_autoadd_attachment_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
 
   @protected
   ContactRouteDto sse_decode_box_autoadd_contact_route_dto(
@@ -494,12 +506,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NodeConfigDto sse_decode_node_config_dto(SseDeserializer deserializer);
 
   @protected
+  NodeTestDto sse_decode_node_test_dto(SseDeserializer deserializer);
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
   AttachmentDto? sse_decode_opt_box_autoadd_attachment_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
 
   @protected
   ContactRouteDto? sse_decode_opt_box_autoadd_contact_route_dto(
@@ -675,6 +693,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AttachmentDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_contact_route_dto(
@@ -869,6 +890,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_node_config_dto(NodeConfigDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_node_test_dto(NodeTestDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
@@ -876,6 +900,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AttachmentDto? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_contact_route_dto(

@@ -10,7 +10,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
-import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 
 import 'support/maturity.dart';
 import 'support/preview_harness.dart';
@@ -94,9 +94,9 @@ void main() {
       expect(KvBurialGauge.positionFor(10, ceiling), 1);
       expect(
         KvBurial.rungFor(
-          TxChipState.accepted,
           10,
           MaturityState.confirmed,
+          stalled: false,
           direction: ActivityDirection.outgoing,
           isCoinbase: false,
           thresholds: kTestDevnetMaturity,
@@ -106,9 +106,9 @@ void main() {
       // …and the same depth is only halfway up the mainnet track.
       expect(
         KvBurial.rungFor(
-          TxChipState.accepted,
           10,
           MaturityState.confirmed,
+          stalled: false,
           direction: ActivityDirection.outgoing,
           isCoinbase: false,
           thresholds: kTestMaturity,
@@ -123,7 +123,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           KvBurialGauge(
-            state: TxChipState.accepted,
+            stalled: false,
             confirmations: 150,
             maturity: MaturityState.confirmed,
             direction: ActivityDirection.incoming,
@@ -151,7 +151,7 @@ void main() {
         _host(
           KvBurialGauge(
             key: const ValueKey('user'),
-            state: TxChipState.accepted,
+            stalled: false,
             confirmations: 150,
             maturity: MaturityState.confirmed,
             direction: ActivityDirection.incoming,
@@ -259,6 +259,42 @@ void main() {
       }
     });
 
+    testWidgets('the ticks the reading has passed take its hue (`S9`)', (
+      tester,
+    ) async {
+      // `S9` draws every graduation of its full track in the fill's own green
+      // ((125,213,132) at five sampled ticks). Under the reading the ticks are
+      // lit; past it they keep the machined tone — the same extent the fill
+      // draws, so the ruler cannot state a second reading (BG-19).
+      await tester.pumpWidget(_host(_gauge(42)));
+      await tester.pump();
+      final ink = _Ink.of(tester);
+      final fillX = ink.filledFraction * ink._size.width;
+      int rgb(Color c) => c.toARGB32() & 0x00FFFFFF;
+      final ticks = ink.verticalTicks;
+      final lit = ticks.where((t) => t.from.dx <= fillX).toList();
+      final beyond = ticks.where((t) => t.from.dx > fillX).toList();
+      // 42 % of twenty steps: the origin and the eight fives up to 40 %.
+      expect(lit.length, 9);
+      expect(beyond.length, 12);
+      expect(lit.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.ok)});
+      expect(beyond.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.inkDim)});
+    });
+
+    testWidgets('at zero deep no tick is lit, and past the ceiling all are', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_host(_gauge(0)));
+      await tester.pump();
+      expect(_Ink.of(tester).tickTones, {KvColor.inkDim.toARGB32() & 0xFFFFFF});
+      await tester.pumpWidget(_host(_gauge(340, key: const ValueKey(340))));
+      await tester.pump();
+      // Past the ceiling the reading wears the terminal rung's hue (D-248).
+      expect(_Ink.of(tester).tickTones, {
+        KvColor.settled.toARGB32() & 0xFFFFFF,
+      });
+    });
+
     testWidgets('no stroke cap paints past any reading', (tester) async {
       await tester.pumpWidget(_host(_gauge(42)));
       await tester.pump();
@@ -280,7 +316,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           KvBurialGauge(
-            state: TxChipState.accepted,
+            stalled: false,
             confirmations: null,
             maturity: MaturityState.confirmed,
             direction: ActivityDirection.outgoing,
@@ -304,8 +340,11 @@ void main() {
       await tester.pumpWidget(
         _host(
           KvBurialGauge(
-            state: TxChipState.stalled,
-            confirmations: 40,
+            stalled: true,
+            // A stalled submit has no acceptance score, so no depth — the
+            // fixture that gave it 40 built a world production cannot
+            // produce (`consensus-auditor` item 26).
+            confirmations: null,
             maturity: MaturityState.pending,
             direction: ActivityDirection.outgoing,
             isCoinbase: false,
@@ -330,6 +369,9 @@ void main() {
     ) async {
       await tester.pumpWidget(_host(_gauge(20)));
       await tester.pump();
+      // The readings arrive a poll apart: the tween crosses the observed
+      // gap, so a second reading in the same frame would cross in 100 ms.
+      await tester.pump(KvMotion.stream);
       // A second reading arrives: the count replays the interval between two
       // observations, linearly, and the gauge is drawn at whatever integer the
       // replay is on. Both readings sit inside the `Accepted` rung, where the
@@ -430,7 +472,7 @@ void main() {
         _host(
           KvBurialGauge(
             key: const ValueKey('unknown'),
-            state: TxChipState.accepted,
+            stalled: false,
             confirmations: null,
             maturity: MaturityState.confirmed,
             direction: ActivityDirection.outgoing,
@@ -513,9 +555,9 @@ void main() {
       // `Pending` chip for its first ten seconds while it was already accepted.
       KvBurialRung rung(ActivityDirection d, MaturityState m, {int? depth}) =>
           KvBurial.rungFor(
-            TxChipState.accepted,
             depth,
             m,
+            stalled: false,
             direction: d,
             isCoinbase: false,
             thresholds: kTestMaturity,
@@ -544,15 +586,34 @@ void main() {
       );
     });
 
+    test('the chain\'s acceptance outranks the tracker\'s stall', () {
+      // The stall is a verdict on an absence the tracker's own deaf lane can
+      // manufacture; `Confirmed` is wallet-core's persisted acceptance. A row
+      // the screen is counting the burial of must never read "Not accepted
+      // yet" (`consensus-auditor`, UX-R3 second beat).
+      KvBurialRung rung(MaturityState m, {int? depth}) => KvBurial.rungFor(
+        depth,
+        m,
+        stalled: true,
+        direction: ActivityDirection.outgoing,
+        isCoinbase: false,
+        thresholds: kTestMaturity,
+      );
+      expect(rung(MaturityState.confirmed, depth: 42), KvBurialRung.accepted);
+      expect(rung(MaturityState.confirmed, depth: 420), KvBurialRung.settled);
+      expect(rung(MaturityState.pending), KvBurialRung.stalled);
+      expect(rung(MaturityState.unknown), KvBurialRung.stalled);
+    });
+
     test('a computable depth outranks a stale Pending flag on a spend', () {
       // The two inputs cannot honestly disagree — `depthOf` anchors a spend on
       // `acceptedDaaScore` and `wallet_sync.rs` derives its maturity from the
       // same field — so when they do, the raw score wins over the projection.
       expect(
         KvBurial.rungFor(
-          TxChipState.accepted,
           42,
           MaturityState.pending,
+          stalled: false,
           direction: ActivityDirection.outgoing,
           isCoinbase: false,
           thresholds: kTestMaturity,
@@ -717,7 +778,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           KvBurialGauge(
-            state: TxChipState.accepted,
+            stalled: false,
             confirmations: depth,
             maturity: record.maturity,
             direction: record.direction,
@@ -746,6 +807,9 @@ void main() {
       await tester.pumpWidget(_host(_mark(96)));
       await tester.pump();
       expect(find.text('Accepted 96'), findsOneWidget);
+      // The readings arrive a poll apart: the tween crosses the observed
+      // gap, so a second reading in the same frame would cross in 100 ms.
+      await tester.pump(KvMotion.stream);
 
       await tester.pumpWidget(_host(_mark(106)));
       await tester.pump();
@@ -821,7 +885,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           KvBurialGauge(
-            state: TxChipState.accepted,
+            stalled: false,
             confirmations: 42,
             maturity: MaturityState.pending,
             direction: ActivityDirection.incoming,
@@ -891,15 +955,15 @@ Finder _reading(String words) => find.byWidgetPredicate(
 /// The rung's hue, read off the reading line's dot — the channel that carries
 /// the rung when the line prints only a number.
 Color? _dotHue(WidgetTester tester) {
-  for (final c in tester.widgetList<Container>(find.byType(Container))) {
-    final d = c.decoration;
-    if (d is BoxDecoration && d.shape == BoxShape.circle) return d.color;
-  }
-  return null;
+  // The dot is §4's lamp since the second beat — a disc inside its tint ring —
+  // so the hue is the lamp's own colour, never the first circle in the tree
+  // (which is the ring).
+  final lamps = tester.widgetList<KvLamp>(find.byType(KvLamp));
+  return lamps.isEmpty ? null : lamps.first.color;
 }
 
 Widget _mark(int depth) => KvBurialMark(
-  state: TxChipState.accepted,
+  stalled: false,
   confirmations: depth,
   maturity: MaturityState.confirmed,
   direction: ActivityDirection.outgoing,
@@ -914,7 +978,7 @@ Widget _mark(int depth) => KvBurialMark(
 /// exactly what a step-by-step sweep must not have (L140).
 Widget _gauge(int depth, {Key? key}) => KvBurialGauge(
   key: key,
-  state: TxChipState.accepted,
+  stalled: false,
   confirmations: depth,
   maturity: MaturityState.confirmed,
   direction: ActivityDirection.outgoing,

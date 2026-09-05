@@ -11,6 +11,8 @@ import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_gauge.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_explorer_exit.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_fact_line.dart';
 
 import 'support/preview_harness.dart';
 import 'support/finders.dart';
@@ -484,6 +486,40 @@ void main() {
     expect(find.textContaining('sent to Mara'), findsOneWidget);
   });
 
+  testWidgets('`S9`\'s facts plate, measured: inkMeta labels, a two-tone stamp, '
+      'a glyph on both copy rows', (tester) async {
+    phone(tester);
+    await tester.pumpWidget(
+      host(
+        seams(
+          records: [_sent(counterparty: _payee, fee: BigInt.from(10000))],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // Every label on the plate is `inkMeta` (122,133,131) — the render's tone
+    // on a `plate` ground, where it clears AA at 4.75 (BG-14).
+    final rows = tester.widgetList<KvFactLine>(find.byType(KvFactLine));
+    expect(rows.length, 5, reason: 'sent · to · fee · DAA score · id');
+    expect(rows.every((r) => r.labelColor == KvColor.inkMeta), isTrue);
+    // Both copy rows carry the copy glyph the render draws (`inkMeta`, 16 dp).
+    final copies = tester
+        .widgetList<KvGlyphIcon>(find.byType(KvGlyphIcon))
+        .where((g) => g.mark == KvGlyph.copy);
+    expect(copies.length, 2);
+    expect(copies.every((g) => g.tone == KvColor.inkMeta), isTrue);
+    // The stamp: the date in `ink`, the time one step down in `inkMeta`.
+    final stamp = tester
+        .widgetList<Text>(find.byType(Text))
+        .where((t) => t.textSpan is TextSpan)
+        .map((t) => t.textSpan! as TextSpan)
+        .firstWhere((span) => (span.children?.length ?? 0) == 2);
+    expect(spanText(stamp.children![0]), '30 Aug 2026, ');
+    expect(spanText(stamp.children![1]), '03:48');
+    expect(stamp.style?.color, KvColor.ink);
+    expect(stamp.children![1].style?.color, KvColor.inkMeta);
+  });
+
   testWidgets('nothing renders under the readable floor at 1.3x / 320dp', (
     tester,
   ) async {
@@ -509,3 +545,5 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 }
+
+String spanText(InlineSpan span) => (span as TextSpan).text ?? '';

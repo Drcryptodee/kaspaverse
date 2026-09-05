@@ -7,7 +7,6 @@ import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
-import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 import 'support/finders.dart';
 import 'support/maturity.dart';
 
@@ -473,31 +472,6 @@ void main() {
     expect(formatScore(BigInt.from(1000)), '1,000');
     expect(formatScore(BigInt.parse('458174109')), '458,174,109');
   });
-
-  test(
-    'chip honesty: unknown is quiet, the depth gate extinguishes at 100',
-    () {
-      // Finding 13 upstream half: a cold-start fold with no live DAA yields
-      // maturity `unknown` — the chip claims nothing (and a stall still shows).
-      expect(
-        chipStateOf(MaturityState.unknown, stalled: false),
-        TxChipState.none,
-      );
-      expect(
-        chipStateOf(MaturityState.unknown, stalled: true),
-        TxChipState.stalled,
-      );
-
-      // Finding 13 display half (founder-ruled ceiling 100): a counter at or
-      // above the ceiling renders NO chip, whatever the state; below it the
-      // state stands; stalled never gates (it carries no depth).
-      expect(gateByDepth(TxChipState.pending, 19000), TxChipState.none);
-      expect(gateByDepth(TxChipState.accepted, 100), TxChipState.none);
-      expect(gateByDepth(TxChipState.accepted, 99), TxChipState.accepted);
-      expect(gateByDepth(TxChipState.pending, null), TxChipState.pending);
-      expect(gateByDepth(TxChipState.stalled, 19000), TxChipState.stalled);
-    },
-  );
 
   testWidgets('cold start: settled history streams NO counters (finding 13)', (
     tester,

@@ -4,8 +4,9 @@ import '../../rust/api/wallet.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
 import 'kv_burial_mark.dart';
+import 'kv_chrome.dart';
+import 'kv_status_chip.dart';
 import 'kv_streaming_count.dart';
-import 'tx_status_chip.dart';
 
 /// **The burial gauge — the instrument register the balance gave up** (D-191),
 /// and the transaction detail's whole reason to exist.
@@ -60,17 +61,26 @@ import 'tx_status_chip.dart';
 /// embedding the mark, because a second [KvStreamingCount] would start a second
 /// tween and the number beside the gauge could differ from the number the gauge
 /// was drawn at.
+///
+/// ## What rebuilds, and what does not (UX-R3, second beat)
+///
+/// The streamed depth changes every frame of a crossing, and only the reading
+/// line and the painted track depend on it — so only they sit inside the
+/// stream's builder. The graduations depend on the ceiling alone and are built
+/// once beside it; the screen-reader sentence is built from the **newest**
+/// reading rather than the streamed one, because the assistive reader wants
+/// where the money is, not where the animation is.
 class KvBurialGauge extends StatefulWidget {
   const KvBurialGauge({
     super.key,
-    required this.state,
+    required this.stalled,
     required this.confirmations,
     required this.maturity,
     required this.direction,
     required this.isCoinbase,
     required this.thresholds,
     this.heading,
-    this.stalled = false,
+    this.stale = false,
   });
 
   /// The section label, laid out on the **same row** as the reading — `S9`
@@ -78,9 +88,17 @@ class KvBurialGauge extends StatefulWidget {
   /// on one line. It is the gauge's own row rather than the plate's, so the
   /// axis name and the number it names cannot drift apart (BG-22 wants a named
   /// axis; one widget owning both is what keeps the naming true).
-  final Widget? heading;
+  ///
+  /// A string rather than a widget, so the row can **measure** it: at 320 dp
+  /// and 1.3× the label and the reading do not both fit, and a section label
+  /// is chrome that never breaks a word — `DEPT / H` was found in the floor
+  /// frame (UX-R3, second beat). The row stacks instead, keeping the reading's
+  /// right edge, exactly as `KvFactLine` does.
+  final String? heading;
 
-  final TxChipState state;
+  /// The tracker has seen no acceptance for this submit past the stall
+  /// threshold — a fault, not a depth (see [KvBurial.rungFor]).
+  final bool stalled;
 
   /// The observed depth, or null when there is none to be had (BG-8).
   final int? confirmations;
@@ -99,7 +117,7 @@ class KvBurialGauge extends StatefulWidget {
 
   /// The link is not live, so no reading is arriving and the counter stops
   /// where it last actually read (BG-8 applied to movement).
-  final bool stalled;
+  final bool stale;
 
   /// The track's own subdivisions, as fractions of the ceiling.
   ///
@@ -142,83 +160,90 @@ class _KvBurialGaugeState extends State<KvBurialGauge> {
   /// construction.
   KvBurialRung? _shown;
 
+  KvBurialRung _rungAt(int? depth) => KvBurial.rungFor(
+    depth,
+    widget.maturity,
+    stalled: widget.stalled,
+    direction: widget.direction,
+    isCoinbase: widget.isCoinbase,
+    thresholds: widget.thresholds,
+  );
+
   @override
   Widget build(BuildContext context) {
     final n = widget.confirmations;
-    // **ONE reading feeds both registers.** The words and the fill are built
-    // inside the same builder from the same `shown`, so the number printed and
-    // the number drawn are the same integer in the same frame.
-    return KvStreamingCount(
-      value: n == null ? null : BigInt.from(n),
-      stalled: widget.stalled,
-      builder: (context, shown) => _body(shown?.toInt() ?? n),
-    );
-  }
-
-  Widget _body(int? depth) {
     final ceiling = widget.thresholds.ceilingFor(coinbase: widget.isCoinbase);
-    final rung = KvBurial.rungFor(
-      widget.state,
-      depth,
-      widget.maturity,
-      direction: widget.direction,
-      isCoinbase: widget.isCoinbase,
-      thresholds: widget.thresholds,
-    );
-    final previous = _shown;
-    final backwards = previous != null && rung.index < previous.index;
-    _shown = rung;
-
-    final words = KvBurial.words(rung, depth: depth);
-    // A decrease snaps; everything else crosses (BG-18 over BG-24).
-    final crossing = backwards ? Duration.zero : KvMotion.fast;
+    // Spoken as one reading, from the NEWEST observation. Without this a
+    // screen reader walks a bare row of numerals — 0, 50, 100 — which is the
+    // axis, not the value.
+    //
+    // **Built from the DEPTH, not from the words**, for two reasons. The words
+    // dangled the axis into a sentence that does not take it, and past the
+    // ceiling the words carry no number at all while the fill carries the
+    // reading: a screen-reader user got **no depth** exactly where a sighted
+    // user reads one off the track (`ux-auditor`, UX-5).
+    final words = KvBurial.words(_rungAt(n), depth: n);
     return Semantics(
-      // Spoken as one reading. Without this a screen reader walks a bare row
-      // of numerals — 0, 50, 100 — which is the axis, not the value.
-      //
-      // **Built from the DEPTH, not from the words**, for two reasons. The
-      // words dangled the axis into a sentence that does not take it, and past
-      // the ceiling the words carry no number at all while the fill carries the
-      // reading: a screen-reader user got **no depth** exactly where a sighted
-      // user reads one off the track (`ux-auditor`, UX-5).
-      label: depth == null
+      label: n == null
           ? '$words. Depth unknown.'
-          : '$words. $depth of $ceiling DAA deep. '
+          : '$words. $n of $ceiling DAA deep. '
                 'Spendable at $ceiling.',
       excludeSemantics: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // **The rung crosses, it does not cut** (BG-24). What changes at a
-          // crossing is now a *hue* — the reading line prints the count and the
-          // ceiling, which are the same words either side of the mark — so the
-          // dot tweens exactly as the fill does, from the same rung, over the
-          // same duration. It used to be an `AnimatedSwitcher` keyed on the
-          // rung, which was right while the line printed the rung's word and
-          // became a switcher with nothing to switch once `S9` moved that word
-          // into the chip: two reading lines were mounted through every
-          // crossing, and the outgoing one still carried the old dot.
-          TweenAnimationBuilder<Color?>(
-            tween: ColorTween(end: KvBurial.hueFor(rung)),
-            duration: crossing,
-            curve: KvMotion.out,
-            builder: (context, hue, _) => _ReadingLine(
+          // **ONE reading feeds both registers.** The words and the fill are
+          // built inside the same builder from the same `shown`, so the number
+          // printed and the number drawn are the same integer in the same frame.
+          KvStreamingCount(
+            value: n == null ? null : BigInt.from(n),
+            stalled: widget.stale,
+            builder: (context, shown) => _live(shown?.toInt() ?? n, ceiling),
+          ),
+          const SizedBox(height: KvSpace.xs),
+          // The axis depends on the ceiling alone: built beside the stream,
+          // never inside it, so a crossing frame rebuilds a line and a painter
+          // and not three labels that cannot change.
+          _Graduations(ceiling: ceiling),
+        ],
+      ),
+    );
+  }
+
+  /// The two things a streamed depth drives — the reading line and the track —
+  /// under **one** colour tween, so the dot and the fill cross from green to
+  /// blue in the same frame by construction rather than by two tweens that
+  /// happen to share a duration.
+  Widget _live(int? depth, int ceiling) {
+    final rung = _rungAt(depth);
+    final previous = _shown;
+    final backwards = previous != null && rung.index < previous.index;
+    _shown = rung;
+    // A decrease snaps; everything else crosses (BG-18 over BG-24).
+    final crossing = backwards ? Duration.zero : KvMotion.fast;
+    // **The rung crosses, it does not cut** (BG-24). What changes at a crossing
+    // is a *hue* — the reading line prints the count and the ceiling, which
+    // are the same words either side of the mark — so the dot and the fill
+    // tween together, from the same rung, over the same duration. Nothing on
+    // the path from a reading to a width touches this builder (BG-22).
+    return TweenAnimationBuilder<Color?>(
+      tween: ColorTween(end: KvBurial.hueFor(rung)),
+      duration: crossing,
+      curve: KvMotion.out,
+      builder: (context, hue, _) {
+        final fill = hue ?? KvBurial.hueFor(rung);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _ReadingLine(
               heading: widget.heading,
               depth: depth,
               ceiling: ceiling,
-              hue: hue ?? KvBurial.hueFor(rung),
+              hue: fill,
+              ring: KvBurial.tintFor(rung),
             ),
-          ),
-          const SizedBox(height: KvSpace.sm),
-          // **Implicit, and colour only.** The extent is a pure function of the
-          // depth below; this builder carries the green -> blue crossing at the
-          // ceiling, which is the one thing that genuinely appears. Nothing on
-          // the path from a reading to a width touches it (BG-22).
-          TweenAnimationBuilder<Color?>(
-            tween: ColorTween(end: KvBurial.hueFor(rung)),
-            duration: crossing,
-            curve: KvMotion.out,
-            builder: (context, fill, _) => CustomPaint(
+            const SizedBox(height: KvSpace.sm),
+            CustomPaint(
               size: const Size(double.infinity, KvBurialGaugePainter.extent),
               painter: KvBurialGaugePainter(
                 depth: rung == KvBurialRung.stalled ? null : depth,
@@ -226,11 +251,9 @@ class _KvBurialGaugeState extends State<KvBurialGauge> {
                 fill: fill,
               ),
             ),
-          ),
-          const SizedBox(height: KvSpace.xs),
-          _Graduations(ceiling: ceiling),
-        ],
-      ),
+          ],
+        );
+      },
     );
   }
 }
@@ -250,12 +273,53 @@ class _ReadingLine extends StatelessWidget {
     required this.depth,
     required this.ceiling,
     required this.hue,
+    required this.ring,
   });
 
-  final Widget? heading;
+  final String? heading;
   final int? depth;
   final int ceiling;
   final Color hue;
+  final Color ring;
+
+  static const TextStyle _figure = TextStyle(
+    fontFamily: KvFont.mono,
+    fontSize: 15,
+    height: 20 / 15,
+    // **Declared AND painted** (L150): on a variable face the enum is only a
+    // hint, and a weight set without its axis paints at whatever the ambient
+    // one is.
+    fontWeight: FontWeight.w500,
+    fontVariations: KvWeight.w500,
+    color: KvColor.ink,
+    fontFeatures: [FontFeature.tabularFigures()],
+  );
+
+  static const TextStyle _unit = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 13,
+    height: 18 / 13,
+    color: KvColor.inkMeta,
+  );
+
+  /// `KvRuledLabel`'s own text style, restated for measurement only.
+  static const TextStyle _caps = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 12,
+    height: 16 / 12,
+    letterSpacing: 0.8,
+  );
+
+  static double _width(String text, TextStyle style, TextScaler scaler) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: scaler,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
 
   /// **One number, one format.** The reading printed `of 1000 DAA` while the
   /// graduation twenty dp beneath it printed `1,000`, and every other chain
@@ -265,77 +329,79 @@ class _ReadingLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final n = depth;
-    return Row(
+    final figure = n == null ? '—' : _grouped(n);
+    // The axis, inline and subordinate — `S9`'s `blocks deep`, in the unit
+    // D-249 corrected it to: `KvBurial.depthOf` computes a **DAA-score**
+    // delta, and at 10 BPS the wall-clock arithmetic is unchanged but the
+    // word must be true.
+    //
+    // **Two phrasings, because there are two questions.** Under the ceiling
+    // the reading is *progress* and `42 of 100 DAA` answers it. At or past
+    // it that question is closed, and `420 of 100 DAA` is arithmetic
+    // nonsense — so the scale drops away and the depth stands on its own,
+    // which is what `S9` itself does with `1,240 blocks deep`. The true
+    // number is printed either way: clamping it to the ceiling would hide
+    // how deep the money actually is, which is the one thing this surface
+    // exists to say. (Caught in a rendered frame of the settled state.)
+    final unit = n != null && n >= ceiling
+        ? 'DAA deep'
+        : 'of ${_grouped(ceiling)} DAA';
+    final reading = Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        // **The heading is not the thing that gets eaten.** With the figure and
-        // the unit in fixed boxes and only the heading flexed, a nine-digit
-        // depth — a year-old row at 10 BPS — collapsed `DEPTH` from 54.6 dp to
-        // 16.5 at 320 dp / 1.3×, clipping the axis name BG-22 requires, with no
-        // overflow raised for a test to see (`ux-auditor`, UX-R3). Both sides
-        // flex now, and the heading keeps a floor it can actually be read at.
-        if (heading != null)
-          Flexible(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 56),
-              child: heading!,
-            ),
-          ),
-        if (heading == null) const Spacer(),
-        const SizedBox(width: KvSpace.s),
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(color: hue, shape: BoxShape.circle),
-        ),
+        // §4's lamp anatomy, in the rung's own hue and tint — `settled` is
+        // fenced out of `KvLampTone` (D-248), so the lamp takes the hue
+        // directly rather than the ladder drawing a second lamp (item 33).
+        KvLamp.hued(color: hue, ring: ring),
         const SizedBox(width: KvSpace.s),
         // **`—` for a depth nobody has** (BG-8): a stale link, a cold start, a
         // row the live DAA cannot anchor. Never a zero, which is a reading.
-        Flexible(
-          child: Text(
-            n == null ? '—' : _grouped(n),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontFamily: KvFont.mono,
-              fontSize: 15,
-              height: 20 / 15,
-              // **Declared AND painted** (L150): on a variable face the enum is
-              // only a hint, and a weight set without its axis paints at whatever
-              // the ambient one is.
-              fontWeight: FontWeight.w500,
-              fontVariations: KvWeight.w500,
-              color: KvColor.ink,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ),
+        Text(figure, maxLines: 1, style: _figure),
         const SizedBox(width: KvSpace.xs),
-        // The axis, inline and subordinate — `S9`'s `blocks deep`, in the unit
-        // D-249 corrected it to: `KvBurial.depthOf` computes a **DAA-score**
-        // delta, and at 10 BPS the wall-clock arithmetic is unchanged but the
-        // word must be true.
-        //
-        // **Two phrasings, because there are two questions.** Under the ceiling
-        // the reading is *progress* and `42 of 100 DAA` answers it. At or past
-        // it that question is closed, and `420 of 100 DAA` is arithmetic
-        // nonsense — so the scale drops away and the depth stands on its own,
-        // which is what `S9` itself does with `1,240 blocks deep`. The true
-        // number is printed either way: clamping it to the ceiling would hide
-        // how deep the money actually is, which is the one thing this surface
-        // exists to say. (Caught in a rendered frame of the settled state.)
-        Text(
-          n != null && n >= ceiling
-              ? 'DAA deep'
-              : 'of ${_grouped(ceiling)} DAA',
-          maxLines: 1,
-          style: const TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 13,
-            height: 18 / 13,
-            color: KvColor.inkMeta,
-          ),
-        ),
+        Text(unit, maxLines: 1, style: _unit),
       ],
+    );
+    final label = heading;
+    if (label == null) {
+      return Align(alignment: Alignment.centerRight, child: reading);
+    }
+    final scaler = MediaQuery.textScalerOf(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // **Measured, then either one row or two** — never a broken word. The
+        // heading needs its rule, its gap and its capitals; the reading needs
+        // its dot, its figure and its unit. When the two cannot share the
+        // width, the heading takes its own line and the reading keeps the
+        // right edge underneath, which is `KvFactLine`'s rule for the same
+        // squeeze one plate down.
+        final headingNeeds =
+            KvSpace.s + KvSpace.s + _width(label.toUpperCase(), _caps, scaler);
+        final readingNeeds =
+            KvLamp.extent +
+            KvSpace.s +
+            _width(figure, _figure, scaler) +
+            KvSpace.xs +
+            _width(unit, _unit, scaler);
+        final fits =
+            headingNeeds + KvSpace.s + readingNeeds <= constraints.maxWidth;
+        if (fits) {
+          return Row(
+            children: [
+              KvRuledLabel(label, tight: true),
+              const Spacer(),
+              reading,
+            ],
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            KvRuledLabel(label, tight: true),
+            const SizedBox(height: KvSpace.xs),
+            Align(alignment: Alignment.centerRight, child: reading),
+          ],
+        );
+      },
     );
   }
 }
@@ -516,11 +582,30 @@ class KvBurialGaugePainter extends CustomPainter {
     final w = size.width;
     final top = majorTick + tickGap;
 
+    // **The fill's extent, computed once and read by both the ticks and the
+    // bar** — a rectangle, so the ink ends where the reading does. A stroked
+    // line with any cap but `butt` paints half a stroke width past both ends,
+    // which is a constant added to every value and an unbounded lie as the
+    // value goes to zero (BG-22).
+    final n = depth;
+    final paintFill = fill;
+    final fillX = n == null || paintFill == null
+        ? null
+        : KvBurialGauge.positionFor(n, ceiling) * w;
+
     // **The ticks, one even rhythm across the whole track.** A linear scale is
     // what earns this: an evenly spaced tick is an even step of DEPTH, so the
     // ruler means something rather than decorating. On the piecewise scale this
     // replaced, evenly spaced ticks were decoration and clustered ticks were,
     // in the founder's words, "just not it".
+    //
+    // **A tick the reading has passed takes the reading's hue** — `S9` draws
+    // every graduation of its full track in `ok` green (measured: (125,213,132)
+    // at five sampled ticks, the fill's own tone), so the ruler reads as part
+    // of the instrument rather than as a rule laid over it. Beyond the reading
+    // the ticks keep the machined tone, which is what makes the lit ones read
+    // as *reached*; it is the same extent the fill draws, from the same
+    // arithmetic, so it cannot state a second reading (BG-19).
     //
     // `isAntiAlias: false` keeps a 1px engraved rule one pixel wide instead of
     // two half-lit ones — the difference between machined and smudged.
@@ -540,15 +625,24 @@ class KvBurialGaugePainter extends CustomPainter {
     // "no reading" face was under the floor. `inkMeta` is **4.75** and `inkDim`
     // **8.14** on `plate`, so the machined hierarchy survives above the bar
     // rather than below it.
-    final tick = Paint()
+    final unread = Paint()
       ..color = depth == null ? KvColor.inkMeta : KvColor.inkDim
+      ..strokeWidth = 1
+      ..isAntiAlias = false;
+    final reached = Paint()
+      ..color = paintFill ?? KvColor.inkDim
       ..strokeWidth = 1
       ..isAntiAlias = false;
     for (var step = 0; step <= KvBurialGauge.subDivisions; step++) {
       final at = step / KvBurialGauge.subDivisions;
       final x = (w * at).clamp(0.5, w - 0.5);
       final len = tickLength(step);
-      canvas.drawLine(Offset(x, top - len), Offset(x, top), tick);
+      final lit = fillX != null && fillX > 0 && w * at <= fillX;
+      canvas.drawLine(
+        Offset(x, top - len),
+        Offset(x, top),
+        lit ? reached : unread,
+      );
     }
 
     // **The track has to READ as a track, and clear the 3:1 floor doing it.**
@@ -563,22 +657,13 @@ class KvBurialGaugePainter extends CustomPainter {
       Paint()..color = KvColor.inkMeta,
     );
 
-    // **The fill: a rectangle, so the ink ends where the reading does.** A
-    // stroked line with any cap but `butt` paints half a stroke width past both
-    // ends, which is a constant added to every value and an unbounded lie as
-    // the value goes to zero (BG-22).
-    final n = depth;
-    final paintFill = fill;
-    if (n != null && paintFill != null) {
-      final x = KvBurialGauge.positionFor(n, ceiling) * w;
-      if (x > 0) {
-        canvas.drawRect(
-          Rect.fromLTWH(0, top, x, band),
-          Paint()
-            ..color = paintFill
-            ..style = PaintingStyle.fill,
-        );
-      }
+    if (fillX != null && fillX > 0) {
+      canvas.drawRect(
+        Rect.fromLTWH(0, top, fillX, band),
+        Paint()
+          ..color = paintFill!
+          ..style = PaintingStyle.fill,
+      );
     }
   }
 

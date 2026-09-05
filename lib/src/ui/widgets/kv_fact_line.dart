@@ -47,6 +47,7 @@ class KvFactLine extends StatelessWidget {
     // leaves a whole-supply figure room to fit itself.
     this.valueShare = 0.45,
     this.strongLabel = false,
+    this.labelColor,
   });
 
   final String label;
@@ -70,15 +71,20 @@ class KvFactLine extends StatelessWidget {
   /// `ink` at 600 while its neighbours stay `inkDim`).
   final bool strongLabel;
 
-  /// `inkDim`, not `inkMeta`: these rows live on a `chip` inner card, where
-  /// `inkMeta` is 4.30 and under AA (§1.4, BG-14).
+  /// The label's tone, where the ground allows a quieter one. `S9` measures
+  /// its labels at `inkMeta` (122,133,131) on `plate`, where it is 4.75:1;
+  /// the default stays `inkDim` because the ceremony's rows live on a `chip`
+  /// inner card, where `inkMeta` is 4.30 and under AA (§1.4, BG-14). The
+  /// caller that knows its ground says so; nothing here guesses it.
+  final Color? labelColor;
+
   TextStyle get _labelStyle => TextStyle(
     fontFamily: KvFont.ui,
     fontSize: 13,
     height: 19 / 13,
     fontWeight: strongLabel ? FontWeight.w600 : FontWeight.w400,
     fontVariations: strongLabel ? KvWeight.w600 : KvWeight.w400,
-    color: strongLabel ? KvColor.ink : KvColor.inkDim,
+    color: strongLabel ? KvColor.ink : (labelColor ?? KvColor.inkDim),
   );
 
   @override

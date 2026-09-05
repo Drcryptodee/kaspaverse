@@ -164,6 +164,8 @@ void main() {
     });
   });
 
+  latencyReadingTests();
+
   test('it is a different instrument from the loading meter (BG-21)', () {
     // One name for two meanings is what BG-21 forbids, and these two genuinely
     // are two objects: a hill that breathes while something is in flight, and a
@@ -210,3 +212,114 @@ Widget _host(Widget child, {double textScale = 1}) => MediaQuery(
     ),
   ),
 );
+
+/// **The stable reading** (UX-R3, second beat): a median over the window and
+/// hysteresis at the tier boundaries, so the instrument moves when the link
+/// moves and not when the noise does.
+void latencyReadingTests() {
+  group('KvLatencyReading · the figure is an observed sample', () {
+    test('the median of the window, never an average', () {
+      var r = const KvLatencyReading.none();
+      expect(r.milliseconds, isNull);
+      r = r.offer(100);
+      expect(r.milliseconds, 100);
+      // Two samples: the slower one — the side the user would rather hear.
+      r = r.offer(140);
+      expect(r.milliseconds, 140);
+      r = r.offer(120);
+      expect(r.milliseconds, 120, reason: 'median of 100 · 140 · 120');
+      // Every figure ever printed is one of the samples.
+      expect(r.samples, contains(r.milliseconds));
+    });
+
+    test('one spike does not take the readout with it', () {
+      var r = const KvLatencyReading.none();
+      for (final ms in [90, 95, 900, 92]) {
+        r = r.offer(ms);
+      }
+      expect(r.milliseconds, 95, reason: 'median of 95 · 900 · 92');
+      expect(r.tier, KvLatencyTier.good);
+    });
+
+    test(
+      'a failed probe empties the window — smoothing never becomes holding',
+      () {
+        var r = const KvLatencyReading.none();
+        r = r.offer(40).offer(42).offer(41);
+        expect(r.tier, KvLatencyTier.fast);
+        r = r.offer(null);
+        expect(r.milliseconds, isNull, reason: 'BG-8: no stale figure stands');
+        expect(r.tier, KvLatencyTier.none);
+        expect(r.samples, isEmpty);
+      },
+    );
+  });
+
+  group('KvLatencyTier · hysteresis at the boundaries', () {
+    test('a reading hovering at a boundary never flaps', () {
+      var r = const KvLatencyReading.none();
+      r = r.offer(148).offer(148).offer(148);
+      expect(r.tier, KvLatencyTier.good);
+      // 148 · 152 · 148 · 152 … — the first cut flipped green ↔ amber on
+      // every other probe.
+      final seen = <KvLatencyTier>{};
+      for (var i = 0; i < 20; i++) {
+        r = r.offer(i.isEven ? 152 : 148);
+        seen.add(r.tier);
+      }
+      expect(seen, {KvLatencyTier.good});
+    });
+
+    test('a genuine move crosses, and lands where the reading is', () {
+      var r = const KvLatencyReading.none();
+      r = r.offer(50).offer(50).offer(50);
+      expect(r.tier, KvLatencyTier.fast);
+      // Three samples at 400 — the median is 400 after the second.
+      r = r.offer(400).offer(400);
+      expect(
+        r.tier,
+        KvLatencyTier.verySlow,
+        reason: 'two tiers at once, not one per probe',
+      );
+      // And back down, once the window has genuinely moved.
+      r = r.offer(30).offer(30).offer(30);
+      expect(r.tier, KvLatencyTier.fast);
+    });
+
+    test('the margin is a tenth of the boundary, both ways', () {
+      // Held at `good` (< 150): slow only at 165 and past.
+      expect(
+        KvLatency.tierFor(164, held: KvLatencyTier.good),
+        KvLatencyTier.good,
+      );
+      expect(
+        KvLatency.tierFor(165, held: KvLatencyTier.good),
+        KvLatencyTier.slow,
+      );
+      // Held at `slow`: good again only under 135.
+      expect(
+        KvLatency.tierFor(135, held: KvLatencyTier.slow),
+        KvLatencyTier.slow,
+      );
+      expect(
+        KvLatency.tierFor(134, held: KvLatencyTier.slow),
+        KvLatencyTier.good,
+      );
+      // Cold, the ladder's letter answers — `T5`'s 151 is `Slow`.
+      expect(KvLatency.tierFor(151), KvLatencyTier.slow);
+      expect(
+        KvLatency.tierFor(151, held: KvLatencyTier.none),
+        KvLatencyTier.slow,
+      );
+    });
+
+    test('the seat passes its held tier to the glass', () {
+      // The widget draws the tier it is handed, not a cold classification of
+      // the number — otherwise the hysteresis would live in the reading and
+      // die at the widget.
+      final held = KvLatencyTier.good;
+      expect(KvLatency.tierFor(160), KvLatencyTier.slow);
+      expect(KvLatency.tierFor(160, held: held), held);
+    });
+  });
+}

@@ -112,7 +112,7 @@ void main() {
   /// not (A6, corrected to green by the founder at D-259 from the intake
   /// render). Teal is never a status.
   bool linkReadsLive(WidgetTester tester) =>
-      tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone ==
+      tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone! ==
       KvLampTone.ok;
 
   /// The TRUST line's own lamp — the LAST on the screen, where the network
@@ -120,7 +120,7 @@ void main() {
   /// only [linkReadsLive] structurally cannot see them disagree, which is the
   /// half of the P0.3 shape that went unguarded.
   KvLampTone trustLampTone(WidgetTester tester) =>
-      tester.widgetList<KvLamp>(find.byType(KvLamp)).last.tone;
+      tester.widgetList<KvLamp>(find.byType(KvLamp)).last.tone!;
 
   group('the money plate — distinguishable truths (C7)', () {
     testWidgets('each state wears its own words, and health is silent', (
@@ -450,9 +450,9 @@ void main() {
       await openNode(tester);
       // Connected and unpinned, so the label is P0b's: the tap looks for a
       // different node rather than dropping this one.
-      expect(find.text('Find a different node'), findsOneWidget);
+      expect(find.text('Switch node'), findsOneWidget);
 
-      await tester.tap(find.text('Find a different node'));
+      await tester.tap(find.text('Switch node'));
       await tester.pump(); // exactly ONE frame after the tap
       expect(
         find.text('Searching…'),

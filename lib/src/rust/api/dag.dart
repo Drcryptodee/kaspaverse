@@ -7,8 +7,9 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `escalation_task`, `fold`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `tracker_handle`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `new`, `offer`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Coalescer`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
 /// harness and the debug screen poll it; nothing streams.
@@ -33,8 +34,13 @@ Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
 /// Probe the live link — see [`LinkProbeDto`]. Returns an empty probe rather
 /// than an error when there is no monitor yet: a surface opened during the cold
 /// window has nothing to read, which is not a failure.
-Future<LinkProbeDto> dagProbeLink() =>
-    RustLib.instance.api.crateApiDagDagProbeLink();
+Future<LinkProbeDto> dagProbeLink({required bool withPeers}) =>
+    RustLib.instance.api.crateApiDagDagProbeLink(withPeers: withPeers);
+
+/// Test a node the user typed — see [`NodeTestDto`]. Validated by the same
+/// intake guard a pin passes (`validate_node_url`), never a second weaker one.
+Future<NodeTestDto> dagTestNode({required String url}) =>
+    RustLib.instance.api.crateApiDagDagTestNode(url: url);
 
 /// Read the node choice (file-backed; defaults to discovery).
 Future<NodeConfigDto> dagNodeConfig() =>
@@ -117,6 +123,11 @@ Stream<DagSnapshot> subscribeDagUpdates() =>
 
 /// Live view of the DAG tip as seen over wRPC, streamed on every change.
 /// Scores stay `u64` end-to-end (they exceed 2^53 — Dart sees `BigInt`, L3).
+///
+/// `PartialEq` is load-bearing, not a convenience: the folder task publishes a
+/// snapshot only when it differs from the one subscribers last saw, so an
+/// event that re-states a score nobody's screen can distinguish costs no FFI
+/// crossing at all (see [`EMIT_EVERY`]).
 class DagSnapshot {
   final bool connected;
 
@@ -247,34 +258,43 @@ class DagStatusDto {
           pinDropped == other.pinDropped;
 }
 
-/// **The connection card's two live readings** (`T5`).
+/// **The connection card's live readings** (`T5`).
 ///
-/// A separate pull rather than two more fields on [`DagStatusDto`], and that is
+/// A separate pull rather than more fields on [`DagStatusDto`], and that is
 /// deliberate: `dag_status` is documented to take **no I/O in its steady
-/// state** and is polled by the money screen's link tick, while these two cost
-/// a real round trip each. Putting them on the status poll would have put two
-/// RPC calls a second behind every surface in the app to serve one card.
+/// state** and is polled by the money screen's link tick, while these cost a
+/// real round trip. Putting them on the status poll would have put RPC calls
+/// behind every surface in the app to serve one card.
 ///
-/// So this is called only while the node surface is open, on its own slower
-/// cadence, exactly as the transport-scan age already is.
+/// So this is called only while the node surface is open, on its own cadence,
+/// exactly as the transport-scan age already is — and the caller says whether
+/// it wants the peer count this time, because that number changes over minutes
+/// while a latency changes over seconds.
 class LinkProbeDto {
-  /// Round-trip time of a `ping` on the bound socket, in milliseconds.
-  /// `None` = the node did not answer, and the surface says so rather than
-  /// showing a stale figure (BG-8).
+  /// Round trip of one `get_server_info` on the bound socket, in
+  /// milliseconds. `None` = the node did not answer, and the surface says so
+  /// rather than showing a stale figure (BG-8).
   final BigInt? latencyMs;
 
-  /// How many peers **the node** is connected to. `None` where the call was
-  /// refused or unanswered — some nodes disable it, and an absent reading is
-  /// its own face rather than a zero.
+  /// **The node's own word on whether it is synced**, from the same answer
+  /// the latency was timed on. The connect race checks this once at
+  /// candidacy and never again; a node that falls behind while bound keeps
+  /// serving a balance and a depth that lag the network, and this is the one
+  /// reading that can say so. `None` when the node did not answer.
+  final bool? synced;
+
+  /// How many peers **the node** is connected to. `None` when it was not
+  /// asked for this time, or when the call went unanswered — an absent
+  /// reading is its own face rather than a zero.
   final int? peers;
 
-  const LinkProbeDto({this.latencyMs, this.peers});
+  const LinkProbeDto({this.latencyMs, this.synced, this.peers});
 
   static Future<LinkProbeDto> default_() =>
       RustLib.instance.api.crateApiDagLinkProbeDtoDefault();
 
   @override
-  int get hashCode => latencyMs.hashCode ^ peers.hashCode;
+  int get hashCode => latencyMs.hashCode ^ synced.hashCode ^ peers.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -282,6 +302,7 @@ class LinkProbeDto {
       other is LinkProbeDto &&
           runtimeType == other.runtimeType &&
           latencyMs == other.latencyMs &&
+          synced == other.synced &&
           peers == other.peers;
 }
 
@@ -318,6 +339,52 @@ class NodeConfigDto {
           url == other.url &&
           activeUrl == other.activeUrl &&
           dropped == other.dropped;
+}
+
+/// **`T5`'s `Test` — what a node the user typed actually is, before anything
+/// is pinned.**
+///
+/// The same probe the connect race runs on every candidate
+/// (`link::probe_endpoint`): an **ephemeral** client dials the URL, asks
+/// `get_server_info`, and refuses a node that is on the wrong network, not
+/// synced, without a UTXO index, or speaking a newer RPC major — the four
+/// reasons a pinned node would fail *after* the user committed to it. The
+/// client is disconnected and dropped before this returns: a test never
+/// becomes the view socket (D-005), and a node that passes is not bound by
+/// passing — `Use this node` is still the commit.
+///
+/// Public data in, public data out (INV-3): a URL the user typed, and what the
+/// node said about itself. The refusal, when there is one, is the `Err` the
+/// user reads — Rust's own words for why this node will not do.
+class NodeTestDto {
+  /// Wall time of the node's `get_server_info` answer, in milliseconds —
+  /// the same round trip the connection card measures on the live link.
+  final BigInt latencyMs;
+
+  /// What the node says it is running.
+  final String serverVersion;
+
+  /// The node's virtual DAA score at the moment it answered.
+  final BigInt virtualDaaScore;
+
+  const NodeTestDto({
+    required this.latencyMs,
+    required this.serverVersion,
+    required this.virtualDaaScore,
+  });
+
+  @override
+  int get hashCode =>
+      latencyMs.hashCode ^ serverVersion.hashCode ^ virtualDaaScore.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is NodeTestDto &&
+          runtimeType == other.runtimeType &&
+          latencyMs == other.latencyMs &&
+          serverVersion == other.serverVersion &&
+          virtualDaaScore == other.virtualDaaScore;
 }
 
 /// One span marker crossing the FFI (V1 observability — findings-register

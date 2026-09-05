@@ -15,7 +15,6 @@ import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
-import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 import 'support/maturity.dart';
 
 /// **The teeth of the six-legend canon** (`design_system.md` §0, BG-19…BG-25,
@@ -272,7 +271,7 @@ void main() {
             builder: (context, setState) {
               rebuild = setState;
               return KvBurialMark(
-                state: TxChipState.accepted,
+                stalled: false,
                 confirmations: confirmations,
                 maturity: MaturityState.pending,
                 direction: ActivityDirection.outgoing,
@@ -331,7 +330,7 @@ void main() {
                   builder: (context, setState) {
                     rebuild = setState;
                     return KvBurialMark(
-                      state: TxChipState.accepted,
+                      stalled: false,
                       confirmations: confirmations,
                       maturity: MaturityState.accepted,
                       direction: ActivityDirection.outgoing,
@@ -393,7 +392,7 @@ void main() {
             builder: (context, setState) {
               rebuild = setState;
               return KvBurialMark(
-                state: TxChipState.accepted,
+                stalled: false,
                 confirmations: confirmations,
                 maturity: MaturityState.accepted,
                 direction: ActivityDirection.outgoing,
@@ -431,7 +430,7 @@ void main() {
             builder: (context, setState) {
               rebuild = setState;
               return KvBurialMark(
-                state: TxChipState.accepted,
+                stalled: false,
                 confirmations: confirmations,
                 maturity: MaturityState.pending,
                 direction: ActivityDirection.outgoing,

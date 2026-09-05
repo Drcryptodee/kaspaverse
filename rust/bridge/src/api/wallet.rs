@@ -767,7 +767,7 @@ where
 /// `NetworkParams` for it. Two literals here would let the glass quote devnet
 /// thresholds over a mainnet balance, which is precisely the class of split
 /// D-249 caught in the UI.
-fn wallet_network_id() -> NetworkId {
+pub(crate) fn wallet_network_id() -> NetworkId {
     NetworkId::new(NetworkType::Mainnet)
 }
 

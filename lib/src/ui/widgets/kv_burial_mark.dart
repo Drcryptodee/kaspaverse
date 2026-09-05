@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../../rust/api/wallet.dart';
 import '../theme/tokens.dart';
 import 'kv_streaming_count.dart';
-import 'tx_status_chip.dart';
 
 /// **The maturity thresholds, as data** — never as a number typed into `lib/`.
 ///
@@ -123,15 +122,36 @@ abstract final class KvBurial {
   /// **This, and not the words, is what a crossfade is keyed on** (BG-24): the
   /// depth streams every frame inside the `accepted` rung, and a switcher keyed
   /// on the rendered text would crossfade the row sixty times a second.
+  ///
+  /// [stalled] is the tracker's verdict on a submit — `ActivityRecord.stalled`,
+  /// or the receipt's `TxStatusKind.stalled` — and it is the ONLY thing the
+  /// ledger's old chip vocabulary ever contributed here. It used to arrive as
+  /// a `TxChipState` run through `chipStateOf` and `gateByDepth`, a gate whose
+  /// `chipCounterCeiling = 100` was the last maturity threshold typed into
+  /// `lib/` and did nothing on this path (UX-R3, second beat). A bool says
+  /// what is meant and cannot smuggle a number.
+  ///
+  /// **And the chain's own acceptance outranks the tracker's stall.** The
+  /// stall is a verdict on an *absence* — the tracker's VCC lane has heard
+  /// nothing for a minute — and that lane can be deaf while wallet-core's
+  /// UTXO lane has already persisted the acceptance (`Confirmed`, from
+  /// `accepted_daa_score`; the D-083 scar's shape). `chipStateOf` used to
+  /// gate exactly this (`confirmed + stalled → none`), and the bool dropped
+  /// the gate: a row the same screen was counting the burial of read *Not
+  /// accepted yet*, which is the sentence that makes a user re-send a payment
+  /// the chain already took (`consensus-auditor`, UX-R3 second beat). An
+  /// accuser must not convict on an absence it can manufacture itself.
   static KvBurialRung rungFor(
-    TxChipState state,
     int? confirmations,
     MaturityState maturity, {
+    required bool stalled,
     required ActivityDirection direction,
     required bool isCoinbase,
     required KvMaturity thresholds,
   }) {
-    if (state == TxChipState.stalled) return KvBurialRung.stalled;
+    if (stalled && maturity != MaturityState.confirmed) {
+      return KvBurialRung.stalled;
+    }
     final incoming = direction == ActivityDirection.incoming;
     final depth = confirmations;
     // **A spend that the DAG has not accepted is the one true `Pending` — and
@@ -280,7 +300,7 @@ abstract final class KvBurial {
 class KvBurialMark extends StatefulWidget {
   const KvBurialMark({
     super.key,
-    required this.state,
+    required this.stalled,
     required this.confirmations,
     required this.maturity,
     required this.direction,
@@ -289,7 +309,9 @@ class KvBurialMark extends StatefulWidget {
     this.fontSize = 11,
   });
 
-  final TxChipState state;
+  /// The tracker has seen no acceptance for this submit past the stall
+  /// threshold — a fault, not a depth (see [KvBurial.rungFor]).
+  final bool stalled;
 
   /// `metaMono`'s 11 by default; the ledger row passes `sub`'s 13, because
   /// the render sets `Settled · 2 h ago` as one 13 dp line (S1, D-261).
@@ -363,9 +385,9 @@ class _KvBurialMarkState extends State<KvBurialMark> {
 
   Widget _body(int? depth) {
     final rung = KvBurial.rungFor(
-      widget.state,
       depth,
       widget.maturity,
+      stalled: widget.stalled,
       direction: widget.direction,
       isCoinbase: widget.isCoinbase,
       thresholds: widget.thresholds,

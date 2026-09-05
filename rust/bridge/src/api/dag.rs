@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use kaspaverse_chain::{
     link, AcceptanceEvent, AcceptanceTracker, DagEvent, DagMonitor, SignedTxRetention,
@@ -19,13 +20,90 @@ use crate::frb_generated::StreamSink;
 
 /// Live view of the DAG tip as seen over wRPC, streamed on every change.
 /// Scores stay `u64` end-to-end (they exceed 2^53 — Dart sees `BigInt`, L3).
-#[derive(Clone, Default)]
+///
+/// `PartialEq` is load-bearing, not a convenience: the folder task publishes a
+/// snapshot only when it differs from the one subscribers last saw, so an
+/// event that re-states a score nobody's screen can distinguish costs no FFI
+/// crossing at all (see [`EMIT_EVERY`]).
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct DagSnapshot {
     pub connected: bool,
     /// Node endpoint picked by the PNN resolver (`None` until first connect).
     pub endpoint: Option<String>,
     pub virtual_daa_score: Option<u64>,
     pub sink_blue_score: Option<u64>,
+}
+
+/// **How often a score change is allowed across the FFI.**
+///
+/// Mainnet produces ten blocks a second, and every one of them moves the
+/// virtual DAA score — so the unthrottled folder crossed the bridge, allocated
+/// a Dart object and pushed a `ValueNotifier` ten times a second for the life
+/// of the process, waking every listener on every screen. Nothing on the glass
+/// can use that: the score is rendered by `KvStreamingCount`, which animates
+/// between the values it is given, and a depth gauge measured in hundreds of
+/// DAA cannot show a difference of two.
+///
+/// 250 ms keeps four updates a second — well past the eye and past the
+/// animator — for 60 % of the crossings. **Liveness does not wait**: a
+/// connect or a disconnect publishes in the same breath it is folded, because
+/// that is the claim a stale frame would get wrong (C7).
+const EMIT_EVERY: Duration = Duration::from_millis(250);
+
+/// **When a folded snapshot may cross the FFI** — the policy, kept pure so it
+/// is tested against a clock the test holds rather than by sleeping.
+///
+/// Two rules and nothing else. **A link coming up or going down, or a rebind,
+/// is news and never waits**: coalescing a liveness transition would put a
+/// quarter of a second between a dead socket and the glass admitting it, which
+/// is the P0.3 scar in miniature (C7). **A score is a tick**, and a tick
+/// crosses only when [`EMIT_EVERY`] has passed since the last crossing; one
+/// that is held is flushed at its deadline by the folder, so the last tick of
+/// a burst is never the one nobody sees. An unchanged snapshot never crosses.
+struct Coalescer {
+    /// What subscribers have actually been shown. The folded snapshot runs
+    /// ahead of it between crossings; the gap is the coalescing.
+    sent: DagSnapshot,
+    last_emit: Option<Instant>,
+}
+
+impl Coalescer {
+    fn new() -> Self {
+        Self {
+            sent: DagSnapshot::default(),
+            last_emit: None,
+        }
+    }
+
+    fn structural(&self, current: &DagSnapshot) -> bool {
+        current.connected != self.sent.connected || current.endpoint != self.sent.endpoint
+    }
+
+    /// Whether `current` goes out now; records the crossing when it does.
+    fn offer(&mut self, current: &DagSnapshot, now: Instant) -> bool {
+        if *current == self.sent {
+            return false;
+        }
+        let due = self
+            .last_emit
+            .is_none_or(|at| now.duration_since(at) >= EMIT_EVERY);
+        if !(self.structural(current) || due) {
+            return false;
+        }
+        self.sent = current.clone();
+        self.last_emit = Some(now);
+        true
+    }
+
+    /// How much longer a held tick may wait — `None` when nothing is held.
+    fn deadline(&self, current: &DagSnapshot, now: Instant) -> Option<Duration> {
+        if *current == self.sent {
+            return None;
+        }
+        Some(self.last_emit.map_or(Duration::ZERO, |at| {
+            EMIT_EVERY.saturating_sub(now.duration_since(at))
+        }))
+    }
 }
 
 /// Snapshot fan-out, created once per process; every Dart subscription
@@ -381,37 +459,95 @@ pub fn dag_status() -> DagStatusDto {
     }
 }
 
-/// **The connection card's two live readings** (`T5`).
+/// **The connection card's live readings** (`T5`).
 ///
-/// A separate pull rather than two more fields on [`DagStatusDto`], and that is
+/// A separate pull rather than more fields on [`DagStatusDto`], and that is
 /// deliberate: `dag_status` is documented to take **no I/O in its steady
-/// state** and is polled by the money screen's link tick, while these two cost
-/// a real round trip each. Putting them on the status poll would have put two
-/// RPC calls a second behind every surface in the app to serve one card.
+/// state** and is polled by the money screen's link tick, while these cost a
+/// real round trip. Putting them on the status poll would have put RPC calls
+/// behind every surface in the app to serve one card.
 ///
-/// So this is called only while the node surface is open, on its own slower
-/// cadence, exactly as the transport-scan age already is.
+/// So this is called only while the node surface is open, on its own cadence,
+/// exactly as the transport-scan age already is — and the caller says whether
+/// it wants the peer count this time, because that number changes over minutes
+/// while a latency changes over seconds.
 #[derive(Clone, Copy, Default)]
 pub struct LinkProbeDto {
-    /// Round-trip time of a `ping` on the bound socket, in milliseconds.
-    /// `None` = the node did not answer, and the surface says so rather than
-    /// showing a stale figure (BG-8).
+    /// Round trip of one `get_server_info` on the bound socket, in
+    /// milliseconds. `None` = the node did not answer, and the surface says so
+    /// rather than showing a stale figure (BG-8).
     pub latency_ms: Option<u64>,
-    /// How many peers **the node** is connected to. `None` where the call was
-    /// refused or unanswered — some nodes disable it, and an absent reading is
-    /// its own face rather than a zero.
+    /// **The node's own word on whether it is synced**, from the same answer
+    /// the latency was timed on. The connect race checks this once at
+    /// candidacy and never again; a node that falls behind while bound keeps
+    /// serving a balance and a depth that lag the network, and this is the one
+    /// reading that can say so. `None` when the node did not answer.
+    pub synced: Option<bool>,
+    /// How many peers **the node** is connected to. `None` when it was not
+    /// asked for this time, or when the call went unanswered — an absent
+    /// reading is its own face rather than a zero.
     pub peers: Option<u32>,
 }
 
 /// Probe the live link — see [`LinkProbeDto`]. Returns an empty probe rather
 /// than an error when there is no monitor yet: a surface opened during the cold
 /// window has nothing to read, which is not a failure.
-pub async fn dag_probe_link() -> LinkProbeDto {
+pub async fn dag_probe_link(with_peers: bool) -> LinkProbeDto {
     let Some(monitor) = MONITOR.get() else {
         return LinkProbeDto::default();
     };
-    let (latency_ms, peers) = monitor.probe_link().await;
-    LinkProbeDto { latency_ms, peers }
+    let probe = monitor.probe_link(with_peers).await;
+    LinkProbeDto {
+        latency_ms: probe.latency_ms,
+        synced: probe.synced,
+        peers: probe.peers,
+    }
+}
+
+/// **`T5`'s `Test` — what a node the user typed actually is, before anything
+/// is pinned.**
+///
+/// The same probe the connect race runs on every candidate
+/// (`link::probe_endpoint`): an **ephemeral** client dials the URL, asks
+/// `get_server_info`, and refuses a node that is on the wrong network, not
+/// synced, without a UTXO index, or speaking a newer RPC major — the four
+/// reasons a pinned node would fail *after* the user committed to it. The
+/// client is disconnected and dropped before this returns: a test never
+/// becomes the view socket (D-005), and a node that passes is not bound by
+/// passing — `Use this node` is still the commit.
+///
+/// Public data in, public data out (INV-3): a URL the user typed, and what the
+/// node said about itself. The refusal, when there is one, is the `Err` the
+/// user reads — Rust's own words for why this node will not do.
+#[derive(Clone, Debug)]
+pub struct NodeTestDto {
+    /// Wall time of the node's `get_server_info` answer, in milliseconds —
+    /// the same round trip the connection card measures on the live link.
+    pub latency_ms: u64,
+    /// What the node says it is running.
+    pub server_version: String,
+    /// The node's virtual DAA score at the moment it answered.
+    pub virtual_daa_score: u64,
+}
+
+/// Test a node the user typed — see [`NodeTestDto`]. Validated by the same
+/// intake guard a pin passes (`validate_node_url`), never a second weaker one.
+pub async fn dag_test_node(url: String) -> Result<NodeTestDto, AppError> {
+    let url = kaspaverse_chain::validate_node_url(&url).map_err(AppError::chain)?;
+    // The connect race's own per-candidate budget, so a node the test accepts
+    // is a node the race would accept — one constant, not two that agree.
+    let outcome = link::probe_endpoint(
+        &url,
+        super::wallet::wallet_network_id(),
+        kaspaverse_chain::PROBE_TIMEOUT,
+    )
+    .await
+    .map_err(AppError::chain)?;
+    Ok(NodeTestDto {
+        latency_ms: outcome.info_ms,
+        server_version: outcome.server_version,
+        virtual_daa_score: outcome.virtual_daa_score,
+    })
 }
 
 /// The user's node choice (D-187) — the INV-8 escape hatch made reachable.
@@ -675,16 +811,38 @@ async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError
             let fan_out = sender.clone();
             tokio::spawn(async move {
                 let mut current = DagSnapshot::default();
+                let mut gate = Coalescer::new();
                 loop {
-                    match events.recv().await {
+                    // A tick is being held: wake at its deadline even if the
+                    // chain has gone quiet. `recv` is cancel-safe (tokio's
+                    // broadcast documents it), which is what makes the timeout
+                    // legal here rather than an event-dropping race.
+                    let received = match gate.deadline(&current, Instant::now()) {
+                        Some(due) => match tokio::time::timeout(due, events.recv()).await {
+                            Ok(received) => received,
+                            Err(_) => {
+                                if gate.offer(&current, Instant::now()) {
+                                    let _ = fan_out.send(current.clone());
+                                }
+                                continue;
+                            }
+                        },
+                        None => events.recv().await,
+                    };
+                    match received {
                         Ok(event) => {
                             fold(&mut current, event);
+                            // LATEST always carries the freshest fold: a
+                            // subscriber attaching mid-interval paints the
+                            // truth, not the last thing that happened to go out.
                             *LATEST
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(current.clone());
-                            // Send fails only with zero subscribers — fine.
-                            let _ = fan_out.send(current.clone());
+                            if gate.offer(&current, Instant::now()) {
+                                // Send fails only with zero subscribers — fine.
+                                let _ = fan_out.send(current.clone());
+                            }
                         }
                         // Lagged: folder fell behind the event buffer; values
                         // are absolute, so skipping ahead is safe.
@@ -761,5 +919,93 @@ mod tests {
         fold(&mut snapshot, DagEvent::Disconnected);
         assert!(!snapshot.connected);
         assert_eq!(snapshot.virtual_daa_score, Some(458_174_109));
+    }
+
+    fn score(n: u64) -> DagSnapshot {
+        DagSnapshot {
+            connected: true,
+            endpoint: Some("wss://node.example/borsh".into()),
+            virtual_daa_score: Some(n),
+            sink_blue_score: None,
+        }
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_liveness_transition_never_waits() {
+        let t0 = Instant::now();
+        let mut gate = Coalescer::new();
+        assert!(gate.offer(&score(1), t0), "the first fold always crosses");
+        let mut down = score(2);
+        down.connected = false;
+        assert!(
+            gate.offer(&down, t0 + ms(10)),
+            "a drop crosses inside the window — a stale frame would get it wrong (C7)"
+        );
+        assert!(
+            gate.offer(&score(3), t0 + ms(20)),
+            "and so does the link coming back"
+        );
+        let mut rebound = score(3);
+        rebound.endpoint = Some("wss://other.example/borsh".into());
+        assert!(
+            gate.offer(&rebound, t0 + ms(30)),
+            "and a rebind, which names a new node"
+        );
+    }
+
+    #[test]
+    fn a_score_tick_inside_the_window_is_held_until_its_deadline() {
+        let t0 = Instant::now();
+        let mut gate = Coalescer::new();
+        assert!(gate.offer(&score(1), t0));
+        assert!(
+            !gate.offer(&score(2), t0 + ms(100)),
+            "a tick 100 ms in waits"
+        );
+        assert_eq!(
+            gate.deadline(&score(2), t0 + ms(100)),
+            Some(ms(150)),
+            "and the folder is told exactly how long"
+        );
+        assert!(
+            gate.offer(&score(2), t0 + ms(250)),
+            "the flush at the deadline"
+        );
+        assert_eq!(
+            gate.deadline(&score(2), t0 + ms(250)),
+            None,
+            "nothing is held after it"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_ten_ticks_in_a_quarter_second_crosses_at_most_twice() {
+        // Mainnet's ten blocks a second, folded: the unthrottled folder crossed
+        // the bridge ten times here.
+        let t0 = Instant::now();
+        let mut gate = Coalescer::new();
+        let mut crossings = 0;
+        for i in 0..10u64 {
+            if gate.offer(&score(i), t0 + ms(i * 25)) {
+                crossings += 1;
+            }
+        }
+        assert!(crossings <= 2, "{crossings} crossings for ten ticks");
+        // What a flush carries is the NEWEST score, never a stale intermediate.
+        assert!(gate.offer(&score(9), t0 + ms(250)));
+        assert_eq!(gate.sent.virtual_daa_score, Some(9));
+    }
+
+    #[test]
+    fn an_unchanged_snapshot_never_crosses() {
+        let t0 = Instant::now();
+        let mut gate = Coalescer::new();
+        assert!(gate.offer(&score(1), t0));
+        assert!(!gate.offer(&score(1), t0 + Duration::from_secs(5)));
+        assert_eq!(gate.deadline(&score(1), t0 + Duration::from_secs(5)), None);
     }
 }

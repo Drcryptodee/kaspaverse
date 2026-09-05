@@ -18,7 +18,6 @@ import '../widgets/kv_burial_mark.dart';
 import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_contact.dart';
 import '../widgets/kv_fiat.dart';
-import '../widgets/tx_status_chip.dart' show chipStateOfAcceptance;
 import '../widgets/kv_cadence.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_explorer_exit.dart';
@@ -1634,7 +1633,7 @@ class _ReceiptCard extends StatelessWidget {
                   // re-accepts.
                   ? const _StatusSentence('Displaced by the network')
                   : KvBurialMark(
-                      state: chipStateOfAcceptance(status!.kind),
+                      stalled: status!.kind == TxStatusKind.stalled,
                       confirmations: status!.blueDepth?.toInt(),
                       // **The tracker's kind IS the maturity here**, and under
                       // D-248's vocabulary it needs no translation: `submitted`
@@ -1647,9 +1646,17 @@ class _ReceiptCard extends StatelessWidget {
                       // the terminal word. The direction now carries that: a
                       // spend with no depth reads `Accepted —` by the
                       // arithmetic rather than by a fixed argument.
-                      maturity: status!.kind == TxStatusKind.submitted
-                          ? MaturityState.pending
-                          : MaturityState.confirmed,
+                      // A stall is the tracker's verdict on a submit it never
+                      // saw accepted, so it is `Pending` too — the ladder lets
+                      // the chain's own `Confirmed` outrank a stall (a deaf
+                      // VCC lane must not convict a spend wallet-core has
+                      // persisted), and this seat has no such evidence to
+                      // offer (`consensus-auditor`, UX-R3 second beat).
+                      maturity: switch (status!.kind) {
+                        TxStatusKind.submitted ||
+                        TxStatusKind.stalled => MaturityState.pending,
+                        _ => MaturityState.confirmed,
+                      },
                       // A receipt is always our own spend, and a spend is never
                       // a coinbase.
                       direction: ActivityDirection.outgoing,

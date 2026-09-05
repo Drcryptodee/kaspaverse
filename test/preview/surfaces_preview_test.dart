@@ -26,7 +26,6 @@ import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
-import 'package:kaspaverse/src/ui/widgets/tx_status_chip.dart';
 
 import '../support/preview_harness.dart';
 import '../support/maturity.dart';
@@ -366,14 +365,20 @@ Future<void> _armTheHold(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 340));
 }
 
-Widget _node() => NodeScreen(
+/// `T5`, and the two states of its node row the happy path cannot show
+/// (BG-20): a dark hunt with the cadence in the disc, and a live node that
+/// says it is not synced.
+Widget _node({bool hunting = false, bool? synced = true}) => NodeScreen(
   scope: NodeScope(
-    connected: ValueNotifier(true),
-    activeEndpoint: ValueNotifier<String?>('wss://isla.kaspa.red'),
+    connected: ValueNotifier(!hunting),
+    activeEndpoint: ValueNotifier<String?>(
+      hunting ? null : 'wss://isla.kaspa.red',
+    ),
     virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
     pinnedNode: ValueNotifier<String?>(null),
     pinDropped: ValueNotifier(false),
     setPinnedNode: (_) async {},
+    searching: ValueNotifier(hunting),
     lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16)),
     // **`T5`'s two live seats, wired** — the `Switch node` glow pill and the
     // connection card's measured reading. Left unwired the frames showed a
@@ -381,9 +386,34 @@ Widget _node() => NodeScreen(
     // where the render draws `151 ms · Slow`. A preview fixture that omits a
     // seam is a picture of the fallback, not of the screen.
     onReconnect: () async {},
-    probeLink: () async => (latencyMs: 151, peers: 14),
+    probeLink: ({required bool peers}) async =>
+        (latencyMs: 151, peers: 14, synced: synced),
+    testNode: (_) async =>
+        (latencyMs: 84, serverVersion: '1.0.1', daa: BigInt.from(528980542)),
   ),
 );
+
+/// Open the pin, type a node, and test it — `T5`'s field row with its answer.
+Future<void> _testANode(WidgetTester tester) async {
+  // Pumped by hand: the latency dot breathes for as long as there is a
+  // reading, so a settle would wait on an animation whose point is not to stop.
+  // Below the fold at 320 dp: a `ListView` builds only what the viewport
+  // reaches, so the toggle is dragged into view before it is tapped.
+  await tester.dragUntilVisible(
+    find.text('Use my own node'),
+    find.byType(ListView),
+    const Offset(0, -200),
+  );
+  await tester.pump();
+  await tester.tap(find.text('Use my own node'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.enterText(find.byType(TextField).first, 'ws://mine.local:17110');
+  await tester.pump();
+  await tester.tap(find.text('Test'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+}
 
 Widget _settings() => SettingsScreen(
   security: SecurityScope(
@@ -415,7 +445,20 @@ Future<Map<String, String>> _packageInfo() async => const {
 /// D-248 seated, and the gauge's fill lands on its ceiling.
 Widget _txDetailSettled() => _txDetail(daa: 458174000 + 420);
 
-Widget _txDetail({int daa = 458174042}) => TxDetailScreen(
+/// The two frames UX-R3's first beat never opened: a **coinbase** row, whose
+/// ceiling is the pin's 1,000 (D-249's safety branch), and a **named**
+/// counterparty in the lifecycle chip.
+const _payee =
+    'kaspa:qr7m4h6xk2f9v0s8d3n5t1w7y2b4c6e8g0j2l4n6p8r0t2v4x6z8a0c2e4g6';
+
+Widget _txDetailCoinbase() => _txDetail(daa: 458173900 + 150, coinbase: true);
+Widget _txDetailNamed() => _txDetail(named: true);
+
+Widget _txDetail({
+  int daa = 458174042,
+  bool coinbase = false,
+  bool named = false,
+}) => TxDetailScreen(
   txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',
   activity: ValueNotifier<List<ActivityRecord>>([
     ActivityRecord(
@@ -424,19 +467,31 @@ Widget _txDetail({int daa = 458174042}) => TxDetailScreen(
       unixtimeMsec: BigInt.from(1788058080000),
       blockDaaScore: BigInt.from(458173900),
       acceptedDaaScore: BigInt.from(458174000),
-      direction: ActivityDirection.outgoing,
-      isCoinbase: false,
+      direction: coinbase
+          ? ActivityDirection.incoming
+          : ActivityDirection.outgoing,
+      isCoinbase: coinbase,
       // `S9` draws a named counterparty and a fee; the fixture carries both so
       // the still shows the composition the render does rather than a stripped
       // version of it. Fixture data only — no preview ever carries an address,
       // a balance or a txid that belongs to anyone.
-      counterpartyAddress:
-          'kaspa:qr7m4h6xk2f9v0s8d3n5t1w7y2b4c6e8g0j2l4n6p8r0t2v4x6z8a0c2e4g6',
-      feeSompi: BigInt.from(10000),
-      maturity: MaturityState.confirmed,
+      counterpartyAddress: coinbase ? null : _payee,
+      feeSompi: coinbase ? null : BigInt.from(10000),
+      // A mined output is `Pending` at the pin until its own maturity; a spend
+      // with an accepting score is `Confirmed` (what the chain layer emits).
+      maturity: coinbase ? MaturityState.pending : MaturityState.confirmed,
       stalled: false,
     ),
   ]),
+  contacts: named
+      ? ContactsScope(
+          contacts: ValueNotifier<List<ContactDto>>([
+            const ContactDto(address: _payee, name: 'Mara'),
+          ]),
+          refresh: () async {},
+          save: (_, _) async {},
+        )
+      : null,
   virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(daa)),
   stale: ValueNotifier<bool>(false),
   maturity: kTestMaturity,
@@ -459,7 +514,7 @@ Widget _gaugeLadder() => const Scaffold(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         KvBurialGauge(
-          state: TxChipState.accepted,
+          stalled: false,
           confirmations: 1,
           maturity: MaturityState.pending,
           direction: ActivityDirection.outgoing,
@@ -468,7 +523,7 @@ Widget _gaugeLadder() => const Scaffold(
         ),
         SizedBox(height: 32),
         KvBurialGauge(
-          state: TxChipState.accepted,
+          stalled: false,
           confirmations: 10,
           maturity: MaturityState.pending,
           direction: ActivityDirection.outgoing,
@@ -477,7 +532,7 @@ Widget _gaugeLadder() => const Scaffold(
         ),
         SizedBox(height: 32),
         KvBurialGauge(
-          state: TxChipState.accepted,
+          stalled: false,
           confirmations: 340,
           maturity: MaturityState.accepted,
           direction: ActivityDirection.outgoing,
@@ -486,7 +541,7 @@ Widget _gaugeLadder() => const Scaffold(
         ),
         SizedBox(height: 32),
         KvBurialGauge(
-          state: TxChipState.accepted,
+          stalled: false,
           confirmations: 4200,
           maturity: MaturityState.confirmed,
           direction: ActivityDirection.outgoing,
@@ -581,6 +636,9 @@ void main() {
     // and its `Switch node` pill. It clamps with `KvColumn` now, so the four
     // spec frames say something rather than showing one stretched column.
     framedSurface('node__connected', _node);
+    surface('node__hunting', () => _node(hunting: true));
+    surface('node__unsynced', () => _node(synced: false));
+    surface('node__test', _node, act: _testANode);
     surface('settings__root', _settings);
 
     // **Send, both steps, in all four frames** (`S6a` · `S6b` · `S6`).
@@ -663,6 +721,8 @@ void main() {
     // **`S9`, in all five frames** (UX-R3).
     framedSurface('tx__detail', _txDetail);
     surface('tx__detail_settled', _txDetailSettled);
+    surface('tx__detail_coinbase', _txDetailCoinbase);
+    surface('tx__detail_named', _txDetailNamed);
 
     // The gauge alone, at four readings that sit on the four decades. Whether
     // a log axis reads as a scale rather than as a progress bar is a judgement
@@ -677,7 +737,7 @@ void main() {
             mainAxisSize: MainAxisSize.min,
             children: [
               KvBurialMark(
-                state: TxChipState.accepted,
+                stalled: false,
                 confirmations: 42,
                 maturity: MaturityState.pending,
                 direction: ActivityDirection.outgoing,
@@ -686,7 +746,7 @@ void main() {
               ),
               SizedBox(height: 12),
               KvBurialMark(
-                state: TxChipState.accepted,
+                stalled: false,
                 confirmations: 420,
                 maturity: MaturityState.accepted,
                 direction: ActivityDirection.outgoing,
@@ -695,7 +755,7 @@ void main() {
               ),
               SizedBox(height: 12),
               KvBurialMark(
-                state: TxChipState.accepted,
+                stalled: false,
                 confirmations: 4200,
                 maturity: MaturityState.confirmed,
                 direction: ActivityDirection.outgoing,

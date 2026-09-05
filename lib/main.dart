@@ -23,7 +23,8 @@ import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/preview/black_glass_home_preview.dart';
-import 'package:kaspaverse/src/rust/api/dag.dart' show dagProbeLink, dagStatus;
+import 'package:kaspaverse/src/rust/api/dag.dart'
+    show dagProbeLink, dagStatus, dagTestNode;
 import 'package:kaspaverse/src/rust/api/prefs.dart'
     show prefsExplorerConfig, prefsExplorerTxUrl, prefsSetExplorerConfig;
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
@@ -92,14 +93,31 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
   // The scan line the retired network sheet uniquely rendered, carried across
   // (UX-3). `dagStatus` is a poll that takes no I/O in its steady state.
   blockAgeSecs: () async => (await dagStatus()).lastBlockAgeSecs?.toInt(),
-  // `T5`'s connection card: one `ping` round trip and the node's peer count,
-  // polled only while that screen is open. Two real RPC calls, which is why
-  // they are a separate pull rather than two more fields on `dagStatus` — that
-  // one is documented to take no I/O in its steady state and every surface
-  // polls it.
-  probeLink: () async {
-    final probe = await dagProbeLink();
-    return (latencyMs: probe.latencyMs?.toInt(), peers: probe.peers);
+  // `T5`'s connection card: one `get_server_info` round trip (the latency and
+  // the node's own `is_synced`) and, when asked, the node's peer count —
+  // polled only while that screen is open, the peers on a slower cadence.
+  // Real RPC calls, which is why they are a separate pull rather than more
+  // fields on `dagStatus` — that one is documented to take no I/O in its
+  // steady state and every surface polls it.
+  probeLink: ({required bool peers}) async {
+    final probe = await dagProbeLink(withPeers: peers);
+    return (
+      latencyMs: probe.latencyMs?.toInt(),
+      peers: probe.peers,
+      synced: probe.synced,
+    );
+  },
+  // `T5`'s `Test`: the connect race's own probe, run once on a node the user
+  // typed, on an ephemeral client that never becomes the view socket. Rust
+  // validates the URL and refuses a node the race would refuse; the refusal
+  // is the message the user reads.
+  testNode: (url) async {
+    final answer = await dagTestNode(url: url);
+    return (
+      latencyMs: answer.latencyMs.toInt(),
+      serverVersion: answer.serverVersion,
+      daa: answer.virtualDaaScore,
+    );
   },
 );
 
