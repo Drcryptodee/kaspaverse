@@ -1611,6 +1611,16 @@ class _ExplorerSheetState extends State<_ExplorerSheet> {
                 color: KvColor.ink,
               ),
             ),
+            const SizedBox(height: KvSpace.s),
+            // **The disclosure, at the top and in one line** (D-277). The
+            // founder struck the paragraph that stood over the act, twice —
+            // but D-192/BG-17 is why it exists at all: a departure you cannot
+            // name is not one you consented to, and `KvExplorerExit`'s compact
+            // button rests its own case on this sheet naming it. So the fact
+            // moved to where the choice is made and shrank to a sentence.
+            const _TrustLabel(
+              'An explorer gets the transaction id and your network address.',
+            ),
             const SizedBox(height: KvSpace.m),
             _ChoiceCard(
               children: [
@@ -1804,6 +1814,14 @@ class _RateSheetState extends State<_RateSheet> {
                     fontVariations: KvWeight.w600,
                     color: KvColor.ink,
                   ),
+                ),
+                const SizedBox(height: KvSpace.s),
+                // One line, at the top, never over the act (D-277) — and the
+                // two facts a price owes: what the source learns, and that
+                // nothing on chain can check what it says (BG-17).
+                const _TrustLabel(
+                  'The source learns that this wallet asked for a price and '
+                  'the address it asked from; no node can check the figure.',
                 ),
                 const SizedBox(height: KvSpace.m),
                 // Not yet read: say so, and offer no control (a switch drawn
@@ -2406,16 +2424,22 @@ class _NodeRow extends StatelessWidget {
   );
 }
 
-/// The node row's disc: `T5`'s 40 dp tint disc with the `network` glyph, in
-/// the link's tone — and, while the link is being hunted, the cadence hill in
-/// its place. One seat, two faces: a mark when there is a node, the app's one
-/// loading indicator while there is not yet one (BG-20, D-192).
 /// **The endpoint on one line, and a tap opens it** (founder on glass,
 /// 2026-09-05: *"20% smaller so the whole text can show in one line, but if
-/// it breaks, minimise it with a '…' that maximises on a tap"*). 11 dp mono —
-/// BG-14's floor, which is where 20 % under 13 lands — with the middle
-/// clipped by an ellipsis only when the width will not hold it; then the
-/// line is a target, and a tap wraps it whole and a second tap folds it.
+/// it breaks the link should be minimized with a '…' continuation that
+/// maximizes if user taps"*). 11 dp mono — 20 % under the row's 13, landing
+/// on BG-14's floor — so all but the longest addresses stand whole.
+///
+/// **Where it will not fit, the MIDDLE goes** (BG-15's reasoning, the same
+/// one `KvAddress` follows): a tail ellipsis eats `:17110` and the
+/// distinguishing subdomain, which is the half that tells two nodes apart.
+/// The split is measured against the width actually given, never guessed.
+///
+/// **And only then is it a control** — a folded line is a 52 dp target
+/// (BG-12; `KvExplorerExit`'s own 34 dp scar is why this is not left at the
+/// line's 16), with its own semantics node; a line that fits is plain text
+/// and takes no target at all, which is what keeps the card compact in the
+/// ordinary case.
 class _EndpointText extends StatefulWidget {
   const _EndpointText(this.endpoint);
 
@@ -2435,29 +2459,59 @@ class _EndpointText extends StatefulWidget {
 class _EndpointTextState extends State<_EndpointText> {
   bool _open = false;
 
+  /// The widest head…tail that fits [width], or null when the whole string
+  /// does. Measured with the same painter that lays the line out.
+  static String? _folded(String text, double width, TextScaler scaler) {
+    double widthOf(String s) {
+      final p = TextPainter(
+        text: TextSpan(text: s, style: _EndpointText.style),
+        textDirection: TextDirection.ltr,
+        textScaler: scaler,
+      )..layout();
+      final w = p.width;
+      p.dispose();
+      return w;
+    }
+
+    if (widthOf(text) <= width) return null;
+    // Keep the tail — the port and the distinguishing label — and give the
+    // head whatever is left. A binary search, so the measurement runs a
+    // handful of times rather than once per character.
+    var lo = 0;
+    var hi = text.length;
+    var best = '…${text.substring(text.length - 1)}';
+    while (lo <= hi) {
+      final keep = (lo + hi) ~/ 2;
+      if (keep * 2 >= text.length) {
+        hi = keep - 1;
+        continue;
+      }
+      final candidate =
+          '${text.substring(0, keep)}…${text.substring(text.length - keep)}';
+      if (widthOf(candidate) <= width) {
+        best = candidate;
+        lo = keep + 1;
+      } else {
+        hi = keep - 1;
+      }
+    }
+    return best;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scaler = MediaQuery.textScalerOf(context);
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Measured, not assumed: only a line that would not fit is a target.
-        final painter = TextPainter(
-          text: TextSpan(text: widget.endpoint, style: _EndpointText.style),
-          textDirection: TextDirection.ltr,
-          textScaler: scaler,
-          maxLines: 1,
-        )..layout(maxWidth: constraints.maxWidth);
-        final overflows = painter.didExceedMaxLines;
-        painter.dispose();
+        final folded = _folded(widget.endpoint, constraints.maxWidth, scaler);
+        if (folded == null) {
+          return Text(widget.endpoint, maxLines: 1, style: _EndpointText.style);
+        }
         final text = Text(
-          widget.endpoint,
-          maxLines: overflows && _open ? null : 1,
-          overflow: overflows && _open
-              ? TextOverflow.visible
-              : TextOverflow.ellipsis,
+          _open ? widget.endpoint : folded,
+          maxLines: _open ? null : 1,
           style: _EndpointText.style,
         );
-        if (!overflows) return text;
         return Semantics(
           container: true,
           button: true,
@@ -2471,7 +2525,12 @@ class _EndpointTextState extends State<_EndpointText> {
                 duration: KvMotion.fast,
                 curve: KvMotion.out,
                 alignment: Alignment.topLeft,
-                child: text,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minHeight: KvSpace.touchTarget,
+                  ),
+                  child: Align(alignment: Alignment.centerLeft, child: text),
+                ),
               ),
             ),
           ),
@@ -2481,6 +2540,10 @@ class _EndpointTextState extends State<_EndpointText> {
   }
 }
 
+/// The node row's disc: `T5`'s 40 dp tint disc with the `network` glyph, in
+/// the link's tone — and, while the link is being hunted, the cadence hill in
+/// its place. One seat, two faces: a mark when there is a node, the app's one
+/// loading indicator while there is not yet one (BG-20, D-192).
 class _NodeDisc extends StatelessWidget {
   const _NodeDisc({required this.tone, required this.busy});
 

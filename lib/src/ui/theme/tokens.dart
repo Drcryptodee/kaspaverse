@@ -604,13 +604,23 @@ abstract final class KvFreshness {
   /// A stale reading dims to this.
   static const double opacityStale = 0.45;
 
-  /// **A region of small text dims to 0.55, not 0.45** (D-276). The ledger
-  /// under a dark link dims as a whole so the screen says *not live* where
-  /// the money is listed (founder on glass, 2026-09-05) — and 0.55 is the
-  /// opacity at which `inkDim` on `plate` still clears BG-14's 4.5:1
-  /// (4.9, recomputed), which 0.45 does not (4.19). Hued figures under it
-  /// take `inkDim` (`KvAmount.muted`); `inkMeta` text is raised to `inkDim`.
-  static const double opacityStaleRegion = 0.55;
+  /// **A region of small text dims to 0.74** (D-276, corrected by D-277 after
+  /// `ux-auditor` recomputed it). The ledger under a dark link dims as a whole
+  /// so the screen says *not live* where the money is listed (founder on
+  /// glass, 2026-09-05) — but every run under it is 13–16 dp, which BG-8's
+  /// own clause forbids dimming below BG-14's floor.
+  ///
+  /// **Recomputed from the hexes, not remembered** (L164): `inkDim #A6B0AE`
+  /// composited on `plate #121717` measures **4.99:1 at 0.74**, 4.60 at 0.70,
+  /// 4.11 at 0.65 and **3.31 at 0.55** — the value first shipped, which was
+  /// under the floor. The number that licensed it (4.9) was `ink` at 0.50 on
+  /// `plate`: a different token, opacity and ground in one sentence, which is
+  /// the L164 failure exactly. A **selected** row is the binding case, since
+  /// its `chip` ground dims toward `plate` under the same layer: `inkDim`
+  /// there is **4.66 at 0.74** and 4.25 at 0.70 — so 0.74 is the floor, not a
+  /// preference. Hued figures under it take `inkDim` (`KvAmount.muted`) and
+  /// `inkMeta` text is raised to `inkDim`, which is what keeps both legal.
+  static const double opacityStaleRegion = 0.74;
 
   /// **The size at or above which the 45% dim is permitted** — and below which
   /// it is a BG-14 violation *(amended 2026-09-04, D-257; the collision was

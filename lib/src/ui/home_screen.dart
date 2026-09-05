@@ -1506,7 +1506,26 @@ class _LedgerState extends State<_Ledger> {
           )
         : NotificationListener<ScrollNotification>(
             onNotification: _onScroll,
-            child: _HomeScreenState._refreshable(widget.onRefresh, _rows()),
+            // **The ledger's ROWS dim as a region while the link is not
+            // live** (D-276, founder on glass 2026-09-05: the activity did
+            // not say *not connected* while the balance above it did).
+            // `opacityStaleRegion`, not the balance's 0.45 — the rows are
+            // 13–16 dp and BG-8 forbids dimming small text below BG-14's
+            // floor; the token carries the recomputed ladder. Eased, so a
+            // link that flaps does not blink the list (BG-24).
+            //
+            // **The rows, not the pane** (`ux-auditor`, D-277): the empty
+            // state and the tokens seat are not chain-derived readings and a
+            // socket drop says nothing about them.
+            child: _HomeScreenState._refreshable(
+              widget.onRefresh,
+              AnimatedOpacity(
+                opacity: widget.stale ? KvFreshness.opacityStaleRegion : 1,
+                duration: KvMotion.calm,
+                curve: KvMotion.curve,
+                child: _rows(),
+              ),
+            ),
           );
     final body = PageView(
       controller: _pages,
@@ -1537,21 +1556,7 @@ class _LedgerState extends State<_Ledger> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             header,
-            // **The ledger dims as a region while the link is not live**
-            // (D-276, founder on glass 2026-09-05: the activity did not say
-            // *not connected* while the balance above it did). 0.55, not the
-            // balance's 0.45 — the opacity at which the rows' small text
-            // still clears BG-14 (`KvFreshness.opacityStaleRegion`); the
-            // rows raise their quiet tones to `inkDim` under it. Eased, so a
-            // link that flaps does not blink the list (BG-24).
-            Expanded(
-              child: AnimatedOpacity(
-                opacity: widget.stale ? KvFreshness.opacityStaleRegion : 1,
-                duration: KvMotion.normal,
-                curve: KvMotion.out,
-                child: body,
-              ),
-            ),
+            Expanded(child: body),
           ],
         ),
       ),

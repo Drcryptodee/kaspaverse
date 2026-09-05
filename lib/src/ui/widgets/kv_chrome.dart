@@ -200,7 +200,7 @@ class KvRuledLabel extends StatelessWidget {
 /// (BG-12), its own semantics node, and the words sit low in it so the air a
 /// target needs falls where the section break is. A header with no explainer
 /// is not a control and takes [plainHeight].
-class KvSectionHeader extends StatelessWidget {
+class KvSectionHeader extends StatefulWidget {
   const KvSectionHeader(this.label, {super.key, this.info});
 
   final String label;
@@ -211,23 +211,35 @@ class KvSectionHeader extends StatelessWidget {
   static const double height = 52;
   static const double plainHeight = 36;
 
-  /// Where the words sit inside the row.
-  static const Alignment _seat = Alignment(-1, 0.25);
+  /// Where the words sit inside the row — **measured, not guessed**: a 16 dp
+  /// label in a 52 dp box leaves 36, and `(1 + 1/3) / 2 × 36` is exactly 24
+  /// above and 12 below, which is the render's rhythm around `MY OWN NODE`.
+  /// (`0.25` gave 22.5 / 13.5 while three comments claimed 24 / 12 —
+  /// `ux-auditor`, D-277.)
+  static const Alignment _seat = Alignment(-1, 1 / 3);
+
+  @override
+  State<KvSectionHeader> createState() => _KvSectionHeaderState();
+}
+
+class _KvSectionHeaderState extends State<KvSectionHeader> {
+  bool _down = false;
 
   @override
   Widget build(BuildContext context) {
-    final info = this.info;
+    final info = widget.info;
+    final label = widget.label;
     final title = KvRuledLabel(label, tight: true, rule: false);
     if (info == null) {
       return SizedBox(
-        height: plainHeight,
-        child: Align(alignment: _seat, child: title),
+        height: KvSectionHeader.plainHeight,
+        child: Align(alignment: KvSectionHeader._seat, child: title),
       );
     }
     return ValueListenableBuilder<bool>(
       valueListenable: info,
       builder: (context, open, _) => SizedBox(
-        height: height,
+        height: KvSectionHeader.height,
         child: Align(
           alignment: Alignment.centerLeft,
           child: Semantics(
@@ -238,27 +250,39 @@ class KvSectionHeader extends StatelessWidget {
             toggled: open,
             label: 'About ${label.toLowerCase()}',
             child: ExcludeSemantics(
-              child: InkWell(
+              // **`GestureDetector`, not `InkWell`** — the house rule
+              // (`KvRow`'s own note): a ripple needs a `Material` ancestor,
+              // this language has no ripple, and a shared part must survive
+              // the one place that dependency throws (the drawer panel sits
+              // above every `Scaffold` in the app). `ux-auditor`, D-277.
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: (_) => setState(() => _down = true),
+                onTapCancel: () => setState(() => _down = false),
+                onTapUp: (_) => setState(() => _down = false),
                 onTap: () => info.value = !open,
-                borderRadius: BorderRadius.circular(KvRadius.pill),
-                highlightColor: KvColor.keyPressed,
-                splashFactory: NoSplash.splashFactory,
-                child: SizedBox(
-                  height: height,
-                  child: Align(
-                    alignment: _seat,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        title,
-                        const SizedBox(width: KvSpace.s),
-                        KvGlyphIcon(
-                          KvGlyph.info,
-                          tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
-                          size: 16,
-                        ),
-                        const SizedBox(width: KvSpace.xs),
-                      ],
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: _down ? KvColor.keyPressed : Colors.transparent,
+                    borderRadius: BorderRadius.circular(KvRadius.pill),
+                  ),
+                  child: SizedBox(
+                    height: KvSectionHeader.height,
+                    child: Align(
+                      alignment: KvSectionHeader._seat,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          title,
+                          const SizedBox(width: KvSpace.s),
+                          KvGlyphIcon(
+                            KvGlyph.info,
+                            tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
+                            size: 16,
+                          ),
+                          const SizedBox(width: KvSpace.xs),
+                        ],
+                      ),
                     ),
                   ),
                 ),

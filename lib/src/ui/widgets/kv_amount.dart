@@ -33,7 +33,7 @@ enum KvAmountRole {
   /// [hero].
   screen,
 
-  /// An amount in a ledger row. One mono run at 15, weight carrying direction,
+  /// An amount in a ledger row. One mono run at 16, weight carrying direction,
   /// trailing zeros trimmed to two.
   row,
 }

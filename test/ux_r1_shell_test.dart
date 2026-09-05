@@ -89,7 +89,11 @@ void main() {
             'a word, and stacks it under the sentence when it cannot — '
             '`KvFactLine`\'s stack-when-tight, a legibility floor found in the '
             '320 dp / 1.3× frame, never a layout chosen from a width (UX-R3, '
-            'second beat)',
+            'second beat). It reads the width TWICE since D-277: the second is '
+            '`_EndpointText`, which measures the box it was handed to decide '
+            'where the endpoint\'s middle ellipsis falls — a text measurement, '
+            'not a window class, and the allowance is file-granular so the '
+            'reason has to name both',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

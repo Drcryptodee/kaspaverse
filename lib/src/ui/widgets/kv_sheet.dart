@@ -63,11 +63,16 @@ class KvSheet extends StatelessWidget {
 
   /// Tapping the scrim. Null makes the sheet undismissible, which is what a
   /// broadcast in flight needs.
-  /// A tap on the scrim. **Null falls back to [onCancel]** (D-277, founder on
-  /// glass 2026-09-05: *"clicking outside the sheet also cancels the sheet …
-  /// across every sheet"*) — so a sheet that has a Cancel is dismissed by the
-  /// ground around it, and a caller with its own exit (the ceremony, the
-  /// drawer, a contact sheet) keeps handing it over as before.
+  /// A tap on the scrim. **Null falls back to [onCancel]**, so a sheet is
+  /// undismissible only when BOTH are null — which is what a broadcast in
+  /// flight needs, and what the signing ceremony passes (it nulls the pair
+  /// together the moment a send is irreversible).
+  ///
+  /// The fallback is D-277 — founder on glass 2026-09-05: *"clicking outside
+  /// the sheet also cancels the sheet … across every sheet"*. A sheet with a
+  /// Cancel is dismissed by the ground around it, and a caller with its own
+  /// exit (the ceremony, the drawer, a contact sheet) keeps handing one over
+  /// as before.
   final VoidCallback? onDismiss;
 
   /// §3: the grabber is 40 × 4 in [KvColor.edgeHi].

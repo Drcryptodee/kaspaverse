@@ -454,9 +454,11 @@ void pollLifecycleTests() {
         expect(tester.getSize(visual).height, closeTo(44, 1));
         final box = tester.widget<AnimatedContainer>(visual);
         expect((box.decoration! as BoxDecoration).color, KvColor.chip);
-        // And the endpoint still stands beside it, whole — scheme and all
-        // (founder on glass, 2026-09-05: *"let the link be in full"*).
-        expect(find.text('ws://public-1.kaspa.example:17110'), findsOneWidget);
+        // And the endpoint stands beside it with its scheme and its port
+        // (D-277: 11 dp, the middle folded away where the seat is narrow —
+        // never the tail, which is what tells two nodes apart).
+        expect(_endpointRun(tester), startsWith('ws://'));
+        expect(_endpointRun(tester), endsWith(':17110'));
       },
     );
 
@@ -547,6 +549,18 @@ Future<void> _pumpScreen(
   }
 }
 
+/// What the node row actually prints for the endpoint — folded or whole.
+/// The run is the only 11 dp mono text on the screen (D-277).
+String _endpointRun(WidgetTester tester) => tester
+    .widgetList<Text>(find.byType(Text))
+    .firstWhere(
+      (t) =>
+          t.style?.fontFamily == KvFont.mono &&
+          t.style?.fontSize == 11 &&
+          (t.data ?? '').contains('://'),
+    )
+    .data!;
+
 /// A finder scoped to the open sheet — `SOURCES` prints a host on its row too,
 /// and the sheet's route is not opaque, so the row is still in the tree.
 Finder _inSheet(Finder f) =>
@@ -578,7 +592,8 @@ void main() {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
       expect(seam.refreshes, 1);
-      expect(find.text('ws://public-1.kaspa.example:17110'), findsOneWidget);
+      expect(_endpointRun(tester), startsWith('ws://'));
+      expect(_endpointRun(tester), endsWith(':17110'));
       expect(find.text('523,216,421'), findsOneWidget);
     });
 
@@ -1355,19 +1370,37 @@ void main() {
       const long = 'wss://a-very-long-public-node-name.kaspa.example:17110';
       seam.activeEndpoint.value = long;
       await _pumpScreen(tester, seam, width: 320);
-      var text = tester.widget<Text>(find.text(long));
-      expect(text.maxLines, 1);
-      expect(text.overflow, TextOverflow.ellipsis);
-      expect(text.style!.fontSize, 11);
+      // Folded: the MIDDLE goes, so the scheme and the port both survive —
+      // a tail ellipsis would eat `:17110` (BG-15's reasoning).
+      final folded = tester
+          .widgetList<Text>(find.byType(Text))
+          .firstWhere(
+            (t) =>
+                (t.data ?? '').contains('…') &&
+                (t.data ?? '').contains(':17110'),
+          );
+      expect(folded.data, startsWith('wss://'));
+      expect(folded.style!.fontSize, 11);
+      expect(find.text(long), findsNothing, reason: 'it did not fit');
+      // And it is a control, so it owes a control's target (BG-12).
+      final target = tester.getSize(
+        find
+            .ancestor(
+              of: find.byWidget(folded),
+              matching: find.byType(ConstrainedBox),
+            )
+            .first,
+      );
+      expect(target.height, greaterThanOrEqualTo(KvSpace.touchTarget));
       await tester.tap(find.bySemanticsLabel('Show the whole address'));
       await tester.pumpAndSettle();
-      text = tester.widget<Text>(find.text(long));
-      expect(text.maxLines, isNull, reason: 'open: the whole address');
+      expect(find.text(long), findsOneWidget, reason: 'open: the whole thing');
       expect(find.bySemanticsLabel('Fold the address'), findsOneWidget);
       // A short one is plain text, not a control.
       seam.activeEndpoint.value = 'ws://n.kaspa:1';
       await tester.pumpAndSettle();
       expect(find.bySemanticsLabel('Show the whole address'), findsNothing);
+      expect(find.text('ws://n.kaspa:1'), findsOneWidget);
     });
 
     testWidgets('back goes back', (tester) async {
