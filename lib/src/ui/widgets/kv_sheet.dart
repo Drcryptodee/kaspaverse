@@ -48,13 +48,14 @@ class KvSheet extends StatelessWidget {
   /// The cancel action's ink. Defaults to `inkDim` — a quiet exit on a sheet
   /// that is merely asking something.
   ///
-  /// **The signing sheet passes `risk`** (founder, on glass 2026-09-04: *"let
-  /// the cancel on the signing sheet be red"*). BG-7 gives red to money
-  /// leaving or at risk, and on that one sheet the word is the way out of an
-  /// irreversible commitment — so the hue is doing BG-7's job rather than
-  /// decorating an exit. It stays opt-in for exactly that reason: red on every
-  /// sheet's Cancel would spend the strongest hue in the system on the
-  /// commonest control and leave nothing for the case that matters.
+  /// **Cancel is red on every sheet** (founder, on glass 2026-09-05: *"let
+  /// 'cancel' be in red, that's how it should be on every sheet"* — D-277,
+  /// widening his 2026-09-04 ruling for the signing sheet alone). The
+  /// 2026-09-04 reasoning that red should stay opt-in — BG-7's hue spent on
+  /// the commonest control — was said in the sitting and he ruled the other
+  /// way: on a sheet the word is always the way out, and one hue for the way
+  /// out on every sheet is the consistency a reader learns once. Null takes
+  /// [KvColor.risk]; a caller may still quiet it.
   final Color? cancelTone;
 
   /// Pinned below the scroll. See the class doc.
@@ -62,6 +63,11 @@ class KvSheet extends StatelessWidget {
 
   /// Tapping the scrim. Null makes the sheet undismissible, which is what a
   /// broadcast in flight needs.
+  /// A tap on the scrim. **Null falls back to [onCancel]** (D-277, founder on
+  /// glass 2026-09-05: *"clicking outside the sheet also cancels the sheet …
+  /// across every sheet"*) — so a sheet that has a Cancel is dismissed by the
+  /// ground around it, and a caller with its own exit (the ceremony, the
+  /// drawer, a contact sheet) keeps handing it over as before.
   final VoidCallback? onDismiss;
 
   /// §3: the grabber is 40 × 4 in [KvColor.edgeHi].
@@ -172,7 +178,7 @@ class KvSheet extends StatelessWidget {
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: onDismiss,
+            onTap: onDismiss ?? onCancel,
             child: scrim,
           ),
         ),
@@ -251,7 +257,7 @@ class _SheetHead extends StatelessWidget {
                       height: 18 / 14,
                       fontWeight: FontWeight.w600,
                       fontVariations: KvWeight.w600,
-                      color: cancelTone ?? KvColor.inkDim,
+                      color: cancelTone ?? KvColor.risk,
                     ),
                   ),
                 ),

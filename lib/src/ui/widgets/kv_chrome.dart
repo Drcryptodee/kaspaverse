@@ -185,6 +185,92 @@ class KvRuledLabel extends StatelessWidget {
   );
 }
 
+/// **A section's caps label, and the mark that opens its explainer** (§4;
+/// D-275 / D-276 / D-277).
+///
+/// A screen's sections are broken by this row and by nothing else: the air
+/// above and below the words IS the break, so a caller adds no gap of its own
+/// and every screen breaks its sections identically. That is what let the
+/// Network surface fit in one view — the founder's own bar, on glass
+/// 2026-09-05 — after three separate gap constants had been stacked around
+/// each label.
+///
+/// **The mark follows the words** (his ruling, same sitting), and a header
+/// that carries one is a control: the whole row is a [height] dp target
+/// (BG-12), its own semantics node, and the words sit low in it so the air a
+/// target needs falls where the section break is. A header with no explainer
+/// is not a control and takes [plainHeight].
+class KvSectionHeader extends StatelessWidget {
+  const KvSectionHeader(this.label, {super.key, this.info});
+
+  final String label;
+
+  /// The explainer's open state; null draws no mark and no target.
+  final ValueNotifier<bool>? info;
+
+  static const double height = 52;
+  static const double plainHeight = 36;
+
+  /// Where the words sit inside the row.
+  static const Alignment _seat = Alignment(-1, 0.25);
+
+  @override
+  Widget build(BuildContext context) {
+    final info = this.info;
+    final title = KvRuledLabel(label, tight: true, rule: false);
+    if (info == null) {
+      return SizedBox(
+        height: plainHeight,
+        child: Align(alignment: _seat, child: title),
+      );
+    }
+    return ValueListenableBuilder<bool>(
+      valueListenable: info,
+      builder: (context, open, _) => SizedBox(
+        height: height,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Semantics(
+            // Its own node, so a reader lands on one control rather than on a
+            // label merged with the caps title beside it.
+            container: true,
+            button: true,
+            toggled: open,
+            label: 'About ${label.toLowerCase()}',
+            child: ExcludeSemantics(
+              child: InkWell(
+                onTap: () => info.value = !open,
+                borderRadius: BorderRadius.circular(KvRadius.pill),
+                highlightColor: KvColor.keyPressed,
+                splashFactory: NoSplash.splashFactory,
+                child: SizedBox(
+                  height: height,
+                  child: Align(
+                    alignment: _seat,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        title,
+                        const SizedBox(width: KvSpace.s),
+                        KvGlyphIcon(
+                          KvGlyph.info,
+                          tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
+                          size: 16,
+                        ),
+                        const SizedBox(width: KvSpace.xs),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// **The pill a screen acts on** (§4).
 ///
 /// Three forms, one widget, because a second rendering of a pill is how two

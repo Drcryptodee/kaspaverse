@@ -1346,6 +1346,30 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('a long endpoint folds to one line, and a tap opens it', (
+      tester,
+    ) async {
+      // D-277: 11 dp mono on one line; only a line that would not fit is a
+      // target, and the whole address is one tap away.
+      final seam = _FakeSeam();
+      const long = 'wss://a-very-long-public-node-name.kaspa.example:17110';
+      seam.activeEndpoint.value = long;
+      await _pumpScreen(tester, seam, width: 320);
+      var text = tester.widget<Text>(find.text(long));
+      expect(text.maxLines, 1);
+      expect(text.overflow, TextOverflow.ellipsis);
+      expect(text.style!.fontSize, 11);
+      await tester.tap(find.bySemanticsLabel('Show the whole address'));
+      await tester.pumpAndSettle();
+      text = tester.widget<Text>(find.text(long));
+      expect(text.maxLines, isNull, reason: 'open: the whole address');
+      expect(find.bySemanticsLabel('Fold the address'), findsOneWidget);
+      // A short one is plain text, not a control.
+      seam.activeEndpoint.value = 'ws://n.kaspa:1';
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Show the whole address'), findsNothing);
+    });
+
     testWidgets('back goes back', (tester) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
@@ -1502,6 +1526,27 @@ void main() {
       expect(find.byType(KvSheet), findsOneWidget, reason: 'fix it here');
       // The link's own state is a different fact and keeps its own line.
       expect(find.text('Connected to'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('Cancel is red, and a tap on the ground cancels too', (
+      tester,
+    ) async {
+      // D-277, on every sheet: the way out wears `risk`, and the scrim is
+      // the same way out.
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        explorer: _FakeExplorer(),
+        source: 'Explorer',
+        height: 2400,
+      );
+      final cancel = tester.widget<Text>(_inSheet(find.text('Cancel')));
+      expect(cancel.style!.color, KvColor.risk);
+      expect(find.textContaining('outbound link'), findsNothing);
+      await tester.tapAt(const Offset(12, 12));
+      await tester.pumpAndSettle();
+      expect(find.byType(KvSheet), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 

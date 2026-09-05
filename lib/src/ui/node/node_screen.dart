@@ -661,7 +661,7 @@ class _NodeScreenState extends State<NodeScreen> {
                     // left like `MY OWN NODE`, and the explainer — what a node
                     // can see and cannot forge (BG-17), and who chose it
                     // (D-207) — eases in beneath the card on a tap.
-                    _SectionHeader('Node', info: _nodeInfo),
+                    KvSectionHeader('Node', info: _nodeInfo),
                     _servingPlate(),
                     _Explainer(
                       open: _nodeInfo,
@@ -673,7 +673,7 @@ class _NodeScreenState extends State<NodeScreen> {
                           'nodes are found for you by the public node directory; '
                           'pin your own and nothing else is used.',
                     ),
-                    const _SectionHeader('My own node'),
+                    const KvSectionHeader('My own node'),
                     _picker(),
                     ..._sources(),
                   ],
@@ -1237,7 +1237,7 @@ class _NodeScreenState extends State<NodeScreen> {
     final rate = widget.rate;
     if (explorer == null && rate == null) return const [];
     return [
-      _SectionHeader('Sources', info: _sourcesInfo),
+      KvSectionHeader('Sources', info: _sourcesInfo),
       // **The host and the chevron sit close to the card's edge** (founder
       // on glass, 2026-09-05): 12 on the right where the card's rule is 20.
       KvRowContainer(
@@ -1342,85 +1342,6 @@ class _NodeScreenState extends State<NodeScreen> {
 /// `primaryMuted` while its explainer is open — *ours*, uncounted (playbook
 /// §5) — and `inkMeta` at rest; the target is 44 dp (BG-12's icon button
 /// target) around a 16 dp glyph.
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader(this.label, {this.info});
-
-  final String label;
-
-  /// The explainer's open state; null draws no mark and no target.
-  final ValueNotifier<bool>? info;
-
-  /// A header that opens something is a target, and BG-12's floor is 52 —
-  /// so the row is 52 tall with its words set low in it (`Alignment` 0.25),
-  /// which puts the title 24 dp under the card above and 12 dp over the card
-  /// below: the render's own rhythm around `MY OWN NODE`, measured. A plain
-  /// header is not a control and takes only [plainHeight].
-  static const double height = 52;
-  static const double plainHeight = 36;
-
-  /// Where the words sit inside the row — low, so the air the target needs
-  /// falls above the title where the section break is.
-  static const Alignment _seat = Alignment(-1, 0.25);
-
-  @override
-  Widget build(BuildContext context) {
-    final info = this.info;
-    final title = KvRuledLabel(label, tight: true, rule: false);
-    if (info == null) {
-      return SizedBox(
-        height: plainHeight,
-        child: Align(alignment: _seat, child: title),
-      );
-    }
-    return ValueListenableBuilder<bool>(
-      valueListenable: info,
-      builder: (context, open, _) => SizedBox(
-        height: height,
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Semantics(
-            // Its own node, so a reader lands on one control and not on a
-            // label merged with the caps title beside it.
-            container: true,
-            button: true,
-            toggled: open,
-            label: 'About ${label.toLowerCase()}',
-            child: ExcludeSemantics(
-              child: InkWell(
-                onTap: () => info.value = !open,
-                borderRadius: BorderRadius.circular(KvRadius.pill),
-                highlightColor: KvColor.keyPressed,
-                splashFactory: NoSplash.splashFactory,
-                child: SizedBox(
-                  height: height,
-                  child: Align(
-                    alignment: _seat,
-                    // **The mark follows the words** (founder on glass,
-                    // 2026-09-05: *"info marks should be after not before"*).
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        title,
-                        const SizedBox(width: KvSpace.s),
-                        KvGlyphIcon(
-                          KvGlyph.info,
-                          tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
-                          size: 16,
-                        ),
-                        const SizedBox(width: KvSpace.xs),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// **An explainer that eases in beneath its card** (founder, 2026-09-05):
 /// closed it takes no room; open it pushes what follows down over `enter`
 /// and fades in — motion that accounts for where the text came from (BG-24).
@@ -1740,13 +1661,9 @@ class _ExplorerSheetState extends State<_ExplorerSheet> {
               const SizedBox(height: KvSpace.s),
               _Fault(problem),
             ],
-            const SizedBox(height: KvSpace.sm),
-            const _TrustLabel(
-              'An explorer is an outbound link and nothing more. Opening one '
-              'hands that site the id you are looking at and the network '
-              'address you are looking from; it shows you its own view of the '
-              'chain, and nothing it says is ever read back into this wallet.',
-            ),
+            // No paragraph above the act (founder on glass, 2026-09-05:
+            // *"there is no need for the text"*). What an explorer is handed
+            // is said where the link is taken — `KvExplorerExit`'s own line.
             const SizedBox(height: KvSpace.s),
           ],
         ),
@@ -1975,14 +1892,8 @@ class _RateSheetState extends State<_RateSheet> {
                     _Fault(problem),
                   ],
                 ],
-                const SizedBox(height: KvSpace.sm),
-                const _TrustLabel(
-                  'A price is the one thing here that no node, no block and no '
-                  'proof can check — so it is display only, and switching it '
-                  'off costs you nothing but the figure. The source sees that '
-                  'this wallet asked for a price, and the network address it '
-                  'asked from; it never learns what you hold.',
-                ),
+                // No paragraph above the act (D-277): the choices say what is
+                // fetched and from where; `Off` says nothing is.
                 const SizedBox(height: KvSpace.s),
               ],
             ),
@@ -2483,18 +2394,7 @@ class _NodeRow extends StatelessWidget {
             // rather than losing its tail. `T5` clips it with an ellipsis at
             // the reference width; two lines at the floor is the honest
             // version of the same picture.
-            if (endpoint != null)
-              Text(
-                endpoint!,
-                maxLines: 2,
-                overflow: TextOverflow.clip,
-                style: const TextStyle(
-                  fontFamily: KvFont.mono,
-                  fontSize: 13,
-                  height: 18 / 13,
-                  color: KvColor.inkDim,
-                ),
-              ),
+            if (endpoint != null) _EndpointText(endpoint!),
           ],
         ),
       ),
@@ -2510,6 +2410,77 @@ class _NodeRow extends StatelessWidget {
 /// the link's tone — and, while the link is being hunted, the cadence hill in
 /// its place. One seat, two faces: a mark when there is a node, the app's one
 /// loading indicator while there is not yet one (BG-20, D-192).
+/// **The endpoint on one line, and a tap opens it** (founder on glass,
+/// 2026-09-05: *"20% smaller so the whole text can show in one line, but if
+/// it breaks, minimise it with a '…' that maximises on a tap"*). 11 dp mono —
+/// BG-14's floor, which is where 20 % under 13 lands — with the middle
+/// clipped by an ellipsis only when the width will not hold it; then the
+/// line is a target, and a tap wraps it whole and a second tap folds it.
+class _EndpointText extends StatefulWidget {
+  const _EndpointText(this.endpoint);
+
+  final String endpoint;
+
+  static const TextStyle style = TextStyle(
+    fontFamily: KvFont.mono,
+    fontSize: 11,
+    height: 16 / 11,
+    color: KvColor.inkDim,
+  );
+
+  @override
+  State<_EndpointText> createState() => _EndpointTextState();
+}
+
+class _EndpointTextState extends State<_EndpointText> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Measured, not assumed: only a line that would not fit is a target.
+        final painter = TextPainter(
+          text: TextSpan(text: widget.endpoint, style: _EndpointText.style),
+          textDirection: TextDirection.ltr,
+          textScaler: scaler,
+          maxLines: 1,
+        )..layout(maxWidth: constraints.maxWidth);
+        final overflows = painter.didExceedMaxLines;
+        painter.dispose();
+        final text = Text(
+          widget.endpoint,
+          maxLines: overflows && _open ? null : 1,
+          overflow: overflows && _open
+              ? TextOverflow.visible
+              : TextOverflow.ellipsis,
+          style: _EndpointText.style,
+        );
+        if (!overflows) return text;
+        return Semantics(
+          container: true,
+          button: true,
+          expanded: _open,
+          label: _open ? 'Fold the address' : 'Show the whole address',
+          child: ExcludeSemantics(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => setState(() => _open = !_open),
+              child: AnimatedSize(
+                duration: KvMotion.fast,
+                curve: KvMotion.out,
+                alignment: Alignment.topLeft,
+                child: text,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _NodeDisc extends StatelessWidget {
   const _NodeDisc({required this.tone, required this.busy});
 
