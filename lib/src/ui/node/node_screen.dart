@@ -10,6 +10,7 @@ import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_cadence.dart';
+import '../widgets/kv_check.dart';
 import '../theme/kv_window.dart';
 import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_glyph.dart';
@@ -27,6 +28,18 @@ import '../widgets/kv_toggle.dart';
 /// `T5`'s pill and field height — the `Test` pill and the `host:port` field
 /// both measure 44 dp on the render.
 const double _pillHeight = 44;
+
+/// **The host and port, as `T5` prints them** (`node.kaspa.org:1…`), not
+/// the whole URL. The scheme is a fact the Transport row states one card up
+/// (`TLS`, or not), and a resolver URL carries a path the row has no use
+/// for — printed whole, `wss://isla.kaspa.red` broke after its scheme at the
+/// reference width (seen in the frame). The full URL still stands where it
+/// is an identifier a user compares: the *You pinned* reading and the field.
+String _hostOf(String endpoint) {
+  final uri = Uri.tryParse(endpoint);
+  if (uri == null || uri.host.isEmpty) return endpoint;
+  return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+}
 
 /// Everything [NodeScreen] needs, as listenables and callbacks — the same
 /// service-singleton → `ValueNotifier` shape the rest of `lib/src/ui` consumes,
@@ -266,31 +279,21 @@ class NodeScreen extends StatefulWidget {
 class _NodeScreenState extends State<NodeScreen> {
   final TextEditingController _url = TextEditingController();
 
-  /// The explorer's two templates, as typed. Separate controllers because a
-  /// transaction page and an address page are different paths on every
-  /// explorer that has both.
-  final TextEditingController _txTemplate = TextEditingController();
-  final TextEditingController _addressTemplate = TextEditingController();
-
-  /// The rate's source, as typed.
-  final TextEditingController _rateEndpoint = TextEditingController();
+  /// **The two explainers' open state** — the founder's circled-i beside a
+  /// section's caps label (2026-09-05): tapping it eases the section's
+  /// explainer in beneath its card and pushes what follows down; tapping again,
+  /// leaving the screen, or a route arriving over it closes it.
+  final ValueNotifier<bool> _nodeInfo = ValueNotifier(false);
+  final ValueNotifier<bool> _sourcesInfo = ValueNotifier(false);
 
   /// What the last attempt to pin or unpin said, in plain English. Null while
   /// nothing has gone wrong.
   String? _problem;
   bool _busy = false;
 
-  /// **The two source sheets' own state**, as notifiers — a sheet is another
-  /// route, so a `setState` here cannot reach it; the sheet's body listens to
-  /// these and to the field controllers, and nothing else on the screen hears
-  /// them. Kept apart from [_problem] so a rejected explorer template never
-  /// overwrites what the link just said.
-  final ValueNotifier<({bool busy, String? problem, ExplorerChoice? choice})>
-  _explorer = ValueNotifier((busy: false, problem: null, choice: null));
-  final ValueNotifier<({bool busy, String? problem})> _rate = ValueNotifier((
-    busy: false,
-    problem: null,
-  ));
+  /// The stored explorer choice, once read — the SOURCES row prints its host
+  /// and the sheet opens on it. Null until the first read lands.
+  final ValueNotifier<ExplorerChoice?> _explorerChoice = ValueNotifier(null);
 
   /// The user has asked for a pinned node, whether or not one is live yet.
   bool _wantPin = false;
@@ -410,16 +413,14 @@ class _NodeScreenState extends State<NodeScreen> {
     _poll?.cancel();
     _scan.dispose();
     _test.dispose();
-    _explorer.dispose();
-    _rate.dispose();
+    _explorerChoice.dispose();
+    _nodeInfo.dispose();
+    _sourcesInfo.dispose();
     _latency.dispose();
     _synced.dispose();
     _peers.dispose();
     _now.dispose();
     _url.dispose();
-    _txTemplate.dispose();
-    _addressTemplate.dispose();
-    _rateEndpoint.dispose();
     super.dispose();
   }
 
@@ -440,7 +441,16 @@ class _NodeScreenState extends State<NodeScreen> {
       _start();
     } else {
       _stop();
+      _closeExplainers();
     }
+  }
+
+  /// An explainer closes when the screen is left, covered, or opens a sheet
+  /// of its own (founder, 2026-09-05) — a sheet's route is translucent, so the
+  /// ticker gate alone would never see it.
+  void _closeExplainers() {
+    _nodeInfo.value = false;
+    _sourcesInfo.value = false;
   }
 
   /// Absent seams ⇒ no poll and no line, never a fabricated reading. A start
@@ -610,11 +620,8 @@ class _NodeScreenState extends State<NodeScreen> {
     return Scaffold(
       backgroundColor: KvColor.abyss,
       body: SafeArea(
-        top: false,
         child: Column(
           children: [
-            // BG-14: the top 52dp belongs to the real system status bar.
-            const SizedBox(height: KvSpace.statusBarReserve),
             KvTopBar(
               // **`Network`** (`T5`) — the drawer's own word for this
               // destination, and the one the founder reads on the row that
@@ -645,36 +652,29 @@ class _NodeScreenState extends State<NodeScreen> {
                     // card, the node row, the own-node card with its field,
                     // then SOURCES as one card of two rows that open sheets.
                     _connectionPlate(),
-                    const SizedBox(height: KvSpace.m),
-                    _servingPlate(),
                     const SizedBox(height: KvSpace.sm),
-                    // BG-17 / ux-auditor 30: every endpoint row states what that
-                    // endpoint can see and what it can lie about — and the
-                    // directory is named where it acts (D-207), here rather than
-                    // in a chip inside the row.
-                    const _TrustLabel(
-                      'A node hands you blocks and takes your signed '
-                      'transactions. It can go quiet or fall behind, and it sees '
-                      'the addresses you ask about — it cannot forge a balance, '
-                      'change an amount, or spend anything. Public nodes are found '
-                      'for you by the public node directory; pin your own and '
-                      'nothing else is used.',
+                    // **`NODE`, with its circled-i** (founder on glass,
+                    // 2026-09-05): the caps label sits at the card's upper
+                    // left like `MY OWN NODE`, and the explainer — what a node
+                    // can see and cannot forge (BG-17), and who chose it
+                    // (D-207) — eases in beneath the card on a tap.
+                    _SectionHeader('Node', info: _nodeInfo),
+                    _servingPlate(),
+                    _Explainer(
+                      open: _nodeInfo,
+                      text:
+                          'A node hands you blocks and takes your signed '
+                          'transactions. It can go quiet or fall behind, and it '
+                          'sees the addresses you ask about — it cannot forge a '
+                          'balance, change an amount, or spend anything. Public '
+                          'nodes are found for you by the public node directory; '
+                          'pin your own and nothing else is used.',
                     ),
                     const SizedBox(height: KvSpace.l),
                     const KvRuledLabel('My own node', rule: false),
                     const SizedBox(height: KvSpace.s),
                     _picker(),
                     ..._sources(),
-                    const SizedBox(height: KvSpace.l),
-                    // The F9d fix (D-207 clause a): an unqualified promise beside
-                    // two named egresses is the census contradicting itself.
-                    const _TrustLabel(
-                      'Nothing else reaches out. Your balance, your history and '
-                      'your sends go to a Kaspa node and nowhere else — the '
-                      'price source and the explorer above are the only other '
-                      'places this app can reach, and both are yours to change '
-                      'or switch off.',
-                    ),
                   ],
                 ),
               ),
@@ -1070,32 +1070,25 @@ class _NodeScreenState extends State<NodeScreen> {
     return endpoint.startsWith('wss://') ? '$base · TLS' : base;
   }
 
-  /// **The host and port, as `T5` prints them** (`node.kaspa.org:1…`), not
-  /// the whole URL. The scheme is a fact the Transport row states one card up
-  /// (`TLS`, or not), and a resolver URL carries a path the row has no use
-  /// for — printed whole, `wss://isla.kaspa.red` broke after its scheme at the
-  /// reference width (seen in the frame). The full URL still stands where it
-  /// is an identifier a user compares: the *You pinned* reading and the field.
-  static String _hostOf(String endpoint) {
-    final uri = Uri.tryParse(endpoint);
-    if (uri == null || uri.host.isEmpty) return endpoint;
-    return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
-  }
-
   static String _peersLine(bool connected, int? n) {
     if (!connected || n == null) return '—';
     return '$n';
   }
 
   /// **`T5`'s own-node card**: the toggle row over its field and `Test`, in
-  /// one card of the home's topography (founder on glass, 2026-09-05). The
-  /// field is always there — a user can type and test before deciding; the
-  /// switch is the decision, and `Use this node` lights only when there is a
-  /// change to commit.
+  /// one card of the home's topography (founder on glass, 2026-09-05).
+  ///
+  /// **The switch governs the field** (his second finding): off, the field and
+  /// `Test` are disabled and the field's hint says why; on, the field takes a
+  /// node and `Test` can dial it. **The commit is a standard pill** — `KvAction
+  /// .raised`, disabled with its reason until there is a change to commit,
+  /// enabled when there is, pressed one step lighter — not an edge that lights
+  /// (the pattern he asked to lose). The playbook allows no fourth kind of
+  /// button, and this is the second kind.
   Widget _picker() {
     final s = widget.scope;
     return AnimatedBuilder(
-      // The field is a `Listenable` too: a keystroke lights `Use this node`
+      // The field is a `Listenable` too: a keystroke enables the commit
       // through this builder and nothing else on the screen.
       animation: Listenable.merge([s.pinnedNode, s.pinDropped, _url, _test]),
       builder: (context, _) {
@@ -1105,8 +1098,10 @@ class _NodeScreenState extends State<NodeScreen> {
         // the user asks for it and stays true while a pin exists.
         final on = _wantPin || pinned != null;
         final typed = _url.text.trim();
-        final canApply = !_busy && typed.isNotEmpty && typed != pinned;
+        final changed = typed.isNotEmpty && typed != pinned;
+        final canApply = on && !_busy && changed;
         final test = _test.value;
+        final canTest = on && !_busy && !test.busy && typed.isNotEmpty;
         return KvRowContainer(
           divided: false,
           inset: const EdgeInsets.fromLTRB(
@@ -1130,18 +1125,14 @@ class _NodeScreenState extends State<NodeScreen> {
                       ? 'A pinned node never silently falls back to a public one.'
                       : 'Bypass public nodes entirely.',
                   disabledReason: 'Setting the node…',
-                  // On with a node typed: that IS the commit. On with nothing
-                  // typed: the field is the next thing to fill. Off: the pin
-                  // clears at once — the safe direction needs no second step.
+                  // On opens the field; the pin happens when the user says
+                  // which node. Off clears the pin at once — the safe
+                  // direction needs no second step.
                   onChanged: _busy
                       ? null
                       : (next) {
                           if (next) {
-                            if (canApply) {
-                              _apply(typed);
-                            } else {
-                              setState(() => _wantPin = true);
-                            }
+                            setState(() => _wantPin = true);
                             return;
                           }
                           setState(() => _wantPin = false);
@@ -1164,15 +1155,15 @@ class _NodeScreenState extends State<NodeScreen> {
                 ],
                 const SizedBox(height: KvSpace.sm),
                 // **`T5`: the field with `Test` beside it** — measured, both
-                // 44 dp tall with a 10 dp gap, the pill in `chip`. A test is
-                // free and a pin is a commitment, so the test sits with the
-                // field and the commit stays below it.
+                // 44 dp tall with a 10 dp gap, the pill in `chip`. Off, the
+                // field's hint is the reason it is disabled (BG-12).
                 Row(
                   children: [
                     Expanded(
                       child: _UrlField(
                         controller: _url,
-                        enabled: !_busy,
+                        enabled: on && !_busy,
+                        hint: on ? 'ws://host:port' : 'Turn on to set a node',
                         onSubmitted: canApply ? () => _apply(typed) : null,
                       ),
                     ),
@@ -1180,12 +1171,9 @@ class _NodeScreenState extends State<NodeScreen> {
                       const SizedBox(width: KvSpace.s10),
                       _ChipPill(
                         label: test.busy ? 'Testing…' : 'Test',
-                        dim: test.busy || typed.isEmpty,
-                        // Nothing typed: nothing to dial, so no tap and no
-                        // haptic.
-                        onTap: typed.isEmpty
-                            ? null
-                            : () => unawaited(_runTest()),
+                        dim: !canTest,
+                        // Nothing to dial: no tap and no haptic.
+                        onTap: canTest ? () => unawaited(_runTest()) : null,
                       ),
                     ],
                   ],
@@ -1198,17 +1186,20 @@ class _NodeScreenState extends State<NodeScreen> {
                   const SizedBox(height: KvSpace.s),
                   _Fault(problem),
                 ],
-                // The commit, only while there is something to commit, or the
-                // write is in flight and the control must say why (BG-12).
-                if (canApply || _busy) ...[
+                // The commit, while the switch is on: disabled with its reason
+                // until there is a change, enabled when there is (BG-12).
+                if (on) ...[
                   const SizedBox(height: KvSpace.sm),
-                  _Action(
+                  KvAction.raised(
                     label: 'Use this node',
-                    enabled: canApply,
-                    reason: _busy
-                        ? 'Setting the node…'
-                        : 'This is already the node you pinned.',
                     onTap: () => _apply(typed),
+                    disabledReason: _busy
+                        ? 'Setting the node…'
+                        : typed.isEmpty
+                        ? 'Type the address of your node first.'
+                        : !changed
+                        ? 'This is already the node you pinned.'
+                        : null,
                   ),
                 ],
                 if (_problem != null) ...[
@@ -1230,28 +1221,29 @@ class _NodeScreenState extends State<NodeScreen> {
 
   /// **`SOURCES`** — `T5`'s one card of two rows, each opening its own sheet
   /// (founder on glass, 2026-09-05): the explorer, and the price source. A row
-  /// names the seat, says what it is for, prints the host, and points on.
+  /// names the seat, says what it is for, prints the host, and points on. The
+  /// caps label carries the circled-i; the census sentence — what else this
+  /// app can reach — eases in beneath the card (D-207 clause a).
   /// Absent seams ⇒ absent rows, never rows wired to nothing (D-206).
   List<Widget> _sources() {
     final explorer = widget.explorer;
     final rate = widget.rate;
     if (explorer == null && rate == null) return const [];
     return [
-      const SizedBox(height: KvSpace.l),
-      const KvRuledLabel('Sources', rule: false),
-      const SizedBox(height: KvSpace.s),
+      // The header row is 44 dp with its words centred, so the gaps around it
+      // are what leave the title where `MY OWN NODE`'s sits (measured).
+      const SizedBox(height: KvSpace.sm),
+      _SectionHeader('Sources', info: _sourcesInfo),
       KvRowContainer(
         children: [
           if (explorer != null)
-            ValueListenableBuilder<
-              ({bool busy, String? problem, ExplorerChoice? choice})
-            >(
-              valueListenable: _explorer,
-              builder: (context, ui, _) => _SourceRow(
+            ValueListenableBuilder<ExplorerChoice?>(
+              valueListenable: _explorerChoice,
+              builder: (context, choice, _) => _SourceRow(
                 title: 'Explorer',
                 sub: 'Where "View on explorer" opens',
-                value: ui.choice == null ? '—' : _hostOf(ui.choice!.txTemplate),
-                onTap: _openExplorer,
+                value: choice == null ? '—' : _hostOf(choice.txTemplate),
+                onTap: () => _openExplorer(choice),
               ),
             ),
           if (rate != null)
@@ -1273,118 +1265,40 @@ class _NodeScreenState extends State<NodeScreen> {
             ),
         ],
       ),
+      _Explainer(
+        open: _sourcesInfo,
+        text:
+            'Nothing else reaches out. Your balance, your history and your '
+            'sends go to a Kaspa node and nowhere else — the price source and '
+            'the explorer above are the only other places this app can reach, '
+            'and both are yours to change or switch off.',
+      ),
     ];
   }
 
-  void _openExplorer() {
+  void _openExplorer(ExplorerChoice? choice) {
+    final scope = widget.explorer;
+    if (scope == null || choice == null) return;
+    _closeExplainers();
     Navigator.of(context).push(
       KvSheetRoute<void>(
-        builder: (sheet) => KvSheet(
-          title: 'Explorer',
-          onCancel: () => Navigator.of(sheet).pop(),
-          child: _explorerSheet(),
+        builder: (_) => _ExplorerSheet(
+          scope: scope,
+          current: choice,
+          onSaved: _loadExplorer,
         ),
       ),
     );
   }
 
   void _openRate() {
+    final scope = widget.rate;
+    if (scope == null) return;
+    _closeExplainers();
     Navigator.of(context).push(
       KvSheetRoute<void>(
-        builder: (sheet) => KvSheet(
-          title: 'API source',
-          onCancel: () => Navigator.of(sheet).pop(),
-          child: _rateSheet(),
-        ),
+        builder: (_) => _RateSheet(scope: scope, clock: widget.clock),
       ),
-    );
-  }
-
-  /// **Where a link out of the wallet goes** — two templates, freely
-  /// replaceable, with the two audited defaults as one-tap starting points.
-  /// The sheet's body: it listens to the fields and to [_explorer], because a
-  /// `setState` on the screen cannot reach a sheet on another route.
-  Widget _explorerSheet() {
-    return ListenableBuilder(
-      listenable: Listenable.merge([_txTemplate, _addressTemplate, _explorer]),
-      builder: (context, _) {
-        final ui = _explorer.value;
-        final choice = ui.choice;
-        final tx = _txTemplate.text.trim();
-        final address = _addressTemplate.text.trim();
-        final unchanged =
-            choice != null &&
-            tx == choice.txTemplate &&
-            address == choice.addressTemplate;
-        final canSave =
-            !ui.busy && tx.isNotEmpty && address.isNotEmpty && !unchanged;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // The defaults are offered, never enforced (D-192 → D-207).
-            if (choice != null && choice.defaults.isNotEmpty)
-              Wrap(
-                spacing: KvSpace.s,
-                runSpacing: KvSpace.s,
-                children: [
-                  for (final option in choice.defaults)
-                    _Pick(
-                      label: option.name,
-                      selected:
-                          tx == option.txTemplate &&
-                          address == option.addressTemplate,
-                      onTap: ui.busy
-                          ? null
-                          : () {
-                              KvHaptic.selection();
-                              _txTemplate.text = option.txTemplate;
-                              _addressTemplate.text = option.addressTemplate;
-                            },
-                    ),
-                ],
-              ),
-            const SizedBox(height: KvSpace.sm),
-            _UrlField(
-              controller: _txTemplate,
-              enabled: !ui.busy,
-              hint: 'https://explorer.example/txs/{txid}',
-              label: 'Transaction link',
-              onSubmitted: canSave ? _saveExplorer : null,
-            ),
-            const SizedBox(height: KvSpace.s),
-            _UrlField(
-              controller: _addressTemplate,
-              enabled: !ui.busy,
-              hint: 'https://explorer.example/addresses/{address}',
-              label: 'Address link',
-              onSubmitted: canSave ? _saveExplorer : null,
-            ),
-            const SizedBox(height: KvSpace.s),
-            _Action(
-              label: 'Use this explorer',
-              enabled: canSave,
-              reason: ui.busy
-                  ? 'Saving…'
-                  : tx.isEmpty || address.isEmpty
-                  ? 'Both links need an address before they can be saved.'
-                  : 'These are already your explorer links.',
-              onTap: _saveExplorer,
-            ),
-            if (ui.problem case final problem?) ...[
-              const SizedBox(height: KvSpace.s),
-              _Fault(problem),
-            ],
-            const SizedBox(height: KvSpace.sm),
-            const _TrustLabel(
-              'An explorer is an outbound link and nothing more. Opening one '
-              'hands that site the id you are looking at and the network '
-              'address you are looking from; it shows you its own view of the '
-              'chain, and nothing it says is ever read back into this wallet.',
-            ),
-          ],
-        );
-      },
     );
   }
 
@@ -1394,160 +1308,11 @@ class _NodeScreenState extends State<NodeScreen> {
     try {
       final choice = await scope.read();
       if (!mounted) return;
-      _explorer.value = (busy: false, problem: null, choice: choice);
-      // Only while untouched — a fresher read must never overwrite a draft.
-      if (_txTemplate.text.isEmpty) _txTemplate.text = choice.txTemplate;
-      if (_addressTemplate.text.isEmpty) {
-        _addressTemplate.text = choice.addressTemplate;
-      }
-    } catch (e) {
-      if (!mounted) return;
-      _explorer.value = (
-        busy: false,
-        problem: displayError(e),
-        choice: _explorer.value.choice,
-      );
+      _explorerChoice.value = choice;
+    } catch (_) {
+      // The row keeps the last choice it knew; the sheet reports a refusal
+      // where the user can act on it.
     }
-  }
-
-  Future<void> _saveExplorer() async {
-    final scope = widget.explorer;
-    if (scope == null || _explorer.value.busy) return;
-    _explorer.value = (
-      busy: true,
-      problem: null,
-      choice: _explorer.value.choice,
-    );
-    try {
-      await scope.write(_txTemplate.text.trim(), _addressTemplate.text.trim());
-      await _loadExplorer();
-    } catch (e) {
-      if (!mounted) return;
-      _explorer.value = (
-        busy: false,
-        problem: displayError(e),
-        choice: _explorer.value.choice,
-      );
-    }
-    if (mounted && _explorer.value.busy) {
-      _explorer.value = (
-        busy: false,
-        problem: _explorer.value.problem,
-        choice: _explorer.value.choice,
-      );
-    }
-  }
-
-  /// **The one claim consensus cannot check**, with its switch beside it —
-  /// the sheet's body.
-  Widget _rateSheet() {
-    final scope = widget.rate!;
-    return AnimatedBuilder(
-      animation: Listenable.merge([
-        scope.enabled,
-        scope.endpoint,
-        scope.quote,
-        scope.error,
-        _rateEndpoint,
-        _rate,
-      ]),
-      builder: (context, _) {
-        final posture = scope.enabled.value;
-        // Not yet read: say so, and offer no control (`wallet-security`).
-        if (posture == null) {
-          return const _TrustLabel('Reading your setting…');
-        }
-        final on = posture;
-        final ui = _rate.value;
-        final typed = _rateEndpoint.text.trim();
-        final canSave =
-            !ui.busy && typed.isNotEmpty && typed != scope.endpoint.value;
-        final quote = scope.quote.value;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            KvToggle(
-              on: on,
-              title: 'Show what your balance is worth',
-              sub: on
-                  ? 'A dollar figure sits under your balance. It never '
-                        'prices a fee, sizes a send, or appears on anything '
-                        'you sign.'
-                  : 'Your balance is shown in KAS only. Nothing is fetched '
-                        'and no price source is contacted.',
-              disabledReason: 'Saving…',
-              onChanged: ui.busy
-                  ? null
-                  : (next) => unawaited(
-                      _saveRate(enabled: next, endpoint: scope.endpoint.value),
-                    ),
-            ),
-            // **The field appears whenever there is something to repair**, not
-            // only while the rate is on (`consensus-auditor`).
-            if (on || typed != scope.defaultEndpoint.value) ...[
-              const SizedBox(height: KvSpace.sm),
-              _UrlField(
-                controller: _rateEndpoint,
-                enabled: !ui.busy,
-                hint: scope.defaultEndpoint.value,
-                label: 'Price source',
-                onSubmitted: canSave
-                    ? () => unawaited(_saveRate(enabled: on, endpoint: typed))
-                    : null,
-              ),
-              const SizedBox(height: KvSpace.s),
-              _Action(
-                label: 'Use this source',
-                enabled: canSave,
-                reason: ui.busy
-                    ? 'Saving…'
-                    : typed.isEmpty
-                    ? 'Type the address of a price source first.'
-                    : 'This is already your price source.',
-                // `enabled: on`, never `true`: the field fixes the address,
-                // the toggle decides whether it is used.
-                onTap: () => unawaited(_saveRate(enabled: on, endpoint: typed)),
-              ),
-              if (on) ...[
-                const SizedBox(height: KvSpace.sm),
-                // What the source actually said, so the setting is verifiable
-                // rather than declarative; `—` when there is no usable price.
-                _Reading(
-                  label: 'Price, per KAS',
-                  value: quote == null
-                      ? '—'
-                      : '\$${trimTrailingZeros(quote.usdPerKas)}',
-                ),
-                if (quote != null)
-                  _Reading(
-                    label: 'As of',
-                    numeric: false,
-                    value:
-                        '${formatAge(widget.clock().difference(quote.fetchedAt))} ago',
-                  ),
-              ],
-            ],
-            if (scope.error.value != null) ...[
-              const SizedBox(height: KvSpace.s),
-              _Fault(displayError(scope.error.value!)),
-            ],
-            if (ui.problem case final problem?) ...[
-              const SizedBox(height: KvSpace.s),
-              _Fault(problem),
-            ],
-            const SizedBox(height: KvSpace.sm),
-            const _TrustLabel(
-              'A price is the one thing here that no node, no block and no '
-              'proof can check — so it is display only, and switching it '
-              'off costs you nothing but the figure. The source sees that '
-              'this wallet asked for a price, and the network address it '
-              'asked from; it never learns what you hold.',
-            ),
-          ],
-        );
-      },
-    );
   }
 
   Future<void> _loadRate() async {
@@ -1558,26 +1323,640 @@ class _NodeScreenState extends State<NodeScreen> {
     } catch (_) {
       // The notifiers keep whatever they last knew.
     }
-    if (!mounted) return;
-    if (_rateEndpoint.text.isEmpty) _rateEndpoint.text = scope.endpoint.value;
+  }
+}
+
+/// **A caps label with the founder's circled-i** (2026-09-05). The mark is
+/// `primaryMuted` while its explainer is open — *ours*, uncounted (playbook
+/// §5) — and `inkMeta` at rest; the target is 44 dp (BG-12's icon button
+/// target) around a 16 dp glyph.
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.label, {this.info});
+
+  final String label;
+
+  /// The explainer's open state; null draws no mark.
+  final ValueNotifier<bool>? info;
+
+  /// The row is the target — 44 dp tall, the mark and the words together —
+  /// so the glyph sits on the card's own left edge like `MY OWN NODE` does
+  /// and the caps title is as tappable as the circle before it (BG-12).
+  static const double height = 44;
+
+  @override
+  Widget build(BuildContext context) {
+    final info = this.info;
+    if (info == null) return KvRuledLabel(label, rule: false);
+    return ValueListenableBuilder<bool>(
+      valueListenable: info,
+      builder: (context, open, _) => Align(
+        alignment: Alignment.centerLeft,
+        child: Semantics(
+          // Its own node, so a reader lands on one control and not on a
+          // label merged with the caps title beside it.
+          container: true,
+          button: true,
+          toggled: open,
+          label: 'About ${label.toLowerCase()}',
+          child: ExcludeSemantics(
+            child: InkWell(
+              onTap: () => info.value = !open,
+              borderRadius: BorderRadius.circular(KvRadius.pill),
+              highlightColor: KvColor.keyPressed,
+              splashFactory: NoSplash.splashFactory,
+              child: SizedBox(
+                height: height,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    KvGlyphIcon(
+                      KvGlyph.info,
+                      tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
+                      size: 16,
+                    ),
+                    const SizedBox(width: KvSpace.s),
+                    KvRuledLabel(label, tight: true, rule: false),
+                    const SizedBox(width: KvSpace.s),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **An explainer that eases in beneath its card** (founder, 2026-09-05):
+/// closed it takes no room; open it pushes what follows down over `enter`
+/// and fades in — motion that accounts for where the text came from (BG-24).
+class _Explainer extends StatelessWidget {
+  const _Explainer({required this.open, required this.text});
+
+  final ValueNotifier<bool> open;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+    valueListenable: open,
+    builder: (context, on, _) => AnimatedSize(
+      duration: KvMotion.enter,
+      curve: KvMotion.curve,
+      alignment: Alignment.topCenter,
+      child: on
+          ? Padding(
+              padding: const EdgeInsets.only(top: KvSpace.sm),
+              child: AnimatedOpacity(
+                opacity: 1,
+                duration: KvMotion.enter,
+                curve: KvMotion.curve,
+                child: _TrustLabel(text),
+              ),
+            )
+          : const SizedBox(width: double.infinity),
+    ),
+  );
+}
+
+/// **The playbook's ceremony truths card, holding choices** (§3.4, §8): a
+/// `chip` inner card at radius 22 with hairlines between rows, and the one
+/// current choice wearing `KvCheck` — a status is a check, never a tinted row
+/// (§6). Sub-lines are `inkDim`, because `inkMeta` fails AA on `chip` (BG-14).
+class _ChoiceCard extends StatelessWidget {
+  const _ChoiceCard({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: KvColor.chip,
+      borderRadius: BorderRadius.circular(KvRadius.bubble),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < children.length; i++) ...[
+          if (i > 0)
+            const SizedBox(
+              height: 1,
+              child: ColoredBox(color: KvColor.hairline),
+            ),
+          children[i],
+        ],
+      ],
+    ),
+  );
+}
+
+/// One choice: a title, an optional line beneath, and the check when it is the
+/// current one. A 56 dp row (BG-12).
+class _ChoiceRow extends StatelessWidget {
+  const _ChoiceRow({
+    required this.title,
+    this.sub,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String title;
+  final String? sub;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    selected: selected,
+    label: sub == null ? title : '$title. $sub',
+    child: ExcludeSemantics(
+      child: InkWell(
+        onTap: onTap,
+        highlightColor: KvColor.chipPressed,
+        splashFactory: NoSplash.splashFactory,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: KvSpace.control),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: KvSpace.m,
+              vertical: KvSpace.s10,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 15,
+                          height: 20 / 15,
+                          fontWeight: FontWeight.w600,
+                          fontVariations: KvWeight.w600,
+                          color: KvColor.ink,
+                        ),
+                      ),
+                      if (sub case final sub?)
+                        Text(
+                          sub,
+                          style: const TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 12,
+                            height: 17 / 12,
+                            color: KvColor.inkDim,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: KvSpace.sm),
+                if (selected)
+                  const KvCheck()
+                else
+                  const SizedBox(width: KvCheck.small, height: KvCheck.small),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// **The explorer sheet — a settings ceremony** (playbook §3.4 / §3.5: a
+/// setting whose change has consequences opens a sheet, not an inline
+/// control). The question in one line; the choices as truths in a chip card —
+/// the shipped explorers, and **`Custom`**, which is what the two link inputs
+/// were for and now reveals them; one primary act in the foot, disabled with
+/// its reason until a choice differs; the disclosure as the one instruction
+/// line. Rust validates every template; a refusal stays on the sheet where
+/// it can be fixed (BG-11).
+class _ExplorerSheet extends StatefulWidget {
+  const _ExplorerSheet({
+    required this.scope,
+    required this.current,
+    required this.onSaved,
+  });
+
+  final ExplorerScope scope;
+  final ExplorerChoice current;
+  final Future<void> Function() onSaved;
+
+  @override
+  State<_ExplorerSheet> createState() => _ExplorerSheetState();
+}
+
+class _ExplorerSheetState extends State<_ExplorerSheet> {
+  /// The chosen preset's index, or -1 for `Custom`.
+  late int _selected;
+  late final TextEditingController _tx;
+  late final TextEditingController _address;
+  bool _busy = false;
+  String? _problem;
+
+  @override
+  void initState() {
+    super.initState();
+    final c = widget.current;
+    _selected = c.defaults.indexWhere(
+      (d) =>
+          d.txTemplate == c.txTemplate &&
+          d.addressTemplate == c.addressTemplate,
+    );
+    _tx = TextEditingController(text: c.txTemplate)..addListener(_changed);
+    _address = TextEditingController(text: c.addressTemplate)
+      ..addListener(_changed);
   }
 
-  Future<void> _saveRate({
-    required bool enabled,
-    required String endpoint,
-  }) async {
-    final scope = widget.rate;
-    if (scope == null || _rate.value.busy) return;
-    _rate.value = (busy: true, problem: null);
-    try {
-      await scope.setConfig(enabled: enabled, endpoint: endpoint);
-      if (mounted) _rateEndpoint.text = scope.endpoint.value;
-      if (mounted) _rate.value = (busy: false, problem: null);
-    } catch (e) {
-      // The refusal is the message: an endpoint Rust would not store must not
-      // leave the row looking as though it had been.
-      if (mounted) _rate.value = (busy: false, problem: displayError(e));
+  void _changed() => setState(() {});
+
+  @override
+  void dispose() {
+    _tx.dispose();
+    _address.dispose();
+    super.dispose();
+  }
+
+  (String, String) get _templates => _selected >= 0
+      ? (
+          widget.current.defaults[_selected].txTemplate,
+          widget.current.defaults[_selected].addressTemplate,
+        )
+      : (_tx.text.trim(), _address.text.trim());
+
+  String? get _reason {
+    if (_busy) return 'Saving…';
+    final (tx, address) = _templates;
+    if (tx.isEmpty || address.isEmpty) {
+      return 'Both links need an address before they can be saved.';
     }
+    if (tx == widget.current.txTemplate &&
+        address == widget.current.addressTemplate) {
+      return 'This is already your explorer.';
+    }
+    return null;
+  }
+
+  Future<void> _save() async {
+    if (_busy) return;
+    final (tx, address) = _templates;
+    setState(() {
+      _busy = true;
+      _problem = null;
+    });
+    try {
+      await widget.scope.write(tx, address);
+      await widget.onSaved();
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) setState(() => _problem = displayError(e));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final custom = _selected < 0;
+    return KvSheet(
+      title: 'Explorer',
+      onCancel: () => Navigator.of(context).pop(),
+      foot: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.m,
+          KvSpace.sm,
+          KvSpace.m,
+          KvSpace.m,
+        ),
+        child: KvAction(
+          label: 'Use this explorer',
+          primary: true,
+          onTap: _save,
+          disabledReason: _reason,
+        ),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Where "View on explorer" opens.',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 20,
+                height: 26 / 20,
+                fontWeight: FontWeight.w600,
+                fontVariations: KvWeight.w600,
+                color: KvColor.ink,
+              ),
+            ),
+            const SizedBox(height: KvSpace.m),
+            _ChoiceCard(
+              children: [
+                for (var i = 0; i < widget.current.defaults.length; i++)
+                  _ChoiceRow(
+                    title: widget.current.defaults[i].name,
+                    selected: _selected == i,
+                    onTap: _busy ? null : () => setState(() => _selected = i),
+                  ),
+                _ChoiceRow(
+                  title: 'Custom',
+                  sub: 'Your own explorer links',
+                  selected: custom,
+                  onTap: _busy ? null : () => setState(() => _selected = -1),
+                ),
+              ],
+            ),
+            // The inputs `Custom` stands for, revealed only under it.
+            AnimatedSize(
+              duration: KvMotion.enter,
+              curve: KvMotion.curve,
+              alignment: Alignment.topCenter,
+              child: custom
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const SizedBox(height: KvSpace.sm),
+                        _UrlField(
+                          controller: _tx,
+                          enabled: !_busy,
+                          hint: 'https://explorer.example/txs/{txid}',
+                          label: 'Transaction link',
+                          onSubmitted: _reason == null ? _save : null,
+                        ),
+                        const SizedBox(height: KvSpace.s),
+                        _UrlField(
+                          controller: _address,
+                          enabled: !_busy,
+                          hint: 'https://explorer.example/addresses/{address}',
+                          label: 'Address link',
+                          onSubmitted: _reason == null ? _save : null,
+                        ),
+                      ],
+                    )
+                  : const SizedBox(width: double.infinity),
+            ),
+            if (_problem case final problem?) ...[
+              const SizedBox(height: KvSpace.s),
+              _Fault(problem),
+            ],
+            const SizedBox(height: KvSpace.sm),
+            const _TrustLabel(
+              'An explorer is an outbound link and nothing more. Opening one '
+              'hands that site the id you are looking at and the network '
+              'address you are looking from; it shows you its own view of the '
+              'chain, and nothing it says is ever read back into this wallet.',
+            ),
+            const SizedBox(height: KvSpace.s),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Which price source, or none.
+enum _RateChoice { off, shipped, custom }
+
+/// **The price-source sheet — the same ceremony** for the one claim consensus
+/// cannot check (INV-8's carve-out, D-191): `Off`, the shipped source, or
+/// **`Custom`** with its field; what the source last said, so the setting is
+/// verifiable rather than declarative; one primary act; the disclosure.
+class _RateSheet extends StatefulWidget {
+  const _RateSheet({required this.scope, required this.clock});
+
+  final RateScope scope;
+  final DateTime Function() clock;
+
+  @override
+  State<_RateSheet> createState() => _RateSheetState();
+}
+
+class _RateSheetState extends State<_RateSheet> {
+  _RateChoice? _choice;
+  late final TextEditingController _endpoint;
+  bool _busy = false;
+  String? _problem;
+
+  @override
+  void initState() {
+    super.initState();
+    _endpoint = TextEditingController(text: widget.scope.endpoint.value)
+      ..addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _endpoint.dispose();
+    super.dispose();
+  }
+
+  /// What the wallet has right now, as a choice.
+  _RateChoice? get _stored => switch (widget.scope.enabled.value) {
+    null => null,
+    false => _RateChoice.off,
+    true =>
+      widget.scope.endpoint.value == widget.scope.defaultEndpoint.value
+          ? _RateChoice.shipped
+          : _RateChoice.custom,
+  };
+
+  (bool, String) _commit(_RateChoice choice) => switch (choice) {
+    _RateChoice.off => (false, widget.scope.endpoint.value),
+    _RateChoice.shipped => (true, widget.scope.defaultEndpoint.value),
+    _RateChoice.custom => (true, _endpoint.text.trim()),
+  };
+
+  String? _reason(_RateChoice choice) {
+    if (_busy) return 'Saving…';
+    final (enabled, endpoint) = _commit(choice);
+    if (enabled && endpoint.isEmpty) {
+      return 'Type the address of a price source first.';
+    }
+    if (enabled == widget.scope.enabled.value &&
+        (!enabled || endpoint == widget.scope.endpoint.value)) {
+      return 'This is already your price source.';
+    }
+    return null;
+  }
+
+  Future<void> _save(_RateChoice choice) async {
+    if (_busy) return;
+    final (enabled, endpoint) = _commit(choice);
+    setState(() {
+      _busy = true;
+      _problem = null;
+    });
+    try {
+      await widget.scope.setConfig(enabled: enabled, endpoint: endpoint);
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      // The refusal is the message: a source Rust would not store must not
+      // leave the sheet looking as though it had been.
+      if (mounted) setState(() => _problem = displayError(e));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = widget.scope;
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        scope.enabled,
+        scope.endpoint,
+        scope.quote,
+        scope.error,
+      ]),
+      builder: (context, _) {
+        final stored = _stored;
+        final choice = _choice ?? stored;
+        return KvSheet(
+          title: 'API source',
+          onCancel: () => Navigator.of(context).pop(),
+          foot: choice == null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    KvSpace.m,
+                    KvSpace.sm,
+                    KvSpace.m,
+                    KvSpace.m,
+                  ),
+                  child: KvAction(
+                    label: 'Use this source',
+                    primary: true,
+                    onTap: () => _save(choice),
+                    disabledReason: _reason(choice),
+                  ),
+                ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Where the price under your balance comes from.',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 20,
+                    height: 26 / 20,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.ink,
+                  ),
+                ),
+                const SizedBox(height: KvSpace.m),
+                // Not yet read: say so, and offer no control (a switch drawn
+                // over a posture nobody has read is a switch reporting a state
+                // it does not know — `wallet-security-auditor`).
+                if (choice == null)
+                  const _TrustLabel('Reading your setting…')
+                else ...[
+                  _ChoiceCard(
+                    children: [
+                      _ChoiceRow(
+                        title: 'Off',
+                        sub:
+                            'Your balance is shown in KAS only. Nothing is fetched.',
+                        selected: choice == _RateChoice.off,
+                        onTap: _busy
+                            ? null
+                            : () => setState(() => _choice = _RateChoice.off),
+                      ),
+                      _ChoiceRow(
+                        title: _hostOf(scope.defaultEndpoint.value),
+                        sub: 'The shipped price source',
+                        selected: choice == _RateChoice.shipped,
+                        onTap: _busy
+                            ? null
+                            : () =>
+                                  setState(() => _choice = _RateChoice.shipped),
+                      ),
+                      _ChoiceRow(
+                        title: 'Custom',
+                        sub: 'Your own price source',
+                        selected: choice == _RateChoice.custom,
+                        onTap: _busy
+                            ? null
+                            : () =>
+                                  setState(() => _choice = _RateChoice.custom),
+                      ),
+                    ],
+                  ),
+                  AnimatedSize(
+                    duration: KvMotion.enter,
+                    curve: KvMotion.curve,
+                    alignment: Alignment.topCenter,
+                    child: choice == _RateChoice.custom
+                        ? Padding(
+                            padding: const EdgeInsets.only(top: KvSpace.sm),
+                            child: _UrlField(
+                              controller: _endpoint,
+                              enabled: !_busy,
+                              hint: scope.defaultEndpoint.value,
+                              label: 'Price source',
+                              onSubmitted: _reason(choice) == null
+                                  ? () => _save(choice)
+                                  : null,
+                            ),
+                          )
+                        : const SizedBox(width: double.infinity),
+                  ),
+                  // What the source actually said, so the setting is
+                  // verifiable rather than declarative; `—` when there is no
+                  // usable price (BG-5).
+                  if (stored != _RateChoice.off) ...[
+                    const SizedBox(height: KvSpace.s),
+                    _Reading(
+                      label: 'Price, per KAS',
+                      value: switch (scope.quote.value) {
+                        null => '—',
+                        final quote =>
+                          '\$${trimTrailingZeros(quote.usdPerKas)}',
+                      },
+                    ),
+                    if (scope.quote.value case final quote?)
+                      _Reading(
+                        label: 'As of',
+                        numeric: false,
+                        value:
+                            '${formatAge(widget.clock().difference(quote.fetchedAt))} ago',
+                      ),
+                  ],
+                  if (scope.error.value case final error?) ...[
+                    const SizedBox(height: KvSpace.s),
+                    _Fault(displayError(error)),
+                  ],
+                  if (_problem case final problem?) ...[
+                    const SizedBox(height: KvSpace.s),
+                    _Fault(problem),
+                  ],
+                ],
+                const SizedBox(height: KvSpace.sm),
+                const _TrustLabel(
+                  'A price is the one thing here that no node, no block and no '
+                  'proof can check — so it is display only, and switching it '
+                  'off costs you nothing but the figure. The source sees that '
+                  'this wallet asked for a price, and the network address it '
+                  'asked from; it never learns what you hold.',
+                ),
+                const SizedBox(height: KvSpace.s),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 }
 
@@ -2023,70 +2402,6 @@ class _Fault extends StatelessWidget {
   );
 }
 
-/// A one-tap starting point. Selected = the templates in the fields are
-/// exactly this option's, so the state is derived rather than remembered and
-/// cannot disagree with what the fields say.
-class _Pick extends StatelessWidget {
-  const _Pick({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: label,
-      child: ExcludeSemantics(
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(KvRadius.control),
-          child: Container(
-            // The visual is the pill; the target is the 52 dp row it sits in
-            // (BG-12 permits the smaller visual and requires this to say so).
-            height: KvSpace.touchTarget,
-            padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
-            decoration: BoxDecoration(
-              color: selected ? KvColor.keyPressed : KvColor.control,
-              borderRadius: BorderRadius.circular(KvRadius.control),
-              border: Border.all(
-                color: selected ? KvColor.edgeHi : KvColor.hairline,
-              ),
-            ),
-            // **A `Row` at `MainAxisSize.min`, NOT `alignment: Alignment.center`
-            // on the Container.** Setting `alignment` makes a `Container`
-            // expand to its maximum constraint, so inside the `Wrap` each pick
-            // took a whole line and the two-way choice rendered as two
-            // full-width buttons stacked down an already-long screen (found on
-            // glass, 2026-08-28 device pass). The Row sizes to its child and
-            // still centres it vertically in the 52 dp target.
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: KvFont.mono,
-                    fontSize: 12,
-                    height: 17 / 12,
-                    color: selected ? KvColor.ink : KvColor.inkDim,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// **`T5`'s node row**: the disc, *Connected to* over the host, and — when
 /// the width allows it — the pill at the right. The serving plate measures
 /// and decides; this only draws.
@@ -2301,100 +2616,6 @@ class _ChipPillState extends State<_ChipPill> {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Names the action and its object (BG-11), and says why it cannot be pressed
-/// when it cannot be pressed (BG-12).
-///
-/// One renderer for all three of this screen's commits — the pin, the explorer
-/// and the price source. They were one control when the screen had one
-/// setting; three copies of it is how they start disagreeing about what a
-/// disabled button looks like.
-class _Action extends StatelessWidget {
-  const _Action({
-    required this.label,
-    required this.enabled,
-    required this.reason,
-    required this.onTap,
-  });
-
-  /// Verb plus object, never "Save" (BG-11).
-  final String label;
-
-  final bool enabled;
-  final String reason;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Semantics(
-          button: true,
-          enabled: enabled,
-          label: label,
-          child: InkWell(
-            onTap: enabled ? onTap : null,
-            borderRadius: BorderRadius.circular(KvRadius.control),
-            child: KvSurface.control(
-              // **A control with something to commit is LIT** (founder, device
-              // sitting 2026-08-31). Every commit button on this screen was
-              // the same grey whether it had a change to write or not, so the
-              // one question the user is asking it — *did my edit take?* —
-              // was the one thing it would not answer. Send already works this
-              // way; settings did not, and the inconsistency read as the whole
-              // settings surface being dead.
-              //
-              // The edge is [KvColor.primaryMuted], the teal edge D-223 gave
-              // `Send max` — the app's existing armed-edge token, not a new
-              // one. `enabled` is already exactly "there is a change to save":
-              // each call site computes it as such, and states the negative in
-              // words underneath (BG-12).
-              edge: enabled ? KvColor.primaryMuted : KvColor.edgeHi,
-              width: double.infinity,
-              height: KvSpace.control,
-              alignment: Alignment.center,
-              // No meter, for the reason `_Reconnect` has none: applying a
-              // pin re-links, and the serving plate above is already running
-              // a cadence for exactly that. BG-2 counts emitting objects, and
-              // this screen's compound failure state was measured at five.
-              //
-              // Nothing replaces it, because nothing had to: `canApply` is
-              // false while the write is in flight, so the control is already
-              // disabled and already states why — *"Setting the node…"*, the
-              // shipped string. A second busy label beside it would have been
-              // one invented string saying what a working one already said
-              // (D-196).
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 15,
-                  height: 20 / 15,
-                  fontWeight: FontWeight.w600,
-                  fontVariations: KvWeight.w600,
-                  color: enabled ? KvColor.inkBright : KvColor.inkMeta,
-                ),
-              ),
-            ),
-          ),
-        ),
-        if (!enabled) ...[
-          const SizedBox(height: KvSpace.xs),
-          Text(
-            reason,
-            style: const TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 12,
-              height: 17 / 12,
-              color: KvColor.inkMeta,
-            ),
-          ),
-        ],
-      ],
     );
   }
 }

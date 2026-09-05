@@ -918,11 +918,8 @@ class _SettingsScreenState extends State<SettingsScreen>
     return Scaffold(
       backgroundColor: KvColor.abyss,
       body: SafeArea(
-        top: false,
         child: Column(
           children: [
-            // BG-14: the top 52dp belongs to the real system status bar.
-            const SizedBox(height: KvSpace.statusBarReserve),
             KvTopBar(
               title: 'Settings',
               onBack: () => Navigator.of(context).maybePop(),

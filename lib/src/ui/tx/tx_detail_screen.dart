@@ -163,12 +163,8 @@ class _TxDetailScreenState extends State<TxDetailScreen> {
     return Scaffold(
       backgroundColor: KvColor.abyss,
       body: SafeArea(
-        top: false,
         child: Column(
           children: [
-            // BG-14: the top 52dp belongs to the real system status bar and
-            // nothing is painted there.
-            const SizedBox(height: KvSpace.statusBarReserve),
             KvTopBar(
               title: 'Transaction',
               onBack: () => Navigator.of(context).pop(),
@@ -588,9 +584,17 @@ class _DepthPlate extends StatelessWidget {
   Widget build(BuildContext context) {
     // **The home's card** — `plate`, radius 28, no border (founder on glass,
     // 2026-09-05); 20 dp round the gauge, as `S9` measures.
+    // Slim, as `S9` measures it (~110 dp): 16 round the gauge and 12 under
+    // the graduations (founder on glass, 2026-09-05 — *"that card is not
+    // slim in height which it has to be"*).
     return KvRowContainer(
       divided: false,
-      inset: const EdgeInsets.all(KvSpace.s20),
+      inset: const EdgeInsets.fromLTRB(
+        KvSpace.m,
+        KvSpace.m,
+        KvSpace.m,
+        KvSpace.sm,
+      ),
       // The link's liveness flips rarely and this plate is the only region it
       // reaches: the gauge stops its counter on it and the caption says why.
       children: [
@@ -614,30 +618,28 @@ class _DepthPlate extends StatelessWidget {
                 stale: stale,
               ),
               // **The dash says there is no reading; this says why.** A user
-              // watching a gauge that has stopped is owed the reason, and the
-              // reason is knowable here — it is the same bit the money plate
-              // folds into its trust line (BG-11/BG-20).
-              //
-              // **Its slot is always reserved and only the ink fades** — the
-              // same mechanism Receive's caption uses. Built as a bare
-              // conditional it cut in with no transition AND took everything
-              // below it down the screen in one frame, every time the link
-              // flapped, on a surface whose whole purpose is watching a number
-              // that is not moving (BG-24; measured, `ux-auditor`, UX-5).
-              const SizedBox(height: KvSpace.s),
-              AnimatedOpacity(
-                opacity: stale ? 1 : 0,
+              // watching a gauge that has stopped is owed the reason (BG-11/
+              // BG-20). It arrives with the motion that accounts for it and
+              // takes no room while the link is live (BG-24): the card stays
+              // slim, and a flap eases the line in rather than cutting it.
+              AnimatedSize(
                 duration: KvMotion.fast,
                 curve: KvMotion.out,
-                child: const Text(
-                  'The link is not live, so the depth cannot be read.',
-                  style: TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 11,
-                    height: 15 / 11,
-                    color: KvColor.inkMeta,
-                  ),
-                ),
+                alignment: Alignment.topCenter,
+                child: stale
+                    ? const Padding(
+                        padding: EdgeInsets.only(top: KvSpace.s),
+                        child: Text(
+                          'The link is not live, so the depth cannot be read.',
+                          style: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 11,
+                            height: 15 / 11,
+                            color: KvColor.inkMeta,
+                          ),
+                        ),
+                      )
+                    : const SizedBox(width: double.infinity),
               ),
             ],
           ),

@@ -162,7 +162,8 @@ void main() {
       );
       await tester.pump();
       expect(_Ink.of(tester).filledFraction, closeTo(1, 0.002));
-      expect(_dotHue(tester), KvColor.ok);
+      // Settled: the track is full and green, and the reading line is gone.
+      expect(_dotHue(tester), isNull);
     });
   });
 
@@ -665,14 +666,17 @@ void main() {
       for (var step = 0; step < 14; step++) {
         final fill = _Ink.of(tester).filledFraction;
         final shown = _shownDepth(tester);
-        if (shown >= kTestMaturity.userDaa) {
+        // Past the ceiling the line prints nothing (founder, 2026-09-05: no
+        // streaming count on a settled transaction) — so "nothing printed"
+        // is the line's way of saying *landed*, and the bar must agree.
+        if (shown == 0 || shown >= kTestMaturity.userDaa) {
           sawOver = true;
           expect(
             fill,
             greaterThanOrEqualTo(1 - 1e-6),
             reason:
-                'the line says $shown — past the ceiling — while the bar is '
-                'still short of it',
+                'the line says landed ($shown) while the bar is still short '
+                'of the ceiling',
           );
         } else {
           sawUnder = true;
@@ -685,9 +689,11 @@ void main() {
         await tester.pump(const Duration(milliseconds: 80));
       }
       expect(sawUnder && sawOver, isTrue, reason: 'the crossing never ran');
-      // And when it has settled, the dot is the fourth hue D-248 seated.
+      // And when it has settled the reading is gone — the chip above and the
+      // full green track carry the fact; no dot, no count, nothing streaming.
       await tester.pumpAndSettle();
-      expect(_dotHue(tester), KvColor.ok);
+      expect(_dotHue(tester), isNull);
+      expect(_shownDepth(tester), 0);
     });
   });
 

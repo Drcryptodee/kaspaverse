@@ -361,9 +361,23 @@ class _ReadingLine extends StatelessWidget {
         Text(unit, maxLines: 1, style: _unit),
       ],
     );
+    // **Past the ceiling nothing counts.** A settled transaction's depth
+    // streamed on every DAA tick for as long as the screen was open — days
+    // later, a number nobody asked for, moving (founder on glass,
+    // 2026-09-05). The fill on its ceiling and the chip above already say
+    // *settled*; the progress count is drawn only while there is progress.
+    final landed = n != null && n >= ceiling;
     final label = heading;
     if (label == null) {
-      return Align(alignment: Alignment.centerRight, child: reading);
+      return landed
+          ? const SizedBox.shrink()
+          : Align(alignment: Alignment.centerRight, child: reading);
+    }
+    if (landed) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: KvRuledLabel(label, tight: true, rule: false),
+      );
     }
     final scaler = MediaQuery.textScalerOf(context);
     return LayoutBuilder(
@@ -434,9 +448,13 @@ class _Graduations extends StatelessWidget {
   /// `of 1000 DAA` while this label said `1,000`, twenty dp apart).
   static String _numeral(int mark) => formatScore(BigInt.from(mark));
 
-  static Widget _label(int mark, {String? word}) => Column(
+  /// The number and, at the ceiling, its word — **on one line**, as `S9`
+  /// sets `100 confirmed` and `1,000 final` (a stacked word made the card a
+  /// row taller than the render's; founder on glass, 2026-09-05).
+  static Widget _label(int mark, {String? word}) => Row(
     mainAxisSize: MainAxisSize.min,
-    crossAxisAlignment: CrossAxisAlignment.center,
+    crossAxisAlignment: CrossAxisAlignment.baseline,
+    textBaseline: TextBaseline.alphabetic,
     children: [
       Text(
         _numeral(mark),
@@ -449,7 +467,8 @@ class _Graduations extends StatelessWidget {
           fontFeatures: [FontFeature.tabularFigures()],
         ),
       ),
-      if (word != null)
+      if (word != null) ...[
+        const SizedBox(width: KvSpace.xs),
         Text(
           word,
           maxLines: 1,
@@ -460,6 +479,7 @@ class _Graduations extends StatelessWidget {
             color: KvColor.inkMeta,
           ),
         ),
+      ],
     ],
   );
 
@@ -476,13 +496,10 @@ class _Graduations extends StatelessWidget {
       (ceiling ~/ 2, null),
       (ceiling, 'settled'),
     ];
-    // The tallest label is a numeral over a word: two line boxes, each
-    // `labelLine / labelSize` of whatever the user's scaler makes of
-    // `labelSize`.
+    // One line box, whatever the user's scaler makes of `labelSize`.
     final rows =
         MediaQuery.textScalerOf(context).scale(labelSize) *
-        (labelLine / labelSize) *
-        2;
+        (labelLine / labelSize);
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;

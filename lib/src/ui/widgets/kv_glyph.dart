@@ -77,6 +77,11 @@ enum KvGlyph {
   /// Destination: help. Lucide `circle-question-mark`.
   help,
 
+  /// "There is more to read about this." Lucide `info` — the circled i the
+  /// founder asked for beside a section's caps label (2026-09-05): tapping it
+  /// eases the section's explainer in beneath its card.
+  info,
+
   /// The lock, and locking. Lucide `lock`.
   lock,
 
@@ -332,6 +337,9 @@ class KvGlyphPainter extends CustomPainter {
               '0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z',
           'm9 12 2 2 4-4',
         ]);
+      case KvGlyph.info:
+        circle(12, 12, 10);
+        path(const ['M12 16v-4', 'M12 8h.01']);
       case KvGlyph.help:
         circle(12, 12, 10);
         path(const ['M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01']);

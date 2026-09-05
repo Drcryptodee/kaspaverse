@@ -59,11 +59,8 @@ class RoadmapScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: KvColor.abyss,
       body: SafeArea(
-        top: false,
         child: Column(
           children: [
-            // BG-14: the top 52dp belongs to the real system status bar.
-            const SizedBox(height: KvSpace.statusBarReserve),
             KvTopBar(
               title: "What's coming",
               onBack: () => Navigator.of(context).maybePop(),

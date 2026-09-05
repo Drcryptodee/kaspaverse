@@ -12,8 +12,8 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 import 'support/maturity.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
@@ -399,8 +399,8 @@ void pollLifecycleTests() {
       await tester.tap(find.text('Test'));
       await tester.pumpAndSettle();
       expect(seam.tests, isEmpty);
-      // Nothing to commit either: no control, no reason, nothing twice.
-      expect(find.text('Use this node'), findsNothing);
+      // The commit is on the page, disabled, saying why — once (BG-12/BG-19).
+      expect(find.text('Type the address of your node first.'), findsOneWidget);
     });
 
     testWidgets('without the seam there is no pill', (tester) async {
@@ -570,10 +570,6 @@ void main() {
   pollLifecycleTests();
   setUpAll(loadBundledFonts);
 
-  /// A healthy link, which is the background every new UX-3 section is judged
-  /// against — the sections under test are not about the link.
-  _FakeSeam seamFor() => _FakeSeam();
-
   group('NodeScreen — the INV-8 escape hatch, made reachable (D-187)', () {
     testWidgets('it opens cold and re-reads the truth from Rust', (
       tester,
@@ -708,8 +704,11 @@ void main() {
       // **The discovery service is named** (D-207 census). "A public community
       // node" said which KIND of node was answering and left out who chose it,
       // and the PNN resolver walk was the census's first unnamed row.
-      // The directory is named where it acts (D-207) — in the trust line under
-      // the card, since the healthy card is `T5`'s bare row (2026-09-05).
+      // The directory is named where it acts (D-207) — in the explainer the
+      // circled-i beside `NODE` eases in beneath the card (founder, 2026-09-05):
+      // the healthy card itself is `T5`'s bare row.
+      await tester.tap(find.bySemanticsLabel('About node'));
+      await tester.pumpAndSettle();
       expect(
         find.textContaining('found for you by the public node directory'),
         findsOneWidget,
@@ -837,34 +836,40 @@ void main() {
     ) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      // `T5`'s own-node card always holds its field (2026-09-05): a user can
-      // type and test before deciding.
+      // `T5`'s own-node card always holds its field, and the switch governs
+      // it (2026-09-05): off, the field is disabled and says why; on, it takes
+      // a node and the commit appears, disabled until there is one.
       expect(find.byType(TextField), findsOneWidget);
+      expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+      expect(find.text('Turn on to set a node'), findsOneWidget);
       expect(find.text('Use this node'), findsNothing);
 
       await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+      expect(find.text('Use this node'), findsOneWidget);
+      expect(find.text('Type the address of your node first.'), findsOneWidget);
       // Asking with nothing typed pins nothing: no call reached Rust.
       expect(seam.calls, isEmpty);
-      // Typing lights the commit; it is still not sent until it is tapped.
       await tester.enterText(find.byType(TextField), 'ws://mine.local:17110');
       await tester.pumpAndSettle();
-      expect(find.text('Use this node'), findsOneWidget);
-      expect(seam.calls, isEmpty);
+      expect(find.text('Type the address of your node first.'), findsNothing);
+      expect(seam.calls, isEmpty, reason: 'typing is not committing');
     });
 
     testWidgets('a control that cannot fire says why, in words (BG-12)', (
       tester,
     ) async {
-      // The commit is absent until there is something to commit — an absent
-      // control needs no reason (BG-12), and the field beside `Test` is the
-      // whole instruction.
+      // A standard pill: disabled with its reason on the page until there is
+      // a change to commit (BG-12), enabled when there is.
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      expect(find.text('Use this node'), findsNothing);
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
+      expect(find.text('Type the address of your node first.'), findsOneWidget);
       await tester.enterText(find.byType(TextField), 'ws://10.0.0.5:17110');
       await tester.pumpAndSettle();
-      expect(find.text('Use this node'), findsOneWidget);
+      expect(find.text('Type the address of your node first.'), findsNothing);
       // And a write in flight says why the control cannot fire again.
       seam.hold = Completer<void>();
       await tester.tap(find.text('Use this node'));
@@ -892,8 +897,8 @@ void main() {
       // URL and never applies a second, weaker guard (INV-9's reasoning).
       expect(seam.calls, ['ws://10.0.0.5:17110']);
       expect(seam.pinnedNode.value, 'ws://10.0.0.5:17110');
-      // Nothing left to commit: the control leaves rather than sits disabled.
-      expect(find.text('Use this node'), findsNothing);
+      // Nothing left to commit: the pill is disabled and says so.
+      expect(find.text('This is already the node you pinned.'), findsOneWidget);
     });
 
     testWidgets('turning it off clears the pin at once', (tester) async {
@@ -914,11 +919,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(seam.calls, [null]);
       expect(seam.pinnedNode.value, isNull);
-      // The field stays (it is the card's, 2026-09-05) and is cleared.
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        '',
-      );
+      // The field stays (it is the card's, 2026-09-05), cleared and disabled.
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller!.text, '');
+      expect(field.enabled, isFalse);
     });
 
     testWidgets('a REJECTED node says nothing changed — because nothing did', (
@@ -1029,8 +1033,7 @@ void main() {
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         'ws://fresh.local:17110',
       );
-      // Field and pin agree: nothing to commit, so no commit control.
-      expect(find.text('Use this node'), findsNothing);
+      expect(find.text('This is already the node you pinned.'), findsOneWidget);
     });
 
     testWidgets('a screen reader can actually work the toggle (BG-14)', (
@@ -1257,25 +1260,20 @@ void main() {
       await tester.pumpAndSettle();
       // Each source's controls live on its own sheet now (`T5`'s SOURCES,
       // 2026-09-05): open, refuse, read the refusal, close.
-      for (final (source, field, control, refusal) in const [
-        (
-          'Explorer',
-          'https://explorer.kaspa.org/txs/{txid}',
-          'Use this explorer',
-          'explorer link refused',
-        ),
-        (
-          'API source',
-          'https://api.kaspa.org/info/price',
-          'Use this source',
-          'rate source refused',
-        ),
+      for (final (source, control, refusal) in const [
+        ('Explorer', 'Use this explorer', 'explorer link refused'),
+        ('API source', 'Use this source', 'rate source refused'),
       ]) {
         await tester.ensureVisible(find.text(source));
         await tester.pumpAndSettle();
         await tester.tap(find.text(source));
         await tester.pumpAndSettle();
-        await tester.enterText(find.text(field), 'http://nope.example/x');
+        await tester.tap(_inSheet(find.text('Custom')));
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          _inSheet(find.byType(TextField)).first,
+          'http://nope.example/x',
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.text(control));
         await tester.pumpAndSettle();
@@ -1387,8 +1385,10 @@ void main() {
     });
   });
 
-  group('the explorer choice — a template, never a vendor list (D-207)', () {
-    testWidgets('the audited defaults are offered, and one tap takes both', (
+  group('the explorer sheet — a settings ceremony from the playbook', () {
+    _FakeSeam seamFor() => _FakeSeam();
+
+    testWidgets('the choices are rows in a chip card with ONE check', (
       tester,
     ) async {
       final explorer = _FakeExplorer();
@@ -1399,50 +1399,23 @@ void main() {
         source: 'Explorer',
         height: 2400,
       );
-      await tester.pumpAndSettle();
-
-      // Two shipped starting points, named by host — "an explorer" cannot be
-      // a sovereignty decision, so the row says which one.
+      // The two audited defaults and `Custom`, as rows; the current one
+      // wears the check and only it.
       expect(_inSheet(find.text('explorer.kaspa.org')), findsOneWidget);
       expect(_inSheet(find.text('kaspa.stream')), findsOneWidget);
-      // And the templates themselves are on the glass, editable — the field IS
-      // the disclosure of where a link would go.
-      expect(
-        find.text('https://explorer.kaspa.org/txs/{txid}'),
-        findsOneWidget,
-      );
-
-      await tester.ensureVisible(_inSheet(find.text('kaspa.stream')));
-      await tester.pumpAndSettle();
-      await tester.tap(_inSheet(find.text('kaspa.stream')));
-      await tester.pumpAndSettle();
-      // A transaction page and an address page are different paths, so a pick
-      // must move BOTH — a half-applied default is a dead address link.
-      expect(
-        find.text('https://kaspa.stream/transactions/{txid}'),
-        findsOneWidget,
-      );
-      expect(
-        find.text('https://kaspa.stream/addresses/{address}'),
-        findsOneWidget,
-      );
-      // Picking is not saving: nothing has been written yet.
+      expect(_inSheet(find.text('Custom')), findsOneWidget);
+      expect(_inSheet(find.byType(KvCheck)), findsOneWidget);
+      // The inputs `Custom` stands for are not drawn until it is chosen.
+      expect(_inSheet(find.byType(TextField)), findsNothing);
+      // Nothing changed: the act is disabled and says why (BG-12).
+      expect(find.text('This is already your explorer.'), findsOneWidget);
       expect(explorer.writes, isEmpty);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('the two defaults are a CHIP ROW, not two stacked buttons', (
+    testWidgets('one tap takes both templates, and the act commits them', (
       tester,
     ) async {
-      // Found on glass, not by the suite (2026-08-28 device pass): `_Pick` set
-      // `alignment: Alignment.center` on its `Container`, which makes a
-      // Container expand to its maximum constraint — so inside the `Wrap` each
-      // pick took a whole line. Nothing overflowed, nothing threw, every
-      // `find.text` passed, and the two-way choice read as two full-width
-      // buttons down an already-long screen.
-      //
-      // The property is positional, so the assertion has to be: same row, and
-      // neither one owning the width.
       final explorer = _FakeExplorer();
       await _pumpScreen(
         tester,
@@ -1451,121 +1424,106 @@ void main() {
         source: 'Explorer',
         height: 2400,
       );
+      await tester.tap(_inSheet(find.text('kaspa.stream')));
       await tester.pumpAndSettle();
-
-      final org = tester.getRect(_inSheet(find.text('explorer.kaspa.org')));
-      final stream = tester.getRect(_inSheet(find.text('kaspa.stream')));
-      expect(
-        org.center.dy,
-        moreOrLessEquals(stream.center.dy, epsilon: 1),
-        reason: 'both defaults sit on one line — it is a choice, not a stack',
-      );
-      // 393dp viewport minus the 24dp gutters; a pick that fills the row is the
-      // defect, whatever it is aligned to.
-      expect(
-        org.width,
-        lessThan(345 * 0.6),
-        reason: 'a pick sizes to its label, never to the space available',
-      );
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('saving reaches the seam verbatim', (tester) async {
-      final explorer = _FakeExplorer();
-      await _pumpScreen(
-        tester,
-        seamFor(),
-        explorer: explorer,
-        source: 'Explorer',
-        height: 2400,
-      );
-      await tester.pumpAndSettle();
-
-      await tester.ensureVisible(find.text('Use this explorer'));
-      await tester.pumpAndSettle();
-      expect(
-        find.text('These are already your explorer links.'),
-        findsOneWidget,
-        reason: 'BG-12: a disabled control always says why, in words',
-      );
-
-      await tester.enterText(
-        find.text('https://explorer.kaspa.org/txs/{txid}'),
-        '  https://mine.example/t/{txid} ',
-      );
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Use this explorer'));
-      await tester.pumpAndSettle();
+      expect(find.text('This is already your explorer.'), findsNothing);
       await tester.tap(find.text('Use this explorer'));
       await tester.pumpAndSettle();
-
-      // Trimmed and otherwise untouched: Rust validates, Dart never parses a
-      // URL and never applies a second, weaker guard (INV-9's reasoning).
       expect(explorer.writes, [
         (
-          'https://mine.example/t/{txid}',
-          'https://explorer.kaspa.org/addresses/{address}',
+          _FakeExplorer.kaspaStream.txTemplate,
+          _FakeExplorer.kaspaStream.addressTemplate,
         ),
       ]);
+      // The sheet closed on the commit, and the row prints the new host.
+      expect(find.byType(KvSheet), findsNothing);
+      expect(find.text('kaspa.stream'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets("a refusal is shown, and does not touch the link's message", (
-      tester,
-    ) async {
+    testWidgets(
+      '`Custom` reveals the two link inputs and saves them verbatim',
+      (tester) async {
+        final explorer = _FakeExplorer();
+        await _pumpScreen(
+          tester,
+          seamFor(),
+          explorer: explorer,
+          source: 'Explorer',
+          height: 2400,
+        );
+        await tester.tap(_inSheet(find.text('Custom')));
+        await tester.pumpAndSettle();
+        expect(_inSheet(find.byType(TextField)), findsNWidgets(2));
+        expect(find.text('Transaction link'), findsOneWidget);
+        expect(find.text('Address link'), findsOneWidget);
+        await tester.enterText(
+          _inSheet(find.byType(TextField)).first,
+          '  https://mine.example/t/{txid} ',
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Use this explorer'));
+        await tester.pumpAndSettle();
+        // Trimmed and otherwise untouched: Rust validates, Dart never parses a
+        // URL and never applies a second, weaker guard (INV-9's reasoning).
+        expect(explorer.writes, [
+          (
+            'https://mine.example/t/{txid}',
+            'https://explorer.kaspa.org/addresses/{address}',
+          ),
+        ]);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets("a refusal stays on the sheet, and does not touch the link's "
+        'message', (tester) async {
       final explorer = _FakeExplorer(
         refuse: StateError('the explorer link must start with https://'),
       );
-      final seam = seamFor();
       await _pumpScreen(
         tester,
-        seam,
+        seamFor(),
         explorer: explorer,
         source: 'Explorer',
         height: 2400,
       );
+      await tester.tap(_inSheet(find.text('Custom')));
       await tester.pumpAndSettle();
-
       await tester.enterText(
-        find.text('https://explorer.kaspa.org/txs/{txid}'),
+        _inSheet(find.byType(TextField)).first,
         'http://nope.example/{txid}',
       );
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Use this explorer'));
-      await tester.pumpAndSettle();
       await tester.tap(find.text('Use this explorer'));
       await tester.pumpAndSettle();
-
       expect(find.textContaining('must start with https://'), findsOneWidget);
+      expect(find.byType(KvSheet), findsOneWidget, reason: 'fix it here');
       // The link's own state is a different fact and keeps its own line.
-      expect(
-        find.textContaining('found for you by the public node directory'),
-        findsOneWidget,
-      );
+      expect(find.text('Connected to'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('no seam, no section — never a control wired to nothing', (
+    testWidgets('no seam, no row — never a control wired to nothing', (
       tester,
     ) async {
       await _pumpScreen(tester, seamFor(), height: 2400);
-      await tester.pumpAndSettle();
       expect(find.text('Explorer'), findsNothing);
-      expect(find.text('Use this explorer'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
+      expect(find.text('SOURCES'), findsNothing);
     });
   });
 
-  group('the fiat rate — the one claim consensus cannot check', () {
-    testWidgets('what the source actually said is on the glass', (
+  group('the price-source sheet — the one claim consensus cannot check', () {
+    _FakeSeam seamFor() => _FakeSeam();
+
+    testWidgets('what the source actually said is on the sheet', (
       tester,
     ) async {
-      final rate = _FakeRate(
-        quote: KvRateQuote(
-          usdPerKas: 0.02864504,
-          fetchedAt: DateTime(2026, 8, 27, 11, 58),
-          source: 'https://api.kaspa.org/info/price',
-        ),
+      final rate = _FakeRate();
+      rate.quote.value = KvRateQuote(
+        usdPerKas: 0.07120000,
+        fetchedAt: DateTime(2026, 8, 27, 11, 59, 30),
+        source: 'https://api.kaspa.org/info/price',
       );
       await _pumpScreen(
         tester,
@@ -1574,19 +1532,13 @@ void main() {
         source: 'API source',
         height: 2400,
       );
-      await tester.pumpAndSettle();
-
-      // Verifiable rather than declarative: the setting shows the number it
-      // produced and how old it is.
-      expect(find.text('\$0.02864504'), findsOneWidget);
+      // The shipped source is the current choice, checked once.
+      expect(_inSheet(find.text('api.kaspa.org')), findsOneWidget);
+      expect(_inSheet(find.byType(KvCheck)), findsOneWidget);
+      // Every significant digit, no trailing zeros (D-210).
+      expect(find.text('\$0.0712'), findsOneWidget);
       expect(find.text('Price, per KAS'), findsOneWidget);
-      expect(find.text('2 m ago'), findsOneWidget);
-      // And the trust label names what the source can see and cannot do.
-      expect(
-        find.textContaining('no proof can check'),
-        findsOneWidget,
-        reason: 'BG-17 / ux-auditor 30: every endpoint row carries its label',
-      );
+      expect(find.textContaining('30 s ago'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -1601,40 +1553,13 @@ void main() {
         source: 'API source',
         height: 2400,
       );
-      await tester.pumpAndSettle();
-      // BG-5's own rendering of an unknown. Never a stale figure at full
-      // confidence, and never a fabricated one.
-      //
-      // **Scoped to the rate's own row**, because `T5`'s connection card
-      // carries three readings that are legitimately dashed on a fixture with
-      // no probe seam (DAA, latency, peers). A bare `findsOneWidget` here was
-      // counting them by accident and would have gone green again for the
-      // wrong reason.
-      expect(
-        find.descendant(
-          of: find
-              .ancestor(
-                of: find.text('Price, per KAS'),
-                matching: find.byType(Row),
-              )
-              .first,
-          matching: find.text('—'),
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('Price, per KAS'), findsOneWidget);
+      expect(_inSheet(find.text('—')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('switching it off reaches the seam and hides the source', (
-      tester,
-    ) async {
-      final rate = _FakeRate(
-        quote: KvRateQuote(
-          usdPerKas: 0.03,
-          fetchedAt: DateTime(2026, 8, 27, 11, 58),
-          source: 'https://api.kaspa.org/info/price',
-        ),
-      );
+    testWidgets('`Off` reaches the seam, and the row says Off', (tester) async {
+      final rate = _FakeRate();
       await _pumpScreen(
         tester,
         seamFor(),
@@ -1642,81 +1567,52 @@ void main() {
         source: 'API source',
         height: 2400,
       );
+      await tester.tap(_inSheet(find.text('Off')));
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Show what your balance is worth'));
+      await tester.tap(find.text('Use this source'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Show what your balance is worth'));
-      await tester.pumpAndSettle();
-
-      expect(rate.writes, [(false, 'https://api.kaspa.org/info/price')]);
-      // Off means the endpoint field goes too: there is nothing to point at.
-      expect(find.text('Price source'), findsNothing);
-      expect(
-        find.textContaining('Nothing is fetched'),
-        findsOneWidget,
-        reason: 'the off state says what it means, not just that it is off',
-      );
+      expect(rate.writes.length, 1);
+      expect(rate.writes.single.$1, isFalse);
+      expect(find.byType(KvSheet), findsNothing);
+      expect(find.text('Off'), findsOneWidget, reason: 'the row prints it');
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a control with something to commit LIGHTS UP (BG-12a)', (
+    testWidgets('the act is disabled with its reason until a choice differs', (
       tester,
     ) async {
-      // **The defect this pins, found on glass.** Every commit control on this
-      // screen was the same grey whether it had a change to write or not, so
-      // the one question the user asks it — *did my edit register?* — was the
-      // one thing it would not answer. Send has always worked this way; the
-      // settings surfaces did not, and the inconsistency read as the whole
-      // screen being dead (founder, device sitting 2026-08-31).
-      //
-      // Measured as the EDGE the control actually paints, not as a bool it was
-      // handed: the armed tone is `primaryMuted`, the teal edge D-223 gave
-      // `Send max`, and the resting tone is `edgeHi`.
+      final rate = _FakeRate();
       await _pumpScreen(
         tester,
-        _FakeSeam(),
-        explorer: _FakeExplorer(),
-        source: 'Explorer',
+        seamFor(),
+        rate: rate,
+        source: 'API source',
         height: 2400,
       );
+      expect(find.text('This is already your price source.'), findsOneWidget);
+      await tester.tap(find.text('Use this source'));
       await tester.pumpAndSettle();
-
-      Color? edgeOf(String label) {
-        final surface = tester.widget<KvSurface>(
-          find
-              .ancestor(of: find.text(label), matching: find.byType(KvSurface))
-              .first,
-        );
-        return surface.edge;
-      }
-
-      await tester.ensureVisible(find.text('Use this explorer'));
+      expect(rate.writes, isEmpty, reason: 'a disabled act does nothing');
+      await tester.tap(_inSheet(find.text('Custom')));
       await tester.pumpAndSettle();
-      expect(
-        edgeOf('Use this explorer'),
-        KvColor.edgeHi,
-        reason: 'nothing has changed, so there is nothing to commit',
-      );
-
+      // Custom with the shipped address typed is still no change.
+      expect(find.text('This is already your price source.'), findsOneWidget);
       await tester.enterText(
-        find.text('https://explorer.kaspa.org/txs/{txid}'),
-        'https://kaspa.stream/txs/{txid}',
+        _inSheet(find.byType(TextField)),
+        'https://prices.example/kas',
       );
       await tester.pumpAndSettle();
-      expect(
-        edgeOf('Use this explorer'),
-        KvColor.primaryMuted,
-        reason: 'an edited link is a change the control can now write',
-      );
+      expect(find.text('This is already your price source.'), findsNothing);
+      await tester.tap(find.text('Use this source'));
+      await tester.pumpAndSettle();
+      expect(rate.writes, [(true, 'https://prices.example/kas')]);
       await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('a rejected source is reported and not adopted', (
       tester,
     ) async {
-      final rate = _FakeRate(
-        refuse: StateError('the rate source must start with https://'),
-      );
+      final rate = _FakeRate(refuse: StateError('rate source refused'));
       await _pumpScreen(
         tester,
         seamFor(),
@@ -1724,38 +1620,29 @@ void main() {
         source: 'API source',
         height: 2400,
       );
+      await tester.tap(_inSheet(find.text('Custom')));
       await tester.pumpAndSettle();
-
       await tester.enterText(
-        find.text('https://api.kaspa.org/info/price'),
-        'http://cleartext.example/price',
+        _inSheet(find.byType(TextField)),
+        'http://nope.example/x',
       );
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Use this source'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Use this source'));
       await tester.pumpAndSettle();
-
-      expect(find.textContaining('must start with https://'), findsOneWidget);
-      expect(
-        rate.endpoint.value,
-        'https://api.kaspa.org/info/price',
-        reason: 'what the glass shows is what Rust stored',
-      );
+      expect(find.textContaining('rate source refused'), findsOneWidget);
+      expect(find.byType(KvSheet), findsOneWidget);
+      expect(rate.endpoint.value, isNot('http://nope.example/x'));
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a refused stored source can still be repaired', (
+    testWidgets('a refused stored source opens on Custom, ready to repair', (
       tester,
     ) async {
-      // `RateConfig::load` answers `enabled: false` while KEEPING an endpoint
-      // it refuses — so the row can show what was refused. Gating the field on
-      // the toggle hid the only control that could fix it: flipping the toggle
-      // re-posts the same bad endpoint, is refused again, and there is no
-      // field. A soft-lock (`consensus-auditor`, this sitting).
-      final rate = _FakeRate(on: false);
-      rate.endpoint.value = 'http://cleartext.example/price';
-      rate.error.value = 'the rate source must start with https://';
+      // A stored endpoint Rust refuses loads as `enabled: false` with the
+      // bad endpoint KEPT, so the sheet must show it where it can be fixed.
+      final rate = _FakeRate();
+      rate.enabled.value = false;
+      rate.endpoint.value = 'http://bad.example/price';
       await _pumpScreen(
         tester,
         seamFor(),
@@ -1763,53 +1650,58 @@ void main() {
         source: 'API source',
         height: 2400,
       );
+      await tester.tap(_inSheet(find.text('Custom')));
       await tester.pumpAndSettle();
-
       expect(
-        find.text('Price source'),
-        findsOneWidget,
-        reason: 'the field that repairs it must be reachable while it is off',
+        tester
+            .widget<TextField>(_inSheet(find.byType(TextField)))
+            .controller!
+            .text,
+        'http://bad.example/price',
       );
-      expect(find.textContaining('must start with https://'), findsOneWidget);
-      // And the repair does not silently switch the rate back on.
-      await tester.enterText(
-        find.text('http://cleartext.example/price'),
-        'https://mine.example/price',
-      );
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Use this source'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Use this source'));
-      await tester.pumpAndSettle();
-      expect(rate.writes, [(false, 'https://mine.example/price')]);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('with the shipped source and the rate off, no field', (
-      tester,
-    ) async {
-      // The other proposition (`L126`): the field appears because there is
-      // something to repair, not always. A user who simply turned fiat off
-      // sees a switch and its explanation, and nothing else.
-      final rate = _FakeRate(on: false);
-      await _pumpScreen(
-        tester,
-        seamFor(),
-        rate: rate,
-        source: 'API source',
-        height: 2400,
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Price source'), findsNothing);
-      expect(find.text('Use this source'), findsNothing);
-      expect(find.text('Price'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('no seam, no section', (tester) async {
+    testWidgets('no seam, no row', (tester) async {
       await _pumpScreen(tester, seamFor(), height: 2400);
+      expect(find.text('API source'), findsNothing);
+    });
+  });
+
+  group('the explainers — a circled-i beside the caps label', () {
+    testWidgets('NODE eases its explainer in beneath the card, and out', (
+      tester,
+    ) async {
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam);
+      expect(find.textContaining('found for you by the public'), findsNothing);
+      await tester.tap(find.bySemanticsLabel('About node'));
       await tester.pumpAndSettle();
-      expect(find.text('Fiat value'), findsNothing);
+      expect(
+        find.textContaining('found for you by the public'),
+        findsOneWidget,
+      );
+      await tester.tap(find.bySemanticsLabel('About node'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('found for you by the public'), findsNothing);
+    });
+
+    testWidgets('SOURCES has its own, and a route arriving over it closes it', (
+      tester,
+    ) async {
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam, explorer: _FakeExplorer(), height: 2400);
+      await tester.ensureVisible(find.text('SOURCES'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.bySemanticsLabel('About sources'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Nothing else reaches out'), findsOneWidget);
+      // Opening a sheet over the screen closes it.
+      await tester.tap(find.text('Explorer'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Nothing else reaches out'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });

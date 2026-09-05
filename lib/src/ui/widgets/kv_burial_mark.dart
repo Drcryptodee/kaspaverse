@@ -302,6 +302,14 @@ abstract final class KvBurial {
 /// live DAA cannot anchor — reads `Accepted —`: the word the pin actually
 /// justifies, and BG-8's dash for the measurement nobody has.
 class KvBurialMark extends StatefulWidget {
+  /// **How deep a row may be and still wear its dot** — the founder's window,
+  /// on glass 2026-09-05: *"the green dots should only show for the duration
+  /// of 1000 blocks; after 1000 blocks it should simply say settled."* A
+  /// display choice about recency, not a maturity threshold (the pin's
+  /// thresholds still arrive as data, D-249): past it the row prints the bare
+  /// word and the ledger stops carrying a mark for money that settled days ago.
+  static const int recentWindowDaa = 1000;
+
   const KvBurialMark({
     super.key,
     required this.stalled,
@@ -437,6 +445,10 @@ class _KvBurialMarkState extends State<KvBurialMark> {
           words: KvBurial.words(rung, depth: depth),
           mono: rung == KvBurialRung.accepted && depth != null,
           fontSize: widget.fontSize,
+          // The dot marks recent money; a row past the window is history and
+          // wears the word alone. An unknown depth keeps it — the state is
+          // still being watched.
+          dot: depth == null || depth < KvBurialMark.recentWindowDaa,
         ),
       ),
     );
@@ -457,12 +469,14 @@ class _Mark extends StatelessWidget {
     required this.words,
     this.mono = false,
     this.fontSize = 11,
+    this.dot = true,
   });
 
   final double fontSize;
   final Color hue;
   final String words;
   final bool mono;
+  final bool dot;
 
   /// The run, split at the first digit: word in Jakarta, number in mono.
   /// Tabular figures ride the number alone, which is where they mean something
@@ -507,12 +521,14 @@ class _Mark extends StatelessWidget {
       children: [
         // No bloom: §1.5 reserves that for a lamp, and a ledger of pending
         // rows must not spend the screen's emission budget one row at a time.
-        Container(
-          width: 6,
-          height: 6,
-          decoration: BoxDecoration(color: hue, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: KvSpace.xs),
+        if (dot) ...[
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: hue, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: KvSpace.xs),
+        ],
         // Bounded, or the longest word in the set — `Not accepted yet` — walks
         // straight out of a 320dp row at 1.3x. The `Wrap` above gives this a
         // width; the flex is what makes it use it.

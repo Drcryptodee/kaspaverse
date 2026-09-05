@@ -394,9 +394,12 @@ abstract final class KvSpace {
   /// The 40 dp disc that opens a row.
   static const double rowDisc = 40;
 
-  /// The top strip that belongs to the real system status bar. Nothing is
-  /// ever painted here, and no status bar is ever drawn in a spec frame
-  /// (BG-14).
+  /// The top strip that belongs to the real system status bar in a **spec
+  /// frame**. **Never reserved on a screen** (D-262 §9.22, re-ruled on glass
+  /// 2026-09-05): a screen takes the system inset from `SafeArea` and nothing
+  /// more, as Send and Home do — four screens reserved these 52 dp and sat
+  /// ~20 dp lower than the rest, which is the proximity the founder called
+  /// out. `top_inset_test` keeps it out of `lib/src/ui`.
   static const double statusBarReserve = 52;
 }
 
