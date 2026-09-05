@@ -63,6 +63,24 @@ Future<void> loadBundledFonts() async {
   }
 }
 
+/// **Clear the frames a previous run left behind** — call it from `setUpAll`
+/// beside [loadBundledFonts], on a `KV_PREVIEW=1` run only.
+///
+/// A fixture that is renamed or retired leaves its PNG on disk for ever, and a
+/// stale frame is indistinguishable from a fresh one when you open it: the
+/// node surface's own frame sat six hours old under a name the catalogue had
+/// stopped writing, showing a design two rebuilds out of date, and was read as
+/// current in the sitting that had just replaced it. A render is a claim about
+/// **now**, so the directory starts empty.
+void clearPreviousFrames() {
+  if (!previewRequested) return;
+  final dir = Directory(previewDirFromRoot);
+  if (!dir.existsSync()) return;
+  for (final f in dir.listSync()) {
+    if (f is File && f.path.endsWith('.png')) f.deleteSync();
+  }
+}
+
 /// A geometry a surface must survive, by name.
 ///
 /// **Both, always.** The reference is what the design is drawn for; the floor is

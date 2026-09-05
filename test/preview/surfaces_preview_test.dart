@@ -574,7 +574,13 @@ Widget _gaugeLadder() => const Scaffold(
 );
 
 void main() {
-  setUpAll(loadBundledFonts);
+  // A render is a claim about now: a frame a renamed fixture left behind is
+  // read as current the moment someone opens it (this happened, six hours
+  // stale, in the sitting that had replaced the design it showed).
+  setUpAll(() async {
+    clearPreviousFrames();
+    await loadBundledFonts();
+  });
 
   /// Renders one surface at BOTH geometries. The floor is where things break;
   /// a preview that only shows the reference is the comfortable half.

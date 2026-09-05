@@ -44,20 +44,30 @@ void main() {
       expect(tier.word, 'Slow');
     });
 
-    test(
-      'the bars are the render\'s staircase, not the Bible\'s transcription',
-      () {
-        // `T5`, measured: 24 · 30 · 36 · 42 · 48 dp, 6 wide, gap 4. §4 said
-        // `12→36`; the render is the original and wins (D-259).
-        expect(KvLatency.barHeights, [24, 30, 36, 42, 48]);
-        expect(KvLatency.barWidth, 6);
-        expect(KvLatency.barGap, 4);
-        // A rising staircase, so the meter reads as strength before a colour is
-        // seen (BG-25) — and it is derived, never asserted (L121).
-        expect(KvLatency.height, 48);
-        expect(KvLatency.width, 5 * 6 + 4 * 4);
-      },
-    );
+    test('the bars are a staircase, and the shape is in the ratio', () {
+      // `T5` measured 24 · 30 · 36 · 42 · 48, and the founder overruled it on
+      // glass (2026-09-05, D-278): *"the lines are too long so its not giving
+      // a perfect network bar shape"*. His eye outranks the render (D-262) as
+      // the render outranks the Bible (D-259). The step stays 6; the first bar
+      // drops to under a third of the last, which is what makes five strokes
+      // read as a staircase rather than a fence.
+      expect(KvLatency.barHeights, [10, 16, 22, 28, 34]);
+      expect(KvLatency.barWidth, 6);
+      expect(KvLatency.barGap, 4);
+      final steps = [
+        for (var i = 1; i < KvLatency.barHeights.length; i++)
+          KvLatency.barHeights[i] - KvLatency.barHeights[i - 1],
+      ];
+      expect(steps, everyElement(6), reason: 'one even climb');
+      expect(
+        KvLatency.barHeights.first / KvLatency.barHeights.last,
+        lessThan(1 / 3),
+        reason: 'the poorest bar has to look poor',
+      );
+      // Derived, never asserted (L121).
+      expect(KvLatency.height, KvLatency.barHeights.last);
+      expect(KvLatency.width, 5 * 6 + 4 * 4);
+    });
   });
 
   group('BG-8 · an absent reading is its own face', () {

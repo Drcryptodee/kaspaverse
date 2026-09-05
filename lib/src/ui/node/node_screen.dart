@@ -1956,7 +1956,11 @@ class _SourceRow extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => Semantics(
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => _row(constraints.maxWidth),
+  );
+
+  Widget _row(double width) => Semantics(
     button: true,
     label: '$title. $sub. $value',
     child: ExcludeSemantics(
@@ -1998,7 +2002,15 @@ class _SourceRow extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: KvSpace.sm),
-                Flexible(
+                // **Not a flex child** (founder on glass, 2026-09-05:
+                // *"let `api.kaspa.org ›` be closer to the right edge too"*).
+                // A `Flexible` here took an equal share of the free space with
+                // the title's `Expanded`, so a short host left its slack at the
+                // row's right edge and the two chevrons did not line up. Bound
+                // it instead: the value takes what it needs up to half the row,
+                // the title absorbs the rest, and the chevron is flush.
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: width * 0.5),
                   child: Text(
                     value,
                     maxLines: 1,

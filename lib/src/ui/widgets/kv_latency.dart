@@ -184,7 +184,15 @@ class KvLatency extends StatelessWidget {
   /// §4 transcribed these as `12→36`; the render is the original and wins
   /// (D-259), so the law is corrected to the picture rather than the picture
   /// halved to the law.
-  static const List<double> barHeights = <double>[24, 30, 36, 42, 48];
+  /// *(v4.17, D-278 — founder on glass 2026-09-05: "the lines are too long so
+  /// its not giving a perfect network bar shape yet. make the lines shorter to
+  /// the one line that signifies 'poor' connection is the shortest.") The
+  /// render's own 24 → 48 read as five tall strokes rather than a staircase,
+  /// because the first bar was already half the last. **The shape is in the
+  /// ratio, not the height**: 10 → 34 keeps the same 6 dp step count in a
+  /// tenth less ink and drops the poorest bar to under a third of the tallest,
+  /// which is what makes a staircase read as one.*
+  static const List<double> barHeights = <double>[10, 16, 22, 28, 34];
   static const double barWidth = 6;
   static const double barGap = 4;
 
