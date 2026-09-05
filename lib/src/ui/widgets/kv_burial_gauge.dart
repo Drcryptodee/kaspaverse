@@ -387,7 +387,7 @@ class _ReadingLine extends StatelessWidget {
         if (fits) {
           return Row(
             children: [
-              KvRuledLabel(label, tight: true),
+              KvRuledLabel(label, tight: true, rule: false),
               const Spacer(),
               reading,
             ],
@@ -396,7 +396,7 @@ class _ReadingLine extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            KvRuledLabel(label, tight: true),
+            KvRuledLabel(label, tight: true, rule: false),
             const SizedBox(height: KvSpace.xs),
             Align(alignment: Alignment.centerRight, child: reading),
           ],

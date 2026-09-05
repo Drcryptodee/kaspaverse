@@ -32,7 +32,13 @@ class KvToggle extends StatelessWidget {
     required this.sub,
     required this.onChanged,
     this.disabledReason,
+    this.bare = false,
   });
+
+  /// No card of its own: the row sits inside a card that also holds the
+  /// controls the switch governs (`T5`'s own-node card, founder on glass
+  /// 2026-09-05). The tap target is still the whole row.
+  final bool bare;
 
   final bool on;
 
@@ -86,13 +92,17 @@ class KvToggle extends StatelessWidget {
           child: InkWell(
             onTap: enabled ? () => onChanged!(!on) : null,
             borderRadius: BorderRadius.circular(KvRadius.panel),
+            // The card is the home's: `plate`, the panel radius, **no
+            // border** (founder on glass 2026-09-05 — every card shares the
+            // home's topography).
             child: Container(
-              padding: const EdgeInsets.all(KvSpace.m),
-              decoration: BoxDecoration(
-                color: KvColor.plate,
-                borderRadius: BorderRadius.circular(KvRadius.panel),
-                border: Border.all(color: KvColor.plateEdge),
-              ),
+              padding: bare ? EdgeInsets.zero : const EdgeInsets.all(KvSpace.m),
+              decoration: bare
+                  ? null
+                  : BoxDecoration(
+                      color: KvColor.plate,
+                      borderRadius: BorderRadius.circular(KvRadius.panel),
+                    ),
               child: Opacity(
                 // The whole row dims, so "you cannot press this right now" is
                 // visible and not only spoken.
@@ -136,12 +146,13 @@ class KvToggle extends StatelessWidget {
                       alignment: on
                           ? Alignment.centerRight
                           : Alignment.centerLeft,
+                      // `T5`, measured: the resting track is a filled grey
+                      // (42,52,51) — `edgeHi` as a fill — under an `inkMeta`
+                      // knob, and it carries no border (founder on glass
+                      // 2026-09-05).
                       decoration: BoxDecoration(
-                        color: on ? KvColor.ok : KvColor.control,
+                        color: on ? KvColor.ok : KvColor.edgeHi,
                         borderRadius: BorderRadius.circular(KvRadius.control),
-                        border: Border.all(
-                          color: on ? KvColor.ok : KvColor.edgeHi,
-                        ),
                       ),
                       child: Container(
                         width: thumb,

@@ -391,6 +391,24 @@ Widget _node({bool hunting = false, bool? synced = true}) => NodeScreen(
     testNode: (_) async =>
         (latencyMs: 84, serverVersion: '1.0.1', daa: BigInt.from(528980542)),
   ),
+  // `T5`'s SOURCES card needs both seams to draw both rows.
+  explorer: ExplorerScope(
+    read: () async => const ExplorerChoice(
+      txTemplate: 'https://explorer.kaspa.org/txs/{txid}',
+      addressTemplate: 'https://explorer.kaspa.org/addresses/{address}',
+      defaults: [],
+    ),
+    write: (_, _) async {},
+  ),
+  rate: RateScope(
+    enabled: ValueNotifier<bool?>(true),
+    endpoint: ValueNotifier('https://api.kaspa.org/info/price'),
+    defaultEndpoint: ValueNotifier('https://api.kaspa.org/info/price'),
+    quote: ValueNotifier(null),
+    error: ValueNotifier(null),
+    setConfig: ({required bool enabled, required String endpoint}) async {},
+    load: () async {},
+  ),
 );
 
 /// Open the pin, type a node, and test it — `T5`'s field row with its answer.

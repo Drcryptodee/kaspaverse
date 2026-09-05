@@ -143,7 +143,7 @@ void main() {
       );
       expect(
         _dotHue(tester),
-        isNot(KvColor.settled),
+        isNot(KvColor.ok),
         reason: 'the rung must not claim spendable either',
       );
       // The same depth on an ordinary payment is over the line.
@@ -162,7 +162,7 @@ void main() {
       );
       await tester.pump();
       expect(_Ink.of(tester).filledFraction, closeTo(1, 0.002));
-      expect(_dotHue(tester), KvColor.settled);
+      expect(_dotHue(tester), KvColor.ok);
     });
   });
 
@@ -277,7 +277,7 @@ void main() {
       // 42 % of twenty steps: the origin and the eight fives up to 40 %.
       expect(lit.length, 9);
       expect(beyond.length, 12);
-      expect(lit.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.ok)});
+      expect(lit.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.settled)});
       expect(beyond.map((t) => rgb(t.colour)).toSet(), {rgb(KvColor.inkDim)});
     });
 
@@ -290,9 +290,7 @@ void main() {
       await tester.pumpWidget(_host(_gauge(340, key: const ValueKey(340))));
       await tester.pump();
       // Past the ceiling the reading wears the terminal rung's hue (D-248).
-      expect(_Ink.of(tester).tickTones, {
-        KvColor.settled.toARGB32() & 0xFFFFFF,
-      });
+      expect(_Ink.of(tester).tickTones, {KvColor.ok.toARGB32() & 0xFFFFFF});
     });
 
     testWidgets('no stroke cap paints past any reading', (tester) async {
@@ -636,8 +634,8 @@ void main() {
       // D-248 seats `settled` as a fourth value hue and spends it in exactly
       // one place: the terminal rung. It is never a general status, which is
       // why it is a colour here and not a fourth `KvLampTone`.
-      expect(KvBurial.hueFor(KvBurialRung.settled), KvColor.settled);
-      expect(KvBurial.hueFor(KvBurialRung.accepted), KvColor.ok);
+      expect(KvBurial.hueFor(KvBurialRung.settled), KvColor.ok);
+      expect(KvBurial.hueFor(KvBurialRung.accepted), KvColor.settled);
       expect(KvBurial.hueFor(KvBurialRung.pending), KvColor.warn);
     });
   });
@@ -689,7 +687,7 @@ void main() {
       expect(sawUnder && sawOver, isTrue, reason: 'the crossing never ran');
       // And when it has settled, the dot is the fourth hue D-248 seated.
       await tester.pumpAndSettle();
-      expect(_dotHue(tester), KvColor.settled);
+      expect(_dotHue(tester), KvColor.ok);
     });
   });
 

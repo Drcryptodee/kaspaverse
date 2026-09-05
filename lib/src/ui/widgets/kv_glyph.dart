@@ -113,6 +113,10 @@ enum KvGlyph {
   /// Hand this to another app. Lucide `share-2`.
   share,
 
+  /// Hand this out of the app — `S9`'s own mark at the top right (founder, on
+  /// glass 2026-09-05). Lucide `share`: a tray with the arrow leaving it.
+  shareUp,
+
   /// The hold's badge, and biometrics. Lucide `fingerprint` (shipped in this
   /// Lucide build under the name `fingerprint-pattern`). **Illustrative**, so
   /// it takes [KvGlyphSpec.strokeIllustrative] rather than the 2.5 default —
@@ -382,6 +386,12 @@ class KvGlyphPainter extends CustomPainter {
           'M15 3h6v6',
           'M10 14 21 3',
           'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
+        ]);
+      case KvGlyph.shareUp:
+        path(const [
+          'M12 2V15',
+          'M16 6L12 2L8 6',
+          'M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8',
         ]);
       case KvGlyph.share:
         circle(18, 5, 3);

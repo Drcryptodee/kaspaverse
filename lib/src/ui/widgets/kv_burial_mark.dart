@@ -90,12 +90,12 @@ enum KvBurialRung {
   /// mempool rung it never observed).
   pending,
 
-  /// **On chain, and not yet spendable.** Green. The acceptance event at depth
-  /// 0, and the linear `0 → ceiling` track runs inside this rung.
+  /// **On chain, and not yet spendable.** Blue (D-274). The acceptance event
+  /// at depth 0, and the linear `0 → ceiling` track runs inside this rung.
   accepted,
 
-  /// **Counted in your balance, and spendable.** Blue. Reached at the pin's own
-  /// maturity threshold for this row.
+  /// **Counted in your balance, and spendable.** Green (D-274 — `S9`'s own
+  /// pill). Reached at the pin's own maturity threshold for this row.
   ///
   /// **It claims nothing more than that.** D-249 struck "past reversal" from
   /// the law: acceptance is explicitly revocable, the pin's only reversal
@@ -259,27 +259,31 @@ abstract final class KvBurial {
     KvBurialRung.settled => 'Settled',
   };
 
-  /// **The hue a rung wears** (BG-7 as amended by D-248).
+  /// **The hue a rung wears** (BG-7 as amended by D-248, **as the founder
+  /// re-ruled it on glass, 2026-09-05 — D-274**): the blue while the money is
+  /// *accepted and filling*, and **green when it is settled** — which is what
+  /// `S9` drew all along (a green pill with a check). Blue is progress; green
+  /// is the answer.
   ///
-  /// `settled` is a *fourth* value hue and its fence is part of the ruling: it
-  /// is spent on the terminal lifecycle rung and nowhere else — never a general
-  /// status, never an "info" colour, never a latency tier, and never the check.
-  /// That is why it is returned as a [Color] here rather than added to
-  /// [KvLampTone], which is the app's general three-signal vocabulary: putting
-  /// a fourth member on that enum is how a fenced hue escapes its fence.
+  /// `settled`'s blue is still a *fourth* value hue with its fence intact: it
+  /// is spent on the one rung the track runs inside and nowhere else — never a
+  /// general status, never an "info" colour, never a latency tier, and never
+  /// the check. That is why it is returned as a [Color] here rather than added
+  /// to [KvLampTone], which is the app's general three-signal vocabulary:
+  /// putting a fourth member on that enum is how a fenced hue escapes its fence.
   static Color hueFor(KvBurialRung rung) => switch (rung) {
     KvBurialRung.stalled => KvColor.warn,
     KvBurialRung.pending => KvColor.warn,
-    KvBurialRung.accepted => KvColor.ok,
-    KvBurialRung.settled => KvColor.settled,
+    KvBurialRung.accepted => KvColor.settled,
+    KvBurialRung.settled => KvColor.ok,
   };
 
   /// The tint the hue sits on, for a chip or a disc.
   static Color tintFor(KvBurialRung rung) => switch (rung) {
     KvBurialRung.stalled => KvColor.warnTint,
     KvBurialRung.pending => KvColor.warnTint,
-    KvBurialRung.accepted => KvColor.okTint,
-    KvBurialRung.settled => KvColor.settledTint,
+    KvBurialRung.accepted => KvColor.settledTint,
+    KvBurialRung.settled => KvColor.okTint,
   };
 }
 

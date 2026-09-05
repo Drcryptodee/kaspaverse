@@ -14,6 +14,8 @@ import '../theme/kv_window.dart';
 import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_latency.dart';
+import '../widgets/kv_rows.dart';
+import '../widgets/kv_sheet.dart';
 import '../widgets/kv_two_pane.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_status_chip.dart';
@@ -21,6 +23,10 @@ import '../widgets/kv_streaming_count.dart';
 import '../widgets/kv_surface.dart';
 import '../widgets/status_beacon.dart' show formatAge;
 import '../widgets/kv_toggle.dart';
+
+/// `T5`'s pill and field height — the `Test` pill and the `host:port` field
+/// both measure 44 dp on the render.
+const double _pillHeight = 44;
 
 /// Everything [NodeScreen] needs, as listenables and callbacks — the same
 /// service-singleton → `ValueNotifier` shape the rest of `lib/src/ui` consumes,
@@ -274,16 +280,17 @@ class _NodeScreenState extends State<NodeScreen> {
   String? _problem;
   bool _busy = false;
 
-  /// Refusals from the two preference sections, kept apart from [_problem] so
-  /// a rejected explorer template never overwrites what the link just said.
-  String? _explorerProblem;
-  String? _rateProblem;
-  bool _explorerBusy = false;
-  bool _rateBusy = false;
-
-  /// The stored explorer choice, once read. Null until the first read lands —
-  /// the section paints its fields from the seam, never from a guess.
-  ExplorerChoice? _explorerChoice;
+  /// **The two source sheets' own state**, as notifiers — a sheet is another
+  /// route, so a `setState` here cannot reach it; the sheet's body listens to
+  /// these and to the field controllers, and nothing else on the screen hears
+  /// them. Kept apart from [_problem] so a rejected explorer template never
+  /// overwrites what the link just said.
+  final ValueNotifier<({bool busy, String? problem, ExplorerChoice? choice})>
+  _explorer = ValueNotifier((busy: false, problem: null, choice: null));
+  final ValueNotifier<({bool busy, String? problem})> _rate = ValueNotifier((
+    busy: false,
+    problem: null,
+  ));
 
   /// The user has asked for a pinned node, whether or not one is live yet.
   bool _wantPin = false;
@@ -403,6 +410,8 @@ class _NodeScreenState extends State<NodeScreen> {
     _poll?.cancel();
     _scan.dispose();
     _test.dispose();
+    _explorer.dispose();
+    _rate.dispose();
     _latency.dispose();
     _synced.dispose();
     _peers.dispose();
@@ -503,46 +512,6 @@ class _NodeScreenState extends State<NodeScreen> {
     }
   }
 
-  Future<void> _loadExplorer() async {
-    final scope = widget.explorer;
-    if (scope == null) return;
-    try {
-      final choice = await scope.read();
-      if (!mounted) return;
-      setState(() {
-        _explorerChoice = choice;
-        // Only while untouched — the same rule the node field follows: a
-        // fresher read must never overwrite a draft mid-edit.
-        if (_txTemplate.text.isEmpty) _txTemplate.text = choice.txTemplate;
-        if (_addressTemplate.text.isEmpty) {
-          _addressTemplate.text = choice.addressTemplate;
-        }
-      });
-    } catch (e) {
-      if (mounted) setState(() => _explorerProblem = displayError(e));
-    }
-  }
-
-  Future<void> _loadRate() async {
-    final scope = widget.rate;
-    if (scope == null) return;
-    try {
-      await scope.load();
-    } catch (_) {
-      // The notifiers keep whatever they last knew.
-    }
-    if (!mounted) return;
-    if (_rateEndpoint.text.isEmpty) {
-      // `setState`, not a bare assignment: the section decides whether to show
-      // the field by comparing the FIELD against the shipped default, and a
-      // controller write notifies the controller's own listeners, not this
-      // build. Without it the section kept the frame it painted before the
-      // config arrived — an empty field standing open on a wallet whose rate
-      // is simply off.
-      setState(() => _rateEndpoint.text = scope.endpoint.value);
-    }
-  }
-
   /// **Test the typed node** — see [NodeScope.testNode]. The answer is one
   /// sentence a user can act on: how fast it answered, that it is synced and
   /// indexed (the probe refuses a node that is not), what it runs, and where
@@ -628,22 +597,6 @@ class _NodeScreenState extends State<NodeScreen> {
     }
   }
 
-  /// The transport-scan liveness line, in the sheet's shipped wording (D-196:
-  /// take the copy verbatim — a redesign changes form, not voice).
-  ///
-  /// The scan runs on every block, so the block-age IS its freshness, and the
-  /// line is honest about "never" before the first one lands.
-  String _scanLine({required bool connected}) {
-    final scan = _scan.value;
-    final age = scan.secs;
-    if (!scan.have || age == null) {
-      return connected ? 'waiting for first block…' : 'not scanning — no link';
-    }
-    if (!connected) return '$age s since last block';
-    if (age <= 5) return 'live — scanning every block';
-    return '$age s since last block';
-  }
-
   /// How old the last snapshot is, in the shipped `formatAge` wording. Falls
   /// back to naming the absence rather than inventing a duration.
   String _ageLabel() {
@@ -687,39 +640,34 @@ class _NodeScreenState extends State<NodeScreen> {
                     KvSpace.xxl,
                   ),
                   children: [
-                    // **`T5`'s connection card**: the caps label and the tier
-                    // word on one row, the measured latency and its staircase
-                    // under them, then the three readings that say what the link
-                    // actually is.
+                    // **`T5`, in the render's order and at the render's
+                    // density** (founder on glass, 2026-09-05): the connection
+                    // card, the node row, the own-node card with its field,
+                    // then SOURCES as one card of two rows that open sheets.
                     _connectionPlate(),
                     const SizedBox(height: KvSpace.m),
-                    // The node itself, and the one control that changes it.
                     _servingPlate(),
                     const SizedBox(height: KvSpace.sm),
                     // BG-17 / ux-auditor 30: every endpoint row states what that
-                    // endpoint can see and what it can lie about. A node is the
-                    // strongest of the three because its answers are checked —
-                    // and saying so is what makes the other two labels mean
-                    // something by contrast.
+                    // endpoint can see and what it can lie about — and the
+                    // directory is named where it acts (D-207), here rather than
+                    // in a chip inside the row.
                     const _TrustLabel(
                       'A node hands you blocks and takes your signed '
                       'transactions. It can go quiet or fall behind, and it sees '
                       'the addresses you ask about — it cannot forge a balance, '
-                      'change an amount, or spend anything.',
+                      'change an amount, or spend anything. Public nodes are found '
+                      'for you by the public node directory; pin your own and '
+                      'nothing else is used.',
                     ),
                     const SizedBox(height: KvSpace.l),
-                    const KvRuledLabel('My own node'),
+                    const KvRuledLabel('My own node', rule: false),
                     const SizedBox(height: KvSpace.s),
                     _picker(),
-                    _explorerSection(),
-                    _rateSection(),
+                    ..._sources(),
                     const SizedBox(height: KvSpace.l),
-                    // The F9d fix (D-207 clause a): the shipped line read
-                    // *"KaspaVerse talks to public Kaspa nodes directly — no
-                    // middlemen, no trackers"*, which was true of the money and
-                    // false of the page it now shares with a price source. An
-                    // unqualified promise beside two named egresses is the
-                    // census contradicting itself.
+                    // The F9d fix (D-207 clause a): an unqualified promise beside
+                    // two named egresses is the census contradicting itself.
                     const _TrustLabel(
                       'Nothing else reaches out. Your balance, your history and '
                       'your sends go to a Kaspa node and nowhere else — the '
@@ -862,101 +810,84 @@ class _NodeScreenState extends State<NodeScreen> {
         final tap = s.onReconnect;
 
         final scaler = MediaQuery.textScalerOf(context);
-        return KvSurface(
-          padding: const EdgeInsets.all(KvSpace.m),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              // **Measured, then either the render's one row or two** — at
-              // 320 dp and 1.3× the pill left the title 77 dp and the word
-              // broke as `Conn / ect…` (found in the floor frame, second
-              // beat). A title is chrome and never breaks: when the title
-              // cannot stand beside the pill, the pill takes its own line
-              // under the sentence, right-aligned, and the row keeps the disc
-              // and the words. The pill's width is its label plus its padding,
-              // floored at the target it sits in.
-              final pillNeeds = math.max(
-                KvSpace.touchTarget,
-                _width(label, _ChipPill.style(hunting), scaler) +
-                    KvSpace.sm * 2,
-              );
-              final titleNeeds = _width(title, _NodeRow.titleStyle, scaler);
-              final beside =
-                  tap == null ||
-                  constraints.maxWidth -
-                          KvSpace.rowDisc -
-                          KvSpace.sm -
-                          KvSpace.s -
-                          pillNeeds >=
-                      titleNeeds;
-              final pill = tap == null
-                  ? null
-                  : _ChipPill(
-                      label: label,
-                      dim: hunting,
-                      onTap: () => unawaited(tap()),
-                    );
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _NodeRow(
-                    tone: tone,
-                    busy: hunting || (!connected && !offline),
-                    title: title,
-                    endpoint: endpoint == null ? null : _hostOf(endpoint),
-                    trailing: beside ? pill : null,
-                  ),
-                  const SizedBox(height: KvSpace.s),
-                  Text(
-                    sentence,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 12,
-                      height: 17 / 12,
-                      color: KvColor.inkMeta,
+        // **The sentence is drawn only where there is news** — a hunt, a dark
+        // or offline link, a node that says it is syncing, or a pin (whose
+        // redial has a cost the user must be told, D-213). Healthy and
+        // unpinned, the card is `T5`'s one row and nothing under it; the
+        // directory is named in the trust line below the card.
+        final news =
+            !connected ||
+            hunting ||
+            offline ||
+            synced == false ||
+            pinned != null;
+        return KvRowContainer(
+          divided: false,
+          inset: const EdgeInsets.all(KvSpace.s20),
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                // **Measured, then either the render's one row or two** — at
+                // 320 dp and 1.3× the pill left the title 77 dp and the word
+                // broke as `Conn / ect…` (found in the floor frame, second
+                // beat). A title is chrome and never breaks: when the title
+                // cannot stand beside the pill, the pill takes its own line
+                // under the row, right-aligned.
+                final pillNeeds = math.max(
+                  KvSpace.touchTarget,
+                  _width(label, _ChipPill.style(hunting), scaler) +
+                      KvSpace.sm * 2,
+                );
+                final titleNeeds = _width(title, _NodeRow.titleStyle, scaler);
+                final beside =
+                    tap == null ||
+                    constraints.maxWidth -
+                            KvSpace.rowDisc -
+                            KvSpace.sm -
+                            KvSpace.s -
+                            pillNeeds >=
+                        titleNeeds;
+                final pill = tap == null
+                    ? null
+                    : _ChipPill(
+                        label: label,
+                        dim: hunting,
+                        onTap: () => unawaited(tap()),
+                      );
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _NodeRow(
+                      tone: tone,
+                      busy: hunting || (!connected && !offline),
+                      title: title,
+                      endpoint: endpoint == null ? null : _hostOf(endpoint),
+                      trailing: beside ? pill : null,
                     ),
-                  ),
-                  const SizedBox(height: KvSpace.sm),
-                  Container(height: 1, color: KvColor.plateDivider),
-                  // The sheet's scan line, carried across intact (UX-3). *Live* is
-                  // a claim about the LINK, not about the age alone: this line
-                  // rides a 2 s poll while the link notifiers are pushed, so a
-                  // just-dropped socket could otherwise read "live — scanning
-                  // every block" beside a row saying the phone is offline. The
-                  // link decides whether the scan may claim liveness; the age
-                  // only refines the claim (C7).
-                  if (s.blockAgeSecs != null)
-                    _Reading(
-                      label: 'Transport scan',
-                      // The `!hunting` term SURVIVES find-then-swap (P0b), on
-                      // purpose. A swap hunt genuinely is scanning while it runs,
-                      // so this line understates it — but the moment a winner
-                      // lands, `install_bind` retires the incumbent and Dart's
-                      // snapshot can still read `connected` for up to one poll.
-                      // *live — scanning every block* is the strongest claim on
-                      // this screen; understating it for a few seconds costs the
-                      // user nothing, and overstating it across a cut-over is the
-                      // P0.3 scar. The row above carries the swap's good news.
-                      value: _scanLine(
-                        connected: connected && !hunting && !offline,
+                    if (news) ...[
+                      const SizedBox(height: KvSpace.s),
+                      Text(
+                        sentence,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 12,
+                          height: 17 / 12,
+                          color: KvColor.inkMeta,
+                        ),
                       ),
-                      numeric: false,
-                    ),
-                  if (pinned != null)
-                    _Reading(label: 'You pinned', value: pinned, wrap: true),
-                  if (!beside && pill != null) ...[
-                    const SizedBox(height: KvSpace.s),
-                    // Unconstrained, so the pill keeps its own width on its
-                    // own line rather than filling the plate (seen in the
-                    // floor frame).
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: UnconstrainedBox(child: pill),
-                    ),
+                    ],
+                    if (!beside && pill != null) ...[
+                      const SizedBox(height: KvSpace.s),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: UnconstrainedBox(child: pill),
+                      ),
+                    ],
                   ],
-                ],
-              );
-            },
-          ),
+                );
+              },
+            ),
+          ],
         );
       },
     );
@@ -977,67 +908,60 @@ class _NodeScreenState extends State<NodeScreen> {
 
   /// **`T5`'s connection card** — the measurement, then what the link is.
   ///
-  /// It is a *separate plate from the node row* because they answer different
-  /// questions: this one is *how good is the connection*, the one below is
-  /// *which node, and can I change it*. The render draws them as two cards for
-  /// exactly that reason.
-  ///
-  /// **Four regions, four listeners.** The instrument hears the probe and the
-  /// link; the chain clock hears the score, the link and the poll clock; the
-  /// transport line hears the endpoint; the peers hear the probe. The first
-  /// cut rebuilt all of them on every DAA tick.
+  /// The home's card (founder on glass, 2026-09-05): `plate`, radius 28, no
+  /// border, the house 6 / 20 padding with a hairline between one reading and
+  /// the next, and nothing under the last row. Four regions, four listeners —
+  /// the instrument hears the probe and the link; the chain clock hears the
+  /// score, the link, the scan and the poll clock; the transport line hears
+  /// the endpoint; the peers hear the probe.
   Widget _connectionPlate() {
     final s = widget.scope;
-    // `T5`'s row labels are `inkMeta` (122,133,131), measured — the caps
-    // role's tone on a `plate` ground, where it is 4.75:1.
+    // `T5`'s row labels are `inkMeta` (122,133,131), measured.
     Widget row(String label, String text, Widget value) => KvFactLine(
       label: label,
       labelColor: KvColor.inkMeta,
       valueText: text,
       value: value,
     );
-    return KvSurface(
-      padding: const EdgeInsets.all(KvSpace.s20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ListenableBuilder(
+    return KvRowContainer(
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: KvSpace.s10, bottom: KvSpace.sm),
+          child: ListenableBuilder(
             listenable: Listenable.merge([_latency, s.connected]),
             builder: (context, _) {
               // **A latency reading belongs to a live socket, and only to
               // one.** The probe clears itself on a failure, but the poll runs
               // at 2 s while the notifiers are pushed — so a socket that
               // dropped a moment ago could still be holding the last good
-              // number for one tick. Gating on `connected` closes that window
-              // without waiting for the probe.
+              // number for one tick. Gating on `connected` closes that window.
               final reading = s.connected.value
                   ? _latency.value
                   : const KvLatencyReading.none();
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // **A `Wrap`, not a `Row`** — and it is L160's fix, one
-                  // screen over. Side by side at the reference width, exactly
-                  // as `T5` draws them; at 320 dp / 1.3× the flex left the caps
-                  // label about 90 dp and Flutter did the only thing left,
-                  // breaking the word as `CONNECTI / ON`. A section label is
-                  // chrome and never breaks; the tier word drops to its own
-                  // line instead, which costs a row of height and no meaning.
-                  // Found in the floor frame, not argued.
+                  // A `Wrap`, not a `Row` (L160): at 320 dp / 1.3× the flex
+                  // broke `CONNECTION` mid-word; the tier word drops to its
+                  // own line instead.
                   Wrap(
                     alignment: WrapAlignment.spaceBetween,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: KvSpace.s,
                     runSpacing: KvSpace.xs,
                     children: [
-                      const KvRuledLabel('Connection', tight: true),
+                      const KvRuledLabel(
+                        'Connection',
+                        tight: true,
+                        rule: false,
+                      ),
                       KvLatencyWord(
                         milliseconds: reading.milliseconds,
                         tier: reading.tier,
                       ),
                     ],
                   ),
-                  const SizedBox(height: KvSpace.sm),
+                  const SizedBox(height: KvSpace.s),
                   KvLatency(
                     milliseconds: reading.milliseconds,
                     tier: reading.tier,
@@ -1046,88 +970,96 @@ class _NodeScreenState extends State<NodeScreen> {
               );
             },
           ),
-          const SizedBox(height: KvSpace.sm),
-          Container(height: 1, color: KvColor.plateDivider),
-          // BG-8, all three states. `ChainService` deliberately KEEPS the
-          // last-known score when a dropped link emits nulls — which is only
-          // honest if the screen dims it and says how old it is. A
-          // disconnected reading at full brightness is the P0.3 scar.
-          // **Streamed, not stepped** (BG-18 / D-226) — the same law as the
-          // money plate's chain clock. `formatScore` still renders DS-1's
-          // dash when there is no reading at all. In a layer of its own: the
-          // count paints every frame of a crossing, and the card around it
-          // must not be re-rasterised for a digit.
-          RepaintBoundary(
-            child: ListenableBuilder(
-              listenable: Listenable.merge([
-                s.connected,
-                s.virtualDaaScore,
-                s.lastUpdate,
-                _now,
-                _synced,
-              ]),
-              builder: (context, _) {
-                final connected = s.connected.value;
-                // **A score from a node that says it is syncing is not a
-                // streaming score** (BG-20): the row wears the node's word
-                // too — amber lamp, `syncing` — rather than a healthy face
-                // over a number the plate below says lags the network.
-                final syncing = connected && _synced.value == false;
-                return KvStreamingCount(
-                  value: s.virtualDaaScore.value,
-                  stalled: !connected,
-                  builder: (context, shown) => row(
-                    !connected
-                        ? 'DAA'
-                        : syncing
-                        ? 'DAA · syncing'
-                        : 'DAA · streaming',
-                    formatScore(shown),
-                    _CardValue(
-                      formatScore(shown),
-                      lamp: !connected
-                          ? null
-                          : syncing
-                          ? KvLampTone.warn
-                          : KvLampTone.ok,
-                      stale: !connected,
-                      age: connected ? null : _ageLabel(),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-          Container(height: 1, color: KvColor.plateDivider),
-          // **Read off the live endpoint, never asserted.** `wRPC` and
-          // `borsh` are what this client is built as (`link.rs` dials
-          // `WrpcEncoding::Borsh`); whether the transport is encrypted is a
-          // property of the URL the socket actually bound, so a `ws://`
-          // node reads `wRPC · borsh` and says nothing it cannot show.
-          ValueListenableBuilder<String?>(
-            valueListenable: s.activeEndpoint,
-            builder: (context, endpoint, _) => row(
-              'Transport',
-              _transportLine(endpoint),
-              _CardValue(_transportLine(endpoint)),
-            ),
-          ),
-          Container(height: 1, color: KvColor.plateDivider),
-          // **The NODE's peers, and the label says so.** A light wallet has
-          // exactly one peer — this node — so the useful number is how well
-          // connected the node it trusts is (BG-11: a reading names what it
-          // is a reading of; `T5`'s bare `Peers` is kept out for that reason,
-          // said out loud in the register). `—` where the node declines the
-          // call.
-          ListenableBuilder(
-            listenable: Listenable.merge([_peers, s.connected]),
+        ),
+        // BG-8, all three states. `ChainService` deliberately KEEPS the
+        // last-known score when a dropped link emits nulls — which is only
+        // honest if the screen dims it and says how old it is. **Streamed,
+        // not stepped** (BG-18 / D-226). In a layer of its own: the count
+        // paints every frame of a crossing. **The scan's freshness rides the
+        // label** (founder on glass, 2026-09-05 — the separate *Transport
+        // scan* line is gone): `streaming` while blocks are landing, the
+        // block age when they are not, `syncing` when the node says so.
+        RepaintBoundary(
+          child: ListenableBuilder(
+            listenable: Listenable.merge([
+              s.connected,
+              s.virtualDaaScore,
+              s.lastUpdate,
+              _now,
+              _synced,
+              _scan,
+              if (s.searching != null) s.searching!,
+              if (s.reconnecting != null) s.reconnecting!,
+              if (s.osOffline != null) s.osOffline!,
+            ]),
             builder: (context, _) {
-              final line = _peersLine(s.connected.value, _peers.value);
-              return row("Node's peers", line, _CardValue(line));
+              final connected = s.connected.value;
+              final syncing = connected && _synced.value == false;
+              final scan = _scan.value;
+              final age = scan.secs;
+              final quiet = connected && scan.have && age != null && age > 5;
+              // *Streaming* is the strongest claim on this screen (C7): it is
+              // withheld while the link is hunting or the phone is offline,
+              // exactly as the retired scan line withheld *live*.
+              final settledLink =
+                  connected &&
+                  !(s.searching?.value ?? false) &&
+                  !(s.reconnecting?.value ?? false) &&
+                  !(s.osOffline?.value ?? false);
+              // A hunting link prints the age it has rather than the claim it
+              // may not make.
+              final aged = scan.have && age != null && (quiet || !settledLink);
+              final label = !connected
+                  ? 'DAA'
+                  : syncing
+                  ? 'DAA · syncing'
+                  : aged
+                  ? 'DAA · $age s since last block'
+                  : settledLink
+                  ? 'DAA · streaming'
+                  : 'DAA';
+              return KvStreamingCount(
+                value: s.virtualDaaScore.value,
+                stalled: !connected,
+                builder: (context, shown) => row(
+                  label,
+                  formatScore(shown),
+                  _CardValue(
+                    formatScore(shown),
+                    lamp: !connected
+                        ? null
+                        : (syncing || quiet)
+                        ? KvLampTone.warn
+                        : KvLampTone.ok,
+                    stale: !connected,
+                    age: connected ? null : _ageLabel(),
+                  ),
+                ),
+              );
             },
           ),
-        ],
-      ),
+        ),
+        // **Read off the live endpoint, never asserted.** Whether the
+        // transport is encrypted is a property of the URL the socket
+        // actually bound.
+        ValueListenableBuilder<String?>(
+          valueListenable: s.activeEndpoint,
+          builder: (context, endpoint, _) => row(
+            'Transport',
+            _transportLine(endpoint),
+            _CardValue(_transportLine(endpoint)),
+          ),
+        ),
+        // **The NODE's peers, and the label says so** (BG-11): a light wallet
+        // has exactly one peer — this node. `—` where the node declines.
+        ListenableBuilder(
+          listenable: Listenable.merge([_peers, s.connected]),
+          builder: (context, _) {
+            final line = _peersLine(s.connected.value, _peers.value);
+            return row("Node's peers", line, _CardValue(line));
+          },
+        ),
+      ],
     );
   }
 
@@ -1155,6 +1087,11 @@ class _NodeScreenState extends State<NodeScreen> {
     return '$n';
   }
 
+  /// **`T5`'s own-node card**: the toggle row over its field and `Test`, in
+  /// one card of the home's topography (founder on glass, 2026-09-05). The
+  /// field is always there — a user can type and test before deciding; the
+  /// switch is the decision, and `Use this node` lights only when there is a
+  /// change to commit.
   Widget _picker() {
     final s = widget.scope;
     return AnimatedBuilder(
@@ -1165,134 +1102,214 @@ class _NodeScreenState extends State<NodeScreen> {
         final pinned = s.pinnedNode.value;
         final dropped = s.pinDropped.value;
         // The switch reads as "I want my own node", which is true the moment
-        // the user asks for it and stays true while a pin exists. Deriving it
-        // from `pinned` alone made turning it ON do nothing visible, because
-        // asking for a pin and having one are not the same state.
+        // the user asks for it and stays true while a pin exists.
         final on = _wantPin || pinned != null;
         final typed = _url.text.trim();
         final canApply = !_busy && typed.isNotEmpty && typed != pinned;
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        final test = _test.value;
+        return KvRowContainer(
+          divided: false,
+          inset: const EdgeInsets.fromLTRB(
+            KvSpace.s20,
+            KvSpace.m,
+            KvSpace.s20,
+            KvSpace.m,
+          ),
           children: [
-            KvToggle(
-              on: on,
-              // `T5`'s own words: *Use my own node · Bypass public nodes
-              // entirely* — measured off the render, and true of this build,
-              // where a pinned wallet never touches the resolver (D-187).
-              title: 'Use my own node',
-              sub: pinned != null
-                  ? 'A pinned node never silently falls back to a public one.'
-                  : 'Bypass public nodes entirely.',
-              disabledReason: 'Setting the node…',
-              // Turning it on pins nothing yet — there is no address to pin. It
-              // opens the field, and the pin happens when the user says which
-              // node. Turning it off clears the pin at once: that is the safe
-              // direction and it needs no second step.
-              onChanged: _busy
-                  ? null
-                  : (next) {
-                      setState(() => _wantPin = next);
-                      if (!next) {
-                        _url.clear();
-                        if (pinned != null) _apply(null);
-                      }
-                    },
-            ),
-            // The startup refusal yields to a FRESHER answer: once the user
-            // has acted and been told what happened, restating the boot-time
-            // notice beside it is the same fact twice, in two amber plates,
-            // spending an emission to say nothing new (D-192 / BG-2).
-            if (dropped && _problem == null) ...[
-              const SizedBox(height: KvSpace.sm),
-              const KvStatusChip(
-                tone: KvLampTone.warn,
-                plated: true,
-                maxLines: null,
-                words:
-                    'The node you pinned was refused when the wallet started, '
-                    'so you are back on public nodes. Your money is safe. '
-                    'Check the address below and set it again.',
-              ),
-            ],
-            if (on) ...[
-              const SizedBox(height: KvSpace.sm),
-              // **`T5`: the field with `Test` beside it** — measured, the
-              // field and the pill are both 44 dp tall with a 10 dp gap, the
-              // pill in `chip`. A test is free and a pin is a commitment, so
-              // the test sits with the field and the commit stays below it.
-              Row(
-                children: [
-                  Expanded(
-                    child: _UrlField(
-                      controller: _url,
-                      enabled: !_busy,
-                      onSubmitted: canApply ? () => _apply(typed) : null,
-                    ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                KvToggle(
+                  bare: true,
+                  on: on,
+                  // `T5`'s own words: *Use my own node · Bypass public nodes
+                  // entirely* — true of this build, where a pinned wallet
+                  // never touches the resolver (D-187).
+                  title: 'Use my own node',
+                  sub: pinned != null
+                      ? 'A pinned node never silently falls back to a public one.'
+                      : 'Bypass public nodes entirely.',
+                  disabledReason: 'Setting the node…',
+                  // On with a node typed: that IS the commit. On with nothing
+                  // typed: the field is the next thing to fill. Off: the pin
+                  // clears at once — the safe direction needs no second step.
+                  onChanged: _busy
+                      ? null
+                      : (next) {
+                          if (next) {
+                            if (canApply) {
+                              _apply(typed);
+                            } else {
+                              setState(() => _wantPin = true);
+                            }
+                            return;
+                          }
+                          setState(() => _wantPin = false);
+                          _url.clear();
+                          if (pinned != null) _apply(null);
+                        },
+                ),
+                // The startup refusal yields to a FRESHER answer (D-192 / BG-2).
+                if (dropped && _problem == null) ...[
+                  const SizedBox(height: KvSpace.sm),
+                  const KvStatusChip(
+                    tone: KvLampTone.warn,
+                    plated: true,
+                    maxLines: null,
+                    words:
+                        'The node you pinned was refused when the wallet started, '
+                        'so you are back on public nodes. Your money is safe. '
+                        'Check the address below and set it again.',
                   ),
-                  if (s.testNode != null) ...[
-                    const SizedBox(width: KvSpace.s10),
-                    _ChipPill(
-                      label: _test.value.busy ? 'Testing…' : 'Test',
-                      dim: _test.value.busy || typed.isEmpty,
-                      // Nothing typed: nothing to dial, so no tap and no
-                      // haptic. `Use this node` states the reason in words.
-                      onTap: typed.isEmpty ? null : () => unawaited(_runTest()),
-                    ),
-                  ],
                 ],
-              ),
-              if (_test.value.answer case final answer?) ...[
-                const SizedBox(height: KvSpace.s),
-                _TestAnswer(answer),
+                const SizedBox(height: KvSpace.sm),
+                // **`T5`: the field with `Test` beside it** — measured, both
+                // 44 dp tall with a 10 dp gap, the pill in `chip`. A test is
+                // free and a pin is a commitment, so the test sits with the
+                // field and the commit stays below it.
+                Row(
+                  children: [
+                    Expanded(
+                      child: _UrlField(
+                        controller: _url,
+                        enabled: !_busy,
+                        onSubmitted: canApply ? () => _apply(typed) : null,
+                      ),
+                    ),
+                    if (s.testNode != null) ...[
+                      const SizedBox(width: KvSpace.s10),
+                      _ChipPill(
+                        label: test.busy ? 'Testing…' : 'Test',
+                        dim: test.busy || typed.isEmpty,
+                        // Nothing typed: nothing to dial, so no tap and no
+                        // haptic.
+                        onTap: typed.isEmpty
+                            ? null
+                            : () => unawaited(_runTest()),
+                      ),
+                    ],
+                  ],
+                ),
+                if (test.answer case final answer?) ...[
+                  const SizedBox(height: KvSpace.s),
+                  _TestAnswer(answer),
+                ],
+                if (test.problem case final problem?) ...[
+                  const SizedBox(height: KvSpace.s),
+                  _Fault(problem),
+                ],
+                // The commit, only while there is something to commit, or the
+                // write is in flight and the control must say why (BG-12).
+                if (canApply || _busy) ...[
+                  const SizedBox(height: KvSpace.sm),
+                  _Action(
+                    label: 'Use this node',
+                    enabled: canApply,
+                    reason: _busy
+                        ? 'Setting the node…'
+                        : 'This is already the node you pinned.',
+                    onTap: () => _apply(typed),
+                  ),
+                ],
+                if (_problem != null) ...[
+                  const SizedBox(height: KvSpace.sm),
+                  KvStatusChip(
+                    tone: KvLampTone.warn,
+                    plated: true,
+                    maxLines: null,
+                    words: _problem!,
+                  ),
+                ],
               ],
-              if (_test.value.problem case final problem?) ...[
-                const SizedBox(height: KvSpace.s),
-                _Fault(problem),
-              ],
-              const SizedBox(height: KvSpace.s),
-              _Action(
-                label: 'Use this node',
-                enabled: canApply,
-                // BG-12: a disabled control always says why, in words.
-                reason: _busy
-                    ? 'Setting the node…'
-                    : typed.isEmpty
-                    ? 'Type the address of your node first.'
-                    : 'This is already the node you pinned.',
-                onTap: () => _apply(typed),
-              ),
-            ],
-            if (_problem != null) ...[
-              const SizedBox(height: KvSpace.sm),
-              KvStatusChip(
-                tone: KvLampTone.warn,
-                plated: true,
-                maxLines: null,
-                words: _problem!,
-              ),
-            ],
+            ),
           ],
         );
       },
     );
   }
 
+  /// **`SOURCES`** — `T5`'s one card of two rows, each opening its own sheet
+  /// (founder on glass, 2026-09-05): the explorer, and the price source. A row
+  /// names the seat, says what it is for, prints the host, and points on.
+  /// Absent seams ⇒ absent rows, never rows wired to nothing (D-206).
+  List<Widget> _sources() {
+    final explorer = widget.explorer;
+    final rate = widget.rate;
+    if (explorer == null && rate == null) return const [];
+    return [
+      const SizedBox(height: KvSpace.l),
+      const KvRuledLabel('Sources', rule: false),
+      const SizedBox(height: KvSpace.s),
+      KvRowContainer(
+        children: [
+          if (explorer != null)
+            ValueListenableBuilder<
+              ({bool busy, String? problem, ExplorerChoice? choice})
+            >(
+              valueListenable: _explorer,
+              builder: (context, ui, _) => _SourceRow(
+                title: 'Explorer',
+                sub: 'Where "View on explorer" opens',
+                value: ui.choice == null ? '—' : _hostOf(ui.choice!.txTemplate),
+                onTap: _openExplorer,
+              ),
+            ),
+          if (rate != null)
+            ListenableBuilder(
+              listenable: Listenable.merge([rate.enabled, rate.endpoint]),
+              builder: (context, _) => _SourceRow(
+                title: 'API source',
+                // What it actually fetches — a price and nothing else (the
+                // render's "token metadata" is not a thing this wallet asks
+                // for, and a row must not claim an egress it does not make).
+                sub: 'Prices',
+                value: switch (rate.enabled.value) {
+                  null => '—',
+                  false => 'Off',
+                  true => _hostOf(rate.endpoint.value),
+                },
+                onTap: _openRate,
+              ),
+            ),
+        ],
+      ),
+    ];
+  }
+
+  void _openExplorer() {
+    Navigator.of(context).push(
+      KvSheetRoute<void>(
+        builder: (sheet) => KvSheet(
+          title: 'Explorer',
+          onCancel: () => Navigator.of(sheet).pop(),
+          child: _explorerSheet(),
+        ),
+      ),
+    );
+  }
+
+  void _openRate() {
+    Navigator.of(context).push(
+      KvSheetRoute<void>(
+        builder: (sheet) => KvSheet(
+          title: 'API source',
+          onCancel: () => Navigator.of(sheet).pop(),
+          child: _rateSheet(),
+        ),
+      ),
+    );
+  }
+
   /// **Where a link out of the wallet goes** — two templates, freely
   /// replaceable, with the two audited defaults as one-tap starting points.
-  ///
-  /// Returns an empty list when the seam is absent, so the section is missing
-  /// rather than dead (`_reconnect`'s rule).
-  Widget _explorerSection() {
-    final scope = widget.explorer;
-    if (scope == null) return const SizedBox.shrink();
-    // The two fields are `Listenable`s: a keystroke rebuilds this section and
-    // nothing above it (the first cut's `setState` per keystroke rebuilt the
-    // whole screen, four text fields included).
+  /// The sheet's body: it listens to the fields and to [_explorer], because a
+  /// `setState` on the screen cannot reach a sheet on another route.
+  Widget _explorerSheet() {
     return ListenableBuilder(
-      listenable: Listenable.merge([_txTemplate, _addressTemplate]),
+      listenable: Listenable.merge([_txTemplate, _addressTemplate, _explorer]),
       builder: (context, _) {
-        final choice = _explorerChoice;
+        final ui = _explorer.value;
+        final choice = ui.choice;
         final tx = _txTemplate.text.trim();
         final address = _addressTemplate.text.trim();
         final unchanged =
@@ -1300,16 +1317,12 @@ class _NodeScreenState extends State<NodeScreen> {
             tx == choice.txTemplate &&
             address == choice.addressTemplate;
         final canSave =
-            !_explorerBusy && tx.isNotEmpty && address.isNotEmpty && !unchanged;
+            !ui.busy && tx.isNotEmpty && address.isNotEmpty && !unchanged;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(height: KvSpace.l),
-            const KvRuledLabel('Explorer'),
-            const SizedBox(height: KvSpace.s),
-            // The defaults are offered, never enforced. `kas.fyi` — which the design
-            // export named — has shut down, and a closed list is how that becomes
-            // the user's problem instead of ours (D-192 → D-207).
+            // The defaults are offered, never enforced (D-192 → D-207).
             if (choice != null && choice.defaults.isNotEmpty)
               Wrap(
                 spacing: KvSpace.s,
@@ -1321,14 +1334,12 @@ class _NodeScreenState extends State<NodeScreen> {
                       selected:
                           tx == option.txTemplate &&
                           address == option.addressTemplate,
-                      onTap: _explorerBusy
+                      onTap: ui.busy
                           ? null
                           : () {
                               KvHaptic.selection();
-                              setState(() {
-                                _txTemplate.text = option.txTemplate;
-                                _addressTemplate.text = option.addressTemplate;
-                              });
+                              _txTemplate.text = option.txTemplate;
+                              _addressTemplate.text = option.addressTemplate;
                             },
                     ),
                 ],
@@ -1336,7 +1347,7 @@ class _NodeScreenState extends State<NodeScreen> {
             const SizedBox(height: KvSpace.sm),
             _UrlField(
               controller: _txTemplate,
-              enabled: !_explorerBusy,
+              enabled: !ui.busy,
               hint: 'https://explorer.example/txs/{txid}',
               label: 'Transaction link',
               onSubmitted: canSave ? _saveExplorer : null,
@@ -1344,7 +1355,7 @@ class _NodeScreenState extends State<NodeScreen> {
             const SizedBox(height: KvSpace.s),
             _UrlField(
               controller: _addressTemplate,
-              enabled: !_explorerBusy,
+              enabled: !ui.busy,
               hint: 'https://explorer.example/addresses/{address}',
               label: 'Address link',
               onSubmitted: canSave ? _saveExplorer : null,
@@ -1353,24 +1364,23 @@ class _NodeScreenState extends State<NodeScreen> {
             _Action(
               label: 'Use this explorer',
               enabled: canSave,
-              // BG-12: a disabled control always says why, in words.
-              reason: _explorerBusy
+              reason: ui.busy
                   ? 'Saving…'
                   : tx.isEmpty || address.isEmpty
                   ? 'Both links need an address before they can be saved.'
                   : 'These are already your explorer links.',
               onTap: _saveExplorer,
             ),
-            if (_explorerProblem != null) ...[
+            if (ui.problem case final problem?) ...[
               const SizedBox(height: KvSpace.s),
-              _Fault(_explorerProblem!),
+              _Fault(problem),
             ],
             const SizedBox(height: KvSpace.sm),
             const _TrustLabel(
-              'An explorer is an outbound link and nothing more. Opening one hands '
-              'that site the id you are looking at and the network address you are '
-              'looking from; it shows you its own view of the chain, and nothing it '
-              'says is ever read back into this wallet.',
+              'An explorer is an outbound link and nothing more. Opening one '
+              'hands that site the id you are looking at and the network '
+              'address you are looking from; it shows you its own view of the '
+              'chain, and nothing it says is ever read back into this wallet.',
             ),
           ],
         );
@@ -1378,167 +1388,178 @@ class _NodeScreenState extends State<NodeScreen> {
     );
   }
 
+  Future<void> _loadExplorer() async {
+    final scope = widget.explorer;
+    if (scope == null) return;
+    try {
+      final choice = await scope.read();
+      if (!mounted) return;
+      _explorer.value = (busy: false, problem: null, choice: choice);
+      // Only while untouched — a fresher read must never overwrite a draft.
+      if (_txTemplate.text.isEmpty) _txTemplate.text = choice.txTemplate;
+      if (_addressTemplate.text.isEmpty) {
+        _addressTemplate.text = choice.addressTemplate;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _explorer.value = (
+        busy: false,
+        problem: displayError(e),
+        choice: _explorer.value.choice,
+      );
+    }
+  }
+
   Future<void> _saveExplorer() async {
     final scope = widget.explorer;
-    if (scope == null || _explorerBusy) return;
-    setState(() {
-      _explorerBusy = true;
-      _explorerProblem = null;
-    });
+    if (scope == null || _explorer.value.busy) return;
+    _explorer.value = (
+      busy: true,
+      problem: null,
+      choice: _explorer.value.choice,
+    );
     try {
       await scope.write(_txTemplate.text.trim(), _addressTemplate.text.trim());
       await _loadExplorer();
     } catch (e) {
-      if (mounted) setState(() => _explorerProblem = displayError(e));
-    } finally {
-      if (mounted) setState(() => _explorerBusy = false);
+      if (!mounted) return;
+      _explorer.value = (
+        busy: false,
+        problem: displayError(e),
+        choice: _explorer.value.choice,
+      );
+    }
+    if (mounted && _explorer.value.busy) {
+      _explorer.value = (
+        busy: false,
+        problem: _explorer.value.problem,
+        choice: _explorer.value.choice,
+      );
     }
   }
 
-  /// **The one claim consensus cannot check**, with its switch beside it.
-  Widget _rateSection() {
-    final scope = widget.rate;
-    if (scope == null) return const SizedBox.shrink();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(height: KvSpace.l),
-        const KvRuledLabel('Fiat value'),
-        const SizedBox(height: KvSpace.s),
-        AnimatedBuilder(
-          // The field rides this builder as a `Listenable`, so a keystroke
-          // rebuilds the section and nothing above it.
-          animation: Listenable.merge([
-            scope.enabled,
-            scope.endpoint,
-            scope.quote,
-            scope.error,
-            _rateEndpoint,
-          ]),
-          builder: (context, _) {
-            final posture = scope.enabled.value;
-            // Not yet read: say so, and offer no control. A toggle drawn `off`
-            // over a posture nobody has read yet is a switch reporting a state
-            // it does not know (`wallet-security-auditor`).
-            if (posture == null) {
-              return const _TrustLabel('Reading your setting…');
-            }
-            final on = posture;
-            final typed = _rateEndpoint.text.trim();
-            final canSave =
-                !_rateBusy && typed.isNotEmpty && typed != scope.endpoint.value;
-            final quote = scope.quote.value;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                KvToggle(
-                  on: on,
-                  title: 'Show what your balance is worth',
-                  sub: on
-                      ? 'A dollar figure sits under your balance. It never '
-                            'prices a fee, sizes a send, or appears on anything '
-                            'you sign.'
-                      : 'Your balance is shown in KAS only. Nothing is fetched '
-                            'and no price source is contacted.',
-                  disabledReason: 'Saving…',
-                  onChanged: _rateBusy
-                      ? null
-                      : (next) => unawaited(
-                          _saveRate(
-                            enabled: next,
-                            endpoint: scope.endpoint.value,
-                          ),
-                        ),
-                ),
-                // **The field appears whenever there is something to repair**,
-                // not only while the rate is on. A stored endpoint Rust refuses
-                // loads as `enabled: false` with the bad endpoint KEPT — so that
-                // the row can show what was refused — and gating the field on
-                // `on` hid the only control that could fix it: turning the
-                // toggle back on re-posts the same bad endpoint, is refused
-                // again, and leaves the user in a loop with no field
-                // (`consensus-auditor`, this sitting).
-                if (on || typed != scope.defaultEndpoint.value) ...[
-                  const SizedBox(height: KvSpace.sm),
-                  _UrlField(
-                    controller: _rateEndpoint,
-                    enabled: !_rateBusy,
-                    hint: scope.defaultEndpoint.value,
-                    label: 'Price source',
-                    onSubmitted: canSave
-                        ? () =>
-                              unawaited(_saveRate(enabled: on, endpoint: typed))
-                        : null,
-                  ),
-                  const SizedBox(height: KvSpace.s),
-                  _Action(
-                    label: 'Use this source',
-                    enabled: canSave,
-                    reason: _rateBusy
-                        ? 'Saving…'
-                        : typed.isEmpty
-                        ? 'Type the address of a price source first.'
-                        : 'This is already your price source.',
-                    // `enabled: on`, never `true`: the field fixes the
-                    // address, the toggle decides whether it is used. A repair
-                    // that also switched the rate back on would take a decision
-                    // the user did not make.
-                    onTap: () =>
-                        unawaited(_saveRate(enabled: on, endpoint: typed)),
-                  ),
-                  if (on) ...[
-                    const SizedBox(height: KvSpace.sm),
-                    // What the source actually said, so the setting is verifiable
-                    // rather than declarative. `—` when there is no usable price:
-                    // the law's own rendering of an unknown rate (BG-5), never a
-                    // number nobody vouched for.
-                    // **The unit is silk-screened on the LABEL**, which is
-                    // where an instrument puts it — and it keeps the value a
-                    // pure number, so it can hold BG-14's no-truncation rule
-                    // honestly. As `Price | \$0.02864504 per KAS` the row was
-                    // 19 characters against a 176dp column and clipped ~1.7 of
-                    // them at 320dp/1.3x, unit-first (`ux-auditor`, measured).
-                    _Reading(
-                      label: 'Price, per KAS',
-                      value: quote == null
-                          ? '—'
-                          // **Every significant digit, no trailing zeros** (D-210,
-                          // written against the unit rather than against KAS). A
-                          // rate of 0.0712 is `\$0.0712`, never `\$0.07120000` —
-                          // padding says a precision the source did not give.
-                          : '\$${trimTrailingZeros(quote.usdPerKas)}',
+  /// **The one claim consensus cannot check**, with its switch beside it —
+  /// the sheet's body.
+  Widget _rateSheet() {
+    final scope = widget.rate!;
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        scope.enabled,
+        scope.endpoint,
+        scope.quote,
+        scope.error,
+        _rateEndpoint,
+        _rate,
+      ]),
+      builder: (context, _) {
+        final posture = scope.enabled.value;
+        // Not yet read: say so, and offer no control (`wallet-security`).
+        if (posture == null) {
+          return const _TrustLabel('Reading your setting…');
+        }
+        final on = posture;
+        final ui = _rate.value;
+        final typed = _rateEndpoint.text.trim();
+        final canSave =
+            !ui.busy && typed.isNotEmpty && typed != scope.endpoint.value;
+        final quote = scope.quote.value;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            KvToggle(
+              on: on,
+              title: 'Show what your balance is worth',
+              sub: on
+                  ? 'A dollar figure sits under your balance. It never '
+                        'prices a fee, sizes a send, or appears on anything '
+                        'you sign.'
+                  : 'Your balance is shown in KAS only. Nothing is fetched '
+                        'and no price source is contacted.',
+              disabledReason: 'Saving…',
+              onChanged: ui.busy
+                  ? null
+                  : (next) => unawaited(
+                      _saveRate(enabled: next, endpoint: scope.endpoint.value),
                     ),
-                    if (quote != null)
-                      _Reading(
-                        label: 'As of',
-                        numeric: false,
-                        value:
-                            '${formatAge(widget.clock().difference(quote.fetchedAt))} ago',
-                      ),
-                  ],
-                ],
-                if (scope.error.value != null) ...[
-                  const SizedBox(height: KvSpace.s),
-                  _Fault(displayError(scope.error.value!)),
-                ],
-                if (_rateProblem != null) ...[
-                  const SizedBox(height: KvSpace.s),
-                  _Fault(_rateProblem!),
-                ],
+            ),
+            // **The field appears whenever there is something to repair**, not
+            // only while the rate is on (`consensus-auditor`).
+            if (on || typed != scope.defaultEndpoint.value) ...[
+              const SizedBox(height: KvSpace.sm),
+              _UrlField(
+                controller: _rateEndpoint,
+                enabled: !ui.busy,
+                hint: scope.defaultEndpoint.value,
+                label: 'Price source',
+                onSubmitted: canSave
+                    ? () => unawaited(_saveRate(enabled: on, endpoint: typed))
+                    : null,
+              ),
+              const SizedBox(height: KvSpace.s),
+              _Action(
+                label: 'Use this source',
+                enabled: canSave,
+                reason: ui.busy
+                    ? 'Saving…'
+                    : typed.isEmpty
+                    ? 'Type the address of a price source first.'
+                    : 'This is already your price source.',
+                // `enabled: on`, never `true`: the field fixes the address,
+                // the toggle decides whether it is used.
+                onTap: () => unawaited(_saveRate(enabled: on, endpoint: typed)),
+              ),
+              if (on) ...[
                 const SizedBox(height: KvSpace.sm),
-                const _TrustLabel(
-                  'A price is the one thing here that no node, no block and no '
-                  'proof can check — so it is display only, and switching it '
-                  'off costs you nothing but the figure. The source sees that '
-                  'this wallet asked for a price, and the network address it '
-                  'asked from; it never learns what you hold.',
+                // What the source actually said, so the setting is verifiable
+                // rather than declarative; `—` when there is no usable price.
+                _Reading(
+                  label: 'Price, per KAS',
+                  value: quote == null
+                      ? '—'
+                      : '\$${trimTrailingZeros(quote.usdPerKas)}',
                 ),
+                if (quote != null)
+                  _Reading(
+                    label: 'As of',
+                    numeric: false,
+                    value:
+                        '${formatAge(widget.clock().difference(quote.fetchedAt))} ago',
+                  ),
               ],
-            );
-          },
-        ),
-      ],
+            ],
+            if (scope.error.value != null) ...[
+              const SizedBox(height: KvSpace.s),
+              _Fault(displayError(scope.error.value!)),
+            ],
+            if (ui.problem case final problem?) ...[
+              const SizedBox(height: KvSpace.s),
+              _Fault(problem),
+            ],
+            const SizedBox(height: KvSpace.sm),
+            const _TrustLabel(
+              'A price is the one thing here that no node, no block and no '
+              'proof can check — so it is display only, and switching it '
+              'off costs you nothing but the figure. The source sees that '
+              'this wallet asked for a price, and the network address it '
+              'asked from; it never learns what you hold.',
+            ),
+          ],
+        );
+      },
     );
+  }
+
+  Future<void> _loadRate() async {
+    final scope = widget.rate;
+    if (scope == null) return;
+    try {
+      await scope.load();
+    } catch (_) {
+      // The notifiers keep whatever they last knew.
+    }
+    if (!mounted) return;
+    if (_rateEndpoint.text.isEmpty) _rateEndpoint.text = scope.endpoint.value;
   }
 
   Future<void> _saveRate({
@@ -1546,22 +1567,106 @@ class _NodeScreenState extends State<NodeScreen> {
     required String endpoint,
   }) async {
     final scope = widget.rate;
-    if (scope == null || _rateBusy) return;
-    setState(() {
-      _rateBusy = true;
-      _rateProblem = null;
-    });
+    if (scope == null || _rate.value.busy) return;
+    _rate.value = (busy: true, problem: null);
     try {
       await scope.setConfig(enabled: enabled, endpoint: endpoint);
       if (mounted) _rateEndpoint.text = scope.endpoint.value;
+      if (mounted) _rate.value = (busy: false, problem: null);
     } catch (e) {
       // The refusal is the message: an endpoint Rust would not store must not
       // leave the row looking as though it had been.
-      if (mounted) setState(() => _rateProblem = displayError(e));
-    } finally {
-      if (mounted) setState(() => _rateBusy = false);
+      if (mounted) _rate.value = (busy: false, problem: displayError(e));
     }
   }
+}
+
+/// **One row of `SOURCES`** — the seat's name over what it is for, the host it
+/// points at, and a chevron (`T5`, measured: title 16/600 `ink`, sub `inkMeta`,
+/// the host in mono `inkDim`). A 52 dp target (BG-12).
+class _SourceRow extends StatelessWidget {
+  const _SourceRow({
+    required this.title,
+    required this.sub,
+    required this.value,
+    required this.onTap,
+  });
+
+  final String title;
+  final String sub;
+  final String value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: '$title. $sub. $value',
+    child: ExcludeSemantics(
+      child: InkWell(
+        onTap: onTap,
+        highlightColor: KvColor.keyPressed,
+        splashFactory: NoSplash.splashFactory,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 16,
+                          height: 21 / 16,
+                          fontWeight: FontWeight.w600,
+                          fontVariations: KvWeight.w600,
+                          color: KvColor.ink,
+                        ),
+                      ),
+                      Text(
+                        sub,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 13,
+                          height: 18 / 13,
+                          color: KvColor.inkMeta,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: KvSpace.sm),
+                Flexible(
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      color: KvColor.inkDim,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: KvSpace.s),
+                const KvGlyphIcon(
+                  KvGlyph.chevron,
+                  tone: KvColor.inkMeta,
+                  size: 16,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// A label and its reading. Mono and tabular on the value, because every value
@@ -1663,13 +1768,11 @@ class _Reading extends StatelessWidget {
   const _Reading({
     required this.label,
     required this.value,
-    this.wrap = false,
     this.numeric = true,
   });
 
   final String label;
   final String value;
-  final bool wrap;
 
   /// Is this reading a NUMBER or an identifier? Only those may not wrap
   /// (BG-14: *labels wrap or shrink, a number scales down and never
@@ -1705,7 +1808,7 @@ class _Reading extends StatelessWidget {
           Expanded(
             child: Text(
               value,
-              maxLines: numeric ? (wrap ? 3 : 1) : null,
+              maxLines: numeric ? 1 : null,
               overflow: TextOverflow.clip,
               style: const TextStyle(
                 fontFamily: KvFont.mono,
@@ -1755,11 +1858,16 @@ class _UrlField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final field = KvSurface.control(
-      padding: const EdgeInsets.symmetric(
-        horizontal: KvSpace.m,
-        vertical: KvSpace.xs,
-      ),
+    // `T5`, measured: the field is a `chip` pill, 44 dp tall, with no edge —
+    // the same surface as the `Test` pill beside it (founder on glass,
+    // 2026-09-05: no borders).
+    final field = KvSurface(
+      tone: KvSurfaceTone.chip,
+      radius: KvRadius.control,
+      edge: Colors.transparent,
+      height: _pillHeight,
+      alignment: Alignment.centerLeft,
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
       child: TextField(
         controller: controller,
         enabled: enabled,
@@ -1791,7 +1899,7 @@ class _UrlField extends StatelessWidget {
           errorBorder: InputBorder.none,
           focusedErrorBorder: InputBorder.none,
           isDense: true,
-          contentPadding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+          contentPadding: EdgeInsets.zero,
           hintText: hint,
           hintStyle: const TextStyle(
             fontFamily: KvFont.mono,
@@ -2118,7 +2226,7 @@ class _ChipPill extends StatefulWidget {
 
   /// `T5`, measured: the `Test` pill runs 552.0 → 596.0 dp — **44 dp** —
   /// and the row's own pill reads the same height at the row's centre.
-  static const double height = 44;
+  static const double height = _pillHeight;
 
   /// The label's style, named once so the plate can measure the pill it is
   /// about to seat (item 0 / L121).

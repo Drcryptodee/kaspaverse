@@ -22,8 +22,8 @@ import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_fiat.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_icon_button.dart';
+import '../widgets/kv_rows.dart';
 import '../widgets/kv_status_chip.dart';
-import '../widgets/kv_surface.dart';
 import '../widgets/kv_two_pane.dart';
 
 /// **Transaction detail** — one transaction, at full size, with the burial
@@ -177,7 +177,7 @@ class _TxDetailScreenState extends State<TxDetailScreen> {
               trailing: onShare == null
                   ? null
                   : KvIconButton(
-                      mark: KvGlyph.share,
+                      mark: KvGlyph.shareUp,
                       label: 'Share this transaction',
                       onTap: () => onShare(widget.txid),
                     ),
@@ -542,8 +542,8 @@ class _LifecycleChipState extends State<_LifecycleChip> {
                 // where `inkDim` measures under AA on `okTint` and `settledTint`
                 // alike; the tinted pill IS the indicator, and the label inside it
                 // is body text on a coloured ground. Contrast is the token pair's
-                // own measurement: `ok`/`okTint` 8.57, `settled`/`settledTint`
-                // 8.02, `warn`/`warnTint` 7.64 (BG-14).
+                // own measurement: `settled`/`settledTint` 8.02 (accepted),
+                // `ok`/`okTint` 8.57 (settled), `warn`/`warnTint` 7.64 (BG-14).
                 Flexible(
                   child: Text(
                     said,
@@ -586,58 +586,63 @@ class _DepthPlate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return KvSurface(
-      padding: const EdgeInsets.all(KvSpace.s20),
+    // **The home's card** — `plate`, radius 28, no border (founder on glass,
+    // 2026-09-05); 20 dp round the gauge, as `S9` measures.
+    return KvRowContainer(
+      divided: false,
+      inset: const EdgeInsets.all(KvSpace.s20),
       // The link's liveness flips rarely and this plate is the only region it
       // reaches: the gauge stops its counter on it and the caption says why.
-      child: ValueListenableBuilder<bool>(
-        valueListenable: stale,
-        builder: (context, stale, _) => Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            KvBurialGauge(
-              // **The axis, named, on the reading's own row** (BG-22). `S9`
-              // sets `DEPTH` at the plate's left edge — measured at 8.25 dp of
-              // cap, which is 11 dp of Jakarta at its 0.773 ratio, the `caps`
-              // role exactly — with the count hard right on the same line.
-              heading: 'Depth',
-              stalled: record.stalled,
-              confirmations: depth,
-              maturity: record.maturity,
-              direction: record.direction,
-              isCoinbase: record.isCoinbase,
-              thresholds: thresholds,
-              stale: stale,
-            ),
-            // **The dash says there is no reading; this says why.** A user
-            // watching a gauge that has stopped is owed the reason, and the
-            // reason is knowable here — it is the same bit the money plate
-            // folds into its trust line (BG-11/BG-20).
-            //
-            // **Its slot is always reserved and only the ink fades** — the
-            // same mechanism Receive's caption uses. Built as a bare
-            // conditional it cut in with no transition AND took everything
-            // below it down the screen in one frame, every time the link
-            // flapped, on a surface whose whole purpose is watching a number
-            // that is not moving (BG-24; measured, `ux-auditor`, UX-5).
-            const SizedBox(height: KvSpace.s),
-            AnimatedOpacity(
-              opacity: stale ? 1 : 0,
-              duration: KvMotion.fast,
-              curve: KvMotion.out,
-              child: const Text(
-                'The link is not live, so the depth cannot be read.',
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 11,
-                  height: 15 / 11,
-                  color: KvColor.inkMeta,
+      children: [
+        ValueListenableBuilder<bool>(
+          valueListenable: stale,
+          builder: (context, stale, _) => Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              KvBurialGauge(
+                // **The axis, named, on the reading's own row** (BG-22). `S9`
+                // sets `DEPTH` at the plate's left edge — measured at 8.25 dp of
+                // cap, which is 11 dp of Jakarta at its 0.773 ratio, the `caps`
+                // role exactly — with the count hard right on the same line.
+                heading: 'Depth',
+                stalled: record.stalled,
+                confirmations: depth,
+                maturity: record.maturity,
+                direction: record.direction,
+                isCoinbase: record.isCoinbase,
+                thresholds: thresholds,
+                stale: stale,
+              ),
+              // **The dash says there is no reading; this says why.** A user
+              // watching a gauge that has stopped is owed the reason, and the
+              // reason is knowable here — it is the same bit the money plate
+              // folds into its trust line (BG-11/BG-20).
+              //
+              // **Its slot is always reserved and only the ink fades** — the
+              // same mechanism Receive's caption uses. Built as a bare
+              // conditional it cut in with no transition AND took everything
+              // below it down the screen in one frame, every time the link
+              // flapped, on a surface whose whole purpose is watching a number
+              // that is not moving (BG-24; measured, `ux-auditor`, UX-5).
+              const SizedBox(height: KvSpace.s),
+              AnimatedOpacity(
+                opacity: stale ? 1 : 0,
+                duration: KvMotion.fast,
+                curve: KvMotion.out,
+                child: const Text(
+                  'The link is not live, so the depth cannot be read.',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 11,
+                    height: 15 / 11,
+                    color: KvColor.inkMeta,
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
+      ],
     );
   }
 }
@@ -682,63 +687,53 @@ class _FactsPlate extends StatelessWidget {
         : formatStamp(DateTime.fromMillisecondsSinceEpoch(at.toInt()));
     final to = counterparty;
     final score = formatScore(record.acceptedDaaScore ?? record.blockDaaScore);
-    return KvSurface(
-      padding: const EdgeInsets.symmetric(
-        horizontal: KvSpace.s20,
-        vertical: KvSpace.xs,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // **`Sent` / `Received` / `Mined`, and the verb is the record's
-          // own** (`kvActivityFace`), so the plate opens by naming what
-          // happened rather than repeating a generic `Time`.
-          //
-          // It states what is true of BOTH clocks behind it without claiming
-          // either. `ActivityRecord.unixtimeMsec` is wallet-core's
-          // `TransactionRecord::unixtime_msec` — for a row observed live it is
-          // the WALLET's clock at the moment it recorded the transaction, and
-          // for a discovered row it is the node's
-          // `get_daa_score_timestamp_estimate`. Neither is the accepting
-          // block's header timestamp; the ceremony's `Accepted` line has that
-          // one and this field does not borrow the word.
-          _fact(
-            label: title,
-            valueText: stamp ?? '—',
-            value: stamp == null ? const _Value('—') : _Stamp(stamp),
+    // **The home's row container** (founder on glass, 2026-09-05): `plate`,
+    // radius 28, no border, and its own hairline between one fact and the next
+    // — `S9` measures the rule inset 20 dp, which is the card's own padding.
+    return KvRowContainer(
+      children: [
+        // **`Sent` / `Received` / `Mined`, and the verb is the record's
+        // own** (`kvActivityFace`), so the plate opens by naming what
+        // happened rather than repeating a generic `Time`.
+        //
+        // It states what is true of BOTH clocks behind it without claiming
+        // either. `ActivityRecord.unixtimeMsec` is wallet-core's
+        // `TransactionRecord::unixtime_msec` — for a row observed live it is
+        // the WALLET's clock at the moment it recorded the transaction, and
+        // for a discovered row it is the node's
+        // `get_daa_score_timestamp_estimate`. Neither is the accepting
+        // block's header timestamp; the ceremony's `Accepted` line has that
+        // one and this field does not borrow the word.
+        _fact(
+          label: title,
+          valueText: stamp ?? '—',
+          value: stamp == null ? const _Value('—') : _Stamp(stamp),
+        ),
+        if (to != null)
+          _CounterpartyLine(
+            address: to,
+            onCopy: () => _copy(context, to, 'Address copied'),
           ),
-          if (to != null) ...[
-            const _Rule(),
-            _CounterpartyLine(
-              address: to,
-              onCopy: () => _copy(context, to, 'Address copied'),
-            ),
-          ],
-          if (record.feeSompi case final fee?) ...[
-            const _Rule(),
-            // Trailing zeros trimmed, like every other figure in the app
-            // since D-267: `0.00010000` reads `0.0001`.
-            _FeeLine(sompi: fee),
-          ],
-          const _Rule(),
-          // **The accepting score when the DAG has one, the containing
-          // block's otherwise.** This is the number the depth is measured
-          // against — `KvBurial.depthOf` subtracts exactly this from the
-          // virtual DAA score — so putting it on the screen lets a reader
-          // check the gauge's arithmetic instead of trusting it.
-          _fact(label: 'DAA score', valueText: score, value: _Value(score)),
-          const _Rule(),
-          // **The id belongs IN the table, not in a well of its own.** It is
-          // one more fact about this transaction, and giving it a card made
-          // the screen read as two unrelated regions. The tap copies all 64
-          // characters — a truncated txid is as useless as a truncated
-          // address.
-          _IdLine(
-            txid: record.txid,
-            onCopy: () => _copy(context, record.txid, 'Transaction id copied'),
-          ),
-        ],
-      ),
+        if (record.feeSompi case final fee?)
+          // Trailing zeros trimmed, like every other figure in the app
+          // since D-267: `0.00010000` reads `0.0001`.
+          _FeeLine(sompi: fee),
+        // **The accepting score when the DAG has one, the containing
+        // block's otherwise.** This is the number the depth is measured
+        // against — `KvBurial.depthOf` subtracts exactly this from the
+        // virtual DAA score — so putting it on the screen lets a reader
+        // check the gauge's arithmetic instead of trusting it.
+        _fact(label: 'DAA score', valueText: score, value: _Value(score)),
+        // **The id belongs IN the table, not in a well of its own.** It is
+        // one more fact about this transaction, and giving it a card made
+        // the screen read as two unrelated regions. The tap copies all 64
+        // characters — a truncated txid is as useless as a truncated
+        // address.
+        _IdLine(
+          txid: record.txid,
+          onCopy: () => _copy(context, record.txid, 'Transaction id copied'),
+        ),
+      ],
     );
   }
 }
@@ -952,22 +947,6 @@ class _Value extends StatelessWidget {
       fontFeatures: [FontFeature.tabularFigures()],
     ),
   );
-}
-
-/// The hairline that divides one fact from the next.
-///
-/// [KvColor.rowDivider] — **the Activity ledger's own rule** (founder, device
-/// sitting). `etch` is the gauge's track tone and is built to be seen; a table
-/// rule is built to be read past, and at table density the heavier tone drew
-/// the eye to the lines instead of to the facts between them. `S9` measures it
-/// inset 20 dp from the plate's edges, which is the plate's own padding — so
-/// the rule is drawn full-width inside a padded plate rather than inset again.
-class _Rule extends StatelessWidget {
-  const _Rule();
-
-  @override
-  Widget build(BuildContext context) =>
-      Container(height: 1, color: KvColor.rowDivider);
 }
 
 /// **The bar `S9` ends on**: two raised actions, 52 dp tall, side by side above

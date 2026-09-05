@@ -16,6 +16,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_surface.dart';
 import 'support/maturity.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
 
 /// A stand-in for `ChainService`'s node seam. Nothing here talks to Rust; the
 /// screen's whole contract is these notifiers and this one call.
@@ -398,8 +399,8 @@ void pollLifecycleTests() {
       await tester.tap(find.text('Test'));
       await tester.pumpAndSettle();
       expect(seam.tests, isEmpty);
-      // `Use this node`'s own reason, and no second copy of it (BG-19).
-      expect(find.text('Type the address of your node first.'), findsOneWidget);
+      // Nothing to commit either: no control, no reason, nothing twice.
+      expect(find.text('Use this node'), findsNothing);
     });
 
     testWidgets('without the seam there is no pill', (tester) async {
@@ -485,6 +486,9 @@ Future<void> _pumpScreen(
   Future<int?> Function()? blockAge,
   bool withProbe = false,
   bool withTest = false,
+  // `T5`'s SOURCES rows open their controls in a sheet; a test about one
+  // names it and the harness opens it.
+  String? source,
   double width = 393,
   // The screen grew two preference sections at UX-3, and a `ListView` only
   // builds what a viewport can reach. A test about the explorer needs the
@@ -534,7 +538,18 @@ Future<void> _pumpScreen(
     await tester.pump();
     await tester.pump(KvMotion.enter);
   }
+  if (source != null) {
+    await tester.ensureVisible(find.text(source));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(source));
+    await tester.pumpAndSettle();
+  }
 }
+
+/// A finder scoped to the open sheet — `SOURCES` prints a host on its row too,
+/// and the sheet's route is not opaque, so the row is still in the tree.
+Finder _inSheet(Finder f) =>
+    find.descendant(of: find.byType(KvSheet), matching: f);
 
 bool _cadenceRunning(WidgetTester tester) =>
     tester.widgetList<KvCadence>(find.byType(KvCadence)).any((c) => c.running);
@@ -693,11 +708,10 @@ void main() {
       // **The discovery service is named** (D-207 census). "A public community
       // node" said which KIND of node was answering and left out who chose it,
       // and the PNN resolver walk was the census's first unnamed row.
+      // The directory is named where it acts (D-207) — in the trust line under
+      // the card, since the healthy card is `T5`'s bare row (2026-09-05).
       expect(
-        find.text(
-          'A public community node, found for you by the public node '
-          'directory.',
-        ),
+        find.textContaining('found for you by the public node directory'),
         findsOneWidget,
       );
 
@@ -818,32 +832,46 @@ void main() {
       expect(find.text('0'), findsNothing);
     });
 
-    testWidgets('asking for a pin opens the field — the toggle is not dead', (
+    testWidgets('asking for a pin is not pinning — the toggle is not dead', (
       tester,
     ) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      expect(find.byType(TextField), findsNothing);
+      // `T5`'s own-node card always holds its field (2026-09-05): a user can
+      // type and test before deciding.
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.text('Use this node'), findsNothing);
 
       await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
-      expect(find.byType(TextField), findsOneWidget);
-      // Asking is not pinning: nothing has been sent to Rust yet.
+      // Asking with nothing typed pins nothing: no call reached Rust.
+      expect(seam.calls, isEmpty);
+      // Typing lights the commit; it is still not sent until it is tapped.
+      await tester.enterText(find.byType(TextField), 'ws://mine.local:17110');
+      await tester.pumpAndSettle();
+      expect(find.text('Use this node'), findsOneWidget);
       expect(seam.calls, isEmpty);
     });
 
     testWidgets('a control that cannot fire says why, in words (BG-12)', (
       tester,
     ) async {
+      // The commit is absent until there is something to commit — an absent
+      // control needs no reason (BG-12), and the field beside `Test` is the
+      // whole instruction.
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      await tester.tap(find.text('Use my own node'));
-      await tester.pumpAndSettle();
-      expect(find.text('Type the address of your node first.'), findsOneWidget);
-
+      expect(find.text('Use this node'), findsNothing);
       await tester.enterText(find.byType(TextField), 'ws://10.0.0.5:17110');
       await tester.pumpAndSettle();
-      expect(find.text('Type the address of your node first.'), findsNothing);
+      expect(find.text('Use this node'), findsOneWidget);
+      // And a write in flight says why the control cannot fire again.
+      seam.hold = Completer<void>();
+      await tester.tap(find.text('Use this node'));
+      await tester.pump();
+      expect(find.text('Setting the node…'), findsWidgets);
+      seam.hold!.complete();
+      await tester.pumpAndSettle();
     });
 
     testWidgets('typing a node and applying it reaches the seam verbatim', (
@@ -864,7 +892,8 @@ void main() {
       // URL and never applies a second, weaker guard (INV-9's reasoning).
       expect(seam.calls, ['ws://10.0.0.5:17110']);
       expect(seam.pinnedNode.value, 'ws://10.0.0.5:17110');
-      expect(find.text('This is already the node you pinned.'), findsOneWidget);
+      // Nothing left to commit: the control leaves rather than sits disabled.
+      expect(find.text('Use this node'), findsNothing);
     });
 
     testWidgets('turning it off clears the pin at once', (tester) async {
@@ -885,7 +914,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(seam.calls, [null]);
       expect(seam.pinnedNode.value, isNull);
-      expect(find.byType(TextField), findsNothing);
+      // The field stays (it is the card's, 2026-09-05) and is cleared.
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
     });
 
     testWidgets('a REJECTED node says nothing changed — because nothing did', (
@@ -996,7 +1029,8 @@ void main() {
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         'ws://fresh.local:17110',
       );
-      expect(find.text('This is already the node you pinned.'), findsOneWidget);
+      // Field and pin agree: nothing to commit, so no commit control.
+      expect(find.text('Use this node'), findsNothing);
     });
 
     testWidgets('a screen reader can actually work the toggle (BG-14)', (
@@ -1221,19 +1255,34 @@ void main() {
         height: 2400,
       );
       await tester.pumpAndSettle();
-      for (final control in const ['Use this explorer', 'Use this source']) {
-        final field = control == 'Use this explorer'
-            ? find.text('https://explorer.kaspa.org/txs/{txid}')
-            : find.text('https://api.kaspa.org/info/price');
-        await tester.enterText(field, 'http://nope.example/x');
+      // Each source's controls live on its own sheet now (`T5`'s SOURCES,
+      // 2026-09-05): open, refuse, read the refusal, close.
+      for (final (source, field, control, refusal) in const [
+        (
+          'Explorer',
+          'https://explorer.kaspa.org/txs/{txid}',
+          'Use this explorer',
+          'explorer link refused',
+        ),
+        (
+          'API source',
+          'https://api.kaspa.org/info/price',
+          'Use this source',
+          'rate source refused',
+        ),
+      ]) {
+        await tester.ensureVisible(find.text(source));
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text(control));
+        await tester.tap(find.text(source));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.text(field), 'http://nope.example/x');
         await tester.pumpAndSettle();
         await tester.tap(find.text(control));
         await tester.pumpAndSettle();
+        expect(find.textContaining(refusal), findsOneWidget);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
       }
-      expect(find.textContaining('explorer link refused'), findsOneWidget);
-      expect(find.textContaining('rate source refused'), findsOneWidget);
       worst.connected.value = false;
       worst.searching.value = true;
       await tester.pump();
@@ -1305,95 +1354,36 @@ void main() {
     });
   });
 
-  group('a sentence on the serving plate wraps — a number never does', () {
-    testWidgets('the scan line renders whole at 320dp, not clipped', (
+  group('the block age rides the DAA row (2026-09-05)', () {
+    testWidgets('blocks landing reads streaming; a quiet node says how long', (
       tester,
     ) async {
-      // **Measured, not asserted about the widget.** `find.text` matches the
-      // string a `Text` was GIVEN, so it is blind to a clip — which is how
-      // *"live — scanning every b"* reached the glass and passed the suite
-      // (`ux-auditor`, this sitting). With the bundled font loaded, the line
-      // is 27 characters at 0.60 em ≈ 210.6dp against the 176dp this row
-      // leaves at 320dp, so a wrapping line MUST occupy more than one line
-      // box and a clipping one occupies exactly one.
-      final seam = seamFor();
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam, blockAge: () async => 1, settle: false);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('DAA · streaming'), findsOneWidget);
+      // A fresh mount: pumping a second seam into the same tree reuses the
+      // state, whose poll would only read the new age on its next tick.
+      await tester.pumpWidget(const SizedBox());
+
+      final quiet = _FakeSeam();
+      await _pumpScreen(tester, quiet, blockAge: () async => 12, settle: false);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('DAA · 12 s since last block'), findsOneWidget);
+      expect(find.text('DAA · streaming'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the DAA reading still refuses to wrap at 320dp', (
+      tester,
+    ) async {
+      final seam = _FakeSeam();
       await _pumpScreen(tester, seam, width: 320, blockAge: () async => 1);
-      await tester.pump();
-      final line = find.text('live — scanning every block');
-      expect(line, findsOneWidget);
-      const lineHeight = 18.0; // 13dp at height 18/13, the plate's data style
-      expect(
-        tester.getSize(line).height,
-        greaterThan(lineHeight * 1.5),
-        reason: 'a label wraps (BG-14); only a number may not',
-      );
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('nothing on the serving plate is clipped at 320dp / 1.3x', (
-      tester,
-    ) async {
-      // **The general guard, not another instance.** `find.text` matches the
-      // string a `Text` was GIVEN and a clipped `Text` inside an `Expanded`
-      // raises no overflow, so both of this sitting's clips were invisible to
-      // a suite that was otherwise measuring the right screen. This lays the
-      // plate out at the worst supported geometry and compares every reading
-      // against what its own style actually needs.
-      final rate = _FakeRate(
-        quote: KvRateQuote(
-          usdPerKas: 0.02864504,
-          fetchedAt: DateTime(2026, 8, 27, 11, 58),
-          source: 'https://api.kaspa.org/info/price',
-        ),
-      );
-      await _pumpScreen(
-        tester,
-        seamFor(),
-        rate: rate,
-        blockAge: () async => 1,
-        width: 320,
-        height: 2400,
-        textScale: 1.3,
-      );
-      await tester.pumpAndSettle();
-
-      for (final finder in [
-        find.text('live — scanning every block'),
-        find.text('\$0.02864504'),
-        find.text('2 m ago'),
-        find.text('523,216,421'),
-      ]) {
-        expect(finder, findsOneWidget);
-        final text = tester.widget<Text>(finder);
-        final box = tester.getSize(finder);
-        final painter = TextPainter(
-          text: TextSpan(text: text.data, style: text.style),
-          textDirection: TextDirection.ltr,
-          maxLines: text.maxLines,
-          textScaler: const TextScaler.linear(1.3),
-        )..layout(maxWidth: box.width);
-        expect(
-          painter.didExceedMaxLines,
-          isFalse,
-          reason:
-              '"${text.data}" needs more room than the ${box.width}dp it was '
-              'given, and clips instead of wrapping or shrinking (BG-14)',
-        );
-      }
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('the DAA reading still refuses to wrap', (tester) async {
-      // The other half: BG-14 lets a label wrap and forbids exactly this one
-      // from doing it. A fix that made everything wrap would pass the test
-      // above and break the law it was written for.
-      final seam = seamFor();
-      await _pumpScreen(tester, seam, width: 320);
-      await tester.pump();
-      final daa = find.text('523,216,421');
-      expect(daa, findsOneWidget);
-      expect(tester.widget<Text>(daa).maxLines, 1);
-      await tester.pumpWidget(const SizedBox());
+      final figure = tester.widget<Text>(find.text('523,216,421'));
+      expect(figure.maxLines, 1);
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -1402,13 +1392,19 @@ void main() {
       tester,
     ) async {
       final explorer = _FakeExplorer();
-      await _pumpScreen(tester, seamFor(), explorer: explorer, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        explorer: explorer,
+        source: 'Explorer',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
       // Two shipped starting points, named by host — "an explorer" cannot be
       // a sovereignty decision, so the row says which one.
-      expect(find.text('explorer.kaspa.org'), findsOneWidget);
-      expect(find.text('kaspa.stream'), findsOneWidget);
+      expect(_inSheet(find.text('explorer.kaspa.org')), findsOneWidget);
+      expect(_inSheet(find.text('kaspa.stream')), findsOneWidget);
       // And the templates themselves are on the glass, editable — the field IS
       // the disclosure of where a link would go.
       expect(
@@ -1416,9 +1412,9 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.ensureVisible(find.text('kaspa.stream'));
+      await tester.ensureVisible(_inSheet(find.text('kaspa.stream')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('kaspa.stream'));
+      await tester.tap(_inSheet(find.text('kaspa.stream')));
       await tester.pumpAndSettle();
       // A transaction page and an address page are different paths, so a pick
       // must move BOTH — a half-applied default is a dead address link.
@@ -1448,11 +1444,17 @@ void main() {
       // The property is positional, so the assertion has to be: same row, and
       // neither one owning the width.
       final explorer = _FakeExplorer();
-      await _pumpScreen(tester, seamFor(), explorer: explorer, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        explorer: explorer,
+        source: 'Explorer',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
-      final org = tester.getRect(find.text('explorer.kaspa.org'));
-      final stream = tester.getRect(find.text('kaspa.stream'));
+      final org = tester.getRect(_inSheet(find.text('explorer.kaspa.org')));
+      final stream = tester.getRect(_inSheet(find.text('kaspa.stream')));
       expect(
         org.center.dy,
         moreOrLessEquals(stream.center.dy, epsilon: 1),
@@ -1470,7 +1472,13 @@ void main() {
 
     testWidgets('saving reaches the seam verbatim', (tester) async {
       final explorer = _FakeExplorer();
-      await _pumpScreen(tester, seamFor(), explorer: explorer, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        explorer: explorer,
+        source: 'Explorer',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
       await tester.ensureVisible(find.text('Use this explorer'));
@@ -1509,7 +1517,13 @@ void main() {
         refuse: StateError('the explorer link must start with https://'),
       );
       final seam = seamFor();
-      await _pumpScreen(tester, seam, explorer: explorer, height: 2400);
+      await _pumpScreen(
+        tester,
+        seam,
+        explorer: explorer,
+        source: 'Explorer',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
       await tester.enterText(
@@ -1553,7 +1567,13 @@ void main() {
           source: 'https://api.kaspa.org/info/price',
         ),
       );
-      await _pumpScreen(tester, seamFor(), rate: rate, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        rate: rate,
+        source: 'API source',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
       // Verifiable rather than declarative: the setting shows the number it
@@ -1574,7 +1594,13 @@ void main() {
       tester,
     ) async {
       final rate = _FakeRate();
-      await _pumpScreen(tester, seamFor(), rate: rate, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        rate: rate,
+        source: 'API source',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
       // BG-5's own rendering of an unknown. Never a stale figure at full
       // confidence, and never a fabricated one.
@@ -1609,7 +1635,13 @@ void main() {
           source: 'https://api.kaspa.org/info/price',
         ),
       );
-      await _pumpScreen(tester, seamFor(), rate: rate, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        rate: rate,
+        source: 'API source',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Show what your balance is worth'));
       await tester.pumpAndSettle();
@@ -1644,6 +1676,7 @@ void main() {
         tester,
         _FakeSeam(),
         explorer: _FakeExplorer(),
+        source: 'Explorer',
         height: 2400,
       );
       await tester.pumpAndSettle();
@@ -1684,7 +1717,13 @@ void main() {
       final rate = _FakeRate(
         refuse: StateError('the rate source must start with https://'),
       );
-      await _pumpScreen(tester, seamFor(), rate: rate, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        rate: rate,
+        source: 'API source',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
       await tester.enterText(
@@ -1717,7 +1756,13 @@ void main() {
       final rate = _FakeRate(on: false);
       rate.endpoint.value = 'http://cleartext.example/price';
       rate.error.value = 'the rate source must start with https://';
-      await _pumpScreen(tester, seamFor(), rate: rate, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        rate: rate,
+        source: 'API source',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
 
       expect(
@@ -1747,7 +1792,13 @@ void main() {
       // something to repair, not always. A user who simply turned fiat off
       // sees a switch and its explanation, and nothing else.
       final rate = _FakeRate(on: false);
-      await _pumpScreen(tester, seamFor(), rate: rate, height: 2400);
+      await _pumpScreen(
+        tester,
+        seamFor(),
+        rate: rate,
+        source: 'API source',
+        height: 2400,
+      );
       await tester.pumpAndSettle();
       expect(find.text('Price source'), findsNothing);
       expect(find.text('Use this source'), findsNothing);

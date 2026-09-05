@@ -561,7 +561,7 @@ void main() {
         blockAge: () async => null,
       );
       expect(
-        find.text('waiting for first block…'),
+        find.text('DAA · streaming'),
         findsOneWidget,
         reason: 'link up, no block seen yet — the honest pre-first-block line',
       );
@@ -584,7 +584,7 @@ void main() {
         blockAge: () async => 1,
       );
       await tester.pump();
-      expect(find.text('live — scanning every block'), findsOneWidget);
+      expect(find.text('DAA · streaming'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -601,8 +601,8 @@ void main() {
         blockAge: () async => 42,
       );
       await tester.pump();
-      expect(find.text('42 s since last block'), findsOneWidget);
-      expect(find.text('live — scanning every block'), findsNothing);
+      expect(find.text('DAA · 42 s since last block'), findsOneWidget);
+      expect(find.text('DAA · streaming'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -619,8 +619,8 @@ void main() {
       // The link decides whether the scan may claim liveness; the age only
       // refines the claim. Otherwise a 2 s poll could read "live — scanning
       // every block" beside a status chip saying the opposite.
-      expect(find.text('not scanning — no link'), findsOneWidget);
-      expect(find.text('live — scanning every block'), findsNothing);
+      expect(find.text('DAA'), findsOneWidget);
+      expect(find.text('DAA · streaming'), findsNothing);
       expect(find.text('Searching…'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
@@ -642,8 +642,8 @@ void main() {
         blockAge: () async => 1,
       );
       await tester.pump();
-      expect(find.text('live — scanning every block'), findsNothing);
-      expect(find.text('1 s since last block'), findsOneWidget);
+      expect(find.text('DAA · streaming'), findsNothing);
+      expect(find.text('DAA · 1 s since last block'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 

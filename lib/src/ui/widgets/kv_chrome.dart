@@ -117,7 +117,17 @@ class KvTopBar extends StatelessWidget {
 /// A tick, then a sentence-case label — where an instrument silk-screens the
 /// name of a section.
 class KvRuledLabel extends StatelessWidget {
-  const KvRuledLabel(this.text, {super.key, this.tight = false});
+  const KvRuledLabel(
+    this.text, {
+    super.key,
+    this.tight = false,
+    this.rule = true,
+  });
+
+  /// The tick before the words. `T5` and `S9` draw their caps labels bare —
+  /// `CONNECTION`, `DEPTH`, `MY OWN NODE`, `SOURCES` — and the founder asked
+  /// for the picture (2026-09-05), so those seats pass `false`.
+  final bool rule;
 
   final String text;
 
@@ -140,8 +150,10 @@ class KvRuledLabel extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisSize: tight ? MainAxisSize.min : MainAxisSize.max,
     children: [
-      Container(width: KvSpace.s, height: 1, color: KvColor.inkMeta),
-      const SizedBox(width: KvSpace.s),
+      if (rule) ...[
+        Container(width: KvSpace.s, height: 1, color: KvColor.inkMeta),
+        const SizedBox(width: KvSpace.s),
+      ],
       // Flexible for the same reason as the rail's title: at 1.3x this label
       // can be wider than a 320dp gutter leaves it.
       Flexible(

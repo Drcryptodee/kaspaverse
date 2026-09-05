@@ -16,7 +16,23 @@ import 'kv_glyph.dart';
 /// row that draws its own separator draws one at the top of the list the first
 /// time somebody reorders the children.
 class KvRowContainer extends StatelessWidget {
-  const KvRowContainer({super.key, required this.children, this.header});
+  const KvRowContainer({
+    super.key,
+    required this.children,
+    this.header,
+    this.divided = true,
+    this.inset = KvRowContainer.padding,
+  });
+
+  /// A hairline between children. Off for a card that holds one composed
+  /// block — `T5`'s node row, the own-node card — where a rule would divide
+  /// nothing (founder, on glass 2026-09-05: every card on a screen shares the
+  /// home's topography — `plate`, radius 28, **no border**).
+  final bool divided;
+
+  /// The card's inner padding; the house 6 / 20 by default, 20 all round for
+  /// a card built around a single row or a gauge.
+  final EdgeInsets inset;
 
   /// The rows. Any widget: the container's only claim is the ground it paints
   /// and the line it puts between them.
@@ -41,14 +57,14 @@ class KvRowContainer extends StatelessWidget {
         borderRadius: BorderRadius.circular(KvRadius.plate),
       ),
       child: Padding(
-        padding: padding,
+        padding: inset,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
             ?header,
             for (var i = 0; i < children.length; i++) ...[
-              if (i > 0) const _Hairline(),
+              if (i > 0 && divided) const _Hairline(),
               children[i],
             ],
           ],
