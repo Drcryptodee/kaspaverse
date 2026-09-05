@@ -27,7 +27,11 @@ import '../widgets/kv_toggle.dart';
 
 /// `T5`'s pill and field height — the `Test` pill and the `host:port` field
 /// both measure 44 dp on the render.
-const double _pillHeight = 44;
+/// **The compact density** (D-278, founder on glass 2026-09-05: *"make
+/// everything on that network screen 10% smaller … all of it"*). The pill and
+/// the field take 40 where the render measured 44; the pill keeps a 52 dp
+/// TARGET around it, because BG-12 does not scale with a density.
+const double _pillHeight = 40;
 
 /// **The host and port, as `T5` prints them** (`node.kaspa.org:1…`), not
 /// the whole URL. The scheme is a fact the Transport row states one card up
@@ -642,9 +646,9 @@ class _NodeScreenState extends State<NodeScreen> {
                 child: ListView(
                   padding: EdgeInsets.fromLTRB(
                     KvWindow.of(context).gutter,
-                    KvSpace.s,
+                    KvSpace.xs,
                     KvWindow.of(context).gutter,
-                    KvSpace.xxl,
+                    KvSpace.l,
                   ),
                   children: [
                     // **`T5`, in the render's order and at the render's
@@ -825,8 +829,8 @@ class _NodeScreenState extends State<NodeScreen> {
         return KvRowContainer(
           divided: false,
           inset: const EdgeInsets.symmetric(
-            horizontal: KvSpace.s20,
-            vertical: KvSpace.m,
+            horizontal: KvSpace.s18,
+            vertical: KvSpace.sm,
           ),
           children: [
             LayoutBuilder(
@@ -877,8 +881,8 @@ class _NodeScreenState extends State<NodeScreen> {
                         sentence,
                         style: const TextStyle(
                           fontFamily: KvFont.ui,
-                          fontSize: 12,
-                          height: 17 / 12,
+                          fontSize: 11,
+                          height: 15 / 11,
                           color: KvColor.inkMeta,
                         ),
                       ),
@@ -926,6 +930,7 @@ class _NodeScreenState extends State<NodeScreen> {
     // `T5`'s row labels are `inkMeta` (122,133,131), measured.
     Widget row(String label, String text, Widget value) => KvFactLine(
       label: label,
+      dense: true,
       labelColor: KvColor.inkMeta,
       valueText: text,
       value: value,
@@ -933,7 +938,7 @@ class _NodeScreenState extends State<NodeScreen> {
     return KvRowContainer(
       children: [
         Padding(
-          padding: const EdgeInsets.only(top: KvSpace.s, bottom: KvSpace.s),
+          padding: const EdgeInsets.only(top: KvSpace.xs, bottom: KvSpace.xs),
           child: ListenableBuilder(
             listenable: Listenable.merge([_latency, s.connected]),
             builder: (context, _) {
@@ -1030,7 +1035,13 @@ class _NodeScreenState extends State<NodeScreen> {
                 stalled: !connected,
                 builder: (context, shown) => row(
                   label,
-                  formatScore(shown),
+                  // **The lamp and its gap are part of the value's width.**
+                  // `KvFactLine` measures the STRING it is given, so a row
+                  // whose value carries a mark has to say so or the row will
+                  // decide it fits and then ellipsise a chain figure — which
+                  // BG-5 forbids and the 320 dp / 1.3× frame caught the moment
+                  // the compact density made the arithmetic marginal (D-278).
+                  '${formatScore(shown)}      ',
                   _CardValue(
                     formatScore(shown),
                     lamp: !connected
@@ -1112,10 +1123,10 @@ class _NodeScreenState extends State<NodeScreen> {
         return KvRowContainer(
           divided: false,
           inset: const EdgeInsets.fromLTRB(
-            KvSpace.s20,
-            KvSpace.m,
-            KvSpace.s20,
-            KvSpace.m,
+            KvSpace.s18,
+            KvSpace.s14,
+            KvSpace.s18,
+            KvSpace.s14,
           ),
           children: [
             Column(
@@ -1170,7 +1181,13 @@ class _NodeScreenState extends State<NodeScreen> {
                       child: _UrlField(
                         controller: _url,
                         enabled: on && !_busy,
-                        hint: on ? 'ws://host:port' : 'Turn on to set a node',
+                        // **The address shape, whether it is on or off**
+                        // (founder on glass, 2026-09-05): a hint that says what
+                        // to type teaches the form, where one saying the control
+                        // is off repeats what the toggle beside it already
+                        // shows. `wss://`, the scheme a public node speaks —
+                        // Rust takes either, and this is the one to encourage.
+                        hint: 'wss://host:port',
                         onSubmitted: canApply ? () => _apply(typed) : null,
                       ),
                     ),
@@ -1242,7 +1259,7 @@ class _NodeScreenState extends State<NodeScreen> {
       // on glass, 2026-09-05): 12 on the right where the card's rule is 20.
       KvRowContainer(
         inset: const EdgeInsets.fromLTRB(
-          KvSpace.s20,
+          KvSpace.s18,
           KvSpace.xs,
           KvSpace.sm,
           KvSpace.xs,
@@ -1950,7 +1967,7 @@ class _SourceRow extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+            padding: const EdgeInsets.symmetric(vertical: KvSpace.s10),
             child: Row(
               children: [
                 Expanded(
@@ -1961,8 +1978,8 @@ class _SourceRow extends StatelessWidget {
                         title,
                         style: const TextStyle(
                           fontFamily: KvFont.ui,
-                          fontSize: 16,
-                          height: 21 / 16,
+                          fontSize: 15,
+                          height: 20 / 15,
                           fontWeight: FontWeight.w600,
                           fontVariations: KvWeight.w600,
                           color: KvColor.ink,
@@ -1972,8 +1989,8 @@ class _SourceRow extends StatelessWidget {
                         sub,
                         style: const TextStyle(
                           fontFamily: KvFont.ui,
-                          fontSize: 13,
-                          height: 18 / 13,
+                          fontSize: 12,
+                          height: 16 / 12,
                           color: KvColor.inkMeta,
                         ),
                       ),
@@ -1989,8 +2006,8 @@ class _SourceRow extends StatelessWidget {
                     textAlign: TextAlign.right,
                     style: const TextStyle(
                       fontFamily: KvFont.mono,
-                      fontSize: 13,
-                      height: 18 / 13,
+                      fontSize: 12,
+                      height: 16 / 12,
                       color: KvColor.inkDim,
                     ),
                   ),
@@ -2384,7 +2401,7 @@ class _NodeRow extends StatelessWidget {
 
   static const TextStyle titleStyle = TextStyle(
     fontFamily: KvFont.ui,
-    fontSize: 15,
+    fontSize: 14,
     height: 20 / 15,
     fontWeight: FontWeight.w600,
     fontVariations: KvWeight.w600,
@@ -2560,7 +2577,7 @@ class _NodeDisc extends StatelessWidget {
     child: Center(
       child: busy
           ? KvCadence(running: true, tone: tone.color)
-          : KvGlyphIcon(KvGlyph.network, tone: tone.color, size: 20),
+          : KvGlyphIcon(KvGlyph.network, tone: tone.color, size: 18),
     ),
   );
 }

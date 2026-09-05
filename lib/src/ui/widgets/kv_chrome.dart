@@ -208,8 +208,11 @@ class KvSectionHeader extends StatefulWidget {
   /// The explainer's open state; null draws no mark and no target.
   final ValueNotifier<bool>? info;
 
+  /// A header that opens an explainer is a control, so it keeps BG-12's 52
+  /// whatever the density is. A plain one is chrome and takes the compact
+  /// register (D-278).
   static const double height = 52;
-  static const double plainHeight = 36;
+  static const double plainHeight = 32;
 
   /// Where the words sit inside the row — **measured, not guessed**: a 16 dp
   /// label in a 52 dp box leaves 36, and `(1 + 1/3) / 2 × 36` is exactly 24

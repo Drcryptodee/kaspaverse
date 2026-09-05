@@ -48,7 +48,13 @@ class KvFactLine extends StatelessWidget {
     this.valueShare = 0.45,
     this.strongLabel = false,
     this.labelColor,
+    this.dense = false,
   });
+
+  /// **The compact density** (D-278): 10 % off the row's air and its type,
+  /// for a screen whose whole content must stand in one view. The floors do
+  /// not scale with it — 11 dp of type and a 52 dp target are BG-14 and BG-12
+  /// and neither bends to a fit.
 
   final String label;
   final Widget value;
@@ -78,10 +84,12 @@ class KvFactLine extends StatelessWidget {
   /// caller that knows its ground says so; nothing here guesses it.
   final Color? labelColor;
 
+  final bool dense;
+
   TextStyle get _labelStyle => TextStyle(
     fontFamily: KvFont.ui,
-    fontSize: 13,
-    height: 19 / 13,
+    fontSize: dense ? 12 : 13,
+    height: dense ? 17 / 12 : 19 / 13,
     // A fact's label carries a little weight — 500, the founder's own bar
     // on glass (2026-09-05): *Sent · To · Network fee · Transaction ID* and
     // the connection card's rows, all at once from here.
@@ -94,7 +102,7 @@ class KvFactLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final scaler = MediaQuery.textScalerOf(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.sm),
+      padding: EdgeInsets.symmetric(vertical: dense ? KvSpace.s10 : KvSpace.sm),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final width = constraints.maxWidth;
@@ -144,7 +152,10 @@ class KvFactLine extends StatelessWidget {
             final vp = TextPainter(
               text: TextSpan(
                 text: printed,
-                style: const TextStyle(fontFamily: KvFont.mono, fontSize: 13),
+                style: TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: dense ? 12 : 13,
+                ),
               ),
               textDirection: TextDirection.ltr,
               textScaler: scaler,

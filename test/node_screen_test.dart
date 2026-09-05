@@ -447,11 +447,13 @@ void pollLifecycleTests() {
           tester.getSize(target).width,
           greaterThanOrEqualTo(KvSpace.touchTarget),
         );
-        // The visual: `T5`'s `chip`-filled pill, measured at ~44 dp.
+        // The visual: `T5`'s `chip`-filled pill, measured at 44 and drawn at
+        // **40** since the compact density (D-278) — the target above stays
+        // 52, because BG-12 does not scale with a density.
         final visual = find
             .ancestor(of: pill, matching: find.byType(AnimatedContainer))
             .first;
-        expect(tester.getSize(visual).height, closeTo(44, 1));
+        expect(tester.getSize(visual).height, closeTo(_pillHeight, 1));
         final box = tester.widget<AnimatedContainer>(visual);
         expect((box.decoration! as BoxDecoration).color, KvColor.chip);
         // And the endpoint stands beside it with its scheme and its port
@@ -548,6 +550,10 @@ Future<void> _pumpScreen(
     await tester.pumpAndSettle();
   }
 }
+
+/// The compact density's pill and field height (D-278), restated here so
+/// the guard moves with the screen rather than pinning a number twice.
+const double _pillHeight = 40;
 
 /// What the node row actually prints for the endpoint — folded or whole.
 /// The run is the only 11 dp mono text on the screen (D-277).
@@ -857,7 +863,9 @@ void main() {
       // a node and the commit appears, disabled until there is one.
       expect(find.byType(TextField), findsOneWidget);
       expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
-      expect(find.text('Turn on to set a node'), findsOneWidget);
+      // The hint teaches the address shape whether the switch is on or off
+      // (founder, 2026-09-05) — the toggle beside it already says it is off.
+      expect(find.text('wss://host:port'), findsOneWidget);
       expect(find.text('Use this node'), findsNothing);
 
       await tester.tap(find.text('Use my own node'));
@@ -1401,6 +1409,46 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.bySemanticsLabel('Show the whole address'), findsNothing);
       expect(find.text('ws://n.kaspa:1'), findsOneWidget);
+    });
+
+    testWidgets('the whole screen fits the phone, with nothing to scroll', (
+      tester,
+    ) async {
+      // **The founder's bar, twice on glass** (2026-09-05, D-278): *"the
+      // network screen has everything in view and i dont have to scroll down
+      // to tap on API source"*. The V60 is 1080 × 2460 at 2.75, so 393 × 894
+      // logical, and the status and gesture bars take about 50 of it — this
+      // asserts the content against what is actually left. A `maxScrollExtent`
+      // of zero is the whole claim: there is nothing below the fold. The
+      // guard is 800 against a content height of ~790 and a device that
+      // leaves ~845, so it reds well before he would see it.
+      final seam = _FakeSeam();
+      await _pumpScreen(
+        tester,
+        seam,
+        explorer: _FakeExplorer(),
+        rate: _FakeRate(),
+        width: 393,
+        height: 800,
+      );
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(
+        position.maxScrollExtent,
+        0,
+        reason:
+            'the Network screen overflows its own phone by '
+            '${position.maxScrollExtent.toStringAsFixed(1)} dp — `API source` '
+            'is below the fold, which is the finding this guards',
+      );
     });
 
     testWidgets('back goes back', (tester) async {
