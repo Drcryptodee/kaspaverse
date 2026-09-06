@@ -1197,6 +1197,65 @@ void main() {
       expect(find.text('All'), findsOneWidget);
     });
 
+    testWidgets('at full the action offers the way back, and back keeps the '
+        'tab the user was on', (tester) async {
+      await pump(
+        tester,
+        money(mature: BigInt.from(500000000), activity: manyRows()),
+      );
+
+      // Move to Tokens first, so the test can tell "returned" from "reset".
+      await tester.tap(find.text('Tokens'));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+
+      await tester.tap(find.text('All'));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+      expect(
+        find.text('Less'),
+        findsOneWidget,
+        reason: 'a way out you have to discover is not a way out (§8)',
+      );
+      expect(findCapsLabel('Available balance'), findsNothing);
+
+      // The system back gesture undoes the level before it leaves the screen.
+      final pop = await tester.binding.handlePopRoute();
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+      expect(pop, isTrue, reason: 'the screen handled it rather than popping');
+      expect(findCapsLabel('Available balance'), findsOneWidget);
+      expect(find.text('All'), findsOneWidget);
+
+      // ...and it is still Tokens, not reset to Activity.
+      expect(
+        tester.widget<KvTabs>(find.byType(KvTabs)).index,
+        1,
+        reason: 'back undoes the LEVEL and nothing else — his own ask',
+      );
+    });
+
+    testWidgets('`Less` gives the band back the same way', (tester) async {
+      await pump(
+        tester,
+        money(mature: BigInt.from(500000000), activity: manyRows()),
+      );
+      await tester.tap(find.text('All'));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+      await tester.tap(find.text('Less'));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+      expect(findCapsLabel('Available balance'), findsOneWidget);
+      expect(find.text('All'), findsOneWidget);
+      expect(find.text('Less'), findsNothing);
+    });
+
     testWidgets('scrolling the rows spends the CHAIN CLOCK and nothing else, '
         'and resting at the top buys it back', (tester) async {
       await pump(

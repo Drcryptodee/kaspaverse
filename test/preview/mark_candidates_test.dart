@@ -45,7 +45,7 @@ void main() {
     await renderSurface(
       tester,
       name: 'probe__mark_candidates',
-      size: const PreviewSize('sheet', Size(1160, 700), 1.0),
+      size: const PreviewSize('sheet', Size(1160, 860), 1.0),
       child: const _Sheet(),
     );
   }, skip: !previewRequested);
@@ -61,7 +61,8 @@ class _Geo {
     required this.upper,
     required this.lower,
     this.bow = 0,
-  });
+    double? bowLower,
+  }) : _bowLower = bowLower;
 
   final String label;
   final String note;
@@ -74,9 +75,15 @@ class _Geo {
   /// comparison dishonest.
   final Offset upper, lower;
 
-  /// Units of bow off each arm's chord. **Positive bows toward the stem**
+  /// Units of bow off the UPPER arm's chord. **Positive bows toward the stem**
   /// (convex right, an arrowhead); negative bows away (concave right).
   final double bow;
+
+  final double? _bowLower;
+
+  /// The lower arm's bow; defaults to the upper's, so a symmetric mark states
+  /// one number.
+  double get bowLower => _bowLower ?? bow;
 
   static const apex = Offset(59, 49.5);
 
@@ -93,81 +100,131 @@ class _Geo {
 /// is his second ask verbatim — *"a variation where the `>` stroke is straight
 /// instead of curved but the other stroke `|` retains its curve"* — and `G`,
 /// `H` are that straight arm at the steeper angle and at more weight.
+/// **The form matrix.** Weight is settled — every candidate here is at 14.4,
+/// the stroke at which the two paths touch — so what is being chosen is
+/// SHAPE: how far apart the chevron's two ends sit, and which arms curve.
+///
+/// The founder's new ask (2026-09-06): *"a variant where the `>` stroke is
+/// brought closer together instead of wide — the angle brings the two strokes
+/// together instead of apart."* That is the `tight` and `tighter` rows. He
+/// also asked for the curve combinations by name: *"straight, curved, straight
+/// and curve or curve curve, etc."*
+///
+/// Read it as a grid: **spread** down the rows (wide · tight · tighter),
+/// **curve** across (straight · both toward · upper only · lower only · both
+/// away).
 const _candidates = <_Geo>[
+  // ── wide: the ends at the stem's own span, 16 → 84 ──────────────────────
   _Geo(
-    label: 'A · shipped',
-    note: 'stroke 12 · straight · 2.37 clear',
-    stroke: 12,
-    upper: Offset(32, 20.5),
-    lower: Offset(29.5, 81),
-  ),
-  _Geo(
-    label: 'J · weight only',
-    note: "contact, nothing else moved",
-    stroke: 14.4,
-    upper: Offset(32, 20.5),
-    lower: Offset(29.5, 81),
-  ),
-  _Geo(
-    label: 'F · straight, longer',
-    note: 'his 2nd ask: no curve on the >',
+    label: 'W1 · wide, straight',
+    note: 'both arms straight',
     stroke: 14.4,
     upper: Offset(32, 16),
     lower: Offset(29.5, 84),
   ),
   _Geo(
-    label: 'G · straight, steeper',
-    note: 'same, arms pulled in',
-    stroke: 14.4,
-    upper: Offset(34.5, 15.5),
-    lower: Offset(32, 84.5),
-  ),
-  _Geo(
-    label: 'H · straight, heavier',
-    note: 'G at stroke 15',
-    stroke: 15,
-    upper: Offset(34.5, 15.5),
-    lower: Offset(32, 84.5),
-  ),
-  _Geo(
-    label: 'B · his 1st ask',
-    note: 'bow 1 toward the stem',
+    label: 'W2 · wide, curve curve',
+    note: 'both bowed toward the stem',
     stroke: 14.4,
     upper: Offset(32, 16),
     lower: Offset(29.5, 84),
     bow: 1,
   ),
   _Geo(
-    label: 'I · half curve',
-    note: 'B, bowed 0.5',
+    label: 'W3 · wide, curve + straight',
+    note: 'upper bowed, lower straight',
     stroke: 14.4,
     upper: Offset(32, 16),
     lower: Offset(29.5, 84),
-    bow: 0.5,
+    bow: 1,
+    bowLower: 0,
   ),
   _Geo(
-    label: 'C · bowed away',
-    note: 'B, curved the other way',
+    label: 'W4 · wide, straight + curve',
+    note: 'upper straight, lower bowed',
+    stroke: 14.4,
+    upper: Offset(32, 16),
+    lower: Offset(29.5, 84),
+    bow: 0,
+    bowLower: 1,
+  ),
+  _Geo(
+    label: 'W5 · wide, bowed away',
+    note: 'both curved outward',
     stroke: 14.4,
     upper: Offset(32, 16),
     lower: Offset(29.5, 84),
     bow: -1,
   ),
+  // ── tight: the ends brought toward each other, 26 → 74 ──────────────────
   _Geo(
-    label: 'E · steeper, curved',
-    note: "D's angle at B's weight",
+    label: 'T1 · tight, straight',
+    note: 'his ask — ends drawn together',
     stroke: 14.4,
-    upper: Offset(34.5, 15.5),
-    lower: Offset(32, 84.5),
+    upper: Offset(32, 26),
+    lower: Offset(29.5, 74),
+  ),
+  _Geo(
+    label: 'T2 · tight, curve curve',
+    note: 'the same, both bowed',
+    stroke: 14.4,
+    upper: Offset(32, 26),
+    lower: Offset(29.5, 74),
     bow: 1,
   ),
   _Geo(
-    label: 'D · stronger',
-    note: 'stroke 15 · steeper · bowed',
-    stroke: 15,
-    upper: Offset(34.5, 15.5),
-    lower: Offset(32, 84.5),
+    label: 'T3 · tight, curve + straight',
+    note: 'upper bowed only',
+    stroke: 14.4,
+    upper: Offset(32, 26),
+    lower: Offset(29.5, 74),
     bow: 1,
+    bowLower: 0,
+  ),
+  _Geo(
+    label: 'T4 · tight + long',
+    note: 'ends together AND pushed left',
+    stroke: 14.4,
+    upper: Offset(24, 26),
+    lower: Offset(21, 74),
+  ),
+  _Geo(
+    label: 'T5 · tight + long, curved',
+    note: 'the same, both bowed',
+    stroke: 14.4,
+    upper: Offset(24, 26),
+    lower: Offset(21, 74),
+    bow: 1,
+  ),
+  // ── tighter: 34 → 66, a properly acute V ────────────────────────────────
+  _Geo(
+    label: 'X1 · tighter, straight',
+    note: 'ends closer still',
+    stroke: 14.4,
+    upper: Offset(32, 34),
+    lower: Offset(29.5, 66),
+  ),
+  _Geo(
+    label: 'X2 · tighter + long',
+    note: 'acute, and reaching left',
+    stroke: 14.4,
+    upper: Offset(20, 34),
+    lower: Offset(17, 66),
+  ),
+  _Geo(
+    label: 'X3 · tighter + long, curved',
+    note: 'the same, bowed toward',
+    stroke: 14.4,
+    upper: Offset(20, 34),
+    lower: Offset(17, 66),
+    bow: 1,
+  ),
+  _Geo(
+    label: 'A · shipped',
+    note: 'stroke 12, straight, clear',
+    stroke: 12,
+    upper: Offset(32, 20.5),
+    lower: Offset(29.5, 81),
   ),
 ];
 
@@ -182,45 +239,29 @@ class _Sheet extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Tile 0: the REAL widget, so the painter below is checkable.
-              _Tile(
-                label: 'real KvMark',
-                note: 'the shipped widget itself',
-                child: const KvMark(size: 152, halo: false),
-              ),
-              for (final geo in _candidates.take(4))
-                _Tile(
-                  label: geo.label,
-                  note: '${geo.note} · ${geo.upperAngle.toStringAsFixed(1)}°',
-                  child: _Candidate(geo: geo, size: 152),
-                ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final geo in _candidates.skip(4))
-                _Tile(
-                  label: geo.label,
-                  note: '${geo.note} · ${geo.upperAngle.toStringAsFixed(1)}°',
-                  child: _Candidate(geo: geo, size: 152),
-                ),
-            ],
-          ),
+          for (var row = 0; row < 3; row++) ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final geo in _candidates.skip(row * 5).take(5))
+                  _Tile(
+                    label: geo.label,
+                    note: '${geo.note} · ${geo.upperAngle.toStringAsFixed(1)}°',
+                    child: _Candidate(geo: geo, size: 140),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 14),
+          ],
           const Spacer(),
-          // The whole set at the smallest canon size, magnified. D-250's reason
-          // for a flat stroke was that 24 dp is where the gap dies; now that
-          // contact is WANTED, 24 dp is where it can blob.
+          // Every candidate at the smallest canon size: 24 dp is where a
+          // contact point can blob.
           Row(
             children: [
-              _Small(
-                label: '24 dp ×4',
-                child: const KvMark(size: 24, halo: false),
-              ),
+              // The REAL widget beside the painter's copy of it: if `A` and
+              // `real` differ, this sheet is lying and nothing on it can be
+              // judged (L157).
+              _Small(label: 'real', child: const KvMark(size: 24, halo: false)),
               for (final geo in _candidates)
                 _Small(
                   label: geo.label.split(' · ').first,
@@ -241,7 +282,7 @@ class _Tile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 184,
+    width: 222,
     child: Column(
       children: [
         child,
@@ -261,7 +302,7 @@ class _Small extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 101,
+    width: 74,
     child: Column(
       children: [
         SizedBox(
@@ -348,7 +389,7 @@ class _GeoPainter extends CustomPainter {
       p,
     );
     c.drawPath(_arm(geo.upper, _Geo.apex, geo.bow, k), p);
-    c.drawPath(_arm(_Geo.apex, geo.lower, geo.bow, k), p);
+    c.drawPath(_arm(_Geo.apex, geo.lower, geo.bowLower, k), p);
   }
 
   @override

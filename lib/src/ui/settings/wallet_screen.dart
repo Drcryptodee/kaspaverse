@@ -534,21 +534,25 @@ class _WalletScreenState extends State<WalletScreen> {
         KvExpands(
           rest: _listMax,
           reading: _tallCap(MediaQuery.sizeOf(context).height),
-          child: KvReadingArea(
-            child: ListView.builder(
-              shrinkWrap: true,
-              padding: EdgeInsets.zero,
-              // Below the cap nothing scrolls, so the page's own scroll keeps
-              // working over the card; at the cap this list takes the drag.
-              physics: const ClampingScrollPhysics(),
-              itemCount: shown.length,
-              itemBuilder: (context, i) => Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (i > 0) const KvHairline(),
-                  _addressRow(shown[i]),
-                ],
+          child: KvScrollEdge(
+            // The card's own ground, not the page's.
+            ground: KvColor.plate,
+            child: KvReadingArea(
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                // Below the cap nothing scrolls, so the page's own scroll keeps
+                // working over the card; at the cap this list takes the drag.
+                physics: const ClampingScrollPhysics(),
+                itemCount: shown.length,
+                itemBuilder: (context, i) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (i > 0) const KvHairline(),
+                    _addressRow(shown[i]),
+                  ],
+                ),
               ),
             ),
           ),

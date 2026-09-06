@@ -21,6 +21,7 @@ import 'package:kaspaverse/src/ui/roadmap_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_reading.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
@@ -1270,6 +1271,23 @@ void main() {
         atRest,
         reason: 'resting at the top is the one position that means done',
       );
+    });
+
+    testWidgets('the address card wears the house scroll edge, on its own '
+        'ground', (tester) async {
+      await pumpWallet(tester, listAddresses: () async => addressList());
+      final edge = find.byType(KvScrollEdge);
+      expect(edge, findsOneWidget);
+      expect(
+        tester.widget<KvScrollEdge>(edge).ground,
+        KvColor.plate,
+        reason:
+            'a card is `plate` and a page is `abyss`; a fade to the wrong '
+            'ground is a smear',
+      );
+      // WHEN it shows is the part's own business and is tested there
+      // (`test/kv_reading_test.dart`) — testing it again through a screen
+      // would assert the same rule twice and pin it to this fixture.
     });
 
     testWidgets('a page scroll does NOT resize the card — only its own list '

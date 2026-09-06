@@ -163,6 +163,40 @@ class _KvReadingInherited extends InheritedWidget {
   bool updateShouldNotify(_KvReadingInherited old) => old.level != level;
 }
 
+/// **The system back gesture undoes a reading level before it leaves the
+/// screen.**
+///
+/// A section that has taken the screen is a state the user got into, so it is
+/// a state back should get them out of — and on Android that is the gesture
+/// people reach for first. Wrap the screen (not the section) in this.
+///
+/// It returns to [KvReadingLevel.rest] in one step, whatever level it was at,
+/// because that is what every other way back does; and it changes **nothing
+/// else**, so whichever tab or filter the section was showing is still showing
+/// when the band comes back. The founder asked for exactly that: *"using the
+/// phone's back button goes back to the less but still showing where the user
+/// is, whether tokens or activity."*
+class KvReadingBackGesture extends StatelessWidget {
+  const KvReadingBackGesture({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final reading = KvReadingScope.of(context);
+    final atRest = reading.value == KvReadingLevel.rest;
+    return PopScope(
+      // At rest there is nothing to undo, so back means back and the route
+      // pops as it always did.
+      canPop: atRest,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) reading.done();
+      },
+      child: child,
+    );
+  }
+}
+
 /// Wraps the scrollable whose reading drives the screen.
 ///
 /// It reports; it decides nothing about layout. What gives way, and by how
@@ -288,6 +322,125 @@ class KvExpands extends StatelessWidget {
       curve: KvMotion.out,
       constraints: BoxConstraints(maxHeight: cap),
       child: child,
+    );
+  }
+}
+
+/// **A fade at the edge of a scroll, and only while there is more past it.**
+///
+/// The founder asked for it (2026-09-06): *"what can we do to signify when a
+/// scrollable container has more contents below to scroll? … it's just a bottom
+/// part that signifies more scrollable contents below."*
+///
+/// ## It is an amendment to BG-4, said out loud rather than slipped in
+///
+/// BG-4 reads *"No gradient, bevel or specular highlight anywhere"* and *"never
+/// a blur inside a scroll"*. That clause is aimed at **decoration** — surface
+/// treatments that fake depth the tone ladder already carries — and every
+/// example it gives is one. This is not that: it is the only mark on the screen
+/// that answers *is there more?*, it appears **only when the answer is yes**,
+/// and it is painted in the container's **own ground colour**, so it adds no
+/// hue, no light and no material. A blur was the other candidate and stays
+/// refused: BG-4's blur clause is about cost and legibility inside a moving
+/// list, and both objections hold.
+///
+/// The narrower reading BG-4 now carries: *no gradient as **decoration***.
+/// A gradient that is the only honest way to state a fact about the content is
+/// information, and information is what this system spends ink on.
+///
+/// ## Honest, or absent
+///
+/// It is driven by the scroll's own metrics and eased in and out (BG-24), so a
+/// list with nothing below it has no fade, a list scrolled to its end loses it,
+/// and a list that grows under a live update gains one. A permanent fade
+/// painted "because lists scroll" would be the decoration BG-4 forbids and a
+/// claim BG-8 forbids — it would say *there is more* over the last row.
+class KvScrollEdge extends StatefulWidget {
+  const KvScrollEdge({
+    super.key,
+    required this.child,
+    required this.ground,
+    this.height = 28,
+  });
+
+  final Widget child;
+
+  /// The colour the fade resolves to — **the container's own ground**, passed
+  /// rather than guessed, because a card is `plate` and a page is `abyss` and
+  /// a fade to the wrong one is a smear.
+  final Color ground;
+
+  /// How tall the fade is. 28 dp is a little under half a row: enough to read
+  /// as an edge, not enough to hide the row it sits over.
+  final double height;
+
+  /// Below this many dp left to scroll, the edge is gone — a couple of pixels
+  /// of remaining extent is the end of the list, not more content.
+  static const double _slack = 4;
+
+  @override
+  State<KvScrollEdge> createState() => _KvScrollEdgeState();
+}
+
+class _KvScrollEdgeState extends State<KvScrollEdge> {
+  bool _more = false;
+
+  bool _update(ScrollMetrics m) {
+    final more =
+        m.axis == Axis.vertical &&
+        m.maxScrollExtent - m.pixels > KvScrollEdge._slack;
+    if (more != _more) {
+      // The metrics arrive during layout, so the rebuild waits for the frame
+      // to finish rather than setting state inside it.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && more != _more) setState(() => _more = more);
+      });
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return NotificationListener<ScrollMetricsNotification>(
+      onNotification: (n) => _update(n.metrics),
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (n) => n.depth == 0 ? _update(n.metrics) : false,
+        child: Stack(
+          children: [
+            widget.child,
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: widget.height,
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : KvMotion.fast,
+                  curve: KvMotion.curve,
+                  opacity: _more ? 1 : 0,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          widget.ground.withValues(alpha: 0),
+                          widget.ground,
+                        ],
+                        // Weighted late, so the row under it stays readable
+                        // for most of the band and only the last few dp go.
+                        stops: const [0, 0.85],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -721,7 +721,8 @@ class _HomeScreenState extends State<HomeScreen> {
     // already there. Calling `animateTo` from that callback also asserts
     // inside the framework (`activity!.isScrolling`), because the level falls
     // during the very drag that lowers it.
-    builder: (context, reading) => _moneyBody(context, metrics),
+    builder: (context, reading) =>
+        KvReadingBackGesture(child: _moneyBody(context, metrics)),
   );
 
   Widget _moneyBody(BuildContext context, KvWindowMetrics metrics) {
@@ -856,9 +857,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 // no longer has two.
                 // `All` asks for the whole thing; the rows' own scroll asks
                 // for one step. Both go through the same controller.
-                onOpenAll: _reading.value == KvReadingLevel.full
-                    ? null
-                    : _openActivity,
+                // One control, two acts — and it renames itself here, which
+                // it deliberately does not do for a scroll. The founder asked
+                // for the word back once `All` could no longer be tapped
+                // again: *"why not add a less button?"* At `full` the only
+                // other way home is scrolling a long list to its top, and a
+                // way out you have to discover is not a way out (§8).
+                onOpenAll: _openActivity,
+                atFull: _reading.value == KvReadingLevel.full,
                 reading: _reading,
                 onOpen: widget.detailRoute == null
                     ? null
@@ -1013,7 +1019,11 @@ class _HomeScreenState extends State<HomeScreen> {
   /// their top.
   void _openActivity() {
     KvHaptic.selection();
-    _reading.openFully();
+    if (_reading.value == KvReadingLevel.full) {
+      _reading.done();
+    } else {
+      _reading.openFully();
+    }
   }
 }
 
@@ -1392,6 +1402,7 @@ class _Ledger extends StatefulWidget {
     this.onOpen,
     this.onRefresh,
     this.onOpenAll,
+    this.atFull = false,
     this.reading,
   });
 
@@ -1426,9 +1437,11 @@ class _Ledger extends StatefulWidget {
   /// Pull-to-refresh on the rows. Null ⇒ no pull.
   final Future<void> Function()? onRefresh;
 
-  /// `All` — opens the feed on its own screen. Null ⇒ the action is absent
-  /// (this IS that screen).
+  /// `All` / `Less` — takes the whole band, or gives it back.
   final VoidCallback? onOpenAll;
+
+  /// The band is fully yielded, so the action offers the way back.
+  final bool atFull;
 
   /// The screen's reading level (`KvReading`). Null ⇒ nothing above this card
   /// yields to a scroll, so the rows do not report.
@@ -1484,7 +1497,10 @@ class _LedgerState extends State<_Ledger> {
             ),
           ),
           if (widget.onOpenAll != null)
-            _QuietAction(label: 'All', onTap: widget.onOpenAll!),
+            _QuietAction(
+              label: widget.atFull ? 'Less' : 'All',
+              onTap: widget.onOpenAll!,
+            ),
         ],
       ),
     );
@@ -1529,30 +1545,34 @@ class _LedgerState extends State<_Ledger> {
               ),
             ),
           )
-        : KvReadingArea(
-            // **The house's reading room** (`KvReading`, D-289): a forward
-            // drag inside the rows advances the screen one step, and resting
-            // at their top returns it. What gives way is the caller's — here
-            // the money plate's clock, and its whole band at `full`.
-            //
-            // **The ledger's ROWS dim as a region while the link is not
-            // live** (D-276, founder on glass 2026-09-05: the activity did
-            // not say *not connected* while the balance above it did).
-            // `opacityStaleRegion`, not the balance's 0.45 — the rows are
-            // 13–16 dp and BG-8 forbids dimming small text below BG-14's
-            // floor; the token carries the recomputed ladder. Eased, so a
-            // link that flaps does not blink the list (BG-24).
-            //
-            // **The rows, not the pane** (`ux-auditor`, D-277): the empty
-            // state and the tokens seat are not chain-derived readings and a
-            // socket drop says nothing about them.
-            child: _HomeScreenState._refreshable(
-              widget.onRefresh,
-              AnimatedOpacity(
-                opacity: widget.stale ? KvFreshness.opacityStaleRegion : 1,
-                duration: KvMotion.calm,
-                curve: KvMotion.curve,
-                child: _rows(),
+        : KvScrollEdge(
+            // The card's ground — the rows sit on `plate`.
+            ground: KvColor.plate,
+            child: KvReadingArea(
+              // **The house's reading room** (`KvReading`, D-289): a forward
+              // drag inside the rows advances the screen one step, and resting
+              // at their top returns it. What gives way is the caller's — here
+              // the money plate's clock, and its whole band at `full`.
+              //
+              // **The ledger's ROWS dim as a region while the link is not
+              // live** (D-276, founder on glass 2026-09-05: the activity did
+              // not say *not connected* while the balance above it did).
+              // `opacityStaleRegion`, not the balance's 0.45 — the rows are
+              // 13–16 dp and BG-8 forbids dimming small text below BG-14's
+              // floor; the token carries the recomputed ladder. Eased, so a
+              // link that flaps does not blink the list (BG-24).
+              //
+              // **The rows, not the pane** (`ux-auditor`, D-277): the empty
+              // state and the tokens seat are not chain-derived readings and a
+              // socket drop says nothing about them.
+              child: _HomeScreenState._refreshable(
+                widget.onRefresh,
+                AnimatedOpacity(
+                  opacity: widget.stale ? KvFreshness.opacityStaleRegion : 1,
+                  duration: KvMotion.calm,
+                  curve: KvMotion.curve,
+                  child: _rows(),
+                ),
               ),
             ),
           );
