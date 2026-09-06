@@ -332,21 +332,25 @@ class KvExpands extends StatelessWidget {
 /// scrollable container has more contents below to scroll? … it's just a bottom
 /// part that signifies more scrollable contents below."*
 ///
-/// ## It is an amendment to BG-4, said out loud rather than slipped in
+/// ## Why a gradient is lawful here — BG-4, as narrowed (D-290 · D-292)
 ///
-/// BG-4 reads *"No gradient, bevel or specular highlight anywhere"* and *"never
-/// a blur inside a scroll"*. That clause is aimed at **decoration** — surface
-/// treatments that fake depth the tone ladder already carries — and every
-/// example it gives is one. This is not that: it is the only mark on the screen
-/// that answers *is there more?*, it appears **only when the answer is yes**,
-/// and it is painted in the container's **own ground colour**, so it adds no
-/// hue, no light and no material. A blur was the other candidate and stays
-/// refused: BG-4's blur clause is about cost and legibility inside a moving
-/// list, and both objections hold.
+/// BG-4 reads **no gradient as DECORATION**, ratified 2026-09-06 after this
+/// part was proposed as a divergence rather than slipped in. The clause always
+/// meant decoration — every example it gives is a surface treatment faking
+/// depth the tone ladder already carries — and the rule now carries its own
+/// test:
 ///
-/// The narrower reading BG-4 now carries: *no gradient as **decoration***.
-/// A gradient that is the only honest way to state a fact about the content is
-/// information, and information is what this system spends ink on.
+/// > *Would this mark still be drawn if the content changed so that it were
+/// > false?* If yes, it is decoration and BG-4 forbids it. If it would
+/// > disappear, it is a reading and **BG-8** owns it.
+///
+/// This disappears: it is the only mark on the screen that answers *is there
+/// more?*, it is painted in the container's **own ground colour** so it adds no
+/// hue, no light and no material, and a list with nothing below it has none.
+///
+/// **The blur clause is untouched** and a blur stays refused: its objections are
+/// cost and legibility inside a moving list, and neither depended on the
+/// gradient clause.
 ///
 /// ## Honest, or absent
 ///
