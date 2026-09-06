@@ -209,13 +209,18 @@ class _AboutScreenState extends State<AboutScreen> {
                       ),
                     ],
                   ),
+                  // **600, not 700** (founder, on glass 2026-09-06: *"i want
+                  // you to make KaspaVerse have less weight — the way it was
+                  // written that i liked didn't have this much boldness"*).
+                  // The name is an identity, not a headline; at 700 beside a
+                  // 40 dp mark it was shouting over the thing it names.
                   style: TextStyle(
                     fontFamily: KvFont.ui,
                     fontSize: 22,
                     height: 26 / 22,
                     letterSpacing: -0.2,
-                    fontWeight: FontWeight.w700,
-                    fontVariations: KvWeight.w700,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
                     color: KvColor.ink,
                   ),
                 ),

@@ -835,6 +835,7 @@ void main() {
       Future<List<WalletAddressDto>> Function()? listAddresses,
       Future<ConsolidateEstimateDto> Function()? consolidateEstimate,
       Widget Function(String address, String label)? receiveRoute,
+      Listenable? coinsChanged,
       double height = 2400,
     }) async {
       tester.view.physicalSize = Size(393 * 3, height * 3);
@@ -850,6 +851,7 @@ void main() {
                   () async => 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
               deepScan: deepScan ?? () async => scanned,
               listAddresses: listAddresses,
+              coinsChanged: coinsChanged,
               receiveRoute: receiveRoute,
               consolidateEstimate: consolidateEstimate,
               consolidate: consolidate,
@@ -1180,6 +1182,50 @@ void main() {
       final toolsAfter = tester.getTopLeft(find.text('Merge coins').first).dy;
       expect(toolsAfter - toolsBefore, lessThan(card.height));
       expect(toolsAfter, lessThan(800));
+    });
+
+    testWidgets('the list re-reads when the coins move, rather than going '
+        'stale under someone watching it', (tester) async {
+      // The founder sent to one of his own addresses while this screen was
+      // open and read the old figure as a derivation bug (2026-09-06). It was
+      // not — the chain agreed with the number — but a screen that names
+      // balances and never revisits them is one send away from lying.
+      final coins = ValueNotifier<int>(0);
+      addTearDown(coins.dispose);
+      var reads = 0;
+      await pumpWallet(
+        tester,
+        coinsChanged: coins,
+        listAddresses: () async {
+          reads++;
+          // The second read finds the money somewhere else.
+          return reads == 1
+              ? addressList()
+              : [
+                  for (final a in addressList())
+                    if (a.index == 1)
+                      WalletAddressDto(
+                        index: 1,
+                        address: a.address,
+                        balanceSompi: BigInt.from(108200000),
+                        lockedSompi: BigInt.zero,
+                        settling: false,
+                      )
+                    else
+                      a,
+                ];
+        },
+      );
+      expect(find.text('Receive 01'), findsNothing, reason: 'empty at first');
+
+      coins.value = 1;
+      await tester.pumpAndSettle();
+      expect(reads, 2, reason: 'a coin move re-reads the list');
+      expect(
+        find.text('Receive 01'),
+        findsOneWidget,
+        reason: 'and the funded address appears without leaving the screen',
+      );
     });
 
     testWidgets('the card GROWS to meet a reader and returns when they stop', (

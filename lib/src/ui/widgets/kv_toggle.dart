@@ -168,7 +168,14 @@ class KvToggle extends StatelessWidget {
                         height: thumb,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: on ? KvColor.abyss : KvColor.inkMeta,
+                          // **`okTint` when on, not `abyss`** (founder, on
+                          // glass 2026-09-06). The knob sits on the `ok`
+                          // track, and the page's own black under a green
+                          // track reads as a hole punched in the control;
+                          // `okTint` is the deep green that belongs to that
+                          // surface, so the knob reads as part of the switch
+                          // rather than as a gap in it.
+                          color: on ? KvColor.okTint : KvColor.inkMeta,
                         ),
                       ),
                     ),

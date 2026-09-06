@@ -234,6 +234,7 @@ WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
         receiveAddress: vaultReceiveAddress,
         deepScan: deepScan,
         listAddresses: listAddresses,
+        coinsChanged: WalletService.instance.mature,
         // The list hands over the address it drew, so the QR is always the row
         // the user tapped — never a re-derivation that could answer with a
         // different one.

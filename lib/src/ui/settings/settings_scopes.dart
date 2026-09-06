@@ -61,6 +61,7 @@ class WalletSettingsScope {
     required this.receiveAddress,
     required this.deepScan,
     this.listAddresses,
+    this.coinsChanged,
     this.receiveRoute,
     this.consolidate,
     this.consolidateEstimate,
@@ -83,6 +84,15 @@ class WalletSettingsScope {
   /// forever, or an empty card over a funded wallet, would both say something
   /// false about the user's money (§8).
   final Future<List<WalletAddressDto>> Function()? listAddresses;
+
+  /// Fires when the wallet's coins may have moved, so the address list can
+  /// re-read rather than going stale under a user who is watching it.
+  ///
+  /// **The mature balance, not a clock.** A snapshot tick fires on every
+  /// stream frame; the balance changes only when coins actually move — and a
+  /// move is the only thing that can change what an address holds. A self-send
+  /// between our own addresses still moves it, because it pays a fee.
+  final Listenable? coinsChanged;
 
   /// Opens Receive over **one** address — the list hands it the address the
   /// user tapped, so the QR is never a different address than the row.

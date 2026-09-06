@@ -365,7 +365,35 @@ class _AddressRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: KvSpace.sm),
-          const KvGlyphIcon(KvGlyph.copy, size: 18, tone: KvColor.inkMeta),
+          // **The mark is a control, so it answers a tap** (founder, on glass
+          // 2026-09-06: *"the copy icon doesn't work, tapping the address card
+          // works"*). It was drawn as decoration beside a tappable address —
+          // which is the one arrangement guaranteed to be tried: a copy glyph
+          // is the most recognisable control on the surface, and it was the
+          // only thing here that did nothing. Its own 44 dp target (BG-12),
+          // not the row's, so selecting the address by dragging across it
+          // still belongs to `KvAddress`.
+          Semantics(
+            button: true,
+            label: 'Copy address',
+            child: ExcludeSemantics(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onCopy,
+                child: const SizedBox(
+                  width: KvSpace.iconButton,
+                  height: KvSpace.iconButton,
+                  child: Center(
+                    child: KvGlyphIcon(
+                      KvGlyph.copy,
+                      size: 18,
+                      tone: KvColor.inkMeta,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

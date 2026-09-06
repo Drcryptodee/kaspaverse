@@ -121,6 +121,7 @@ class _WalletScreenState extends State<WalletScreen> {
   /// answer; the card keeps its footprint either way (BG-20).
   List<WalletAddressDto>? _addresses;
   bool _addressesFailed = false;
+  bool _readingAddresses = false;
 
   /// `All` and `Show` are the same fact, so they are the same field.
   bool _showAll = false;
@@ -155,13 +156,36 @@ class _WalletScreenState extends State<WalletScreen> {
     _readAddress();
     _readAddresses();
     _readEstimate();
+    widget.scope.coinsChanged?.addListener(_onCoinsMoved);
+  }
+
+  @override
+  void dispose() {
+    widget.scope.coinsChanged?.removeListener(_onCoinsMoved);
+    super.dispose();
+  }
+
+  /// The coins moved, so both readings on this screen are stale.
+  ///
+  /// **Why this exists.** The list read once, on open. The founder sent to one
+  /// of his own addresses while looking at it and read the old figure as a
+  /// derivation bug (2026-09-06) — it was not, the chain agreed with the
+  /// number, but a screen that names balances and never revisits them is one
+  /// send away from lying anyway.
+  void _onCoinsMoved() {
+    unawaited(_readAddresses());
+    unawaited(_readEstimate());
   }
 
   /// The list. Absent seam ⇒ nothing is asked and the card falls back to the
   /// one address the wallet can always answer for.
   Future<void> _readAddresses() async {
     final list = widget.scope.listAddresses;
-    if (list == null) return;
+    // One at a time: the notifier can fire twice inside one settle, and two
+    // derivations of the same window racing to `setState` is two answers for
+    // one question.
+    if (list == null || _readingAddresses) return;
+    _readingAddresses = true;
     try {
       final addresses = await list();
       if (mounted) {
@@ -172,6 +196,8 @@ class _WalletScreenState extends State<WalletScreen> {
       }
     } catch (_) {
       if (mounted) setState(() => _addressesFailed = true);
+    } finally {
+      _readingAddresses = false;
     }
   }
 

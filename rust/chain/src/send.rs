@@ -2582,47 +2582,56 @@ fn search_minimum(
 /// function: 1.00 and 1.05 KAS refused, 1.06 built — 60 steps up.
 const NEAREST_STEPS: u32 = 64;
 
-/// The amount closest to `amount` that this wallet can actually build,
-/// **searched outward in both directions** — the number a storage-mass refusal
-/// owes a user who has just been told their amount does not fit.
+/// The amounts nearest `amount` that this wallet can actually build — **the
+/// closest below it and the closest above it**, each `None` when the search
+/// finds none within [`NEAREST_STEPS`].
 ///
-/// **Why both directions.** The obvious reading of a change-side refusal is
-/// *send less* — bigger change, less dust. It is not reliable, and the founder
-/// disproved it on glass (2026-09-06): 1.00 and 1.05 KAS refused from a 22.81
-/// KAS wallet, and **1.06 went through**. The spend order takes the smallest
-/// coins first, so an amount just under a coin's value leaves that coin's
-/// remainder as dust, while an amount that consumes it exactly leaves no change
-/// at all. The nearest buildable amount is as often above as below.
+/// **Why both, and not the nearest of the two.** The first cut returned one
+/// number, whichever side won, and the founder read it and asked for the other:
+/// *"it works and says the nearest number to send is 0.978; it should also say
+/// the nearest number that can be sent that is ABOVE the value i want to
+/// send."* He is right, and the reason is that the two answers mean different
+/// things. Below is *"settle for less"*; above is *"pay slightly more and it
+/// goes"* — and a user who typed 1 KAS because they meant *about a KAS* will
+/// often prefer the second. Naming one and hiding the other makes the wallet
+/// look like it has one grudging answer.
 ///
 /// **Why a walk and not a bisection.** Sendability is not monotone: KIP-9's bar
-/// is computed over the whole shape, so the buildable set has holes and an
+/// is computed over the whole transaction, so the buildable set has holes and an
 /// amount refused between two that build is ordinary. Bisection assumes one
 /// boundary and would step over a band.
 ///
-/// Steps outward one precision unit at a time, testing the lower side first —
-/// a smaller send is the more conservative suggestion where both are equally
-/// close. Bounded below by `floor` (under it a different refusal and a
-/// different sentence own the case) and above by `ceiling` (never suggest more
-/// than the wallet holds). `None` within [`NEAREST_STEPS`] ⇒ the caller
-/// degrades to copy that names no direction, and never guesses.
+/// The lower side is floored at `floor` — under it a different refusal and a
+/// different sentence own the case — and the upper side is ceilinged at the free
+/// balance, because a suggestion is a recommendation and the reserved tail is
+/// not ours to recommend ([`maximum_sendable`] gives the reasoning).
 fn search_nearest_buildable(
     mut probe: impl FnMut(u64) -> Result<ProbeOutcome>,
     amount: u64,
     floor: u64,
     ceiling: u64,
-) -> Result<Option<u64>> {
+) -> Result<(Option<u64>, Option<u64>)> {
+    let mut below = None;
+    let mut above = None;
     for step in 1..=NEAREST_STEPS {
-        let delta = PROBE_PRECISION_SOMPI.saturating_mul(step as u64);
-        let below = amount.saturating_sub(delta);
-        if below > floor && probe(below)? == ProbeOutcome::Builds {
-            return Ok(Some(below));
+        if below.is_some() && above.is_some() {
+            break;
         }
-        let above = amount.saturating_add(delta);
-        if above <= ceiling && probe(above)? == ProbeOutcome::Builds {
-            return Ok(Some(above));
+        let delta = PROBE_PRECISION_SOMPI.saturating_mul(step as u64);
+        if below.is_none() {
+            let candidate = amount.saturating_sub(delta);
+            if candidate > floor && probe(candidate)? == ProbeOutcome::Builds {
+                below = Some(candidate);
+            }
+        }
+        if above.is_none() {
+            let candidate = amount.saturating_add(delta);
+            if candidate <= ceiling && probe(candidate)? == ProbeOutcome::Builds {
+                above = Some(candidate);
+            }
         }
     }
-    Ok(None)
+    Ok((below, above))
 }
 
 fn search_maximum(
@@ -2841,8 +2850,8 @@ impl WalletEngine {
         search_maximum(probe, anchor, balance)
     }
 
-    /// The amount nearest `amount_sompi` that builds — see
-    /// [`search_nearest_buildable`] for why it searches both ways.
+    /// The amounts nearest `amount_sompi` that build, `(below, above)` — see
+    /// [`search_nearest_buildable`] for why both are returned.
     ///
     /// The same context, order and change address a real send would use, so
     /// what it hands back is an amount the Generator actually built and not an
@@ -2857,7 +2866,7 @@ impl WalletEngine {
         exclude: &[Address],
         amount_sompi: u64,
         floor: u64,
-    ) -> Result<Option<u64>> {
+    ) -> Result<(Option<u64>, Option<u64>)> {
         let context = self.context();
         let mature = mature_snapshot_sync(&context)?;
         let ceiling = free_balance(&mature, exclude);
@@ -5111,9 +5120,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            found,
+            found.0,
             Some(99_900_000),
-            "the lower side is tested first and 0.999 builds, so it wins"
+            "the closest below: 0.999 is outside the hole"
+        );
+        assert_eq!(
+            found.1,
+            Some(105_600_000),
+            "and the closest above, which is where he actually found it"
         );
     }
 
@@ -5135,7 +5149,8 @@ mod tests {
             2_281_111_322,
         )
         .unwrap();
-        assert_eq!(found, Some(105_600_000), "0.001 above the hole's top");
+        assert_eq!(found.0, None, "the hole runs past the search bound below");
+        assert_eq!(found.1, Some(105_600_000), "0.001 above the hole's top");
     }
 
     #[test]
@@ -5155,8 +5170,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            found, None,
-            "a suggestion above the balance is not a suggestion"
+            found,
+            (None, None),
+            "nothing below builds, and a suggestion above the balance is not a \
+             suggestion"
         );
     }
 
@@ -5170,8 +5187,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            found, None,
-            "below the floor a different sentence owns the case"
+            found,
+            (None, None),
+            "below the floor a different sentence owns the case, and nothing \
+             above builds either"
         );
     }
 
