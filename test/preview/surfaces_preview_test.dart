@@ -142,7 +142,7 @@ List<ActivityRecord> _activity() => [
   ),
 ];
 
-Widget _home() => HomeScreen(
+Widget _home({List<ActivityRecord>? activity}) => HomeScreen(
   chain: ChainScope(
     connected: ValueNotifier(true),
     virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
@@ -157,7 +157,7 @@ Widget _home() => HomeScreen(
     maturity: kTestMaturity,
     mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
     pending: ValueNotifier<BigInt?>(BigInt.zero),
-    activity: ValueNotifier(_activity()),
+    activity: ValueNotifier(activity ?? _activity()),
     syncing: ValueNotifier(false),
     utxoIndexMissing: ValueNotifier(false),
   ),
@@ -258,6 +258,43 @@ Widget _shell(Widget home, {int selected = 0}) => KvNav(
 
 /// Summons the drawer the way a thumb does — the `compact` posture, and a
 /// no-op in the classes where navigation already stands.
+/// A feed long enough that the rows actually scroll.
+List<ActivityRecord> _longActivity() {
+  final base = _activity();
+  return [
+    for (var i = 0; i < 9; i++)
+      for (final r in base)
+        ActivityRecord(
+          txid: '${i.toString().padLeft(2, '0')}${r.txid.substring(2)}',
+          valueSompi: r.valueSompi,
+          unixtimeMsec: r.unixtimeMsec,
+          blockDaaScore: r.blockDaaScore,
+          acceptedDaaScore: r.acceptedDaaScore,
+          maturity: r.maturity,
+          direction: r.direction,
+          isCoinbase: r.isCoinbase,
+          stalled: r.stalled,
+          counterpartyAddress: r.counterpartyAddress,
+          feeSompi: r.feeSompi,
+        ),
+  ];
+}
+
+Future<void> _openAll(WidgetTester tester) async {
+  await tester.tap(find.text('All'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.enter);
+}
+
+/// Drag the rows so the plate yields its clock.
+Future<void> _readLedger(WidgetTester tester) async {
+  await tester.drag(find.byType(Scrollable).last, const Offset(0, -120));
+  await tester.pump();
+  await tester.pump(KvMotion.calm);
+  await tester.pump(KvMotion.calm);
+}
+
 Future<void> _summonDrawer(WidgetTester tester) async {
   final avatar = find.bySemanticsLabel('Open navigation');
   if (avatar.evaluate().isEmpty) return;
@@ -762,6 +799,17 @@ void main() {
     framedSurface('home__funded', () => _shell(_home()));
     framedSurface('home__status', () => _shell(_homeStatus()));
     framedSurface('home__drawer', () => _shell(_home()), act: _summonDrawer);
+    // `All` — the feed on its own surface (founder, 2026-09-06), and what a
+    // scroll costs: the chain clock, and nothing else.
+    framedSurface('home__activity_all', () => _shell(_home()), act: _openAll);
+    // **Enough rows to scroll.** With the two-row feed the drag produces no
+    // downward delta, nothing yields, and the frame shows the resting state
+    // under a name claiming otherwise — a picture that lies (L125).
+    framedSurface(
+      'home__reading',
+      () => _shell(_home(activity: _longActivity())),
+      act: _readLedger,
+    );
     // A drawer destination without a feature behind it (D-261).
     framedSurface(
       'coming_soon_page',

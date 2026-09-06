@@ -380,9 +380,16 @@ class _AddressRow extends StatelessWidget {
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: onCopy,
+                // 24, not the 44 it first got — **founder's call on glass
+                // 2026-09-06**, and it is his to make: this is a convenience
+                // beside an address that is already tappable across its whole
+                // card, so the cost of a miss is a second tap and never a
+                // wrong send. The honest trade is written here rather than
+                // argued: 24 is under BG-12's 52, so on a small screen this
+                // glyph is the harder of the two ways to copy.
                 child: const SizedBox(
-                  width: KvSpace.iconButton,
-                  height: KvSpace.iconButton,
+                  width: KvSpace.l,
+                  height: KvSpace.l,
                   child: Center(
                     child: KvGlyphIcon(
                       KvGlyph.copy,

@@ -54,8 +54,9 @@ void main() {
     required BigInt sompi,
     required DateTime at,
     MaturityState maturity = MaturityState.confirmed,
+    String? txid,
   }) => ActivityRecord(
-    txid: 'a' * 64,
+    txid: txid ?? 'a' * 64,
     valueSompi: sompi,
     unixtimeMsec: BigInt.from(at.millisecondsSinceEpoch),
     blockDaaScore: BigInt.from(1000),
@@ -1131,6 +1132,99 @@ void main() {
         returnsNormally,
         reason: 'the last honest reading survives the owner',
       );
+    });
+  });
+  // ── `All`, and what a scroll costs (founder, on glass 2026-09-06) ────────
+
+  group('the feed asks for room from ABOVE, and `All` is a door', () {
+    List<ActivityRecord> manyRows() => [
+      for (var i = 0; i < 12; i++)
+        received(
+          sompi: BigInt.from(100000000 + i),
+          at: t0.subtract(Duration(minutes: i + 1)),
+          txid: '${i.toString().padLeft(2, '0')}${'a' * 62}',
+        ),
+    ];
+
+    testWidgets('`All` keeps its word and opens the feed on its own screen', (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        money(mature: BigInt.from(500000000), activity: manyRows()),
+      );
+
+      expect(find.text('All'), findsOneWidget);
+      expect(
+        find.text('Less'),
+        findsNothing,
+        reason: 'it is not a toggle any more — it is a door',
+      );
+
+      await tester.tap(find.text('All'));
+      // **Bounded pumps, never `pumpAndSettle`** — this surface never
+      // quiesces (the freshness ticker), and the route it opens carries the
+      // same live feed.
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+
+      // A surface of its own: its own top bar, and the home's balance gone.
+      expect(find.text('Activity'), findsWidgets);
+      expect(
+        findCapsLabel('Available balance'),
+        findsNothing,
+        reason: 'a feed someone asked to see all of is not a summary',
+      );
+      // And no `All` on the screen that IS all of it (§8).
+      expect(find.text('All'), findsNothing);
+
+      // Back through the route, not `pageBack()` — `KvTopBar` draws the
+      // house's own back mark and no Cupertino/Material one exists to find.
+      tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      expect(findCapsLabel('Available balance'), findsOneWidget);
+      expect(find.text('All'), findsOneWidget);
+    });
+
+    testWidgets('scrolling the rows spends the CHAIN CLOCK and nothing else, '
+        'and resting at the top buys it back', (tester) async {
+      await pump(
+        tester,
+        money(mature: BigInt.from(500000000), activity: manyRows()),
+      );
+
+      expect(find.text('DAA'), findsOneWidget);
+      expect(find.text('2,000'), findsOneWidget);
+
+      // The rows' own scroll — the room comes from above.
+      final rows = find.byType(Scrollable).last;
+      await tester.drag(rows, const Offset(0, -120));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+
+      expect(
+        find.text('DAA'),
+        findsNothing,
+        reason: 'the clock is the one ambient thing on the plate',
+      );
+      expect(
+        findCapsLabel('Available balance'),
+        findsOneWidget,
+        reason:
+            'the balance is NOT what a scroll costs — a user reading '
+            'their history has not stopped caring what they hold',
+      );
+
+      await tester.drag(rows, const Offset(0, 400));
+      await tester.pump();
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
+      expect(find.text('DAA'), findsOneWidget);
+      expect(find.text('2,000'), findsOneWidget);
     });
   });
 }

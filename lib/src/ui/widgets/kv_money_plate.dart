@@ -98,31 +98,68 @@ class KvMoneyPlate extends StatelessWidget {
             const SizedBox(height: KvSpace.s),
             figure,
             if (fiat != null) ...[const SizedBox(height: KvSpace.s), fiat!],
-            if (chainClock != null) ...[
-              // The render's one line inside the plate: 16 under the fiat,
-              // 14 over the clock, `hairline` the whole inner width (S1,
-              // measured at 264 dp on the 393 frame).
-              const SizedBox(height: KvSpace.m),
-              // **`width: double.infinity` is the whole fix.** The column is
-              // start-aligned, so a `SizedBox(height: 1)` with no width laid
-              // out at ZERO width and painted nothing — through `hairline`,
-              // then `controlEdge`, then two builds the founder looked at
-              // (D-263). Never a contrast problem; a geometry one. The tone
-              // is `controlEdge` (12% white): the render's own line measures
-              // `hairline`'s 7%, and the founder asked for one he can see.
-              const SizedBox(
-                height: 1,
-                width: double.infinity,
-                child: ColoredBox(color: KvColor.controlEdge),
-              ),
-              const SizedBox(height: KvSpace.s14),
-              chainClock!,
-            ],
+            // **The clock's whole seat opens and closes as one.**
+            // `chainClock: null` is not just "no clock" — it takes the rule
+            // and both gaps with it, because a rule under nothing is a line
+            // across the bottom of a plate and the 30 dp of air it sat in is
+            // 30 dp the ledger below could have had. The home screen passes
+            // null while its rows are being scrolled, and this is what makes
+            // the plate rise (founder, on glass 2026-09-06: *"it expands
+            // upwards and covers the DAA, balance still shows"*).
+            //
+            // `topCenter`, so the collapse runs upward from the plate's foot
+            // and the balance above it never moves; `double.infinity` on the
+            // closed box for D-263's reason — a start-aligned column lays a
+            // width-less box out at zero and the animation would snap.
+            AnimatedSize(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : KvMotion.calm,
+              curve: KvMotion.out,
+              alignment: Alignment.topCenter,
+              child: chainClock == null
+                  ? const SizedBox(width: double.infinity)
+                  : _ClockSeat(clock: chainClock!),
+            ),
           ],
         ),
       ),
     );
   }
+}
+
+/// The rule and the air the clock sits in — one object, so it cannot be drawn
+/// over an absent clock.
+class _ClockSeat extends StatelessWidget {
+  const _ClockSeat({required this.clock});
+
+  final Widget clock;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      // The render's one line inside the plate: 16 under the fiat,
+      // 14 over the clock, `hairline` the whole inner width (S1,
+      // measured at 264 dp on the 393 frame).
+      const SizedBox(height: KvSpace.m),
+      // **`width: double.infinity` is the whole fix.** The column is
+      // start-aligned, so a `SizedBox(height: 1)` with no width laid
+      // out at ZERO width and painted nothing — through `hairline`,
+      // then `controlEdge`, then two builds the founder looked at
+      // (D-263). Never a contrast problem; a geometry one. The tone
+      // is `controlEdge` (12% white): the render's own line measures
+      // `hairline`'s 7%, and the founder asked for one he can see.
+      const SizedBox(
+        height: 1,
+        width: double.infinity,
+        child: ColoredBox(color: KvColor.controlEdge),
+      ),
+      const SizedBox(height: KvSpace.s14),
+      clock,
+    ],
+  );
 }
 
 /// **The `short` collapse, and the only one there is** (BG-33).

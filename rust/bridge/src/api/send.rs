@@ -270,7 +270,8 @@ pub(crate) fn storage_mass_message(
             return format!(
                 "this amount leaves change too small to keep — the network \
                  anti-dust rule for your current coins. Nothing was sent — {} \
-                 or {} KAS works right now.",
+                 or {} KAS works right now, or use Send everything to empty \
+                 the wallet.",
                 kas_exact(below),
                 kas_exact(above)
             );
@@ -1043,6 +1044,11 @@ mod tests {
         assert!(msg.contains("0.978"), "the lower one: {msg}");
         assert!(msg.contains("1.06"), "and the upper one: {msg}");
         assert!(msg.contains("or"), "offered as a pair, not a range: {msg}");
+        assert!(
+            msg.contains("Send everything"),
+            "**all three ways out**, his own list: the lower amount, the \
+             higher one, and emptying the wallet (2026-09-06): {msg}"
+        );
         assert!(
             !msg.contains("and above"),
             "never a RANGE — the set has holes above too, so \"1.06 and above\" \
