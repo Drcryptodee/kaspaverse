@@ -7,12 +7,21 @@ import 'package:kaspaverse/src/rust/api/send.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
-import 'package:kaspaverse/src/ui/settings_screen.dart';
+import 'package:kaspaverse/src/ui/settings/about_screen.dart';
+import 'package:kaspaverse/src/ui/settings/security_screen.dart';
+import 'package:kaspaverse/src/ui/settings/settings_scopes.dart';
+import 'package:kaspaverse/src/ui/settings/settings_screen.dart';
+import 'package:kaspaverse/src/ui/settings/wallet_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
+import 'package:kaspaverse/src/ui/address_text.dart';
+import 'package:kaspaverse/src/ui/roadmap_screen.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
 import 'support/preview_harness.dart';
 import 'support/finders.dart';
@@ -42,15 +51,19 @@ void main() {
     ValueNotifier<String?>? pinnedNode,
     ValueNotifier<bool>? rateEnabled,
     bool withNetwork = true,
+    Future<void> Function()? lockNow,
+    Future<void> Function()? removeWallet,
   }) => SettingsScreen(
-    security: SecurityScope(
-      biometricStatus: biometricStatus ?? () async => 'ready',
-      pathAState: pathAState ?? () async => pathANone,
-      enroll: enroll ?? () async => true,
-      clearEnrollment: clear ?? () async {},
-      lockGraceSecs: grace ?? ValueNotifier(0),
-      setLockGraceSecs: setGrace ?? (_) async {},
+    security: securityScope(
+      biometricStatus: biometricStatus,
+      pathAState: pathAState,
+      enroll: enroll,
+      clear: clear,
+      grace: grace,
+      setGrace: setGrace,
+      lockNow: lockNow,
     ),
+    removeWallet: removeWallet,
     wallet: WalletSettingsScope(
       receiveAddress:
           receiveAddress ??
@@ -118,8 +131,12 @@ void main() {
 
       expect(find.text('Settings'), findsWidgets);
       // Every section the registry declares is on the glass.
-      for (final section in ['Security', 'Wallet', 'Network', 'About']) {
-        expect(findRuledLabel(section), findsOneWidget, reason: section);
+      // The root's two groups, and the four doors the drawer's users hunt.
+      for (final group in ['Wallet', 'App']) {
+        expect(findRuledLabel(group), findsOneWidget, reason: group);
+      }
+      for (final door in ['Security', 'Network', 'About']) {
+        expect(find.text(door), findsOneWidget, reason: door);
       }
       semantics.dispose();
     },
@@ -312,366 +329,789 @@ void main() {
     },
   );
 
-  testWidgets('the registry renders one row per declared entry', (
+  // ── `T1` · the root, as the render draws it ─────────────────────────────
+
+  testWidgets('the root names its two groups and every door in them', (
     tester,
   ) async {
-    final s = screen();
-    await pump(tester, s);
-    final state = tester.state<State<SettingsScreen>>(
-      find.byType(SettingsScreen),
-    );
-    // The registry IS the screen. If a row is declared it renders, and adding
-    // one later must stay an additive entry rather than a layout change.
-    final ids = [
-      for (final section
-          in (state as dynamic).registry() as List<SettingsSection>)
-        for (final row in section.rows) row.id,
-    ];
-    expect(
-      ids,
-      containsAll(<String>[
-        'biometric',
-        'lock-grace',
-        'receive-address',
-        'deep-scan',
-        'node-connection',
-        'version',
-        'signature',
-        'roadmap',
-      ]),
-    );
-    for (final title in [
-      'Fingerprint unlock',
-      'Lock when I leave',
-      'Receive address',
-      'Scan for more addresses',
-      'Node & connection',
-      'Version',
-      'App signature',
-      "What's coming",
-    ]) {
-      expect(find.text(title), findsOneWidget, reason: title);
+    await pump(tester, screen());
+    for (final group in ['Wallet', 'App']) {
+      expect(findRuledLabel(group), findsOneWidget, reason: group);
     }
+    for (final door in const [
+      'Security',
+      'Wallet',
+      'Network',
+      'Messages',
+      'Appearance',
+      'Notifications',
+      'Privacy',
+      'About',
+    ]) {
+      expect(find.text(door), findsOneWidget, reason: door);
+    }
+  });
+
+  testWidgets('every door states a condition — never a bare name', (
+    tester,
+  ) async {
+    // `T1`'s law: the sub-line IS the row's current state. A door that shows
+    // only its name is a door the user has to open to learn anything, which
+    // is the screen this group replaced.
+    await pump(tester, screen(grace: ValueNotifier(30)));
+    expect(find.textContaining('locks after 30 s'), findsOneWidget);
+    expect(find.textContaining('Public community nodes'), findsOneWidget);
+    expect(find.textContaining('KaspaVerse 1.0.0'), findsOneWidget);
+    for (final row in const [
+      'Messages',
+      'Appearance',
+      'Notifications',
+      'Privacy',
+    ]) {
+      final sub = find.descendant(
+        of: find.ancestor(of: find.text(row), matching: find.byType(KvRow)),
+        matching: find.byType(Text),
+      );
+      expect(
+        sub.evaluate().length,
+        greaterThanOrEqualTo(2),
+        reason: '$row states its name and nothing else',
+      );
+    }
+  });
+
+  testWidgets('the fingerprint fragment reports the STATE, not a bool', (
+    tester,
+  ) async {
+    // The scar, in one row: collapsed to on/off, "no fingerprint registered"
+    // and "no sensor on this phone" read identically, and only one of them is
+    // something the user can fix.
+    await pump(
+      tester,
+      screen(
+        biometricStatus: () async => 'ready',
+        pathAState: () async => pathAInvalidated,
+      ),
+    );
+    expect(find.textContaining('needs setting up again'), findsOneWidget);
+  });
+
+  testWidgets('a probe that throws reads as UNKNOWN, never as a verdict', (
+    tester,
+  ) async {
+    await pump(tester, screen(biometricStatus: () async => throw 'no channel'));
+    expect(find.textContaining('Fingerprint unknown'), findsOneWidget);
   });
 
   testWidgets('the Network row summarises the CHOICE, not the health', (
     tester,
   ) async {
-    // A summary of the link's health here would be a second rendering of a
-    // truth the screen behind the row already tells — the C7 disagreement the
-    // retired network sheet actually caused. Whose node and whether a price is
-    // fetched are both things the USER chose, so they cannot contradict it.
-    final pinned = ValueNotifier<String?>(null);
-    final rateOn = ValueNotifier<bool>(true);
-    await pump(tester, screen(pinnedNode: pinned, rateEnabled: rateOn));
-    expect(find.text('Public community nodes · fiat value on'), findsOneWidget);
-
-    // Both halves are live, and both propositions are asserted — a summary
-    // that only ever renders one branch is a summary nobody has checked
-    // (`L126`).
-    pinned.value = 'wss://mine.example/borsh';
-    rateOn.value = false;
-    await tester.pump();
+    await pump(
+      tester,
+      screen(
+        pinnedNode: ValueNotifier<String?>('ws://mine.local:17110'),
+        rateEnabled: ValueNotifier(false),
+      ),
+    );
     expect(find.text('Your own node · fiat value off'), findsOneWidget);
-
-    // Nothing about liveness, ever: that word belongs to the surface behind
-    // the row.
+    // The health belongs to the screen behind the row and is never restated
+    // here — a second rendering of the link is the C7 defect.
     expect(find.textContaining('Connected'), findsNothing);
-    expect(find.textContaining('Answering'), findsNothing);
   });
 
-  testWidgets('with no network seam the section is absent, not dead', (
+  testWidgets('with no network seam the row is absent, not dead', (
     tester,
   ) async {
     await pump(tester, screen(withNetwork: false));
-    expect(findRuledLabel('Network'), findsNothing);
-    expect(find.text('Node & connection'), findsNothing);
-    // The custody domains are untouched by the absence.
-    expect(findRuledLabel('Security'), findsOneWidget);
-    expect(findRuledLabel('About'), findsOneWidget);
+    expect(find.text('Network'), findsNothing);
   });
 
-  testWidgets("what a PLANNED destination says, when tapped", (tester) async {
-    // The compact nav dropped the one-line blurbs (D-193, with a recorded
-    // dissent), the panel was then withdrawn entirely (D-190), and the
-    // explanation had nowhere to live. It lives here now — on a surface no
-    // navigation shape can delete.
+  testWidgets('with no removal seam the red text is absent, not inert', (
+    tester,
+  ) async {
+    // `T1` draws it and `vault.rs` has no wipe. A control that says "Remove
+    // this wallet from this phone" and removes nothing is the worst thing
+    // this screen could ship (§8) — so it is not drawn until the seam is.
     await pump(tester, screen());
-    await tester.tap(find.text("What's coming"));
-    await tester.pumpAndSettle();
+    expect(find.textContaining('Remove this wallet'), findsNothing);
 
-    for (final name in const ['Games', 'Contracts', 'Finance', 'Assets']) {
-      expect(find.text(name), findsOneWidget, reason: name);
-    }
-    // The dissent's own example, verbatim: the entire pitch of Contracts to
-    // someone who has never heard of a covenant.
-    expect(find.textContaining('Agreements with no admin key'), findsOneWidget);
-    // Engraved tags, one per destination — "not yet" as information rather
-    // than as damage (D-190).
-    expect(find.text('PLANNED'), findsNWidgets(4));
-    // And it promises nothing before it names anything.
-    expect(find.textContaining('None of these exist yet'), findsOneWidget);
-  });
-
-  // The defect in three assertions: collapsed to a bool, "this phone has no
-  // fingerprint registered" and "this phone has no sensor" both read "Off", and
-  // only one of them is something the user can fix. One test each — pumping a
-  // second SettingsScreen of the same type into the same slot reuses the State,
-  // so `initState` would never re-run and the first probe would stand forever.
-  testWidgets('a phone with no fingerprint registered says exactly that', (
-    tester,
-  ) async {
-    await pump(tester, screen(biometricStatus: () async => 'none_enrolled'));
-    expect(find.text('No fingerprint on this phone'), findsOneWidget);
-    expect(find.text('Off'), findsNothing);
-  });
-
-  testWidgets('a phone with no sensor says exactly that instead', (
-    tester,
-  ) async {
-    await pump(tester, screen(biometricStatus: () async => 'no_hardware'));
-    expect(find.text('Not supported'), findsOneWidget);
-    expect(find.text('Off'), findsNothing);
-  });
-
-  testWidgets('an enrolled wallet reads On', (tester) async {
+    var removed = false;
     await pump(
       tester,
-      screen(
-        biometricStatus: () async => 'ready',
-        pathAState: () async => pathAReady,
-      ),
+      screen(lockNow: () async {}, removeWallet: () async => removed = true),
     );
-    expect(find.text('On'), findsOneWidget);
+    final red = find.textContaining('Remove this wallet');
+    expect(red, findsOneWidget);
+    // It is the ONE red thing, and it sits below the raised pill — §4 puts
+    // destructive text last on a page with no primary.
+    expect(
+      tester.widget<Text>(red).style!.color,
+      KvColor.risk,
+      reason: 'the removal text is `risk`',
+    );
+    expect(
+      tester.getTopLeft(red).dy,
+      greaterThan(tester.getTopLeft(find.text('Lock now')).dy),
+      reason: 'the red text sits below the raised pill, out of the thumb arc',
+    );
+    await tester.tap(red);
+    await tester.pump();
+    expect(removed, isTrue);
   });
 
-  testWidgets('a probe that throws reads as UNKNOWN, not as a verdict', (
+  testWidgets('Lock now fires the vault, and is absent without the seam', (
     tester,
   ) async {
-    await pump(
-      tester,
-      screen(biometricStatus: () async => throw PlatformException(code: 'x')),
-    );
-    // DS-1 gives three honest states and unknown is one of them. "Off" would
-    // claim the feature is available and switched off; "Unavailable" — the
-    // first version — would assert a platform fact the app has just admitted it
-    // could not determine, and would contradict the sheet one tap away, which
-    // says "the wallet can't tell" (ux-auditor, Track 2).
-    expect(find.text('—'), findsWidgets);
-    expect(find.text('Off'), findsNothing);
-    expect(find.text('Unavailable'), findsNothing);
-  });
-
-  testWidgets('enrolment is offered from Settings — the reversible "Not now"', (
-    tester,
-  ) async {
-    var enrolls = 0;
-    await pump(
-      tester,
-      screen(
-        enroll: () async => ++enrolls > 0,
-        pathAState: () async => pathANone,
-      ),
-    );
-    await tester.tap(find.text('Fingerprint unlock'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Enable fingerprint unlock'));
-    await tester.pumpAndSettle();
-    expect(enrolls, 1, reason: 'a create-flow "Not now" must be recoverable');
-  });
-
-  testWidgets('an enrolled wallet can turn it off again', (tester) async {
-    var cleared = 0;
-    await pump(
-      tester,
-      screen(pathAState: () async => pathAReady, clear: () async => cleared++),
-    );
-    await tester.tap(find.text('Fingerprint unlock'));
-    await tester.pumpAndSettle();
-    expect(find.text('Set up again'), findsOneWidget);
-    await tester.tap(find.text('Turn off'));
-    await tester.pumpAndSettle();
-    expect(cleared, 1);
-  });
-
-  testWidgets('the lock-grace row reads the live setting and can change it', (
-    tester,
-  ) async {
-    final grace = ValueNotifier(0);
-    var written = -1;
-    await pump(
-      tester,
-      screen(
-        grace: grace,
-        setGrace: (secs) async {
-          written = secs;
-          grace.value = secs;
-        },
-      ),
-    );
-    expect(find.text('Immediately'), findsOneWidget);
-
-    await tester.tap(find.text('Lock when I leave'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('After 1 minute'));
-    await tester.pumpAndSettle();
-
-    expect(written, 60);
-    expect(find.text('After 1 minute'), findsOneWidget);
-  });
-
-  testWidgets('"nothing new" is reported as SUCCESS, not as a failure', (
-    tester,
-  ) async {
-    // Most taps land here, on a wallet that was already complete. Copy that
-    // implied a failure would train the user to distrust a working control.
     await pump(tester, screen());
-    await tester.tap(find.text('Scan for more addresses'));
-    await tester.pumpAndSettle();
-    expect(find.text('Nothing new found'), findsOneWidget);
+    expect(find.text('Lock now'), findsNothing);
+
+    var locked = false;
+    await pump(tester, screen(lockNow: () async => locked = true));
+    await tester.tap(find.text('Lock now'));
+    await tester.pump();
+    expect(locked, isTrue);
   });
 
-  testWidgets('a widening scan says the balance is moving', (tester) async {
-    await pump(
-      tester,
-      screen(
-        deepScan: () async => const DeepScanReport(
-          depth: 2048,
-          receiveSeen: 13,
-          changeSeen: 1501,
-          widened: true,
+  testWidgets('the whole root fits the phone, with nothing to scroll', (
+    tester,
+  ) async {
+    // **Playbook §19.** A settings group owes a one-view fit: a setting you
+    // must scroll to hunt is a setting you will not change. The V60 is
+    // 393 × 894 logical and the system bars take ~50 of it, so the real
+    // budget is ~845; the guard is 800, and it reds before he sees it.
+    //
+    // Every seam is present, because a screen that fits only because a
+    // section is absent does not fit.
+    tester.view.physicalSize = const Size(393 * 3, 800 * 3);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: _kvWindow,
+        // **Every seam this build actually wires** (§19.3: a screen that
+        // fits only because a section is absent does not fit). `removeWallet`
+        // is deliberately not among them — `main.dart` passes null because
+        // `vault.rs` has no wipe. The red text costs 60 dp when its seam
+        // lands (52 target + 8 gap), which is the budget the sitting that
+        // builds it has to find; the assertion below is what will tell it.
+        home: screen(
+          grace: ValueNotifier(30),
+          lockNow: () async {},
+          consolidate: () async => throw UnimplementedError(),
         ),
       ),
     );
-    await tester.tap(find.text('Scan for more addresses'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Found more'), findsOneWidget);
+    final position = tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(ListView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+    expect(
+      position.maxScrollExtent,
+      0,
+      reason:
+          'the Settings root overflows its own phone by '
+          '${position.maxScrollExtent.toStringAsFixed(1)} dp — `About` and '
+          'the red text are below the fold, which is the finding this guards',
+    );
   });
 
-  testWidgets('a failed scan NEVER reports success', (tester) async {
-    // The cost of getting this wrong is the whole reason the row is audited: a
-    // user taps "scan deeper", the app says it worked, and the funds stay
-    // invisible — Track 1's original defect wearing a fresh button.
-    await pump(
-      tester,
-      screen(deepScan: () async => throw Exception('socket down')),
-    );
-    await tester.tap(find.text('Scan for more addresses'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining("Couldn't finish the scan"), findsOneWidget);
-    expect(find.text('Nothing new found'), findsNothing);
-  });
+  // ── `T2` · Security ──────────────────────────────────────────────────────
 
-  testWidgets(
-    'About shows the build, and the sheet shows the WHOLE fingerprint',
-    (tester) async {
-      const full =
-          'ef7ac03d1b2c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6';
-      await pump(tester, screen());
-      expect(find.text('1.0.0 (7)'), findsOneWidget);
-      // Elided in the row — 64 hex characters do not belong in a list row.
-      expect(find.text('ef7ac03d…a3b4c5d6'), findsOneWidget);
-
-      // …but the sheet must hold every character, because comparing against the
-      // value published in RELEASE.md is the entire point of the row. The first
-      // version shortened on ARRIVAL, destroying the only copy: the sheet then
-      // rendered 16 of 64 characters under a comment claiming it showed all of
-      // them, and no user following the provenance check could ever match it.
-      // The old test passed on `findsWidgets('…')` — it asserted the truncation
-      // rather than the promise (dependency-steward, Track 2).
-      await tester.tap(find.text('App signature'));
-      await tester.pumpAndSettle();
-      expect(find.text(full), findsOneWidget);
-      expect(full.length, 64);
-    },
-  );
-
-  testWidgets('unreadable build metadata degrades to em dashes, never a lie', (
-    tester,
-  ) async {
-    await pump(
-      tester,
-      screen(packageInfo: () async => throw PlatformException(code: 'x')),
-    );
-    expect(find.text('—'), findsWidgets);
-  });
-
-  group('Merge coins (consolidation reachability + honesty)', () {
-    SignableSummaryDto mergeSummary() => SignableSummaryDto(
-      nonce: BigInt.one,
-      kind: SignableKind.consolidate,
-      destination: 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
-      amountSompi: BigInt.from(24700000000),
-      feeSompi: BigInt.from(427200),
-      totalSompi: BigInt.from(24700427200),
-      mass: BigInt.from(4272),
-      txCount: 1,
-      utxoCount: 22,
-      resultingCoins: 1,
-      payloadLen: null,
-      payloadKind: null,
-      feeStrategy: FeeStrategyKind.senderPays,
-      priorityFeeSompi: BigInt.zero,
-    );
-
-    testWidgets('the row exists only when wired, and opens the ONE signing '
-        'surface over Rust\'s summary', (tester) async {
-      // Unwired (every pre-existing test): no row — the harness default
-      // proves the hidden state.
-      await pump(tester, screen());
-      expect(find.text('Merge coins'), findsNothing);
-
-      var prepares = 0;
-      await pump(
-        tester,
-        screen(
-          consolidate: () async {
-            prepares++;
-            return mergeSummary();
-          },
-        ),
-      );
-      expect(find.text('Merge coins'), findsOneWidget);
-
-      await tester.tap(find.text('Merge coins'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(prepares, 1);
-      // The same anti-blind-signing sheet every send uses (B7): kind-derived
-      // title, fee-led headline, the absorbed count from the DTO.
-      expect(find.text('Confirm merge'), findsOneWidget);
-      // The `— COSTS YOU` rule label left the ceremony at UX-R2C (founder,
-      // on glass): the figure is the subject of the sheet. A merge's headline
-      // is still the fee, and the row that names the returning value is what
-      // the reachability of this flow is actually about.
-      expect(find.text('Returns to you'), findsOneWidget);
-      expect(find.textContaining('Merges 22 coins into one'), findsOneWidget);
-    });
-
-    testWidgets('a Rust refusal lands as the row status, in Rust\'s words', (
-      tester,
-    ) async {
-      await pump(
-        tester,
-        screen(
-          consolidate: () async => throw const AppError(
-            message:
-                'nothing to merge — your spendable coins are already '
-                'consolidated',
+  group('T2 · Security', () {
+    Future<void> pumpSecurity(
+      WidgetTester tester, {
+      Future<String> Function()? biometricStatus,
+      Future<String> Function()? pathAState,
+      Future<bool> Function()? enroll,
+      Future<void> Function()? clear,
+      ValueNotifier<int>? grace,
+      Future<void> Function(int)? setGrace,
+      double height = 2400,
+    }) async {
+      tester.view.physicalSize = Size(393 * 3, height * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: SecurityScreen(
+            scope: securityScope(
+              biometricStatus: biometricStatus,
+              pathAState: pathAState,
+              enroll: enroll,
+              clear: clear,
+              grace: grace,
+              setGrace: setGrace,
+            ),
           ),
         ),
       );
-      await tester.tap(find.text('Merge coins'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      'the render\'s three sections, with the live grace on the row',
+      (tester) async {
+        await pumpSecurity(tester, grace: ValueNotifier(300));
+        // `SIGNING` was removed on his word (2026-09-06, on glass); its two
+        // rows are logged in IDEAS_BACKLOG with their copy.
+        for (final section in ['Unlock', 'Recovery']) {
+          expect(findRuledLabel(section), findsOneWidget, reason: section);
+        }
+        expect(find.text('After 5 min'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a toggle that cannot fire says why (BG-12)', (tester) async {
+      await pumpSecurity(
+        tester,
+        biometricStatus: () async => biometricNoneEnrolled,
+      );
+      expect(find.text('Biometric unlock'), findsOneWidget);
+      // The refusal is on the glass, in our words, where the refusal is.
       expect(
-        find.textContaining('nothing to merge'),
+        find.textContaining('no fingerprint set up yet'),
         findsOneWidget,
-        reason: 'the honest refusal renders, never a shrug',
+        reason: 'a disabled control always says why',
+      );
+    });
+
+    testWidgets('enrolment is reachable, and a CANCEL is not a failure', (
+      tester,
+    ) async {
+      var enrolled = false;
+      await pumpSecurity(
+        tester,
+        pathAState: () async => enrolled ? pathAReady : pathANone,
+        enroll: () async {
+          enrolled = true;
+          return true;
+        },
+      );
+      await tester.tap(find.text('Biometric unlock'));
+      await tester.pumpAndSettle();
+      expect(enrolled, isTrue);
+
+      // A cancel leaves no banner and nothing to apologise for.
+      await pumpSecurity(
+        tester,
+        enroll: () async => throw PlatformException(code: 'cancelled'),
+      );
+      await tester.tap(find.text('Biometric unlock'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('could not'), findsNothing);
+    });
+
+    testWidgets('Block screenshots is a GUARANTEE, not a switch', (
+      tester,
+    ) async {
+      // BG-10 is not a preference: secret screens set FLAG_SECURE and refuse
+      // accessibility unconditionally, so a switch that turns that off is a
+      // switch that breaks a safety law. Drawn as a switch it renders dim and
+      // reads as broken — the frame said so — so it takes the shape the two
+      // rows above it already use for a guarantee.
+      await pumpSecurity(tester);
+      final row = find.ancestor(
+        of: find.text('Block screenshots'),
+        matching: find.byType(KvRow),
+      );
+      expect(row, findsOneWidget);
+      expect(
+        tester.widget<KvRow>(row).onTap,
+        isNull,
+        reason: 'a guarantee is a record, never a control',
+      );
+      expect(find.byType(KvToggle), findsOneWidget, reason: 'only biometrics');
+      // And the section that held the other two guarantees is gone on his
+      // word — the assertion is here so a future sitting re-adds it
+      // deliberately rather than by drift.
+      expect(findRuledLabel('Signing'), findsNothing);
+      expect(find.text('Hold to sign'), findsNothing);
+      expect(find.textContaining('cannot be turned off'), findsOneWidget);
+    });
+
+    testWidgets('the whole screen fits the phone, with nothing to scroll', (
+      tester,
+    ) async {
+      await pumpSecurity(tester, height: 800, grace: ValueNotifier(30));
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(
+        position.maxScrollExtent,
+        0,
+        reason:
+            'Security overflows its own phone by '
+            '${position.maxScrollExtent.toStringAsFixed(1)} dp',
       );
     });
   });
+
+  // ── `T3` · the lock timer, and the sheet law's four clauses ─────────────
+
+  group('T3 · the lock timer ceremony', () {
+    Future<void> openSheet(
+      WidgetTester tester,
+      ValueNotifier<int> grace, {
+      List<int>? saved,
+    }) async {
+      tester.view.physicalSize = const Size(393 * 3, 852 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: SecurityScreen(
+            scope: securityScope(
+              grace: grace,
+              setGrace: (secs) async {
+                saved?.add(secs);
+                grace.value = secs;
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lock when I leave'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('Cancel is `risk`, and the scrim leaves the sheet', (
+      tester,
+    ) async {
+      // D-277 clauses 1 and 2. `T3` draws Cancel in `inkDim`; the founder's
+      // house-wide ruling was made on glass AFTER these renders and his eye
+      // outranks the render (D-262). Said in the sitting.
+      await openSheet(tester, ValueNotifier(30));
+      final cancel = find.text('Cancel');
+      expect(cancel, findsOneWidget);
+      expect(tester.widget<Text>(cancel).style!.color, KvColor.risk);
+
+      await tester.tapAt(const Offset(196, 40));
+      await tester.pumpAndSettle();
+      expect(find.text('Cancel'), findsNothing, reason: 'the scrim leaves it');
+    });
+
+    testWidgets('one sentence at the top, and one act in the foot', (
+      tester,
+    ) async {
+      // D-277 clause 3: the disclosure belongs where the choice is made, not
+      // stacked over the button — one sentence, and it is above the CHOICES.
+      await openSheet(tester, ValueNotifier(30));
+      final sentence = find.textContaining('How long the wallet stays open');
+      expect(sentence, findsOneWidget);
+      expect(
+        tester.getTopLeft(sentence).dy,
+        lessThan(tester.getTopLeft(find.text('Immediately')).dy),
+      );
+      // The act is in the foot. **Disabled, its label IS the reason**
+      // (D-284), so `Done` appears the moment a different option is picked.
+      expect(find.text('30 seconds is already set'), findsOneWidget);
+      await tester.tap(find.text('1 minute'));
+      await tester.pumpAndSettle();
+      expect(find.text('Done'), findsOneWidget);
+    });
+
+    testWidgets('the act is disabled with its reason until a choice differs', (
+      tester,
+    ) async {
+      // D-277 clause 4, and D-275's settings ceremony.
+      await openSheet(tester, ValueNotifier(30));
+      // The reason names the SETTING, not the situation — one line saying
+      // what is in force and why the act is waiting (D-284, the render).
+      expect(find.text('30 seconds is already set'), findsOneWidget);
+      expect(find.text('Done'), findsNothing);
+      await tester.tap(find.text('5 minutes'));
+      await tester.pumpAndSettle();
+      expect(find.text('30 seconds is already set'), findsNothing);
+      expect(find.text('Done'), findsOneWidget);
+    });
+
+    testWidgets('exactly one check, and a ring on every other option', (
+      tester,
+    ) async {
+      // **The house check marks the choice, and a ring marks the rest** —
+      // his ruling on glass (2026-09-06). BG-29's value is that the app has
+      // exactly one yes; a second chosen-mark vocabulary costs more than the
+      // choosing/confirmed distinction buys, and teal stays light rather than
+      // status (BG-2).
+      await openSheet(tester, ValueNotifier(30));
+      expect(find.byType(KvCheck), findsOneWidget);
+      // Five rings: four unchosen options, and the miniature on the disabled
+      // act that says *nothing new has been picked* in the same vocabulary.
+      expect(find.byType(KvRadio), findsNWidgets(5));
+      final rows = tester
+          .widgetList<KvChoiceRow>(find.byType(KvChoiceRow))
+          .where((r) => r.selected)
+          .toList();
+      expect(rows.length, 1);
+      expect(rows.single.title, '30 seconds');
+    });
+
+    testWidgets('NEVER is not offered — the vault clamps at 15 minutes', (
+      tester,
+    ) async {
+      // `T3` draws it. `vault.rs` clamps the grace at MAX_LOCK_GRACE_SECS =
+      // 900 and stores a `u32`, so "never lock" does not exist on the Rust
+      // side and offering it would be a control that silently did something
+      // else. The cost the render says out loud under **Never** moves to the
+      // longest wait that really exists.
+      await openSheet(tester, ValueNotifier(30));
+      expect(find.text('Never'), findsNothing);
+      expect(find.text('15 minutes'), findsOneWidget);
+      expect(
+        find.text('Anyone holding the phone in that window can spend'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Done writes the chosen grace, and leaving writes nothing', (
+      tester,
+    ) async {
+      final saved = <int>[];
+      final grace = ValueNotifier(30);
+      await openSheet(tester, grace, saved: saved);
+      await tester.tap(find.text('5 minutes'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+      expect(saved, [300]);
+      expect(find.text('After 5 min'), findsOneWidget);
+
+      await openSheet(tester, grace, saved: saved);
+      await tester.tap(find.text('1 minute'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(saved, [300], reason: 'a cancelled ceremony changes nothing');
+    });
+  });
+
+  // ── `T4` · Wallet — the half this build can honestly draw ───────────────
+
+  group('T4 · Wallet', () {
+    Future<void> pumpWallet(
+      WidgetTester tester, {
+      Future<DeepScanReport> Function()? deepScan,
+      Future<String> Function()? receiveAddress,
+      Future<SignableSummaryDto> Function()? consolidate,
+    }) async {
+      tester.view.physicalSize = const Size(393 * 3, 2400 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: WalletScreen(
+            scope: WalletSettingsScope(
+              receiveAddress:
+                  receiveAddress ??
+                  () async => 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
+              deepScan: deepScan ?? () async => scanned,
+              consolidate: consolidate,
+              commitSend: consolidate == null
+                  ? null
+                  : (_) async => SendOutcomeDto(
+                      finalTxid: 'a' * 64,
+                      submitted: 1,
+                      total: 1,
+                      partial: false,
+                    ),
+              abandonSend: consolidate == null ? null : () async {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('"nothing new" is reported as SUCCESS, never as a failure', (
+      tester,
+    ) async {
+      await pumpWallet(tester);
+      await tester.tap(find.text('Scan for more addresses'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Nothing new found'), findsOneWidget);
+      expect(find.textContaining('watching 92'), findsOneWidget);
+    });
+
+    testWidgets('a widening scan says what it found', (tester) async {
+      await pumpWallet(
+        tester,
+        deepScan: () async => const DeepScanReport(
+          depth: 2048,
+          receiveSeen: 20,
+          changeSeen: 4,
+          widened: true,
+        ),
+      );
+      await tester.tap(find.text('Scan for more addresses'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Found more addresses'), findsOneWidget);
+    });
+
+    testWidgets('a failed scan NEVER reports success', (tester) async {
+      await pumpWallet(tester, deepScan: () async => throw 'boom');
+      await tester.tap(find.text('Scan for more addresses'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining("Couldn't finish the scan"), findsOneWidget);
+    });
+
+    testWidgets('the merge row exists only when wired, and EXPLAINS before '
+        'anything is priced (BG-11)', (tester) async {
+      await pumpWallet(tester);
+      expect(find.text('Merge coins'), findsNothing);
+      expect(find.textContaining('Merging is an ordinary send'), findsNothing);
+
+      await pumpWallet(tester, consolidate: () async => _summary());
+      expect(find.text('Merge coins'), findsOneWidget);
+      final notice = find.textContaining('Merging is an ordinary send');
+      expect(notice, findsOneWidget);
+      // The disclosure sits above the act it describes: explain, then price.
+      expect(
+        tester.getTopLeft(notice).dy,
+        greaterThan(tester.getTopLeft(find.text('Merge coins')).dy),
+      );
+      // And it names no figure of its own — the fee is the ceremony's, from
+      // the prepared plan, never a number this screen guessed.
+      expect(find.textContaining('KAS fee'), findsNothing);
+    });
+
+    testWidgets('a Rust refusal lands on the row, in Rust\'s own words', (
+      tester,
+    ) async {
+      await pumpWallet(
+        tester,
+        consolidate: () async => throw const AppError(
+          message:
+              'nothing to merge — your spendable coins are already '
+              'consolidated',
+        ),
+      );
+      await tester.tap(find.text('Merge coins'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('nothing to merge'), findsOneWidget);
+    });
+
+    testWidgets('the receive address is rendered by the house part', (
+      tester,
+    ) async {
+      await pumpWallet(tester);
+      expect(find.byType(AddressText), findsOneWidget);
+    });
+  });
+
+  // ── `T6` · About ────────────────────────────────────────────────────────
+
+  group('T6 · About', () {
+    Future<void> pumpAbout(
+      WidgetTester tester, {
+      Future<Map<String, String>> Function()? packageInfo,
+    }) async {
+      tester.view.physicalSize = const Size(393 * 3, 2400 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: AboutScreen(
+            scope: AboutScope(
+              packageInfo:
+                  packageInfo ??
+                  () async => const {
+                    'version': '1.0.0',
+                    'build': '7',
+                    'signature':
+                        'ef7ac03d1b2c4d5e6f708192a3b4c5d6'
+                        'e7f8091a2b3c4d5e6f708192a3b4c5d6',
+                  },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the WHOLE fingerprint is on the glass, in printable groups', (
+      tester,
+    ) async {
+      // The scar: shortening on arrival destroyed the only copy, so the
+      // surface that exists to show the whole thing had 16 characters and an
+      // ellipsis, and a user following RELEASE.md could never match it.
+      await pumpAbout(tester);
+      expect(
+        find.text(
+          'EF7A C03D 1B2C 4D5E 6F70 8192 A3B4 C5D6 '
+          'E7F8 091A 2B3C 4D5E 6F70 8192 A3B4 C5D6',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('nothing claims to be verified or up to date', (tester) async {
+      // A build cannot verify its own signature (a tampered build carries a
+      // tampered expectation and prints the same tick), and INV-8 means it
+      // cannot know whether it is current without asking a server. Both would
+      // be the first lie on the screen whose whole job is provenance.
+      await pumpAbout(tester);
+      expect(find.textContaining('Up to date'), findsNothing);
+      expect(find.text('Verified'), findsNothing);
+      expect(find.byType(KvCheck), findsNothing);
+      expect(find.textContaining('published beside it'), findsOneWidget);
+    });
+
+    testWidgets('unreadable build metadata degrades honestly (BG-8)', (
+      tester,
+    ) async {
+      await pumpAbout(tester, packageInfo: () async => throw 'no channel');
+      expect(find.text('build metadata unavailable'), findsOneWidget);
+      expect(find.textContaining('unreadable on this build'), findsOneWidget);
+    });
+
+    testWidgets('every roadmap line carries a status, and none is blank', (
+      tester,
+    ) async {
+      await pumpAbout(tester);
+      for (final d in RoadmapScreen.destinations) {
+        expect(find.text(d.name), findsOneWidget, reason: d.name);
+      }
+      expect(find.text('Next'), findsOneWidget);
+      expect(
+        find.text('Planned'),
+        findsNWidgets(RoadmapScreen.destinations.length - 1),
+      );
+    });
+
+    testWidgets('the whole screen fits the phone, with nothing to scroll', (
+      tester,
+    ) async {
+      // **Playbook §19.1 names About**: a status surface, where the whole
+      // state is the point. It owes the fit, so it owes the §19.3 guard —
+      // and the register claimed the fit from a frame that its own `Licences`
+      // row was clipped in (`ux-auditor`, BLOCK).
+      tester.view.physicalSize = const Size(393 * 3, 800 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: AboutScreen(
+            scope: AboutScope(
+              // Every seam, and the longest real datum: 64 hex characters.
+              packageInfo: () async => const {
+                'version': '1.0.0',
+                'build': '3041',
+                'signature':
+                    'a1f39c204b7e88d10e52c6aa71b93f04'
+                    'd2e85c179a0b6e33f41022cd8b7ae059',
+              },
+              openUrl: (_) async => true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(
+        position.maxScrollExtent,
+        0,
+        reason:
+            'About overflows its own phone by '
+            '${position.maxScrollExtent.toStringAsFixed(1)} dp — `Licences` '
+            'is below the fold, which is the finding this guards',
+      );
+    });
+
+    testWidgets('the source row leaves the app, and says so', (tester) async {
+      final opened = <String>[];
+      tester.view.physicalSize = const Size(393 * 3, 2400 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: AboutScreen(
+            scope: AboutScope(
+              packageInfo: () async => const {'version': '1.0.0'},
+              openUrl: (url) async {
+                opened.add(url);
+                return true;
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel(RegExp('Leaves the app')), findsOneWidget);
+      await tester.tap(find.text('Source code'));
+      await tester.pump();
+      expect(opened, [AboutScreen.repository]);
+      semantics.dispose();
+    });
+  });
 }
+
+/// Security's seams, in one place, so the root and `T2` are pumped against the
+/// same contract.
+SecurityScope securityScope({
+  Future<String> Function()? biometricStatus,
+  Future<String> Function()? pathAState,
+  Future<bool> Function()? enroll,
+  Future<void> Function()? clear,
+  ValueNotifier<int>? grace,
+  Future<void> Function(int)? setGrace,
+  Future<void> Function()? lockNow,
+}) => SecurityScope(
+  biometricStatus: biometricStatus ?? () async => 'ready',
+  pathAState: pathAState ?? () async => pathANone,
+  enroll: enroll ?? () async => true,
+  clearEnrollment: clear ?? () async {},
+  lockGraceSecs: grace ?? ValueNotifier(0),
+  setLockGraceSecs: setGrace ?? (_) async {},
+  lockNow: lockNow,
+);
+
+SignableSummaryDto _summary() => SignableSummaryDto(
+  kind: SignableKind.consolidate,
+  destination: 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
+  amountSompi: BigInt.from(1240000000),
+  feeSompi: BigInt.from(40000),
+  totalSompi: BigInt.from(1240040000),
+  mass: BigInt.from(2036),
+  txCount: 1,
+  utxoCount: 38,
+  payloadLen: null,
+  payloadKind: null,
+  nonce: BigInt.one,
+  resultingCoins: 1,
+  feeStrategy: FeeStrategyKind.senderPays,
+  priorityFeeSompi: BigInt.zero,
+);
 
 /// The money screen **inside the app's navigation**, wired to nothing but the
 /// doors under test.

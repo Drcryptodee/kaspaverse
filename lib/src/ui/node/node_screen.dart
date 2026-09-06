@@ -10,7 +10,6 @@ import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_cadence.dart';
-import '../widgets/kv_check.dart';
 import '../theme/kv_window.dart';
 import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_glyph.dart';
@@ -648,7 +647,13 @@ class _NodeScreenState extends State<NodeScreen> {
                     KvWindow.of(context).gutter,
                     KvSpace.xs,
                     KvWindow.of(context).gutter,
-                    KvSpace.l,
+                    // **20, not 24.** The own-node card's bare toggle gained a
+                    // row's vertical air (his glass finding, 2026-09-06: a
+                    // card's top sat too close to its text), which cost this
+                    // screen 16 dp and left the one-view guard 2 dp short.
+                    // Spent on the list's own bottom edge — structure first,
+                    // and the cheapest 4 dp on the screen (playbook §19.4).
+                    KvSpace.s20,
                   ),
                   children: [
                     // **`T5`, in the render's order and at the render's
@@ -1394,111 +1399,6 @@ class _Explainer extends StatelessWidget {
 /// `chip` inner card at radius 22 with hairlines between rows, and the one
 /// current choice wearing `KvCheck` — a status is a check, never a tinted row
 /// (§6). Sub-lines are `inkDim`, because `inkMeta` fails AA on `chip` (BG-14).
-class _ChoiceCard extends StatelessWidget {
-  const _ChoiceCard({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: KvColor.chip,
-      borderRadius: BorderRadius.circular(KvRadius.bubble),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (var i = 0; i < children.length; i++) ...[
-          if (i > 0)
-            const SizedBox(
-              height: 1,
-              child: ColoredBox(color: KvColor.hairline),
-            ),
-          children[i],
-        ],
-      ],
-    ),
-  );
-}
-
-/// One choice: a title, an optional line beneath, and the check when it is the
-/// current one. A 56 dp row (BG-12).
-class _ChoiceRow extends StatelessWidget {
-  const _ChoiceRow({
-    required this.title,
-    this.sub,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String title;
-  final String? sub;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    selected: selected,
-    label: sub == null ? title : '$title. $sub',
-    child: ExcludeSemantics(
-      child: InkWell(
-        onTap: onTap,
-        highlightColor: KvColor.chipPressed,
-        splashFactory: NoSplash.splashFactory,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: KvSpace.control),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: KvSpace.m,
-              vertical: KvSpace.s10,
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontFamily: KvFont.ui,
-                          fontSize: 15,
-                          height: 20 / 15,
-                          fontWeight: FontWeight.w600,
-                          fontVariations: KvWeight.w600,
-                          color: KvColor.ink,
-                        ),
-                      ),
-                      if (sub case final sub?)
-                        Text(
-                          sub,
-                          style: const TextStyle(
-                            fontFamily: KvFont.ui,
-                            fontSize: 12,
-                            height: 17 / 12,
-                            color: KvColor.inkDim,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: KvSpace.sm),
-                if (selected)
-                  const KvCheck()
-                else
-                  const SizedBox(width: KvCheck.small, height: KvCheck.small),
-              ],
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
 /// **The explorer sheet — a settings ceremony** (playbook §3.4 / §3.5: a
 /// setting whose change has consequences opens a sheet, not an inline
 /// control). The question in one line; the choices as truths in a chip card —
@@ -1612,7 +1512,8 @@ class _ExplorerSheetState extends State<_ExplorerSheet> {
         ),
       ),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+        // `KvSheet` owns the gutter (D-284); this sheet had been at 16 while
+        // its own title sat at 24.
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -1639,15 +1540,15 @@ class _ExplorerSheetState extends State<_ExplorerSheet> {
               'An explorer gets the transaction id and your network address.',
             ),
             const SizedBox(height: KvSpace.m),
-            _ChoiceCard(
+            KvChoiceCard(
               children: [
                 for (var i = 0; i < widget.current.defaults.length; i++)
-                  _ChoiceRow(
+                  KvChoiceRow(
                     title: widget.current.defaults[i].name,
                     selected: _selected == i,
                     onTap: _busy ? null : () => setState(() => _selected = i),
                   ),
-                _ChoiceRow(
+                KvChoiceRow(
                   title: 'Custom',
                   sub: 'Your own explorer links',
                   selected: custom,
@@ -1816,7 +1717,7 @@ class _RateSheetState extends State<_RateSheet> {
                   ),
                 ),
           child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+            // `KvSheet` owns the gutter (D-284).
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -1847,9 +1748,9 @@ class _RateSheetState extends State<_RateSheet> {
                 if (choice == null)
                   const _TrustLabel('Reading your setting…')
                 else ...[
-                  _ChoiceCard(
+                  KvChoiceCard(
                     children: [
-                      _ChoiceRow(
+                      KvChoiceRow(
                         title: 'Off',
                         sub:
                             'Your balance is shown in KAS only. Nothing is fetched.',
@@ -1858,7 +1759,7 @@ class _RateSheetState extends State<_RateSheet> {
                             ? null
                             : () => setState(() => _choice = _RateChoice.off),
                       ),
-                      _ChoiceRow(
+                      KvChoiceRow(
                         title: _hostOf(scope.defaultEndpoint.value),
                         sub: 'The shipped price source',
                         selected: choice == _RateChoice.shipped,
@@ -1867,7 +1768,7 @@ class _RateSheetState extends State<_RateSheet> {
                             : () =>
                                   setState(() => _choice = _RateChoice.shipped),
                       ),
-                      _ChoiceRow(
+                      KvChoiceRow(
                         title: 'Custom',
                         sub: 'Your own price source',
                         selected: choice == _RateChoice.custom,

@@ -306,7 +306,6 @@ class _ContactNameSheetState extends State<_ContactNameSheet> {
                 ? 'Remove name'
                 : 'Save',
             primary: true,
-            inlineReason: true,
             disabledReason: value.text.trim().isEmpty && widget.initial == null
                 ? 'Type a name to save'
                 : null,
@@ -320,7 +319,7 @@ class _ContactNameSheetState extends State<_ContactNameSheet> {
       // name to — that string is the reason the sheet exists (BG-15).
       child: ListView(
         shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(horizontal: KvSpace.l),
+        padding: EdgeInsets.zero, // `KvSheet` owns the gutter (D-284)
         children: [
           Container(
             padding: const EdgeInsets.symmetric(

@@ -718,7 +718,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // window's.
       child: ListView(
         shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(horizontal: KvSpace.l),
+        padding: EdgeInsets.zero, // `KvSheet` owns the gutter (D-284)
         children: _truthRows(context),
       ),
     );

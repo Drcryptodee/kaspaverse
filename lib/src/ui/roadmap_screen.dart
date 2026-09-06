@@ -32,15 +32,13 @@ class RoadmapScreen extends StatelessWidget {
   static const List<({String name, String line})> destinations = [
     (
       name: 'Games',
-      line:
-          'Play for stakes that settle on the chain itself. No house holds '
-          'the pot, and nobody can refuse to pay out.',
+      line: 'Play for stakes that settle on the chain. No house holds the pot.',
     ),
     (
       name: 'Contracts',
       line:
-          'Agreements with no admin key. Once one is made, its terms cannot '
-          'be changed by anyone — including us.',
+          'Agreements with no admin key. Nobody can change the terms — '
+          'including us.',
     ),
     (
       name: 'Finance',
@@ -48,11 +46,16 @@ class RoadmapScreen extends StatelessWidget {
     ),
     (
       name: 'Assets',
-      line:
-          'Tokens and collectibles, held in this wallet the same way your KAS '
-          'is held.',
+      line: 'Tokens and collectibles, held the way your KAS is held.',
     ),
   ];
+
+  /// **Which one is actually being built.** `P3` is the covenant engine and
+  /// the first covenant games on L1 are what it exists for (D-008/D-019), so
+  /// Games is `Next` and everything else is `Planned`. A name, not a date:
+  /// the project can keep an order and cannot keep a quarter, and `T6`'s
+  /// status column may not carry a promise this repo cannot honour.
+  static const String next = 'Games';
 
   @override
   Widget build(BuildContext context) {

@@ -96,7 +96,16 @@ class KvToggle extends StatelessWidget {
             // border** (founder on glass 2026-09-05 — every card shares the
             // home's topography).
             child: Container(
-              padding: bare ? EdgeInsets.zero : const EdgeInsets.all(KvSpace.m),
+              // **A bare toggle is a ROW, and takes a row's vertical air**
+              // (founder on glass 2026-09-06: *"there isnt enough padding in
+              // some elements that starts at the top… the text need a little
+              // gap untop so the cards top isnt so close to the text"*).
+              // `KvRowContainer` pads 6, and `KvRow` adds 8 of its own — so a
+              // bare toggle sitting first in a card had 6 where every row
+              // beside it had 14.
+              padding: bare
+                  ? const EdgeInsets.symmetric(vertical: KvSpace.s)
+                  : const EdgeInsets.all(KvSpace.m),
               decoration: bare
                   ? null
                   : BoxDecoration(

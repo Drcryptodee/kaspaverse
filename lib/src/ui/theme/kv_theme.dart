@@ -256,6 +256,15 @@ ThemeData kvDarkTheme() {
     brightness: Brightness.dark,
     colorScheme: scheme,
     scaffoldBackgroundColor: KvColor.abyss,
+    // **The one Material surface the app does not draw itself.**
+    // `showLicensePage` is the SDK's own screen and it is the *complete*
+    // licence list — a legal artefact, not a designed one, so About routes to
+    // it rather than transcribing 40 licences into house parts. It resolves
+    // `Theme.of(context).cardColor` for its panels, which nothing here pinned,
+    // so it painted Material's default grey over the abyss (`ux-auditor`,
+    // UX-R4). Pinned to the house plate; "Powered by Flutter" in its footer is
+    // the SDK's and stays.
+    cardColor: KvColor.plate,
     canvasColor: KvColor.abyss,
     fontFamily: KvFont.ui,
     textTheme: text,

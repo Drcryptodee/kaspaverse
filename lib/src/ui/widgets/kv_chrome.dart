@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/tokens.dart';
 import 'kv_glyph.dart';
 import 'kv_icon_button.dart';
+import 'kv_rows.dart';
 
 /// The furniture every full-screen surface shares: the top bar it hangs
 /// under, the label that names a section, and the pill it ends on.
@@ -25,9 +26,25 @@ class KvTopBar extends StatelessWidget {
     required this.title,
     required this.onBack,
     this.trailing,
+    this.page = false,
   });
 
   final String title;
+
+  /// **The root register** (§2 `pageTitle`, `T1 · Settings` measured).
+  ///
+  /// A screen at the top of its own group names itself the way the money
+  /// screen does — 22 / 700, **left, beside the leading disc**, not centred at
+  /// 18 — and the render draws exactly that: a 44 dp disc seated on the gutter
+  /// with `Settings` at the wordmark's size beside it, 15 dp clear of it.
+  ///
+  /// `T1` draws the identity monogram in that disc, because in the render
+  /// Settings is a standing destination with the drawer behind it. **In this
+  /// build it is a pushed route with no drawer above it**, so the disc holds
+  /// the control it actually has — the way back — and everything else about
+  /// the composition is the render's. Said in the sitting; when the shell
+  /// makes Settings a standing destination the monogram takes the seat back.
+  final bool page;
 
   /// An optional reading at the right of the bar — `S6`'s step counter, and
   /// nothing that acts. It is laid out in a box at least [KvSpace.touchTarget]
@@ -81,21 +98,22 @@ class KvTopBar extends StatelessWidget {
           // heading at the floor, so a longer title fails a test instead of
           // clipping in silence (L121: a measurement is only as true as what
           // it measured).
+          if (page) const SizedBox(width: KvSpace.xs),
           Expanded(
             child: Text(
               title,
-              textAlign: TextAlign.center,
+              textAlign: page ? TextAlign.start : TextAlign.center,
               maxLines: 2,
               // §2 `barTitle` — **18 / 700 in `ink`**, measured off `S6a`
               // (cap 14.0 dp against the `caps` label's calibration). It was
               // 15 / 600 `inkDim`, which is the `rowTitle` role wearing a
               // bar's job: a screen's own name should not be quieter than the
               // rows underneath it (UX-R2).
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: KvFont.ui,
-                fontSize: 18,
-                height: 22 / 18,
-                letterSpacing: -0.18,
+                fontSize: page ? 22 : 18,
+                height: (page ? 26 : 22) / (page ? 22 : 18),
+                letterSpacing: page ? -0.2 : -0.18,
                 fontWeight: FontWeight.w700,
                 fontVariations: KvWeight.w700,
                 color: KvColor.ink,
@@ -103,11 +121,13 @@ class KvTopBar extends StatelessWidget {
             ),
           ),
           // Balances the back target so the title sits centred, and seats the
-          // optional reading.
-          ConstrainedBox(
-            constraints: const BoxConstraints(minWidth: KvSpace.touchTarget),
-            child: Center(child: trailing ?? const SizedBox.shrink()),
-          ),
+          // optional reading. A `page` title is not centred, so it balances
+          // nothing and only appears when something is actually in it.
+          if (!page || trailing != null)
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: KvSpace.touchTarget),
+              child: Center(child: trailing ?? const SizedBox.shrink()),
+            ),
         ],
       ),
     );
@@ -201,12 +221,22 @@ class KvRuledLabel extends StatelessWidget {
 /// target needs falls where the section break is. A header with no explainer
 /// is not a control and takes [plainHeight].
 class KvSectionHeader extends StatefulWidget {
-  const KvSectionHeader(this.label, {super.key, this.info});
+  const KvSectionHeader(this.label, {super.key, this.info, this.trailing});
 
   final String label;
 
   /// The explainer's open state; null draws no mark and no target.
   final ValueNotifier<bool>? info;
+
+  /// A control seated at the **right end of the same break**, sharing the
+  /// header's air instead of adding its own — `T4`'s `With funds · All`
+  /// segmented, measured on the label's own centre line (label 112.9,
+  /// control 114.1).
+  ///
+  /// It raises the row to whatever the control needs, so a 52 dp target does
+  /// not get squeezed into a 32 dp chrome row; the words stay seated low in
+  /// it, which is what keeps every section break in the house the same shape.
+  final Widget? trailing;
 
   /// A header that opens an explainer is a control, so it keeps BG-12's 52
   /// whatever the density is. A plain one is chrome and takes the compact
@@ -233,12 +263,33 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
     final info = widget.info;
     final label = widget.label;
     final title = KvRuledLabel(label, tight: true, rule: false);
+    final trailing = widget.trailing;
+    if (info == null && trailing != null) {
+      // The words sit on the control's own centre line — `T4` measured them
+      // 1.2 dp apart — so the break is one line rather than a label with a
+      // control floating beside it. The row takes the control's height, which
+      // is the air BG-12 owes a 52 dp target anyway.
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(child: title),
+          const SizedBox(width: KvSpace.sm),
+          trailing,
+        ],
+      );
+    }
     if (info == null) {
       return SizedBox(
         height: KvSectionHeader.plainHeight,
         child: Align(alignment: KvSectionHeader._seat, child: title),
       );
     }
+    assert(
+      trailing == null,
+      'a section break carries an explainer mark or a control, never both — '
+      'two targets in one 52 dp row is BG-12 at the seat that defines the '
+      'break',
+    );
     return ValueListenableBuilder<bool>(
       valueListenable: info,
       builder: (context, open, _) => SizedBox(
@@ -308,8 +359,21 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
 ///  * **raised** — [KvColor.chip] fill, [KvColor.ink] label; pressed
 ///    [KvColor.chipPressed]. The secondary action, and the money plate's
 ///    Send / Receive pair.
-///  * **disabled** — [KvColor.shelf] fill, [KvColor.etch] label, and the
-///    reason in [KvColor.inkMeta] underneath (BG-12).
+///  * **disabled** — **no fill, a 2 dp [KvColor.edgeHi] outline, and the
+///    reason AS the label** in [KvColor.inkDim] beside a small unchosen
+///    [KvRadio] (BG-12).
+///
+/// **The disabled form is the sheet renders' answer, and it replaced ours on
+/// the founder's word** (2026-09-06: *"the way its depicted as being disabled
+/// is just not it"*). The old one was a `shelf`-filled pill with an `etch`
+/// label and a separate `inkMeta` sentence beneath — a filled dark pill reads
+/// as *broken*, and the sentence under it made a disabled control two objects
+/// where an enabled one is one. The outline reads as **waiting** rather than
+/// damaged; putting the reason in the label makes the control state its own
+/// condition, so it cannot be pressed and wondered about; and the miniature
+/// ring says, in the sheet's own vocabulary, *nothing new has been picked*.
+/// One rendering: the `inlineReason` switch is gone, because there is no
+/// longer a second way to say why.
 ///
 /// Promoted out of `home_screen.dart` at UX-4 rather than copied a third time.
 /// `node_screen.dart` keeps its own, deliberately — it is never primary, it
@@ -328,7 +392,6 @@ class KvAction extends StatefulWidget {
     this.disabledReason,
     this.mark,
     this.height = KvSpace.control,
-    this.inlineReason = false,
   });
 
   /// The raised form: `chip` fill, `ink` label. Sugar for `primary: false`,
@@ -372,16 +435,8 @@ class KvAction extends StatefulWidget {
   /// a minimum and one line never reaches it.
   static const double labelPad = KvSpace.s;
 
-  /// **The reason inside the pill, not beneath it.** For a control whose
-  /// footprint must stay constant — the money screen's foot bar, which the
-  /// ledger card stops exactly short of (D-262). The disabled pill then reads
-  /// the reason in **`inkDim`** where its verb was, at 12 / 500 on two lines
-  /// at most, and draws nothing under itself. §4 says `etch` for a sleeping
-  /// pill's LABEL and §1.4 says `etch` carries no information anywhere; the
-  /// reason is information, so it takes the step that is AA on `shelf`
-  /// (9.03:1). BG-12 is met either way: the reason is in words, on the
-  /// control.
-  final bool inlineReason;
+  /// The disabled outline's stroke (`sheet-SELECTION SHEET`, measured 2).
+  static const double disabledEdge = 2;
 
   /// The glyph's box (§4).
   static const double glyph = 18;
@@ -396,20 +451,20 @@ class _KvActionState extends State<KvAction> {
   @override
   Widget build(BuildContext context) {
     final disabled = widget.disabledReason != null;
-    final inline = widget.inlineReason;
     final lit = widget.primary && !disabled;
     // Every control is a stadium (§3): the `KvAction` 8 dp trial is closed.
     const radius = KvRadius.control;
     final Color fill;
     if (disabled) {
-      fill = KvColor.shelf;
+      // **Nothing.** The outline is the whole shape (see the class doc).
+      fill = Colors.transparent;
     } else if (lit) {
       fill = _down ? KvColor.primaryPressed : KvColor.primary;
     } else {
       fill = _down ? KvColor.chipPressed : KvColor.chip;
     }
     final ink = disabled
-        ? KvColor.etch
+        ? KvColor.inkDim
         : (lit ? KvColor.onPrimary : KvColor.ink);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -439,12 +494,23 @@ class _KvActionState extends State<KvAction> {
               decoration: BoxDecoration(
                 color: fill,
                 borderRadius: BorderRadius.circular(radius),
+                border: disabled
+                    ? Border.all(
+                        color: KvColor.edgeHi,
+                        width: KvAction.disabledEdge,
+                      )
+                    : null,
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  if (widget.mark != null && !(inline && disabled)) ...[
+                  if (disabled) ...[
+                    // *Nothing new has been picked* — the sheet's own mark, in
+                    // miniature, rather than a second vocabulary.
+                    const KvRadio(ring: KvRadio.markInPill),
+                    const SizedBox(width: KvSpace.s),
+                  ] else if (widget.mark != null) ...[
                     KvGlyphIcon(widget.mark!, size: KvAction.glyph, tone: ink),
                     const SizedBox(width: KvSpace.s),
                   ],
@@ -453,16 +519,20 @@ class _KvActionState extends State<KvAction> {
                       padding: const EdgeInsets.symmetric(
                         vertical: KvAction.labelPad,
                       ),
-                      child: inline && disabled
+                      child: disabled
                           ? Text(
+                              // **The reason IS the label** — measured off the
+                              // render at 15 / 500 `inkDim`, the same size the
+                              // verb takes on a 52-high control, so the pill
+                              // does not shrink its own voice when it refuses.
                               widget.disabledReason!,
                               maxLines: 2,
                               textAlign: TextAlign.center,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 fontFamily: KvFont.ui,
-                                fontSize: 12,
-                                height: 16 / 12,
+                                fontSize: 15,
+                                height: 20 / 15,
                                 fontWeight: FontWeight.w500,
                                 fontVariations: KvWeight.w500,
                                 // `inkDim`, not `etch`: the reason is
@@ -495,19 +565,6 @@ class _KvActionState extends State<KvAction> {
             ),
           ),
         ),
-        if (disabled && !inline) ...[
-          const SizedBox(height: KvSpace.xs),
-          Text(
-            widget.disabledReason!,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontFamily: KvFont.ui,
-              fontSize: 11,
-              height: 15 / 11,
-              color: KvColor.inkMeta,
-            ),
-          ),
-        ],
       ],
     );
   }

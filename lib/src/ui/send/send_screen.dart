@@ -856,7 +856,6 @@ class _SendScreenState extends State<SendScreen> {
             // The reason rides INSIDE the pill (`S6a`): a screen whose only
             // control is this one has nowhere quieter to put it, and the
             // footprint stays constant as the address is fixed.
-            inlineReason: true,
             disabledReason: block?.reason,
             onTap: _continue,
           ),
@@ -992,7 +991,6 @@ class _SendScreenState extends State<SendScreen> {
                 ? 'Review this send'
                 : 'Review ${_trimmed(_amountSompi!)} KAS',
             primary: !_building,
-            inlineReason: true,
             disabledReason: _building
                 ? 'Building your transaction\u2026'
                 : block?.reason,

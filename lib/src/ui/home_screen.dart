@@ -1885,7 +1885,6 @@ class _ActionBar extends StatelessWidget {
                 mark: KvGlyph.arrowOut,
                 height: height,
                 disabledReason: sendDisabledReason,
-                inlineReason: true,
                 onTap: onSend!,
               ),
             ),

@@ -82,6 +82,29 @@ enum KvGlyph {
   /// eases the section's explainer in beneath its card.
   info,
 
+  /// Appearance — theme and how the app looks. Lucide `palette`. Its four
+  /// wells are zero-radius round-capped strokes, which is how §2a rule 4 draws
+  /// a dot inside a mark: nothing here is filled.
+  palette,
+
+  /// Notifications. Lucide `bell`.
+  bell,
+
+  /// Reveal, and privacy. Lucide `eye`.
+  eye,
+
+  /// Look deeper for addresses another wallet may have used. Lucide `layers`.
+  layers,
+
+  /// Many coins becoming one. Lucide `git-merge`.
+  merge,
+
+  /// The source code. Lucide `github` — the one mark in the set that names a
+  /// company rather than an act, because the row it opens names that company
+  /// too and a generic `external` there would say less than the words already
+  /// do.
+  github,
+
   /// The lock, and locking. Lucide `lock`.
   lock,
 
@@ -340,6 +363,51 @@ class KvGlyphPainter extends CustomPainter {
       case KvGlyph.info:
         circle(12, 12, 10);
         path(const ['M12 16v-4', 'M12 8h.01']);
+      case KvGlyph.palette:
+        path(const [
+          'M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 '
+              '1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z',
+        ]);
+        // Lucide fills these four; §2a rule 4 forbids a fill, so each is the
+        // round cap of a zero-length stroke — the same way `kebab`'s three
+        // dots are drawn.
+        circle(13.5, 6.5, 0);
+        circle(17.5, 10.5, 0);
+        circle(6.5, 12.5, 0);
+        circle(8.5, 7.5, 0);
+      case KvGlyph.bell:
+        path(const [
+          'M10.268 21a2 2 0 0 0 3.464 0',
+          'M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 '
+              '18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326',
+        ]);
+      case KvGlyph.eye:
+        path(const [
+          'M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 '
+              '1 0 .696 10.75 10.75 0 0 1-19.876 0',
+        ]);
+        circle(12, 12, 3);
+      case KvGlyph.layers:
+        path(const [
+          'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 '
+              '2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z',
+          'M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 '
+              '0 22 12',
+          'M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 '
+              '0 22 17',
+        ]);
+      case KvGlyph.merge:
+        circle(18, 18, 3);
+        circle(6, 6, 3);
+        path(const ['M6 21V9a9 9 0 0 0 9 9']);
+      case KvGlyph.github:
+        path(const [
+          'M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5'
+              '.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 '
+              '2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 '
+              '6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4',
+          'M9 18c-4.51 2-5-2-7-2',
+        ]);
       case KvGlyph.help:
         circle(12, 12, 10);
         path(const ['M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01']);

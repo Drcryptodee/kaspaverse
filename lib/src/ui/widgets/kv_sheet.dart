@@ -32,7 +32,13 @@ class KvSheet extends StatelessWidget {
     this.cancelTone,
     this.foot,
     this.onDismiss,
+    this.bleed = false,
   });
+
+  /// The body reaches the sheet's own edges instead of taking its gutter.
+  /// For a sheet whose content must span the panel — nothing does yet, and
+  /// the flag exists so the next one does not re-open the padding question.
+  final bool bleed;
 
   /// The restatement. Scrolls inside the sheet when it does not fit.
   final Widget child;
@@ -133,8 +139,42 @@ class KvSheet extends StatelessWidget {
               ),
               if (title != null)
                 _SheetHead(title!, onCancel, cancelLabel, cancelTone),
-              Flexible(child: child),
-              ?foot,
+              // **The sheet owns its gutter** (`sheet-SELECTION SHEET`,
+              // measured: the card and the act both run 24 from each edge,
+              // and the head has always used 24). It was every caller's to
+              // guess, and they guessed differently — the ceremony and the
+              // contact sheet at 24, the two node sheets at 16, the lock
+              // timer at 0 — so a sheet's body could disagree with its own
+              // title about where the content starts. Same argument as
+              // `KvSectionHeader`'s air: the part owns it, the caller adds
+              // none. A body that genuinely needs the full width (a divider
+              // that must reach the edge) opts out with [bleed].
+              Flexible(
+                child: bleed
+                    ? child
+                    : Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: KvSpace.l,
+                        ),
+                        child: child,
+                      ),
+              ),
+              if (foot case final foot?)
+                Padding(
+                  // **24 above the act** (`sheet-SELECTION SHEET`, measured
+                  // card-bottom 738 → pill-top 762; founder on glass
+                  // 2026-09-06: *"there isnt enough gap between the 'Done'
+                  // button and the 15 minutes option"*). The foot had sat
+                  // flush against the body, so on a sheet whose last row
+                  // wrapped, the act touched it.
+                  padding: const EdgeInsets.fromLTRB(
+                    KvSpace.l,
+                    KvSpace.l,
+                    KvSpace.l,
+                    0,
+                  ),
+                  child: foot,
+                ),
               // **The keyboard's inset, added below the foot** (BG-12/BG-14).
               //
               // A sheet that holds a text field opens with the IME already up

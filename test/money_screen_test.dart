@@ -237,10 +237,17 @@ void main() {
             )
             .first,
       );
+      // **A disabled pill has no fill and a 2 dp `edgeHi` outline**, with its
+      // reason as the label (§4, D-284, from the sheet renders on the
+      // founder's word: a filled dark pill reads as *broken*, an outline
+      // reads as *waiting*).
+      final decoration = send.decoration! as BoxDecoration;
+      expect(decoration.color, Colors.transparent);
+      expect(decoration.border, isNotNull);
       expect(
-        (send.decoration! as BoxDecoration).color,
-        KvColor.shelf,
-        reason: 'a disabled pill is `shelf`, its reason in words on it (§4)',
+        (decoration.border! as Border).top.color,
+        KvColor.edgeHi,
+        reason: 'the outline is the whole shape of a disabled pill',
       );
 
       await tester.pumpWidget(const SizedBox());

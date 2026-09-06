@@ -28,7 +28,9 @@ import 'package:kaspaverse/src/rust/api/prefs.dart'
     show prefsExplorerConfig, prefsExplorerTxUrl, prefsSetExplorerConfig;
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
-import 'package:kaspaverse/src/ui/settings_screen.dart';
+import 'package:kaspaverse/src/ui/settings/security_screen.dart';
+import 'package:kaspaverse/src/ui/settings/settings_scopes.dart';
+import 'package:kaspaverse/src/ui/settings/settings_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart' show KvMaturity;
@@ -206,18 +208,27 @@ class KaspaVerseApp extends StatelessWidget {
   }
 }
 
+/// Security's own seams, built once: the drawer's Security row opens `T2`
+/// directly and the Settings root opens the same screen from its own row, so
+/// the two doors reach one surface rather than two renderings of it (C7).
+SecurityScope _securityScope() => SecurityScope(
+  biometricStatus: VaultService.instance.biometricStatus,
+  pathAState: VaultService.instance.pathAState,
+  enroll: VaultService.instance.enrollBiometric,
+  clearEnrollment: VaultService.instance.clearBiometric,
+  lockGraceSecs: VaultService.instance.lockGraceSecs,
+  setLockGraceSecs: VaultService.instance.setLockGraceSecs,
+  // `T1`'s raised pill and the drawer's Lock foot are the same act. BG-13:
+  // a lock is a discard, and the shell routes on the vault's own status
+  // stream, so nothing here navigates.
+  lockNow: () async => VaultService.instance.lockNow(),
+);
+
 /// **The** settings surface, built once so the drawer and any later door
 /// open the same screen rather than two renderings of one truth (C7).
 WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
     (_) => SettingsScreen(
-      security: SecurityScope(
-        biometricStatus: VaultService.instance.biometricStatus,
-        pathAState: VaultService.instance.pathAState,
-        enroll: VaultService.instance.enrollBiometric,
-        clearEnrollment: VaultService.instance.clearBiometric,
-        lockGraceSecs: VaultService.instance.lockGraceSecs,
-        setLockGraceSecs: VaultService.instance.setLockGraceSecs,
-      ),
+      security: _securityScope(),
       wallet: WalletSettingsScope(
         receiveAddress: vaultReceiveAddress,
         deepScan: deepScan,
@@ -229,7 +240,15 @@ WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
         commitSend: wallet.commitSend,
         abandonSend: wallet.abandonSend,
       ),
-      about: AboutScope(packageInfo: VaultService.instance.packageInfo),
+      about: AboutScope(
+        packageInfo: VaultService.instance.packageInfo,
+        openUrl: VaultService.instance.openUrl,
+      ),
+      // **No `removeWallet`.** `T1` draws it as the one red text and there is
+      // no seam behind it: `vault.rs` has no wipe, and a control that says
+      // "Remove this wallet from this phone" and removes nothing is the worst
+      // thing this screen could ship. Absent until the seam exists (§8).
+      removeWallet: null,
       // The SAME screen the money plate's chip opens, from the same
       // builder — never a second rendering of one truth (C7). The
       // summary beside the row reports the CHOICE (whose node, fiat on
@@ -484,12 +503,12 @@ class _MoneyShellState extends State<_MoneyShell> {
           live: widget.chain.connected,
           onTap: () => _push(_nodeRoute(widget.chain)),
         ),
-        // Security's rows live inside Settings until `T2 · Security` is built
-        // as its own surface; the row opens where those rows are today.
+        // `T2 · Security` is its own surface since UX-R4, so this row opens
+        // it rather than the root that also contains it.
         KvDestination(
           mark: KvGlyph.shield,
           label: 'Security',
-          onTap: () => _push(_settingsRoute(widget.chain, widget.wallet)),
+          onTap: () => _push((_) => SecurityScreen(scope: _securityScope())),
         ),
         KvDestination(
           mark: KvGlyph.help,

@@ -909,7 +909,17 @@ class _RailSocket extends StatelessWidget {
                     mark: destination.mark,
                     ring: KvColor.tealTintEdge,
                   )
-                : KvRowDisc.neutral(mark: destination.mark),
+                // **`inkDim`, stated here rather than inherited.** The
+                // neutral disc's default glyph is `ink` (§2a rule 3, `T1`
+                // measured); an *inactive* socket in the rail is deliberately
+                // quieter than an ordinary neutral row, and the rail is a
+                // settled surface. Saying it at the seat that means it keeps
+                // the shared default correct without re-skinning this one.
+                : KvRowDisc(
+                    mark: destination.mark,
+                    tint: KvColor.chip,
+                    tone: KvColor.inkDim,
+                  ),
             const SizedBox(height: KvSpace.xs),
             Text(
               destination.label,

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
+import 'kv_check.dart';
 import 'kv_glyph.dart';
 
 /// **The default home of any list of eight or fewer rows** (§4, BG-1 as
@@ -112,8 +113,14 @@ class KvRowDisc extends StatelessWidget {
       );
 
   /// Neutral: a row that is not about value and is not ours.
+  ///
+  /// **The glyph is `ink`** — §2a rule 3 ("in a `chip` disc or icon button it
+  /// is `ink`") and `T1 · Settings` measured, where the Wallet, Messages,
+  /// Appearance, Notifications, Privacy and About discs all draw their mark at
+  /// `#F2F5F4`. It was `inkDim`, which is the drawer's *inactive* seat doing
+  /// the default's job; the drawer now states that tone where it means it.
   const KvRowDisc.neutral({Key? key, required KvGlyph mark})
-    : this(key: key, mark: mark, tint: KvColor.chip, tone: KvColor.inkDim);
+    : this(key: key, mark: mark, tint: KvColor.chip, tone: KvColor.ink);
 
   final KvGlyph mark;
   final Color tint;
@@ -163,6 +170,9 @@ class KvRow extends StatefulWidget {
     this.trailingMeta,
     this.onTap,
     this.semanticLabel,
+    this.dense = false,
+    this.subLines = 1,
+    this.titleLines = 1,
   }) : assert(
          sub == null || subWidget == null,
          'a row has one sub-line: a string or a widget, never both',
@@ -192,6 +202,39 @@ class KvRow extends StatefulWidget {
 
   /// What a screen reader announces for the whole row. Defaults to [title].
   final String? semanticLabel;
+
+  /// **The compact register** (D-278/D-279, playbook §19.4 step 5) — the type
+  /// one step down, and nothing else: 16 → 15 for the title, 13 → 12 for the
+  /// sub. Both are clear of BG-14's 11 dp floor, and [height] does not move,
+  /// because a row's box is a thumb target and a target never scales with a
+  /// density (BG-12, §19.5).
+  ///
+  /// `T1`, `T2` and `T4` are drawn at this register — measured off the renders
+  /// at 4×: a row title's cap is 11.0 dp (÷ Jakarta's 0.773 = 14.2) and a
+  /// sub-line's 9.5 (= 12.3), against the 16 / 13 the default draws.
+  final bool dense;
+
+  /// How many lines the **title** may take before it ellipsises.
+  ///
+  /// One by default: a ledger row's title is a name or a counterparty, and a
+  /// long one belongs in an ellipsis rather than in two lines that push the
+  /// figure beside it out of alignment.
+  ///
+  /// **A settings row is the other case.** At 320 dp / 1.3× — BG-14's floor —
+  /// `Lock when I leave` beside its `After 30 s` reading came out as
+  /// `Lock whe…`, which names nothing. `KvTopBar`'s own rule is the house
+  /// answer and it applies here: *a label WRAPS; only a number is forbidden
+  /// from doing so.* Read off the floor frame, not argued (playbook §19.6).
+  final int titleLines;
+
+  /// How many lines the sub-line may take before it ellipsises.
+  ///
+  /// One by default — a ledger row's sub-line is one line (§2 `sub`). `T2`'s
+  /// settings rows explain what a control *costs* ("Locking discards
+  /// everything on screen; it is rebuilt from the chain on return"), and an
+  /// explanation that ellipsises is worse than no explanation on a custody
+  /// screen. The row's height grows with it; [height] stays the minimum.
+  final int subLines;
 
   /// §4: fixed in every window class (BG-33).
   static const double height = KvSpace.row;
@@ -242,12 +285,12 @@ class _KvRowState extends State<KvRow> {
                 children: [
                   Text(
                     title,
-                    maxLines: 1,
+                    maxLines: widget.titleLines,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: KvFont.ui,
-                      fontSize: 16,
-                      height: 20 / 16,
+                      fontSize: widget.dense ? 15 : 16,
+                      height: 20 / (widget.dense ? 15 : 16),
                       fontWeight: FontWeight.w600,
                       fontVariations: KvWeight.w600,
                       color: KvColor.ink,
@@ -257,12 +300,13 @@ class _KvRowState extends State<KvRow> {
                   if (sub != null)
                     Text(
                       sub,
-                      maxLines: 1,
+                      maxLines: widget.subLines,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: KvFont.ui,
-                        fontSize: 13,
-                        height: 18 / 13,
+                        fontSize: widget.dense ? 12 : 13,
+                        height:
+                            (widget.dense ? 17 : 18) / (widget.dense ? 12 : 13),
                         color: KvColor.inkMeta,
                       ),
                     ),
@@ -335,6 +379,196 @@ class _KvRowState extends State<KvRow> {
               borderRadius: BorderRadius.circular(KvRadius.row),
             ),
             child: body,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **The choices inside a settings ceremony** (§4, D-275; `T3` measured).
+///
+/// A [KvColor.chip] card at [KvRadius.bubble] holding the options as rows with
+/// exactly one [KvCheck] — the inner card of a sheet, never a screen's own
+/// container (that is [KvRowContainer]). Promoted out of `node_screen.dart` at
+/// UX-R4, where it was the explorer and API-source sheets' private shape: the
+/// lock timer is the third sheet of the family, and a third copy is how three
+/// ceremonies start disagreeing about what a chosen option looks like (BG-21).
+class KvChoiceCard extends StatelessWidget {
+  const KvChoiceCard({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: KvColor.chip,
+      borderRadius: BorderRadius.circular(KvRadius.bubble),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < children.length; i++) ...[
+          if (i > 0)
+            const SizedBox(
+              height: 1,
+              child: ColoredBox(color: KvColor.hairline),
+            ),
+          children[i],
+        ],
+      ],
+    ),
+  );
+}
+
+/// One choice: a title, an optional line beneath, and the mark that says which
+/// one is current. A [KvSpace.control]-high row (BG-12).
+///
+/// **The unchosen options carry an empty ring, not an empty box** (`T3`,
+/// measured: a 22 dp [KvColor.edgeHi] circle on every row that is not the
+/// current one). A column of one check and five blanks reads as a list with
+/// one annotation; a column of six rings reads as a choice, which is what the
+/// sheet is for. The shipped sheets held the space and drew nothing in it.
+class KvChoiceRow extends StatelessWidget {
+  const KvChoiceRow({
+    super.key,
+    required this.title,
+    this.sub,
+    this.subTone,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String title;
+  final String? sub;
+
+  /// The sub-line's hue. Null is the house [KvColor.inkDim] on this ground
+  /// (§1.4). `T3` spends [KvColor.warn] on exactly one line — *Anyone holding
+  /// the phone can spend*, under **Never** — because that option's cost is the
+  /// thing the sheet exists to make visible (BG-7: not-yet-safe, said in
+  /// words as well as in hue).
+  final Color? subTone;
+
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    selected: selected,
+    label: sub == null ? title : '$title. $sub',
+    child: ExcludeSemantics(
+      child: InkWell(
+        onTap: onTap,
+        highlightColor: KvColor.chipPressed,
+        splashFactory: NoSplash.splashFactory,
+        child: ConstrainedBox(
+          // **64, not 56** (`sheet-SELECTION SHEET`, measured: five rows at a
+          // 65 dp pitch inside a card padded 6, so the row is the house 64 and
+          // the extra dp is the hairline). It is a minimum, so a wrapped
+          // at-risk line grows the row rather than clipping.
+          constraints: const BoxConstraints(minHeight: KvSpace.row),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: KvSpace.s20,
+              vertical: KvSpace.s,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 15,
+                          height: 20 / 15,
+                          fontWeight: FontWeight.w600,
+                          fontVariations: KvWeight.w600,
+                          color: KvColor.ink,
+                        ),
+                      ),
+                      if (sub case final sub?)
+                        Text(
+                          sub,
+                          style: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 12,
+                            height: 17 / 12,
+                            color: subTone ?? KvColor.inkDim,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: KvSpace.sm),
+                // The app's one yes (BG-29), and the ring where it is not.
+                if (selected)
+                  const KvCheck(ground: KvColor.chip)
+                else
+                  const KvRadio(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// **The unchosen mark**: a 24 dp ring, 2 dp stroke, in [KvColor.etch]
+/// (`sheet-SELECTION SHEET`, measured at 2×).
+///
+/// It exists because a column of one mark and five blanks reads as a list with
+/// one annotation, while a column of rings reads as a **choice** — which is
+/// what a selection sheet is for. The shipped sheets held the space and drew
+/// nothing in it.
+///
+/// **The chosen mark is [KvCheck], and stays [KvCheck]** — the founder's
+/// ruling on glass (2026-09-06: *"let it use our green checkmark, the way it
+/// was before … lets always use that instead of this teal select color"*).
+/// The sheet render drew a lit teal ring and D-284 argued for it from BG-29's
+/// own wording — the check means *confirmed*, and nothing on a selection sheet
+/// is confirmed yet. **His eye outranks that reading** (D-262), and he is
+/// right about the thing the argument missed: BG-29's value is that the app
+/// has exactly ONE yes, recognisable without being re-learned, and a second
+/// chosen-mark vocabulary costs more than the tense distinction buys. Teal
+/// also stays what it is — light, never a status (BG-2).
+///
+/// It draws inside [KvCheck]'s own footprint, so the column does not shift by
+/// a ring width when the choice moves.
+class KvRadio extends StatelessWidget {
+  const KvRadio({super.key, this.ring = 24});
+
+  /// The visible circle. The widget's box is [KvCheck]'s outer, which is
+  /// larger — the ring sits centred in it.
+  final double ring;
+
+  /// The ring's stroke, at any size (measured 2 at 24).
+  static const double stroke = 2;
+
+  /// The miniature that rides a disabled action's label, saying *nothing new
+  /// has been picked* in the sheet's own vocabulary.
+  static const double markInPill = 10;
+
+  @override
+  Widget build(BuildContext context) {
+    const box = KvCheck(disc: KvCheck.small);
+    final extent = ring <= markInPill ? ring : box.outer;
+    return SizedBox(
+      width: extent,
+      height: extent,
+      child: Center(
+        child: Container(
+          width: ring,
+          height: ring,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: KvColor.etch, width: stroke),
           ),
         ),
       ),

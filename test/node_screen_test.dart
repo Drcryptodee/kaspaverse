@@ -13,6 +13,7 @@ import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/maturity.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
@@ -871,13 +872,18 @@ void main() {
       await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
       expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
-      expect(find.text('Use this node'), findsOneWidget);
+      // **The pill is present and disabled, and its LABEL is the reason**
+      // (D-284): the verb arrives with the ability to use it. The control was
+      // never absent — `Use this node` returns the moment there is something
+      // to commit, two lines down.
       expect(find.text('Type the address of your node first.'), findsOneWidget);
+      expect(find.text('Use this node'), findsNothing);
       // Asking with nothing typed pins nothing: no call reached Rust.
       expect(seam.calls, isEmpty);
       await tester.enterText(find.byType(TextField), 'ws://mine.local:17110');
       await tester.pumpAndSettle();
       expect(find.text('Type the address of your node first.'), findsNothing);
+      expect(find.text('Use this node'), findsOneWidget);
       expect(seam.calls, isEmpty, reason: 'typing is not committing');
     });
 
@@ -1506,11 +1512,16 @@ void main() {
         height: 2400,
       );
       // The two audited defaults and `Custom`, as rows; the current one
-      // wears the check and only it.
+      // wears the check and only it — and **the others now carry a ring**
+      // rather than a blank, which is what the promoted `KvChoiceRow`
+      // brought (D-284). A shared part changing underneath is expected.
       expect(_inSheet(find.text('explorer.kaspa.org')), findsOneWidget);
       expect(_inSheet(find.text('kaspa.stream')), findsOneWidget);
       expect(_inSheet(find.text('Custom')), findsOneWidget);
       expect(_inSheet(find.byType(KvCheck)), findsOneWidget);
+      // Three: the two unchosen options, and the miniature on the disabled
+      // act that says *nothing new has been picked*.
+      expect(_inSheet(find.byType(KvRadio)), findsNWidgets(3));
       // The inputs `Custom` stands for are not drawn until it is chosen.
       expect(_inSheet(find.byType(TextField)), findsNothing);
       // Nothing changed: the act is disabled and says why (BG-12).
@@ -1661,6 +1672,8 @@ void main() {
       );
       // The shipped source is the current choice, checked once.
       expect(_inSheet(find.text('api.kaspa.org')), findsOneWidget);
+      // The price-source sheet is the same promoted part: the check marks
+      // the choice, a ring marks every other option (D-284).
       expect(_inSheet(find.byType(KvCheck)), findsOneWidget);
       // Every significant digit, no trailing zeros (D-210).
       expect(find.text('\$0.0712'), findsOneWidget);
@@ -1716,8 +1729,11 @@ void main() {
         source: 'API source',
         height: 2400,
       );
+      // **Disabled, the pill's label IS the reason** (D-284) — so the verb
+      // is not on the glass and the thing to tap is the reason itself.
       expect(find.text('This is already your price source.'), findsOneWidget);
-      await tester.tap(find.text('Use this source'));
+      expect(find.text('Use this source'), findsNothing);
+      await tester.tap(find.text('This is already your price source.'));
       await tester.pumpAndSettle();
       expect(rate.writes, isEmpty, reason: 'a disabled act does nothing');
       await tester.tap(_inSheet(find.text('Custom')));

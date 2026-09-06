@@ -13,7 +13,11 @@ import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
-import 'package:kaspaverse/src/ui/settings_screen.dart';
+import 'package:kaspaverse/src/ui/settings/about_screen.dart';
+import 'package:kaspaverse/src/ui/settings/security_screen.dart';
+import 'package:kaspaverse/src/ui/settings/settings_scopes.dart';
+import 'package:kaspaverse/src/ui/settings/settings_screen.dart';
+import 'package:kaspaverse/src/ui/settings/wallet_screen.dart';
 import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/send/signing_ceremony.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
@@ -439,22 +443,69 @@ Future<void> _testANode(WidgetTester tester) async {
   await tester.pump(KvMotion.enter);
 }
 
-Widget _settings() => SettingsScreen(
-  security: SecurityScope(
-    biometricStatus: () async => 'ready',
-    pathAState: () async => pathANone,
-    enroll: () async => true,
-    clearEnrollment: () async {},
-    lockGraceSecs: ValueNotifier(0),
-    setLockGraceSecs: (_) async {},
-  ),
-  wallet: WalletSettingsScope(
-    receiveAddress: () async => _addr,
-    deepScan: () async =>
-        DeepScanReport(depth: 0, receiveSeen: 0, changeSeen: 0, widened: false),
-  ),
-  about: const AboutScope(packageInfo: _packageInfo),
+/// **The settings group's five seams, in the state a frame should be read
+/// in** (UX-R4): fingerprint enrolled, a 30 s lock grace, both wallet tools
+/// wired, the network row on public nodes. A preview built on the *empty*
+/// state proves nothing about the screen the founder actually opens.
+SecurityScope _securityScope({int grace = 30, String state = pathAReady}) =>
+    SecurityScope(
+      biometricStatus: () async => 'ready',
+      pathAState: () async => state,
+      enroll: () async => true,
+      clearEnrollment: () async {},
+      lockGraceSecs: ValueNotifier(grace),
+      setLockGraceSecs: (_) async {},
+      lockNow: () async {},
+    );
+
+WalletSettingsScope _walletScope() => WalletSettingsScope(
+  receiveAddress: () async => _addr,
+  receiveRoute: (_) => const SizedBox.shrink(),
+  deepScan: () async =>
+      DeepScanReport(depth: 0, receiveSeen: 12, changeSeen: 6, widened: false),
+  consolidate: () async => throw UnimplementedError(),
+  commitSend: (_) async => throw UnimplementedError(),
+  abandonSend: () async {},
 );
+
+Widget _settings() => SettingsScreen(
+  security: _securityScope(),
+  wallet: _walletScope(),
+  about: const AboutScope(packageInfo: _packageInfo),
+  network: NetworkSettingsScope(
+    route: (_) => const SizedBox.shrink(),
+    pinnedNode: ValueNotifier(null),
+    rateEnabled: ValueNotifier(true),
+  ),
+);
+
+Widget _security() => SecurityScreen(scope: _securityScope());
+
+Widget _walletSettings() => WalletScreen(scope: _walletScope());
+
+Widget _about() => AboutScreen(
+  scope: AboutScope(
+    // **Wired, because a null seam removes the CONTROL, not just its
+    // destination** — without `openUrl` the source row loses its external
+    // mark, and without a signature the card renders its own failure state.
+    // A preview built on those is a preview of a screen nobody has (L125).
+    packageInfo: () async => const {
+      'version': '1.0.0',
+      'build': '3041',
+      'signature':
+          'a1f39c204b7e88d10e52c6aa71b93f04d2e85c179a0b6e33f41022cd'
+          '8b7ae059',
+    },
+    openUrl: (_) async => true,
+  ),
+);
+
+/// `T3` — the ceremony over its own screen, which is how it is read.
+Future<void> _openLockTimer(WidgetTester tester) async {
+  await tester.tap(find.text('Lock when I leave'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+}
 
 Future<Map<String, String>> _packageInfo() async => const {
   'version': '1.0.0',
@@ -676,7 +727,15 @@ void main() {
     surface('node__hunting', () => _node(hunting: true));
     surface('node__unsynced', () => _node(synced: false));
     surface('node__test', _node, act: _testANode);
-    surface('settings__root', _settings);
+    // **`T1` · `T2` · `T3` · `T4` · `T6`, the whole group** (UX-R4). The root
+    // and Security owe a one-view fit, so both are framed: a frame is where
+    // the fit is *read*, and the guard in `settings_group_test` is where it is
+    // proven.
+    framedSurface('settings__root', _settings);
+    framedSurface('settings__security', _security);
+    surface('settings__lock_timer', _security, act: _openLockTimer);
+    framedSurface('settings__wallet', _walletSettings);
+    framedSurface('settings__about', _about);
 
     // **Send, both steps, in all four frames** (`S6a` · `S6b` · `S6`).
     framedSurface('send__recipient', _sendScreen);
