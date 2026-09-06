@@ -1146,7 +1146,8 @@ void main() {
         ),
     ];
 
-    testWidgets('`All` keeps its word and opens the feed on its own screen', (
+    testWidgets('`All` takes the whole band — the balance goes, the two verbs '
+        'stay, and resting the rows at their top gives it back', (
       tester,
     ) async {
       await pump(
@@ -1158,33 +1159,40 @@ void main() {
       expect(
         find.text('Less'),
         findsNothing,
-        reason: 'it is not a toggle any more — it is a door',
+        reason: 'it never renames itself — it is one word and one act',
       );
 
       await tester.tap(find.text('All'));
-      // **Bounded pumps, never `pumpAndSettle`** — this surface never
-      // quiesces (the freshness ticker), and the route it opens carries the
-      // same live feed.
       await tester.pump();
-      await tester.pump(KvMotion.enter);
-      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
 
-      // A surface of its own: its own top bar, and the home's balance gone.
-      expect(find.text('Activity'), findsWidgets);
       expect(
         findCapsLabel('Available balance'),
         findsNothing,
-        reason: 'a feed someone asked to see all of is not a summary',
+        reason: 'his ruling: the balance is pushed up and out entirely',
       );
-      // And no `All` on the screen that IS all of it (§8).
-      expect(find.text('All'), findsNothing);
+      expect(
+        find.text('Send'),
+        findsOneWidget,
+        reason:
+            '**the whole reason this is not a route** — a user reading '
+            'their history is one tap from spending',
+      );
+      expect(find.text('Receive'), findsOneWidget);
+      expect(
+        find.text('All'),
+        findsNothing,
+        reason:
+            'at full it has nothing left to do, so it is absent rather '
+            'than inert (§8)',
+      );
 
-      // Back through the route, not `pageBack()` — `KvTopBar` draws the
-      // house's own back mark and no Cupertino/Material one exists to find.
-      tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+      // The way back is the one every reading area has.
+      await tester.drag(find.byType(Scrollable).last, const Offset(0, 600));
       await tester.pump();
-      await tester.pump(KvMotion.enter);
-      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.calm);
+      await tester.pump(KvMotion.calm);
       expect(findCapsLabel('Available balance'), findsOneWidget);
       expect(find.text('All'), findsOneWidget);
     });

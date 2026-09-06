@@ -283,8 +283,8 @@ List<ActivityRecord> _longActivity() {
 Future<void> _openAll(WidgetTester tester) async {
   await tester.tap(find.text('All'));
   await tester.pump();
-  await tester.pump(KvMotion.enter);
-  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.calm);
+  await tester.pump(KvMotion.calm);
 }
 
 /// Drag the rows so the plate yields its clock.
@@ -801,7 +801,11 @@ void main() {
     framedSurface('home__drawer', () => _shell(_home()), act: _summonDrawer);
     // `All` — the feed on its own surface (founder, 2026-09-06), and what a
     // scroll costs: the chain clock, and nothing else.
-    framedSurface('home__activity_all', () => _shell(_home()), act: _openAll);
+    framedSurface(
+      'home__activity_all',
+      () => _shell(_home(activity: _longActivity())),
+      act: _openAll,
+    );
     // **Enough rows to scroll.** With the two-row feed the drag produces no
     // downward delta, nothing yields, and the frame shows the resting state
     // under a name claiming otherwise — a picture that lies (L125).

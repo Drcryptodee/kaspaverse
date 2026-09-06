@@ -17,6 +17,7 @@ import '../widgets/kv_amount.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_loader.dart';
+import '../widgets/kv_reading.dart';
 import '../widgets/kv_rows.dart';
 import '../widgets/kv_tabs.dart';
 import '../widgets/kv_two_pane.dart';
@@ -109,11 +110,6 @@ class _WalletScreenState extends State<WalletScreen> {
   /// [_listMax] so a short frame can never make reading *shrink* the card.
   static double _tallCap(double frame) => math.max(_listMax, frame * 0.62);
 
-  /// How far the list must be dragged before the card grows. Small enough to
-  /// feel immediate, large enough that a thumb resting on a row while tapping
-  /// it does not resize the screen underneath.
-  static const double _readingThreshold = 6;
-
   String? _address;
   bool _addressFailed = false;
 
@@ -125,11 +121,6 @@ class _WalletScreenState extends State<WalletScreen> {
 
   /// `All` and `Show` are the same fact, so they are the same field.
   bool _showAll = false;
-
-  /// **The card has grown to meet a scroll.** Set on the first real downward
-  /// drag inside the addresses, cleared when they come back to rest at the
-  /// top. See [_tallCap].
-  bool _reading = false;
 
   /// What a merge would cost, from a plan built and dropped. Null while it is
   /// being asked for; [_mergeRefusal] carries the answer when there is nothing
@@ -353,110 +344,112 @@ class _WalletScreenState extends State<WalletScreen> {
   Widget build(BuildContext context) {
     final canMerge = widget.scope.canMerge;
     final gutter = KvWindow.of(context).gutter;
-    return Scaffold(
-      backgroundColor: KvColor.abyss,
-      body: SafeArea(
-        child: Column(
-          children: [
-            KvTopBar(
-              title: 'Wallet',
-              onBack: () => Navigator.of(context).maybePop(),
-            ),
-            Expanded(
-              child: KvColumn(
-                gutter: false,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: ListView(
-                        padding: EdgeInsets.fromLTRB(
-                          gutter,
-                          KvSpace.xs,
-                          gutter,
-                          canMerge ? KvSpace.s20 : KvSpace.l,
-                        ),
-                        children: [
-                          KvSectionHeader('Addresses', trailing: _filter()),
-                          _addressCard(),
-                          const KvSectionHeader('Tools'),
-                          KvRowContainer(
-                            children: [
-                              _tool(
-                                mark: KvGlyph.layers,
-                                title: 'Scan for more addresses',
-                                sub:
-                                    'Looks deeper for funds at addresses '
-                                    'another wallet app may have created from '
-                                    'these words',
-                                outcome: _scanOutcome,
-                                failed: _scanFailed,
-                                busy: _busy == 'scan',
-                                onTap: _scan,
-                              ),
-                              if (canMerge)
-                                _tool(
-                                  mark: KvGlyph.merge,
-                                  title: 'Merge coins',
-                                  // No fee COUNT and no "all your coins": a
-                                  // pile too big for one transaction merges in
-                                  // bounded passes, each paying its own fee
-                                  // (D-170), and coins reserved for live
-                                  // conversations stay where they are. The
-                                  // ceremony carries the real numbers.
-                                  sub: _mergeSub(),
-                                  outcome: _mergeOutcome,
-                                  failed: _mergeFailed,
-                                  busy: _busy == 'merge',
-                                  onTap: _canMergeNow ? _merge : null,
-                                ),
-                            ],
+    return KvReadingScope(
+      builder: (context, reading) => Scaffold(
+        backgroundColor: KvColor.abyss,
+        body: SafeArea(
+          child: Column(
+            children: [
+              KvTopBar(
+                title: 'Wallet',
+                onBack: () => Navigator.of(context).maybePop(),
+              ),
+              Expanded(
+                child: KvColumn(
+                  gutter: false,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: ListView(
+                          padding: EdgeInsets.fromLTRB(
+                            gutter,
+                            KvSpace.xs,
+                            gutter,
+                            canMerge ? KvSpace.s20 : KvSpace.l,
                           ),
-                          if (canMerge) ...[
-                            const SizedBox(height: KvSpace.m),
-                            // BG-11, and the render's own info card: the
-                            // disclosure sits **before** anything is priced.
-                            // The price itself is the ceremony's, from the
-                            // prepared plan.
-                            // **Three lines, and the fee is not among them.**
-                            // It used to end "and you see the exact fee
-                            // before you hold to sign" — a promise about a
-                            // later screen, written when nothing here could
-                            // show a price. The bar below now shows one, so
-                            // the sentence was BG-19 (nothing twice on one
-                            // surface) and it cost the screen its one-view
-                            // fit by exactly 14 dp. The render puts the fee
-                            // in this card; we put it on the control, which
-                            // is closer to the act.
-                            const _Notice(
-                              'Merging is an ordinary send to yourself. It '
-                              'pays one fee now and makes every later send '
-                              'cheaper. Nothing leaves the wallet.',
+                          children: [
+                            KvSectionHeader('Addresses', trailing: _filter()),
+                            _addressCard(),
+                            const KvSectionHeader('Tools'),
+                            KvRowContainer(
+                              children: [
+                                _tool(
+                                  mark: KvGlyph.layers,
+                                  title: 'Scan for more addresses',
+                                  sub:
+                                      'Looks deeper for funds at addresses '
+                                      'another wallet app may have created from '
+                                      'these words',
+                                  outcome: _scanOutcome,
+                                  failed: _scanFailed,
+                                  busy: _busy == 'scan',
+                                  onTap: _scan,
+                                ),
+                                if (canMerge)
+                                  _tool(
+                                    mark: KvGlyph.merge,
+                                    title: 'Merge coins',
+                                    // No fee COUNT and no "all your coins": a
+                                    // pile too big for one transaction merges in
+                                    // bounded passes, each paying its own fee
+                                    // (D-170), and coins reserved for live
+                                    // conversations stay where they are. The
+                                    // ceremony carries the real numbers.
+                                    sub: _mergeSub(),
+                                    outcome: _mergeOutcome,
+                                    failed: _mergeFailed,
+                                    busy: _busy == 'merge',
+                                    onTap: _canMergeNow ? _merge : null,
+                                  ),
+                              ],
                             ),
+                            if (canMerge) ...[
+                              const SizedBox(height: KvSpace.m),
+                              // BG-11, and the render's own info card: the
+                              // disclosure sits **before** anything is priced.
+                              // The price itself is the ceremony's, from the
+                              // prepared plan.
+                              // **Three lines, and the fee is not among them.**
+                              // It used to end "and you see the exact fee
+                              // before you hold to sign" — a promise about a
+                              // later screen, written when nothing here could
+                              // show a price. The bar below now shows one, so
+                              // the sentence was BG-19 (nothing twice on one
+                              // surface) and it cost the screen its one-view
+                              // fit by exactly 14 dp. The render puts the fee
+                              // in this card; we put it on the control, which
+                              // is closer to the act.
+                              const _Notice(
+                                'Merging is an ordinary send to yourself. It '
+                                'pays one fee now and makes every later send '
+                                'cheaper. Nothing leaves the wallet.',
+                              ),
+                            ],
                           ],
-                        ],
-                      ),
-                    ),
-                    // **Pinned, not in flow.** It is the screen's one primary
-                    // action and the list above it can grow by four rows under
-                    // the user's thumb; an action bar that scrolled away when
-                    // the addresses opened would be reachable exactly when it
-                    // was not needed. The render seats it 25 dp off the frame's
-                    // foot at 56 high (measured), which is [KvSpace.control].
-                    if (canMerge)
-                      Padding(
-                        padding: EdgeInsets.fromLTRB(
-                          gutter,
-                          0,
-                          gutter,
-                          KvSpace.l,
                         ),
-                        child: _mergeBar(),
                       ),
-                  ],
+                      // **Pinned, not in flow.** It is the screen's one primary
+                      // action and the list above it can grow by four rows under
+                      // the user's thumb; an action bar that scrolled away when
+                      // the addresses opened would be reachable exactly when it
+                      // was not needed. The render seats it 25 dp off the frame's
+                      // foot at 56 high (measured), which is [KvSpace.control].
+                      if (canMerge)
+                        Padding(
+                          padding: EdgeInsets.fromLTRB(
+                            gutter,
+                            0,
+                            gutter,
+                            KvSpace.l,
+                          ),
+                          child: _mergeBar(),
+                        ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -534,38 +527,14 @@ class _WalletScreenState extends State<WalletScreen> {
       // part (`KvHairline`).
       divided: false,
       children: [
-        // **The card grows to meet a reader and returns when they stop.**
-        // Expand on the first real downward drag inside the list; collapse the
-        // moment it comes back to rest at its own top. Deliberately NOT "any
-        // upward scroll": a card that shrank halfway through a list would move
-        // the rows out from under the thumb reading them, and the top is the
-        // one position a user unambiguously means *done*.
-        NotificationListener<ScrollUpdateNotification>(
-          onNotification: (notification) {
-            // Only this list's own scroll — the page's notifications bubble
-            // through here too, and a page drag must not resize the card.
-            if (notification.depth != 0) return false;
-            final pixels = notification.metrics.pixels;
-            final delta = notification.scrollDelta ?? 0;
-            final next = _reading
-                ? pixels > 0
-                : delta > 0 && pixels > _readingThreshold;
-            if (next != _reading) setState(() => _reading = next);
-            return false;
-          },
-          child: AnimatedContainer(
-            // `calm`, not `fast`: this is a container changing size under the
-            // reader's own thumb, and the house reserves `fast` for a tint or
-            // a thumb sliding. Reduced motion collapses it (BG-9).
-            duration: MediaQuery.disableAnimationsOf(context)
-                ? Duration.zero
-                : KvMotion.calm,
-            curve: KvMotion.out,
-            constraints: BoxConstraints(
-              maxHeight: _reading
-                  ? _tallCap(MediaQuery.sizeOf(context).height)
-                  : _listMax,
-            ),
+        // **The house's reading room** (`KvReading`, D-289). The card takes
+        // more of the screen while someone is scrolling it and gives it back
+        // when they rest at the top — the gesture contract and the motion are
+        // the shared part's, so this screen states only its own two caps.
+        KvExpands(
+          rest: _listMax,
+          reading: _tallCap(MediaQuery.sizeOf(context).height),
+          child: KvReadingArea(
             child: ListView.builder(
               shrinkWrap: true,
               padding: EdgeInsets.zero,

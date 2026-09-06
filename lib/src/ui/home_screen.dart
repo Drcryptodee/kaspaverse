@@ -25,6 +25,7 @@ import 'widgets/kv_empty_state.dart';
 import 'widgets/haptics.dart';
 import 'widgets/kv_glyph.dart';
 import 'widgets/kv_money_plate.dart';
+import 'widgets/kv_reading.dart';
 import 'widgets/kv_rows.dart';
 import 'widgets/kv_status_chip.dart';
 import 'widgets/kv_streaming_count.dart';
@@ -322,16 +323,10 @@ class _HomeScreenState extends State<HomeScreen> {
   /// first upward scroll on the rows — the card drops under the bar and the
   /// rows scroll beneath the fixed tabs. `Less` snaps it back. **The plate
   /// never moves and never minimises**: the founder ruled that out.
-  /// **The ledger is being read.** Set on the first upward drag inside the
-  /// rows, cleared when they come back to rest at the top — the same gesture
-  /// contract `T4`'s address card uses, and the founder asked for it here in
-  /// the same breath: *"i want expansive scrolls to behave this way… but
-  /// instead of expanding downwards, it expands upwards and covers the DAA."*
-  ///
-  /// It costs the chain clock and nothing else. The balance stays — a user
-  /// scrolling their history has not stopped caring what they hold, and the
-  /// clock is the one thing on the plate that is ambient rather than owed.
-  bool _reading = false;
+  /// The reading level for this screen — the house's shared contract
+  /// (`KvReading`, D-289). Held here rather than inside the scope's builder
+  /// because `_openActivity` and the scroll-home both need to reach it.
+  final KvReadingController _reading = KvReadingController();
 
   /// The rows' own scroll position, kept across the open/closed swap so the
   /// gesture that opened the card is the same gesture that keeps scrolling it.
@@ -435,6 +430,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _reading.dispose();
     _ticker?.cancel();
     _ledgerScroll.dispose();
     widget.fiat?.detach?.call();
@@ -717,7 +713,18 @@ class _HomeScreenState extends State<HomeScreen> {
   /// The money column: **the plate fixed, the strip under it, the ledger card
   /// filling the rest, and the Receive · Send bar over the card's foot**
   /// (founder, on glass 2026-09-04, D-262). Nothing above the card scrolls.
-  Widget _moneyColumn(KvWindowMetrics metrics) {
+  Widget _moneyColumn(KvWindowMetrics metrics) => KvReadingScope(
+    controller: _reading,
+    // **No `onChanged` scroll-home, deliberately.** The old `Less` button
+    // could drop the level with the rows anywhere, so it animated them back;
+    // nothing can now — `done()` fires only at `pixels <= 0`, so the rows are
+    // already there. Calling `animateTo` from that callback also asserts
+    // inside the framework (`activity!.isScrolling`), because the level falls
+    // during the very drag that lowers it.
+    builder: (context, reading) => _moneyBody(context, metrics),
+  );
+
+  Widget _moneyBody(BuildContext context, KvWindowMetrics metrics) {
     // **`short` is the only collapse there is** (BG-33). A phone on its side
     // has 412 dp of height and the ledger is what it was turned for, so the
     // plate becomes a 56 dp bar carrying the two verbs (R5) and there is no
@@ -751,7 +758,10 @@ class _HomeScreenState extends State<HomeScreen> {
               // and its air with it — the plate owns that geometry and
               // animates the whole seat closed, so the ledger below rises
               // into all 30 dp of it rather than into an empty ruled band.
-              chainClock: _reading
+              // **The clock is what a SCROLL spends** — one step, and the
+              // balance never moves with it. The plate takes `null` rather
+              // than a collapsed widget so its rule and both gaps go too.
+              chainClock: _reading.value.reaches(KvReadingLevel.reading)
                   ? null
                   : _ChainClock(
                       daa: widget.chain.virtualDaaScore,
@@ -793,20 +803,32 @@ class _HomeScreenState extends State<HomeScreen> {
           // takes, as it was under the pinned band (A3), never the balance
           // and never the ledger. **Pull-to-refresh lives here too** (D-194:
           // it works FROM the balance), as well as on the rows.
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: math.max(
-                0.0,
-                box.maxHeight - _Ledger.minHeight - foot,
-              ),
-            ),
-            child: _refreshable(
-              refresh,
-              SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(
-                  parent: ClampingScrollPhysics(),
+          // **And the whole band is what `All` spends** (founder, 2026-09-06:
+          // *"let the activity section expand and cover even the available
+          // balance… receive and send below stays"*). `keep: 0` — he asked for
+          // it gone, not reduced, and a balance shown as a sliver would be a
+          // figure the eye cannot read beside one it can.
+          //
+          // Only a CONTROL reaches this. A drag stops at the clock, because a
+          // gesture that could remove the balance by accident is a gesture
+          // nobody would make twice.
+          KvYields(
+            from: KvReadingLevel.full,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: math.max(
+                  0.0,
+                  box.maxHeight - _Ledger.minHeight - foot,
                 ),
-                child: band,
+              ),
+              child: _refreshable(
+                refresh,
+                SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(
+                    parent: ClampingScrollPhysics(),
+                  ),
+                  child: band,
+                ),
               ),
             ),
           ),
@@ -832,10 +854,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 // activity and token row in its own full screen — that is way
                 // better UX"*). It keeps its word in both states, because it
                 // no longer has two.
-                onOpenAll: () => _openActivity(metrics),
-                onReading: (reading) {
-                  if (reading != _reading) setState(() => _reading = reading);
-                },
+                // `All` asks for the whole thing; the rows' own scroll asks
+                // for one step. Both go through the same controller.
+                onOpenAll: _reading.value == KvReadingLevel.full
+                    ? null
+                    : _openActivity,
+                reading: _reading,
                 onOpen: widget.detailRoute == null
                     ? null
                     : (txid) => _open(txid, metrics),
@@ -976,30 +1000,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// `All` — the whole feed on its own screen.
+  /// `All` — the feed takes the screen, in place.
   ///
-  /// **A screen, not a taller card.** The card used to grow under the foot bar
-  /// and the action became `Less`; that gave the rows more room while leaving
-  /// them in a container that was still competing with a balance, a status
-  /// strip and two pills. A feed someone has asked to see all of has stopped
-  /// being a summary, and the honest answer to *"show me all"* is a surface
-  /// whose only job is the feed.
-  void _openActivity(KvWindowMetrics metrics) {
+  /// **In place, not a route** (founder's ruling 2026-09-06, replacing the
+  /// pushed screen he had asked for a beat earlier): the money plate and the
+  /// status strip yield entirely, the feed rises into all of it, and **Send ·
+  /// Receive stay at the foot** — which is the whole reason it is not a route.
+  /// A user reading their history is one tap from spending, and a pushed
+  /// screen puts a back gesture between them and the two verbs.
+  ///
+  /// The way back is the same one every reading area has: rest the rows at
+  /// their top.
+  void _openActivity() {
     KvHaptic.selection();
-    Navigator.of(context).push(
-      KvPageRoute<void>(
-        builder: (_) => _ActivityPage(
-          wallet: widget.wallet,
-          chain: widget.chain,
-          now: _now,
-          dimmed: _dimmed,
-          feedInputs: _feedInputs,
-          onOpen: widget.detailRoute == null
-              ? null
-              : (txid) => _open(txid, metrics),
-        ),
-      ),
-    );
+    _reading.openFully();
   }
 }
 
@@ -1378,7 +1392,7 @@ class _Ledger extends StatefulWidget {
     this.onOpen,
     this.onRefresh,
     this.onOpenAll,
-    this.onReading,
+    this.reading,
   });
 
   final List<ActivityRecord> records;
@@ -1416,9 +1430,9 @@ class _Ledger extends StatefulWidget {
   /// (this IS that screen).
   final VoidCallback? onOpenAll;
 
-  /// The rows are being scrolled, or have come back to rest at their top.
-  /// Null ⇒ nothing above this card yields to a scroll.
-  final ValueChanged<bool>? onReading;
+  /// The screen's reading level (`KvReading`). Null ⇒ nothing above this card
+  /// yields to a scroll, so the rows do not report.
+  final KvReadingController? reading;
 
   /// The least the card is ever given: its head, one row and its 6 dp foot.
   /// Below this the band above yields instead (see `_moneyColumn`).
@@ -1449,36 +1463,6 @@ class _LedgerState extends State<_Ledger> {
     if (_pages.hasClients) {
       _pages.animateToPage(i, duration: KvMotion.calm, curve: KvMotion.curve);
     }
-  }
-
-  /// The first upward scroll makes room for the rows (D-262): a user reaching
-  /// for more gets them, without finding `All` first. What yields is the
-  /// caller's business — on the home screen it is the chain clock.
-  ///
-  /// **It reports both ways now.** It used to be one-directional, because the
-  /// way back was a `Less` button and a scroll must never snap a card shut
-  /// under a thumb. With `All` gone to its own screen the room is given back
-  /// by the same gesture that took it, and the safe moment is the one the
-  /// address card already uses: **at rest, at the top**. Nowhere in the middle
-  /// of a list does a scroll move rows out from under the thumb reading them.
-  bool _onScroll(ScrollNotification n) {
-    final report = widget.onReading;
-    if (report == null) return false;
-    // The page swipe is a scroll too, and sideways; only the rows' own
-    // vertical motion counts.
-    if (n.metrics.axis != Axis.vertical) return false;
-    switch (n) {
-      case ScrollUpdateNotification(:final dragDetails, :final scrollDelta):
-        if (dragDetails != null && (scrollDelta ?? 0) > 0) report(true);
-        if (n.metrics.pixels <= 0) report(false);
-      case OverscrollNotification(:final dragDetails, :final overscroll):
-        if (dragDetails != null && overscroll > 0) report(true);
-      case ScrollEndNotification():
-        if (n.metrics.pixels <= 0) report(false);
-      default:
-        break;
-    }
-    return false;
   }
 
   @override
@@ -1545,8 +1529,12 @@ class _LedgerState extends State<_Ledger> {
               ),
             ),
           )
-        : NotificationListener<ScrollNotification>(
-            onNotification: _onScroll,
+        : KvReadingArea(
+            // **The house's reading room** (`KvReading`, D-289): a forward
+            // drag inside the rows advances the screen one step, and resting
+            // at their top returns it. What gives way is the caller's — here
+            // the money plate's clock, and its whole band at `full`.
+            //
             // **The ledger's ROWS dim as a region while the link is not
             // live** (D-276, founder on glass 2026-09-05: the activity did
             // not say *not connected* while the balance above it did).
@@ -1700,91 +1688,6 @@ class _LedgerState extends State<_Ledger> {
 /// the mark its own `direction` and `isCoinbase` because one `MaturityState`
 /// means different things on a spend and on a receive, and a mined output
 /// matures at a different depth.
-/// **`All` — the feed, on a screen whose only job is the feed.**
-///
-/// The same [_Ledger] the home screen draws, given a whole page: no balance
-/// above it competing for the eye, no action bar under it, no cap on how tall
-/// the card may grow. One rendering of the rows and one of the tab row, which
-/// is the point — a second activity list would be a second answer to *what has
-/// happened*, and the two would drift (C7).
-///
-/// It carries no `onOpenAll` (this is that screen) and no `onReading` (there is
-/// nothing above it left to yield), so the same widget is a summary in one
-/// seat and a whole surface in the other, without a mode flag.
-class _ActivityPage extends StatefulWidget {
-  const _ActivityPage({
-    required this.wallet,
-    required this.chain,
-    required this.now,
-    required this.dimmed,
-    required this.feedInputs,
-    this.onOpen,
-  });
-
-  final WalletScope wallet;
-  final ChainScope chain;
-  final ValueNotifier<DateTime> now;
-  final ValueListenable<bool> dimmed;
-
-  /// The same merged listenable the home feed rebuilds on — the counters and
-  /// relative ages here are live for the same reason they are live there.
-  final Listenable feedInputs;
-
-  final void Function(String txid)? onOpen;
-
-  @override
-  State<_ActivityPage> createState() => _ActivityPageState();
-}
-
-class _ActivityPageState extends State<_ActivityPage> {
-  final ScrollController _scroll = ScrollController();
-
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final gutter = KvWindow.of(context).gutter;
-    return Scaffold(
-      backgroundColor: KvColor.abyss,
-      body: SafeArea(
-        child: Column(
-          children: [
-            KvTopBar(
-              title: 'Activity',
-              onBack: () => Navigator.of(context).maybePop(),
-            ),
-            Expanded(
-              child: KvColumn(
-                gutter: false,
-                child: ListenableBuilder(
-                  listenable: widget.feedInputs,
-                  builder: (context, _) => _Ledger(
-                    records: widget.wallet.activity.value,
-                    maturity: widget.wallet.maturity,
-                    now: widget.now.value,
-                    virtualDaaScore: widget.chain.virtualDaaScore.value,
-                    stale: widget.dimmed.value,
-                    gutter: gutter,
-                    // No bar below it, so nothing to stop short of.
-                    foot: 0,
-                    controller: _scroll,
-                    onRefresh: widget.wallet.onRefreshActivity,
-                    onOpen: widget.onOpen,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _LedgerRow extends StatelessWidget {
   const _LedgerRow({
     super.key,
