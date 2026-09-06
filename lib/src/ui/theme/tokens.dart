@@ -112,9 +112,6 @@ abstract final class KvColor {
   /// tab underline; the armed edge and glyph of a glow pill; the orb disc.
   static const Color primary = Color(0xFF49EACB);
 
-  /// Hover of [primary].
-  static const Color primaryHover = Color(0xFF3DD9BB);
-
   /// Pressed of [primary].
   static const Color primaryPressed = Color(0xFF2FCBAD);
 
@@ -565,8 +562,15 @@ abstract final class KvLayout {
   /// A page never exceeds this; wider windows centre it.
   static const double pageMax = 1200;
 
-  /// The list pane in a two-pane layout.
-  static const double listPaneMin = 400;
+  /// The list pane's lower bound in `expanded` (§3a: *list 400–480*).
+  ///
+  /// **Unread, and that is a finding rather than dead code** (cleanup,
+  /// 2026-09-06). `KvTwoPane` clamps every class at its own `minList = 340`,
+  /// which is §3a's number for `expanded short` — so a tall `expanded` window
+  /// can hand the list 340 where the law says 400. Two numbers for one
+  /// quantity, and the wrong one shipping: routed to UX-R8 with the rest of
+  /// the shell sweep rather than changed in a cleanup pass, because it moves
+  /// a layout.
 
   /// The list pane's upper bound.
   static const double listPaneMax = 480;
@@ -589,15 +593,12 @@ abstract final class KvLayout {
   /// A floating sheet's inset from the bottom edge.
   static const double sheetFloatingInset = 24;
 
-  /// The four spec frames a screen must be seen in before it is done (BG-33):
-  /// 393 `compact` · 700 `medium` · 1180 `expanded` · 915 × 412 `expanded
-  /// short`.
-  static const List<Size> specFrames = [
-    Size(393, 852),
-    Size(700, 900),
-    Size(1180, 800),
-    Size(915, 412),
-  ];
+  // **The spec frames live in the preview harness, not here** (cleanup,
+  // 2026-09-06). A `specFrames` list sat here unread while
+  // `test/support/preview_harness.dart` carried its own — the same law
+  // stated twice, and the harness's is the one that renders (it also has
+  // the 320 dp / 1.3x floor this list never carried). One statement, in
+  // the place that acts on it (BG-21).
 }
 
 /// §1 — Freshness (BG-8). Stale dims and says its age; unknown renders `—`.
