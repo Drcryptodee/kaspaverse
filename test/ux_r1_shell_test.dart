@@ -809,7 +809,12 @@ List<ActivityRecord> _activity({int count = 1}) => [
     ActivityRecord(
       txid: '${i.toRadixString(16)}${'a' * 63}',
       valueSompi: BigInt.from(2400000000),
-      unixtimeMsec: BigInt.from(1788085010103),
+      // A local wall clock, never a bare epoch constant (L173): the age this
+      // row prints is measured against a local `DateTime` clock, so a fixed
+      // instant makes the reading shift with the machine's timezone.
+      unixtimeMsec: BigInt.from(
+        DateTime(2026, 8, 30, 11, 16, 50, 103).millisecondsSinceEpoch,
+      ),
       blockDaaScore: BigInt.from(526633400),
       direction: ActivityDirection.incoming,
       isCoinbase: false,

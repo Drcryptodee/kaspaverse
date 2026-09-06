@@ -23,11 +23,18 @@ import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 const _txid =
     'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34';
 
-/// 2026-08-30 02:48 UTC — the moment wallet-core RECORDED this transaction
-/// (its own clock, or a node's DAA→time estimate on a discovered row). It is
-/// **not** the accepting block's header timestamp; that field is
+/// 2026-08-30 03:48 **local** — the moment wallet-core RECORDED this
+/// transaction (its own clock, or a node's DAA→time estimate on a discovered
+/// row). It is **not** the accepting block's header timestamp; that field is
 /// `TxStatusDto.acceptedUnixMs` and it reaches the ceremony, not this screen.
-const int _recordedMs = 1788058080000;
+///
+/// **Built from a local `DateTime`, never a bare epoch constant** (L173).
+/// `formatStamp` renders local time by design, so a hard-coded 1788058080000
+/// with a hard-coded `03:48` beside it asserts the *author's* timezone: it was
+/// green on a UTC+1 machine and red on every CI run for a day, because the
+/// runner is UTC. A fixture that round-trips through `DateTime(...)` prints
+/// the same wall clock in every zone.
+final int _recordedMs = DateTime(2026, 8, 30, 3, 48).millisecondsSinceEpoch;
 
 /// A counterparty the fixture can name.
 const _payee =

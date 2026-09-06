@@ -10,13 +10,18 @@ import 'support/maturity.dart';
 import 'support/preview_harness.dart';
 import 'support/rebuilds.dart';
 
+/// 2026-08-30 03:48 local — a wall clock that prints the same in any zone.
+final int _recordedMs = DateTime(2026, 8, 30, 3, 48).millisecondsSinceEpoch;
+
 const _txid =
     'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34';
 
 ActivityRecord _sent() => ActivityRecord(
   txid: _txid,
   valueSompi: BigInt.from(1240000000),
-  unixtimeMsec: BigInt.from(1788058080000),
+  // A local `DateTime`, never a bare epoch constant (L173): this file asserts
+  // no wall clock, but the constant travels by copy and the next file will.
+  unixtimeMsec: BigInt.from(_recordedMs),
   blockDaaScore: BigInt.from(458173900),
   acceptedDaaScore: BigInt.from(458174000),
   direction: ActivityDirection.outgoing,

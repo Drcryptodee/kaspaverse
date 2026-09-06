@@ -113,7 +113,9 @@ List<ActivityRecord> _activity() => [
   ActivityRecord(
     txid: 'a' * 64,
     valueSompi: BigInt.from(100000000),
-    unixtimeMsec: BigInt.from(1788085010103),
+    unixtimeMsec: BigInt.from(
+      DateTime(2026, 8, 30, 11, 16, 50, 103).millisecondsSinceEpoch,
+    ),
     blockDaaScore: BigInt.from(526633400),
     acceptedDaaScore: BigInt.from(526633400),
     direction: ActivityDirection.outgoing,
@@ -125,7 +127,9 @@ List<ActivityRecord> _activity() => [
   ActivityRecord(
     txid: 'b' * 64,
     valueSompi: BigInt.from(2500000000),
-    unixtimeMsec: BigInt.from(1788080000000),
+    unixtimeMsec: BigInt.from(
+      DateTime(2026, 8, 30, 9, 53, 20).millisecondsSinceEpoch,
+    ),
     blockDaaScore: BigInt.from(526000000),
     direction: ActivityDirection.incoming,
     isCoinbase: false,
@@ -337,7 +341,9 @@ Widget _ceremonyOverSend({bool book = true}) => Stack(
       acceptanceStatus: (_) async => TxStatusDto(
         kind: TxStatusKind.accepted,
         blueDepth: BigInt.from(42),
-        acceptedUnixMs: BigInt.from(1788085010103),
+        acceptedUnixMs: BigInt.from(
+          DateTime(2026, 8, 30, 11, 16, 50, 103).millisecondsSinceEpoch,
+        ),
       ),
     ),
   ],
@@ -484,7 +490,12 @@ Widget _txDetail({
     ActivityRecord(
       txid: 'e154009eae73d2ef9cab0a80dc42a62ebb91f93cbdeab514a57ca3b01d7e5d34',
       valueSompi: BigInt.from(1240000000),
-      unixtimeMsec: BigInt.from(1788058080000),
+      // A local `DateTime`, never a bare epoch constant (L173) — a frame
+      // rendered on a UTC runner and one rendered here must show the same
+      // wall clock, or the catalogue documents the author's timezone.
+      unixtimeMsec: BigInt.from(
+        DateTime(2026, 8, 30, 3, 48).millisecondsSinceEpoch,
+      ),
       blockDaaScore: BigInt.from(458173900),
       acceptedDaaScore: BigInt.from(458174000),
       direction: coinbase
