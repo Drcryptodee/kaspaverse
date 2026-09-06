@@ -458,12 +458,58 @@ SecurityScope _securityScope({int grace = 30, String state = pathAReady}) =>
       lockNow: () async {},
     );
 
-WalletSettingsScope _walletScope() => WalletSettingsScope(
+/// `T4`'s own numbers, so the preview is a picture of the render and not of a
+/// convenient wallet: 31 receive addresses, **3** of them funded — 27.72 ·
+/// 0.40 · 0.00905522 — at indices 0, 2 and 14, and 28 empty behind `Show`.
+/// A fixture is a claim (L125).
+String _bech32(int seed) {
+  const alphabet = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  return [
+    for (var i = 0; i < 5; i++) alphabet[(seed * (i + 3) + i * 7) % 32],
+  ].join();
+}
+
+List<WalletAddressDto> _addressFixture() {
+  const funded = {0: 2772000000, 2: 40000000, 14: 905522};
+  return [
+    for (var i = 0; i < 31; i++)
+      WalletAddressDto(
+        index: i,
+        // Distinct head AND tail per index. A fixture whose rows all compact
+        // to the same `qr7m…gfx9t` is a picture of one address repeated
+        // thirty-one times, which is not what the screen does (L125).
+        address:
+            'kaspa:${_bech32(i * 7 + 3)}${'v4k2xn8hq3l6t0wc5yd1sfp7ug' * 2}'
+            '${_bech32(i * 11 + 5)}',
+        balanceSompi: BigInt.from(funded[i] ?? 0),
+        // Index 7 holds a covenant-bound coin: the wallet refuses to move
+        // it on every path (D-211), so it is reported and NOT spendable.
+        lockedSompi: BigInt.from(i == 7 ? 150000000 : 0),
+        // Index 3 has nothing spendable but something on its way, which is the
+        // row that must NOT be filed under "empty" (the L92 scar).
+        settling: i == 3,
+      ),
+  ];
+}
+
+WalletSettingsScope _walletScope({
+  bool addresses = true,
+  String? mergeRefusal,
+}) => WalletSettingsScope(
   receiveAddress: () async => _addr,
-  receiveRoute: (_) => const SizedBox.shrink(),
+  listAddresses: addresses ? () async => _addressFixture() : null,
+  receiveRoute: (address, label) => const SizedBox.shrink(),
   deepScan: () async =>
       DeepScanReport(depth: 0, receiveSeen: 12, changeSeen: 6, widened: false),
   consolidate: () async => throw UnimplementedError(),
+  consolidateEstimate: mergeRefusal != null
+      ? () async => throw mergeRefusal
+      : () async => ConsolidateEstimateDto(
+          feeSompi: BigInt.from(40000),
+          utxoCount: 38,
+          resultingCoins: 1,
+          addressCount: 3,
+        ),
   commitSend: (_) async => throw UnimplementedError(),
   abandonSend: () async {},
 );
@@ -482,6 +528,26 @@ Widget _settings() => SettingsScreen(
 Widget _security() => SecurityScreen(scope: _securityScope());
 
 Widget _walletSettings() => WalletScreen(scope: _walletScope());
+
+/// The seam absent — the card falls back to the one address the wallet can
+/// always name, which is what `T4` shipped before the list existed.
+Widget _walletNoList() => WalletScreen(scope: _walletScope(addresses: false));
+
+/// Nothing to merge: the wallet in its BEST state. The bar takes the disabled
+/// form (the reason as the label), never a live control over nothing.
+Widget _walletMerged() => WalletScreen(
+  scope: _walletScope(
+    mergeRefusal:
+        'nothing to merge — your spendable coins are already consolidated',
+  ),
+);
+
+/// Open the empty tail. `Show` and `All` set the same flag; this taps `Show`.
+Future<void> _showAllAddresses(WidgetTester tester) async {
+  await tester.tap(find.text('Show'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+}
 
 Widget _about() => AboutScreen(
   scope: AboutScope(
@@ -735,6 +801,14 @@ void main() {
     framedSurface('settings__security', _security);
     surface('settings__lock_timer', _security, act: _openLockTimer);
     framedSurface('settings__wallet', _walletSettings);
+    surface('settings__wallet_fit', _walletSettings);
+    framedSurface(
+      'settings__wallet_all',
+      _walletSettings,
+      act: _showAllAddresses,
+    );
+    framedSurface('settings__wallet_nomerge', _walletMerged);
+    framedSurface('settings__wallet_noseam', _walletNoList);
     framedSurface('settings__about', _about);
 
     // **Send, both steps, in all four frames** (`S6a` · `S6b` · `S6`).

@@ -2,11 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:kaspaverse/src/rust/api/send.dart' show sendFeePreview;
+import 'package:kaspaverse/src/rust/api/send.dart'
+    show consolidateEstimate, sendFeePreview;
 import 'package:kaspaverse/src/rust/api/transport.dart' show txAcceptanceStatus;
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/api/wallet.dart'
-    show deepScan, maturityThresholds;
+    show deepScan, listAddresses, maturityThresholds;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/contacts_service.dart';
@@ -232,11 +233,17 @@ WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
       wallet: WalletSettingsScope(
         receiveAddress: vaultReceiveAddress,
         deepScan: deepScan,
-        receiveRoute: (_) => ReceiveScreen(
-          fetch: vaultReceiveAddress,
+        listAddresses: listAddresses,
+        // The list hands over the address it drew, so the QR is always the row
+        // the user tapped — never a re-derivation that could answer with a
+        // different one.
+        receiveRoute: (address, label) => ReceiveScreen(
+          fetch: () async => address,
           share: VaultService.instance.shareText,
+          title: label,
         ),
         consolidate: wallet.prepareConsolidate,
+        consolidateEstimate: consolidateEstimate,
         commitSend: wallet.commitSend,
         abandonSend: wallet.abandonSend,
       ),

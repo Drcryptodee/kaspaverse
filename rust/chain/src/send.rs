@@ -25,6 +25,7 @@
 //! called twice, pending.rs:207) is structurally unreachable here ([`PreparedSend`]
 //! is consumed by `commit`, so each tx is submitted at most once).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use kaspa_addresses::Address;
@@ -83,6 +84,16 @@ pub struct SendSummary {
     /// `0` where the question does not apply: an ordinary payment leaves change
     /// whose count is not this field's business.
     pub resulting_coins: u32,
+    /// **Distinct addresses this send draws from** — `0` where the question
+    /// does not apply (an ordinary payment, whose inputs are the policy
+    /// order's business and not a sentence any screen prints).
+    ///
+    /// Counted inside the plan, over the SAME snapshot the chain was built
+    /// from and the same run of the withholding filter. A caller that took a
+    /// second read and re-ran the filter could describe two different wallets
+    /// in one sentence — "38 coins across 3 addresses" over a set that had
+    /// changed between the two reads (`consensus`, this sitting).
+    pub source_addresses: u32,
     /// Payload bytes on the FINAL built transaction (0 = none) — read back from
     /// the generated tx itself, never echoed from the caller (B7; P2.1
     /// anti-blind-signing parity: the confirm renders what will be signed).
@@ -357,6 +368,116 @@ impl WalletEngine {
         Ok(entries.into_iter().map(Into::into).collect())
     }
 
+    /// Every mature coin the live context holds, folded onto its address —
+    /// the whole source for the wallet's address list.
+    ///
+    /// **The same read as [`mature_utxos_at`], unfiltered.** `get_utxos(None,
+    /// None)` returns `context().mature` (context.rs:757 @ `cfafeb4`), which is
+    /// the set `prepare_send` builds from and the set the folded balance
+    /// reflects. Nothing is probed: this is the same SET the send path spends
+    /// from and the merge planner counts, not a second measurement of it.
+    ///
+    /// **That is not the same as agreeing with the folded balance, and the
+    /// claim used to overreach.** At the pin `calculate_balance` is
+    /// `sum(mature) + consumed − outgoing` (context.rs:506-549) and
+    /// `register_outgoing_transaction` removes a send's inputs from `mature` at
+    /// submit (context.rs:254) — so while a send is in flight the rows here and
+    /// the wallet's headline legitimately differ (`consensus`, this sitting).
+    ///
+    /// **What it therefore does NOT include, stated because a caller printing
+    /// it beside an address is making a claim about money:** coins still
+    /// maturing, coins inside an outgoing transaction of ours, and coinbase
+    /// output in stasis are all absent — they are not in `mature`. This answers
+    /// *what is spendable from here right now*, never *what has ever arrived
+    /// here*. [`settling_among`] answers the waiting half.
+    ///
+    /// Covenant-bound coins are **kept and told apart**
+    /// ([`AddressHolding::locked_sompi`]): the drain path withholds them
+    /// (D-211) and the fence refuses any chain that draws one, so folding them
+    /// into a spendable figure would promise a move no path will make.
+    pub async fn mature_balances_by_address(&self) -> Result<HashMap<Address, AddressHolding>> {
+        let entries: Vec<UtxoEntryReference> = self
+            .context()
+            .get_utxos(None, None)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let (folded, unattributed) = fold_by_address(&entries);
+        if unattributed > 0 {
+            log::warn!(
+                "wallet: {unattributed} mature coin(s) carry no address and are \
+                 absent from the per-address fold"
+            );
+        }
+        Ok(folded)
+    }
+
+    /// Which of `addresses` have something on the way — [`settling_at`]'s
+    /// question asked of a whole list in ONE pass.
+    ///
+    /// The per-address form clones the processor's outgoing set on every call,
+    /// so asking it thirty-one times walked the same two maps thirty-one times.
+    /// Worse, the cost pushed the caller into asking only about EMPTY rows,
+    /// which made the answer asymmetric: an address holding 0.5 KAS with 100
+    /// more inside the maturity hold reported nothing waiting. Reading the two
+    /// sets once is both cheaper and symmetric (`wallet-security`, this
+    /// sitting).
+    ///
+    /// **Three legs, where [`settling_at`] reads two.** The third is coinbase
+    /// stasis, which `settling_at` names as a deliberate blind spot because its
+    /// caller is deciding whether WAITING is worth it and 500 DAA is far past
+    /// any wait budget. This caller asks a different question — *is this row
+    /// empty?* — and a mining address reading empty gets folded away under
+    /// "empty addresses hidden" while it holds the user's coinbase. Same maps,
+    /// same provenance (`processor.stasis()` mirrors `context.stasis`,
+    /// context.rs:305-307 @ `cfafeb4`); different question, so a different
+    /// answer (`consensus`, this sitting).
+    pub fn settling_among(&self, addresses: &[Address]) -> HashSet<Address> {
+        let context = self.context();
+        let processor = context.processor();
+        let mut waiting = HashSet::new();
+
+        // Leg 1 — submitted, not yet accepted. Clone the handles OUT of the map
+        // first (each is an `Arc` bump): `transaction()` takes the pending
+        // transaction's own lock, and taking it while a DashMap shard guard is
+        // still alive is a lock order this module has no reason to own.
+        let outgoing: Vec<OutgoingTransaction> = processor
+            .outgoing()
+            .iter()
+            .map(|outgoing| outgoing.value().clone())
+            .collect();
+        for tx in &outgoing {
+            let transaction = tx.pending_transaction().transaction();
+            for address in addresses {
+                if !waiting.contains(address) && pays_to(&transaction, address) {
+                    waiting.insert(address.clone());
+                }
+            }
+        }
+
+        // Legs 2 and 3 — accepted-not-yet-mature, and coinbase in stasis.
+        // Bound, not iterated inline: `processor` borrows `context`, which must
+        // outlive the shard guards.
+        let held: Vec<Address> = processor
+            .pending()
+            .iter()
+            .filter_map(|pending| pending.value().entry().address())
+            .chain(
+                processor
+                    .stasis()
+                    .iter()
+                    .filter_map(|stasis| stasis.value().entry().address()),
+            )
+            .collect();
+        for address in held {
+            if addresses.contains(&address) {
+                waiting.insert(address);
+            }
+        }
+        waiting
+    }
+
     /// Is something on its way to `address` that will make it spendable — i.e.
     /// is waiting worth anything, or is this address simply unfunded?
     ///
@@ -410,6 +531,13 @@ impl WalletEngine {
     /// what is outgoing; this only asks which of ITS answers name `address`.
     /// Synchronous on purpose: it holds sharded map guards, which must not be
     /// carried across an `.await`.
+    ///
+    /// **[`settling_among`] is not a copy of this** — it asks a whole list at
+    /// once AND reads a third set, `stasis`, which the blind spot above
+    /// deliberately excludes here. The two differ because the questions differ:
+    /// this one decides whether WAITING is worth it (and 500 DAA is not), that
+    /// one decides whether a row is EMPTY (and a coinbase in stasis is not).
+    /// Change one and read the other's doc before assuming it should follow.
     pub fn settling_at(&self, address: &Address) -> bool {
         let context = self.context();
         let processor = context.processor();
@@ -1124,6 +1252,64 @@ fn drain_included(
     (included, reserved_count, covenant_count)
 }
 
+/// What one address holds, as the wallet's own bookkeeping sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AddressHolding {
+    /// Mature coins the wallet would actually spend from here.
+    pub spendable_sompi: u64,
+    /// Mature coins it structurally **refuses** to spend: covenant-bound
+    /// output, which `covenant_fence` rejects on every path including the total
+    /// sweep (D-211). It is the user's money at the user's address, so it is
+    /// reported — but a surface that folded it into [spendable_sompi] would be
+    /// telling someone they can move a coin no code path will move.
+    pub locked_sompi: u64,
+    /// Coins here, spendable and locked together.
+    ///
+    /// **No production reader** — it crossed the FFI until INV-12 took it off
+    /// a surface that never drew it. It stays because it is the fold's own
+    /// invariant: the tests assert *three coins at one address sum, and the
+    /// COUNT is coins not addresses*, which is the attribution rule the whole
+    /// function exists to keep, and a rule with nothing to assert against is a
+    /// rule with no test.
+    pub coin_count: u32,
+}
+
+/// Fold coins onto their addresses, returning the map and **how many could not
+/// be placed**. Pure, so the one rule that matters here gets a test rather than
+/// a comment (`scan_chunks` / `drain_included` pattern).
+///
+/// The rule: a coin is attributed by **its own `address` field**, never by its
+/// position in the vector. Nothing upstream promises an order, and on this code
+/// path a misattributed balance is a figure printed beside the wrong address —
+/// the same class of defect `highest_funded_in_chunk` refuses by matching on
+/// address rather than response order.
+///
+/// A coin whose address is `None` is counted, not guessed at. It cannot be a
+/// deficit in any row's figure, because a row only ever shows what was
+/// attributed TO it; the count exists so a nonzero one can be logged instead of
+/// disappearing.
+fn fold_by_address(entries: &[UtxoEntryReference]) -> (HashMap<Address, AddressHolding>, usize) {
+    let mut folded: HashMap<Address, AddressHolding> = HashMap::new();
+    let mut unattributed = 0usize;
+    for entry in entries {
+        let Some(address) = entry.utxo.address.clone() else {
+            unattributed += 1;
+            continue;
+        };
+        let slot = folded.entry(address).or_default();
+        // Saturating: a fold over a set the node reported cannot legitimately
+        // exceed the supply, and wrapping here would print a small number over
+        // a large balance rather than failing.
+        if spend_policy::is_covenant_bound(entry) {
+            slot.locked_sompi = slot.locked_sompi.saturating_add(entry.amount());
+        } else {
+            slot.spendable_sompi = slot.spendable_sompi.saturating_add(entry.amount());
+        }
+        slot.coin_count = slot.coin_count.saturating_add(1);
+    }
+    (folded, unattributed)
+}
+
 /// Pick the Generator mode for a drain over `included` coins. Pure; the
 /// permanent tests drive every branch. `has_exclusions` is whether the CALLER
 /// is withholding coins (consolidation around live conversation addresses) —
@@ -1413,6 +1599,27 @@ impl WalletEngine {
             )));
         }
         let offered_count = included.len();
+        // Read from THIS snapshot's included set, before `plan_drain` consumes
+        // it. An address-less coin cannot be attributed and is logged rather
+        // than dropped in silence, the same rule `fold_by_address` follows.
+        let source_addresses = {
+            let placed: HashSet<&Address> = included
+                .iter()
+                .filter_map(|entry| entry.utxo.address.as_ref())
+                .collect();
+            let orphans = included.len()
+                - included
+                    .iter()
+                    .filter(|entry| entry.utxo.address.is_some())
+                    .count();
+            if orphans > 0 {
+                log::warn!(
+                    "drain: {orphans} offered coin(s) carry no address and are \
+                     absent from the source-address count"
+                );
+            }
+            placed.len() as u32
+        };
         let arm = plan_drain(included, has_withheld)?;
         let chained_drain_allowed = !is_exit && matches!(arm, DrainArm::Drain);
         // The diagnosis lane for every "sweep won't work" report. Counts and
@@ -1493,7 +1700,7 @@ impl WalletEngine {
             )?,
         };
 
-        let summary = finish_drain(
+        let mut summary = finish_drain(
             &pending,
             &summary,
             &destination,
@@ -1501,6 +1708,7 @@ impl WalletEngine {
             chained_drain_allowed,
             is_exit,
         )?;
+        summary.source_addresses = source_addresses;
         log::info!(
             "drain: {} built — {} coin(s) absorbed across {} tx",
             drain_kind(is_exit),
@@ -1559,6 +1767,7 @@ fn batched_merge(
     let mut mass_total = 0u64;
     let mut absorbed_total = 0u32;
     let mut passes = 0usize;
+    let mut sources: HashSet<Address> = HashSet::new();
 
     while passes < MERGE_BATCH_LIMIT && rest.len() >= 2 {
         let Some((taken, pending, summary)) = largest_single_tx_batch(&rest, build)? else {
@@ -1572,6 +1781,20 @@ fn batched_merge(
         fee_total = fee_total.saturating_add(facts.fee_sompi);
         mass_total = mass_total.saturating_add(summary.aggregate_mass());
         absorbed_total = absorbed_total.saturating_add(facts.absorbed_utxos);
+        // **The addresses this pass actually draws from**, accumulated as the
+        // batches are accepted rather than taken from the whole offered set.
+        // `batched_merge` stops at `MERGE_BATCH_LIMIT` and leaves the rest —
+        // and because it takes the SMALLEST coins first, the leftovers are the
+        // largest, so an address whose only coin is big can be offered and
+        // never drawn. Counting the offer would have put a number in the merge
+        // row's sentence that the ceremony does not honour (`consensus`, this
+        // sitting — the same defect the snapshot fix removed, surviving on one
+        // arm).
+        sources.extend(
+            rest[..taken]
+                .iter()
+                .filter_map(|entry| entry.utxo.address.clone()),
+        );
         all_pending.extend(pending);
         rest.drain(..taken);
         passes += 1;
@@ -1619,6 +1842,9 @@ fn batched_merge(
             // One coin per pass — the arm where the two counts coincide, and
             // exactly why they must still be separate fields.
             resulting_coins: passes as u32,
+            // Counted here, over the batches actually taken — NOT stamped by
+            // the caller from the offered set. See the accumulation above.
+            source_addresses: sources.len() as u32,
             payload_len: 0,
         },
     ))
@@ -1871,6 +2097,8 @@ fn finish_drain(
         // refused any chain whose final transaction has more than one output,
         // so the compound arm provably ends in a single coin.
         resulting_coins: 1,
+        // Stamped by `prepare_drain_inner`, which holds the snapshot.
+        source_addresses: 0,
         payload_len: 0,
     })
 }
@@ -2645,8 +2873,10 @@ fn project_summary(gs: &GeneratorSummary, destination: String) -> SendSummary {
         tx_count: gs.number_of_generated_transactions() as u32,
         utxo_count: gs.aggregated_utxos() as u32,
         // Not a drain: an ordinary payment's change count is not this field's
-        // business, and 0 is how it says so.
+        // business, and 0 is how it says so. Nor is its input spread — the
+        // policy order picks those and no screen states them.
         resulting_coins: 0,
+        source_addresses: 0,
         payload_len: 0, // set by the caller from the BUILT chain (B7)
     }
 }
@@ -2698,6 +2928,9 @@ mod tests {
     // Upstream gen1 mainnet vectors (keychain.rs / hd.rs) — valid, distinct.
     const DEST: &str = "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf";
     const CHANGE: &str = "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692";
+    /// A third mainnet address, for the counts that need to tell one from two
+    /// (borrowed from `transport_store`'s interop vectors — a real Kasia one).
+    const THIRD: &str = "kaspa:qqwsnxvukqew5hx5r7y5dr938hnw7hmgs7ca87zlvwlrps6rxdy2ja3xknpvj";
 
     fn mainnet() -> NetworkId {
         NetworkId::new(NetworkType::Mainnet)
@@ -2741,6 +2974,111 @@ mod tests {
         )
         .unwrap();
         Generator::try_new(settings, None, None).unwrap()
+    }
+
+    /// A simulated coin sitting at `address` — the shape the context holds
+    /// once a UTXO has been matched to one of our derived addresses.
+    ///
+    /// The pin's own constructor, not a clone-and-mutate: that left a coin
+    /// whose `script_public_key` paid one address while its `.address` field
+    /// claimed another — a shape that cannot exist on chain, and a fixture
+    /// asserting an impossible one is L125 (`ffi-leak`, this sitting).
+    fn entry_at(address: &Address, kas: f64) -> UtxoEntryReference {
+        UtxoEntryReference::simulated_with_address(kaspa_to_sompi(kas), address)
+    }
+
+    /// A coin the context holds with no address on it.
+    fn address_less(sompi: u64) -> UtxoEntryReference {
+        let mut utxo = (*UtxoEntryReference::simulated(sompi).utxo).clone();
+        utxo.address = None;
+        UtxoEntryReference::from(utxo)
+    }
+
+    /// The shape a caller reads: spendable, locked, coins.
+    fn holding(spendable: f64, locked: f64, coins: u32) -> AddressHolding {
+        AddressHolding {
+            spendable_sompi: kaspa_to_sompi(spendable),
+            locked_sompi: kaspa_to_sompi(locked),
+            coin_count: coins,
+        }
+    }
+
+    #[test]
+    fn coins_fold_onto_their_own_address_and_count_themselves() {
+        let a = addr(DEST);
+        let b = addr(CHANGE);
+        let folded = fold_by_address(&[
+            entry_at(&a, 1.0),
+            entry_at(&b, 0.25),
+            entry_at(&a, 2.5),
+            entry_at(&a, 0.5),
+        ]);
+        assert_eq!(folded.1, 0, "every coin was placed");
+        assert_eq!(
+            folded.0.get(&a).copied(),
+            Some(holding(4.0, 0.0, 3)),
+            "three coins at one address sum, and the COUNT is coins not addresses"
+        );
+        assert_eq!(folded.0.get(&b).copied(), Some(holding(0.25, 0.0, 1)));
+    }
+
+    /// D-211, replicated where a figure is PRINTED rather than where a chain is
+    /// built: `covenant_fence` refuses any chain drawing a covenant-bound coin,
+    /// so a row that folded one into its spendable figure would offer money no
+    /// path will move.
+    #[test]
+    fn a_covenant_bound_coin_is_reported_but_never_counted_spendable() {
+        let a = addr(DEST);
+        let mut locked = (*covenant_entry(3.0).utxo).clone();
+        locked.address = Some(a.clone());
+        let folded = fold_by_address(&[entry_at(&a, 1.0), UtxoEntryReference::from(locked)]);
+        assert_eq!(
+            folded.0.get(&a).copied(),
+            Some(holding(1.0, 3.0, 2)),
+            "the contract coin is reported, apart, and counted among the coins"
+        );
+        assert_eq!(folded.1, 0);
+    }
+
+    #[test]
+    fn attribution_follows_the_address_field_never_the_position() {
+        let a = addr(DEST);
+        let b = addr(CHANGE);
+        // Same coins, opposite order. A fold that read position would swap the
+        // two balances; a fold that reads the field cannot.
+        let forward = fold_by_address(&[entry_at(&a, 1.0), entry_at(&b, 9.0)]).0;
+        let reverse = fold_by_address(&[entry_at(&b, 9.0), entry_at(&a, 1.0)]).0;
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.get(&a).copied(), Some(holding(1.0, 0.0, 1)));
+        assert_eq!(forward.get(&b).copied(), Some(holding(9.0, 0.0, 1)));
+    }
+
+    #[test]
+    fn an_address_less_coin_is_counted_and_never_guessed_at() {
+        let a = addr(DEST);
+        let (folded, unattributed) = fold_by_address(&[
+            entry_at(&a, 1.0),
+            // The pin's type says `Option`; a coin the context holds without an
+            // address belongs to no row and must not be dropped silently.
+            // `simulated()` carries one, so it is cleared here on purpose —
+            // the same way `drain_included`'s fail-closed test builds its
+            // corner.
+            address_less(kaspa_to_sompi(7.0)),
+        ]);
+        assert_eq!(unattributed, 1);
+        assert_eq!(
+            folded.get(&a).copied(),
+            Some(holding(1.0, 0.0, 1)),
+            "the orphan is not folded into some other address"
+        );
+        assert_eq!(folded.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_wallet_folds_to_an_empty_map_rather_than_a_zero_row() {
+        let (folded, unattributed) = fold_by_address(&[]);
+        assert!(folded.is_empty());
+        assert_eq!(unattributed, 0);
     }
 
     /// A covenant-bound simulated coin — `covenant_id` stamped on the pin's
@@ -3280,6 +3618,63 @@ mod tests {
             "48 coins stay behind — and the summary says 352, not 400"
         );
         assert_batch_custody(&pending, &home, &entries);
+    }
+
+    /// **`source_addresses` counts what the merge DRAWS, not what it is
+    /// offered** — and the batched arm is the one where those differ, because
+    /// it stops at `MERGE_BATCH_LIMIT` and takes the smallest coins first, so
+    /// the leftovers are the largest. An address whose only coin is big is
+    /// offered and never touched; counting it would put a number in the merge
+    /// row's sentence that the ceremony does not honour (`consensus`).
+    #[test]
+    fn the_source_address_count_names_only_the_addresses_a_batch_reaches() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        let other = addr(THIRD);
+        // Two addresses of small coins — 380 of them, more than the four
+        // passes can take — and a third holding only coins so large they sort
+        // to the very back of the queue.
+        let mut entries: Vec<UtxoEntryReference> = (0..200)
+            .map(|_| UtxoEntryReference::simulated_with_address(50_000_000, &home))
+            .collect();
+        entries.extend(
+            (0..180).map(|_| UtxoEntryReference::simulated_with_address(50_000_000, &change)),
+        );
+        entries.extend(
+            (0..20).map(|_| UtxoEntryReference::simulated_with_address(900_000_000, &other)),
+        );
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        let (_, summary) = batched_merge(entries.clone(), &home, 0, &mut build).unwrap();
+
+        assert!(
+            summary.utxo_count < entries.len() as u32,
+            "the pass limit leaves coins behind — that is the premise"
+        );
+        assert_eq!(
+            summary.source_addresses, 2,
+            "three addresses were offered; the batches reached two, and the \
+             sentence the merge row prints must say two"
+        );
+    }
+
+    /// The ordinary case, so the assertion above cannot pass by counting wrong
+    /// in both directions.
+    #[test]
+    fn a_merge_that_reaches_every_offered_address_counts_them_all() {
+        let home = addr(DEST);
+        let change = addr(CHANGE);
+        let entries: Vec<UtxoEntryReference> = (0..20)
+            .map(|i| {
+                UtxoEntryReference::simulated_with_address(
+                    50_000_000,
+                    if i % 2 == 0 { &home } else { &change },
+                )
+            })
+            .collect();
+        let mut build = offline_batch_builder(&entries, &home, &change);
+        let (_, summary) = batched_merge(entries.clone(), &home, 0, &mut build).unwrap();
+        assert_eq!(summary.utxo_count, 20, "one pass takes the lot");
+        assert_eq!(summary.source_addresses, 2);
     }
 
     /// Smallest first: the pile is cleared from the bottom, because that is

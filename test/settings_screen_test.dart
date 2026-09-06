@@ -20,7 +20,9 @@ import 'package:kaspaverse/src/ui/address_text.dart';
 import 'package:kaspaverse/src/ui/roadmap_screen.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
 import 'support/preview_harness.dart';
@@ -805,13 +807,37 @@ void main() {
   // ── `T4` · Wallet — the half this build can honestly draw ───────────────
 
   group('T4 · Wallet', () {
+    /// `T4`'s own list: 31 receive addresses, three funded — 27.72 · 0.40 ·
+    /// 0.00905522 at indices 0, 2 and 14 — which is exactly what the render
+    /// draws. Index 3 holds nothing but has something arriving.
+    List<WalletAddressDto> addressList({
+      bool settlingRow = false,
+      bool lockedRow = false,
+    }) {
+      const funded = {0: 2772000000, 2: 40000000, 14: 905522};
+      return [
+        for (var i = 0; i < 31; i++)
+          WalletAddressDto(
+            index: i,
+            address: 'kaspa:qr${i}k2f9pabcdefghijklmnopqrstuvw${i}mx3f4a2',
+            balanceSompi: BigInt.from(funded[i] ?? 0),
+            lockedSompi: BigInt.from(lockedRow && i == 7 ? 150000000 : 0),
+            settling: settlingRow && i == 3,
+          ),
+      ];
+    }
+
     Future<void> pumpWallet(
       WidgetTester tester, {
       Future<DeepScanReport> Function()? deepScan,
       Future<String> Function()? receiveAddress,
       Future<SignableSummaryDto> Function()? consolidate,
+      Future<List<WalletAddressDto>> Function()? listAddresses,
+      Future<ConsolidateEstimateDto> Function()? consolidateEstimate,
+      Widget Function(String address, String label)? receiveRoute,
+      double height = 2400,
     }) async {
-      tester.view.physicalSize = const Size(393 * 3, 2400 * 3);
+      tester.view.physicalSize = Size(393 * 3, height * 3);
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
@@ -823,6 +849,9 @@ void main() {
                   receiveAddress ??
                   () async => 'kaspa:qrxk2f9pabcdefghijklmnopqrstuvwmx3f4a2',
               deepScan: deepScan ?? () async => scanned,
+              listAddresses: listAddresses,
+              receiveRoute: receiveRoute,
+              consolidateEstimate: consolidateEstimate,
               consolidate: consolidate,
               commitSend: consolidate == null
                   ? null
@@ -879,17 +908,70 @@ void main() {
       expect(find.textContaining('Merging is an ordinary send'), findsNothing);
 
       await pumpWallet(tester, consolidate: () async => _summary());
-      expect(find.text('Merge coins'), findsOneWidget);
+      // The row, and the pinned action bar beneath it.
+      expect(find.text('Merge coins'), findsNWidgets(2));
       final notice = find.textContaining('Merging is an ordinary send');
       expect(notice, findsOneWidget);
       // The disclosure sits above the act it describes: explain, then price.
       expect(
         tester.getTopLeft(notice).dy,
-        greaterThan(tester.getTopLeft(find.text('Merge coins')).dy),
+        greaterThan(tester.getTopLeft(find.text('Merge coins').first).dy),
       );
-      // And it names no figure of its own — the fee is the ceremony's, from
-      // the prepared plan, never a number this screen guessed.
+      // And with no estimate seam there is no figure ANYWHERE: the bar reads
+      // `Merge coins` and prints no fee it has not been told (BG-8).
       expect(find.textContaining('KAS fee'), findsNothing);
+    });
+
+    testWidgets('the bar prices from the ESTIMATE, and the disclosure still '
+        'comes first (BG-11)', (tester) async {
+      await pumpWallet(
+        tester,
+        consolidate: () async => _summary(),
+        consolidateEstimate: () async => ConsolidateEstimateDto(
+          feeSompi: BigInt.from(40000),
+          utxoCount: 38,
+          resultingCoins: 1,
+          addressCount: 3,
+        ),
+      );
+      final fee = find.textContaining('KAS fee');
+      expect(fee, findsOneWidget);
+      // The number is Rust's, formatted by the one conversion site.
+      expect(find.textContaining('0.0004'), findsOneWidget);
+      // The estimate also gives the row its real counts.
+      expect(find.textContaining('38 coins'), findsOneWidget);
+      expect(find.textContaining('→ 1'), findsOneWidget);
+      // Explain, THEN price: the notice is above the bar.
+      expect(
+        tester.getTopLeft(fee).dy,
+        greaterThan(
+          tester.getTopLeft(find.textContaining('Merging is an ordinary')).dy,
+        ),
+      );
+    });
+
+    testWidgets('nothing to merge is the wallet at its BEST — the bar '
+        'refuses in its disabled form, never sits tappable over nothing', (
+      tester,
+    ) async {
+      await pumpWallet(
+        tester,
+        consolidate: () async => _summary(),
+        consolidateEstimate: () async => throw const AppError(
+          message:
+              'nothing to merge — your spendable coins are already '
+              'consolidated',
+        ),
+      );
+      // The reason IS the label (the form he approved on the sheet).
+      expect(find.text('Nothing to merge'), findsOneWidget);
+      expect(find.textContaining('KAS fee'), findsNothing);
+      final bar = tester.widget<KvAction>(find.byType(KvAction));
+      expect(
+        bar.disabledReason,
+        isNotNull,
+        reason: 'a control with nothing behind it must not answer a tap (§8)',
+      );
     });
 
     testWidgets('a Rust refusal lands on the row, in Rust\'s own words', (
@@ -903,7 +985,8 @@ void main() {
               'consolidated',
         ),
       );
-      await tester.tap(find.text('Merge coins'));
+      // The ROW, not the pinned bar beneath it — both carry the words.
+      await tester.tap(find.text('Merge coins').first);
       await tester.pumpAndSettle();
       expect(find.textContaining('nothing to merge'), findsOneWidget);
     });
@@ -913,6 +996,279 @@ void main() {
     ) async {
       await pumpWallet(tester);
       expect(find.byType(AddressText), findsOneWidget);
+    });
+
+    // ── the address list ─────────────────────────────────────────────────
+
+    testWidgets('with no list seam the card DEGRADES to the one address the '
+        'wallet can always name, and nothing throws', (tester) async {
+      await pumpWallet(tester);
+      expect(find.text('Receive address'), findsOneWidget);
+      expect(find.text('Main'), findsNothing);
+      expect(find.byType(KvSegmented), findsNothing);
+    });
+
+    testWidgets('`With funds` draws the funded rows and folds the rest away', (
+      tester,
+    ) async {
+      await pumpWallet(tester, listAddresses: () async => addressList());
+      expect(find.text('Main'), findsOneWidget);
+      expect(find.text('Receive 02'), findsOneWidget);
+      expect(find.text('Receive 14'), findsOneWidget);
+      // Not drawn, and counted honestly: 31 - 3.
+      expect(find.text('Receive 01'), findsNothing);
+      expect(find.textContaining('28 empty addresses hidden'), findsOneWidget);
+      // The default address wears the render's badge; nothing else does.
+      expect(find.text('Default'), findsOneWidget);
+    });
+
+    testWidgets('an address with nothing spendable but something ARRIVING is '
+        'not filed under empty (the L92 scar)', (tester) async {
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(settlingRow: true),
+      );
+      expect(find.text('Receive 03'), findsOneWidget);
+      expect(find.text('Pending'), findsOneWidget);
+      // Four rows in view now, so 27 are folded rather than 28.
+      expect(find.textContaining('27 empty addresses hidden'), findsOneWidget);
+    });
+
+    testWidgets('a covenant-bound coin is reported but never counted as '
+        'spendable (D-211)', (tester) async {
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(lockedRow: true),
+      );
+      // It is not hidden: an address holding the user's money is never filed
+      // under "empty addresses".
+      expect(find.text('Receive 07'), findsOneWidget);
+      // ...and it is not offered as spendable either.
+      expect(find.text('Locked'), findsOneWidget);
+      final row = tester.widget<KvRow>(
+        find.ancestor(
+          of: find.text('Receive 07'),
+          matching: find.byType(KvRow),
+        ),
+      );
+      expect(
+        row.semanticLabel,
+        contains('1.50 KAS locked in a contract'),
+        reason: 'the spoken form names the figure the row cannot show',
+      );
+    });
+
+    testWidgets('the spoken balance is the PRINTED balance, never raw sompi', (
+      tester,
+    ) async {
+      await pumpWallet(tester, listAddresses: () async => addressList());
+      final row = tester.widget<KvRow>(
+        find.ancestor(of: find.text('Main'), matching: find.byType(KvRow)),
+      );
+      expect(row.semanticLabel, 'Main, 27.72 KAS');
+      expect(
+        row.semanticLabel,
+        isNot(contains('2772000000')),
+        reason:
+            'sompi read aloud is the printed figure times a hundred '
+            'million — one fact said two ways (kv_amount, 2026-09-04)',
+      );
+    });
+
+    testWidgets('a refusal the screen worked out for itself never overwrites '
+        'what a TAP already reported', (tester) async {
+      // The scar: after a merge is broadcast the estimate truthfully refuses
+      // ("already consolidated"), and promoting that unconditionally wiped the
+      // acknowledgement of the transaction the user had just signed
+      // (`wallet-security`, this sitting). Driven here through the scan, which
+      // refreshes the estimate for the same reason a merge does.
+      var estimates = 0;
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        consolidate: () async => throw const AppError(
+          message:
+              'these coins are worth less than the network fee to move '
+              'them',
+        ),
+        consolidateEstimate: () async {
+          estimates++;
+          if (estimates == 1) {
+            return ConsolidateEstimateDto(
+              feeSompi: BigInt.from(40000),
+              utxoCount: 38,
+              resultingCoins: 1,
+              addressCount: 3,
+            );
+          }
+          throw const AppError(
+            message:
+                'nothing to merge — your spendable coins are already '
+                'consolidated',
+          );
+        },
+      );
+      // A tap reports something.
+      await tester.tap(find.text('Merge coins').first);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('worth less than the network fee'), findsOne);
+
+      // The scan refreshes the estimate, which now refuses.
+      await tester.tap(find.text('Scan for more addresses'));
+      await tester.pumpAndSettle();
+      expect(estimates, 2, reason: 'a widened window can change the merge');
+      // The bar takes the refusal...
+      expect(find.text('Nothing to merge'), findsOneWidget);
+      // ...and the tap's own report is still on the row.
+      expect(find.textContaining('worth less than the network fee'), findsOne);
+      expect(find.textContaining('already consolidated'), findsNothing);
+    });
+
+    testWidgets('`Show` and `All` are ONE state, and each reflects the other', (
+      tester,
+    ) async {
+      await pumpWallet(tester, listAddresses: () async => addressList());
+
+      // `Show` opens it...
+      await tester.tap(find.text('Show'));
+      await tester.pumpAndSettle();
+      expect(find.text('Receive 01'), findsOneWidget);
+      expect(find.textContaining('empty addresses hidden'), findsNothing);
+      // ...and the segmented has moved with it.
+      expect(
+        tester.widget<KvSegmented>(find.byType(KvSegmented)).index,
+        1,
+        reason: 'the filter and the disclosure are one fact (C7)',
+      );
+
+      // Back through the segmented, and the summary returns.
+      await tester.tap(find.text('With funds'));
+      await tester.pumpAndSettle();
+      expect(find.text('Receive 01'), findsNothing);
+      expect(find.textContaining('28 empty addresses hidden'), findsOneWidget);
+    });
+
+    testWidgets('the revealed tail scrolls INSIDE the card — the page below '
+        'it stays where it was', (tester) async {
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        consolidate: () async => _summary(),
+        height: 800,
+      );
+      final toolsBefore = tester.getTopLeft(find.text('Merge coins').first).dy;
+      await tester.tap(find.text('Show'));
+      await tester.pumpAndSettle();
+
+      // The card holds its cap rather than growing by 31 rows.
+      final card = tester.getSize(find.byType(KvRowContainer).first);
+      expect(
+        card.height,
+        lessThan(400),
+        reason:
+            'the revealed tail is bounded — his "not so down below the '
+            'screen view"',
+      );
+      // ...and it has its own scroll, with somewhere to go.
+      final inner = tester
+          .state<ScrollableState>(find.byType(Scrollable).last)
+          .position;
+      expect(inner.maxScrollExtent, greaterThan(0));
+
+      // The tools moved down by less than the card's own height, and are
+      // still on the screen.
+      final toolsAfter = tester.getTopLeft(find.text('Merge coins').first).dy;
+      expect(toolsAfter - toolsBefore, lessThan(card.height));
+      expect(toolsAfter, lessThan(800));
+    });
+
+    testWidgets('tapping an address opens Receive over THAT address, never '
+        'the default', (tester) async {
+      final opened = <(String, String)>[];
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        receiveRoute: (address, label) {
+          opened.add((address, label));
+          return const Scaffold(body: Text('receive'));
+        },
+      );
+      await tester.tap(find.text('Receive 14'));
+      await tester.pumpAndSettle();
+      expect(opened, hasLength(1));
+      expect(opened.single.$1, contains('qr14'));
+      expect(
+        opened.single.$2,
+        'Receive 14',
+        reason: 'the QR must say WHICH address it is',
+      );
+    });
+
+    testWidgets('the action bar is PINNED — it survives scrolling the page '
+        'to its end', (tester) async {
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        consolidate: () async => _summary(),
+        consolidateEstimate: () async => ConsolidateEstimateDto(
+          feeSompi: BigInt.from(40000),
+          utxoCount: 38,
+          resultingCoins: 1,
+          addressCount: 3,
+        ),
+        height: 700,
+      );
+      final fee = find.textContaining('KAS fee');
+      final before = tester.getTopLeft(fee).dy;
+      await tester.drag(find.byType(ListView).first, const Offset(0, -400));
+      await tester.pumpAndSettle();
+      expect(fee, findsOneWidget);
+      expect(
+        tester.getTopLeft(fee).dy,
+        before,
+        reason: 'the one primary action never scrolls away from the thumb',
+      );
+    });
+
+    testWidgets('the whole screen fits the phone at rest, with the render\'s '
+        'own three funded addresses', (tester) async {
+      // **Playbook §19**, with the bound this screen actually owes. Its list
+      // is data-driven, so "one view" cannot mean *any* wallet; it means the
+      // composition the render was approved at — three funded addresses, both
+      // tools, the disclosure and the pinned bar — fits without scrolling.
+      // Beyond that the page scrolls and the bar stays, which is what the
+      // pinned bar is for. Guard at 800 against the V60's ~845 budget, so it
+      // reds before he sees it.
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        consolidate: () async => _summary(),
+        consolidateEstimate: () async => ConsolidateEstimateDto(
+          feeSompi: BigInt.from(40000),
+          utxoCount: 38,
+          resultingCoins: 1,
+          addressCount: 3,
+        ),
+        height: 800,
+      );
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView).first,
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(
+        position.maxScrollExtent,
+        0,
+        reason:
+            'T4 overflows its own phone by '
+            '${position.maxScrollExtent.toStringAsFixed(1)} dp at the '
+            'render\'s own content',
+      );
     });
   });
 

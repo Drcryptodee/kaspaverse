@@ -8,7 +8,7 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_exact`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `spend_exclusions`, `storage_mass_message`, `take_stashed`, `validate_mainnet_address`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
 /// floor for the live UTXO shape, computed by probing the pinned Generator —
@@ -74,6 +74,9 @@ Future<SignableSummaryDto> sweepPrepare({required String destination}) =>
 Future<SignableSummaryDto> consolidatePrepare() =>
     RustLib.instance.api.crateApiSendConsolidatePrepare();
 
+Future<ConsolidateEstimateDto> consolidateEstimate() =>
+    RustLib.instance.api.crateApiSendConsolidateEstimate();
+
 /// Phase 2: sign + broadcast the stashed plan identified by `nonce`. Refuses a
 /// stale/mismatched nonce or an empty stash (the user re-confirms). Advances the
 /// change cursor only on a fully-broadcast send.
@@ -82,6 +85,71 @@ Future<SendOutcomeDto> sendCommit({required BigInt nonce}) =>
 
 /// Drop any stashed send (confirm dismissed / back-gesture). Idempotent.
 Future<void> sendAbandon() => RustLib.instance.api.crateApiSendSendAbandon();
+
+/// What a merge would cost and move, **without stashing a plan** — the numbers
+/// `T4`'s resting action bar prints before anything is tapped.
+///
+/// **Why this is not [`consolidate_prepare`].** That function stashes the built
+/// plan in `PENDING_SEND` against a nonce, because the ceremony that follows it
+/// commits or abandons that exact plan. A screen that priced its button from it
+/// would stash a plan on every visit and strand it the moment the user walked
+/// away — and `PENDING_SEND` is one slot, so it would also sit on top of a Send
+/// the user had already confirmed. This builds the same plan through the same
+/// `prepare_consolidate`, reads its summary, and **drops it**. No nonce, no
+/// stash, no lifecycle.
+///
+/// **It is an estimate and says so.** The UTXO set can change between this call
+/// and the tap, which is why the surface prints `≈`. The binding number is the
+/// one the signing ceremony shows over the plan actually being signed (BG-11 —
+/// explain before you price, and price what you sign).
+///
+/// Refusals arrive already-English through [`map_drain_error`]; "nothing to
+/// merge …" is the wallet in its BEST state and a caller must not dress it as a
+/// fault.
+class ConsolidateEstimateDto {
+  /// Aggregate fee across the whole merge chain (sompi).
+  final BigInt feeSompi;
+
+  /// Coins the merge would consume.
+  final int utxoCount;
+
+  /// Coins it would leave — 1 for the native compound, N for a batched merge.
+  /// Published by the layer that knows which arm ran, never inferred.
+  final int resultingCoins;
+
+  /// Distinct addresses the merge would draw from — `SendSummary`'s
+  /// `source_addresses`, counted inside the plan over the same snapshot and
+  /// the same run of the withholding filter. Never "addresses with a
+  /// balance": the two disagree the moment a coin is covenant-bound or
+  /// reserved for a live conversation, and composing that with [`utxo_count`]
+  /// printed a sentence about the ceremony that was not true of it
+  /// (`wallet-security`; the snapshot half is `consensus`).
+  final int addressCount;
+
+  const ConsolidateEstimateDto({
+    required this.feeSompi,
+    required this.utxoCount,
+    required this.resultingCoins,
+    required this.addressCount,
+  });
+
+  @override
+  int get hashCode =>
+      feeSompi.hashCode ^
+      utxoCount.hashCode ^
+      resultingCoins.hashCode ^
+      addressCount.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConsolidateEstimateDto &&
+          runtimeType == other.runtimeType &&
+          feeSompi == other.feeSompi &&
+          utxoCount == other.utxoCount &&
+          resultingCoins == other.resultingCoins &&
+          addressCount == other.addressCount;
+}
 
 /// Reserved fee-strategy discriminant (V5). One variant today — every flow
 /// pays `Fees::SenderPays(priority)` at the pinned Generator

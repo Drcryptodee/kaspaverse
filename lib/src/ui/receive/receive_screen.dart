@@ -15,10 +15,16 @@ import '../widgets/kv_qr.dart';
 /// person checking it character by character.
 ///
 /// An address is public data (INV-1 governs secrets, not addresses), so
-/// showing, scanning, copying and sharing it are all safe. It shows the
-/// **static** receive address (index 0) for the alpha; next-unused rotation is
-/// deferred (D-045a). A pure consumer — the address arrives through an injected
-/// [fetch] — so the screen renders in a widget test with no native library.
+/// showing, scanning, copying and sharing it are all safe. A pure consumer —
+/// the address arrives through an injected [fetch] — so the screen renders in a
+/// widget test with no native library.
+///
+/// **It shows whichever address it is given.** Until `T4`'s address list it
+/// was only ever handed `receive/0`, and this doc said so; the list now opens
+/// it over any address in the watch window, so the screen says WHICH one in
+/// its own title ([title]) rather than leaving a user holding a QR they cannot
+/// identify. Automatic next-unused rotation is still deferred (D-045a) — that
+/// is a different question from being able to open an address you chose.
 ///
 /// ## Three laws hold this composition together
 ///
@@ -41,10 +47,20 @@ import '../widgets/kv_qr.dart';
 /// the URI format decided rather than invented. §8 forbids a control that
 /// answers a tap and does nothing, so until then Share stands alone.
 class ReceiveScreen extends StatefulWidget {
-  const ReceiveScreen({required this.fetch, super.key, this.share});
+  const ReceiveScreen({
+    required this.fetch,
+    super.key,
+    this.share,
+    this.title = 'Receive',
+  });
 
   /// Resolves the receive address (derived in Rust from the account xpub).
   final Future<String> Function() fetch;
+
+  /// What the top bar calls this address — `Receive` for the wallet's default,
+  /// `Receive 14` when `T4`'s list opened a particular one. A QR with no name
+  /// over it is a QR the user cannot check against the row they tapped.
+  final String title;
 
   /// Hands the address to another app. **Null hides the control** rather than
   /// showing one that goes nowhere (BG-12) — which is what a widget test and a
@@ -124,7 +140,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         child: Column(
           children: [
             KvTopBar(
-              title: 'Receive',
+              title: widget.title,
               onBack: () => Navigator.of(context).pop(),
             ),
             // **One column, clamped at 560 and centred** (BG-33).

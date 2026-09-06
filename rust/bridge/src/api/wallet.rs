@@ -542,6 +542,99 @@ pub async fn deep_scan() -> Result<DeepScanReport, AppError> {
     })
 }
 
+/// One receive address, as `T4`'s address list draws it.
+///
+/// Every field is **public** data: an address derived from the account xpub and
+/// a balance the node already told us. No secret is near this type (INV-1
+/// governs secrets, not addresses).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalletAddressDto {
+    /// The `receive/N` slot. `0` is the wallet's default address.
+    pub index: u32,
+    pub address: String,
+    /// What can be **spent from this address right now** — see
+    /// [`list_addresses`] for the three things that are deliberately not in it.
+    pub balance_sompi: u64,
+    /// Mature coins here the wallet structurally **refuses** to spend:
+    /// covenant-bound output, which `covenant_fence` rejects on every path
+    /// including the total sweep (D-211). Kept out of [`balance_sompi`] so a
+    /// row can never offer a figure no code path will move, and surfaced so it
+    /// is not simply missing money.
+    pub locked_sompi: u64,
+    /// Something is on its way here that will become spendable — a deposit
+    /// still maturing, or an outgoing transaction of ours that pays here.
+    ///
+    /// Asked of **every** address, not only the empty ones: an address holding
+    /// half a KAS with a hundred more inside the maturity hold is as much
+    /// mid-settle as an empty one, and answering only for zeros made the flag
+    /// say different things about the same situation (the L92 scar, both
+    /// halves).
+    pub settling: bool,
+}
+
+/// The wallet's receive addresses with what each holds — the whole source for
+/// `T4 · Wallet`'s `ADDRESSES` list.
+///
+/// **Nothing is probed.** The window comes from [`wallet_window`], the
+/// addresses from the ONE derivation site (`vault::derive_wallet_branches`),
+/// and the balances from the engine's live `UtxoContext` —
+/// `mature_balances_by_address`, which is the same local read `prepare_send`
+/// builds from (`chain::send`, `context.rs:757` @ `cfafeb4`). So this list is a
+/// re-projection of one set, not a second measurement of it — a
+/// `get_balances_by_addresses` probe would have been the second measurement.
+///
+/// **It is not, however, the wallet's headline balance.** That is
+/// `sum(mature) + consumed − outgoing` at the pin (context.rs:506-549), and a
+/// submitted send has already had its inputs removed from `mature`
+/// (context.rs:254) — so while a send is in flight these rows and the home
+/// screen differ, correctly (`consensus`, this sitting). The screen prints no
+/// total for exactly this family of reasons.
+///
+/// **What a balance here does not include**, because a figure printed beside an
+/// address is a claim about money: coins still inside the 100-DAA maturity
+/// hold, coins inside an outgoing transaction of ours, and coinbase output in
+/// stasis. All three are absent from `mature`, and all three are picked up by
+/// [`WalletAddressDto::settling`], which reads the processor's outgoing,
+/// pending AND stasis sets — so a row can be empty of spendable money without
+/// ever being filed under "empty".
+///
+/// **Receive branch only.** Change addresses are not shown: they are not
+/// addresses a user hands out, and `T4` does not draw them. A caller must
+/// therefore never present the sum of this list as the wallet's balance — the
+/// screen prints no total for exactly that reason.
+///
+/// Locked vault ⇒ the derivation refuses, which is the honest answer. An empty
+/// list from a locked wallet would read as "you have no addresses".
+pub async fn list_addresses() -> Result<Vec<WalletAddressDto>, AppError> {
+    let (receive_count, _) = wallet_window();
+    let (receive, _) = vault::derive_wallet_branches(receive_count, 0)?;
+    let engine = engine_handle()
+        .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    let folded = engine
+        .mature_balances_by_address()
+        .await
+        .map_err(AppError::chain)?;
+    // ONE pass over the processor's two sets for the whole list, rather than
+    // one per row — and therefore askable of every row, which is what makes
+    // the answer symmetric.
+    let settling = engine.settling_among(&receive);
+
+    Ok(receive
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| {
+            let holding = folded.get(&address).copied().unwrap_or_default();
+            WalletAddressDto {
+                index: index as u32,
+                settling: settling.contains(&address),
+                address: address.to_string(),
+                balance_sompi: holding.spendable_sompi,
+                locked_sompi: holding.locked_sompi,
+            }
+        })
+        .collect())
+}
+
 /// The whole pass's deadline, and therefore the whole gate's: the longest the
 /// sync engine and the messaging hub can be held before they open on the last
 /// known-good window.

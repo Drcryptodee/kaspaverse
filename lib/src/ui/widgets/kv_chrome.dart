@@ -269,13 +269,21 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
       // 1.2 dp apart — so the break is one line rather than a label with a
       // control floating beside it. The row takes the control's height, which
       // is the air BG-12 owes a 52 dp target anyway.
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Expanded(child: title),
-          const SizedBox(width: KvSpace.sm),
-          trailing,
-        ],
+      //
+      // **`Wrap`, not `Row`, and the reason is BG-14's floor.** Under a `Row`
+      // the label took `Expanded` and the control its intrinsic width — which
+      // at 320 dp / 1.3× left the label about 26 dp and rendered `ADDRESSES`
+      // as `ADD / RESS / ES`, three lines of a word broken mid-syllable. A
+      // `Wrap` needs no threshold and no measurement: both sit on one line
+      // and spread to the edges while they fit, and the control drops to its
+      // own line the moment they do not. Found in a preview frame at the
+      // floor, which is where geometry defects are found (playbook §19.6).
+      return Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: KvSpace.sm,
+        runSpacing: KvSpace.xs,
+        children: [title, trailing],
       );
     }
     if (info == null) {
@@ -390,6 +398,7 @@ class KvAction extends StatefulWidget {
     required this.primary,
     required this.onTap,
     this.disabledReason,
+    this.labelWidget,
     this.mark,
     this.height = KvSpace.control,
   });
@@ -422,6 +431,16 @@ class KvAction extends StatefulWidget {
 
   /// Null ⇒ enabled. Non-null ⇒ disabled, and this is what it says.
   final String? disabledReason;
+
+  /// The **enabled** label, composed — for the one case a plain string cannot
+  /// carry: a label that mixes words with a figure, which BG-30 sets in two
+  /// faces. `T4`'s `Merge coins · ≈ 0.0004 KAS fee` is that case.
+  ///
+  /// [label] is still required and still the truth for a screen reader, so a
+  /// composed label can never quietly say something different from what is
+  /// announced. The disabled form ignores this entirely: its label is the
+  /// reason, which is always words.
+  final Widget? labelWidget;
 
   /// An optional 18 dp glyph before the label (§4).
   final KvGlyph? mark;
@@ -472,6 +491,8 @@ class _KvActionState extends State<KvAction> {
         Semantics(
           button: true,
           enabled: !disabled,
+          // The composed label paints; [label] is what is SPOKEN, always.
+          label: widget.labelWidget == null || disabled ? null : widget.label,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: disabled ? null : widget.onTap,
@@ -540,24 +561,25 @@ class _KvActionState extends State<KvAction> {
                                 color: KvColor.inkDim,
                               ),
                             )
-                          : Text(
-                              widget.label,
-                              textAlign: TextAlign.center,
-                              // Unbounded: it wraps at a space, so a figure and
-                              // its unit stay together on one line whatever
-                              // happens (BG-5, BG-14).
-                              style: TextStyle(
-                                fontFamily: KvFont.ui,
-                                // §2 `button`: 16, and 15 on a 52-high control.
-                                fontSize: widget.height >= KvSpace.control
-                                    ? 16
-                                    : 15,
-                                height: 20 / 16,
-                                fontWeight: FontWeight.w600,
-                                fontVariations: KvWeight.w600,
-                                color: ink,
-                              ),
-                            ),
+                          : widget.labelWidget ??
+                                Text(
+                                  widget.label,
+                                  textAlign: TextAlign.center,
+                                  // Unbounded: it wraps at a space, so a figure and
+                                  // its unit stay together on one line whatever
+                                  // happens (BG-5, BG-14).
+                                  style: TextStyle(
+                                    fontFamily: KvFont.ui,
+                                    // §2 `button`: 16, and 15 on a 52-high control.
+                                    fontSize: widget.height >= KvSpace.control
+                                        ? 16
+                                        : 15,
+                                    height: 20 / 16,
+                                    fontWeight: FontWeight.w600,
+                                    fontVariations: KvWeight.w600,
+                                    color: ink,
+                                  ),
+                                ),
                     ),
                   ),
                 ],

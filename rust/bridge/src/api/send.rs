@@ -656,6 +656,69 @@ pub async fn consolidate_prepare() -> Result<SignableSummaryDto, AppError> {
     Ok(dto)
 }
 
+/// What a merge would cost and move, **without stashing a plan** — the numbers
+/// `T4`'s resting action bar prints before anything is tapped.
+///
+/// **Why this is not [`consolidate_prepare`].** That function stashes the built
+/// plan in `PENDING_SEND` against a nonce, because the ceremony that follows it
+/// commits or abandons that exact plan. A screen that priced its button from it
+/// would stash a plan on every visit and strand it the moment the user walked
+/// away — and `PENDING_SEND` is one slot, so it would also sit on top of a Send
+/// the user had already confirmed. This builds the same plan through the same
+/// `prepare_consolidate`, reads its summary, and **drops it**. No nonce, no
+/// stash, no lifecycle.
+///
+/// **It is an estimate and says so.** The UTXO set can change between this call
+/// and the tap, which is why the surface prints `≈`. The binding number is the
+/// one the signing ceremony shows over the plan actually being signed (BG-11 —
+/// explain before you price, and price what you sign).
+///
+/// Refusals arrive already-English through [`map_drain_error`]; "nothing to
+/// merge …" is the wallet in its BEST state and a caller must not dress it as a
+/// fault.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsolidateEstimateDto {
+    /// Aggregate fee across the whole merge chain (sompi).
+    pub fee_sompi: u64,
+    /// Coins the merge would consume.
+    pub utxo_count: u32,
+    /// Coins it would leave — 1 for the native compound, N for a batched merge.
+    /// Published by the layer that knows which arm ran, never inferred.
+    pub resulting_coins: u32,
+    /// Distinct addresses the merge would draw from — `SendSummary`'s
+    /// `source_addresses`, counted inside the plan over the same snapshot and
+    /// the same run of the withholding filter. Never "addresses with a
+    /// balance": the two disagree the moment a coin is covenant-bound or
+    /// reserved for a live conversation, and composing that with [`utxo_count`]
+    /// printed a sentence about the ceremony that was not true of it
+    /// (`wallet-security`; the snapshot half is `consensus`).
+    pub address_count: u32,
+}
+
+pub async fn consolidate_estimate() -> Result<ConsolidateEstimateDto, AppError> {
+    let engine = wallet::engine_handle()
+        .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
+    let destination = payment_change_address()?;
+    let exclude = super::transport::drain_exclusions()?;
+    let signer: Arc<dyn SignerT> = Arc::new(wallet::wallet_signer()?);
+    let rpc = dag::shared_monitor().await?.rpc();
+
+    let prepared = engine
+        .prepare_consolidate(destination, &exclude, signer, rpc)
+        .await
+        .map_err(map_drain_error)?;
+    let summary = prepared.summary();
+    Ok(ConsolidateEstimateDto {
+        fee_sompi: summary.fee_sompi,
+        utxo_count: summary.utxo_count,
+        resulting_coins: summary.resulting_coins,
+        // The plan's OWN count, over the snapshot it was built from — never a
+        // second read (`consensus`, this sitting).
+        address_count: summary.source_addresses,
+    })
+    // `prepared` drops here, unstashed and unsigned.
+}
+
 /// Drain refusals arrive typed from the chain layer with their copy already
 /// honest (each is a refusal, not a fault); the two families that need a
 /// friendlier sentence than their Debug form are mapped here.
@@ -807,6 +870,7 @@ mod tests {
             total_sompi: 20_031_000,
             mass: 2_000,
             tx_count: 1,
+            source_addresses: 0,
             utxo_count: 1,
             resulting_coins: 0,
             payload_len: 154,

@@ -1,8 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../rust/api/send.dart' show SendOutcomeDto, SignableSummaryDto;
-import '../../rust/api/wallet.dart' show DeepScanReport;
+import '../../rust/api/send.dart'
+    show ConsolidateEstimateDto, SendOutcomeDto, SignableSummaryDto;
+import '../../rust/api/wallet.dart' show DeepScanReport, WalletAddressDto;
 
 /// The seams the settings group is built on — **one file, so the four screens
 /// share a contract rather than four opinions of one** (the V5 scope pattern,
@@ -59,8 +60,10 @@ class WalletSettingsScope {
   const WalletSettingsScope({
     required this.receiveAddress,
     required this.deepScan,
+    this.listAddresses,
     this.receiveRoute,
     this.consolidate,
+    this.consolidateEstimate,
     this.commitSend,
     this.abandonSend,
   });
@@ -71,12 +74,32 @@ class WalletSettingsScope {
   /// design and bounded Rust-side; the row owns the busy state.
   final Future<DeepScanReport> Function() deepScan;
 
-  final WidgetBuilder? receiveRoute;
+  /// Every receive address in the watch window with what it holds — `T4`'s
+  /// `ADDRESSES` list.
+  ///
+  /// **Nullable, and the screen degrades rather than lying.** Absent ⇒ `T4`
+  /// draws the single receive address it can always answer for, which is what
+  /// it shipped before this seam existed. A list that renders a spinner
+  /// forever, or an empty card over a funded wallet, would both say something
+  /// false about the user's money (§8).
+  final Future<List<WalletAddressDto>> Function()? listAddresses;
+
+  /// Opens Receive over **one** address — the list hands it the address the
+  /// user tapped, so the QR is never a different address than the row.
+  /// `label` is what the top bar calls it (`Receive`, `Receive 14`).
+  final Widget Function(String address, String label)? receiveRoute;
 
   /// Merge coins: Rust builds and stashes the plan, the screen opens the ONE
   /// signing surface over its summary. All three seams present ⇒ the row
   /// renders; absent ⇒ hidden.
   final Future<SignableSummaryDto> Function()? consolidate;
+
+  /// What a merge would cost and move, **without stashing a plan** — the
+  /// resting action bar's fee and the merge row's coin counts. Separate from
+  /// [consolidate] on purpose: that one stashes a plan the ceremony must then
+  /// commit or abandon, and pricing a button from it would strand one every
+  /// time the screen was opened and left.
+  final Future<ConsolidateEstimateDto> Function()? consolidateEstimate;
   final Future<SendOutcomeDto> Function(BigInt nonce)? commitSend;
   final Future<void> Function()? abandonSend;
 

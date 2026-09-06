@@ -65,7 +65,7 @@ class KvRowContainer extends StatelessWidget {
           children: [
             ?header,
             for (var i = 0; i < children.length; i++) ...[
-              if (i > 0 && divided) const _Hairline(),
+              if (i > 0 && divided) const KvHairline(),
               children[i],
             ],
           ],
@@ -77,8 +77,13 @@ class KvRowContainer extends StatelessWidget {
 
 /// The one line inside a container (§1.2). One physical pixel would vanish on a
 /// 3× panel; 1 dp is the demarcation the law names.
-class _Hairline extends StatelessWidget {
-  const _Hairline();
+///
+/// Public since `T4`: a card whose rows live inside their **own** scroll view
+/// cannot get its rules from [KvRowContainer], which only draws between the
+/// children it is handed. The list draws them itself, from the same part, so
+/// there is still one hairline in the system rather than a second opinion.
+class KvHairline extends StatelessWidget {
+  const KvHairline({super.key});
 
   @override
   Widget build(BuildContext context) =>
@@ -166,6 +171,7 @@ class KvRow extends StatefulWidget {
     required this.title,
     this.sub,
     this.subWidget,
+    this.badge,
     this.trailing,
     this.trailingMeta,
     this.onTap,
@@ -190,6 +196,13 @@ class KvRow extends StatefulWidget {
 
   /// A composed sub-line — the ledger's lifecycle mark, for instance.
   final Widget? subWidget;
+
+  /// A small mark that belongs **to the title**, on its own line beside it —
+  /// `T4`'s green `Default` pill on the wallet's main address. Distinct from
+  /// [trailing], which belongs to the row: a badge qualifies the name, a
+  /// trailing object reports the row's value. It takes only its intrinsic
+  /// width, so a long title still ellipsises rather than crushing it.
+  final Widget? badge;
 
   /// The value, the toggle, or an [KvColor.etch] chevron.
   final Widget? trailing;
@@ -258,6 +271,20 @@ class KvRow extends StatefulWidget {
 class _KvRowState extends State<KvRow> {
   bool _down = false;
 
+  Text _title(String title) => Text(
+    title,
+    maxLines: widget.titleLines,
+    overflow: TextOverflow.ellipsis,
+    style: TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: widget.dense ? 15 : 16,
+      height: 20 / (widget.dense ? 15 : 16),
+      fontWeight: FontWeight.w600,
+      fontVariations: KvWeight.w600,
+      color: KvColor.ink,
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final leading = widget.leading;
@@ -283,19 +310,16 @@ class _KvRowState extends State<KvRow> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    title,
-                    maxLines: widget.titleLines,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: widget.dense ? 15 : 16,
-                      height: 20 / (widget.dense ? 15 : 16),
-                      fontWeight: FontWeight.w600,
-                      fontVariations: KvWeight.w600,
-                      color: KvColor.ink,
-                    ),
-                  ),
+                  if (widget.badge case final badge?)
+                    Row(
+                      children: [
+                        Flexible(child: _title(title)),
+                        const SizedBox(width: KvSpace.s),
+                        badge,
+                      ],
+                    )
+                  else
+                    _title(title),
                   ?subLine,
                   if (sub != null)
                     Text(

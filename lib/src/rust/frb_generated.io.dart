@@ -107,6 +107,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WalletSnapshot dco_decode_box_autoadd_wallet_snapshot(dynamic raw);
 
   @protected
+  ConsolidateEstimateDto dco_decode_consolidate_estimate_dto(dynamic raw);
+
+  @protected
   ContactDto dco_decode_contact_dto(dynamic raw);
 
   @protected
@@ -183,6 +186,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ThreadMessageDto> dco_decode_list_thread_message_dto(dynamic raw);
+
+  @protected
+  List<WalletAddressDto> dco_decode_list_wallet_address_dto(dynamic raw);
 
   @protected
   MaturityParamsDto dco_decode_maturity_params_dto(dynamic raw);
@@ -288,6 +294,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   VaultStatus dco_decode_vault_status(dynamic raw);
+
+  @protected
+  WalletAddressDto dco_decode_wallet_address_dto(dynamic raw);
 
   @protected
   WalletSnapshot dco_decode_wallet_snapshot(dynamic raw);
@@ -396,6 +405,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ConsolidateEstimateDto sse_decode_consolidate_estimate_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ContactDto sse_decode_contact_dto(SseDeserializer deserializer);
 
   @protected
@@ -486,6 +500,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ThreadMessageDto> sse_decode_list_thread_message_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<WalletAddressDto> sse_decode_list_wallet_address_dto(
     SseDeserializer deserializer,
   );
 
@@ -613,6 +632,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   VaultStatus sse_decode_vault_status(SseDeserializer deserializer);
+
+  @protected
+  WalletAddressDto sse_decode_wallet_address_dto(SseDeserializer deserializer);
 
   @protected
   WalletSnapshot sse_decode_wallet_snapshot(SseDeserializer deserializer);
@@ -750,6 +772,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_consolidate_estimate_dto(
+    ConsolidateEstimateDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_contact_dto(ContactDto self, SseSerializer serializer);
 
   @protected
@@ -866,6 +894,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_thread_message_dto(
     List<ThreadMessageDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_wallet_address_dto(
+    List<WalletAddressDto> self,
     SseSerializer serializer,
   );
 
@@ -1021,6 +1055,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_vault_status(VaultStatus self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_wallet_address_dto(
+    WalletAddressDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_wallet_snapshot(

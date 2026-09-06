@@ -217,6 +217,12 @@ class KvSegmented extends StatelessWidget {
     return SizedBox(
       height: KvSpace.touchTarget,
       child: Center(
+        // **Shrink-wrap.** Without it the control takes whatever width it is
+        // offered, which under `KvSectionHeader`'s `Wrap` was the whole row —
+        // pushing the section label onto a second run and costing `T4` 20 dp
+        // it did not have. A segmented is as wide as its options and no wider
+        // (the track's own rule: content-sized segments, `T4` measured).
+        widthFactor: 1,
         child: Container(
           height: track,
           padding: const EdgeInsets.all(inset),
@@ -283,17 +289,52 @@ class _Segment extends StatelessWidget {
               color: active ? KvColor.chip : Colors.transparent,
               borderRadius: BorderRadius.circular(KvRadius.control),
             ),
-            child: Text(
-              count == null ? option.label : '${option.label} · $count',
-              maxLines: 1,
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 14,
-                height: 18 / 14,
-                fontWeight: FontWeight.w600,
-                fontVariations: KvWeight.w600,
-                color: active ? KvColor.ink : KvColor.inkMeta,
-              ),
+            // **The count is a figure and takes the mono face** (BG-30), the
+            // word beside it does not — one `Text` carrying both set `31` in
+            // Jakarta, which `T4` does not. Split when this control got its
+            // first call site, which is when the defect became visible.
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  option.label,
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 14,
+                    height: 18 / 14,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: active ? KvColor.ink : KvColor.inkMeta,
+                  ),
+                ),
+                if (count != null) ...[
+                  Text(
+                    ' · ',
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 14,
+                      height: 18 / 14,
+                      color: active ? KvColor.inkDim : KvColor.inkMeta,
+                    ),
+                  ),
+                  Text(
+                    '$count',
+                    maxLines: 1,
+                    style: TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      fontWeight: FontWeight.w600,
+                      fontVariations: KvWeight.w600,
+                      color: active ? KvColor.ink : KvColor.inkMeta,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ),

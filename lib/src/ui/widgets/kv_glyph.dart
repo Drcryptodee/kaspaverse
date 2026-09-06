@@ -96,7 +96,9 @@ enum KvGlyph {
   /// Look deeper for addresses another wallet may have used. Lucide `layers`.
   layers,
 
-  /// Many coins becoming one. Lucide `git-merge`.
+  /// Many coins becoming one. **The one mark in this set with no Lucide
+  /// name**: `T4`'s is a two-into-one fork, measured off the render rather
+  /// than pasted, because no Lucide icon is that shape. See the painter.
   merge,
 
   /// The source code. Lucide `github` — the one mark in the set that names a
@@ -397,9 +399,34 @@ class KvGlyphPainter extends CustomPainter {
               '0 22 17',
         ]);
       case KvGlyph.merge:
-        circle(18, 18, 3);
-        circle(6, 6, 3);
-        path(const ['M6 21V9a9 9 0 0 0 9 9']);
+        // **Measured off `T4`, not pasted from Lucide.** Every other mark here
+        // carries a Lucide name because the render used one; this one does not
+        // match any of them. `T4`'s disc draws ink **11.0 × 17.0 dp** inside
+        // the 20 dp glyph box — taller and far narrower than `layers` at
+        // 15.5 × 16.25 in the same card — with node rings whose path radius is
+        // 1.5 dp against a 2 dp stroke, where Lucide's `git-fork` is square
+        // (18 × 18 of 24) with rings half again as fat. Two different shapes,
+        // and the founder asked for the one in the picture (2026-09-06:
+        // *"change the Merge icon to whats being shown in the screenshot"*),
+        // which is the standing order anyway — the render wins where it
+        // differs (D-259).
+        //
+        // So the geometry below is transcribed from the render at 4× and
+        // proved by a pixel diff against its own crop, not traced by eye.
+        // On the 24 grid: ink 20.1 × 13.2 units, centred; rings at
+        // (8.4, 5) · (15.6, 5) · (12, 19) — the ring radius is the render's
+        // own (outer 20 px, hole 4 px at 4× ⇒ r 1.8 against the house's 2.5
+        // stroke, which does not bend for one glyph); the two stems fold into
+        // a bracket
+        // at y 12.3 and one stem drops from it. It reads as two-into-one, which
+        // is what merging coins is.
+        circle(8.4, 5, 1.8);
+        circle(15.6, 5, 1.8);
+        circle(12, 19, 1.8);
+        path(const [
+          'M15.6 6.75v3.15c0 1.44-.96 2.4-2.4 2.4H10.8c-1.44 0-2.4-.96-2.4-2.4V6.75',
+          'M12 12.3v4.95',
+        ]);
       case KvGlyph.github:
         path(const [
           'M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5'

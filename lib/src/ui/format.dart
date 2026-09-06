@@ -189,14 +189,13 @@ String chunkAddress(String address) {
 /// `kaspa:qrxk2f9p…wmx3f4a2`. Payloads of 16 chars or fewer are returned whole
 /// (nothing to elide). The full review form is [chunkAddress]; a tap on a
 /// compact address should reveal it.
-String truncateAddressPayload(String address) {
+String truncateAddressPayload(String address, {int head = 8, int tail = 8}) {
   final sep = address.indexOf(':');
   final prefix = sep >= 0 ? address.substring(0, sep + 1) : '';
   final payload = sep >= 0 ? address.substring(sep + 1) : address;
-  if (payload.length <= 16) return address;
-  final head = payload.substring(0, 8);
-  final tail = payload.substring(payload.length - 8);
-  return '$prefix$head…$tail';
+  if (payload.length <= head + tail) return address;
+  return '$prefix${payload.substring(0, head)}…'
+      '${payload.substring(payload.length - tail)}';
 }
 
 /// Apply one amount-keypad press to the amount being typed, returning the new
