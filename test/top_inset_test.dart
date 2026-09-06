@@ -7,8 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 /// Transaction, Settings and Roadmap reserved a fixed 52 dp above their bars
 /// and sat visibly lower — *"the proximity the height is from the top of the
 /// back button to the roof of the screen … every screen has to have it."*
-/// A screen that reserves the strip is a finding; the retired Black Glass
-/// prototype is the one exemption, by name.
+/// A screen that reserves the strip is a finding. **The exemption is gone
+/// with its holder** (2026-09-06, D-281): the Black Glass prototype was
+/// deleted and `KvSpace.statusBarReserve` with it, so the guard no longer
+/// carves out `preview/` or `tokens.dart` — the name may appear nowhere under
+/// `lib/src/ui`, which is a stronger claim than the one it replaces.
 void main() {
   test('no screen reserves the status-bar strip; SafeArea owns the inset', () {
     final offenders = <String>[];
@@ -17,10 +20,15 @@ void main() {
             .listSync(recursive: true)
             .whereType<File>()
             .where((f) => f.path.endsWith('.dart'))) {
-      if (file.path.contains('/preview/')) continue;
-      if (file.path.endsWith('theme/tokens.dart')) continue;
       final source = file.readAsStringSync();
-      if (source.contains('statusBarReserve')) offenders.add(file.path);
+      // The token is gone, so a use would not compile — but the NAME coming
+      // back is how it would return, and a re-declaration is what this
+      // catches. The comment in `tokens.dart` that records the deletion is
+      // the one place the word is allowed to survive.
+      if (source.contains('statusBarReserve') &&
+          !file.path.endsWith('theme/tokens.dart')) {
+        offenders.add(file.path);
+      }
       // A `SafeArea(top: false)` under a `Scaffold` body is the same reserve
       // by another door — the screen would have to draw the inset itself.
       if (RegExp(r'body: SafeArea\(\s*top: false').hasMatch(source)) {

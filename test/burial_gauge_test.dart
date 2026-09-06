@@ -1060,18 +1060,13 @@ void main() {
 ///
 ///  * `lib/src/rust/` — generated bindings. That is Rust's own text, mirrored;
 ///    the ladder's law is enforced on the Rust side by `NetworkParams` itself.
-///  * `lib/src/ui/preview/black_glass_home_preview.dart` — the **Black Glass
-///    prototype**, a debug-only feel test of a design language the app has
-///    since replaced twice. It is imported only by the dev launcher, imports
-///    nothing from the shipped screens, and is a frozen record of what the
-///    founder judged on glass in July. Migrating its vocabulary would make it a
-///    *worse* record of that, and its `kSafeDepth`/`kFinalDepth` are its own
-///    prototype constants rather than a threshold any user's money is measured
-///    against. **The exemption is scoped to that one file** — a second preview
-///    reaching for the retired words fails here.
-bool _exempt(String path) =>
-    path.contains('/rust/') ||
-    path.endsWith('preview/black_glass_home_preview.dart');
+///
+/// **The second exemption is gone** (2026-09-06, D-281). It named the Black
+/// Glass prototype — a debug-only feel test carrying its own
+/// `kSafeDepth`/`kFinalDepth` — and the founder deleted the prototype once the
+/// screens it stood in for had shipped. Nothing in `lib/` may now reach for the
+/// retired vocabulary, which is what this guard was always for.
+bool _exempt(String path) => path.contains('/rust/');
 
 /// The reading line's own words, told apart from the axis label that happens to
 /// carry the same name. `settled` is both a rung and a graduation, so a bare

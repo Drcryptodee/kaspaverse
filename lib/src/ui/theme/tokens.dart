@@ -398,7 +398,11 @@ abstract final class KvSpace {
   /// more, as Send and Home do — four screens reserved these 52 dp and sat
   /// ~20 dp lower than the rest, which is the proximity the founder called
   /// out. `top_inset_test` keeps it out of `lib/src/ui`.
-  static const double statusBarReserve = 52;
+  // `statusBarReserve` (52) was deleted with the Black Glass prototype
+  // (2026-09-06, D-281): §9.22 had already closed — every screen takes the
+  // system inset from `SafeArea` and nothing more (D-275) — and the retired
+  // prototype was the token's last reader. `test/top_inset_test.dart` now
+  // guards the name's absence rather than its confinement.
 }
 
 /// §3 — Corner radii. **Everything is round; the question is how round.**
