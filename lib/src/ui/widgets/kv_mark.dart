@@ -1,8 +1,15 @@
 // lib/src/ui/widgets/kv_mark.dart
-// KaspaVerse mark — LOCKED 2026-09-03 (Design Bible §4a / §4a.1).
+// KaspaVerse mark — LOCKED 2026-09-06 (Design Bible §4a / §4a.1, D-291).
 // The two paths below ARE the mark. Do not redraw, trace, tidy or substitute.
 // Pure Dart: no asset, no icon font, no package (BG-16, BG-25).
-// RevealActivity.kt and the adaptive-icon SVG mirror these coordinates by hand.
+//
+// NOTHING MIRRORS THESE COORDINATES. The header carried that claim from
+// 2026-09-03 to 2026-09-06 naming `RevealActivity.kt` and an adaptive-icon SVG;
+// neither is true. That file draws the recovery words and has no path data, and
+// `android/` has no adaptive icon at all — the launcher is still five stock
+// Flutter rasters (IDEAS_BACKLOG, 2026-09-06). A fence nobody can check is
+// worse than none, so it is stated as it is: change this file and nothing else
+// moves, until the icon beat gives it a mirror on purpose.
 
 import 'package:flutter/material.dart';
 import '../theme/tokens.dart'; // KvColor, KvMotion
@@ -29,20 +36,25 @@ class KvMark extends StatelessWidget {
   final bool breathe;
 
   /// Stroke in 100-grid units. **One weight at every size** (founder ruling,
-  /// D-250).
+  /// D-250, amended D-291).
   ///
   /// The v4.1 ladder climbed to 14 and 16 as the mark shrank, on the stated
   /// reasoning that a heavier stroke made "the gap survive". It does the
-  /// opposite: the two locked paths' closest approach is **fixed at 14.374
-  /// units**, so every unit of stroke is a unit of gap spent. At 16 they
-  /// overlapped by 1.63 units and the K read as one shape (Bible §9.12).
+  /// opposite: the two paths' closest approach is **fixed at 14.374 units**, so
+  /// every unit of stroke is a unit of gap spent, and at 16 they overlapped by
+  /// 1.63 and the K read as one shape (Bible §9.12).
   ///
-  /// Flat 12 leaves **2.374 units** of clearance at every size — 2.59 dp on the
-  /// 176 splash, and **0.35 dp at 24 dp**, which is roughly one pixel on the
-  /// reference panel. That is the founder's brief exactly: *touching but not
-  /// quite touching.* Dial it with this one number — 11 opens the gap, 13
-  /// closes it toward a hairline that aliases away at 24 dp.
-  static double strokeUnitsFor(double size) => 12;
+  /// **D-250's arithmetic is what chose this number; only its conclusion
+  /// changed.** It set a flat 12 for *touching but not quite touching*; the
+  /// founder asked on 2026-09-06 for *more weight and touch at the centre*,
+  /// which is one move rather than two — two strokes centred 14.374 apart meet
+  /// at exactly that width. **14.4 is a kiss**: the paths make contact at their
+  /// closest point and overlap by 0.026 of a unit, which is a fortieth of a
+  /// pixel at 176 dp. Chosen from fourteen rendered candidates, not argued —
+  /// **D-291**, variant W2.
+  /// Dial it here and nowhere else: below 14.374 the contact opens into a gap,
+  /// and D-250's ceiling of 16 still holds.
+  static double strokeUnitsFor(double size) => 14.4;
 
   /// Halo per §1.8: 14 px @ 36 % at 40 dp, 8 px at 25, none below 24.
   static List<BoxShadow> orbHalo(double size, {double t = 0}) {
@@ -212,15 +224,25 @@ class _KPainter extends CustomPainter {
       ..strokeJoin = StrokeJoin.round;
 
     // Stem — a gentle bow: ends tuck toward the chevron, middle sits away.
+    // **Untouched by D-291**, at the founder's word: *"the `|` already has a
+    // suitable curve."*
     final stem = Path()
       ..moveTo(71.5 * k, 15.5 * k)
       ..cubicTo(74 * k, 39 * k, 74 * k, 62 * k, 71.5 * k, 84.5 * k);
 
-    // Chevron — leans in to meet the stem; upper arm a touch shorter.
+    // Chevron — **W2** (D-291). Two moves from the straight polyline it was:
+    // the arms reach the stem's own span (15.5 → 84.5 rather than 20.5 → 81),
+    // which steepens them 43.0° → 38.9° off vertical; and each carries a
+    // one-unit bow **toward the stem**, so the mark reads as a drawn arrowhead
+    // rather than a folded line. Half the stem's own 1.9, which is what *"the
+    // `>` gets 1% curve, not the other `|`"* asked for.
+    //
+    // The apex stays at (59, 49.5) — moving it would move the contact point,
+    // and the contact is the whole reason the stroke is 14.4.
     final chevron = Path()
-      ..moveTo(32 * k, 20.5 * k)
-      ..lineTo(59 * k, 49.5 * k)
-      ..lineTo(29.5 * k, 81 * k);
+      ..moveTo(32 * k, 16 * k)
+      ..cubicTo(42.04 * k, 26.33 * k, 51.04 * k, 37.5 * k, 59 * k, 49.5 * k)
+      ..cubicTo(50.18 * k, 61.87 * k, 40.35 * k, 73.37 * k, 29.5 * k, 84 * k);
 
     c.drawPath(stem, p);
     c.drawPath(chevron, p);
