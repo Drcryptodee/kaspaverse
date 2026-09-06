@@ -45,7 +45,7 @@ void main() {
     await renderSurface(
       tester,
       name: 'probe__mark_candidates',
-      size: const PreviewSize('sheet', Size(1290, 500), 1.0),
+      size: const PreviewSize('sheet', Size(1160, 700), 1.0),
       child: const _Sheet(),
     );
   }, skip: !previewRequested);
@@ -85,6 +85,14 @@ class _Geo {
       math.atan((apex.dx - upper.dx) / (apex.dy - upper.dy)) * 180 / math.pi;
 }
 
+/// Ten candidates across three axes — **weight**, **angle**, **curve** — so the
+/// founder chooses from pictures rather than from arithmetic, and so each axis
+/// can be judged with the other two held still.
+///
+/// `A` is what ships. `J` is the minimal move: contact and nothing else. `F`
+/// is his second ask verbatim — *"a variation where the `>` stroke is straight
+/// instead of curved but the other stroke `|` retains its curve"* — and `G`,
+/// `H` are that straight arm at the steeper angle and at more weight.
 const _candidates = <_Geo>[
   _Geo(
     label: 'A · shipped',
@@ -94,33 +102,69 @@ const _candidates = <_Geo>[
     lower: Offset(29.5, 81),
   ),
   _Geo(
-    label: 'B · his ask',
-    note: 'stroke 14.4 · kisses · bow toward the stem',
+    label: 'J · weight only',
+    note: "contact, nothing else moved",
+    stroke: 14.4,
+    upper: Offset(32, 20.5),
+    lower: Offset(29.5, 81),
+  ),
+  _Geo(
+    label: 'F · straight, longer',
+    note: 'his 2nd ask: no curve on the >',
+    stroke: 14.4,
+    upper: Offset(32, 16),
+    lower: Offset(29.5, 84),
+  ),
+  _Geo(
+    label: 'G · straight, steeper',
+    note: 'same, arms pulled in',
+    stroke: 14.4,
+    upper: Offset(34.5, 15.5),
+    lower: Offset(32, 84.5),
+  ),
+  _Geo(
+    label: 'H · straight, heavier',
+    note: 'G at stroke 15',
+    stroke: 15,
+    upper: Offset(34.5, 15.5),
+    lower: Offset(32, 84.5),
+  ),
+  _Geo(
+    label: 'B · his 1st ask',
+    note: 'bow 1 toward the stem',
     stroke: 14.4,
     upper: Offset(32, 16),
     lower: Offset(29.5, 84),
     bow: 1,
   ),
   _Geo(
-    label: 'C · B, bowed away',
-    note: 'the same, curved the other way',
+    label: 'I · half curve',
+    note: 'B, bowed 0.5',
+    stroke: 14.4,
+    upper: Offset(32, 16),
+    lower: Offset(29.5, 84),
+    bow: 0.5,
+  ),
+  _Geo(
+    label: 'C · bowed away',
+    note: 'B, curved the other way',
     stroke: 14.4,
     upper: Offset(32, 16),
     lower: Offset(29.5, 84),
     bow: -1,
   ),
   _Geo(
-    label: 'D · stronger',
-    note: 'stroke 15 · steeper again · bow toward',
-    stroke: 15,
+    label: 'E · steeper, curved',
+    note: "D's angle at B's weight",
+    stroke: 14.4,
     upper: Offset(34.5, 15.5),
     lower: Offset(32, 84.5),
     bow: 1,
   ),
   _Geo(
-    label: 'E · steeper only',
-    note: "stroke 14.4 · D's angle at B's weight",
-    stroke: 14.4,
+    label: 'D · stronger',
+    note: 'stroke 15 · steeper · bowed',
+    stroke: 15,
     upper: Offset(34.5, 15.5),
     lower: Offset(32, 84.5),
     bow: 1,
@@ -145,24 +189,36 @@ class _Sheet extends StatelessWidget {
               _Tile(
                 label: 'real KvMark',
                 note: 'the shipped widget itself',
-                child: const KvMark(size: 176, halo: false),
+                child: const KvMark(size: 152, halo: false),
               ),
-              for (final geo in _candidates)
+              for (final geo in _candidates.take(4))
                 _Tile(
                   label: geo.label,
                   note: '${geo.note} · ${geo.upperAngle.toStringAsFixed(1)}°',
-                  child: _Candidate(geo: geo, size: 176),
+                  child: _Candidate(geo: geo, size: 152),
+                ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final geo in _candidates.skip(4))
+                _Tile(
+                  label: geo.label,
+                  note: '${geo.note} · ${geo.upperAngle.toStringAsFixed(1)}°',
+                  child: _Candidate(geo: geo, size: 152),
                 ),
             ],
           ),
           const Spacer(),
-          // The same five at the smallest canon size, magnified 5x. D-250's
-          // whole reason for a flat stroke was that 24 dp is where the gap
-          // dies; now that contact is WANTED, 24 dp is where it can blob.
+          // The whole set at the smallest canon size, magnified. D-250's reason
+          // for a flat stroke was that 24 dp is where the gap dies; now that
+          // contact is WANTED, 24 dp is where it can blob.
           Row(
             children: [
               _Small(
-                label: '24 dp ×5',
+                label: '24 dp ×4',
                 child: const KvMark(size: 24, halo: false),
               ),
               for (final geo in _candidates)
@@ -185,7 +241,7 @@ class _Tile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 208,
+    width: 184,
     child: Column(
       children: [
         child,
@@ -205,12 +261,12 @@ class _Small extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 208,
+    width: 101,
     child: Column(
       children: [
         SizedBox(
-          height: 124,
-          child: Center(child: Transform.scale(scale: 5, child: child)),
+          height: 104,
+          child: Center(child: Transform.scale(scale: 4, child: child)),
         ),
         Text(label, style: _meta),
       ],

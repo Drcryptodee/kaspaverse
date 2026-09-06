@@ -176,16 +176,39 @@ class _AboutScreenState extends State<AboutScreen> {
     inset: const EdgeInsets.all(KvSpace.sm),
     children: [
       Row(
+        // **The mark sits on the name's own block, not on the card's.** The
+        // founder asked for it smaller and *"aligned to KaspaVerse
+        // perfectly"* — so the row centres its two children against each
+        // other and the 40 dp disc's centre line lands on the centre of the
+        // name-plus-build stack rather than floating in the card's air.
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const KvMark(size: 64),
-          const SizedBox(width: KvSpace.m),
+          // 40, down from 64 (founder, 2026-09-06: *"i want it 60% smaller or
+          // something"*). 40 is a canon size (§4a), the one the drawer already
+          // draws, so the mark keeps a size the system knows rather than
+          // taking an arbitrary 25.6.
+          const KvMark(size: 40),
+          const SizedBox(width: KvSpace.sm),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'KaspaVerse',
+                // **`Verse` steps back** (founder, 2026-09-06). One word, one
+                // run, two tones: `Kaspa` is the chain this wallet is of and
+                // `Verse` is what we added, so the emphasis says which half is
+                // the claim. `inkDim`, not `inkMeta` — it is still the app's
+                // own name and must not read as a caption.
+                const Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(text: 'Kaspa'),
+                      TextSpan(
+                        text: 'Verse',
+                        style: TextStyle(color: KvColor.inkDim),
+                      ),
+                    ],
+                  ),
                   style: TextStyle(
                     fontFamily: KvFont.ui,
                     fontSize: 22,

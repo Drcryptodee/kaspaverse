@@ -237,18 +237,33 @@ fn fully_broadcast(outcome: &SendOutcome) -> bool {
 /// failed) degrades to the floor sentence WITHOUT the hint, never to silence.
 ///
 /// `maximum` is the PROVEN ceiling (`WalletEngine::maximum_sendable` — an
-/// amount the Generator actually built), and it is the ceiling sentence's
-/// mirror of the floor's number: without it the sentence can only say "send a
-/// little less", which leaves the user bisecting by hand. It is offered ONLY
-/// when it is strictly below what was asked — a bound that does not point
-/// downward answers a different question than the one the user just failed.
+/// amount the Generator actually built). It is offered ONLY when it is strictly
+/// below what was asked — a bound that does not point downward answers a
+/// different question than the one the user just failed.
+///
+/// `nearest` is `WalletEngine::nearest_sendable`: the closest amount to the one
+/// refused — **above or below it** — that the Generator actually built. **It is preferred over
+/// `maximum`** when both exist, because it is the amount the user is closest to
+/// having meant. Its real job is the case neither other number covers — an
+/// amount sitting in a HOLE, above the floor and far below the ceiling, where
+/// the sentence previously had nothing but "send a little less" and the founder
+/// went the other way and succeeded (2026-09-06, on glass: 1.00 and 1.05 KAS
+/// refused from a 22.81 KAS wallet, 1.06 built).
+///
+/// **Why holes exist, since the copy now stops pretending they don't.** KIP-9's
+/// anti-dust bar is computed over the whole transaction, so which coins the
+/// spend order picks — and it changes with the amount — moves the bar. Probing
+/// real shapes offline shows the buildable set is genuinely discontinuous: one
+/// two-coin shape builds across `0.11 … 1.89`, refuses `1.90 … 1.99`, and
+/// builds again from `2.00`.
 pub(crate) fn storage_mass_message(
     amount_sompi: u64,
     minimum: Option<u64>,
     maximum: Option<u64>,
+    nearest: Option<u64>,
 ) -> String {
     if minimum.is_some_and(|m| amount_sompi > m) {
-        return match maximum.filter(|m| *m < amount_sompi) {
+        return match nearest.or_else(|| maximum.filter(|m| *m < amount_sompi)) {
             // NOT "the largest that works". `maximum_sendable` says in its own
             // doc that it cannot claim the supremum (the top boundary is not
             // monotone), and its climb is bounded by the FREE coins, so amounts
@@ -262,9 +277,17 @@ pub(crate) fn storage_mass_message(
                  KAS works right now, or use Send everything to empty the wallet.",
                 kas_exact(ceiling)
             ),
+            // **Never "send a little less" alone.** The buildable set has
+            // HOLES — an amount refused between two that build is ordinary,
+            // not exceptional — so a one-directional hint is a coin flip, and
+            // the founder lost it on glass (2026-09-06): told to send less
+            // over a refused 1.00 KAS, he sent MORE and 1.06 went through.
+            // Without a proven number the honest sentence names neither
+            // direction as the answer.
             None => "this amount leaves change too small to keep — the network \
-                     anti-dust rule for your current coins. Nothing was sent — send a \
-                     little less, or use Send everything to empty the wallet."
+                     anti-dust rule for your current coins. Nothing was sent — a \
+                     slightly different amount will work, up or down, or use Send \
+                     everything to empty the wallet."
                 .to_string(),
         };
     }
@@ -550,10 +573,22 @@ pub async fn send_prepare(
                         .ok()
                         .flatten()
                 });
+            // The near answer, for the hole case — bounded, and only asked
+            // when the floor says this refusal is change-side. It runs after
+            // the ceiling because it is the cheaper of the two to give up on.
+            let nearest = minimum.filter(|m| amount_sompi > *m).and_then(|floor| {
+                payment_change_address().ok().and_then(|change| {
+                    engine
+                        .nearest_sendable(change, &[], &exclude, amount_sompi, floor)
+                        .ok()
+                        .flatten()
+                })
+            });
             return Err(AppError::msg(storage_mass_message(
                 amount_sompi,
                 minimum,
                 maximum,
+                nearest,
             )));
         }
         Err(e) => return Err(AppError::chain(e)),
@@ -883,7 +918,7 @@ mod tests {
     /// sentence, which points the user at a bigger amount.
     #[test]
     fn the_dead_zone_names_the_change_not_the_amount() {
-        let msg = storage_mass_message(50_000_000, Some(10_437_500), None);
+        let msg = storage_mass_message(50_000_000, Some(10_437_500), None, None);
         assert!(msg.contains("leaves change too small to keep"), "{msg}");
         assert!(
             msg.contains("Nothing was sent"),
@@ -893,7 +928,11 @@ mod tests {
             !msg.contains("storage mass"),
             "jargon: the screen's own minimum line says 'network anti-dust rule'"
         );
-        assert!(msg.contains("send a little less"), "{msg}");
+        // **Not "send a little less".** The founder disproved that remedy on
+        // glass (2026-09-06): refused at 1.00 and 1.05 KAS, he sent MORE and
+        // 1.06 built. With no proven number the sentence names no direction.
+        assert!(!msg.contains("send a little less"), "{msg}");
+        assert!(msg.contains("up or down"), "{msg}");
         assert!(msg.contains("Send everything"), "{msg}");
         assert!(
             !msg.contains("this amount is too small to send"),
@@ -907,7 +946,7 @@ mod tests {
     /// proved buildable from the measured 0.57725200 coin.
     #[test]
     fn the_dead_zone_offers_the_proven_ceiling() {
-        let msg = storage_mass_message(50_000_000, Some(10_437_500), Some(47_103_938));
+        let msg = storage_mass_message(50_000_000, Some(10_437_500), Some(47_103_938), None);
         assert!(msg.contains("leaves change too small to keep"), "{msg}");
         assert!(
             msg.contains("0.47103938"),
@@ -936,20 +975,55 @@ mod tests {
     #[test]
     fn a_ceiling_at_or_above_the_asked_amount_is_withheld() {
         for ceiling in [50_000_000, 55_000_000] {
-            let msg = storage_mass_message(50_000_000, Some(10_437_500), Some(ceiling));
+            let msg = storage_mass_message(50_000_000, Some(10_437_500), Some(ceiling), None);
             assert!(
-                msg.contains("send a little less"),
+                msg.contains("up or down"),
                 "must fall back to the numberless sentence: {msg}"
             );
             assert!(!msg.contains("KAS works right now"), "{msg}");
         }
     }
 
+    /// The founder's own case, as copy: refused at 1.00 KAS with the floor far
+    /// below and the ceiling far above, so neither existing number applies —
+    /// and the nearest buildable amount is ABOVE, which is where he found it.
+    #[test]
+    fn the_nearest_amount_is_offered_even_when_it_is_larger() {
+        let msg = storage_mass_message(100_000_000, Some(10_437_500), None, Some(106_000_000));
+        assert!(msg.contains("1.06"), "the number he found by hand: {msg}");
+        assert!(msg.contains("KAS works right now"), "{msg}");
+        assert!(
+            !msg.contains("up or down"),
+            "a number replaces the hedge: {msg}"
+        );
+        assert!(
+            msg.contains("Nothing was sent"),
+            "the funds beat, §12: {msg}"
+        );
+    }
+
+    /// And it is preferred over the ceiling when both exist — it is the amount
+    /// closest to what the user actually meant.
+    #[test]
+    fn the_nearest_amount_wins_over_a_distant_ceiling() {
+        let msg = storage_mass_message(
+            100_000_000,
+            Some(10_437_500),
+            Some(47_103_938),
+            Some(99_000_000),
+        );
+        assert!(msg.contains("0.99"), "{msg}");
+        assert!(
+            !msg.contains("0.47103938"),
+            "the distant bound is not the answer: {msg}"
+        );
+    }
+
     /// Below the floor the ceiling is irrelevant — the floor sentence stands
     /// whole, and no upper number may leak into it.
     #[test]
     fn below_the_floor_no_ceiling_leaks_in() {
-        let msg = storage_mass_message(5_000_000, Some(10_437_500), Some(47_103_938));
+        let msg = storage_mass_message(5_000_000, Some(10_437_500), Some(47_103_938), None);
         assert!(msg.contains("too small for your current coins"), "{msg}");
         assert!(!msg.contains("0.47103938"), "{msg}");
     }
@@ -958,7 +1032,7 @@ mod tests {
     /// stands — with the computed way out.
     #[test]
     fn below_the_floor_still_names_the_floor_and_its_number() {
-        let msg = storage_mass_message(5_000_000, Some(10_437_500), None);
+        let msg = storage_mass_message(5_000_000, Some(10_437_500), None, None);
         assert!(msg.contains("too small for your current coins"), "{msg}");
         // Exact-8, matching the minimum line the same screen renders (DS-2).
         assert!(msg.contains("0.10437500"), "{msg}");
@@ -974,7 +1048,7 @@ mod tests {
     /// the comparison to `>=` reds this and nothing else.)
     #[test]
     fn at_the_floor_exactly_it_is_still_the_floor_sentence() {
-        let msg = storage_mass_message(10_437_500, Some(10_437_500), None);
+        let msg = storage_mass_message(10_437_500, Some(10_437_500), None, None);
         assert!(msg.contains("too small for your current coins"), "{msg}");
         assert!(!msg.contains("leaves change too small"), "{msg}");
     }
@@ -983,7 +1057,7 @@ mod tests {
     /// change sentence (which would be an unproven claim) and never to silence.
     #[test]
     fn an_unknown_floor_degrades_without_inventing_a_cause() {
-        let msg = storage_mass_message(50_000_000, None, None);
+        let msg = storage_mass_message(50_000_000, None, None, None);
         // Neither cause may be asserted: we do not know which side failed.
         assert!(msg.contains("doesn't fit your current coins"), "{msg}");
         assert!(!msg.contains("too small for your current coins"), "{msg}");

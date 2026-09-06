@@ -94,6 +94,15 @@ void main() {
             'where the endpoint\'s middle ellipsis falls — a text measurement, '
             'not a window class, and the allowance is file-granular so the '
             'reason has to name both',
+        'lib/src/ui/settings/wallet_screen.dart':
+            'the address card reads the frame HEIGHT — never a width, and '
+            'never to choose a layout — to bound how far it may grow while '
+            'someone is scrolling it. The founder\'s constraint is stated in '
+            'screens ("not entirely past the bottom of the screen"), so the '
+            'cap has to be a share of the screen; `_tallCap` derives 0.62 from '
+            'the card\'s own offset and the chrome above and below it, and '
+            'the same composition renders in all four window classes '
+            'unchanged (D-285, his glass ask 2026-09-06)',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

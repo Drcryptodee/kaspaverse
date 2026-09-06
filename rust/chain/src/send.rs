@@ -2575,6 +2575,56 @@ fn search_minimum(
 /// (generator.rs:862 @ `cfafeb4`), so an amount equal to the whole balance
 /// cannot build. If a pin bump ever made that false, this returns a value below
 /// the true maximum — conservative, never a bound that does not build.
+/// How far either side of a refused amount to look for one that builds, in
+/// [`PROBE_PRECISION_SOMPI`] steps.
+///
+/// 64 steps is ±0.064 KAS. Measured against the case that produced this
+/// function: 1.00 and 1.05 KAS refused, 1.06 built — 60 steps up.
+const NEAREST_STEPS: u32 = 64;
+
+/// The amount closest to `amount` that this wallet can actually build,
+/// **searched outward in both directions** — the number a storage-mass refusal
+/// owes a user who has just been told their amount does not fit.
+///
+/// **Why both directions.** The obvious reading of a change-side refusal is
+/// *send less* — bigger change, less dust. It is not reliable, and the founder
+/// disproved it on glass (2026-09-06): 1.00 and 1.05 KAS refused from a 22.81
+/// KAS wallet, and **1.06 went through**. The spend order takes the smallest
+/// coins first, so an amount just under a coin's value leaves that coin's
+/// remainder as dust, while an amount that consumes it exactly leaves no change
+/// at all. The nearest buildable amount is as often above as below.
+///
+/// **Why a walk and not a bisection.** Sendability is not monotone: KIP-9's bar
+/// is computed over the whole shape, so the buildable set has holes and an
+/// amount refused between two that build is ordinary. Bisection assumes one
+/// boundary and would step over a band.
+///
+/// Steps outward one precision unit at a time, testing the lower side first —
+/// a smaller send is the more conservative suggestion where both are equally
+/// close. Bounded below by `floor` (under it a different refusal and a
+/// different sentence own the case) and above by `ceiling` (never suggest more
+/// than the wallet holds). `None` within [`NEAREST_STEPS`] ⇒ the caller
+/// degrades to copy that names no direction, and never guesses.
+fn search_nearest_buildable(
+    mut probe: impl FnMut(u64) -> Result<ProbeOutcome>,
+    amount: u64,
+    floor: u64,
+    ceiling: u64,
+) -> Result<Option<u64>> {
+    for step in 1..=NEAREST_STEPS {
+        let delta = PROBE_PRECISION_SOMPI.saturating_mul(step as u64);
+        let below = amount.saturating_sub(delta);
+        if below > floor && probe(below)? == ProbeOutcome::Builds {
+            return Ok(Some(below));
+        }
+        let above = amount.saturating_add(delta);
+        if above <= ceiling && probe(above)? == ProbeOutcome::Builds {
+            return Ok(Some(above));
+        }
+    }
+    Ok(None)
+}
+
 fn search_maximum(
     mut probe: impl FnMut(u64) -> Result<ProbeOutcome>,
     anchor: u64,
@@ -2789,6 +2839,41 @@ impl WalletEngine {
             return Ok(None);
         };
         search_maximum(probe, anchor, balance)
+    }
+
+    /// The amount nearest `amount_sompi` that builds — see
+    /// [`search_nearest_buildable`] for why it searches both ways.
+    ///
+    /// The same context, order and change address a real send would use, so
+    /// what it hands back is an amount the Generator actually built and not an
+    /// arithmetic guess about one. The upward bound is the FREE balance, for
+    /// the reason [`maximum_sendable`] gives: a suggestion is a
+    /// recommendation, and recommending the reserved tail drains a
+    /// conversation's binding.
+    pub fn nearest_sendable(
+        &self,
+        change: Address,
+        pinned: &[UtxoEntryReference],
+        exclude: &[Address],
+        amount_sompi: u64,
+        floor: u64,
+    ) -> Result<Option<u64>> {
+        let context = self.context();
+        let mature = mature_snapshot_sync(&context)?;
+        let ceiling = free_balance(&mature, exclude);
+        let order = spend_policy::select_spend_priority(
+            &mature,
+            pinned,
+            spend_policy::RIDER_LIMIT,
+            exclude,
+        );
+        let order = (!order.is_empty()).then_some(order);
+        search_nearest_buildable(
+            |amount| probe_context(&context, &change, amount, order.as_deref()),
+            amount_sompi,
+            floor,
+            ceiling,
+        )
     }
 }
 
@@ -5004,6 +5089,89 @@ mod tests {
         assert!(
             matches!(mapped, ChainError::StorageMassExceeded { .. }),
             "a dust-small send must map to StorageMassExceeded, got {mapped:?}"
+        );
+    }
+
+    /// The founder's case, as a pure boundary: everything in `[1.00, 1.055]`
+    /// refuses, `1.06` builds. A downward-only search never finds it.
+    #[test]
+    fn the_nearest_buildable_amount_is_found_above_when_that_is_where_it_is() {
+        let hole = 100_000_000u64..=105_500_000u64;
+        let found = search_nearest_buildable(
+            |v| {
+                Ok(if hole.contains(&v) {
+                    ProbeOutcome::TooSmall
+                } else {
+                    ProbeOutcome::Builds
+                })
+            },
+            100_000_000,
+            10_437_500,
+            2_281_111_322,
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            Some(99_900_000),
+            "the lower side is tested first and 0.999 builds, so it wins"
+        );
+    }
+
+    /// ...and when the hole extends below the asked amount, the answer is the
+    /// one above it — the direction the old copy never named.
+    #[test]
+    fn a_hole_that_runs_downward_is_escaped_upward() {
+        let hole = 50_000_000u64..=105_500_000u64;
+        let found = search_nearest_buildable(
+            |v| {
+                Ok(if hole.contains(&v) {
+                    ProbeOutcome::TooSmall
+                } else {
+                    ProbeOutcome::Builds
+                })
+            },
+            100_000_000,
+            10_437_500,
+            2_281_111_322,
+        )
+        .unwrap();
+        assert_eq!(found, Some(105_600_000), "0.001 above the hole's top");
+    }
+
+    #[test]
+    fn the_nearest_search_never_suggests_more_than_the_wallet_holds() {
+        // Everything refuses below; the only builds are above the ceiling.
+        let found = search_nearest_buildable(
+            |v| {
+                Ok(if v > 200_000_000 {
+                    ProbeOutcome::Builds
+                } else {
+                    ProbeOutcome::TooSmall
+                })
+            },
+            100_000_000,
+            10_437_500,
+            150_000_000, // the free balance
+        )
+        .unwrap();
+        assert_eq!(
+            found, None,
+            "a suggestion above the balance is not a suggestion"
+        );
+    }
+
+    #[test]
+    fn the_nearest_search_stops_at_the_floor_rather_than_crossing_it() {
+        let found = search_nearest_buildable(
+            |_| Ok(ProbeOutcome::TooSmall),
+            11_000_000,
+            10_437_500,
+            2_281_111_322,
+        )
+        .unwrap();
+        assert_eq!(
+            found, None,
+            "below the floor a different sentence owns the case"
         );
     }
 

@@ -1182,6 +1182,80 @@ void main() {
       expect(toolsAfter, lessThan(800));
     });
 
+    testWidgets('the card GROWS to meet a reader and returns when they stop', (
+      tester,
+    ) async {
+      // His ask (2026-09-06): "when scrolling on the all addresses to see more,
+      // the view expands down and pushes what's below it… and scrolling the
+      // opposite direction snaps the view back."
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        consolidate: () async => _summary(),
+        height: 800,
+      );
+      await tester.tap(find.text('Show'));
+      await tester.pumpAndSettle();
+
+      final card = find.byType(KvRowContainer).first;
+      final atRest = tester.getSize(card).height;
+
+      // The inner list — the last Scrollable, inside the card.
+      final inner = find.byType(Scrollable).last;
+      await tester.drag(inner, const Offset(0, -120));
+      await tester.pumpAndSettle();
+      final reading = tester.getSize(card).height;
+      expect(
+        reading,
+        greaterThan(atRest),
+        reason: 'the card grows under a reader',
+      );
+      expect(
+        reading,
+        lessThan(800),
+        reason: 'and never past the bottom of the screen — his constraint',
+      );
+
+      // Back to the top of the list, and the card returns.
+      await tester.drag(inner, const Offset(0, 400));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getSize(card).height,
+        atRest,
+        reason: 'resting at the top is the one position that means done',
+      );
+    });
+
+    testWidgets('a page scroll does NOT resize the card — only its own list '
+        'does', (tester) async {
+      await pumpWallet(
+        tester,
+        listAddresses: () async => addressList(),
+        consolidate: () async => _summary(),
+        height: 700,
+      );
+      await tester.tap(find.text('Show'));
+      await tester.pumpAndSettle();
+      final card = find.byType(KvRowContainer).first;
+      final atRest = tester.getSize(card).height;
+      // **From below the card.** Dragging at the page ListView's own centre
+      // lands inside the card, and the card's list takes that gesture — which
+      // is correct behaviour and would have made this test pass for the wrong
+      // reason. The Tools row is unambiguously page, not card.
+      await tester.drag(
+        find.text('Scan for more addresses'),
+        const Offset(0, -150),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getSize(card).height,
+        atRest,
+        reason:
+            'the page and the card scroll in the same axis; only the '
+            'card\'s own drag may resize it',
+      );
+    });
+
     testWidgets('tapping an address opens Receive over THAT address, never '
         'the default', (tester) async {
       final opened = <(String, String)>[];

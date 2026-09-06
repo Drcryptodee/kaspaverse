@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -83,11 +84,35 @@ class WalletScreen extends StatefulWidget {
 }
 
 class _WalletScreenState extends State<WalletScreen> {
-  /// **The widest the address card may grow.** Four rows and a peek of a
-  /// fifth: the peek is the affordance — a list clipped flush at a row edge
+  /// **The widest the address card may grow at rest.** Four rows and a peek of
+  /// a fifth: the peek is the affordance — a list clipped flush at a row edge
   /// looks finished, and the founder's whole ask was that the reveal not push
   /// the page away. 4 × [KvRow.height] + half a row.
   static const double _listMax = KvRow.height * 4.5;
+
+  /// **And the widest it grows once you start reading it.** The founder's
+  /// second ask (2026-09-06): *"when scrolling on the all addresses to see
+  /// more, the view expands down and pushes what's below it… but not entirely
+  /// past the bottom of the screen, and scrolling the opposite direction snaps
+  /// the view back."*
+  ///
+  /// A share of the FRAME rather than a count of rows, because the constraint
+  /// he stated is about the screen and not about the list.
+  ///
+  /// **0.62, derived rather than liked.** The card's top sits about 56 dp into
+  /// the page (a 52 dp section break plus its lead), and the page's viewport is
+  /// the frame less the top bar and the pinned action bar — call it 140. So the
+  /// card's bottom stays on screen while `cap ≤ frame − 196`, which is 0.77 of
+  /// an 851 dp frame, 0.73 of the 720 floor and 0.52 of the 412 dp landscape
+  /// short frame. 0.62 clears all three with room, and still nearly doubles the
+  /// card: 528 dp on the reference frame against 288 at rest. Floored at
+  /// [_listMax] so a short frame can never make reading *shrink* the card.
+  static double _tallCap(double frame) => math.max(_listMax, frame * 0.62);
+
+  /// How far the list must be dragged before the card grows. Small enough to
+  /// feel immediate, large enough that a thumb resting on a row while tapping
+  /// it does not resize the screen underneath.
+  static const double _readingThreshold = 6;
 
   String? _address;
   bool _addressFailed = false;
@@ -99,6 +124,11 @@ class _WalletScreenState extends State<WalletScreen> {
 
   /// `All` and `Show` are the same fact, so they are the same field.
   bool _showAll = false;
+
+  /// **The card has grown to meet a scroll.** Set on the first real downward
+  /// drag inside the addresses, cleared when they come back to rest at the
+  /// top. See [_tallCap].
+  bool _reading = false;
 
   /// What a merge would cost, from a plan built and dropped. Null while it is
   /// being asked for; [_mergeRefusal] carries the answer when there is nothing
@@ -478,19 +508,53 @@ class _WalletScreenState extends State<WalletScreen> {
       // part (`KvHairline`).
       divided: false,
       children: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: _listMax),
-          child: ListView.builder(
-            shrinkWrap: true,
-            padding: EdgeInsets.zero,
-            // Below the cap nothing scrolls, so the page's own scroll keeps
-            // working over the card; at the cap this list takes the drag.
-            physics: const ClampingScrollPhysics(),
-            itemCount: shown.length,
-            itemBuilder: (context, i) => Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [if (i > 0) const KvHairline(), _addressRow(shown[i])],
+        // **The card grows to meet a reader and returns when they stop.**
+        // Expand on the first real downward drag inside the list; collapse the
+        // moment it comes back to rest at its own top. Deliberately NOT "any
+        // upward scroll": a card that shrank halfway through a list would move
+        // the rows out from under the thumb reading them, and the top is the
+        // one position a user unambiguously means *done*.
+        NotificationListener<ScrollUpdateNotification>(
+          onNotification: (notification) {
+            // Only this list's own scroll — the page's notifications bubble
+            // through here too, and a page drag must not resize the card.
+            if (notification.depth != 0) return false;
+            final pixels = notification.metrics.pixels;
+            final delta = notification.scrollDelta ?? 0;
+            final next = _reading
+                ? pixels > 0
+                : delta > 0 && pixels > _readingThreshold;
+            if (next != _reading) setState(() => _reading = next);
+            return false;
+          },
+          child: AnimatedContainer(
+            // `calm`, not `fast`: this is a container changing size under the
+            // reader's own thumb, and the house reserves `fast` for a tint or
+            // a thumb sliding. Reduced motion collapses it (BG-9).
+            duration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : KvMotion.calm,
+            curve: KvMotion.out,
+            constraints: BoxConstraints(
+              maxHeight: _reading
+                  ? _tallCap(MediaQuery.sizeOf(context).height)
+                  : _listMax,
+            ),
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              // Below the cap nothing scrolls, so the page's own scroll keeps
+              // working over the card; at the cap this list takes the drag.
+              physics: const ClampingScrollPhysics(),
+              itemCount: shown.length,
+              itemBuilder: (context, i) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (i > 0) const KvHairline(),
+                  _addressRow(shown[i]),
+                ],
+              ),
             ),
           ),
         ),
