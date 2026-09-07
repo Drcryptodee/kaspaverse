@@ -190,6 +190,24 @@ class MessagingService {
   /// stays silent rather than claiming a zero it has not measured.
   final ValueNotifier<StashStateDto?> stashState = ValueNotifier(null);
 
+  /// **The handshake bond, in sompi, from Rust** (`HANDSHAKE_BOND_SOMPI`).
+  ///
+  /// Synchronous and I/O-free on the Rust side, so a surface can price the
+  /// handshake in its first frame. It is read through a seam like every other
+  /// bridge call — a widget test has no native library, and a screen that
+  /// prints the price of a spend must not be untestable because of it.
+  ///
+  /// **No fallback, and that is the point.** This first shipped wrapped in a
+  /// `catch (_)` returning a hard-coded `20000000` "for widget tests", which
+  /// re-created in Dart the exact literal the Rust fn was added to delete —
+  /// and worse, swallowed a genuine bridge failure into a money figure the
+  /// crate never produced (`ffi-leak-auditor`, UX-R5). A test with no native
+  /// library sets [handshakeBondFn], which is what the seam is for.
+  @visibleForTesting
+  static BigInt Function() handshakeBondFn = transportHandshakeBondSompi;
+
+  BigInt get handshakeBondSompi => handshakeBondFn();
+
   StreamSubscription<String>? _subscription;
 
   /// Consumer apply-echo through the ONE build-flavor-proof log lane (three

@@ -5,7 +5,10 @@ import '../../services/messaging_service.dart';
 import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
-import '../widgets/kv_loader.dart';
+import '../widgets/kv_chrome.dart';
+import '../widgets/kv_glyph.dart';
+import '../widgets/kv_rows.dart';
+import '../widgets/kv_sheet.dart';
 import '../widgets/kv_toggle.dart';
 import '../widgets/status_beacon.dart' show formatAge;
 
@@ -158,12 +161,14 @@ class HistoryNoticeBanner extends StatelessWidget {
                     0,
                   ),
                   child: Material(
-                    // A recessed notice plate, with the edge §1.1 gives it —
-                    // a container without its boundary is not earned (BG-1/4).
-                    color: KvColor.notice,
+                    // **A plate on the ground has no edge** — BG-4 as amended
+                    // (Deep V6), which reversed the v3.1 reasoning this
+                    // comment used to quote. The tone step from `abyss` IS the
+                    // boundary; drawing a hairline as well says it twice
+                    // (`ux-auditor` BLOCK, UX-R5).
+                    color: KvColor.plate,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(KvRadius.plate),
-                      side: const BorderSide(color: KvColor.noticeEdge),
                     ),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(KvRadius.plate),
@@ -182,25 +187,25 @@ class HistoryNoticeBanner extends StatelessWidget {
                         padding: const EdgeInsets.all(KvSpace.sm),
                         child: Row(
                           children: [
-                            const Icon(
-                              Icons.history,
+                            const KvGlyphIcon(
+                              KvGlyph.history,
                               size: 18,
-                              color: KvColor.inkMeta,
+                              tone: KvColor.inkMeta,
                             ),
                             const SizedBox(width: KvSpace.s),
                             Expanded(
                               child: Text(
                                 text,
                                 style: theme.textTheme.bodySmall?.copyWith(
-                                  color: KvColor.textSecondary,
+                                  color: KvColor.inkDim,
                                   fontFamily: KvFont.ui,
                                 ),
                               ),
                             ),
-                            const Icon(
-                              Icons.chevron_right,
+                            const KvGlyphIcon(
+                              KvGlyph.chevron,
                               size: 18,
-                              color: KvColor.textTertiary,
+                              tone: KvColor.inkMeta,
                             ),
                           ],
                         ),
@@ -249,7 +254,7 @@ class _BackupBlock extends StatelessWidget {
               'them too. It costs a network fee; the amount comes straight '
               'back to you.',
               style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textSecondary,
+                color: KvColor.inkDim,
                 fontFamily: KvFont.ui,
               ),
             ),
@@ -257,17 +262,31 @@ class _BackupBlock extends StatelessWidget {
             Text(
               _coverageLine(state),
               style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textSecondary,
+                color: KvColor.inkDim,
                 fontFamily: KvFont.ui,
               ),
             ),
             const SizedBox(height: KvSpace.m),
-            FilledButton.tonalIcon(
-              // Nothing to back up is a disabled button with an honest line
-              // above it, never a button that spends a fee on an empty payload.
-              onPressed: (state == null || state.total == 0) ? null : onBackUp,
-              icon: const Icon(Icons.backup_outlined, size: 18),
-              label: const Text('Back up now'),
+            KvAction.raised(
+              label: 'Back up now',
+              // `shareUp` is the tray with the arrow leaving it — parking the
+              // conversation list on chain is exactly that, and it is a mark
+              // the app owns (BG-25). `Icons.backup_outlined` rendered as an
+              // empty box in the preview frame, which is what a Material icon
+              // does on a surface whose font the house never bundles.
+              mark: KvGlyph.shareUp,
+              // Nothing to back up is a disabled action with its reason ON it,
+              // never a button that spends a fee on an empty payload.
+              disabledReason:
+                  (state == null || state.total == 0 || onBackUp == null)
+                  ? 'Nothing to back up yet'
+                  : null,
+              disabledMark: false,
+              // **Never an enabled pill with an empty callback.** `?? () {}`
+              // made a lit control that swallows a tap the moment a caller
+              // passes no handler — BG-12's own refusal (`ux-auditor`, UX-R5).
+              // The null case is now a stated refusal instead.
+              onTap: onBackUp ?? () {},
             ),
           ],
         );
@@ -304,10 +323,11 @@ Future<void> showHistoryFillSheet(
   MessagingService messaging, {
   VoidCallback? onBackUp,
 }) {
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    builder: (_) => HistoryFillSheet(messaging: messaging, onBackUp: onBackUp),
+  return Navigator.of(context).push<void>(
+    KvSheetRoute<void>(
+      builder: (_) =>
+          HistoryFillSheet(messaging: messaging, onBackUp: onBackUp),
+    ),
   );
 }
 
@@ -431,26 +451,33 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final inset = MediaQuery.of(context).viewInsets.bottom;
-    return SafeArea(
+    // **`KvSheet`, not a hand-rolled `showModalBottomSheet` column.** The
+    // sheet law (D-277) is a part, not a convention: the grabber, the gutter,
+    // the air above the act, the `barTitle` with its exit opposite, the scrim
+    // tap, and a body that scrolls under a foot that does not. This surface
+    // predates all of it and was reproducing the half it remembered — a
+    // centred `titleMedium`, its own 16 dp gutter (the sheet owns 24), and no
+    // way out but the system back gesture.
+    return KvSheet(
+      title: 'History & backup',
+      cancelLabel: 'Close',
+      cancelTone: KvColor.inkDim,
+      onCancel: () => Navigator.of(context).pop(),
+      // **`KvSheet` flexes its body; it does not scroll it** — the part caps
+      // the panel at 90 % of the window and leaves scrolling to whatever the
+      // caller puts inside, which is what keeps the foot out of the scroll.
+      // This body is the longest in the app (the D-074 disclosure is five
+      // paragraphs the user is entitled to read before turning an indexer on)
+      // and without this it overflowed by 559 dp. The keyboard inset rides
+      // here too: the archive endpoint is a field near its foot.
       child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(
-          KvSpace.gutter,
-          KvSpace.m,
-          KvSpace.gutter,
-          KvSpace.l + inset,
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Center(
-              child: Text(
-                'History & backup',
-                style: theme.textTheme.titleMedium,
-              ),
-            ),
-            const SizedBox(height: KvSpace.m),
             _BackupBlock(
               messaging: widget.messaging,
               onBackUp: widget.onBackUp == null
@@ -460,7 +487,9 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
                       widget.onBackUp!();
                     },
             ),
-            const Divider(height: KvSpace.xl),
+            const SizedBox(height: KvSpace.l),
+            const KvHairline(),
+            const SizedBox(height: KvSpace.l),
             Text(
               'Your Kaspa node only keeps recent history (about 30 hours). '
               'Messages sent while the app is closed longer than that — or '
@@ -468,7 +497,7 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
               // Prose is Inter (§4 role map) — bare bodySmall is the mono
               // data face here.
               style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textSecondary,
+                color: KvColor.inkDim,
                 fontFamily: KvFont.ui,
               ),
             ),
@@ -499,10 +528,13 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
             const SizedBox(height: KvSpace.s),
             // The privacy disclosure — the price and the guarantee, plainly.
             Container(
-              padding: const EdgeInsets.all(KvSpace.sm),
+              padding: const EdgeInsets.all(KvSpace.m),
               decoration: BoxDecoration(
-                color: KvColor.surfaceAlt,
-                borderRadius: BorderRadius.circular(KvRadius.card),
+                // `chip` INSIDE a sheet (§1.1, D-293) — the alias it used
+                // resolves to the same colour, but the name said `surfaceAlt`,
+                // which is a Black Glass token this file was the last user of.
+                color: KvColor.chip,
+                borderRadius: BorderRadius.circular(KvRadius.inner),
               ),
               child: Text(
                 'What the archive operator learns: which addresses and '
@@ -523,7 +555,7 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
                 'Off, everything works against your node alone — only '
                 'history past its horizon stays unrecoverable.',
                 style: theme.textTheme.bodySmall?.copyWith(
-                  color: KvColor.textSecondary,
+                  color: KvColor.inkDim,
                   fontFamily: KvFont.ui,
                 ),
               ),
@@ -545,12 +577,14 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
                 onSubmitted: (_) => _apply(enabled: true),
               ),
               const SizedBox(height: KvSpace.m),
-              FilledButton.tonalIcon(
-                onPressed: _busy ? null : _checkNow,
-                icon: _busy
-                    ? const KvLoader.inline()
-                    : const Icon(Icons.cloud_download_outlined, size: 18),
-                label: const Text('Check now'),
+              KvAction.raised(
+                label: 'Check now',
+                mark: KvGlyph.history,
+                disabledReason: _busy ? 'Checking…' : null,
+                // A network check in flight is not "nothing has been picked",
+                // which is what the disabled ring means (`ux-auditor`, UX-R5).
+                disabledMark: false,
+                onTap: _checkNow,
               ),
             ],
             if (_line != null) ...[
@@ -558,7 +592,7 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
               Text(
                 _line!,
                 style: theme.textTheme.bodySmall?.copyWith(
-                  color: KvColor.textSecondary,
+                  color: KvColor.inkDim,
                   fontFamily: KvFont.ui,
                 ),
               ),

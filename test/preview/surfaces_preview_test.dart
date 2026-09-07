@@ -3,8 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
 import 'package:kaspaverse/src/rust/api/send.dart';
-import 'package:kaspaverse/src/rust/api/transport.dart'
-    show ContactDto, TxStatusDto, TxStatusKind;
+import 'package:kaspaverse/src/rust/api/transport.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/services/rate_service.dart';
@@ -28,9 +27,13 @@ import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 
+import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
+import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
+import 'package:kaspaverse/src/services/messaging_service.dart';
 import '../support/preview_harness.dart';
 import '../support/maturity.dart';
 
@@ -94,6 +97,114 @@ ContactsScope _contacts() {
     save: (_, _) async {},
   );
 }
+
+/// **The messages surfaces** (`M1` · `M2` · `M4`, UX-R5).
+///
+/// The service is a singleton with static seams, so the fixture sets them and
+/// the screen pulls through the same path the app does — no widget here is fed
+/// a list it could not have got from Rust.
+ConversationDto _conv(
+  String id, {
+  String status = 'active',
+  String? name,
+  bool superseded = false,
+  bool expired = false,
+  int agoMinutes = 3,
+  String address = _addr,
+}) => ConversationDto(
+  conversationId: id,
+  contactAddress: status == 'pending_in' ? '' : address,
+  myAlias: 'fa6d1afa79e1',
+  theirAlias: 'a1e1b60b5fca',
+  status: status,
+  initiatedByMe: status != 'pending_in',
+  createdUnixMs: BigInt.from(
+    DateTime.now().millisecondsSinceEpoch - 86400000 * 9,
+  ),
+  lastActivityUnixMs: BigInt.from(
+    DateTime.now().millisecondsSinceEpoch - agoMinutes * 60000,
+  ),
+  inviteExpired: expired,
+  contactName: name,
+  superseded: superseded,
+);
+
+Widget _chats({bool requests = false, bool empty = false}) {
+  MessagingService.conversationsFn = () async => empty
+      ? const []
+      : [
+          _conv('c1', name: 'Mara'),
+          _conv('c2', name: 'Jonas', agoMinutes: 60 * 26),
+          _conv('c3', name: 'Dev fund', agoMinutes: 60 * 24 * 3),
+          _conv('c4', name: 'Anna', agoMinutes: 60 * 24 * 4, superseded: true),
+          // **One UNNAMED contact, deliberately.** Every chat in this fixture
+          // had a name, so the floor frame never drew a row whose title is an
+          // address — which is why a title that ellipsised `kaspa:qz7u…ellj43pf`
+          // down to `kaspa:qz…` at 320 dp / 1.3× went unseen
+          // (`wallet-security-auditor`, UX-R5). A frame that only shows the
+          // easy case is the comfortable half.
+          _conv('c5', agoMinutes: 60 * 24 * 26),
+          _conv('r1', status: 'pending_in', agoMinutes: 120),
+          _conv('r2', status: 'pending_in', agoMinutes: 60 * 30),
+        ];
+  MessagingService.gapAgeFn = () async => null;
+  MessagingService.fillConfigFn = () async =>
+      const FillConfigDto(enabled: false, endpoint: '', defaultEndpoint: '');
+  MessagingService.fillStatusFn = () async => null;
+  MessagingService.stashStateFn = () async => StashStateDto(
+    lastUnixMs: BigInt.from(DateTime.now().millisecondsSinceEpoch - 7200000),
+    confirmedReadable: true,
+    covered: 5,
+    total: 5,
+  );
+  MessagingService.instance.refresh();
+  return ContactsScreen(messaging: MessagingService.instance);
+}
+
+Widget _thread() {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final rows = [
+    _msg(
+      't1',
+      now - 86400000 - 3600000,
+      'Invoice for the print run is 40 — send when you can.',
+    ),
+    _msg('t2', now - 86400000 - 1800000, 'Will do tonight.', outbound: true),
+    _msg('t3', now - 900000, 'Sent — thanks for waiting.', outbound: true),
+  ];
+  MessagingService.threadSinceFn = (_, _) async => ThreadDeltaDto(
+    messages: rows,
+    statuses: [
+      for (final m in rows)
+        MessageStatusDto(txid: m.txid, tombstoned: false, acceptance: null),
+    ],
+  );
+  return ThreadScreen(
+    conversationId: 'c2',
+    contactLabel: 'Jonas',
+    // 67 characters — `mainnetAddressLengths` is {67, 69} and a fixture the
+    // wallet's own shape check would reject is a frame drawn of a world that
+    // cannot exist (`consensus-auditor`, UX-R5).
+    contactAddress: 'kaspa:qpz3${'x' * 52}41k8t',
+    messaging: MessagingService.instance,
+  );
+}
+
+ThreadMessageDto _msg(
+  String txid,
+  int unixMs,
+  String text, {
+  bool outbound = false,
+}) => ThreadMessageDto(
+  txid: txid,
+  kind: 'comm',
+  outbound: outbound,
+  unixMs: BigInt.from(unixMs),
+  text: text,
+  readable: true,
+  tombstoned: false,
+  provenance: 'node',
+);
 
 Widget _sendScreen({bool book = true, BigInt? mature}) => SendScreen(
   mature: ValueNotifier<BigInt?>(mature ?? BigInt.from(2597792200)),
@@ -765,6 +876,33 @@ Widget _gaugeLadder() => const Scaffold(
   ),
 );
 
+Future<void> _openRequestsTab(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Requests'));
+  await tester.pumpAndSettle();
+}
+
+/// Long-press a row, then take its Hide confirm — the shared `_ConfirmSheet`.
+Future<void> _openHideConfirm(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.longPress(find.byType(KvRow).first);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Hide conversation'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openHistorySheet(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.bySemanticsLabel('History & backup'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openMessageSettings(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.bySemanticsLabel('Message settings'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   // A render is a claim about now: a frame a renamed fixture left behind is
   // read as current the moment someone opens it (this happened, six hours
@@ -772,6 +910,13 @@ void main() {
   setUpAll(() async {
     clearPreviousFrames();
     await loadBundledFonts();
+    // **Set once, for the whole file** (`ffi-leak-auditor` · `consensus`,
+    // UX-R5). A fixture that sets a mutable static leaks it into every later
+    // test in the isolate; a `tearDown` that restores it to the real bridge
+    // fn is worse — the next preview to render `ContactsScreen` outside the
+    // messages fixture would then call into an uninitialized `RustLib`. There
+    // is no native library in a preview run at all, so the seam is the file's.
+    MessagingService.handshakeBondFn = () => BigInt.from(20000000);
   });
 
   /// Renders one surface at BOTH geometries. The floor is where things break;
@@ -905,6 +1050,32 @@ void main() {
     framedSurface('settings__about', _about);
 
     // **Send, both steps, in all four frames** (`S6a` · `S6b` · `S6`).
+    // **UX-R5 — the messages group.** `M1`'s list, `M2`'s requests lane with
+    // its gloss and its two actions, `M1` with nothing in it, and `M4`'s
+    // thread. Every one at the 320 dp / 1.3× floor as well as the reference,
+    // because that is where this line's composition defects have all been
+    // found.
+    framedSurface('messages__chats', _chats);
+    surface(
+      'messages__requests',
+      () => _chats(requests: true),
+      act: _openRequestsTab,
+    );
+    surface('messages__empty', () => _chats(empty: true));
+    framedSurface('messages__thread', _thread);
+    framedSurface('messages__history', _chats, act: _openHistorySheet);
+    framedSurface(
+      'messages__handshake',
+      () => NewHandshakeScreen(bond: BigInt.from(20000000)),
+    );
+    framedSurface(
+      'messages__settings_sheet',
+      _chats,
+      act: _openMessageSettings,
+    );
+    // The confirm ceremony, which had no frame at all.
+    framedSurface('messages__confirm', _chats, act: _openHideConfirm);
+
     framedSurface('send__recipient', _sendScreen);
     framedSurface('send__checked', _sendScreen, act: _checkedDestination);
     framedSurface('send__amount', _sendScreen, act: _typeASend);

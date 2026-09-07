@@ -5850,6 +5850,23 @@ pub struct WipeReportDto {
     pub floor_persisted: bool,
 }
 
+/// **The handshake bond, in sompi** (§0.6 — the one amount the transport
+/// spends that is not a fee).
+///
+/// It exists because the figure was written into eight UI strings as the
+/// literal `0.2 KAS`, and the truth is [`HANDSHAKE_BOND_SOMPI`] one crate
+/// down. Eight copies of a money figure are eight chances to tell a user the
+/// wrong price of an irreversible spend the day the constant moves — the same
+/// defect `maturity_thresholds` was added to close for the lifecycle rungs
+/// (UX-R3, `consensus-auditor`: a UI literal is a BLOCK).
+///
+/// Synchronous and I/O-free — it reads a `const`, so a surface can render the
+/// price in its first frame and never has to paint a number it does not have.
+#[flutter_rust_bridge::frb(sync)]
+pub fn transport_handshake_bond_sompi() -> u64 {
+    HANDSHAKE_BOND_SOMPI
+}
+
 /// Retire every live conversation with one contact, so a fresh contact request
 /// to them can be minted. The per-contact exit (INV-6).
 ///

@@ -455,6 +455,10 @@ class _AddressRow extends StatelessWidget {
     ].join(', ');
 
     return KvRow(
+      // The card under this row is `chip`, so the sub-line owes BG-14 on
+      // `chip` — `inkMeta` measures 4.30 there against 4.5 (`ux-auditor`,
+      // UX-R5, which made the ground statable in the first place).
+      ground: KvColor.chip,
       leading: KvRowDisc(
         mark: used ? KvGlyph.history : KvGlyph.circleDashed,
         // One step above the `chip` card it sits on, with the render's own

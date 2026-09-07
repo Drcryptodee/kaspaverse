@@ -9,10 +9,13 @@ import 'package:kaspaverse/src/rust/api/transport.dart';
 import 'package:kaspaverse/src/services/contacts_service.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
 import 'package:kaspaverse/src/ui/error_text.dart';
+import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/history_fill_sheet.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_icon_button.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
 ConversationDto conversation(
@@ -120,6 +123,52 @@ Future<void> openRequests(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// The house icon control, addressed by the words it announces.
+///
+/// `find.bySemanticsLabel` does not reach these: the attachment card sits
+/// inside the thread row's own semantics, and a merged node does not expose
+/// the child's label on its own. A widget predicate reads the label off the
+/// control itself, which is what the test means.
+Finder _iconButton(String label) =>
+    find.byWidgetPredicate((w) => w is KvIconButton && w.label == label);
+
+/// The handle for one conversation row.
+///
+/// The tests used to grab a row by its status line — `find.text('Active')` —
+/// and UX-R5 stopped drawing that line: `M1`'s second line is what the row
+/// knows, and "Active" is true of every row you can open, so it named nothing.
+/// A row is now addressed the way the user addresses it: by the name at the
+/// top of it, which for an unnamed contact is the compact address.
+Finder _row([String? label]) => label == null
+    ? find.byType(KvRow).first
+    : find.ancestor(of: find.text(label), matching: find.byType(KvRow));
+
+/// **UX-R5 moved these three controls off Material and onto the house parts**
+/// (`M1 · Chats`): the FAB became the foot action, `Icons.history` became a
+/// [KvIconButton] in the bar, and the `PopupMenuButton` became `M5`'s sheet.
+/// The gestures they stand for are unchanged, so the tests keep their names
+/// and get their finders from here rather than each learning the new tree.
+Future<void> _tapNewHandshake(WidgetTester tester) async {
+  await tester.tap(find.text('New handshake'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _tapHistory(WidgetTester tester) async {
+  await tester.tap(find.bySemanticsLabel('History & backup'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _tapMessageSettings(WidgetTester tester) async {
+  await tester.tap(find.bySemanticsLabel('Message settings'));
+  await tester.pumpAndSettle();
+}
+
+/// The address field inside the add-contact sheet. `find.byType(TextField)`
+/// is no longer unambiguous: `M1` puts a search field on the screen the sheet
+/// opens over, and it is EARLIER in the tree — `.first` would type the address
+/// into the search box and the test would pass nothing to Rust.
+Finder get _addressField => find.widgetWithText(TextField, 'kaspa:…');
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late StreamController<String> pings;
@@ -129,6 +178,12 @@ void main() {
     MessagingService.pingFactory = () => pings.stream;
     MessagingService.startFn = () async {};
     MessagingService.conversationsFn = () async => const [];
+    // **The bond comes through the seam, never from a Dart literal in `lib/`**
+    // (`ffi-leak-auditor`, UX-R5). `HANDSHAKE_BOND_SOMPI` is 20_000_000 sompi
+    // and `rust/chain/src/transport.rs:810` asserts it there; this is that
+    // constant's only copy on this side, and it lives in a test rather than in
+    // the code that prices a spend.
+    MessagingService.handshakeBondFn = () => BigInt.from(20000000);
     MessagingService.threadFn = (_) async => const [];
     MessagingService.threadSinceFn = (_, _) async => delta(const []);
     MessagingService.commitFn = (_) async => const SendOutcomeDto(
@@ -487,7 +542,7 @@ void main() {
 
       expect(find.textContaining("didn't decode"), findsOneWidget);
       // Nothing to save from a file that did not decode.
-      expect(find.byIcon(Icons.download_outlined), findsNothing);
+      expect(_iconButton('Save to device'), findsNothing);
     });
 
     testWidgets('saving fetches the bytes only on demand', (tester) async {
@@ -517,7 +572,7 @@ void main() {
       // Drawing the card must not have pulled any bytes across the bridge.
       expect(fetches, 0, reason: 'bytes cross only when the user asks');
 
-      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.tap(_iconButton('Save to device'));
       await tester.pumpAndSettle();
 
       expect(fetches, 1);
@@ -560,13 +615,13 @@ void main() {
 
       // Nothing to open before it has been saved — opening points at the
       // user's own file, so there is no copy to point at yet.
-      expect(find.byIcon(Icons.open_in_new), findsNothing);
+      expect(_iconButton('Open this file'), findsNothing);
 
-      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.tap(_iconButton('Save to device'));
       await tester.pumpAndSettle();
-      expect(find.byIcon(Icons.open_in_new), findsOneWidget);
+      expect(_iconButton('Open this file'), findsOneWidget);
 
-      await tester.tap(find.byIcon(Icons.open_in_new));
+      await tester.tap(_iconButton('Open this file'));
       await tester.pumpAndSettle();
       // The destination the user chose, and the type WE derived.
       expect(opened, 'content://downloads/9|image/jpeg');
@@ -593,14 +648,14 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.tap(_iconButton('Save to device'));
       await tester.pumpAndSettle();
       // Let the "Saved" snackbar expire — only one shows at a time, so the
       // next would otherwise sit queued behind it.
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byIcon(Icons.open_in_new));
+      await tester.tap(_iconButton('Open this file'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('No app on this phone'), findsOneWidget);
@@ -625,7 +680,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byIcon(Icons.download_outlined));
+      await tester.tap(_iconButton('Save to device'));
       await tester.pumpAndSettle();
 
       // A cancel is a decision, not an error — no snackbar of any kind.
@@ -640,7 +695,7 @@ void main() {
       );
       await tester.pump();
       expect(find.textContaining('No conversations yet'), findsOneWidget);
-      expect(find.byIcon(Icons.person_add_alt), findsOneWidget);
+      expect(find.text('New handshake'), findsOneWidget);
     });
 
     testWidgets('a residual gap raises the banner; tap opens the sheet with '
@@ -701,8 +756,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('may be missing'), findsNothing);
-      await tester.tap(find.byIcon(Icons.history));
-      await tester.pumpAndSettle();
+      await _tapHistory(tester);
       expect(find.text('History & backup'), findsOneWidget);
     });
 
@@ -728,11 +782,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(FloatingActionButton));
+      await _tapNewHandshake(tester);
+      await tester.enterText(_addressField, addr);
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, addr);
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.tap(find.text('Review request'));
       await tester.pumpAndSettle();
 
       expect(asked, addr, reason: 'Rust is asked before a bond is quoted');
@@ -771,11 +824,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(FloatingActionButton));
+      await _tapNewHandshake(tester);
+      await tester.enterText(_addressField, addr);
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, addr);
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.tap(find.text('Review request'));
       await tester.pumpAndSettle();
 
       expect(accepts, 1, reason: 'their bond is refunded, not a second spent');
@@ -799,11 +851,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(FloatingActionButton));
+      await _tapNewHandshake(tester);
+      await tester.enterText(_addressField, addr);
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, addr);
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.tap(find.text('Review request'));
       await tester.pumpAndSettle();
 
       expect(handshakes, 1);
@@ -827,11 +878,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(FloatingActionButton));
+      await _tapNewHandshake(tester);
+      await tester.enterText(_addressField, addr);
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, addr);
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Review request'));
+      await tester.tap(find.text('Review request'));
       await tester.pumpAndSettle();
 
       expect(
@@ -873,12 +923,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       await tester.tap(find.text('Name this contact'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, 'Alice');
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      // The search box on the screen behind is also a `TextField` and it is
+      // EARLIER in the tree, so `.first` would have named nobody.
+      await tester.enterText(find.byType(TextField).last, 'Alice');
+      // The house name sheet's act is gated on the field (BG-27), and a
+      // disabled `KvAction` renders its REASON as its label — so the frame has
+      // to land before `Save` exists to tap.
+      await tester.pump();
+      await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
 
       expect(written, endsWith('=Alice'));
@@ -898,7 +954,7 @@ void main() {
       await tester.pumpAndSettle();
       await openRequests(tester);
 
-      await tester.longPress(find.text('Wants to connect'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       // Hiding is still offered; naming is not, because a name keys on the
       // address and this row has none until its sender is recorded.
@@ -922,14 +978,14 @@ void main() {
 
       // Chats: the two you can open. No Accept button — a card that spends
       // 0.2 KAS must never sit between two of your conversations.
-      expect(find.text('Accept'), findsNothing);
+      expect(find.text('Accept…'), findsNothing);
       expect(find.text('Wants to connect'), findsNothing);
       // The count is on the tab, so an invitation is visible without
       // letting a stranger push your real threads down the screen.
       expect(find.text('1'), findsOneWidget);
 
       await openRequests(tester);
-      expect(find.text('Accept'), findsOneWidget);
+      expect(find.text('Accept…'), findsOneWidget);
       expect(find.text('Wants to connect'), findsOneWidget);
     });
 
@@ -953,16 +1009,23 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // It is named, not merely dimmed — and only the replaced one is.
-      expect(find.text('Replaced'), findsOneWidget);
-      expect(find.text('Active'), findsOneWidget);
-      expect(find.textContaining('started a new conversation'), findsOneWidget);
+      // It is named, not merely dimmed — and only the replaced one is. Both
+      // rows are drawn; exactly one carries the line.
+      expect(find.byType(KvRow), findsNWidgets(2));
+      expect(find.text('Replaced by a newer thread'), findsOneWidget);
 
+      // **The row no longer carries the paragraph, and nothing was lost.**
+      // It used to explain what happened, what it means and where to go, in
+      // three lines inside a list row. `M4`'s own `_ReplacedNotice` says all
+      // three where they are actionable — in the seat the composer would have
+      // occupied, at the moment the user tries to type — so the row states the
+      // fact and the thread states the consequence.
+      //
       // Still openable, and it opens READ-ONLY: the history is real and the
       // user came looking for it. Hiding the row instead would answer a lost
       // message by deleting the evidence.
       MessagingService.threadSinceFn = (_, _) async => delta(const []);
-      await tester.tap(find.text('Replaced'));
+      await tester.tap(_row('Replaced by a newer thread'));
       await tester.pumpAndSettle();
       expect(
         tester.widget<ThreadScreen>(find.byType(ThreadScreen)).superseded,
@@ -990,7 +1053,7 @@ void main() {
       expect(find.textContaining('hello over L1'), findsOneWidget);
       // But there is nowhere to type and nothing to send.
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(Icons.send_outlined), findsNothing);
+      expect(find.text('Send'), findsNothing);
       expect(find.textContaining('would not reach them'), findsOneWidget);
     });
 
@@ -1027,8 +1090,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(PopupMenuButton<String>));
-      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
       await tester.tap(find.text('Delete all messages').last);
       await tester.pumpAndSettle();
 
@@ -1094,8 +1156,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(PopupMenuButton<String>));
-      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
       await tester.tap(find.text('Delete all messages').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Cancel'));
@@ -1127,9 +1188,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Clear messages'));
+      await tester.tap(find.text('Clear messages').last);
       await tester.pumpAndSettle();
 
       // It must be told apart from Hide, which sits right beneath it and also
@@ -1138,7 +1199,7 @@ void main() {
       expect(find.textContaining('stay there permanently'), findsOneWidget);
       expect(cleared, isNull, reason: 'the sheet alone clears nothing');
 
-      await tester.tap(find.widgetWithText(FilledButton, 'Clear messages'));
+      await tester.tap(find.text('Clear messages').last);
       await tester.pumpAndSettle();
       expect(cleared, 'c1');
       expect(find.textContaining('6 messages cleared'), findsOneWidget);
@@ -1174,7 +1235,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       await tester.tap(find.text('Start over with this contact'));
       await tester.pumpAndSettle();
@@ -1206,7 +1267,7 @@ void main() {
       await tester.pumpAndSettle();
       await openRequests(tester);
 
-      await tester.longPress(find.text('Wants to connect'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       // Hiding an invitation is permanent, and it is the only route to
       // refunding the bond they already paid.
@@ -1243,8 +1304,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(PopupMenuButton<String>));
-      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
       await tester.tap(find.text('Delete all messages').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Delete 1 conversation'));
@@ -1269,11 +1329,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Clear messages'));
+      await tester.tap(find.text('Clear messages').last);
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Clear messages'));
+      await tester.tap(find.text('Clear messages').last);
       await tester.pumpAndSettle();
 
       expect(find.textContaining('could not be stopped'), findsOneWidget);
@@ -1301,7 +1361,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       await tester.tap(find.text('Start over with this contact'));
       await tester.pumpAndSettle();
@@ -1334,8 +1394,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(PopupMenuButton<String>));
-      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
       await tester.tap(find.text('Delete all messages').last);
       await tester.pumpAndSettle();
 
@@ -1343,7 +1402,18 @@ void main() {
         find.textContaining('2 unanswered contact requests'),
         findsOneWidget,
       );
-      expect(find.textContaining('can no longer be returned'), findsOneWidget);
+      // **The figure, not just the clause.** This sentence describes somebody
+      // else's money the erase makes unreturnable, and it carried a `0.2 KAS`
+      // literal that survived UX-R5's sweep because it was split across two
+      // source lines (`consensus-auditor` BLOCK). Pinning the rendered figure
+      // is what stops it drifting from `HANDSHAKE_BOND_SOMPI` in silence.
+      expect(
+        find.textContaining(
+          '${kasCanonical(MessagingService.instance.handshakeBondSompi)} KAS '
+          'bond each sender paid can no longer be returned',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('with no unanswered requests the bond clause stays away', (
@@ -1363,8 +1433,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(PopupMenuButton<String>));
-      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
       await tester.tap(find.text('Delete all messages').last);
       await tester.pumpAndSettle();
 
@@ -1383,7 +1452,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Replaced'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       expect(find.text('Start over with this contact'), findsNothing);
     });
@@ -1420,8 +1489,11 @@ void main() {
       await openRequests(tester);
 
       expect(find.text('Wants to connect'), findsOneWidget);
-      expect(find.text('Accept'), findsOneWidget);
-      expect(find.textContaining('0.2 KAS bond'), findsOneWidget);
+      expect(find.text('Accept…'), findsOneWidget);
+      // The price moved from a paragraph repeated under every request to
+      // `M2`'s gloss at the top of the lane — said once, and read from Rust's
+      // own `HANDSHAKE_BOND_SOMPI` rather than typed into the string.
+      expect(find.textContaining('0.20'), findsWidgets);
       // No address is claimed before the node resolves the sender.
       expect(find.text('Unknown sender'), findsOneWidget);
     });
@@ -1453,8 +1525,17 @@ void main() {
         expect(find.text('Dismiss'), findsOneWidget);
         // The dead affordances are GONE, not disabled: no Accept, no
         // transient bond copy, no accept ceremony reachable.
-        expect(find.text('Accept'), findsNothing);
-        expect(find.textContaining('0.2 KAS bond'), findsNothing);
+        expect(find.text('Accept…'), findsNothing);
+        // **This assertion had gone vacuous and the invariant behind it had
+        // broken.** Every bond string now renders through `kasCanonical` as
+        // `0.20`, so `'0.2 KAS bond'` was no longer producible by any code
+        // path — true forever, checking nothing — while `_RequestsGloss` went
+        // on offering to spend over a lane whose only row can never be
+        // accepted (`consensus-auditor`, UX-R5). Assert the figure that IS
+        // rendered, from the seam rather than from a typed string.
+        final bond = kasCanonical(MessagingService.instance.handshakeBondSompi);
+        expect(find.textContaining('$bond KAS bond'), findsNothing);
+        expect(find.textContaining('Accepting returns'), findsNothing);
 
         // One tap dismisses (founder-ruled: the copy already explains) —
         // through the same reversible tombstone lane as hide.
@@ -1477,7 +1558,7 @@ void main() {
       await tester.pumpAndSettle();
       await openRequests(tester);
 
-      expect(find.text('Accept'), findsOneWidget);
+      expect(find.text('Accept…'), findsOneWidget);
       expect(find.text('Wants to connect'), findsOneWidget);
       expect(find.text('Dismiss'), findsNothing);
       expect(find.text('Invitation expired'), findsNothing);
@@ -1501,7 +1582,7 @@ void main() {
       await tester.pumpAndSettle();
       await openRequests(tester);
 
-      await tester.tap(find.text('Accept'));
+      await tester.tap(find.text('Accept…'));
       await tester.pumpAndSettle();
 
       expect(prepared, 'c1');
@@ -1518,7 +1599,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Active'));
+      await tester.tap(_row());
       await tester.pumpAndSettle();
       expect(find.byType(ThreadScreen), findsOneWidget);
     });
@@ -1535,7 +1616,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       // Long-press now offers naming as well as hiding.
       await tester.tap(find.text('Hide conversation'));
@@ -1553,7 +1634,7 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.widgetWithText(FilledButton, 'Hide'));
+      await tester.tap(find.text('Hide'));
       await tester.pumpAndSettle();
       expect(hidden, 'c1', reason: 'the bridge hide ran for this conversation');
     });
@@ -1570,12 +1651,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.text('Active'));
+      await tester.longPress(_row());
       await tester.pumpAndSettle();
       // Long-press now offers naming as well as hiding.
       await tester.tap(find.text('Hide conversation'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(hideCalls, 0);
     });
@@ -1624,8 +1705,9 @@ void main() {
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
-      expect(find.text('Yesterday'), findsOneWidget);
-      expect(find.text('Today'), findsOneWidget);
+      // `M4` sets the day separator in the `caps` role — uppercase.
+      expect(find.text('YESTERDAY'), findsOneWidget);
+      expect(find.text('TODAY'), findsOneWidget);
 
       // The inbound run closes at 'three', so exactly one clock face for it —
       // plus one for the reply, which is its own run. Four messages today, two
@@ -1854,7 +1936,10 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byType(TextField), 'challenge you to RPS');
-      await tester.tap(find.byIcon(Icons.send_outlined));
+      // The pill is gated on the draft now (BG-27) — it arms on the first
+      // character, so the frame has to land before the tap.
+      await tester.pump();
+      await tester.tap(find.text('Send'));
       await tester.pumpAndSettle();
 
       expect(sentText, 'challenge you to RPS');
@@ -2161,8 +2246,8 @@ void main() {
       // The card is built from the JSON fields (game/stake), not the line.
       expect(find.text('Attack & Defend'), findsOneWidget);
       expect(find.textContaining('10 KAS'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Accept'), findsOneWidget);
-      expect(find.widgetWithText(TextButton, 'Decline'), findsOneWidget);
+      expect(find.text('Accept'), findsOneWidget);
+      expect(find.text('Decline'), findsOneWidget);
     });
 
     testWidgets('a friendly (no-stake) challenge reads "Friendly"', (
@@ -2198,7 +2283,7 @@ void main() {
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
-      await tester.tap(find.widgetWithText(FilledButton, 'Accept'));
+      await tester.tap(find.text('Accept'));
       await tester.pumpAndSettle();
 
       expect(accepted, 'c1/a1b2c3d4', reason: 'accept references the id');
@@ -2235,7 +2320,7 @@ void main() {
         expect(find.textContaining('Reported result'), findsOneWidget);
         expect(find.text('🏁 I won'), findsOneWidget);
         // Inert: no tappable action wired to a result, and nothing broadcast.
-        expect(find.widgetWithText(FilledButton, 'Accept'), findsNothing);
+        expect(find.text('Accept'), findsNothing);
         expect(commits, 0, reason: 'a frame binds no value (§0.3)');
       },
     );
@@ -2252,11 +2337,11 @@ void main() {
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
-      await tester.tap(find.widgetWithText(TextButton, 'Decline'));
+      await tester.tap(find.text('Decline'));
       await tester.pumpAndSettle();
 
       expect(find.text('Declined'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Accept'), findsNothing);
+      expect(find.text('Accept'), findsNothing);
       expect(accepts, 0, reason: 'Decline sends no frame (no decline kind)');
     });
 
@@ -2266,7 +2351,7 @@ void main() {
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
       expect(find.text('Challenge sent'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Accept'), findsNothing);
+      expect(find.text('Accept'), findsNothing);
     });
 
     testWidgets('composing a challenge runs prepare + the confirm ceremony', (
@@ -2282,7 +2367,9 @@ void main() {
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byIcon(Icons.sports_esports_outlined));
+      await tester.tap(find.bySemanticsLabel('Thread actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Challenge or taunt'));
       await tester.pumpAndSettle();
       expect(find.text('Attack & Defend'), findsOneWidget);
 
@@ -2292,7 +2379,7 @@ void main() {
         ),
         '5',
       );
-      await tester.tap(find.widgetWithText(FilledButton, 'Review challenge'));
+      await tester.tap(find.text('Review challenge'));
       await tester.pumpAndSettle();
 
       expect(convId, 'c1');

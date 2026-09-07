@@ -164,6 +164,30 @@ enum KvGlyph {
 
   /// Dismiss, clear, close. Lucide `x`.
   close,
+
+  /// Find something in a list. Lucide `search` — `M1 · Chats` seats it inside
+  /// the search field, which is the only place the app looks anything up.
+  search,
+
+  /// Save this to the device. Lucide `download` — the tray with the arrow
+  /// coming INTO it, the mirror of [shareUp], which is what an attachment
+  /// save is against an attachment share.
+  download,
+
+  /// Put this out of sight. Lucide `eye-off` — [eye] with the stroke through
+  /// it, which is the pair Lucide draws and not a rotation of one mark.
+  eyeOff,
+
+  /// The one irreversible action. Lucide `trash-2` — the bin with two
+  /// staves, which is the mark this app's single destructive ceremony had
+  /// been borrowing from Material.
+  trash,
+
+  /// Open a conversation with someone new. Lucide `user-round-plus` — the
+  /// figure shifted left of [identity]'s centre to make room for the plus,
+  /// which is Lucide's own geometry and not a reading of it. `M1`'s foot
+  /// action, `M2`'s request discs and `M3`'s explainer all carry it.
+  userPlus,
 }
 
 /// One glyph, painted.
@@ -538,6 +562,39 @@ class KvGlyphPainter extends CustomPainter {
         ]);
       case KvGlyph.close:
         path(const ['M18 6 6 18', 'm6 6 12 12']);
+      case KvGlyph.download:
+        path(const [
+          'M12 15V3',
+          'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4',
+          'm7 10 5 5 5-5',
+        ]);
+      case KvGlyph.eyeOff:
+        path(const [
+          'M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 '
+              '10.747 10.747 0 0 1-1.444 2.49',
+          'M14.084 14.158a3 3 0 0 1-4.242-4.242',
+          'M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 '
+              '0-.696 10.75 10.75 0 0 1 4.446-5.143',
+          'm2 2 20 20',
+        ]);
+      case KvGlyph.trash:
+        path(const [
+          'M3 6h18',
+          'M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6',
+          'M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2',
+          'M10 11v6',
+          'M14 11v6',
+        ]);
+      case KvGlyph.search:
+        circle(11, 11, 8);
+        path(const ['m21 21-4.3-4.3']);
+      case KvGlyph.userPlus:
+        // Lucide's own arc stops at the plus rather than closing under it —
+        // `identity`'s shoulders are a full `a8 8 0 0 0-16 0` and this one is
+        // deliberately open on the right.
+        path(const ['M2 21a8 8 0 0 1 13.292-6']);
+        circle(10, 8, 5);
+        path(const ['M19 16v6', 'M22 19h-6']);
     }
   }
 

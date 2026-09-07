@@ -26,6 +26,8 @@ class KvTopBar extends StatelessWidget {
     required this.title,
     required this.onBack,
     this.trailing,
+    this.avatar,
+    this.subtitle,
     this.page = false,
   });
 
@@ -51,6 +53,24 @@ class KvTopBar extends StatelessWidget {
   /// wide, which is the same box that balances the back target, so the title
   /// stays centred whether or not anything is in it.
   final Widget? trailing;
+
+  /// **The identity register** (§2, `M4 · Thread` measured at 4×).
+  ///
+  /// A 44 dp object between the back control and the title — the counterparty's
+  /// own disc, 12 dp clear of the chevron's. A thread's bar names a *person*,
+  /// not a screen, so the title drops from the `page` register's 22 to 16 and
+  /// [subtitle] takes the line beneath it: `Jonas` over `kaspa:qpz3…41k8t`.
+  ///
+  /// That pairing is the point rather than decoration. A contact's name is a
+  /// label the user typed over an address (D-049) and this is the surface an
+  /// address-poisoning attack aims at — it wants the name to sit over somebody
+  /// else's key. The key travels with the name wherever the name is shown.
+  final Widget? avatar;
+
+  /// A second line under [title] — the counterparty's address, through
+  /// [KvAddress] in the one law shape (D-296). Only meaningful with [avatar];
+  /// a screen that names itself has nothing to put here.
+  final Widget? subtitle;
 
   /// Null ⇒ **the way out is closed right now**, and the chevron says so
   /// rather than looking live and doing nothing (BG-12). The ceremony uses it
@@ -98,37 +118,103 @@ class KvTopBar extends StatelessWidget {
           // heading at the floor, so a longer title fails a test instead of
           // clipping in silence (L121: a measurement is only as true as what
           // it measured).
-          if (page) const SizedBox(width: KvSpace.xs),
+          if (avatar != null) ...[
+            const SizedBox(width: KvSpace.sm),
+            avatar!,
+            const SizedBox(width: KvSpace.sm),
+          ] else if (page)
+            const SizedBox(width: KvSpace.xs),
           Expanded(
-            child: Text(
-              title,
-              textAlign: page ? TextAlign.start : TextAlign.center,
-              maxLines: 2,
-              // §2 `barTitle` — **18 / 700 in `ink`**, measured off `S6a`
-              // (cap 14.0 dp against the `caps` label's calibration). It was
-              // 15 / 600 `inkDim`, which is the `rowTitle` role wearing a
-              // bar's job: a screen's own name should not be quieter than the
-              // rows underneath it (UX-R2).
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: page ? 22 : 18,
-                height: (page ? 26 : 22) / (page ? 22 : 18),
-                letterSpacing: page ? -0.2 : -0.18,
-                fontWeight: FontWeight.w700,
-                fontVariations: KvWeight.w700,
-                color: KvColor.ink,
-              ),
-            ),
+            child: subtitle == null
+                ? _fitted(context)
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [_title(context), subtitle!],
+                  ),
           ),
           // Balances the back target so the title sits centred, and seats the
           // optional reading. A `page` title is not centred, so it balances
           // nothing and only appears when something is actually in it.
-          if (!page || trailing != null)
+          if ((!page && avatar == null) || trailing != null)
             ConstrainedBox(
               constraints: const BoxConstraints(minWidth: KvSpace.touchTarget),
               child: Center(child: trailing ?? const SizedBox.shrink()),
             ),
         ],
+      ),
+    );
+  }
+
+  /// **A single word scales rather than breaking.**
+  ///
+  /// BG-14's rule here is `KvTopBar`'s own — *a label WRAPS; only a number is
+  /// forbidden from doing so* — and wrapping is still what a multi-word title
+  /// does. But a title that is ONE word wider than its column does not wrap:
+  /// Flutter breaks it mid-syllable, and at 320 dp / 1.3× this bar rendered
+  /// `Messag / es`. That is D-285's `ADD / RESS / ES` finding, in the bar
+  /// instead of the section header, and it was found the same way — in the
+  /// floor frame, not in a test.
+  ///
+  /// [BoxFit.scaleDown] never enlarges, so every title that fits renders at
+  /// exactly the size §2 gives it and no shipped screen moves; only a title
+  /// that would otherwise be broken gives up a little size instead. It is the
+  /// rule [KvAmount] already follows for a figure that will not fit — scale
+  /// before you clip — applied to the one other object that must stay whole.
+  ///
+  /// **There is no floor constant here, deliberately.** A `FittedBox` cannot
+  /// be given one, and a `static const minScale` sitting beside it would claim
+  /// a guarantee the widget does not enforce — the class of false claim that
+  /// cost this project a whole auditor pass (L164). What holds the size is the
+  /// floor frame: `kv_chrome_test` re-measures this title at 320 dp / 1.3×
+  /// with the bundled faces loaded and fails if it is broken or smaller than
+  /// the rows beneath it.
+  Widget _fitted(BuildContext context) {
+    final title = _title(context);
+    // A wrapping title has nothing to scale — `scaleDown` on a two-line box
+    // would shrink the whole block rather than let the second line exist.
+    if (this.title.trim().contains(RegExp(r'\s'))) return title;
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: page || avatar != null
+          ? Alignment.centerLeft
+          : Alignment.center,
+      child: title,
+    );
+  }
+
+  Widget _title(BuildContext context) {
+    // The identity register's own size: `M4` measures `Jonas` at cap 12.25
+    // (÷ Jakarta's 0.773 = 15.85). It is smaller than a `page` title because
+    // it shares the bar with a second line, and larger than nothing because a
+    // person's name is the most important word on the screen.
+    final identity = avatar != null;
+    return Text(
+      title,
+      textAlign: (page || identity) ? TextAlign.start : TextAlign.center,
+      maxLines: subtitle == null ? 2 : 1,
+      overflow: TextOverflow.ellipsis,
+      // §2 `barTitle` — **18 / 700 in `ink`**, measured off `S6a`
+      // (cap 14.0 dp against the `caps` label's calibration). It was
+      // 15 / 600 `inkDim`, which is the `rowTitle` role wearing a
+      // bar's job: a screen's own name should not be quieter than the
+      // rows underneath it (UX-R2).
+      style: TextStyle(
+        fontFamily: KvFont.ui,
+        fontSize: page
+            ? 22
+            : identity
+            ? 16
+            : 18,
+        height: page
+            ? 26 / 22
+            : identity
+            ? 20 / 16
+            : 22 / 18,
+        letterSpacing: page ? -0.2 : -0.18,
+        fontWeight: FontWeight.w700,
+        fontVariations: KvWeight.w700,
+        color: KvColor.ink,
       ),
     );
   }
@@ -447,11 +533,42 @@ class KvAction extends StatefulWidget {
     required this.label,
     required this.primary,
     required this.onTap,
+    this.destructive = false,
     this.disabledReason,
+    this.disabledLabel,
+    this.disabledMark = true,
     this.labelWidget,
     this.mark,
     this.height = KvSpace.control,
   });
+
+  /// **The destructive form**: a `risk` fill with a `plate` label.
+  ///
+  /// The app has exactly one control in this register — the total message
+  /// erase — and §3 rations `error` to fund risk and DESTRUCTION. It is
+  /// deliberately NOT the primary pill: DS §8's glow is the signing
+  /// ceremony's, and dressing an erase in it would say *this is the thing you
+  /// want*. It is deliberately not `raised` either, which reads identical to
+  /// the benign "Clear messages" confirm one gesture away, and the two do very
+  /// different things. Promoted out of `contacts_screen.dart`'s
+  /// `FilledButton(backgroundColor: risk)` at UX-R5 so the one destructive
+  /// control in the app is a stated form rather than a styled Material button
+  /// (`ux-auditor`, BG-21/BG-25).
+  const KvAction.destructive({
+    Key? key,
+    required String label,
+    required VoidCallback onTap,
+    String? disabledReason,
+    double height = KvSpace.control,
+  }) : this(
+         key: key,
+         label: label,
+         primary: false,
+         destructive: true,
+         onTap: onTap,
+         disabledReason: disabledReason,
+         height: height,
+       );
 
   /// The raised form: `chip` fill, `ink` label. Sugar for `primary: false`,
   /// which is the same rendering — the named constructor exists so a call site
@@ -461,6 +578,7 @@ class KvAction extends StatefulWidget {
     required String label,
     required VoidCallback onTap,
     String? disabledReason,
+    bool disabledMark = true,
     KvGlyph? mark,
     double height = KvSpace.control,
   }) : this(
@@ -469,6 +587,7 @@ class KvAction extends StatefulWidget {
          primary: false,
          onTap: onTap,
          disabledReason: disabledReason,
+         disabledMark: disabledMark,
          mark: mark,
          height: height,
        );
@@ -477,10 +596,38 @@ class KvAction extends StatefulWidget {
   final String label;
 
   final bool primary;
+
+  /// See [KvAction.destructive].
+  final bool destructive;
+
   final VoidCallback onTap;
 
   /// Null ⇒ enabled. Non-null ⇒ disabled, and this is what it says.
   final String? disabledReason;
+
+  /// **What a disabled pill PAINTS, when the reason will not fit in it.**
+  ///
+  /// The disabled form normally sets [disabledReason] as its label, which is
+  /// right for a full-width action: the user may not otherwise see why it is
+  /// dark. It is wrong for a narrow pill beside a field. The thread composer's
+  /// Send is 108 dp and its reason is 21 characters — at 320 dp / 1.3× the
+  /// pill took the whole row and the message field measured 0.0 dp
+  /// (`ux-auditor` BLOCK, UX-R5).
+  ///
+  /// The reason is not lost: it stays the pill's **semantic** label, so a
+  /// screen reader is told why while the glass stays legible. Null keeps the
+  /// reason on the glass, which remains the default everywhere else.
+  final String? disabledLabel;
+
+  /// **Whether the disabled form carries its ring.**
+  ///
+  /// The mark is [KvRadio] and its documented meaning is *nothing new has been
+  /// picked* — it came from the selection sheet, where that is exactly the
+  /// refusal. It is wrong on a refusal about anything else: `M3`'s *Enter an
+  /// address to continue* is not an unmade choice, and neither is a network
+  /// check in flight (`ux-auditor`, UX-R5). Defaults on, so no shipped surface
+  /// moves; a caller whose refusal is not about a choice turns it off.
+  final bool disabledMark;
 
   /// The **enabled** label, composed — for the one case a plain string cannot
   /// carry: a label that mixes words with a figure, which BG-30 sets in two
@@ -527,6 +674,14 @@ class _KvActionState extends State<KvAction> {
     if (disabled) {
       // **Nothing.** The outline is the whole shape (see the class doc).
       fill = Colors.transparent;
+    } else if (widget.destructive) {
+      // **The press INVERTS; it does not just darken.** `riskTint` is §1.6's
+      // surface of `risk`, not a pressed step of it — `plate` ink on it
+      // measured **1.12:1**, so the label of the app's one irreversible
+      // confirmation vanished at the moment of the press (`ux-auditor` BLOCK,
+      // UX-R5). Inverted, the ink moves with the fill: `risk` on `riskTint` is
+      // 5.51, and the pill reads as pressed rather than as extinguished.
+      fill = _down ? KvColor.riskTint : KvColor.risk;
     } else if (lit) {
       fill = _down ? KvColor.primaryPressed : KvColor.primary;
     } else {
@@ -534,6 +689,8 @@ class _KvActionState extends State<KvAction> {
     }
     final ink = disabled
         ? KvColor.inkDim
+        : widget.destructive
+        ? (_down ? KvColor.risk : KvColor.plate)
         : (lit ? KvColor.onPrimary : KvColor.ink);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -541,8 +698,12 @@ class _KvActionState extends State<KvAction> {
         Semantics(
           button: true,
           enabled: !disabled,
-          // The composed label paints; [label] is what is SPOKEN, always.
-          label: widget.labelWidget == null || disabled ? null : widget.label,
+          // The composed label paints; [label] is what is SPOKEN, always —
+          // and a disabled pill painting a short word still ANNOUNCES its
+          // reason (see [disabledLabel]).
+          label: disabled
+              ? (widget.disabledLabel == null ? null : widget.disabledReason)
+              : (widget.labelWidget == null ? null : widget.label),
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: disabled ? null : widget.onTap,
@@ -576,19 +737,34 @@ class _KvActionState extends State<KvAction> {
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  if (disabled) ...[
+                  if (disabled && widget.disabledMark) ...[
                     // *Nothing new has been picked* — the sheet's own mark, in
-                    // miniature, rather than a second vocabulary.
+                    // miniature, rather than a second vocabulary. See
+                    // [disabledMark] for when it does not belong.
                     const KvRadio(ring: KvRadio.markInPill),
                     const SizedBox(width: KvSpace.s),
-                  ] else if (widget.mark != null) ...[
+                  ] else if (!disabled && widget.mark != null) ...[
                     KvGlyphIcon(widget.mark!, size: KvAction.glyph, tone: ink),
                     const SizedBox(width: KvSpace.s),
                   ],
                   Flexible(
                     child: Padding(
+                      // **Horizontal air, measured off `M2`** — its Accept
+                      // pill starts at x 97.0 and the label's ink at 115.2,
+                      // so 18.2 ≈ [KvSpace.s20]. The part had none: every
+                      // caller so far was full width, where the label floats
+                      // in the middle and the omission cannot be seen. The
+                      // first content-sized pill in the system — `M2`'s
+                      // `Accept…` under [IntrinsicWidth] — rendered with 1 dp
+                      // between the word and the pill's edge.
+                      //
+                      // A full-width caller is unaffected until its label
+                      // nearly fills the pill, which is exactly where side air
+                      // is wanted; and `KvAction`'s height is a MINIMUM, so
+                      // the pill grows rather than clipping (BG-5).
                       padding: const EdgeInsets.symmetric(
                         vertical: KvAction.labelPad,
+                        horizontal: KvSpace.s20,
                       ),
                       child: disabled
                           ? Text(
@@ -596,7 +772,8 @@ class _KvActionState extends State<KvAction> {
                               // render at 15 / 500 `inkDim`, the same size the
                               // verb takes on a 52-high control, so the pill
                               // does not shrink its own voice when it refuses.
-                              widget.disabledReason!,
+                              // Unless it cannot fit: see [disabledLabel].
+                              widget.disabledLabel ?? widget.disabledReason!,
                               maxLines: 2,
                               textAlign: TextAlign.center,
                               overflow: TextOverflow.ellipsis,
@@ -638,6 +815,76 @@ class _KvActionState extends State<KvAction> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// **The Paste ghost** (§4; `S6a`, and `M3 · New handshake` draws the same
+/// chip in the same seat).
+///
+/// Promoted out of `send_screen.dart` at UX-R5, when the handshake screen
+/// needed the identical object — one address field, one clipboard read, one
+/// chip (BG-21).
+///
+/// **`primary`, not `primaryMuted`.** §1.5 lists "the Paste chip's glyph and
+/// label" under the ambient teal and BG-2 lists *Paste* among the ghost text
+/// actions that emit — two laws on one object, and `S6a` settles it: the render
+/// paints both glyph and word at `#49eacb`. It is a ghost action that happens
+/// to sit in a chip, and it spends one of this screen's three emissions.
+class KvPasteChip extends StatelessWidget {
+  const KvPasteChip({
+    super.key,
+    required this.onTap,
+    this.label = 'Paste the address from your clipboard',
+  });
+
+  final VoidCallback onTap;
+
+  /// What a screen reader says — verb plus object (BG-11).
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        // A 40 dp chip in a 52 dp target (BG-12): the visual may be smaller
+        // than the target, and the target never shrinks.
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            vertical: (KvSpace.touchTarget - KvSpace.rowDisc) / 2,
+          ),
+          child: Container(
+            height: KvSpace.rowDisc,
+            padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
+            decoration: BoxDecoration(
+              color: KvColor.chip,
+              borderRadius: BorderRadius.circular(KvRadius.control),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                KvGlyphIcon(KvGlyph.paste, size: 16, tone: KvColor.primary),
+                SizedBox(width: KvSpace.s),
+                Text(
+                  'Paste',
+                  style: TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

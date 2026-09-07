@@ -134,13 +134,35 @@ class KvRowDisc extends StatelessWidget {
   /// Appearance, Notifications, Privacy and About discs all draw their mark at
   /// `#F2F5F4`. It was `inkDim`, which is the drawer's *inactive* seat doing
   /// the default's job; the drawer now states that tone where it means it.
-  const KvRowDisc.neutral({Key? key, required KvGlyph mark})
-    : this(key: key, mark: mark, tint: KvColor.chip, tone: KvColor.ink);
+  const KvRowDisc.neutral({
+    Key? key,
+    required KvGlyph mark,
+    double size = KvSpace.rowDisc,
+  }) : this(
+         key: key,
+         mark: mark,
+         tint: KvColor.chip,
+         tone: KvColor.ink,
+         size: size,
+       );
 
   final KvGlyph mark;
+
   final Color tint;
   final Color tone;
   final double size;
+
+  /// **The person disc is 44, not 40** (`M1` measured: the tint runs
+  /// y 217.0..261.0 at 4×). A name's monogram needs the room a 24 dp glyph on
+  /// a 40 dp disc does not; every other row keeps [KvSpace.rowDisc].
+  ///
+  /// The disc itself is [KvContactAvatar] — §4 rules a contact-we-hold `chip`
+  /// + `ink` and retired the teal treatment at v4.8 off `S6a`/`S6`/`S8`. A
+  /// `KvRowDisc.initial` briefly lived here drawing `tealTint` +
+  /// `primaryMuted`, which is the face §4 reserves for the wallet's OWN mark:
+  /// one contact then wore two faces across Send and Messages (`ux-auditor`
+  /// BLOCK, UX-R5, BG-21).
+  static const double person = 44;
 
   /// Overrides the glyph's stroke **on the 24 dp grid**. A direction arrow
   /// inside a value disc takes [KvGlyphSpec.strokeArrow] (BG-25); everything
@@ -338,14 +360,17 @@ class KvRow extends StatefulWidget {
     super.key,
     this.leading,
     required this.title,
+    this.titleWidget,
     this.sub,
     this.subWidget,
     this.badge,
     this.trailing,
     this.trailingMeta,
     this.onTap,
+    this.onLongPress,
     this.semanticLabel,
     this.dense = false,
+    this.ground = KvColor.plate,
     this.trailingCap = KvRow.trailingMax,
     this.subLines = 1,
     this.titleLines = 1,
@@ -359,6 +384,24 @@ class KvRow extends StatefulWidget {
   final Widget? leading;
 
   final String title;
+
+  /// **A composed title** — the counterpart of [subWidget], and it exists for
+  /// exactly one case: a row whose name IS an address.
+  ///
+  /// [title] is a `String` rendered in the UI face with `overflow: ellipsis`,
+  /// which is the wrong object for a key. The conversation list handed it a
+  /// pre-truncated `kaspa:qz7u…ellj43pf` and at 320 dp / 1.3× the row
+  /// ellipsised it a second time, to **`kaspa:qz…`** — two different keys
+  /// sharing a 4-character payload head then render as byte-identical rows,
+  /// which is the shape [KvAddress] exists to make impossible and its own
+  /// `assert(!address.contains('…'))` exists to catch. Passing the whole
+  /// address through `KvAddress(form: compact)` here restores the weighting,
+  /// the mono face, the scale-to-floor and that assert
+  /// (`wallet-security-auditor`, UX-R5).
+  ///
+  /// [title] is still required and is still what a screen reader announces,
+  /// so a composed title can never quietly say something else.
+  final Widget? titleWidget;
 
   /// `sub` [KvColor.inkMeta] — and [KvColor.inkDim] on a [KvColor.chip]
   /// ground, which BG-14 requires (§1.4).
@@ -382,6 +425,15 @@ class KvRow extends StatefulWidget {
 
   /// Null ⇒ the row is a record, not a control.
   final VoidCallback? onTap;
+
+  /// **A second gesture on the same row** — the conversation list's
+  /// name / start over / clear / hide menu (D-068), which the old Material
+  /// card carried on `InkWell.onLongPress`. It is a parameter rather than a
+  /// wrapping `GestureDetector` at the call site so both gestures are declared
+  /// on one widget and resolve in one arena: two nested detectors competing
+  /// for the same pointer is how a tap starts losing to a long-press that was
+  /// not quite long enough.
+  final VoidCallback? onLongPress;
 
   /// What a screen reader announces for the whole row. Defaults to [title].
   final String? semanticLabel;
@@ -418,6 +470,16 @@ class KvRow extends StatefulWidget {
   /// explanation that ellipsises is worse than no explanation on a custody
   /// screen. The row's height grows with it; [height] stays the minimum.
   final int subLines;
+
+  /// **The ground this row is drawn on**, so the sub-line can meet BG-14 on
+  /// it. `plate` is a card on a screen; `chip` is a card inside a sheet
+  /// (§1.1) — and `inkMeta` `#7a8583` on `chip` `#1a2120` measures **4.30:1**,
+  /// under the 4.5 a sub-line carrying information owes. The class doc has
+  /// claimed "`inkDim` on a `chip` ground, which BG-14 requires" since the row
+  /// shipped and nothing implemented it: the field was a hard-coded `inkMeta`
+  /// and the row had no way to be told (`ux-auditor` BLOCK, UX-R5). `inkDim`
+  /// on `chip` is 7.36.
+  final Color ground;
 
   /// §4: fixed in every window class (BG-33).
   static const double height = KvSpace.row;
@@ -506,10 +568,10 @@ class _KvRowState extends State<KvRow> {
                       crossAxisAlignment: WrapCrossAlignment.center,
                       spacing: KvSpace.s,
                       runSpacing: 2,
-                      children: [_title(title), badge],
+                      children: [widget.titleWidget ?? _title(title), badge],
                     )
                   else
-                    _title(title),
+                    widget.titleWidget ?? _title(title),
                   ?subLine,
                   if (sub != null)
                     Text(
@@ -521,7 +583,11 @@ class _KvRowState extends State<KvRow> {
                         fontSize: widget.dense ? 12 : 13,
                         height:
                             (widget.dense ? 17 : 18) / (widget.dense ? 12 : 13),
-                        color: KvColor.inkMeta,
+                        // BG-14 on the ground it is actually drawn on: 4.30
+                        // for `inkMeta` on `chip`, against 7.36 for `inkDim`.
+                        color: widget.ground == KvColor.chip
+                            ? KvColor.inkDim
+                            : KvColor.inkMeta,
                       ),
                     ),
                 ],
@@ -570,7 +636,13 @@ class _KvRowState extends State<KvRow> {
       ),
     );
     final tap = onTap;
-    if (tap == null) return body;
+    final longPress = widget.onLongPress;
+    // **A row with no gesture at all** is a record and gets no detector — but
+    // the guard used to read `onTap == null`, which dropped [onLongPress] on
+    // exactly the rows that are not doors: a request card's own action is its
+    // Accept button, so its `onTap` is null, and its long-press menu (name,
+    // hide, start over) silently stopped existing.
+    if (tap == null && longPress == null) return body;
     // **A `GestureDetector`, not an `InkWell`.** There is no ripple in this
     // language, so the only thing an ink response would give us is a hard
     // dependency on a `Material` ancestor — and the drawer panel sits above
@@ -584,6 +656,7 @@ class _KvRowState extends State<KvRow> {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: tap,
+          onLongPress: longPress,
           onTapDown: (_) => setState(() => _down = true),
           onTapUp: (_) => setState(() => _down = false),
           onTapCancel: () => setState(() => _down = false),

@@ -1803,7 +1803,7 @@ class _AddressFieldState extends State<_AddressField> {
               ),
               const SizedBox(width: KvSpace.s),
               if (text.isEmpty)
-                _PasteChip(onTap: widget.onPaste)
+                KvPasteChip(onTap: widget.onPaste)
               else
                 _ClearButton(
                   onTap: () {
@@ -1815,64 +1815,6 @@ class _AddressFieldState extends State<_AddressField> {
           ),
         );
       },
-    );
-  }
-}
-
-/// The Paste ghost (`S6a`).
-///
-/// **`primary`, not `primaryMuted`.** §1.5 lists "the Paste chip's glyph and
-/// label" under the ambient teal and BG-2 lists *Paste* among the ghost text
-/// actions that emit — two laws on one object, and `S6a` settles it: the render
-/// paints both glyph and word at `#49eacb`. It is a ghost action that happens
-/// to sit in a chip, and it spends one of this screen's three emissions.
-class _PasteChip extends StatelessWidget {
-  const _PasteChip({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: 'Paste the address from your clipboard',
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        // A 40 dp chip in a 52 dp target (BG-12): the visual may be smaller
-        // than the target, and the target never shrinks.
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            vertical: (KvSpace.touchTarget - KvSpace.rowDisc) / 2,
-          ),
-          child: Container(
-            height: KvSpace.rowDisc,
-            padding: const EdgeInsets.symmetric(horizontal: KvSpace.m),
-            decoration: BoxDecoration(
-              color: KvColor.chip,
-              borderRadius: BorderRadius.circular(KvRadius.control),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                KvGlyphIcon(KvGlyph.paste, size: 16, tone: KvColor.primary),
-                SizedBox(width: KvSpace.s),
-                Text(
-                  'Paste',
-                  style: TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 15,
-                    height: 20 / 15,
-                    fontWeight: FontWeight.w600,
-                    fontVariations: KvWeight.w600,
-                    color: KvColor.primary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

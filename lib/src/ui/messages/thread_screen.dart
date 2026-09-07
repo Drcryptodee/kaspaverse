@@ -8,7 +8,16 @@ import '../send/confirm_send_flow.dart';
 import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
+import '../widgets/kv_address.dart';
+import '../widgets/kv_chrome.dart';
+import '../widgets/kv_contact.dart';
+import '../widgets/kv_glyph.dart';
+import '../widgets/kv_icon_button.dart';
 import '../widgets/kv_loader.dart';
+import '../widgets/kv_rows.dart';
+import '../widgets/kv_tabs.dart';
+import '../widgets/kv_sheet.dart';
+import '../widgets/kv_two_pane.dart';
 import '../widgets/tx_status_chip.dart';
 
 /// One conversation thread (P2.3 plain view + P2.4 `kv:1:` game frames +
@@ -42,12 +51,18 @@ class ThreadScreen extends StatefulWidget {
     super.key,
     required this.conversationId,
     required this.contactLabel,
+    this.contactAddress = '',
     this.superseded = false,
     this.messaging,
   });
 
   final String conversationId;
   final String contactLabel;
+
+  /// The counterparty's address, for the bar's second line. Empty on a row
+  /// whose sender the node has not resolved yet — the bar then names the
+  /// person and claims no key, which is the honest half of the pair.
+  final String contactAddress;
 
   /// A newer live conversation with this same contact exists, so this thread's
   /// alias reaches nobody. Read-only: the history is real and stays readable,
@@ -100,16 +115,34 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// First paint lands at the bottom instantly; later arrivals glide.
   bool _settled = false;
 
+  /// The draft, mirrored so the send control can arm on it (BG-27). A
+  /// `TextEditingController` is a `Listenable`; nothing here reads its text
+  /// except to decide whether there is anything to commit.
+  String _draft = '';
+
   @override
   void initState() {
     super.initState();
     _messaging.lastPing.addListener(_onPing);
+    _compose.addListener(_onDraft);
     _pull();
+  }
+
+  void _onDraft() {
+    final draft = _compose.text;
+    // Only when the ANSWER changes — a rebuild per keystroke over a thread
+    // list is what BG-18's own rule warns about.
+    if (draft.trim().isEmpty != _draft.trim().isEmpty) {
+      setState(() => _draft = draft);
+    } else {
+      _draft = draft;
+    }
   }
 
   @override
   void dispose() {
     _messaging.lastPing.removeListener(_onPing);
+    _compose.removeListener(_onDraft);
     _compose.dispose();
     _scroll.dispose();
     // The decrypted rows die with this state object (§0.4 — view-scoped) — and
@@ -341,10 +374,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   Future<void> _openArcadeComposer() async {
     KvHaptic.selection();
-    final result = await showModalBottomSheet<_ArcadeCompose>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => const _ArcadeComposeSheet(),
+    final result = await Navigator.of(context).push<_ArcadeCompose>(
+      KvSheetRoute<_ArcadeCompose>(builder: (_) => const _ArcadeComposeSheet()),
     );
     if (result == null || !mounted) return;
     switch (result) {
@@ -365,64 +396,228 @@ class _ThreadScreenState extends State<ThreadScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final address = widget.contactAddress;
+    final initial = _nameOf(widget.contactLabel);
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          widget.contactLabel,
-          style: theme.textTheme.titleMedium?.copyWith(fontFamily: KvFont.mono),
-        ),
-      ),
+      backgroundColor: KvColor.abyss,
       body: SafeArea(
         child: Column(
           children: [
-            Expanded(child: _body(theme)),
-            const Divider(height: 1),
+            // `M4`'s bar: the way back, then the person — their disc, their
+            // name, and the key the name stands for (see [KvTopBar.avatar]).
+            KvTopBar(
+              title: widget.contactLabel,
+              onBack: () => Navigator.of(context).maybePop(),
+              // [KvContactAvatar] — §4's contact face, the same object the
+              // Send screen's address book draws (BG-21). `null` is the
+              // stranger, which is what an unnamed counterparty is.
+              avatar: KvContactAvatar(name: initial, size: KvRowDisc.person),
+              subtitle: address.isEmpty
+                  ? null
+                  : KvAddress(
+                      address,
+                      form: KvAddressForm.compact,
+                      fontSize: 12,
+                    ),
+              trailing: KvIconButton(
+                mark: KvGlyph.kebab,
+                label: 'Thread actions',
+                tone: KvColor.inkNav,
+                onTap: _threadActions,
+              ),
+            ),
+            Expanded(child: KvColumn(gutter: false, child: _body(theme))),
             if (widget.superseded)
               _ReplacedNotice(theme: theme)
             else
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  KvSpace.s,
-                  KvSpace.s,
-                  KvSpace.s,
-                  KvSpace.s,
-                ),
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: 'New challenge or taunt',
-                      onPressed: _openArcadeComposer,
-                      icon: const Icon(Icons.sports_esports_outlined),
-                      color: KvColor.primaryMuted,
-                    ),
-                    Expanded(
-                      child: TextField(
-                        controller: _compose,
-                        minLines: 1,
-                        maxLines: 4,
-                        textInputAction: TextInputAction.newline,
-                        decoration: const InputDecoration(
-                          hintText: 'Encrypted message…',
-                          border: InputBorder.none,
+              KvColumn(
+                child: Padding(
+                  padding: const EdgeInsets.only(
+                    top: KvSpace.s,
+                    bottom: KvSpace.l,
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Flexible(
+                        fit: FlexFit.tight,
+                        child: Container(
+                          constraints: const BoxConstraints(
+                            minHeight: KvSpace.touchTarget,
+                            minWidth: _fieldMin,
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: KvSpace.s20,
+                            vertical: KvSpace.sm,
+                          ),
+                          decoration: BoxDecoration(
+                            color: KvColor.plate,
+                            borderRadius: BorderRadius.circular(
+                              KvRadius.control,
+                            ),
+                          ),
+                          child: TextField(
+                            controller: _compose,
+                            minLines: 1,
+                            maxLines: 4,
+                            textInputAction: TextInputAction.newline,
+                            cursorColor: KvColor.primary,
+                            style: const TextStyle(
+                              fontFamily: KvFont.ui,
+                              fontSize: 15,
+                              height: 20 / 15,
+                              fontWeight: FontWeight.w400,
+                              fontVariations: KvWeight.w400,
+                              color: KvColor.ink,
+                            ),
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              contentPadding: EdgeInsets.zero,
+                              hintText: 'Message',
+                              hintStyle: TextStyle(
+                                fontFamily: KvFont.ui,
+                                fontSize: 15,
+                                height: 20 / 15,
+                                fontWeight: FontWeight.w400,
+                                fontVariations: KvWeight.w400,
+                                color: KvColor.inkMeta,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                    IconButton(
-                      tooltip: 'Review & send',
-                      onPressed: () {
-                        KvHaptic.selection();
-                        _send();
-                      },
-                      icon: const Icon(Icons.send_outlined),
-                      color: KvColor.primary,
-                    ),
-                  ],
+                      const SizedBox(width: KvSpace.touchGap),
+                      // **`M4` prints `0.0001 KAS` under `Send` and this
+                      // build does not.** A comm is a SELF-SEND: the value
+                      // returns to the wallet and only the network fee is
+                      // spent, so there is no fixed amount to print — and the
+                      // fee itself is not known until Rust has built the
+                      // transaction, which happens after this tap. A figure
+                      // here would be a claim about a spend nobody has priced
+                      // yet, on the control that commits it. The words are
+                      // what the app can back; the ceremony behind the tap
+                      // shows the real figure before anything is signed.
+                      // **The pill sizes to its own content**, with `M4`'s
+                      // 108 dp as the floor rather than the answer. The render
+                      // measures 108 around `0.0001 KAS`; this pill carries
+                      // different words, and forcing the render's number onto
+                      // them broke one — the frame rendered `Networ / k fee`,
+                      // the top bar's defect again. What the render actually
+                      // fixes is the PROPORTION: a compact pill beside a field
+                      // that takes the rest, which an intrinsic width keeps at
+                      // every window class.
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minWidth: _sendWidth,
+                          maxWidth: _sendMax,
+                        ),
+                        child: IntrinsicWidth(
+                          child: KvAction(
+                            label: 'Send',
+                            primary: true,
+                            // **BG-27: a control with nothing to commit is
+                            // not lit.** It was unconditionally teal and its
+                            // tap returned silently on an empty draft, which
+                            // is D-185's own gate — a control that looks live
+                            // and does nothing teaches distrust of every
+                            // other control on the screen (`ux-auditor`
+                            // BLOCK, UX-R5). `_compose` is now listened to,
+                            // so the pill arms on the first character.
+                            disabledReason: _draft.trim().isEmpty
+                                ? 'Write a message first'
+                                : null,
+                            // The pill is 108 dp beside a field; the reason is
+                            // 21 characters. It paints the verb and announces
+                            // the reason (see [KvAction.disabledLabel]).
+                            disabledLabel: 'Send',
+                            // Not an unmade choice.
+                            disabledMark: false,
+                            // **`M4` draws an arrow here and this build does
+                            // not**, and it is a trade rather than an
+                            // omission. The mark costs 26 dp (18 + the gap),
+                            // and at 320 dp / 1.3× those 26 dp came out of the
+                            // field beside it — the composer's own placeholder
+                            // rendered `Messag / e`. Between an arrow beside
+                            // the word `Send` and the line that says what
+                            // sending costs, the words are the information and
+                            // the arrow is the decoration. Said in the sitting.
+                            labelWidget: const Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  'Send',
+                                  style: TextStyle(
+                                    fontFamily: KvFont.ui,
+                                    fontSize: 15,
+                                    height: 18 / 15,
+                                    fontWeight: FontWeight.w700,
+                                    fontVariations: KvWeight.w700,
+                                    color: KvColor.onPrimary,
+                                  ),
+                                ),
+                                Text(
+                                  'Network fee',
+                                  style: TextStyle(
+                                    fontFamily: KvFont.ui,
+                                    fontSize: 11,
+                                    height: 14 / 11,
+                                    fontWeight: FontWeight.w500,
+                                    fontVariations: KvWeight.w500,
+                                    color: KvColor.onPrimary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            onTap: () {
+                              KvHaptic.selection();
+                              _send();
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
           ],
         ),
       ),
     );
+  }
+
+  /// `M4` measures the send pill at x 260.0..368.0 — 108 dp beside a field
+  /// that takes the rest of the column.
+  static const double _sendWidth = 108;
+
+  /// The widest the pill may grow, and the least the field may shrink to.
+  ///
+  /// Both are stated rather than emergent. The pill's label is variable — a
+  /// verb, or a refusal — and a `Row` whose only flex child is the field hands
+  /// an unbounded intrinsic sibling everything: at 320 dp / 1.3× the disabled
+  /// label's 21 characters took the whole row and the message field measured
+  /// **0.0 dp**, its hint painting at zero width, which `find.text` still
+  /// matches and no presence assertion can see (L131, `ux-auditor` BLOCK,
+  /// UX-R5).
+  static const double _sendMax = 148;
+  static const double _fieldMin = 96;
+
+  /// The thread's own overflow. The arcade composer used to be a permanent
+  /// icon in the composer row, where it competed with the two controls the
+  /// screen is actually for; `M4` draws neither it nor a seat for it, and an
+  /// action used once a session does not earn a seat beside the one used
+  /// every time.
+  Future<void> _threadActions() async {
+    KvHaptic.selection();
+    final action = await Navigator.of(context).push<String>(
+      KvSheetRoute<String>(
+        builder: (_) => _ThreadActionsSheet(superseded: widget.superseded),
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'arcade') await _openArcadeComposer();
   }
 
   Widget _body(ThemeData theme) {
@@ -438,7 +633,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
             children: [
               const Icon(
                 Icons.lock_outline,
-                color: KvColor.textSecondary,
+                color: KvColor.inkDim,
                 size: KvSpace.xl,
               ),
               const SizedBox(height: KvSpace.m),
@@ -446,7 +641,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 _lockedMessage!,
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium?.copyWith(
-                  color: KvColor.textSecondary,
+                  color: KvColor.inkDim,
                 ),
               ),
             ],
@@ -458,9 +653,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
       return Center(
         child: Text(
           'No messages yet.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: KvColor.textSecondary,
-          ),
+          style: theme.textTheme.bodyMedium?.copyWith(color: KvColor.inkDim),
         ),
       );
     }
@@ -613,16 +806,14 @@ class _ReplacedNotice extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.history, size: 20, color: KvColor.textTertiary),
+          const KvGlyphIcon(KvGlyph.history, size: 20, tone: KvColor.inkMeta),
           const SizedBox(width: KvSpace.s),
           Expanded(
             child: Text(
               'This conversation was replaced. Your contact started a new one '
               'with you — messages sent here would not reach them. Open the '
               'newer thread from the contacts list.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textSecondary,
-              ),
+              style: theme.textTheme.bodySmall?.copyWith(color: KvColor.inkDim),
             ),
           ),
         ],
@@ -669,24 +860,23 @@ class _DaySeparator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    // `M4` draws the day as bare caps on the ground — no chip, no rule. The
+    // chip was a container around a label, which BG-4 calls a boundary saying
+    // nothing: a date is not an object, it is where the thread changes day.
+    // The `caps` role (§2), measured off `M4` at cap 8.25 ÷ 0.773.
     return Padding(
-      padding: const EdgeInsets.only(top: KvSpace.m, bottom: KvSpace.sm),
+      padding: const EdgeInsets.only(top: KvSpace.l, bottom: KvSpace.sm),
       child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: KvSpace.sm,
-            vertical: KvSpace.xs,
-          ),
-          decoration: BoxDecoration(
-            color: KvColor.surfaceAlt,
-            borderRadius: BorderRadius.circular(KvRadius.data),
-          ),
-          child: Text(
-            _label(),
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: KvColor.textTertiary,
-            ),
+        child: Text(
+          _label().toUpperCase(),
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 11,
+            height: 16 / 11,
+            letterSpacing: 1.1,
+            fontWeight: FontWeight.w600,
+            fontVariations: KvWeight.w600,
+            color: KvColor.inkMeta,
           ),
         ),
       ),
@@ -725,13 +915,15 @@ Future<void> _copyMessage(BuildContext context, String text) async {
 /// any one of them alone fails somewhere: alignment collapses on a narrow
 /// screen, hue is invisible to a colour-blind reader, and the tail only
 /// appears on the last bubble of a run.
+/// **A bubble has no edge** (`M4` measured: the ground steps straight to
+/// `#121717` at x 25.00 with no intermediate tone, and to `#0F2E28` on the
+/// outgoing side). BG-4 says a plate on the ground has none, and the bubble is
+/// exactly that — a tone step is the whole boundary. It used to draw
+/// `Border.all` on both sides, which is the boundary said twice.
 BoxDecoration _bubbleDecoration({required bool outbound, required bool tail}) =>
     BoxDecoration(
-      color: outbound ? KvColor.messageMine : KvColor.messageTheirs,
+      color: outbound ? KvColor.tealTint : KvColor.plate,
       borderRadius: _bubbleRadius(outbound: outbound, tail: tail),
-      border: Border.all(
-        color: outbound ? KvColor.messageMineEdge : KvColor.messageTheirsEdge,
-      ),
     );
 
 /// The bubble's corner set. Every corner takes the card radius except the one
@@ -739,8 +931,11 @@ BoxDecoration _bubbleDecoration({required bool outbound, required bool tail}) =>
 /// radius — the tail. Direction is then legible without relying on alignment
 /// alone, and a run of messages reads as one block with one tail.
 BorderRadius _bubbleRadius({required bool outbound, required bool tail}) {
-  const big = Radius.circular(KvRadius.card);
-  const small = Radius.circular(KvRadius.data);
+  // `KvRadius.bubble`, which exists for this and was not being used: the
+  // corner was `card` (28) and `M4` solves to ~24 off three points on the
+  // curve. 22 is the token within 2 dp; 28 is visibly rounder than the render.
+  const big = Radius.circular(KvRadius.bubble);
+  const small = Radius.circular(KvRadius.bubbleTail);
   return BorderRadius.only(
     topLeft: big,
     topRight: big,
@@ -758,6 +953,49 @@ BorderRadius _bubbleRadius({required bool outbound, required bool tail}) {
   'attack_defend' => (Icons.sports_kabaddi, 'Attack & Defend'),
   _ => (Icons.sports_kabaddi, 'Challenge'),
 };
+
+/// **A bubble caps off the COLUMN it is in, never off the window** (U2-1 /
+/// U2-2, the defect this sub-phase exists to close).
+///
+/// Both call sites read `MediaQuery.sizeOf(context).width * 0.78`, which is
+/// the whole window. On one column that is the same number and the bug is
+/// invisible; the day the thread lands beside the list in a [KvTwoPane] —
+/// which is `expanded`'s whole shape, already built for the ledger — a bubble
+/// gets 78 % of a window it occupies half of, and every one of them overflows
+/// its own pane. It is a latent defect that only a wide device shows, which is
+/// exactly the kind BG-33 exists to catch before the device does.
+///
+/// [LayoutBuilder] asks the parent instead of the screen, so the answer is the
+/// column in every window class and needs no branch on one.
+///
+/// The share stays ~78 %: a bubble that spans its column reads as a document,
+/// and the visible opposite margin is what makes a thread read as a
+/// conversation.
+class _BubbleWidth extends StatelessWidget {
+  const _BubbleWidth({required this.child});
+
+  static const double share = 0.78;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // An unbounded parent (a horizontal scroll, a test harness) has no
+        // column to take a share of — fall back to the window rather than
+        // multiplying infinity.
+        final width = constraints.hasBoundedWidth
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width;
+        return ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: width * share),
+          child: child,
+        );
+      },
+    );
+  }
+}
 
 class _MessageRow extends StatelessWidget {
   const _MessageRow({
@@ -852,16 +1090,14 @@ class _MessageRow extends StatelessWidget {
         Text(
           _clock(context, m.unixMs),
           style: theme.textTheme.labelSmall?.copyWith(
-            color: KvColor.textTertiary,
+            color: KvColor.inkMeta,
             fontFamily: KvFont.mono,
           ),
         ),
       if (ghost)
         Text(
           'Displaced by the network',
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: KvColor.textTertiary,
-          ),
+          style: theme.textTheme.labelSmall?.copyWith(color: KvColor.inkMeta),
         )
       else if (chip != TxChipState.none)
         TxStatusChip(state: chip),
@@ -914,7 +1150,7 @@ class _MessageRow extends StatelessWidget {
             child: Text(
               m.outbound ? 'Handshake sent' : 'Handshake received',
               style: theme.textTheme.labelSmall?.copyWith(
-                color: KvColor.textTertiary,
+                color: KvColor.inkMeta,
               ),
             ),
           ),
@@ -984,14 +1220,7 @@ class _MessageRow extends StatelessWidget {
         ),
         child: Align(
           alignment: m.outbound ? Alignment.centerRight : Alignment.centerLeft,
-          child: ConstrainedBox(
-            // A share of the screen, not 300 fixed dp: the old constant
-            // cramped a small phone and stranded a wide one. ~78% leaves the
-            // opposite margin visible, which is what makes a thread read as a
-            // conversation rather than a document.
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.sizeOf(context).width * 0.78,
-            ),
+          child: _BubbleWidth(
             child: GestureDetector(
               // Offered only where there are words to copy.
               onLongPress: m.readable && m.text.isNotEmpty
@@ -1016,7 +1245,7 @@ class _MessageRow extends StatelessWidget {
                     : Text(
                         'Unreadable message',
                         style: theme.textTheme.bodySmall?.copyWith(
-                          color: KvColor.textTertiary,
+                          color: KvColor.inkMeta,
                           fontStyle: FontStyle.italic,
                         ),
                       ),
@@ -1056,34 +1285,46 @@ class _MessageRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: KvSpace.m),
           child: Row(
             children: [
-              const Expanded(child: Divider(color: KvColor.warning, height: 1)),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // `warning`, not tertiary chrome: this says our view of
-                    // the thread above the line may be wrong, and an
-                    // authenticity marker must not be quieter than the content
-                    // it qualifies (BG-8).
-                    const Icon(
-                      Icons.inventory_2_outlined,
-                      size: 12,
-                      color: KvColor.warning,
-                    ),
-                    const SizedBox(width: KvSpace.xs),
-                    Text(
-                      allAboveRestored
-                          ? 'Everything above was restored from an archive'
-                          : 'Some messages above were restored from an archive',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: KvColor.warning,
+              const Expanded(child: Divider(color: KvColor.warn, height: 1)),
+              // **`Flexible`, not a bare child.** The label is a whole
+              // sentence and it took its intrinsic width off a `Row` that had
+              // already given the rest away to the rule — so the row
+              // overflowed by 76 dp the moment the thread sat in a clamped
+              // column rather than the full window. Exactly U2-1's defect one
+              // widget over: content sized against the window instead of
+              // against the column it is in.
+              Flexible(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // `warning`, not tertiary chrome: this says our view of
+                      // the thread above the line may be wrong, and an
+                      // authenticity marker must not be quieter than the content
+                      // it qualifies (BG-8).
+                      const Icon(
+                        Icons.inventory_2_outlined,
+                        size: 12,
+                        color: KvColor.warn,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: KvSpace.xs),
+                      Flexible(
+                        child: Text(
+                          allAboveRestored
+                              ? 'Everything above was restored from an archive'
+                              : 'Some messages above were restored from an '
+                                    'archive',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: KvColor.warn,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              const Expanded(child: Divider(color: KvColor.warning, height: 1)),
+              const Expanded(child: Divider(color: KvColor.warn, height: 1)),
             ],
           ),
         ),
@@ -1119,16 +1360,15 @@ class _ChallengeCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
       child: Align(
         alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * 0.78,
-          ),
+        child: _BubbleWidth(
           child: Container(
             padding: const EdgeInsets.all(KvSpace.m),
             decoration: BoxDecoration(
-              color: KvColor.surface,
+              color: KvColor.plate,
               borderRadius: BorderRadius.circular(KvRadius.card),
-              border: Border.all(color: KvColor.border),
+              // **A plate on the ground has no edge** (BG-4). Both of these
+              // cards drew one, which is the boundary said twice — the tone
+              // step is the whole boundary (`ux-auditor` BLOCK, UX-R5).
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1174,15 +1414,15 @@ class _ChallengeCard extends StatelessWidget {
                                   // below fixes (ux-auditor, this wave).
                                   style: TextStyle(
                                     color: staked
-                                        ? KvColor.textPrimary
-                                        : KvColor.textSecondary,
+                                        ? KvColor.ink
+                                        : KvColor.inkDim,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
                               ],
                             ),
                             style: theme.textTheme.labelSmall?.copyWith(
-                              color: KvColor.textSecondary,
+                              color: KvColor.inkDim,
                             ),
                           ),
                         ],
@@ -1202,7 +1442,7 @@ class _ChallengeCard extends StatelessWidget {
                     'Accepting binds no money — this is a claim in a message, '
                     'not an on-chain wager.',
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: KvColor.textTertiary,
+                      color: KvColor.inkMeta,
                     ),
                   ),
                 ],
@@ -1218,7 +1458,7 @@ class _ChallengeCard extends StatelessWidget {
 
   Widget _actions(BuildContext context, ThemeData theme) {
     final caption = theme.textTheme.labelSmall?.copyWith(
-      color: KvColor.textTertiary,
+      color: KvColor.inkMeta,
     );
     if (outbound) {
       return Align(
@@ -1277,9 +1517,9 @@ class _FrameLightSurface extends StatelessWidget {
     // result stays muted-`textSecondary` to reinforce it's an unverified claim.
     final (glyph, tint) = switch (kind) {
       'accept' => (Icons.check, KvColor.primaryMuted),
-      'result' => (Icons.flag_outlined, KvColor.textSecondary),
+      'result' => (Icons.flag_outlined, KvColor.inkDim),
       'taunt' => (Icons.chat_bubble_outline, KvColor.primaryMuted),
-      _ => (Icons.circle, KvColor.textSecondary),
+      _ => (Icons.circle, KvColor.inkDim),
     };
 
     return Padding(
@@ -1294,9 +1534,8 @@ class _FrameLightSurface extends StatelessWidget {
               vertical: KvSpace.s,
             ),
             decoration: BoxDecoration(
-              color: KvColor.surfaceAlt,
+              color: KvColor.chip,
               borderRadius: BorderRadius.circular(KvRadius.card),
-              border: Border.all(color: KvColor.border),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1308,7 +1547,7 @@ class _FrameLightSurface extends StatelessWidget {
                     child: Text(
                       'Reported result — unverified until played',
                       style: theme.textTheme.labelSmall?.copyWith(
-                        color: KvColor.textTertiary,
+                        color: KvColor.inkMeta,
                       ),
                     ),
                   ),
@@ -1404,95 +1643,92 @@ class _ArcadeComposeSheetState extends State<_ArcadeComposeSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final challenge = _mode == _ArcadeMode.challenge;
-    return Padding(
-      padding: EdgeInsets.only(
-        left: KvSpace.l,
-        right: KvSpace.l,
-        top: KvSpace.l,
-        bottom: KvSpace.l + MediaQuery.of(context).viewInsets.bottom,
+    // **The sixth sheet** (`ux-auditor` BLOCK, UX-R5). It was the last raw
+    // `showModalBottomSheet` on the messages surface: a `titleMedium` heading,
+    // a `SegmentedButton`, three `Icons.*` — one of them painted `primary`,
+    // which is a Material glyph carrying a teal emission (BG-2/BG-25) — and a
+    // `FilledButton`. No render covers the arcade composer, so the house parts
+    // ARE the design here: `KvSheet`, `KvSegmented`, `KvGlyph`, `KvAction`.
+    return KvSheet(
+      title: 'Attack & Defend',
+      onCancel: () => Navigator.of(context).pop(),
+      foot: KvAction(
+        label: challenge ? 'Review challenge' : 'Review taunt',
+        primary: true,
+        onTap: _submit,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.sports_kabaddi,
-                size: KvSpace.l,
-                color: KvColor.primary,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            KvSegmented(
+              options: const [
+                KvSegmentedOption('Challenge'),
+                KvSegmentedOption('Taunt'),
+              ],
+              index: challenge ? 0 : 1,
+              onSelect: (i) => setState(() {
+                _mode = i == 0 ? _ArcadeMode.challenge : _ArcadeMode.taunt;
+                _error = null;
+              }),
+            ),
+            const SizedBox(height: KvSpace.l),
+            if (challenge) ...[
+              const KvSectionHeader('Stake', gloss: 'optional'),
+              _ArcadeField(
+                controller: _stake,
+                hint: 'e.g. 10',
+                suffix: 'KAS',
+                mono: true,
               ),
-              const SizedBox(width: KvSpace.sm),
-              Text('Attack & Defend', style: theme.textTheme.titleMedium),
+              const SizedBox(height: KvSpace.sm),
+              const Text(
+                'Leave empty for a friendly duel. The stake is shown to your '
+                'opponent now; it binds when you play, not here.',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  fontWeight: FontWeight.w400,
+                  fontVariations: KvWeight.w400,
+                  color: KvColor.inkDim,
+                ),
+              ),
+            ] else ...[
+              const KvSectionHeader('Taunt'),
+              _ArcadeField(controller: _taunt, hint: 'trash talk…'),
+              const SizedBox(height: KvSpace.sm),
+              const Text(
+                'A jab, sent as a message. It costs the network fee like any '
+                'other.',
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  fontWeight: FontWeight.w400,
+                  fontVariations: KvWeight.w400,
+                  color: KvColor.inkDim,
+                ),
+              ),
             ],
-          ),
-          const SizedBox(height: KvSpace.l),
-          SegmentedButton<_ArcadeMode>(
-            segments: const [
-              ButtonSegment(
-                value: _ArcadeMode.challenge,
-                label: Text('Challenge'),
-                icon: Icon(Icons.sports_esports_outlined),
-              ),
-              ButtonSegment(
-                value: _ArcadeMode.taunt,
-                label: Text('Taunt'),
-                icon: Icon(Icons.chat_bubble_outline),
+            if (_error case final error?) ...[
+              const SizedBox(height: KvSpace.sm),
+              Text(
+                error,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  fontWeight: FontWeight.w400,
+                  fontVariations: KvWeight.w400,
+                  color: KvColor.warn,
+                ),
               ),
             ],
-            selected: {_mode},
-            onSelectionChanged: (s) => setState(() {
-              _mode = s.first;
-              _error = null;
-            }),
-          ),
-          const SizedBox(height: KvSpace.l),
-          if (challenge) ...[
-            TextField(
-              controller: _stake,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              decoration: const InputDecoration(
-                labelText: 'Stake',
-                hintText: 'e.g. 10',
-                suffixText: 'KAS',
-              ),
-            ),
-            const SizedBox(height: KvSpace.s),
-            Text(
-              'Leave empty for a friendly duel. The stake is shown to your '
-              'opponent now; it binds when you play, not here.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.textSecondary,
-              ),
-            ),
-          ] else
-            TextField(
-              controller: _taunt,
-              minLines: 1,
-              maxLines: 3,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: 'Taunt',
-                hintText: 'trash talk…',
-              ),
-            ),
-          if (_error != null) ...[
-            const SizedBox(height: KvSpace.s),
-            Text(
-              _error!,
-              style: theme.textTheme.bodySmall?.copyWith(color: KvColor.error),
-            ),
           ],
-          const SizedBox(height: KvSpace.l),
-          FilledButton(
-            onPressed: _submit,
-            child: Text(challenge ? 'Review challenge' : 'Review taunt'),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -1571,9 +1807,7 @@ class _AttachmentCard extends StatelessWidget {
                     Icon(
                       file.broken ? Icons.error_outline : _icon,
                       size: 20,
-                      color: file.broken
-                          ? KvColor.textTertiary
-                          : KvColor.textSecondary,
+                      color: file.broken ? KvColor.inkMeta : KvColor.inkDim,
                     ),
                     const SizedBox(width: KvSpace.s),
                     Expanded(
@@ -1591,24 +1825,29 @@ class _AttachmentCard extends StatelessWidget {
                             Text(
                               prettySize(file.sizeBytes),
                               style: theme.textTheme.bodySmall?.copyWith(
-                                color: KvColor.textTertiary,
+                                color: KvColor.inkMeta,
                                 fontFamily: KvFont.ui,
                               ),
                             ),
                         ],
                       ),
                     ),
+                    // **`KvIconButton`, not `IconButton`** — §4's one icon
+                    // control, which brings the 44-in-52 target and the
+                    // pressed state a Material button on this surface never
+                    // had, and identifies itself by its words rather than by
+                    // its glyph (§1.2a).
                     if (!file.broken && onOpen != null)
-                      IconButton(
-                        tooltip: 'Open',
-                        icon: const Icon(Icons.open_in_new, size: 20),
-                        onPressed: onOpen,
+                      KvIconButton(
+                        mark: KvGlyph.external,
+                        label: 'Open this file',
+                        onTap: onOpen,
                       ),
                     if (!file.broken && onSave != null)
-                      IconButton(
-                        tooltip: 'Save to device',
-                        icon: const Icon(Icons.download_outlined, size: 20),
-                        onPressed: onSave,
+                      KvIconButton(
+                        mark: KvGlyph.download,
+                        label: 'Save to device',
+                        onTap: onSave,
                       ),
                   ],
                 ),
@@ -1626,7 +1865,7 @@ class _AttachmentCard extends StatelessWidget {
                           return Text(
                             "This image didn't decode",
                             style: theme.textTheme.bodySmall?.copyWith(
-                              color: KvColor.textTertiary,
+                              color: KvColor.inkMeta,
                             ),
                           );
                         }
@@ -1659,7 +1898,7 @@ class _AttachmentCard extends StatelessWidget {
                               errorBuilder: (_, _, _) => Text(
                                 "This image didn't decode",
                                 style: theme.textTheme.bodySmall?.copyWith(
-                                  color: KvColor.textTertiary,
+                                  color: KvColor.inkMeta,
                                 ),
                               ),
                             ),
@@ -1677,7 +1916,7 @@ class _AttachmentCard extends StatelessWidget {
                     width: double.infinity,
                     padding: const EdgeInsets.all(KvSpace.s),
                     decoration: BoxDecoration(
-                      color: KvColor.messageInset,
+                      color: KvColor.abyss,
                       borderRadius: BorderRadius.circular(KvRadius.data),
                     ),
                     // Plain text, never markup — the sender chose these bytes,
@@ -1778,7 +2017,7 @@ class _ImageViewer extends StatelessWidget {
                   errorBuilder: (_, _, _) => Text(
                     "This image didn't decode",
                     style: theme.textTheme.bodySmall?.copyWith(
-                      color: KvColor.textTertiary,
+                      color: KvColor.inkMeta,
                     ),
                   ),
                 ),
@@ -1835,9 +2074,10 @@ class _ImageViewer extends StatelessWidget {
                       children: [
                         IconButton(
                           tooltip: 'Close',
-                          icon: const Icon(
-                            Icons.close,
-                            color: KvColor.textPrimary,
+                          icon: const KvGlyphIcon(
+                            KvGlyph.close,
+                            size: 20,
+                            tone: KvColor.ink,
                           ),
                           onPressed: () => Navigator.of(context).maybePop(),
                         ),
@@ -1847,7 +2087,7 @@ class _ImageViewer extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodyMedium?.copyWith(
-                              color: KvColor.textPrimary,
+                              color: KvColor.ink,
                             ),
                           ),
                         ),
@@ -1858,6 +2098,152 @@ class _ImageViewer extends StatelessWidget {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The NAME for the thread bar's disc, or null when the counterparty has none.
+///
+/// [KvContactAvatar] takes a name and does the monogram itself; this only has
+/// to decide whether there IS one. `contactLabel` returns the address when
+/// there is not, and this used to hand that straight on — so every stranger's
+/// thread wore a teal **`K`**, from `kaspa:`. Its own comment claimed it took
+/// the neutral mark instead; it did not (`wallet-security-auditor`, UX-R5 —
+/// the L164 class: a doc asserting a defence the code never implemented).
+String? _nameOf(String label) {
+  final t = label.trim();
+  if (t.isEmpty || t.startsWith('kaspa:') || t.startsWith('kaspatest:')) {
+    return null;
+  }
+  return t;
+}
+
+/// The thread's overflow sheet. It holds what the composer row used to carry
+/// as a permanent icon: `M4` draws two controls in that row and this is where
+/// the third went.
+class _ThreadActionsSheet extends StatelessWidget {
+  const _ThreadActionsSheet({required this.superseded});
+
+  /// A replaced thread can be read and cannot be typed in, so it can carry no
+  /// action that composes. Offering one would be a control that looks live and
+  /// fails behind the confirm (BG-12).
+  final bool superseded;
+
+  @override
+  Widget build(BuildContext context) {
+    return KvSheet(
+      title: 'This conversation',
+      cancelLabel: 'Close',
+      cancelTone: KvColor.inkDim,
+      onCancel: () => Navigator.of(context).pop(),
+      child: KvRowContainer(
+        ground: KvColor.chip,
+        children: [
+          if (superseded)
+            const KvRow(
+              dense: true,
+              ground: KvColor.chip,
+              leading: KvRowDisc.neutral(mark: KvGlyph.history),
+              title: 'Read only',
+              sub:
+                  'They started a newer conversation with you — open that '
+                  'thread to message them',
+              subLines: 3,
+            )
+          else
+            KvRow(
+              dense: true,
+              ground: KvColor.chip,
+              leading: const KvRowDisc.neutral(mark: KvGlyph.games),
+              title: 'Challenge or taunt',
+              sub: 'Send a duel invitation or a jab',
+              trailing: const KvGlyphIcon(
+                KvGlyph.chevron,
+                size: 20,
+                tone: KvColor.etch,
+              ),
+              onTap: () => Navigator.of(context).pop('arcade'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One field on the arcade composer — the same pill the handshake screen
+/// draws, with an optional unit after it.
+class _ArcadeField extends StatelessWidget {
+  const _ArcadeField({
+    required this.controller,
+    required this.hint,
+    this.suffix,
+    this.mono = false,
+  });
+
+  final TextEditingController controller;
+  final String hint;
+  final String? suffix;
+  final bool mono;
+
+  @override
+  Widget build(BuildContext context) {
+    final suffix = this.suffix;
+    return Container(
+      constraints: const BoxConstraints(minHeight: KvSpace.control),
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.s20),
+      decoration: BoxDecoration(
+        color: KvColor.chip,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: controller,
+              cursorColor: KvColor.primary,
+              keyboardType: mono
+                  ? const TextInputType.numberWithOptions(decimal: true)
+                  : null,
+              style: TextStyle(
+                fontFamily: mono ? KvFont.mono : KvFont.ui,
+                fontSize: 15,
+                height: 20 / 15,
+                fontWeight: FontWeight.w400,
+                fontVariations: KvWeight.w400,
+                color: KvColor.ink,
+              ),
+              decoration: InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                contentPadding: const EdgeInsets.symmetric(vertical: KvSpace.m),
+                hintText: hint,
+                hintStyle: TextStyle(
+                  fontFamily: mono ? KvFont.mono : KvFont.ui,
+                  fontSize: 15,
+                  height: 20 / 15,
+                  fontWeight: FontWeight.w400,
+                  fontVariations: KvWeight.w400,
+                  color: KvColor.inkMeta,
+                ),
+              ),
+            ),
+          ),
+          if (suffix != null)
+            Text(
+              suffix,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 20 / 15,
+                fontWeight: FontWeight.w500,
+                fontVariations: KvWeight.w500,
+                color: KvColor.inkDim,
+              ),
+            ),
         ],
       ),
     );
