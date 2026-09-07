@@ -46,6 +46,28 @@ class WalletService {
   final ValueNotifier<BigInt?> pending = ValueNotifier(null);
   final ValueNotifier<BigInt?> outgoing = ValueNotifier(null);
 
+  /// **THE seam every surface that prints a balance listens to** — bumped once
+  /// per snapshot in which anything that can move a figure moved.
+  ///
+  /// **The rule, founder-set on glass 2026-09-07:** *"every screen where
+  /// balance is shown gets updated the instant a fund comes in."* A screen that
+  /// draws money subscribes here; it does not pick one of the three balances
+  /// below and hope.
+  ///
+  /// It exists because picking one is exactly what went wrong. `T4`'s address
+  /// list listened to [mature] alone, and a `ValueNotifier` only fires when its
+  /// value CHANGES — so a deposit landing in the maturity hold moves [pending]
+  /// and nothing else, the list never re-read, and the row sat on a stale
+  /// figure until the screen was left and re-entered. His words: *"when a
+  /// transaction comes in and im there, it doesnt detect it fast, and it gets
+  /// stuck on saying pending in amber. it is when i go back and click on wallet
+  /// again that i see the pending gone."*
+  ///
+  /// **A counter, not a merge.** `Listenable.merge` over the three would fire up
+  /// to three times for one snapshot, and every listener here answers by making
+  /// an FFI call. This bumps once, after the whole snapshot is applied.
+  final ValueNotifier<int> coins = ValueNotifier(0);
+
   /// Newest-first activity rows (public chain data; §0.10).
   final ValueNotifier<List<ActivityRecord>> activity = ValueNotifier(const []);
 
@@ -253,11 +275,22 @@ class WalletService {
     discoveryIncomplete.value = snapshot.discoveryIncomplete;
     // The snapshot is cumulative — the Rust fold retains balances across events,
     // so a value never regresses to null once seen. Assign directly.
+    //
+    // **Read the three BEFORE assigning**, so [coins] can bump on the whole
+    // snapshot rather than on each field: three notifications for one arrival
+    // would be three FFI calls from every listener.
+    final moved =
+        mature.value != snapshot.matureSompi ||
+        pending.value != snapshot.pendingSompi ||
+        outgoing.value != snapshot.outgoingSompi;
     mature.value = snapshot.matureSompi;
     pending.value = snapshot.pendingSompi;
     outgoing.value = snapshot.outgoingSompi;
     activity.value = snapshot.activity;
     error.value = snapshot.error;
+    // Bumped LAST, so a listener that reads the notifiers in its callback sees
+    // the whole snapshot and never half of one.
+    if (moved) coins.value++;
     // Freshness clock: a connected snapshot bearing a real balance is fresh.
     if (snapshot.connected && snapshot.matureSompi != null) {
       lastUpdate.value = DateTime.now();

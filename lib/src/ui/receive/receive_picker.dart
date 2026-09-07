@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../rust/api/wallet.dart' show WalletAddressDto;
+import '../address_order.dart';
 import '../address_text.dart';
 import '../error_text.dart';
 import '../format.dart';
@@ -23,38 +26,29 @@ import '../widgets/kv_sheet.dart';
 /// which string they scan. Nothing here can lose money — that is what the
 /// sheet's own first sentence says, and it is why this surface has no warning.
 ///
-/// ## What `FRESH` means, and what it deliberately does not
+/// ## What `FRESH` means
 ///
-/// The approved render splits the list into `FRESH · never seen on the chain`
-/// and `USED · has received before`, and gives every used row a `14 received ·
-/// last 3 Sep` history line. **Neither claim can be made offline**, so neither
-/// is made here.
+/// **An address with nothing in it.** Founder's ruling on glass, 2026-09-07:
+/// *"'fresh' address simply mean an address with zero balance."* `USED` is the
+/// complement — it is holding coins, or something is on its way to it.
 ///
-/// A Kaspa node is a UTXO-state machine: it answers *what does this address
-/// hold right now* and nothing else. History lives in indexers and INV-8
-/// forbids trusting one, which `kaspaverse_chain::discovery` explains at length
-/// — it is the same fact that makes address discovery balance-driven. So a
-/// mature balance of zero is equally **never seen** and **used and swept**, and
-/// no field crossing the bridge can tell them apart.
+/// It replaced a narrower claim that was true and awkward. The approved render
+/// says `FRESH · never seen on the chain` and gives every used row a
+/// `14 received · last 3 Sep` line; **neither can be answered offline**, because
+/// a Kaspa node is a UTXO-state machine (`RpcApi` @ `cfafeb4` has no
+/// address-history call at all) and INV-8 forbids asking an indexer. The first
+/// build therefore said *"not handed out from this phone"*, over a record the
+/// app wrote whenever it displayed an address — true, but scoped to one handset
+/// and needing a sentence to explain itself.
 ///
-/// What the wallet *can* answer, outright and about itself, is whether **this
-/// phone has put an address in front of someone** — the Receive screen records
-/// each address it displays (`vault`'s `receive.given`, D-293). That is the
-/// split this sheet draws, and every word on it is scoped to it:
+/// Balance is better on every axis: the node answers it, a restored wallet gets
+/// the same answer as the one that earned the coins, and it needs no local
+/// state at all. The handout record and its FFI seam were **removed** with it
+/// (D-295) rather than left as a field nothing reads. [AddressOrder] holds the
+/// rule, because `T4`'s list obeys it too.
 ///
-/// | | says | true because |
-/// |:--|:--|:--|
-/// | `FRESH` | not handed out from this phone | this app wrote the record |
-/// | `USED` | handed out, or holding coins | the record, or the node's own UTXO set |
-///
-/// The bound is real and stated rather than hidden: a wallet **restored** onto
-/// a new phone starts with an empty record, so addresses used on the old one
-/// read as fresh until something arrives at them. The group's own sub-label is
-/// where that is said — *from this phone*, not *never* — because a header that
-/// defines its term is worth more than a paragraph nobody reads.
-///
-/// A coin count replaces the render's `14 received`: what is HERE is checkable
-/// against the node, where what once arrived is not.
+/// A coin count replaces the render's `14 received` for the same reason: what
+/// is HERE is checkable, what once arrived is not.
 class ReceivePicker extends StatefulWidget {
   const ReceivePicker({
     required this.addresses,
@@ -107,18 +101,9 @@ class ReceivePicker extends StatefulWidget {
     ),
   );
 
-  /// Has this address been handed out, or does the chain say it holds
-  /// something? Either answer puts it under `USED`.
-  ///
-  /// The chain half is what keeps a **restored** wallet honest: its handout
-  /// record is empty, but an address holding coins has plainly received them,
-  /// and filing that under "fresh" would be the one reading this sheet must
-  /// never produce.
-  static bool isUsed(WalletAddressDto a) =>
-      a.givenOut ||
-      a.balanceSompi > BigInt.zero ||
-      a.lockedSompi > BigInt.zero ||
-      a.settling;
+  /// Holding something, so it is `USED`. The law is [AddressOrder]'s, stated
+  /// once and obeyed by every surface that draws these rows.
+  static bool isUsed(WalletAddressDto a) => AddressOrder.holdsSomething(a);
 
   /// `Main` for the wallet's default, `Receive 05` for the rest — zero-padded,
   /// as `T4` prints it, because the index is a slot in a derivation path and a
@@ -146,9 +131,7 @@ class ReceivePicker extends StatefulWidget {
     }
     return ReceiveCaption(
       state: state,
-      words: a.settling
-          ? 'something on its way'
-          : (isUsed(a) ? 'nothing here now' : 'not handed out yet'),
+      words: a.settling ? 'something on its way' : 'zero balance',
     );
   }
 
@@ -158,7 +141,17 @@ class ReceivePicker extends StatefulWidget {
 
 class _ReceivePickerState extends State<ReceivePicker> {
   late Future<List<WalletAddressDto>> _addresses = widget.addresses();
-  bool _allFresh = false;
+
+  /// The fresh card's reading level. Held here, not inside the scope, because
+  /// `Show` reaches it from outside the card — the same arrangement `T4`'s
+  /// `All` and the home feed use.
+  final _fresh = KvReadingController();
+
+  @override
+  void dispose() {
+    _fresh.dispose();
+    super.dispose();
+  }
 
   void _retry() {
     final next = widget.addresses();
@@ -216,11 +209,7 @@ class _ReceivePickerState extends State<ReceivePicker> {
                   return _Groups(
                     addresses: list,
                     selected: widget.selected,
-                    allFresh: _allFresh,
-                    onShowAllFresh: () {
-                      KvHaptic.selection();
-                      setState(() => _allFresh = true);
-                    },
+                    fresh: _fresh,
                     onChoose: _choose,
                   );
                 },
@@ -240,74 +229,118 @@ class _Groups extends StatelessWidget {
   const _Groups({
     required this.addresses,
     required this.selected,
-    required this.allFresh,
-    required this.onShowAllFresh,
+    required this.fresh,
     required this.onChoose,
   });
 
   final List<WalletAddressDto> addresses;
   final int selected;
-  final bool allFresh;
-  final VoidCallback onShowAllFresh;
+  final KvReadingController fresh;
   final void Function(WalletAddressDto) onChoose;
+
+  /// The fresh card at rest — four and a half rows, so the half row says there
+  /// is more without a control having to. `T4`'s own number.
+  static const double restCap = KvRow.height * 4.5;
 
   @override
   Widget build(BuildContext context) {
-    final used = addresses.where(ReceivePicker.isUsed).toList(growable: false);
-    final fresh = addresses
+    final ordered = AddressOrder.sorted(addresses);
+    final used = ordered.where(ReceivePicker.isUsed).toList(growable: false);
+    final freshRows = ordered
         .where(
           (a) =>
               !ReceivePicker.isUsed(a) && a.index < ReceivePicker.deepestOffer,
         )
         .toList(growable: false);
-    // Index order in both, which is the order a derivation path has and the
-    // order `T4` already prints. The render sorts its used group by last
-    // receipt — a date this wallet cannot know (see the class doc).
-    final freshShown = allFresh
-        ? fresh
-        : fresh.take(ReceivePicker.freshPreview).toList(growable: false);
-    final foldedAway = fresh.length - freshShown.length;
+    // Index order within each group — a derivation slot, and the order `T4`
+    // prints. The render sorts its used group by last receipt, a date this
+    // wallet cannot know (see the class doc).
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (fresh.isNotEmpty) ...[
-          const KvSectionHeader(
-            'FRESH',
-            gloss: 'not handed out from this phone',
-          ),
-          _Card(
-            rows: [
-              for (final a in freshShown)
-                _AddressRow(
-                  address: a,
-                  selected: a.index == selected,
-                  onTap: () => onChoose(a),
+        if (freshRows.isNotEmpty) ...[
+          const KvSectionHeader('FRESH', gloss: 'zero balance'),
+          // **The reading room, exactly as `T4`'s `All` uses it** (D-289) —
+          // founder, on glass 2026-09-07: *"clicking on 'show' literally does
+          // what 'All' does in wallet settings, where it pushes used below a
+          // little, and user can scroll it and scrolling back the opposite way
+          // snaps it back to position. this should happen on scroll too."*
+          //
+          // So `Show` is not a filter any more: every fresh address is already
+          // in this list, and the control asks for ROOM rather than for rows.
+          // The gesture and the motion are the shared part's; this card states
+          // only its two caps.
+          //
+          // **The container is OUTSIDE the cap**, as `T4` has it. Inside, its
+          // `Column` hands the list unbounded height and a `shrinkWrap` list
+          // takes all of it — 438 dp past the sheet, in a card whose whole job
+          // is to be capped.
+          KvReadingScope(
+            controller: fresh,
+            builder: (context, reading) => KvRowContainer(
+              ground: KvColor.chip,
+              divided: false,
+              children: [
+                KvExpands(
+                  rest: restCap,
+                  reading: _readingCap(context),
+                  child: KvScrollEdge(
+                    ground: KvColor.chip,
+                    child: KvReadingArea(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        padding: EdgeInsets.zero,
+                        // Below the cap nothing scrolls, so the sheet's own
+                        // scroll keeps working over the card; at the cap this
+                        // list takes the drag.
+                        physics: const ClampingScrollPhysics(),
+                        itemCount: freshRows.length,
+                        itemBuilder: (context, i) => Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (i > 0) const KvHairline(),
+                            _AddressRow(
+                              address: freshRows[i],
+                              selected: freshRows[i].index == selected,
+                              onTap: () => onChoose(freshRows[i]),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
-            ],
-            // The opener is the card's footer, not the list's last row — `T4`
-            // learned that one in a preview frame at 320 dp / 1.3×, where a
-            // control inside the scroll went below the fold exactly when it
-            // was needed.
-            footer: foldedAway > 0
-                ? KvFoldRow(
-                    figure: foldedAway,
-                    words: foldedAway == 1
-                        ? ' more fresh address'
-                        : ' more fresh addresses',
+                // The opener is the card's FOOTER, not the list's last row —
+                // inside the scroll it is the one thing a clipped list hides,
+                // which `T4` found in a frame at 320 dp / 1.3×.
+                if (freshRows.length > _restRows &&
+                    !reading.value.reaches(KvReadingLevel.full)) ...[
+                  const KvHairline(),
+                  KvFoldRow(
+                    figure: freshRows.length,
+                    words: freshRows.length == 1
+                        ? ' address with zero balance'
+                        : ' addresses with zero balance',
                     semanticLabel:
-                        'Show $foldedAway more fresh '
-                        '${foldedAway == 1 ? 'address' : 'addresses'}',
+                        'Show all ${freshRows.length} addresses with zero '
+                        'balance',
                     // `inkMeta` measures 4.30 on `chip` — BG-14's one standing
                     // prohibition, and this card is on `chip`.
                     tone: KvColor.inkDim,
-                    onTap: onShowAllFresh,
-                  )
-                : null,
+                    onTap: () {
+                      KvHaptic.selection();
+                      reading.openFully();
+                    },
+                  ),
+                ],
+              ],
+            ),
           ),
         ],
         if (used.isNotEmpty) ...[
-          const KvSectionHeader('USED', gloss: 'handed out, or holding coins'),
+          const KvSectionHeader('USED', gloss: 'holding coins'),
           _Card(
             rows: [
               for (final a in used)
@@ -322,14 +355,23 @@ class _Groups extends StatelessWidget {
       ],
     );
   }
+
+  /// Rows the resting cap shows whole.
+  static const int _restRows = 4;
+
+  /// The cap while it is being read: most of the sheet, so the fresh list has
+  /// somewhere to grow into and `USED` is pushed down rather than replaced.
+  static double _readingCap(BuildContext context) => math.max(
+    restCap,
+    MediaQuery.sizeOf(context).height * KvSheet.maxHeightFraction * 0.62,
+  );
 }
 
 /// One group's card: rows on the sheet's inner ground, ruled between.
 class _Card extends StatelessWidget {
-  const _Card({required this.rows, this.footer});
+  const _Card({required this.rows});
 
   final List<Widget> rows;
-  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -345,7 +387,6 @@ class _Card extends StatelessWidget {
           if (i > 0) const KvHairline(),
           rows[i],
         ],
-        if (footer case final footer?) ...[const KvHairline(), footer],
       ],
     );
   }
@@ -373,7 +414,7 @@ class _AddressRow extends StatelessWidget {
     // read out to the one user who cannot check it.
     final spoken = [
       label,
-      used ? 'used' : 'fresh',
+      used ? 'used' : 'zero balance',
       if (a.balanceSompi > BigInt.zero) '${kasSpoken(a.balanceSompi)} KAS',
       if (a.lockedSompi > BigInt.zero) '${kasSpoken(a.lockedSompi)} KAS locked',
       if (selected) 'showing now',
@@ -417,9 +458,13 @@ class _AddressRow extends StatelessWidget {
       ),
       // `Locked` wins the slot when both apply: a coin the wallet will never
       // move is a harder fact than one merely on its way.
+      // **`Accepted`, not `Pending`** (founder, on glass 2026-09-07: *"no
+      // pending, just Accepted and Settled after 100 blocks"*). The DAG has
+      // the coin; the wallet cannot spend it for 100 more blocks. `Pending`
+      // said the first half was in doubt when only the second is.
       trailingMeta: a.lockedSompi > BigInt.zero
           ? const KvRowMeta('Locked')
-          : (a.settling ? const KvRowMeta('Pending') : null),
+          : (a.settling ? const KvRowMeta('Accepted') : null),
       semanticLabel: spoken,
       onTap: onTap,
     );
@@ -514,6 +559,10 @@ class ReceiveCaption {
   /// word — the render draws one, and it is the same mark the sheet seats
   /// beside every fresh row.
   bool get fresh => state == 'Fresh';
+
+  /// True when the state is the wallet's default address, which is drawn as the
+  /// green `KvDefaultChip` rather than as a word.
+  bool get isDefault => state == 'Default';
 
   /// One line, for a screen reader and for a test.
   String get spoken =>

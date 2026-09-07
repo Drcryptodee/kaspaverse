@@ -180,13 +180,17 @@ class _Orb extends StatelessWidget {
           boxShadow: halo ? KvMark.orbHalo(size, t: t) : const [],
         ),
         alignment: Alignment.center,
-        // The artwork's ink is `plate`, not `abyss` — the Deep ground rather
-        // than black, and it is what the SVG paints.
+        // **`abyss`, the Deep ground** — founder's ruling on glass
+        // 2026-09-07: *"let the strokes also use that color … the ground
+        // #0a0d0d color should be law for every deep cos the teal comes out
+        // well against it."* The artwork paints `plate` (#121717); this is
+        // four values darker and it is the one place the picture gives way, on
+        // his word rather than on ours.
         child: _Glyph(
           size: size,
           glyphBox: glyphBox,
           units: units,
-          ink: KvColor.plate,
+          ink: KvColor.abyss,
         ),
       ),
     );

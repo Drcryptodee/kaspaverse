@@ -124,7 +124,18 @@ class KvQrFrame extends StatelessWidget {
   /// The tile's largest side. It takes the width it is given up to this, and is
   /// square by construction — so the floor geometry narrows it instead of
   /// overflowing, and no widget below the root reads a width (BG-33).
-  static const double maxSide = 256;
+  ///
+  /// **300, where it was 256** — founder, on glass 2026-09-07: *"increase the
+  /// size of the QR code in the white background, expand it so its closer to
+  /// all 4 corners."* The lever is the TILE, not the margin: the quiet zone
+  /// stays four modules because that is a scanner's requirement and not a taste
+  /// (see [KvQr.quietModules]), so the way to make the code bigger is to give
+  /// it more tile. At the 393 dp reference the card's inner width is 299 —
+  /// 393 less two 25 dp gutters and two 22 dp card insets — so the tile now
+  /// fills the card edge to edge and the code itself grows about **17 %**. Past
+  /// that the cap holds: `KvColumn` clamps the column at 560, and a 500 dp QR
+  /// is a poster, not an address.
+  static const double maxSide = 300;
 
   @override
   Widget build(BuildContext context) {

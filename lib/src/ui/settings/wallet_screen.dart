@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../rust/api/send.dart' show ConsolidateEstimateDto;
 import '../../rust/api/wallet.dart' show DeepScanReport, WalletAddressDto;
+import '../address_order.dart';
 import '../address_text.dart';
 import '../error_text.dart';
 import '../format.dart';
@@ -119,6 +120,10 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _addressesFailed = false;
   bool _readingAddresses = false;
 
+  /// Coins moved while a read was in flight — run it again when this one
+  /// lands, rather than answering with what the wallet held a moment ago.
+  bool _addressesStale = false;
+
   /// `All` and `Show` are the same fact, so they are the same field.
   bool _showAll = false;
 
@@ -172,23 +177,39 @@ class _WalletScreenState extends State<WalletScreen> {
   /// one address the wallet can always answer for.
   Future<void> _readAddresses() async {
     final list = widget.scope.listAddresses;
-    // One at a time: the notifier can fire twice inside one settle, and two
-    // derivations of the same window racing to `setState` is two answers for
-    // one question.
-    if (list == null || _readingAddresses) return;
+    if (list == null) return;
+    // **One at a time, but the newer ask is QUEUED, never dropped.**
+    //
+    // It used to `return` while a read was in flight, which reads as caution
+    // and is the bug the founder found on glass (2026-09-07): *"when a
+    // transaction comes in and im there, it doesnt detect it fast, and it gets
+    // stuck on saying pending in amber. it is when i go back and click on
+    // wallet again that i see the pending gone."* A deposit fires two events in
+    // quick succession — the balance and the record — and the second, which
+    // carries the newer state, landed inside the first read's window and was
+    // thrown away. The screen then held the OLDER answer until something else
+    // asked. A guard that drops the newer request pins the older answer, which
+    // is the opposite of what a guard is for.
+    if (_readingAddresses) {
+      _addressesStale = true;
+      return;
+    }
     _readingAddresses = true;
     try {
-      final addresses = await list();
-      if (mounted) {
+      do {
+        _addressesStale = false;
+        final addresses = await list();
+        if (!mounted) return;
         setState(() {
           _addresses = addresses;
           _addressesFailed = false;
         });
-      }
+      } while (_addressesStale);
     } catch (_) {
       if (mounted) setState(() => _addressesFailed = true);
     } finally {
       _readingAddresses = false;
+      _addressesStale = false;
     }
   }
 
@@ -266,11 +287,16 @@ class _WalletScreenState extends State<WalletScreen> {
         // "Nothing new" is the wallet in its BEST state and must not read
         // like a failure — most taps land here, on a wallet that was already
         // complete.
+        // **The WINDOW, not the two marks.** It printed
+        // `receiveSeen + changeSeen` — the sum of two high-water indices — in a
+        // sentence about how many addresses are watched, so it disagreed with
+        // the list directly beside it (founder, on glass 2026-09-07: *"it shows
+        // currently that i have about 117 addresses … but here it says 53 more
+        // fresh addresses"*). Two quantities under one word, which is L86.
+        final watching = report.receiveWatched + report.changeWatched;
         _scanOutcome = report.widened
-            ? 'Found more addresses — watching '
-                  '${report.receiveSeen + report.changeSeen}'
-            : 'Nothing new found — watching '
-                  '${report.receiveSeen + report.changeSeen}';
+            ? 'Found more addresses — watching $watching'
+            : 'Nothing new found — watching $watching';
       });
     } catch (_) {
       // Our own words, never the platform's. Never a silent "done": a scan
@@ -483,7 +509,7 @@ class _WalletScreenState extends State<WalletScreen> {
   /// mid-deposit filed under "empty addresses hidden" is money the wallet has
   /// hidden from its owner.
   static bool _hasSomething(WalletAddressDto a) =>
-      a.balanceSompi > BigInt.zero || a.lockedSompi > BigInt.zero || a.settling;
+      AddressOrder.holdsSomething(a);
 
   Widget _addressCard() {
     final addresses = _addresses;
@@ -516,10 +542,16 @@ class _WalletScreenState extends State<WalletScreen> {
       );
     }
 
+    // **Money first, then index** — the law, stated once in `AddressOrder` and
+    // obeyed by every surface that draws these rows (founder, on glass
+    // 2026-09-07: *"the ones with balance float against the ones with zero
+    // balance"*). It has to run over the WHOLE list, not the filtered one, or
+    // `All` would show funded rows scattered through the empties.
+    final ordered = AddressOrder.sorted(addresses);
     final shown = _showAll
-        ? addresses
-        : addresses.where(_hasSomething).toList(growable: false);
-    final hidden = addresses.length - shown.length;
+        ? ordered
+        : ordered.where(_hasSomething).toList(growable: false);
+    final hidden = ordered.length - shown.length;
 
     return KvRowContainer(
       // The rows live in their own scroll view, so the rules between them
@@ -586,7 +618,7 @@ class _WalletScreenState extends State<WalletScreen> {
     final spoken = a.balanceSompi > BigInt.zero
         ? '$label, ${kasSpoken(a.balanceSompi)} KAS$locked'
         : (a.settling
-              ? '$label, pending$locked'
+              ? '$label, accepted, not yet spendable$locked'
               : (locked.isEmpty ? '$label, empty' : '$label$locked'));
     return KvRow(
       title: label,
@@ -616,9 +648,13 @@ class _WalletScreenState extends State<WalletScreen> {
       // BG-7's amber: not yet certain. Never `ok` — nothing has settled.
       // `Locked` wins the slot when both apply: a coin the wallet will never
       // move is a harder fact than one that is merely on its way.
+      // **`Accepted`, not `Pending`** (founder, on glass 2026-09-07: *"no
+      // pending, just Accepted and Settled after 100 blocks"*). The DAG has the
+      // coin and the wallet cannot spend it yet; `Pending` put the first half
+      // in doubt when only the second is.
       trailingMeta: a.lockedSompi > BigInt.zero
           ? const KvRowMeta('Locked')
-          : (a.settling ? const KvRowMeta('Pending') : null),
+          : (a.settling ? const KvRowMeta('Accepted') : null),
       semanticLabel: spoken,
       onTap: widget.scope.receiveRoute == null
           ? null

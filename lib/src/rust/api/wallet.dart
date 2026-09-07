@@ -81,23 +81,6 @@ Future<DeepScanReport> deepScan() =>
 Future<List<WalletAddressDto>> listAddresses() =>
     RustLib.instance.api.crateApiWalletListAddresses();
 
-/// Record that the Receive screen has **displayed** `index`'s address, so the
-/// picker can tell an address this phone has handed out from one it has not.
-///
-/// Called on display rather than on copy or share: a QR on a screen is the
-/// commonest way an address is given away and no tap of ours precedes a camera.
-/// See `vault::mark_receive_given` for the one-way trade that follows, and
-/// [`WalletAddressDto::given_out`] for why this local fact is the only honest
-/// answer available — the chain question ("has anything ever arrived here")
-/// cannot be asked of a node, and INV-8 forbids asking an indexer.
-///
-/// Never fails the caller's screen: a wallet whose directory is not writable
-/// still shows the address. The error is returned so the caller can log it, and
-/// `main.dart` does exactly that rather than putting a file-system fault in
-/// front of someone waiting to be paid.
-Future<void> noteAddressGiven({required int index}) =>
-    RustLib.instance.api.crateApiWalletNoteAddressGiven(index: index);
-
 /// Read the pin's maturity thresholds for this wallet's network.
 ///
 /// Synchronous and I/O-free by construction (the library answers from its own
@@ -223,6 +206,22 @@ class DeepScanReport {
   final int receiveSeen;
   final int changeSeen;
 
+  /// Addresses the wallet now WATCHES on each branch — `mark + GAP_LIMIT`,
+  /// floored at `GAP_LIMIT`, which is what [`wallet_window`] hands the sync
+  /// engine and the signer.
+  ///
+  /// **Distinct from the marks above, and the control has to print these.**
+  /// A mark is *the highest index funds were ever found at, plus one*; a
+  /// window is *how many addresses are being looked at*. `T4`'s scan row said
+  /// "watching `receive_seen + change_seen`" — the sum of two high-water
+  /// marks, in a sentence about how many addresses exist — so it disagreed
+  /// with the receive list beside it, which draws the receive WINDOW. Two
+  /// quantities under one word, which is the L86 scar exactly (founder, on
+  /// glass 2026-09-07: *"it shows currently that i have about 117 addresses …
+  /// but here it says 53 more fresh addresses"*).
+  final int receiveWatched;
+  final int changeWatched;
+
   /// The watch/sign window actually grew — the wallet now sees more than it did
   /// before the tap. `false` is the ordinary, *successful* "nothing new out
   /// there", and the control must say so rather than implying a failure.
@@ -232,6 +231,8 @@ class DeepScanReport {
     required this.depth,
     required this.receiveSeen,
     required this.changeSeen,
+    required this.receiveWatched,
+    required this.changeWatched,
     required this.widened,
   });
 
@@ -240,6 +241,8 @@ class DeepScanReport {
       depth.hashCode ^
       receiveSeen.hashCode ^
       changeSeen.hashCode ^
+      receiveWatched.hashCode ^
+      changeWatched.hashCode ^
       widened.hashCode;
 
   @override
@@ -250,6 +253,8 @@ class DeepScanReport {
           depth == other.depth &&
           receiveSeen == other.receiveSeen &&
           changeSeen == other.changeSeen &&
+          receiveWatched == other.receiveWatched &&
+          changeWatched == other.changeWatched &&
           widened == other.widened;
 }
 
@@ -332,21 +337,6 @@ class WalletAddressDto {
   /// [`list_addresses`] on why the second question has no offline answer).
   final int coinCount;
 
-  /// **This install has put this address in front of someone** — the Receive
-  /// screen has displayed it, so its QR has been on a screen a camera could
-  /// read.
-  ///
-  /// The narrow, true version of *fresh vs used*. A node answers what an
-  /// address HOLDS, never what it once received, and INV-8 forbids asking an
-  /// indexer instead — so a zero balance is equally *never seen* and *used
-  /// and swept*, and no field here can say which. This one claims something
-  /// this app owns outright and can never be wrong about in the direction
-  /// that matters: it says the address was handed out, and a surface may
-  /// therefore say an address was NOT handed out **from this phone** —
-  /// never that the chain has not seen it. Backed by `vault`'s
-  /// `receive.given` (D-293).
-  final bool givenOut;
-
   const WalletAddressDto({
     required this.index,
     required this.address,
@@ -354,7 +344,6 @@ class WalletAddressDto {
     required this.lockedSompi,
     required this.settling,
     required this.coinCount,
-    required this.givenOut,
   });
 
   @override
@@ -364,8 +353,7 @@ class WalletAddressDto {
       balanceSompi.hashCode ^
       lockedSompi.hashCode ^
       settling.hashCode ^
-      coinCount.hashCode ^
-      givenOut.hashCode;
+      coinCount.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -377,8 +365,7 @@ class WalletAddressDto {
           balanceSompi == other.balanceSompi &&
           lockedSompi == other.lockedSompi &&
           settling == other.settling &&
-          coinCount == other.coinCount &&
-          givenOut == other.givenOut;
+          coinCount == other.coinCount;
 }
 
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI

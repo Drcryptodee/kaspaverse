@@ -7,7 +7,7 @@ import 'package:kaspaverse/src/rust/api/send.dart'
 import 'package:kaspaverse/src/rust/api/transport.dart' show txAcceptanceStatus;
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/api/wallet.dart'
-    show deepScan, listAddresses, maturityThresholds, noteAddressGiven;
+    show deepScan, listAddresses, maturityThresholds;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/contacts_service.dart';
@@ -236,19 +236,9 @@ Widget _receiveScreen({
   fetch: address,
   index: index,
   addresses: listAddresses,
-  // **Displaying an address is handing it out** — the picker's whole notion of
-  // *fresh* rests on this line, and nothing else writes that record.
-  //
-  // Fire-and-forget, and the failure is a log: the wallet directory being
-  // unwritable is a real fault, but it is not one to put in front of somebody
-  // holding a QR up to a camera. The cost of the miss is that an address which
-  // has been handed out still reads as fresh — the picker knowing less, never
-  // the address being wrong.
-  onGivenOut: (i) => unawaited(
-    Future<void>(() => noteAddressGiven(index: i)).catchError(
-      (Object e) => debugPrint('receive: could not record handout of $i: $e'),
-    ),
-  ),
+  // The rule (D-295): a screen that prints money re-reads the instant money
+  // moves. The line under the pill counts coins, so this is one of them.
+  coinsChanged: WalletService.instance.coins,
   share: VaultService.instance.shareText,
 );
 
@@ -261,7 +251,7 @@ WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
         receiveAddress: vaultReceiveAddress,
         deepScan: deepScan,
         listAddresses: listAddresses,
-        coinsChanged: WalletService.instance.mature,
+        coinsChanged: WalletService.instance.coins,
         // The list hands over the address it drew, so the QR is always the row
         // the user tapped — never a re-derivation that could answer with a
         // different one. The index rides along: Receive names the address from

@@ -7,6 +7,9 @@ import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_qr.dart';
+import 'package:kaspaverse/src/ui/address_order.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_reading.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/receive/receive_picker.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart' show WalletAddressDto;
@@ -287,6 +290,10 @@ void main() {
         );
 
         // BG-11: an error that does not say what to do is not an error message.
+        // The tile is 300 now, so on the 800x600 default surface the control
+        // sits below the fold — scroll to it the way a thumb would.
+        await tester.ensureVisible(find.text('Try again'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('Try again'));
         await tester.pumpAndSettle();
         expect(attempts, 2);
@@ -387,9 +394,10 @@ void main() {
 
   /// `funded` maps index → sompi; `given` are the indices this phone has
   /// already shown. Everything else is fresh and empty.
+  /// `funded` maps index → sompi; `settling` names indices with something on
+  /// the way. Everything else has a zero balance and is therefore FRESH.
   List<WalletAddressDto> rowsFor({
     Map<int, int> funded = const {},
-    Set<int> given = const {},
     Set<int> settling = const {},
     int count = 12,
   }) => [
@@ -404,40 +412,62 @@ void main() {
         lockedSompi: BigInt.zero,
         settling: settling.contains(i),
         coinCount: funded.containsKey(i) ? 1 : 0,
-        givenOut: given.contains(i),
       ),
   ];
 
+  // ── The picker (UX-R4b, re-scoped at D-295) ────────────────────────────
+  //
+  // **`FRESH` is an address with a zero balance**, and nothing more subtle.
+  // It was "not handed out from this phone" for one sitting, over a record the
+  // app wrote when it displayed an address; the founder replaced it on glass
+  // and the record went with it. Balance is answerable from the node, says the
+  // same thing on a restored wallet, and needs no local state at all.
+
   group('the receive picker', () {
     test('what puts an address under USED, and what does not', () {
-      final rows = rowsFor(funded: {0: 2772000000}, given: {3}, settling: {7});
-      // Handed out from this phone, with nothing in it — the case the whole
-      // record exists for, and the one a balance can never answer.
-      expect(ReceivePicker.isUsed(rows[3]), isTrue);
-      // Holds coins but was never handed out FROM HERE: a restored wallet's
-      // shape, and filing it under fresh is the one reading this must never
-      // produce.
+      final rows = rowsFor(funded: {0: 2772000000}, settling: {7});
+      // Holding coins.
       expect(ReceivePicker.isUsed(rows[0]), isTrue);
-      // Empty now, but something is on its way.
+      // Empty now, but something is on its way — money the wallet must not
+      // file under "nothing here" (the L92 scar).
       expect(ReceivePicker.isUsed(rows[7]), isTrue);
       // Everything else.
+      expect(ReceivePicker.isUsed(rows[3]), isFalse);
       expect(ReceivePicker.isUsed(rows[5]), isFalse);
+      // And the law is `AddressOrder`'s, so the two cannot drift apart.
+      for (final row in rows) {
+        expect(ReceivePicker.isUsed(row), AddressOrder.holdsSomething(row));
+      }
+    });
+
+    test('money floats above zero balances, index order within each', () {
+      final rows = rowsFor(funded: {2: 40000000, 9: 100}, settling: {5});
+      final order = AddressOrder.sorted(rows).map((a) => a.index).toList();
+      expect(
+        order.take(3),
+        [2, 5, 9],
+        reason:
+            'the ones with balance float against the ones with zero '
+            '(founder, on glass 2026-09-07) — settling counts as balance',
+      );
+      expect(order.skip(3), [0, 1, 3, 4, 6, 7, 8, 10, 11]);
     });
 
     test('the caption states one checkable fact, never a history', () {
-      final rows = rowsFor(funded: {0: 2772000000, 2: 40000000}, given: {3});
+      final rows = rowsFor(funded: {0: 2772000000, 2: 40000000}, settling: {3});
       expect(ReceivePicker.captionFor(rows[0]).spoken, 'Default · 1 coin here');
       expect(ReceivePicker.captionFor(rows[2]).spoken, 'Used · 1 coin here');
       expect(
         ReceivePicker.captionFor(rows[3]).spoken,
-        'Used · nothing here now',
+        'Used · something on its way',
       );
       expect(
         ReceivePicker.captionFor(rows[5]).spoken,
-        'Fresh · not handed out yet',
+        'Fresh · zero balance',
         reason: 'never "never seen on the chain" — nothing here can know that',
       );
       expect(ReceivePicker.captionFor(rows[5]).fresh, isTrue);
+      expect(ReceivePicker.captionFor(rows[0]).isDefault, isTrue);
     });
 
     testWidgets('no address seam ⇒ the caps label, and no dead control', (
@@ -464,86 +494,53 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Main'), findsOneWidget);
       expect(find.text('YOUR ADDRESS'), findsNothing);
-      // The caption is one `Text.rich`, so read it off the semantics the pill
-      // publishes rather than by hunting for split spans.
+      // The caption is one `Text.rich` with a chip inside it, so read it off
+      // the semantics the pill publishes rather than hunting for split spans.
+      expect(
+        find.bySemanticsLabel('Main, Default · 1 coin here. Change address'),
+        findsOneWidget,
+      );
+      // And `Default` is the green badge, not a word in the sentence — the
+      // same object the row beside `Main` wears (founder, on glass).
+      expect(find.byType(KvDefaultChip), findsOneWidget);
+    });
+
+    testWidgets('a coin arriving re-reads the caption where it stands', (
+      tester,
+    ) async {
+      // **The rule (D-295): a screen that prints money re-reads the instant
+      // money moves.** The founder found the opposite on glass — a deposit
+      // landed, the figure did not move, and only leaving the screen and
+      // coming back showed it.
+      final coins = ValueNotifier(0);
+      addTearDown(coins.dispose);
+      var reads = 0;
+      await tester.pumpWidget(
+        _host(
+          ReceiveScreen(
+            fetch: () async => _addr,
+            coinsChanged: coins,
+            addresses: () async {
+              reads++;
+              return rowsFor(funded: reads == 1 ? {} : {0: 2772000000});
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('Main, Default · zero balance. Change address'),
+        findsOneWidget,
+      );
+
+      coins.value++;
+      await tester.pumpAndSettle();
+      expect(reads, 2, reason: 'a coin move re-reads');
       expect(
         find.bySemanticsLabel('Main, Default · 1 coin here. Change address'),
         findsOneWidget,
       );
     });
-
-    testWidgets('displaying an address records the handout — ONCE, and after '
-        'the caption has been read', (tester) async {
-      final given = <int>[];
-      await tester.pumpWidget(
-        _host(
-          ReceiveScreen(
-            fetch: () async => _addr,
-            index: 4,
-            addresses: () async => rowsFor(),
-            onGivenOut: given.add,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(given, [4], reason: 'shown once, recorded once');
-      // **The ordering is the point.** Index 4 was fresh when the sheet listed
-      // it, and the caption must say so — a screen that recorded the handout
-      // first would describe an address as used in the same breath as showing
-      // it for the first time, which is useless to the person deciding
-      // whether to give it away.
-      expect(
-        find.bySemanticsLabel(
-          'Receive 04, Fresh · not handed out yet. Change address',
-        ),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets(
-      'no seam still records the handout — the QR is still on screen',
-      (tester) async {
-        final given = <int>[];
-        await tester.pumpWidget(
-          _host(
-            ReceiveScreen(
-              fetch: () async => _addr,
-              index: 2,
-              onGivenOut: given.add,
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(given, [2]);
-      },
-    );
-
-    testWidgets(
-      'a list that never answers still gets the handout written down',
-      (tester) async {
-        final given = <int>[];
-        await tester.pumpWidget(
-          _host(
-            ReceiveScreen(
-              fetch: () async => _addr,
-              index: 6,
-              // Never settles. The QR is on the glass regardless, and an
-              // unrecorded handout is the one direction this record must not
-              // fail in.
-              addresses: () => Completer<List<WalletAddressDto>>().future,
-              onGivenOut: given.add,
-            ),
-          ),
-        );
-        await tester.pump();
-        expect(given, isEmpty, reason: 'it waits for the caption first');
-        await tester.pump(ReceiveScreen.recordAfter);
-        expect(given, [6]);
-        // And the deadline does not double up with the other two paths.
-        await tester.pumpWidget(const SizedBox());
-        expect(given, [6]);
-      },
-    );
 
     test('the offer stops where this app can still find the money again', () {
       // The picker offers only what a restore of this very wallet reaches:
@@ -556,7 +553,7 @@ void main() {
     testWidgets('an address past the offer depth is never offered as fresh, '
         'and money at one is still shown', (tester) async {
       final deep = [
-        ...rowsFor(given: {0}, count: 3),
+        ...rowsFor(funded: {0: 2772000000}, count: 3),
         WalletAddressDto(
           index: ReceivePicker.deepestOffer,
           address: 'kaspa:qdeep7mzv4dka9tep0lxh2wnfscjg8y5u3e6vddwm0s3jnp4khce',
@@ -564,7 +561,6 @@ void main() {
           lockedSompi: BigInt.zero,
           settling: false,
           coinCount: 0,
-          givenOut: false,
         ),
         WalletAddressDto(
           index: ReceivePicker.deepestOffer + 1,
@@ -573,7 +569,6 @@ void main() {
           lockedSompi: BigInt.zero,
           settling: false,
           coinCount: 1,
-          givenOut: false,
         ),
       ];
       await tester.pumpWidget(
@@ -596,17 +591,13 @@ void main() {
       );
     });
 
-    testWidgets('choosing a row swaps the QR to THAT address and records it', (
-      tester,
-    ) async {
+    testWidgets('choosing a row swaps the QR to THAT address', (tester) async {
       final rows = rowsFor(funded: {0: 2772000000});
-      final given = <int>[];
       await tester.pumpWidget(
         _host(
           ReceiveScreen(
             fetch: () async => rows[0].address,
             addresses: () async => rows,
-            onGivenOut: given.add,
           ),
         ),
       );
@@ -619,23 +610,19 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Receive at'), findsNothing, reason: 'the sheet closes');
       expect(find.text('Receive 03'), findsOneWidget, reason: 'the pill moved');
-      expect(given, [0, 3]);
       // The address on the glass is the row's own, never a re-derivation.
-      final shown = tester.widget<KvQr>(find.byType(KvQr)).data;
-      expect(shown, rows[3].address);
+      expect(tester.widget<KvQr>(find.byType(KvQr)).data, rows[3].address);
     });
 
     testWidgets('cancelling leaves the address exactly where it was', (
       tester,
     ) async {
       final rows = rowsFor(funded: {0: 2772000000});
-      final given = <int>[];
       await tester.pumpWidget(
         _host(
           ReceiveScreen(
             fetch: () async => rows[0].address,
             addresses: () async => rows,
-            onGivenOut: given.add,
           ),
         ),
       );
@@ -645,36 +632,46 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(find.text('Main'), findsOneWidget);
-      expect(given, [0], reason: 'nothing was handed out by looking');
     });
 
-    testWidgets('the fresh group folds past five and Show opens it', (
-      tester,
-    ) async {
+    testWidgets('the fresh card is the reading room, and Show asks it for the '
+        'whole thing', (tester) async {
+      // **`Show` asks for ROOM, not for rows** (founder, on glass 2026-09-07:
+      // *"clicking on 'show' literally does what 'All' does in wallet
+      // settings, where it pushes used below a little"*). Every fresh address
+      // is already in the list; the control changes the cap it lives under, and
+      // a scroll does the same one step at a time.
       await tester.pumpWidget(
         _host(
           ReceiveScreen(
             fetch: () async => _addr,
-            addresses: () async => rowsFor(given: {0}, count: 12),
+            addresses: () async => rowsFor(funded: {0: 2772000000}, count: 24),
           ),
         ),
       );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Main'));
       await tester.pumpAndSettle();
-      // 11 fresh, five shown.
-      expect(find.text('Receive 05'), findsOneWidget);
-      expect(find.text('Receive 06'), findsNothing);
-      expect(find.textContaining('more fresh addresses'), findsOneWidget);
 
-      // The opener is the fresh card's footer and a short window puts it below
-      // the fold — scroll to it the way a thumb would.
-      await tester.ensureVisible(find.text('Show'));
-      await tester.pumpAndSettle();
+      final card = find.ancestor(
+        of: find.text('Receive 01'),
+        matching: find.byType(KvExpands),
+      );
+      expect(card, findsOneWidget);
+      final atRest = tester.getSize(card).height;
+
       await tester.tap(find.text('Show'));
       await tester.pumpAndSettle();
-      expect(find.text('Receive 06'), findsOneWidget);
-      expect(find.textContaining('more fresh addresses'), findsNothing);
+      expect(
+        tester.getSize(card).height,
+        greaterThan(atRest),
+        reason: 'Show gives the fresh card more room, it does not filter',
+      );
+      expect(
+        find.text('Show'),
+        findsNothing,
+        reason: 'a control that has nothing left to ask for is not drawn',
+      );
     });
 
     testWidgets('a failed list states its three beats and does not touch the '
@@ -721,7 +718,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final caption = find.textContaining('not handed out yet');
+        final caption = find.textContaining('zero balance');
         expect(caption, findsOneWidget, reason: 'the caption is drawn');
         final box = tester
             .renderObject<RenderBox>(caption)
@@ -753,7 +750,7 @@ void main() {
             fetch: () async => _addr,
             // The `Default` badge beside a title, a balance AND a check in one
             // row is what overflowed `KvRow` by 5.2 dp at this frame.
-            addresses: () async => rowsFor(funded: {0: 2772000000}, given: {0}),
+            addresses: () async => rowsFor(funded: {0: 2772000000}),
           ),
           textScale: 1.3,
         ),

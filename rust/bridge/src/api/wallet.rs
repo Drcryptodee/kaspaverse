@@ -124,16 +124,6 @@ const _: () = assert!(MAX_DISCOVERY_DEPTH <= MANUAL_DISCOVERY_DEPTH);
 /// bug from the other end.
 const _: () = assert!(MANUAL_DISCOVERY_DEPTH + GAP_LIMIT <= MAX_WINDOW);
 
-/// And the handed-out file's ceiling is the same fact once more. It stores
-/// receive indices, so it must reach at least as far as the widest receive
-/// window this app can derive — otherwise the deepest addresses a user can
-/// actually be shown would silently read back as never handed out.
-const _: () = assert!(MANUAL_DISCOVERY_DEPTH + GAP_LIMIT <= vault::MAX_GIVEN_INDEX);
-/// And the store must hold as many entries as there are indices to hold — the
-/// index ceiling and the entry count are two ends of one axis, and pinning only
-/// the first is how a count and an index end up sharing a number (D-132 / L86).
-const _: () = assert!((MANUAL_DISCOVERY_DEPTH + GAP_LIMIT) as usize <= vault::MAX_GIVEN_ENTRIES);
-
 /// The next change index to hand out — the send cursor (D-041), floored at what
 /// discovery found.
 ///
@@ -493,6 +483,21 @@ pub struct DeepScanReport {
     pub depth: u32,
     pub receive_seen: u32,
     pub change_seen: u32,
+    /// Addresses the wallet now WATCHES on each branch — `mark + GAP_LIMIT`,
+    /// floored at `GAP_LIMIT`, which is what [`wallet_window`] hands the sync
+    /// engine and the signer.
+    ///
+    /// **Distinct from the marks above, and the control has to print these.**
+    /// A mark is *the highest index funds were ever found at, plus one*; a
+    /// window is *how many addresses are being looked at*. `T4`'s scan row said
+    /// "watching `receive_seen + change_seen`" — the sum of two high-water
+    /// marks, in a sentence about how many addresses exist — so it disagreed
+    /// with the receive list beside it, which draws the receive WINDOW. Two
+    /// quantities under one word, which is the L86 scar exactly (founder, on
+    /// glass 2026-09-07: *"it shows currently that i have about 117 addresses …
+    /// but here it says 53 more fresh addresses"*).
+    pub receive_watched: u32,
+    pub change_watched: u32,
     /// The watch/sign window actually grew — the wallet now sees more than it did
     /// before the tap. `false` is the ordinary, *successful* "nothing new out
     /// there", and the control must say so rather than implying a failure.
@@ -544,10 +549,15 @@ pub async fn deep_scan() -> Result<DeepScanReport, AppError> {
         "wallet: manual deep scan to depth {MANUAL_DISCOVERY_DEPTH} — \
          marks receive={receive_seen} change={change_seen}, widened={widened}"
     );
+    // The window AFTER the pass — read from the same seam the engine and the
+    // signer read, so the number on the glass is the number being watched.
+    let (receive_watched, change_watched) = wallet_window();
     Ok(DeepScanReport {
         depth: MANUAL_DISCOVERY_DEPTH,
         receive_seen,
         change_seen,
+        receive_watched,
+        change_watched,
         widened,
     })
 }
@@ -585,20 +595,6 @@ pub struct WalletAddressDto {
     /// a count of what is HERE, never a count of what once arrived (see
     /// [`list_addresses`] on why the second question has no offline answer).
     pub coin_count: u32,
-    /// **This install has put this address in front of someone** — the Receive
-    /// screen has displayed it, so its QR has been on a screen a camera could
-    /// read.
-    ///
-    /// The narrow, true version of *fresh vs used*. A node answers what an
-    /// address HOLDS, never what it once received, and INV-8 forbids asking an
-    /// indexer instead — so a zero balance is equally *never seen* and *used
-    /// and swept*, and no field here can say which. This one claims something
-    /// this app owns outright and can never be wrong about in the direction
-    /// that matters: it says the address was handed out, and a surface may
-    /// therefore say an address was NOT handed out **from this phone** —
-    /// never that the chain has not seen it. Backed by `vault`'s
-    /// `receive.given` (D-293).
-    pub given_out: bool,
 }
 
 /// The wallet's receive addresses with what each holds — the whole source for
@@ -647,44 +643,22 @@ pub async fn list_addresses() -> Result<Vec<WalletAddressDto>, AppError> {
     // one per row — and therefore askable of every row, which is what makes
     // the answer symmetric.
     let settling = engine.settling_among(&receive);
-    // One read of the handed-out file for the whole list, like `settling` above.
-    let given = vault::given_receive_indices();
 
     Ok(receive
         .into_iter()
         .enumerate()
         .map(|(index, address)| {
             let holding = folded.get(&address).copied().unwrap_or_default();
-            let index = index as u32;
             WalletAddressDto {
-                index,
+                index: index as u32,
                 settling: settling.contains(&address),
                 address: address.to_string(),
                 balance_sompi: holding.spendable_sompi,
                 locked_sompi: holding.locked_sompi,
                 coin_count: holding.coin_count,
-                given_out: given.contains(&index),
             }
         })
         .collect())
-}
-
-/// Record that the Receive screen has **displayed** `index`'s address, so the
-/// picker can tell an address this phone has handed out from one it has not.
-///
-/// Called on display rather than on copy or share: a QR on a screen is the
-/// commonest way an address is given away and no tap of ours precedes a camera.
-/// See `vault::mark_receive_given` for the one-way trade that follows, and
-/// [`WalletAddressDto::given_out`] for why this local fact is the only honest
-/// answer available — the chain question ("has anything ever arrived here")
-/// cannot be asked of a node, and INV-8 forbids asking an indexer.
-///
-/// Never fails the caller's screen: a wallet whose directory is not writable
-/// still shows the address. The error is returned so the caller can log it, and
-/// `main.dart` does exactly that rather than putting a file-system fault in
-/// front of someone waiting to be paid.
-pub fn note_address_given(index: u32) -> Result<(), AppError> {
-    vault::mark_receive_given(index)
 }
 
 /// The whole pass's deadline, and therefore the whole gate's: the longest the

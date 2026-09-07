@@ -103,6 +103,14 @@ void main() {
             'the card\'s own offset and the chrome above and below it, and '
             'the same composition renders in all four window classes '
             'unchanged (D-285, his glass ask 2026-09-06)',
+        'lib/src/ui/receive/receive_picker.dart':
+            'the fresh card reads the sheet HEIGHT — never a width, and never '
+            'to choose a layout — to bound how far it may grow while someone '
+            'is scrolling it. `T4`\'s address card, one file over, does the '
+            'same for the same reason and carries the same allowance; the '
+            'founder asked for exactly that behaviour here (2026-09-07: '
+            '"clicking on show literally does what All does in wallet '
+            'settings")',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

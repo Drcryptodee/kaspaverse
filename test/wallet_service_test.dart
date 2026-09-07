@@ -269,4 +269,64 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(wallet.lastApply, isNotNull);
   });
+
+  // ── The one seam every balance surface listens to (D-295) ────────────────
+
+  test('coins bumps ONCE per snapshot in which money moved', () async {
+    // **The rule, founder-set on glass 2026-09-07:** *"every screen where
+    // balance is shown gets updated the instant a fund comes in."* Surfaces
+    // that answer by making an FFI call subscribe here, so a snapshot must
+    // announce itself exactly once — a merge over the three balances would
+    // fire up to three times for one arrival.
+    final wallet = WalletService.instance;
+    wallet.start();
+    final bumps = <int>[];
+    void listen() => bumps.add(wallet.coins.value);
+    wallet.coins.addListener(listen);
+    addTearDown(() => wallet.coins.removeListener(listen));
+
+    // A deposit lands in the maturity hold: PENDING moves, mature does not.
+    // This is the case that used to reach nobody, because `T4` listened to
+    // `mature` alone and a `ValueNotifier` is silent when its value is equal.
+    controller.add(snap(mature: BigInt.zero, pending: BigInt.from(100)));
+    await Future<void>.delayed(Duration.zero);
+    expect(bumps, hasLength(1), reason: 'a pending deposit is a coin move');
+
+    // It matures: pending drains into mature. One snapshot, one bump.
+    controller.add(snap(mature: BigInt.from(100), pending: BigInt.zero));
+    await Future<void>.delayed(Duration.zero);
+    expect(bumps, hasLength(2));
+
+    // The freshness watchdog re-serves the same fold on every quiet tick.
+    // Nothing moved, so nothing is announced — otherwise every listener would
+    // make an FFI call once a second over an unchanged wallet.
+    controller.add(snap(mature: BigInt.from(100), pending: BigInt.zero));
+    await Future<void>.delayed(Duration.zero);
+    expect(bumps, hasLength(2), reason: 'a re-serve is not a coin move');
+  });
+
+  test('the whole snapshot is applied BEFORE coins announces it', () async {
+    // A listener reads the notifiers in its callback, so it must never see
+    // half a snapshot.
+    final wallet = WalletService.instance;
+    wallet.start();
+    final seen = <(BigInt?, BigInt?, BigInt?)>[];
+    void listen() => seen.add((
+      wallet.mature.value,
+      wallet.pending.value,
+      wallet.outgoing.value,
+    ));
+    wallet.coins.addListener(listen);
+    addTearDown(() => wallet.coins.removeListener(listen));
+
+    controller.add(
+      snap(
+        mature: BigInt.from(7),
+        pending: BigInt.from(8),
+        outgoing: BigInt.from(9),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(seen, [(BigInt.from(7), BigInt.from(8), BigInt.from(9))]);
+  });
 }

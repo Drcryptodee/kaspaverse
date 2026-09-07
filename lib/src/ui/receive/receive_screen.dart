@@ -13,6 +13,7 @@ import '../widgets/kv_chrome.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_two_pane.dart';
 import '../widgets/kv_qr.dart';
+import '../widgets/kv_rows.dart';
 import 'receive_picker.dart';
 
 /// **Receive** (`S5`) — the QR a sender scans, and the address in full for a
@@ -31,11 +32,9 @@ import 'receive_picker.dart';
 /// (D-045a): choosing an address is a different question from the wallet
 /// choosing one for you.
 ///
-/// **Displaying an address is handing it out**, so the screen says so
-/// ([onGivenOut] → `note_address_given`). Not on copy and not on share: a QR on
-/// a screen is the commonest way an address reaches someone and no tap of ours
-/// comes before a camera. That record is the only honest basis for *fresh* in
-/// the picker, and [ReceivePicker]'s class doc is where the reasoning lives.
+/// **It re-reads when money moves** ([coinsChanged]). The line under the pill
+/// counts coins, so this is a surface that prints money and it obeys the same
+/// rule as every other one (D-295).
 ///
 /// ## Three laws hold this composition together
 ///
@@ -65,7 +64,7 @@ class ReceiveScreen extends StatefulWidget {
     this.title = 'Receive',
     this.index = 0,
     this.addresses,
-    this.onGivenOut,
+    this.coinsChanged,
   });
 
   /// Resolves the receive address (derived in Rust from the account xpub).
@@ -86,10 +85,12 @@ class ReceiveScreen extends StatefulWidget {
   /// than a control that opens nothing (§8).
   final Future<List<WalletAddressDto>> Function()? addresses;
 
-  /// Record that this install has now shown `index`'s address to someone. Null
-  /// in a test; `main.dart` logs a failure rather than putting a file-system
-  /// fault in front of a user waiting to be paid.
-  final void Function(int index)? onGivenOut;
+  /// Fires whenever anything that can move a balance moved
+  /// (`WalletService.coins`). The caption under the pill counts coins, so it is
+  /// a balance surface and obeys the same rule every other one does: **a screen
+  /// that prints money re-reads the instant money moves** (founder, 2026-09-07;
+  /// D-295).
+  final Listenable? coinsChanged;
 
   /// What the top bar calls this screen. It stays `Receive` even when a
   /// particular address is open: the **pill** names the address, and saying it
@@ -112,57 +113,43 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   late String _label = ReceivePicker.labelFor(widget.index);
   ReceiveCaption? _caption;
 
-  /// Indices this screen has already recorded, so the three paths that can
-  /// record one — the list answering, the deadline, and leaving — cannot
-  /// record the same handout twice.
-  final _recorded = <int>{};
-  Timer? _recordTimer;
-
   @override
   void initState() {
     super.initState();
-    final seam = widget.addresses;
-    if (seam == null) {
-      _record(_index);
-      return;
-    }
-    // **The caption is read BEFORE the handout is recorded.** Otherwise an
-    // address a user has just opened for the first time would describe itself
-    // as used in the same breath as being shown — true a millisecond later,
-    // and useless to the person deciding whether to give it out.
-    final opened = _index;
-    seam()
-        .then(
-          (rows) {
-            if (mounted) setState(() => _caption = _captionOf(rows, opened));
-          },
-          // A caption is an extra; the address is not. A failure is silent
-          // here and stated in the sheet, which is where someone went looking
-          // for the list.
-          onError: (Object _) {},
-        )
-        .whenComplete(() => _record(opened));
-    // **And the record does not wait on it forever.** A seam that never
-    // settles would otherwise leave a QR on the glass and nothing written
-    // down, which is the one direction this record must not fail in
-    // (`consensus`, this sitting). `dispose` is the third and last chance.
-    _recordTimer = Timer(ReceiveScreen.recordAfter, () => _record(opened));
+    widget.coinsChanged?.addListener(_readCaption);
+    _readCaption();
   }
 
   @override
   void dispose() {
-    _recordTimer?.cancel();
-    // Leaving is the last moment to write it down, and by then the QR has
-    // certainly been on the glass.
-    _record(widget.index);
+    widget.coinsChanged?.removeListener(_readCaption);
     super.dispose();
   }
 
-  /// Write down that this install has shown `index`'s address to someone.
-  void _record(int index) {
-    if (!_recorded.add(index)) return;
-    widget.onGivenOut?.call(index);
+  /// Re-read the line under the pill. Called on mount and on every coin move,
+  /// because a caption that says *"1 coin here"* over an address that now holds
+  /// two is a figure the screen is asserting and the chain has already
+  /// contradicted.
+  void _readCaption() {
+    final seam = widget.addresses;
+    if (seam == null) return;
+    // **A sequence token, because answers can land out of order.** Two coin
+    // moves in quick succession start two reads, and the slower one may finish
+    // last carrying the older truth. Only the newest ask may paint.
+    final ask = ++_captionAsk;
+    seam()
+        .then((rows) {
+          if (mounted && ask == _captionAsk) {
+            setState(() => _caption = _captionOf(rows, _index));
+          }
+        })
+        // A caption is an extra; the address is not. A failure is silent here
+        // and stated in the sheet, which is where someone went looking for the
+        // list.
+        .catchError((Object _) {});
   }
+
+  int _captionAsk = 0;
 
   static ReceiveCaption? _captionOf(List<WalletAddressDto> rows, int index) {
     for (final a in rows) {
@@ -192,7 +179,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _caption = ReceivePicker.captionFor(chosen);
       _address = Future.value(chosen.address);
     });
-    _record(chosen.index);
   }
 
   /// The retry exists because *"could not load"* with no way forward is an
@@ -777,7 +763,24 @@ class _AddressPillState extends State<_AddressPill> {
                                 ),
                               ),
                             ),
-                          TextSpan(text: '${caption.state} · ', style: _meta),
+                          // **`Default` wears the badge, not the sentence**
+                          // (founder, on glass 2026-09-07: *"let the 'Default'
+                          // be the normal green in pill chip that we already
+                          // use"*). The same `KvDefaultChip` the row beside
+                          // `Main` wears in both address lists — one object for
+                          // one fact on all three surfaces (BG-21).
+                          if (caption.isDefault)
+                            const WidgetSpan(
+                              alignment: PlaceholderAlignment.middle,
+                              child: Padding(
+                                padding: EdgeInsets.only(right: KvSpace.s),
+                                child: KvDefaultChip(),
+                              ),
+                            )
+                          else
+                            TextSpan(text: '${caption.state} · ', style: _meta),
+                          if (caption.isDefault)
+                            TextSpan(text: '· ', style: _meta),
                           // BG-30: the figure is mono, the words are not. The
                           // space belongs to the WORDS — a mono space is wider
                           // than the UI face's and put the count adrift.

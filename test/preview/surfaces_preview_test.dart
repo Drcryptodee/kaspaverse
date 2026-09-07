@@ -526,10 +526,6 @@ List<WalletAddressDto> _addressFixture() {
         // row that must NOT be filed under "empty" (the L92 scar).
         settling: i == 3,
         coinCount: funded.containsKey(i) ? 1 : (i == 7 ? 1 : 0),
-        // Indices 0 and 5 have been shown to someone from this phone; 5 holds
-        // nothing, so it is the row that is USED only because of that record —
-        // the case the picker exists to get right.
-        givenOut: i == 0 || i == 5,
       ),
   ];
 }
@@ -541,8 +537,14 @@ WalletSettingsScope _walletScope({
   receiveAddress: () async => _addr,
   listAddresses: addresses ? () async => _addressFixture() : null,
   receiveRoute: (address, label) => const SizedBox.shrink(),
-  deepScan: () async =>
-      DeepScanReport(depth: 0, receiveSeen: 12, changeSeen: 6, widened: false),
+  deepScan: () async => DeepScanReport(
+    depth: 0,
+    receiveSeen: 12,
+    changeSeen: 6,
+    receiveWatched: 42,
+    changeWatched: 36,
+    widened: false,
+  ),
   consolidate: () async => throw UnimplementedError(),
   consolidateEstimate: mergeRefusal != null
       ? () async => throw mergeRefusal

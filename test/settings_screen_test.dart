@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -37,6 +38,11 @@ void main() {
     depth: 2048,
     receiveSeen: 13,
     changeSeen: 79,
+    // The WINDOW, which is what the control prints — `mark + GAP_LIMIT` on each
+    // branch. A fixture that made these equal to the marks would agree with the
+    // defect rather than with the wallet (D-295).
+    receiveWatched: 43,
+    changeWatched: 109,
     widened: false,
   );
 
@@ -828,9 +834,6 @@ void main() {
             // 1.5 KAS locked and a coin count of zero is a world production
             // cannot produce (`consensus`, this sitting).
             coinCount: funded.containsKey(i) || (lockedRow && i == 7) ? 1 : 0,
-            // Only the default has been handed out, which is a fresh wallet
-            // that has opened Receive once.
-            givenOut: i == 0,
           ),
       ];
     }
@@ -886,7 +889,7 @@ void main() {
       await tester.tap(find.text('Scan for more addresses'));
       await tester.pumpAndSettle();
       expect(find.textContaining('Nothing new found'), findsOneWidget);
-      expect(find.textContaining('watching 92'), findsOneWidget);
+      expect(find.textContaining('watching 152'), findsOneWidget);
     });
 
     testWidgets('a widening scan says what it found', (tester) async {
@@ -896,6 +899,8 @@ void main() {
           depth: 2048,
           receiveSeen: 20,
           changeSeen: 4,
+          receiveWatched: 50,
+          changeWatched: 34,
           widened: true,
         ),
       );
@@ -1039,9 +1044,63 @@ void main() {
         listAddresses: () async => addressList(settlingRow: true),
       );
       expect(find.text('Receive 03'), findsOneWidget);
-      expect(find.text('Pending'), findsOneWidget);
+      expect(find.text('Accepted'), findsOneWidget);
       // Four rows in view now, so 27 are folded rather than 28.
       expect(find.textContaining('27 empty addresses hidden'), findsOneWidget);
+    });
+
+    testWidgets('a coin move DURING a read is queued, never dropped', (
+      tester,
+    ) async {
+      // **The bug the founder found on glass** (2026-09-07): *"when a
+      // transaction comes in and im there, it doesnt detect it fast, and it
+      // gets stuck on saying pending in amber. it is when i go back and click
+      // on wallet again that i see the pending gone."* A deposit fires two
+      // events close together; the second landed inside the first read's
+      // window and the guard threw it away, so the screen held the OLDER
+      // answer. A guard that drops the newer request pins the older one.
+      final coins = ValueNotifier(0);
+      addTearDown(coins.dispose);
+      final gates = <Completer<List<WalletAddressDto>>>[];
+      var reads = 0;
+      await pumpWallet(
+        tester,
+        coinsChanged: coins,
+        listAddresses: () {
+          reads++;
+          // The open answers at once, so the screen can settle; every read
+          // after it is held so a coin can move mid-flight.
+          if (reads == 1) return Future.value(addressList());
+          final gate = Completer<List<WalletAddressDto>>();
+          gates.add(gate);
+          return gate.future;
+        },
+      );
+      expect(reads, 1, reason: 'the open reads once');
+
+      coins.value++; // starts read 2, which is held
+      await tester.pump();
+      expect(reads, 2);
+
+      // Money moves twice more while read 2 is still in flight.
+      coins.value++;
+      coins.value++;
+      await tester.pump();
+      expect(reads, 2, reason: 'still one in flight');
+
+      gates.first.complete(addressList());
+      await tester.pump();
+      // The queued ask ran — once, not twice, because two moves inside one
+      // window are one thing to go and ask about.
+      expect(reads, 3);
+
+      gates.last.complete(addressList(settlingRow: true));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Accepted'),
+        findsOneWidget,
+        reason: 'the screen ends on the NEWEST answer, not the first one',
+      );
     });
 
     testWidgets('a covenant-bound coin is reported but never counted as '
@@ -1219,7 +1278,6 @@ void main() {
                         lockedSompi: BigInt.zero,
                         settling: false,
                         coinCount: 1,
-                        givenOut: false,
                       )
                     else
                       a,
