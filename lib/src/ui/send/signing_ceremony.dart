@@ -337,6 +337,24 @@ class _SigningCeremonyState extends State<SigningCeremony>
   /// One second, which is what makes the count STREAM rather than step. The
   /// depth is recomputed at read from the live sink blue score, so each poll
   /// is a fresh node-read rather than a cached number ticking on a clock.
+  /// **How often the acceptance probe runs while the sheet is still waiting.**
+  ///
+  /// 500 ms, halved from a second (founder, on glass 2026-09-07: *"reduce the
+  /// delay that shows after signing the transaction, it stays on that sheet for
+  /// like a few seconds before showing sent, reduce it by half"*).
+  ///
+  /// **The wait itself is real and is not shortened**: submit→accepted is
+  /// 1.3–3.8 s measured, and a receipt shown before the DAG has taken the
+  /// transaction would claim an acceptance nobody has (D-189). What WAS ours to
+  /// give back is the poll's own lateness — at a one-second cadence the sheet
+  /// could sit on an acceptance for up to a second after it happened, which is
+  /// a third of a fast send spent watching a spinner for no reason.
+  static const Duration _depthWaiting = Duration(milliseconds: 500);
+
+  /// And once the receipt is up the cadence returns to a second: the reading it
+  /// carries then is DEPTH, which advances about once a second anyway, and two
+  /// node reads a second for a number that has not moved is traffic spent on
+  /// nothing.
   static const Duration _depthEvery = Duration(seconds: 1);
 
   /// Start streaming the depth once there is a txid to ask about. Every answer
@@ -397,8 +415,13 @@ class _SigningCeremonyState extends State<SigningCeremony>
     }
 
     unawaited(tick());
-    _depthPoll = Timer.periodic(_depthEvery, (_) => tick());
+    _tickAt = tick;
+    _depthPoll = Timer.periodic(_depthWaiting, (_) => tick());
   }
+
+  /// The probe, held so [_settle] can restart its timer at the slower cadence
+  /// without knowing how the poll was built.
+  Future<void> Function()? _tickAt;
 
   /// Comfortably past the measured 1.3–3.8 s submit→accepted range, so a
   /// normal send never sees the line at all.
@@ -567,6 +590,13 @@ class _SigningCeremonyState extends State<SigningCeremony>
     if (!mounted || _settledNow) return;
     _acceptCeiling?.cancel();
     _exitTimer?.cancel();
+    // The waiting cadence has done its job; the receipt's reading is depth,
+    // which does not need two reads a second.
+    final tick = _tickAt;
+    if (tick != null && _depthPoll != null) {
+      _depthPoll?.cancel();
+      _depthPoll = Timer.periodic(_depthEvery, (_) => tick());
+    }
     setState(() {
       _settledNow = true;
       _sending = false;
@@ -684,34 +714,37 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // Cancel in the app that BG-7's risk hue actually describes: the way out
       // of a commitment that cannot be undone once it is made.
       cancelTone: KvColor.risk,
-      foot: Padding(
-        padding: const EdgeInsets.fromLTRB(KvSpace.l, KvSpace.m, KvSpace.l, 0),
-        // The foot changes shape when the hold fires; `AnimatedSize` on the
-        // one easing makes it read as the control handing over rather than
-        // blinking out (BG-24).
-        child: AnimatedSize(
-          duration: KvMotion.calm,
-          curve: KvMotion.curve,
-          alignment: Alignment.topCenter,
-          child: _sending && _showWait
-              ? _StagedWait(stage: _stage, mayLeave: _mayLeave)
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    KvHold(
-                      label: _holdLabel(s),
-                      progress: _hold,
-                      // Dead the moment it fires: the ring is full, the
-                      // transaction is Rust's, and a second press has nothing
-                      // to start.
-                      enabled: !_fired,
-                      signed: _fired,
-                      onDown: _down,
-                      onUp: _release,
-                    ),
-                  ],
-                ),
-        ),
+      // **No horizontal padding of its own.** `KvSheet` pads its foot 24 a
+      // side (D-284, *"the sheet owns its gutter and the air above its act"*)
+      // and this added 24 more, so the one control that commits a transaction
+      // sat **297 dp wide inside a 345 dp card** — narrower than everything
+      // above it, which is exactly how the founder read it on glass
+      // (2026-09-07: *"give it more width like it used to … not wide enough"*).
+      // A caller that pads a sheet's foot is describing the double gutter that
+      // law removed.
+      foot: AnimatedSize(
+        duration: KvMotion.calm,
+        curve: KvMotion.curve,
+        alignment: Alignment.topCenter,
+        child: _sending && _showWait
+            ? _StagedWait(stage: _stage, mayLeave: _mayLeave)
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  KvHold(
+                    height: KvHold.ceremony,
+                    label: _holdLabel(s),
+                    progress: _hold,
+                    // Dead the moment it fires: the ring is full, the
+                    // transaction is Rust's, and a second press has nothing
+                    // to start.
+                    enabled: !_fired,
+                    signed: _fired,
+                    onDown: _down,
+                    onUp: _release,
+                  ),
+                ],
+              ),
       ),
       // `shrinkWrap`, so a short restatement makes a short sheet and a long one
       // scrolls inside the 90 % cap — the height is the content's, never the
@@ -1152,10 +1185,10 @@ class _FactRow extends StatelessWidget {
   }
 
   @override
-  @override
   Widget build(BuildContext context) => KvFactLine(
     label: label,
     valueText: _printed,
+    dense: true,
     strongLabel: direction == KvMoneyDirection.outgoing,
     // No `FittedBox`. `KvAmount` fits its own figure given a bounded width
     // and keeps the unit OUT of that fit so its 11dp floor survives — an
@@ -1192,6 +1225,7 @@ class _StampRow extends StatelessWidget {
   Widget build(BuildContext context) => KvFactLine(
     label: label,
     valueText: formatStamp(at),
+    dense: true,
     value: Text(
       formatStamp(at),
       textAlign: TextAlign.right,
@@ -1607,6 +1641,7 @@ class _ReceiptCard extends StatelessWidget {
             KvFactLine(
               label: 'Status',
               valueShare: 0.55,
+              dense: true,
               // **The tracker's own kind decides the reading — this surface
               // asserts nothing** (INV-9, BG-20).
               //
@@ -1688,6 +1723,7 @@ class _ReceiptCard extends StatelessWidget {
             KvFactLine(
               label: 'Transaction ID',
               valueShare: 0.66,
+              dense: true,
               valueText: _shortId(txid!),
               value: Text(
                 _shortId(txid!),

@@ -129,6 +129,16 @@ class KvHold extends StatelessWidget {
   /// §4: the badge's outer diameter.
   static const double badge = 46;
 
+  /// **The height on the signing ceremony — 64, where a control is 56.**
+  ///
+  /// Founder, on glass 2026-09-07: *"give it a few more height … so it looks
+  /// well fitted and not kinda small."* BG-12 sets a control at 56 and this is
+  /// the one control the whole app is arranged around: an irreversible send,
+  /// held for 800 ms, carrying a 46 dp ring badge that leaves only 5 dp of
+  /// clearance at 56 and a comfortable 9 at 64. It is also `KvSpace.row`, so
+  /// the number is one the house already keeps.
+  static const double ceremony = 64;
+
   /// The `plate` disc inside it (§4).
   static const double badgeDisc = 38;
 

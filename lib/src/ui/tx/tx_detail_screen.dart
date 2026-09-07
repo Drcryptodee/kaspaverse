@@ -365,11 +365,26 @@ class _Head extends StatelessWidget {
   final ActivityRecord record;
   final FiatScope? fiat;
 
-  /// `S9`, measured: the disc runs 169.0 → 225.0 dp horizontally and
-  /// 99.0 → 155.0 vertically — **56 dp**, on the screen's centre line, in
-  /// `riskTint` (51,25,26) with a `risk` (242,109,95) mark. Both token values
-  /// exactly.
-  static const double disc = 56;
+  /// `S9` measures the disc at **56** — 169.0 → 225.0 dp horizontally,
+  /// 99.0 → 155.0 vertically, in `riskTint` (51,25,26) with a `risk`
+  /// (242,109,95) mark, both token values exactly.
+  ///
+  /// **It draws at 52, and the whole head with it** (founder, on glass
+  /// 2026-09-07: *"it feels kinda bigger a little than the rest of the settings
+  /// screens and receive screens"*). This is the compact density D-278 already
+  /// defines — a tenth off everything that can take it — applied to a screen
+  /// that was measured at the render's own scale while its neighbours were
+  /// not. The 4 dp does not come out of the target: nothing here is one.
+  static const double disc = 52;
+
+  /// The glyph inside it, a step down with the disc (24 → 22, D-278).
+  static const double discGlyph = 22;
+
+  /// The amount. `S9` measures **44** — integer cap 32.0 dp, fraction cap 16.5,
+  /// a ratio of exactly one half, which is 44/22 at JetBrains Mono's 0.739 cap
+  /// ratio. **40 at the compact density**, which is `KvAmountRole.screen`'s own
+  /// number and the size the send screen sets a figure at.
+  static const double amount = 40;
 
   @override
   Widget build(BuildContext context) {
@@ -386,16 +401,13 @@ class _Head extends StatelessWidget {
             width: disc,
             height: disc,
             decoration: BoxDecoration(color: tint, shape: BoxShape.circle),
-            child: Center(child: KvGlyphIcon(mark, tone: hue, size: 24)),
+            child: Center(
+              child: KvGlyphIcon(mark, tone: hue, size: discGlyph),
+            ),
           ),
         ),
-        const SizedBox(height: KvSpace.l),
+        const SizedBox(height: KvSpace.m),
         Center(
-          // **44, measured off the render** — its integer cap is 32.0 dp and
-          // its fraction cap 16.5, a ratio of exactly one half, which is 44/22
-          // at JetBrains Mono's 0.739 cap ratio. Neither `hero` (48) nor
-          // `screen` (40) is that number, so the role carries the *rules* and
-          // the size carries the measurement.
           //
           // `hero`, because a record is a **magnitude** — what this
           // transaction was — rather than something about to be committed.
@@ -410,7 +422,7 @@ class _Head extends StatelessWidget {
             record.valueSompi,
             role: KvAmountRole.hero,
             emphasis: KvAmountEmphasis.significant,
-            size: 44,
+            size: amount,
             direction: direction,
           ),
         ),
@@ -701,6 +713,16 @@ class _FactsPlate extends StatelessWidget {
   final String title;
   final String? counterparty;
 
+  /// **Every fact on this plate is one row of the same height**, dense.
+  ///
+  /// Founder, on glass 2026-09-07: *"i feel even everything in the card under
+  /// depth is not sized well and all having equal height when between the line
+  /// that demarcates them."* Two things made them unequal. The plate was at the
+  /// house density while the screens either side of it are compact, and the two
+  /// rows carrying a copy affordance — `To` and `Transaction ID` — wrapped
+  /// their value in a 52 dp target, so they stood **12 dp taller than their
+  /// neighbours** inside the same card. `dense` takes the first; [_Target]
+  /// takes the second.
   static Widget _fact({
     required String label,
     required String valueText,
@@ -710,6 +732,7 @@ class _FactsPlate extends StatelessWidget {
     labelColor: KvColor.inkMeta,
     valueText: valueText,
     value: value,
+    dense: true,
   );
 
   @override
@@ -859,44 +882,27 @@ class _CounterpartyLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _FactsPlate._fact(
-      label: 'To',
-      // **What the row will actually PRINT, not the whole address** — the
-      // compact form is what `KvAddress` renders here, and handing the grid the
-      // 67-character original made it decide the value could not fit and stack
-      // the row at the reference width. `KvFactLine`'s own doc says the string
-      // is for measurement only; a mismatch costs a stack-or-not decision, and
-      // it cost exactly that. Found in a rendered frame, not in a test. The
-      // three trailing spaces stand in for the glyph and its gap — 24 dp, three
-      // mono characters at 13 — so the measurement includes the whole run.
-      valueText: '${truncateAddressPayload(address)}   ',
-      value: Semantics(
-        button: true,
-        label: 'Copy the address',
-        child: InkWell(
-          onTap: onCopy,
-          highlightColor: KvColor.keyPressed,
-          splashFactory: NoSplash.splashFactory,
-          // **52 dp, and it is a constraint rather than whatever the text
-          // happens to measure** (BG-12, item 21). Built from the run alone it
-          // was 22.0 dp on the glass — a copy that a thumb misses on a funds
-          // surface (`ux-auditor`, UX-R3).
-          child: _Target(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: KvAddress(address, form: KvAddressForm.compact),
-                ),
-                const SizedBox(width: KvSpace.s),
-                const KvGlyphIcon(
-                  KvGlyph.copy,
-                  tone: KvColor.inkMeta,
-                  size: 16,
-                ),
-              ],
-            ),
-          ),
+    return _CopyRow(
+      onTap: onCopy,
+      semanticLabel: 'Copy the address',
+      child: _FactsPlate._fact(
+        label: 'To',
+        // **What the row will actually PRINT, not the whole address** — the
+        // compact form is what `KvAddress` renders here, and handing the grid the
+        // 67-character original made it decide the value could not fit and stack
+        // the row at the reference width. `KvFactLine`'s own doc says the string
+        // is for measurement only; a mismatch costs a stack-or-not decision, and
+        // it cost exactly that. Found in a rendered frame, not in a test. The
+        // three trailing spaces stand in for the glyph and its gap — 24 dp, three
+        // mono characters at 13 — so the measurement includes the whole run.
+        valueText: '${truncateAddressPayload(address)}   ',
+        value: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(child: KvAddress(address, form: KvAddressForm.compact)),
+            const SizedBox(width: KvSpace.s),
+            const KvGlyphIcon(KvGlyph.copy, tone: KvColor.inkMeta, size: 16),
+          ],
         ),
       ),
     );
@@ -945,50 +951,69 @@ class _IdLine extends StatelessWidget {
   String get _shown => '${txid.substring(0, 8)}…${txid.substring(56)}';
 
   @override
-  Widget build(BuildContext context) => _FactsPlate._fact(
-    label: 'Transaction ID',
-    // Three trailing spaces for the glyph and its gap, as the `To` row.
-    valueText: '$_shown   ',
-    value: Semantics(
-      button: true,
-      label: 'Copy the transaction id',
-      child: InkWell(
-        onTap: onCopy,
-        // **Grey, not teal** — the ledger row that navigates here presses in
-        // `keyPressed` and there is no ripple in this language, so a teal
-        // splash one tap later is two vocabularies for one gesture (BG-21).
-        highlightColor: KvColor.keyPressed,
-        splashFactory: NoSplash.splashFactory,
-        child: _Target(
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _Value(_shown),
-              const SizedBox(width: KvSpace.s),
-              const KvGlyphIcon(KvGlyph.copy, tone: KvColor.inkMeta, size: 16),
-            ],
-          ),
-        ),
+  Widget build(BuildContext context) => _CopyRow(
+    onTap: onCopy,
+    semanticLabel: 'Copy the transaction id',
+    child: _FactsPlate._fact(
+      label: 'Transaction ID',
+      // Three trailing spaces for the glyph and its gap, as the `To` row.
+      valueText: '$_shown   ',
+      value: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _Value(_shown),
+          const SizedBox(width: KvSpace.s),
+          const KvGlyphIcon(KvGlyph.copy, tone: KvColor.inkMeta, size: 16),
+        ],
       ),
     ),
   );
 }
 
-/// **A 52 dp touch target around a run of text** (BG-12).
+/// **The whole fact row is the copy control** — label, value and the air
+/// around them.
 ///
-/// A row of 13 dp mono is 20 dp tall, and an `InkWell` around it is a 20 dp
+/// A run of 13 dp mono is 20 dp tall, and an `InkWell` around it is a 20 dp
 /// target — which is what both copy actions on this screen shipped as until
-/// `ux-auditor` measured them. The height is a *constraint*, so the run inside
-/// can change without the target quietly shrinking with it.
-class _Target extends StatelessWidget {
-  const _Target({required this.child});
+/// `ux-auditor` measured them and put a **52 dp box around the value**. That
+/// fixed the target and broke the card: a copy row then stood 12 dp taller than
+/// the plain facts beside it, so a plate of five facts had two rhythms and the
+/// founder saw it at once (2026-09-07: *"everything in the card under depth is
+/// … all having equal height when between the line that demarcates them"*).
+///
+/// **Moving the target out to the row answers both.** Every fact is one dense
+/// row, and the two that copy are ~343 × 40 rather than 52 × 150 — a bigger
+/// target than the box ever was, in the shape a thumb actually arrives in. 40
+/// is under BG-12's 52 and the trade is his own, made at D-288 on Receive: the
+/// cost of a miss is a second tap and never a wrong send.
+///
+/// **Grey, not teal** — the ledger row that navigates here presses in
+/// `keyPressed`, and there is no ripple in this language, so a teal splash one
+/// tap later would be two vocabularies for one gesture (BG-21).
+class _CopyRow extends StatelessWidget {
+  const _CopyRow({
+    required this.child,
+    required this.onTap,
+    required this.semanticLabel,
+  });
 
   final Widget child;
+  final VoidCallback onTap;
+  final String semanticLabel;
 
   @override
-  Widget build(BuildContext context) => ConstrainedBox(
-    constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
-    child: Align(alignment: Alignment.centerRight, child: child),
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: semanticLabel,
+    child: ExcludeSemantics(
+      child: InkWell(
+        onTap: onTap,
+        highlightColor: KvColor.keyPressed,
+        splashFactory: NoSplash.splashFactory,
+        borderRadius: BorderRadius.circular(KvRadius.row),
+        child: child,
+      ),
+    ),
   );
 }
 

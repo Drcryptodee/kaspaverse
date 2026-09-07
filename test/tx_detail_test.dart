@@ -190,10 +190,14 @@ void main() {
   ) async {
     // `KvAmountRole.hero` defaults to `magnitude`, which is right for a
     // balance — the integer is what you own, even at `0`. A record can be
-    // 0.005 KAS, and then the one bright 44 dp character is a `0` that is `0`
-    // for every such record while the digits that ARE the amount sit at 15 dp:
+    // 0.005 KAS, and then the one bright character is a `0` that is `0`
+    // for every such record while the digits that ARE the amount sit small:
     // §8's named anti-pattern, and the identical defect D-231 corrected for
     // the live fee. At or above 1 the two rules agree exactly.
+    //
+    // The threshold is 36, not the old 44: the head takes the compact density
+    // (D-297) and a test that pinned the old size would fail on the size rather
+    // than on the emphasis it is written for.
     final dust = _sent(value: BigInt.from(500000)); // 0.005 KAS
     await tester.pumpWidget(host(seams(records: [dust])));
     await tester.pumpAndSettle();
@@ -201,7 +205,7 @@ void main() {
     final runs = tester
         .widgetList<Text>(find.byType(Text))
         .where((t) => t.style?.fontFamily == KvFont.mono)
-        .where((t) => (t.style?.fontSize ?? 0) >= 44)
+        .where((t) => (t.style?.fontSize ?? 0) >= 36)
         .map((t) => t.data ?? '')
         .toList();
     expect(runs, isNotEmpty, reason: 'no run took the emphasis at all');
@@ -460,10 +464,23 @@ void main() {
         (w) => w is Semantics && w.properties.label == label,
       );
       expect(finder, findsOneWidget, reason: '$label is not on the screen');
+      final box = tester.getSize(finder);
+      // **The target is the ROW, and it is measured in both axes** (D-297).
+      // It was a 52 dp box around the value alone, which fixed the height and
+      // broke the card: a copy row stood 12 dp taller than the plain facts
+      // beside it. The row is 40 dp and spans the card — a bigger target than
+      // the box was, in the shape a thumb arrives in — and 40 is under BG-12's
+      // 52 by the founder's own trade at D-288 (on glass, 2026-09-07). The
+      // guard now holds the AREA, so nobody can shrink it back to a text run.
       expect(
-        tester.getSize(finder).height,
-        greaterThanOrEqualTo(KvSpace.touchTarget),
-        reason: '"$label" is a ${tester.getSize(finder).height} dp target',
+        box.height,
+        greaterThanOrEqualTo(40),
+        reason: '"$label" is ${box.height} dp tall',
+      );
+      expect(
+        box.width,
+        greaterThanOrEqualTo(280),
+        reason: '"$label" is only ${box.width} dp wide — the ROW is the target',
       );
     }
     expect(
