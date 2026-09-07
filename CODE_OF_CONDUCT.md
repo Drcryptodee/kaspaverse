@@ -13,13 +13,6 @@ feedback gracefully, center what is best for the community, and take responsibil
 get it wrong. Harassment, discrimination, personal attacks, and other abusive behavior are
 not tolerated, in project spaces or when representing the project in public.
 
-## Adopted standard (by reference)
-
-This project adopts the **[Contributor Covenant, version 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/)**
-in full. We reference it rather than copy it so we always point at the canonical, current
-text. The Covenant's "Our Pledge", "Our Standards", "Enforcement Responsibilities", "Scope",
-and "Enforcement Guidelines" sections apply to this project as written there.
-
 ## Reporting & enforcement
 
 Maintainers are responsible for clarifying and enforcing this standard and will respond to
@@ -34,11 +27,17 @@ To report a concern, contact the maintainer privately through either channel:
 Use whichever you're comfortable with; both reach the maintainer directly.
 
 Reports will be reviewed and investigated promptly. Maintainers will respect the privacy and
-safety of anyone who reports in good faith. Consequences follow the Contributor Covenant's
-Enforcement Guidelines, ranging from a private warning through to a permanent ban, scaled to
-the severity and pattern of the behavior.
+safety of anyone who reports in good faith.
 
-## Attribution
+Consequences are scaled to the severity and the pattern of the behavior, and a maintainer
+will say which one is being applied and why:
 
-Adapted from the [Contributor Covenant](https://www.contributor-covenant.org), version 2.1.
-Community Impact Guidelines are those of the Contributor Covenant.
+1. **A private word** — the behavior is named, with what is expected instead.
+2. **A warning** — a stated period of no interaction with the people involved, in project
+   spaces or outside them.
+3. **A temporary ban** from project spaces.
+4. **A permanent ban**, for a sustained pattern, for harassment of an individual, or for
+   aggression toward a class of people.
+
+A first serious incident can start anywhere on that list. Nothing above is a process a
+reporter has to navigate; it describes what maintainers owe, not what a reporter must do.

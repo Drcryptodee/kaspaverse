@@ -31,7 +31,6 @@ terms, its own copyright statements are unchanged, and nothing here relicenses a
 | Gradle wrapper | `android/gradlew`, `android/gradlew.bat`, `android/gradle/wrapper/gradle-wrapper.jar` | the original authors, 2015-2021 | Apache-2.0 — headers in the scripts |
 | BIP-39 English wordlist | `assets/bip39/english.txt` | the BIP-39 authors | see **Wordlist** below |
 | Icon geometry transcribed from Lucide | `lib/src/ui/widgets/kv_glyph.dart` | Lucide Icons and Contributors; Feather icons, Cole Bemis | ISC (Lucide); MIT for the Feather-derived subset |
-| Code of Conduct text | `CODE_OF_CONDUCT.md` | the Contributor Covenant authors | adapted from Contributor Covenant 2.1; attribution retained in the file. Its own terms are **unsettled** — see below |
 
 The vendored copy of `tokio-tungstenite` is the crates.io tarball verbatim save for one
 patched function; `rust/vendor/PROVENANCE.md` records the file-level digests and the gate
@@ -44,13 +43,6 @@ reproduced unmodified as specification data. It is included because a BIP-39 wal
 use exactly this list; no claim of authorship over it is made here. The BIP-39 document's
 own preamble declares the BIP MIT-licensed; the wordlist file carries no separate licence
 statement upstream.
-
-**Code of Conduct.** `CODE_OF_CONDUCT.md` is adapted from Contributor Covenant 2.1 and
-retains the attribution that text asks for. The licence of the Covenant *text* could not be
-established: neither the canonical 2.1 page nor the project FAQ states one, and the upstream
-repository's own `LICENSE.md` is the Hippocratic License 3.0 — which covers the site's source
-and is not stated to reach the Covenant document. Recorded so the next reader does not repeat
-the search.
 
 **Icons.** No icon package is a dependency. The glyph outlines in
 `lib/src/ui/widgets/kv_glyph.dart` are transcribed from Lucide's path data and each one
