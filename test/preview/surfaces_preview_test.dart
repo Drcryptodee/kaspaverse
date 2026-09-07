@@ -1056,7 +1056,11 @@ void main() {
     // because that is where this line's composition defects have all been
     // found.
     framedSurface('messages__chats', _chats);
-    surface(
+    // **All four frames, not two.** The register's C/M/E/S/F columns cannot be
+    // ticked off a two-geometry render, and the `Wrap` action row is the layout
+    // most likely to move at 700/1180 — so it was the one never drawn there
+    // (`ux-auditor` 24d, UX-R5).
+    framedSurface(
       'messages__requests',
       () => _chats(requests: true),
       act: _openRequestsTab,
