@@ -346,6 +346,7 @@ class KvRow extends StatefulWidget {
     this.onTap,
     this.semanticLabel,
     this.dense = false,
+    this.trailingCap = KvRow.trailingMax,
     this.subLines = 1,
     this.titleLines = 1,
   }) : assert(
@@ -432,6 +433,15 @@ class KvRow extends StatefulWidget {
   /// leaves the title 36 dp rather than nothing. Fixed in dp, like every other
   /// height and gap in the system (BG-33).
   static const double trailingMax = 132;
+
+  /// This row's own cap on the trailing column, defaulting to [trailingMax].
+  ///
+  /// An **address** row wants a tighter one: its sub-line is a compact address
+  /// of a fixed 19 characters, and a wide amount beside it pushed that line
+  /// into two — founder, on glass 2026-09-07: *"a kas with more decimals kinda
+  /// breaks the address and its not well sized there."* The figure has a
+  /// `FittedBox` and can give way; the address has neither.
+  final double trailingCap;
 
   @override
   State<KvRow> createState() => _KvRowState();
@@ -546,7 +556,7 @@ class _KvRowState extends State<KvRow> {
               // [trailingMax] when it is not (the figure scales inside a bound
               // instead of eating the row).
               ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: KvRow.trailingMax),
+                constraints: BoxConstraints(maxWidth: widget.trailingCap),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisAlignment: MainAxisAlignment.center,

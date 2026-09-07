@@ -488,7 +488,9 @@ void main() {
       final payload = _address.substring(_address.indexOf(':') + 1);
       expect(
         rendered,
-        'kaspa:${payload.substring(0, 8)}…'
+        // **4 + 8 since 2026-09-07** (founder, on glass): one compact form on
+        // every screen, and the same two numbers the full form weights.
+        'kaspa:${payload.substring(0, 4)}…'
         '${payload.substring(payload.length - 8)}',
       );
       expect(rendered, isNot(startsWith('kaspa:q…')));
@@ -509,7 +511,10 @@ void main() {
       // The whole compact string is laid out; the box scales it, and the last
       // eight payload characters are still in it.
       final laid = tester.renderObject<RenderBox>(find.byType(Text));
-      expect(laid.size.width, greaterThan(160));
+      // The compact string is shorter than it was (4 + 8, not 8 + 8), so the
+      // box it needs is narrower — but still wider than 160, which is what
+      // makes this a scale-down rather than a fit.
+      expect(laid.size.width, greaterThan(140));
       expect(
         text.textSpan!.toPlainText(),
         endsWith(_address.substring(_address.length - 8)),
@@ -565,9 +570,12 @@ void main() {
       // bold, standing alone. The weighting exists so the eye lands where an
       // address-poisoning attack has to succeed, and a single stranded
       // character is the weakest possible place to put it — there is almost
-      // nothing there to compare against. The tail keeps five now.
+      // nothing there to compare against. The tail keeps EIGHT now
+      // (2026-09-07, superseding D-223's five), and no head group is left
+      // under three characters for the same reason.
       expect(groups.last, hasLength(KvAddress.tailGroup));
-      expect(groups.last, _address.substring(_address.length - 5));
+      expect(groups.last, _address.substring(_address.length - 8));
+      expect(groups.every((g) => g.length >= 3), isTrue);
       // Nothing is lost in the chunking: this form is the one a user checks
       // character by character, so it must be the WHOLE payload.
       expect(groups.join(), _address.substring(_address.indexOf(':') + 1));

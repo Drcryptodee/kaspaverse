@@ -625,9 +625,19 @@ class _WalletScreenState extends State<WalletScreen> {
       badge: isDefault ? const KvDefaultChip() : null,
       subWidget: Padding(
         padding: const EdgeInsets.only(top: KvSpace.xs),
-        child: AddressText(a.address, tight: true),
+        // One line, always — it shrinks rather than wraps. The picker's row
+        // carries the reasoning; this is the same row on the other screen.
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: AddressText(
+            a.address,
+            style: const TextStyle(fontSize: 12, height: 17 / 12),
+          ),
+        ),
       ),
       dense: true,
+      trailingCap: 110,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

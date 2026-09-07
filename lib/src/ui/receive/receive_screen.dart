@@ -171,6 +171,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       context,
       addresses: seam,
       selected: _index,
+      coinsChanged: widget.coinsChanged,
     );
     if (chosen == null || !mounted) return;
     setState(() {
@@ -424,8 +425,13 @@ class _Body extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: KvSpace.s),
                 child: Text(
+                  // Two statements, not three. *"Nobody can take from it"*
+                  // was the third beat of §7.1's house sentence and the
+                  // founder cut it on glass (2026-09-07): it answers a fear
+                  // nobody arrives with, on the one screen where the user is
+                  // trying to hand a string to someone.
                   'Receives KAS on Mainnet. Anyone with this address can send '
-                  'to you. Nobody can take from it.',
+                  'to you.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: KvFont.ui,
@@ -484,8 +490,13 @@ class _AddressRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
+      // **The horizontal inset is `s`, not `m`** — sixteen dp a side was
+      // sixteen dp the address could not use, and 67 mono characters at 13 dp
+      // wanted three lines for the want of them (founder, on glass 2026-09-07:
+      // *"i want it so the full address showing is displayed at at most 2
+      // lines"*). The vertical inset is unchanged.
       padding: const EdgeInsets.symmetric(
-        horizontal: KvSpace.m,
+        horizontal: KvSpace.s,
         vertical: KvSpace.s14,
       ),
       decoration: BoxDecoration(
@@ -503,6 +514,11 @@ class _AddressRow extends StatelessWidget {
               form: KvAddressForm.chunked,
               selectable: true,
               plated: false,
+              // 12, not the house 13: the difference between two lines and
+              // three for a 67-character payload in the width this row has.
+              // Above BG-14's floor of 11, and the weighted head and tail are
+              // what the eye is aimed at anyway (BG-15).
+              fontSize: 12,
               onTap: onCopy,
             ),
           ),

@@ -1322,8 +1322,10 @@ void main() {
             spans.add(span);
             return true;
           });
-      // scheme + 14 fours + the five.
-      expect(spans.length, 16);
+      // scheme + the head groups + the eight. 4 + 8 since 2026-09-07
+      // (founder, on glass), so a 61-character payload leaves 53 head
+      // characters: twelve fours and a five, the stray one folded in.
+      expect(spans.length, 15);
       expect(
         spans.map((s) => (s as TextSpan).text).join(),
         _addr,
@@ -1332,7 +1334,7 @@ void main() {
       final head = spans[1] as TextSpan;
       final tail = spans.last as TextSpan;
       expect(head.text!.length, 4);
-      expect(tail.text!.length, 5);
+      expect(tail.text!.length, 8);
       // **The MERGED axis, not the enum** (L150): on a variable face
       // `fontWeight` is a hint and `FontVariation('wght')` is the ink.
       for (final checkpoint in [head, tail]) {

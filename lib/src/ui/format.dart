@@ -130,12 +130,29 @@ String trimTrailingZeros(double value, {int max = 8}) {
   return text.endsWith('.') ? text.substring(0, text.length - 1) : text;
 }
 
-/// The last group of a chunked address keeps **five** characters, not four.
+/// **The weighted tail is EIGHT characters, and the weighted head is four.**
 ///
-/// Ratified by the founder on glass (D-223) and it applies to **every** surface
-/// that chunks an address, which is why the rule lives here in the format layer
-/// rather than in any one widget.
-const int addressTailGroup = 5;
+/// Founder's ruling on glass, 2026-09-07: *"the first 4 characters are bold,
+/// and last 8 characters are bold instead of first 4 bold and last 5 bold that
+/// we use. I want it to hold across all screens that displays address in full
+/// and when compact."* It applies to **every** surface that chunks or truncates
+/// an address, which is why the rule lives here in the format layer rather than
+/// in any one widget, and it is the same number on both forms — the compact
+/// `kaspa:xxxx…xxxxxxxx` and the full form's weighting boundary — so the eye is
+/// taught one shape.
+///
+/// It supersedes D-223's five, which was itself an amendment to four. The
+/// weighting is the address-poisoning steer (BG-15): an attacker must buy a
+/// convincing head **and** a convincing tail, and eight characters at the end
+/// is more of it than five.
+const int addressTailGroup = 8;
+
+/// The weighted head, and the compact form's head. Four, unchanged.
+const int addressHeadGroup = 4;
+
+/// A head chunk shorter than this is folded into the one before it, so no
+/// group is left with one or two characters stranded beside the weighted tail.
+const int _minHeadChunk = 3;
 
 /// The payload, split into groups of four — **except the last, which keeps five
 /// characters together.**
@@ -167,6 +184,16 @@ List<String> addressPayloadGroups(String address) {
     final end = i + 4;
     out.add(head.substring(i, end < head.length ? end : head.length));
   }
+  // **Fold a stranded remainder into the group before it.** With the tail at
+  // eight a 61-character payload leaves 53 head characters — thirteen fours and
+  // a **one** — and a single character sitting beside the weighted tail is the
+  // same defect the five was introduced to remove, moved one group left. Under
+  // three characters, merge; a two-or-three is the shortest group worth reading
+  // on its own.
+  if (out.length > 1 && out.last.length < _minHeadChunk) {
+    final stray = out.removeLast();
+    out[out.length - 1] = '${out.last}$stray';
+  }
   out.add(payload.substring(payload.length - addressTailGroup));
   return out;
 }
@@ -189,7 +216,18 @@ String chunkAddress(String address) {
 /// `kaspa:qrxk2f9p…wmx3f4a2`. Payloads of 16 chars or fewer are returned whole
 /// (nothing to elide). The full review form is [chunkAddress]; a tap on a
 /// compact address should reveal it.
-String truncateAddressPayload(String address, {int head = 8, int tail = 8}) {
+/// The compact form: the scheme, [addressHeadGroup] characters, an ellipsis,
+/// and [addressTailGroup] characters — `kaspa:qr7m…ce2muaq7`.
+///
+/// **One compact form, and these are its two numbers** (founder, on glass
+/// 2026-09-07). It was 8 + 8 by default with a private 4 + 5 for narrow rows,
+/// which meant the address a user learned on one screen was a different string
+/// on the next.
+String truncateAddressPayload(
+  String address, {
+  int head = addressHeadGroup,
+  int tail = addressTailGroup,
+}) {
   final sep = address.indexOf(':');
   final prefix = sep >= 0 ? address.substring(0, sep + 1) : '';
   final payload = sep >= 0 ? address.substring(sep + 1) : address;

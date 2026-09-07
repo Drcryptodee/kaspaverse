@@ -34,7 +34,12 @@ class KvMark extends StatelessWidget {
     this.style = KvMarkStyle.orb,
     this.halo = true,
     this.breathe = false,
+    this.haloAlpha,
   });
+
+  /// Override the halo's strength. Null takes [KvMark.haloStrength]; the
+  /// launcher tile passes [KvMark.tileHaloStrength].
+  final double? haloAlpha;
 
   /// Disc diameter in dp. Canon: 176 · 120 · 96 · 64 · 40 · 28 · 24.
   final double size;
@@ -81,14 +86,26 @@ class KvMark extends StatelessWidget {
   /// counter.
   static double strokeUnitsFor(double size) => 14;
 
+  /// The halo's strength on an orb inside the app. §1.8's number.
+  static const double haloStrength = 0.36;
+
+  /// **The halo's strength on the launcher tile — a third of the app's.**
+  ///
+  /// Founder, on glass 2026-09-07: *"the surroundings of the orb is kinda
+  /// green. could you dim the glow and make it faint so that the deep dark
+  /// color can pop."* An icon is looked at against a wallpaper at 48 dp, where
+  /// a halo built for a 176 dp orb on true black reads as a green wash rather
+  /// than as light coming off a disc.
+  static const double tileHaloStrength = 0.12;
+
   /// Halo per §1.8: 14 px @ 36 % at 40 dp, 8 px at 25, none below 24.
-  static List<BoxShadow> orbHalo(double size, {double t = 0}) {
+  static List<BoxShadow> orbHalo(double size, {double t = 0, double? alpha}) {
     if (size < 24) return const [];
     final blur = (size * 0.35).clamp(8.0, 40.0) + t * (size * 0.65);
-    final alpha = 0.36 + t * 0.22;
+    final strength = (alpha ?? haloStrength) + t * 0.22;
     return [
       BoxShadow(
-        color: KvColor.primaryMuted.withValues(alpha: alpha),
+        color: KvColor.primaryMuted.withValues(alpha: strength),
         blurRadius: blur,
       ),
     ];
@@ -101,8 +118,15 @@ class KvMark extends StatelessWidget {
   /// meets the edge at the same point and eases into it a shade sooner.
   static const double tileRadiusRatio = 0.244;
 
-  /// The disc inside that tile, measured the same way: 690 of 1024.
-  static const double tileDiscRatio = 0.674;
+  /// The disc inside that tile.
+  ///
+  /// **0.505 — a quarter smaller than the 0.674 measured off the artwork**
+  /// (founder, on glass 2026-09-07: *"perhaps make the orb smaller. make it
+  /// like 25 % smaller than it is currently on the app icon"*). It gives the
+  /// `abyss` ground room to read as ground, which is the whole point of the
+  /// containment, and it puts the disc comfortably inside the 66 % an adaptive
+  /// mask always shows even before the halo is counted.
+  static const double tileDiscRatio = 0.505;
 
   @override
   Widget build(BuildContext context) {
@@ -142,7 +166,11 @@ class KvMark extends StatelessWidget {
               borderRadius: BorderRadius.circular(size * tileRadiusRatio),
             ),
             alignment: Alignment.center,
-            child: KvMark(size: size * tileDiscRatio, halo: halo),
+            child: KvMark(
+              size: size * tileDiscRatio,
+              halo: halo,
+              haloAlpha: tileHaloStrength,
+            ),
           ),
         );
       case KvMarkStyle.orb:
@@ -151,6 +179,7 @@ class KvMark extends StatelessWidget {
           glyphBox: glyphBox,
           units: units,
           halo: halo,
+          alpha: haloAlpha,
         );
         return breathe ? _Breathing(size: size, child: disc) : disc;
     }
@@ -164,8 +193,10 @@ class _Orb extends StatelessWidget {
     required this.units,
     required this.halo,
     this.t = 0,
+    this.alpha,
   });
   final double size, glyphBox, units, t;
+  final double? alpha;
   final bool halo;
 
   @override
@@ -177,7 +208,7 @@ class _Orb extends StatelessWidget {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: KvColor.primary, // flat — no radial, highlight or rim (BG-4)
-          boxShadow: halo ? KvMark.orbHalo(size, t: t) : const [],
+          boxShadow: halo ? KvMark.orbHalo(size, t: t, alpha: alpha) : const [],
         ),
         alignment: Alignment.center,
         // **`abyss`, the Deep ground** — founder's ruling on glass

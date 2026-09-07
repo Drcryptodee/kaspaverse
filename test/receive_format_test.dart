@@ -9,8 +9,10 @@ const _addr =
 void main() {
   group('truncateAddressPayload (DS-8)', () {
     test('keeps the scheme intact, truncates only the payload', () {
-      // first 8 = qrqrnyzd · last 8 = 3pmcd692 (of the PAYLOAD, not the string)
-      expect(truncateAddressPayload(_addr), 'kaspa:qrqrnyzd…3pmcd692');
+      // first 4 = qrqr · last 8 = 3pmcd692 (of the PAYLOAD, not the string).
+      // 4 + 8 since 2026-09-07 (founder), where it was 8 + 8 — one compact form
+      // on every screen, and the same numbers the full form weights.
+      expect(truncateAddressPayload(_addr), 'kaspa:qrqr…3pmcd692');
     });
 
     test('never spends the budget on the scheme (no kaspa:q… elision)', () {
@@ -21,19 +23,21 @@ void main() {
       expect(out.contains('…'), isTrue);
     });
 
-    test('payloads of 16 chars or fewer are returned whole', () {
-      const whole = 'kaspa:0123456789abcdef'; // 16-char payload — boundary
+    test('payloads of 12 chars or fewer are returned whole', () {
+      // The budget is head + tail = 4 + 8, so twelve is the boundary: a
+      // payload that short has nothing to elide.
+      const whole = 'kaspa:0123456789ab'; // 12-char payload — boundary
       expect(truncateAddressPayload(whole), whole);
       expect(truncateAddressPayload('kaspa:qrqr'), 'kaspa:qrqr');
       expect(truncateAddressPayload(''), '');
     });
 
     test(
-      '17-char payload is the first truncation step (elides the middle)',
+      '13-char payload is the first truncation step (elides the middle)',
       () {
         expect(
-          truncateAddressPayload('kaspa:0123456789abcdefg'),
-          'kaspa:01234567…9abcdefg',
+          truncateAddressPayload('kaspa:0123456789abc'),
+          'kaspa:0123…56789abc',
         );
       },
     );
@@ -41,7 +45,7 @@ void main() {
     test('a string with no scheme is treated as all-payload', () {
       expect(
         truncateAddressPayload('abcdefghijklmnopqrstuvwxyz'),
-        'abcdefgh…stuvwxyz',
+        'abcd…stuvwxyz',
       );
     });
   });

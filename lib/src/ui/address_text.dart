@@ -25,22 +25,21 @@ import 'theme/tokens.dart';
 /// safe to render, truncate and copy. The a11y label speaks the tail the way
 /// §11 prescribes ("address ending 3 f 4 a 2").
 class AddressText extends StatelessWidget {
-  const AddressText(this.address, {this.style, this.tight = false, super.key});
+  const AddressText(this.address, {this.style, super.key});
 
   final String address;
   final TextStyle? style;
-
-  /// The narrow form, for a row that shares its line with a value.
-  final bool tight;
 
   @override
   Widget build(BuildContext context) {
     final base =
         (style ?? Theme.of(context).textTheme.bodyMedium ?? const TextStyle())
             .copyWith(fontFamily: KvFont.mono);
-    final compact = tight
-        ? truncateAddressPayload(address, head: 4, tail: 5)
-        : truncateAddressPayload(address);
+    // **One compact form everywhere** — `kaspa:` + four + `…` + eight. The
+    // narrow `tight` variant that used to live here (4 + 5) made the same
+    // address read as two different strings on two screens; the law is
+    // `format.dart`'s and it has no per-caller dial (founder, 2026-09-07).
+    final compact = truncateAddressPayload(address);
     final sep = compact.indexOf(':');
     final scheme = sep >= 0 ? compact.substring(0, sep + 1) : '';
     final payload = sep >= 0 ? compact.substring(sep + 1) : compact;

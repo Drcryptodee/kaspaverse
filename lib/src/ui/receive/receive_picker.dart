@@ -54,6 +54,7 @@ class ReceivePicker extends StatefulWidget {
     required this.addresses,
     required this.selected,
     super.key,
+    this.coinsChanged,
   });
 
   /// The wallet's receive window, balances folded in. The sheet calls it once.
@@ -61,6 +62,15 @@ class ReceivePicker extends StatefulWidget {
 
   /// Which index the screen behind is showing, so the sheet can mark it.
   final int selected;
+
+  /// Fires whenever anything that can move a balance moved
+  /// (`WalletService.coins`). **The sheet is a balance surface and obeys the
+  /// same rule as every other one** (D-295): the founder watched a deposit
+  /// mature with this sheet open and it kept saying `Accepted` over a stale
+  /// figure, because the list was read once when the sheet opened and never
+  /// again — *"i had to go back and click the sheet again to see updated
+  /// balance."*
+  final Listenable? coinsChanged;
 
   /// **The deepest index this sheet will OFFER as fresh.**
   ///
@@ -95,9 +105,14 @@ class ReceivePicker extends StatefulWidget {
     BuildContext context, {
     required Future<List<WalletAddressDto>> Function() addresses,
     required int selected,
+    Listenable? coinsChanged,
   }) => Navigator.of(context).push(
     KvSheetRoute<WalletAddressDto>(
-      builder: (_) => ReceivePicker(addresses: addresses, selected: selected),
+      builder: (_) => ReceivePicker(
+        addresses: addresses,
+        selected: selected,
+        coinsChanged: coinsChanged,
+      ),
     ),
   );
 
@@ -148,9 +163,24 @@ class _ReceivePickerState extends State<ReceivePicker> {
   final _fresh = KvReadingController();
 
   @override
+  void initState() {
+    super.initState();
+    widget.coinsChanged?.addListener(_reread);
+  }
+
+  @override
   void dispose() {
+    widget.coinsChanged?.removeListener(_reread);
     _fresh.dispose();
     super.dispose();
+  }
+
+  /// Money moved, so every figure on this sheet is stale. Re-ask, and let the
+  /// `FutureBuilder` swap the rows under whatever the user is doing — the level
+  /// the fresh card is expanded to is held by [_fresh] and survives it.
+  void _reread() {
+    final next = widget.addresses();
+    if (mounted) setState(() => _addresses = next);
   }
 
   void _retry() {
@@ -260,7 +290,7 @@ class _Groups extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (freshRows.isNotEmpty) ...[
-          const KvSectionHeader('FRESH', gloss: 'zero balance'),
+          const KvSectionHeader('FRESH', gloss: '· zero balance'),
           // **The reading room, exactly as `T4`'s `All` uses it** (D-289) —
           // founder, on glass 2026-09-07: *"clicking on 'show' literally does
           // what 'All' does in wallet settings, where it pushes used below a
@@ -340,7 +370,7 @@ class _Groups extends StatelessWidget {
           ),
         ],
         if (used.isNotEmpty) ...[
-          const KvSectionHeader('USED', gloss: 'holding coins'),
+          const KvSectionHeader('USED', gloss: '· holding coins'),
           _Card(
             rows: [
               for (final a in used)
@@ -393,6 +423,10 @@ class _Card extends StatelessWidget {
 }
 
 /// One address: what it is called, the address itself, and what it holds.
+/// The address sub-line's own size, one step under the house 13 — this row
+/// carries a disc, a title, a badge, a figure and sometimes a check.
+const TextStyle _addressLine = TextStyle(fontSize: 12, height: 17 / 12);
+
 class _AddressRow extends StatelessWidget {
   const _AddressRow({
     required this.address,
@@ -433,9 +467,24 @@ class _AddressRow extends StatelessWidget {
       badge: a.index == 0 ? const KvDefaultChip() : null,
       subWidget: Padding(
         padding: const EdgeInsets.only(top: KvSpace.xs),
-        child: AddressText(a.address, tight: true),
+        // **It shrinks rather than wraps.** A compact address is nineteen
+        // characters and every one of them is load-bearing — the weighted head
+        // and tail are the address-poisoning steer (BG-15) — so it may not
+        // ellipsise, and a second line breaks the row's rhythm beside a
+        // balance (founder, on glass 2026-09-07: *"a kas with more decimals
+        // kinda breaks the address and its not well sized there"*).
+        // `scaleDown` gives way instead, from 12 dp, which at the narrowest
+        // this row gets is still above BG-14's floor.
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: AddressText(a.address, style: _addressLine),
+        ),
       ),
       dense: true,
+      // The address needs the width more than the figure does; `KvAmount` has
+      // a `FittedBox` of its own and can give way.
+      trailingCap: 110,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

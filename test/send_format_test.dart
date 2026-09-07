@@ -78,25 +78,37 @@ void main() {
     // pure grouping in fours, which is the rule the founder replaced after
     // seeing its output on glass: a 61-character payload ended `c6jz qunt h`,
     // stranding one bold character where the eye is supposed to land.
-    test('keeps the kaspa: prefix, fours in the head, FIVE in the tail', () {
-      expect(chunkAddress('kaspa:qz7ulu4c25dh'), 'kaspa:qz7u lu4 c25dh');
+    test('keeps the kaspa: prefix, fours in the head, EIGHT in the tail', () {
+      // 4 + 8 since 2026-09-07 (founder, on glass): the weighted head is four
+      // and the weighted tail is eight, on the full form and the compact one
+      // alike, so the eye is taught one shape.
+      expect(chunkAddress('kaspa:qz7ulu4c25dh'), 'kaspa:qz7u lu4c25dh');
     });
 
     test('a colon-less string takes the same rule', () {
-      expect(chunkAddress('abcdefgh'), 'abc defgh');
+      expect(chunkAddress('abcdefghijkl'), 'abcd efghijkl');
     });
 
-    test('the real 61-character payload ends qunth, not qunt h', () {
-      // The exact address and the exact complaint that produced the amendment.
+    test('no group is left with one character stranded beside the tail', () {
+      // The complaint that produced the FIVE (D-223) applies to the eight the
+      // same way, one group left: a 61-character payload leaves 53 head
+      // characters, which is thirteen fours and a ONE. Under three, it folds
+      // into the group before it.
       const addr =
           'kaspa:qz5a8jtqt3l3nf8zxve9eu0qtrkewc5e0yn465djghw4438jqdecc6jzqunth';
-      final out = chunkAddress(addr);
-      expect(out, endsWith(' c6jz qunth'));
-      expect(out, isNot(contains(' qunt h')));
-      // Fourteen fours then the five: the short group, when a length produces
-      // one, falls NEXT TO the tail rather than splitting it.
-      expect(addressPayloadGroups(addr).last, 'qunth');
-      expect(addressPayloadGroups(addr).length, 15);
+      final groups = addressPayloadGroups(addr);
+      expect(
+        groups.last,
+        'c6jzqunth'.substring(1),
+        reason: 'eight in the tail',
+      );
+      expect(groups.last.length, 8);
+      expect(
+        groups.every((g) => g.length >= 3),
+        isTrue,
+        reason: 'no stranded one- or two-character group',
+      );
+      expect(chunkAddress(addr), isNot(contains(' q qunth')));
     });
 
     test('EVERY surface that chunks an address uses this one rule', () {

@@ -62,28 +62,32 @@ void main() {
       expect(anyDark, isTrue, reason: 'a real QR has dark modules');
     });
 
-    test('the quiet zone is four modules, computed from the real matrix', () {
-      // **The spec is four MODULES, and 16 dp is only the floor** — a longer
-      // payload means more modules and smaller cells, and a fixed margin would
-      // silently stop being four of them. This asserts the geometry rather
-      // than the constant (item 0 / L121).
+    test('the quiet zone is 2.4 modules, computed from the real matrix', () {
+      // **The margin is expressed in MODULES, not dp** — a longer payload
+      // means more modules and smaller cells, and a fixed dp margin would
+      // silently stop being a fixed number of them. This asserts the geometry
+      // rather than the constant (item 0 / L121).
+      //
+      // 2.4, where it was four: a founder decision on glass (2026-09-07,
+      // *"reduce it by 40 % and size the QR to fit it"*) that trades 40 % of
+      // ISO/IEC 18004's margin for a code 30 % larger inside the same tile.
+      // The trade is written at `KvQr.quietModules`.
       final modules = QrImage(
         QrCode(
           payload: QrPayload.fromString(_addr),
           errorCorrectLevel: QrErrorCorrectLevel.medium,
         ),
       ).moduleCount;
-      // **Four modules at ANY tile side**, because the painter divides the
-      // side into `modules + 8` cells and spends four a side. That is the
-      // property a fixed dp margin cannot have: `S5` draws an 18 dp pad on a
-      // 256 dp tile, which for this address is 3.03 modules — under spec.
+      // **The same fraction of a module at ANY tile side**, because the
+      // painter divides the side into `modules + 2 × quiet` cells. That is the
+      // property a fixed dp margin cannot have.
       for (final side in [KvQrFrame.maxSide, 180.0, 120.0]) {
         final quiet = KvQr.quietZone(modules, side);
         final cell = (side - 2 * quiet) / modules;
         expect(
           quiet,
-          closeTo(4 * cell, 1e-9),
-          reason: 'a QR with less than four modules of margin fails scanners',
+          closeTo(KvQr.quietModules * cell, 1e-9),
+          reason: 'the margin must stay a fixed number of MODULES',
         );
       }
 
@@ -92,7 +96,10 @@ void main() {
       final denseQuiet = KvQr.quietZone(dense, KvQrFrame.maxSide);
       expect(
         denseQuiet,
-        closeTo(4 * (KvQrFrame.maxSide - 2 * denseQuiet) / dense, 1e-9),
+        closeTo(
+          KvQr.quietModules * (KvQrFrame.maxSide - 2 * denseQuiet) / dense,
+          1e-9,
+        ),
       );
     });
 

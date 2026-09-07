@@ -31,22 +31,25 @@ class KvQr extends StatefulWidget {
   /// way to take it. Expected to route through the one copy path.
   final VoidCallback? onTap;
 
-  /// **The quiet zone is four modules on every side, and it is drawn by the
+  /// **The quiet zone is 2.4 modules on every side, and it is drawn by the
   /// painter rather than reserved by the layout** (item 0 / L121 — geometry is
   /// computed, never asserted).
   ///
-  /// The spec is four modules of clear margin; a QR without it fails many
-  /// scanners. Expressed in modules the requirement is scale-free — the tile
-  /// divides its side into `moduleCount + 8` cells and spends four of them a
-  /// side — so a longer payload (more modules, smaller cells) cannot erode it,
-  /// and neither can a narrower window.
+  /// Expressed in modules the margin is scale-free — the tile divides its side
+  /// into `moduleCount + 2 × quiet` cells — so a longer payload (more modules,
+  /// smaller cells) cannot erode it, and neither can a narrower window.
   ///
-  /// §1.7's *"padding 18"* is the **render's** number and is a floor, not the
-  /// rule: `S5` measures a 256 dp tile with an 18 dp pad, which for a
-  /// 67-character `kaspa:` address (37 modules) is **3.03 modules** — under
-  /// spec. A picture cannot encode a scanner's requirement, so this is the one
-  /// place the render does not win (D-259 governs design, not function).
-  static const int quietModules = 4;
+  /// **2.4, where it was 4 — a founder decision, and the trade is written here
+  /// rather than argued** (on glass, 2026-09-07: *"about that margin, reduce it
+  /// by 40 % and size the QR to fit it"*). Four is ISO/IEC 18004's number and
+  /// this is 60 % of it, so the margin is now narrower than the standard asks.
+  /// What makes it a reasonable call rather than a reckless one: the tile is
+  /// white and the quiet zone's job is a light border the decoder can find the
+  /// finder patterns against, the code is drawn at 256 dp where a module is
+  /// ~5.8 dp on a modern sensor, and the ERROR CORRECTION is unchanged at
+  /// medium. It is his surface and his call; the honest note is that a scanner
+  /// held at a hard angle has less margin to work with than the spec assumes.
+  static const double quietModules = 2.4;
 
   /// The quiet zone in dp for a given matrix and tile side — exposed so a
   /// guard can read the geometry back rather than trust it.
@@ -125,17 +128,13 @@ class KvQrFrame extends StatelessWidget {
   /// square by construction — so the floor geometry narrows it instead of
   /// overflowing, and no widget below the root reads a width (BG-33).
   ///
-  /// **300, where it was 256** — founder, on glass 2026-09-07: *"increase the
-  /// size of the QR code in the white background, expand it so its closer to
-  /// all 4 corners."* The lever is the TILE, not the margin: the quiet zone
-  /// stays four modules because that is a scanner's requirement and not a taste
-  /// (see [KvQr.quietModules]), so the way to make the code bigger is to give
-  /// it more tile. At the 393 dp reference the card's inner width is 299 —
-  /// 393 less two 25 dp gutters and two 22 dp card insets — so the tile now
-  /// fills the card edge to edge and the code itself grows about **17 %**. Past
-  /// that the cap holds: `KvColumn` clamps the column at 560, and a 500 dp QR
-  /// is a poster, not an address.
-  static const double maxSide = 300;
+  /// **256.** It went to 300 for one sitting so the code inside it could grow
+  /// with the quiet zone untouched; the founder looked and took the other lever
+  /// instead (2026-09-07: *"revert the qr to be 17 % smaller … reduce [the
+  /// margin] by 40 % and size the QR to fit it"*). The tile is back where `S5`
+  /// measures it and the code inside is larger than it has ever been, because
+  /// [KvQr.quietModules] gave up the space rather than the card.
+  static const double maxSide = 256;
 
   @override
   Widget build(BuildContext context) {
