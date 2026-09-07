@@ -12,7 +12,7 @@ exclude = ["vendor/tokio-tungstenite"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "ISC"
 
 # Profile note (P0 §0.5): TLS/crypto deps must be rustls-based — anything
 # OpenSSL-linked breaks the Android cross-compile (lesson L16). Verified at the

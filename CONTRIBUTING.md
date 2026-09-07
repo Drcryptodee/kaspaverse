@@ -111,6 +111,29 @@ small PR doesn't have to wait on the full record.
 - Commit messages: `type(scope): summary` with the tier tag, e.g.
   `feat(receive): QR + payload-aware address [T1]`.
 - Paste your gate result. For T2/T3, note the device proof and which auditor verdicts apply.
-- By contributing, you agree your work is licensed under the project's [MIT License](LICENSE).
+- If your change adds or updates third-party material, say where it came from and under
+  what terms, and add it to [NOTICE.md](NOTICE.md) in the same PR.
+
+## Licensing your contribution
+
+The project is licensed under the **ISC License** ([LICENSE](LICENSE)). By opening a pull
+request you confirm that you wrote the contribution or otherwise have the right to submit
+it, and that you licence it to the project under the ISC License. That is the whole of it —
+there is no CLA to sign today and none is planned as a hurdle for small changes.
+
+Two honest caveats, so nothing here surprises a future contributor:
+
+- **The project is at a single-maintainer stage.** The original KaspaVerse work is currently
+  the copyright of one author (see [NOTICE.md](NOTICE.md)); contributors keep the copyright
+  in their own contributions and licence them in under ISC as above.
+- **This policy may evolve before broad external contributions are accepted** — most likely
+  when the project moves to the official KaspaVerse organization, where a formal contributor
+  licensing or IP policy may be adopted. Any such change will be stated here, will apply
+  going forward, and will not retroactively alter the terms your contribution was accepted
+  under.
+
+Contributing code does not grant rights in the KaspaVerse name or mark, and does not receive
+any — branding is handled separately from the software licence in
+[TRADEMARK.md](TRADEMARK.md).
 
 Welcome aboard — and thank you for holding the line on proof.

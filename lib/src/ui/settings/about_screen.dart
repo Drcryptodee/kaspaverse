@@ -36,7 +36,7 @@ class AboutScreen extends StatefulWidget {
 
   final AboutScope scope;
 
-  /// The repository the code is published from. **MIT, and the whole point**:
+  /// The repository the code is published from. **ISC, and the whole point**:
   /// the row that names it is the only way a user can get from this screen to
   /// the thing the fingerprint above it is a fingerprint *of*.
   static const String repository = 'https://github.com/Drcryptodee/kaspaverse';
@@ -153,6 +153,15 @@ class _AboutScreenState extends State<AboutScreen> {
                               context: context,
                               applicationName: 'KaspaVerse',
                               applicationVersion: _version ?? '',
+                              // The app's OWN licence, which the SDK screen
+                              // cannot know: `LicenseRegistry` enumerates the
+                              // Dart package graph, so without this line the
+                              // one licence a user is looking for is the one
+                              // absent. ISC asks that the copyright notice
+                              // travel with every copy, and a shipped APK is
+                              // a copy.
+                              applicationLegalese:
+                                  'Copyright (c) 2026 Drcryptodee · ISC License',
                             );
                           },
                         ),

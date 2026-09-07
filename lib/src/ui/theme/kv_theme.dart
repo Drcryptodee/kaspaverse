@@ -257,9 +257,14 @@ ThemeData kvDarkTheme() {
     colorScheme: scheme,
     scaffoldBackgroundColor: KvColor.abyss,
     // **The one Material surface the app does not draw itself.**
-    // `showLicensePage` is the SDK's own screen and it is the *complete*
-    // licence list — a legal artefact, not a designed one, so About routes to
-    // it rather than transcribing 40 licences into house parts. It resolves
+    // `showLicensePage` is the SDK's own screen and it is the complete
+    // licence list **for the Dart package graph** — which is not the same as
+    // the licence list for the shipped binary: `LicenseRegistry` cannot see
+    // the bundled OFL faces or the Rust crates in the native library, since
+    // those are `cargo` dependencies rather than `pubspec` ones (D-298 records
+    // the gap and its trigger). It is a legal artefact, not a designed one, so
+    // About routes to it rather than transcribing 40 licences into house
+    // parts. It resolves
     // `Theme.of(context).cardColor` for its panels, which nothing here pinned,
     // so it painted Material's default grey over the abyss (`ux-auditor`,
     // UX-R4). Pinned to the house plate; "Powered by Flutter" in its footer is

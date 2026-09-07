@@ -89,7 +89,7 @@ without the app getting worse.
 
 The test we hold ourselves to is not the licence. In the famous cases where an open project
 quietly closed — Red Hat, Android — **the licence never changed**; what moved behind the wall
-was everything needed to actually build the thing. So MIT is not the promise. **The app
+was everything needed to actually build the thing. So ISC is not the promise. **The app
 building and running for a third party, with every optional service switched off, is the
 promise** — and it is a thing you can check rather than a thing you have to believe.
 
@@ -183,6 +183,17 @@ phase plans — is private. Contributors and auditors get it in full.
   report a vulnerability privately.
 - **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — stag hunt, not prisoner's dilemma.
 
-## License
+## Licence and branding
 
-MIT — see [LICENSE](LICENSE).
+**KaspaVerse is open source.** The source code is licensed under the **ISC License** — see
+[LICENSE](LICENSE). Use it, fork it, modify it, ship it, commercially or not.
+
+Third-party material in this tree (vendored code, the bundled fonts, the Gradle wrapper, the
+BIP-39 wordlist, the transcribed icon geometry) keeps its own licences and its own copyright
+statements. [NOTICE.md](NOTICE.md) says what is original work and what is not.
+
+**The name and the mark are maintained separately from the licence.** The ISC grant is a
+copyright grant; it conveys no rights in the KaspaVerse name, logo or branding. A fork or
+derivative must not be represented as an official KaspaVerse release merely because it uses
+this code — rename it and ship it as your own. The full policy, including what you *may*
+freely do, is [TRADEMARK.md](TRADEMARK.md).
