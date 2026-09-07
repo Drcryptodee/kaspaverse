@@ -221,7 +221,26 @@ class KvRuledLabel extends StatelessWidget {
 /// target needs falls where the section break is. A header with no explainer
 /// is not a control and takes [plainHeight].
 class KvSectionHeader extends StatefulWidget {
-  const KvSectionHeader(this.label, {super.key, this.info, this.trailing});
+  const KvSectionHeader(
+    this.label, {
+    super.key,
+    this.info,
+    this.trailing,
+    this.gloss,
+  });
+
+  /// A few dim words on the label's own line, **defining the label**.
+  ///
+  /// The receive picker's `FRESH · not handed out from this phone`, where the
+  /// gloss is load-bearing rather than decorative: `FRESH` alone reads as a
+  /// claim about the chain, which is the one thing that wallet cannot make. It
+  /// is a slot here rather than a private widget there because a caps label
+  /// with its own gaps stacked around it is exactly what D-277 named after the
+  /// Network overflow — the part owns the air, the caller adds none.
+  ///
+  /// A header carries a gloss **or** a control, never both: they want opposite
+  /// ends of the same line.
+  final String? gloss;
 
   final String label;
 
@@ -284,6 +303,37 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
         spacing: KvSpace.sm,
         runSpacing: KvSpace.xs,
         children: [title, trailing],
+      );
+    }
+    final gloss = widget.gloss;
+    if (info == null && gloss != null) {
+      // A `Wrap` at the START, not `spaceBetween`: a definition sits beside
+      // the word it defines. `ConstrainedBox`, not `SizedBox`, so the gloss
+      // drops to a second line at 320 dp / 1.3× instead of being clipped.
+      return ConstrainedBox(
+        constraints: const BoxConstraints(
+          minHeight: KvSectionHeader.plainHeight,
+        ),
+        child: Align(
+          alignment: KvSectionHeader._seat,
+          child: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: KvSpace.s,
+            runSpacing: 2,
+            children: [
+              title,
+              Text(
+                gloss,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  color: KvColor.inkDim,
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     }
     if (info == null) {

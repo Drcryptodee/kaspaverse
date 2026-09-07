@@ -119,6 +119,15 @@ enum KvGlyph {
   /// History, and anything that reaches backwards in time. Lucide `history`.
   history,
 
+  /// A slot that exists and has not been filled. Lucide `circle-dashed` — a
+  /// ring drawn as eight arcs, which is how every interface on earth says
+  /// *nothing here yet* without saying *nothing here, ever*. It seats the
+  /// receive picker's fresh addresses opposite [history]'s used ones, and the
+  /// distinction it draws is deliberately the narrow one: this phone has not
+  /// handed the address out. What the chain has seen is a question no node
+  /// answers (INV-8; `bridge::api::wallet`, D-293).
+  circleDashed,
+
   /// Overflow. Lucide `ellipsis` — three dots, each a zero-length stroke.
   kebab,
 
@@ -460,6 +469,19 @@ class KvGlyphPainter extends CustomPainter {
           'M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8',
           'M3 3v5h5',
           'M12 7v5l4 2',
+        ]);
+      case KvGlyph.circleDashed:
+        // Lucide's eight arcs, verbatim — a dashed stroke would give the
+        // gaps to the dash phase and move them under every rotation.
+        path(const [
+          'M10.1 2.18a9.93 9.93 0 0 1 3.8 0',
+          'M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7',
+          'M21.82 10.1a9.93 9.93 0 0 1 0 3.8',
+          'M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69',
+          'M13.9 21.82a9.94 9.94 0 0 1-3.8 0',
+          'M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7',
+          'M2.18 13.9a9.93 9.93 0 0 1 0-3.8',
+          'M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69',
         ]);
       case KvGlyph.kebab:
         // Lucide's own r = 1 circles, stroked — the pin, not a reading of it.

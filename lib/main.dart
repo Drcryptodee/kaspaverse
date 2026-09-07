@@ -7,7 +7,7 @@ import 'package:kaspaverse/src/rust/api/send.dart'
 import 'package:kaspaverse/src/rust/api/transport.dart' show txAcceptanceStatus;
 import 'package:kaspaverse/src/rust/api/vault.dart' show vaultReceiveAddress;
 import 'package:kaspaverse/src/rust/api/wallet.dart'
-    show deepScan, listAddresses, maturityThresholds;
+    show deepScan, listAddresses, maturityThresholds, noteAddressGiven;
 import 'package:kaspaverse/src/rust/frb_generated.dart';
 import 'package:kaspaverse/src/services/chain_service.dart';
 import 'package:kaspaverse/src/services/contacts_service.dart';
@@ -225,6 +225,33 @@ SecurityScope _securityScope() => SecurityScope(
   lockNow: () async => VaultService.instance.lockNow(),
 );
 
+/// **Receive**, built once for both its doors — the home screen's own control
+/// and `T4`'s address list — so the picker, the handout record and the share
+/// seam cannot differ between them (C7's rule, applied to the second screen
+/// that acquired two entrances).
+Widget _receiveScreen({
+  required Future<String> Function() address,
+  int index = 0,
+}) => ReceiveScreen(
+  fetch: address,
+  index: index,
+  addresses: listAddresses,
+  // **Displaying an address is handing it out** — the picker's whole notion of
+  // *fresh* rests on this line, and nothing else writes that record.
+  //
+  // Fire-and-forget, and the failure is a log: the wallet directory being
+  // unwritable is a real fault, but it is not one to put in front of somebody
+  // holding a QR up to a camera. The cost of the miss is that an address which
+  // has been handed out still reads as fresh — the picker knowing less, never
+  // the address being wrong.
+  onGivenOut: (i) => unawaited(
+    Future<void>(() => noteAddressGiven(index: i)).catchError(
+      (Object e) => debugPrint('receive: could not record handout of $i: $e'),
+    ),
+  ),
+  share: VaultService.instance.shareText,
+);
+
 /// **The** settings surface, built once so the drawer and any later door
 /// open the same screen rather than two renderings of one truth (C7).
 WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
@@ -237,12 +264,10 @@ WidgetBuilder _settingsRoute(ChainService chain, WalletService wallet) =>
         coinsChanged: WalletService.instance.mature,
         // The list hands over the address it drew, so the QR is always the row
         // the user tapped — never a re-derivation that could answer with a
-        // different one.
-        receiveRoute: (address, label) => ReceiveScreen(
-          fetch: () async => address,
-          share: VaultService.instance.shareText,
-          title: label,
-        ),
+        // different one. The index rides along: Receive names the address from
+        // it and records the handout against it.
+        receiveRoute: (address, index) =>
+            _receiveScreen(address: () async => address, index: index),
         consolidate: wallet.prepareConsolidate,
         consolidateEstimate: consolidateEstimate,
         commitSend: wallet.commitSend,
@@ -345,10 +370,7 @@ class _MoneyShellState extends State<_MoneyShell> {
       // the service surfaces its own errors.
       MessagingService.instance.start();
     },
-    receiveRoute: (_) => ReceiveScreen(
-      fetch: vaultReceiveAddress,
-      share: VaultService.instance.shareText,
-    ),
+    receiveRoute: (_) => _receiveScreen(address: vaultReceiveAddress),
     sendRoute: (_, balanceStale) => SendScreen(
       mature: widget.wallet.mature,
       balanceStale: balanceStale,

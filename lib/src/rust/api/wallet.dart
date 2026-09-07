@@ -81,6 +81,23 @@ Future<DeepScanReport> deepScan() =>
 Future<List<WalletAddressDto>> listAddresses() =>
     RustLib.instance.api.crateApiWalletListAddresses();
 
+/// Record that the Receive screen has **displayed** `index`'s address, so the
+/// picker can tell an address this phone has handed out from one it has not.
+///
+/// Called on display rather than on copy or share: a QR on a screen is the
+/// commonest way an address is given away and no tap of ours precedes a camera.
+/// See `vault::mark_receive_given` for the one-way trade that follows, and
+/// [`WalletAddressDto::given_out`] for why this local fact is the only honest
+/// answer available — the chain question ("has anything ever arrived here")
+/// cannot be asked of a node, and INV-8 forbids asking an indexer.
+///
+/// Never fails the caller's screen: a wallet whose directory is not writable
+/// still shows the address. The error is returned so the caller can log it, and
+/// `main.dart` does exactly that rather than putting a file-system fault in
+/// front of someone waiting to be paid.
+Future<void> noteAddressGiven({required int index}) =>
+    RustLib.instance.api.crateApiWalletNoteAddressGiven(index: index);
+
 /// Read the pin's maturity thresholds for this wallet's network.
 ///
 /// Synchronous and I/O-free by construction (the library answers from its own
@@ -309,12 +326,35 @@ class WalletAddressDto {
   /// halves).
   final bool settling;
 
+  /// Coins sitting here right now, spendable and covenant-locked together.
+  /// The honest, checkable half of what a render drew as *"14 received"* —
+  /// a count of what is HERE, never a count of what once arrived (see
+  /// [`list_addresses`] on why the second question has no offline answer).
+  final int coinCount;
+
+  /// **This install has put this address in front of someone** — the Receive
+  /// screen has displayed it, so its QR has been on a screen a camera could
+  /// read.
+  ///
+  /// The narrow, true version of *fresh vs used*. A node answers what an
+  /// address HOLDS, never what it once received, and INV-8 forbids asking an
+  /// indexer instead — so a zero balance is equally *never seen* and *used
+  /// and swept*, and no field here can say which. This one claims something
+  /// this app owns outright and can never be wrong about in the direction
+  /// that matters: it says the address was handed out, and a surface may
+  /// therefore say an address was NOT handed out **from this phone** —
+  /// never that the chain has not seen it. Backed by `vault`'s
+  /// `receive.given` (D-293).
+  final bool givenOut;
+
   const WalletAddressDto({
     required this.index,
     required this.address,
     required this.balanceSompi,
     required this.lockedSompi,
     required this.settling,
+    required this.coinCount,
+    required this.givenOut,
   });
 
   @override
@@ -323,7 +363,9 @@ class WalletAddressDto {
       address.hashCode ^
       balanceSompi.hashCode ^
       lockedSompi.hashCode ^
-      settling.hashCode;
+      settling.hashCode ^
+      coinCount.hashCode ^
+      givenOut.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -334,7 +376,9 @@ class WalletAddressDto {
           address == other.address &&
           balanceSompi == other.balanceSompi &&
           lockedSompi == other.lockedSompi &&
-          settling == other.settling;
+          settling == other.settling &&
+          coinCount == other.coinCount &&
+          givenOut == other.givenOut;
 }
 
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI

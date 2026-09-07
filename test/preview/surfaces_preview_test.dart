@@ -525,6 +525,11 @@ List<WalletAddressDto> _addressFixture() {
         // Index 3 has nothing spendable but something on its way, which is the
         // row that must NOT be filed under "empty" (the L92 scar).
         settling: i == 3,
+        coinCount: funded.containsKey(i) ? 1 : (i == 7 ? 1 : 0),
+        // Indices 0 and 5 have been shown to someone from this phone; 5 holds
+        // nothing, so it is the row that is USED only because of that record —
+        // the case the picker exists to get right.
+        givenOut: i == 0 || i == 5,
       ),
   ];
 }
@@ -604,6 +609,26 @@ Widget _about() => AboutScreen(
 );
 
 /// `T3` — the ceremony over its own screen, which is how it is read.
+/// Receive over one of the wallet's own addresses, with the picker wired.
+/// `index` picks which: 0 is the default, 5 is the fresh one the render draws.
+Widget _receive({int index = 0}) {
+  final rows = _addressFixture();
+  return ReceiveScreen(
+    fetch: () async => rows[index].address,
+    index: index,
+    addresses: () async => rows,
+    share: (_) async => true,
+  );
+}
+
+Future<void> _openReceivePicker(WidgetTester tester) async {
+  await tester.tap(find.byType(ReceiveScreen).hitTestable());
+  await tester.pump();
+  await tester.tap(find.text('Main'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+}
+
 Future<void> _openLockTimer(WidgetTester tester) async {
   await tester.tap(find.text('Lock when I leave'));
   await tester.pump();
@@ -830,6 +855,20 @@ void main() {
       () => ReceiveScreen(fetch: () async => _addr, share: (_) async => true),
     );
 
+    // **The picker's three states** (UX-R4b), against the founder's renders:
+    // the default address with its pill, a fresh one chosen, and the sheet.
+    framedSurface('receive__picker_default', () => _receive());
+    // Index 9 is fresh; index 5 is the row that is USED only because this
+    // phone handed it out, and the sheet frame is where that one is read.
+    framedSurface('receive__picker_fresh', () => _receive(index: 9));
+    // **All five frames for the sheet**: `KvSheet` transforms at `medium`+
+    // (560 wide, floating, four radii) and a picker nobody has seen there is
+    // a picker whose widest form is unjudged (§3a.2).
+    framedSurface(
+      'receive__picker_sheet',
+      () => _receive(),
+      act: _openReceivePicker,
+    );
     // **The failed state, at the same footprint** (BG-20) — the one no
     // happy-path preview can show.
     framedSurface(

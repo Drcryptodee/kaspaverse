@@ -505,7 +505,7 @@ class _WalletScreenState extends State<WalletScreen> {
             semanticLabel: 'Receive address',
             onTap: widget.scope.receiveRoute == null
                 ? null
-                : () => _openReceive(_address, 'Receive'),
+                : () => _openReceive(_address, 0),
           ),
           if (_addressesFailed)
             const _Fault(
@@ -581,16 +581,16 @@ class _WalletScreenState extends State<WalletScreen> {
     // million times the number on the glass, read out to the one user who
     // cannot check it against the row (`wallet-security`, this sitting).
     final locked = a.lockedSompi > BigInt.zero
-        ? ', ${_kas(a.lockedSompi)} KAS locked in a contract'
+        ? ', ${kasSpoken(a.lockedSompi)} KAS locked in a contract'
         : '';
     final spoken = a.balanceSompi > BigInt.zero
-        ? '$label, ${_kas(a.balanceSompi)} KAS$locked'
+        ? '$label, ${kasSpoken(a.balanceSompi)} KAS$locked'
         : (a.settling
               ? '$label, pending$locked'
               : (locked.isEmpty ? '$label, empty' : '$label$locked'));
     return KvRow(
       title: label,
-      badge: isDefault ? const _DefaultChip() : null,
+      badge: isDefault ? const KvDefaultChip() : null,
       subWidget: Padding(
         padding: const EdgeInsets.only(top: KvSpace.xs),
         child: AddressText(a.address, tight: true),
@@ -617,12 +617,12 @@ class _WalletScreenState extends State<WalletScreen> {
       // `Locked` wins the slot when both apply: a coin the wallet will never
       // move is a harder fact than one that is merely on its way.
       trailingMeta: a.lockedSompi > BigInt.zero
-          ? const _Meta('Locked')
-          : (a.settling ? const _Meta('Pending') : null),
+          ? const KvRowMeta('Locked')
+          : (a.settling ? const KvRowMeta('Pending') : null),
       semanticLabel: spoken,
       onTap: widget.scope.receiveRoute == null
           ? null
-          : () => _openReceive(a.address, label),
+          : () => _openReceive(a.address, a.index),
     );
   }
 
@@ -635,63 +635,14 @@ class _WalletScreenState extends State<WalletScreen> {
   /// out loud rather than filed: it is a 10 dp divergence from `T4`.
   Widget _hiddenRow(int hidden) {
     final plural = hidden == 1 ? 'address' : 'addresses';
-    return Semantics(
-      button: true,
-      label: 'Show $hidden empty $plural',
-      child: ExcludeSemantics(
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () {
-            KvHaptic.selection();
-            setState(() => _showAll = true);
-          },
-          child: SizedBox(
-            height: KvSpace.touchTarget,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text.rich(
-                    TextSpan(
-                      children: [
-                        // BG-30: the figure is mono, the words are not.
-                        TextSpan(
-                          text: '$hidden',
-                          style: const TextStyle(
-                            fontFamily: KvFont.mono,
-                            fontWeight: FontWeight.w500,
-                            fontVariations: KvWeight.w500,
-                          ),
-                        ),
-                        TextSpan(text: ' empty $plural hidden'),
-                      ],
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontFamily: KvFont.ui,
-                      fontSize: 13,
-                      height: 18 / 13,
-                      color: KvColor.inkMeta,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: KvSpace.sm),
-                const Text(
-                  'Show',
-                  style: TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 14,
-                    height: 20 / 14,
-                    fontWeight: FontWeight.w600,
-                    fontVariations: KvWeight.w600,
-                    color: KvColor.ink,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+    return KvFoldRow(
+      figure: hidden,
+      words: ' empty $plural hidden',
+      semanticLabel: 'Show $hidden empty $plural',
+      onTap: () {
+        KvHaptic.selection();
+        setState(() => _showAll = true);
+      },
     );
   }
 
@@ -738,7 +689,7 @@ class _WalletScreenState extends State<WalletScreen> {
     return KvAction(
       label: estimate == null
           ? 'Merge coins'
-          : 'Merge coins, fee about ${_kas(estimate.feeSompi)} KAS',
+          : 'Merge coins, fee about ${kasSpoken(estimate.feeSompi)} KAS',
       primary: false,
       mark: KvGlyph.merge,
       height: KvSpace.control,
@@ -766,7 +717,7 @@ class _WalletScreenState extends State<WalletScreen> {
       children: [
         const TextSpan(text: 'Merge coins · ≈ '),
         TextSpan(
-          text: _kas(estimate.feeSompi),
+          text: kasSpoken(estimate.feeSompi),
           style: const TextStyle(
             fontFamily: KvFont.mono,
             fontWeight: FontWeight.w600,
@@ -787,13 +738,6 @@ class _WalletScreenState extends State<WalletScreen> {
     ),
   );
 
-  /// Sompi → the KAS the bar prints. The ONE conversion site is `format.dart`
-  /// (§5); nothing here does arithmetic on money.
-  static String _kas(BigInt sompi) {
-    final parts = kasParts(sompi);
-    return '${parts.integer}.${trimFraction(parts.fraction)}';
-  }
-
   /// Rust's refusals are whole sentences ("nothing to merge — your spendable
   /// coins are already consolidated"). A pill holds the clause; the row above
   /// holds the sentence.
@@ -806,13 +750,13 @@ class _WalletScreenState extends State<WalletScreen> {
   Widget _chevron() =>
       const KvGlyphIcon(KvGlyph.chevron, size: 16, tone: KvColor.etch);
 
-  void _openReceive(String? address, String label) {
+  void _openReceive(String? address, int index) {
     final route = widget.scope.receiveRoute;
     if (route == null || address == null) return;
     KvHaptic.selection();
     Navigator.of(
       context,
-    ).push(KvPageRoute<void>(builder: (_) => route(address, label)));
+    ).push(KvPageRoute<void>(builder: (_) => route(address, index)));
   }
 
   /// The address as the house draws one: BG-15's compact form, scheme
@@ -956,34 +900,6 @@ class _Notice extends StatelessWidget {
   );
 }
 
-/// The green `Default` pill beside `Main` (`T4`). `okTint` ground, `ok` ink —
-/// BG-7's settled green, because "this is the one" is a fact and not a state
-/// that might change while you look at it.
-class _DefaultChip extends StatelessWidget {
-  const _DefaultChip();
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: KvSpace.s, vertical: 2),
-    decoration: BoxDecoration(
-      color: KvColor.okTint,
-      borderRadius: BorderRadius.circular(KvRadius.control),
-    ),
-    child: const Text(
-      'Default',
-      maxLines: 1,
-      style: TextStyle(
-        fontFamily: KvFont.ui,
-        fontSize: 11,
-        height: 16 / 11,
-        fontWeight: FontWeight.w600,
-        fontVariations: KvWeight.w600,
-        color: KvColor.ok,
-      ),
-    ),
-  );
-}
-
 /// A line under a card's rows when the seam behind them failed. Amber, and it
 /// says what is still true — a fault that only names what broke leaves the
 /// user unable to act.
@@ -1005,28 +921,6 @@ class _Fault extends StatelessWidget {
         fontVariations: KvWeight.w600,
         color: KvColor.warn,
       ),
-    ),
-  );
-}
-
-/// A one-word amber note under a row's value — `Pending`, `Locked`. BG-7's
-/// amber, never `ok`: both words name something that has NOT settled into
-/// spendable money.
-class _Meta extends StatelessWidget {
-  const _Meta(this.word);
-
-  final String word;
-
-  @override
-  Widget build(BuildContext context) => Text(
-    word,
-    style: const TextStyle(
-      fontFamily: KvFont.ui,
-      fontSize: 11,
-      height: 16 / 11,
-      fontWeight: FontWeight.w600,
-      fontVariations: KvWeight.w600,
-      color: KvColor.warn,
     ),
   );
 }

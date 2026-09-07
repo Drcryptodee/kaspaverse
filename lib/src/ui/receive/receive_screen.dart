@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../../rust/api/wallet.dart' show WalletAddressDto;
 import '../error_text.dart';
 import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
@@ -10,6 +13,7 @@ import '../widgets/kv_chrome.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_two_pane.dart';
 import '../widgets/kv_qr.dart';
+import 'receive_picker.dart';
 
 /// **Receive** (`S5`) — the QR a sender scans, and the address in full for a
 /// person checking it character by character.
@@ -19,12 +23,19 @@ import '../widgets/kv_qr.dart';
 /// the address arrives through an injected [fetch] — so the screen renders in a
 /// widget test with no native library.
 ///
-/// **It shows whichever address it is given.** Until `T4`'s address list it
-/// was only ever handed `receive/0`, and this doc said so; the list now opens
-/// it over any address in the watch window, so the screen says WHICH one in
-/// its own title ([title]) rather than leaving a user holding a QR they cannot
-/// identify. Automatic next-unused rotation is still deferred (D-045a) — that
-/// is a different question from being able to open an address you chose.
+/// **It shows whichever address it is given, and it can now change its own
+/// mind.** Until `T4`'s address list it was only ever handed `receive/0`; the
+/// list then opened it over any address in the watch window, and UX-R4b put the
+/// choice on the screen itself — the pill above the QR names the address and
+/// opens [ReceivePicker]. Automatic next-unused rotation is still deferred
+/// (D-045a): choosing an address is a different question from the wallet
+/// choosing one for you.
+///
+/// **Displaying an address is handing it out**, so the screen says so
+/// ([onGivenOut] → `note_address_given`). Not on copy and not on share: a QR on
+/// a screen is the commonest way an address reaches someone and no tap of ours
+/// comes before a camera. That record is the only honest basis for *fresh* in
+/// the picker, and [ReceivePicker]'s class doc is where the reasoning lives.
 ///
 /// ## Three laws hold this composition together
 ///
@@ -52,14 +63,38 @@ class ReceiveScreen extends StatefulWidget {
     super.key,
     this.share,
     this.title = 'Receive',
+    this.index = 0,
+    this.addresses,
+    this.onGivenOut,
   });
 
   /// Resolves the receive address (derived in Rust from the account xpub).
   final Future<String> Function() fetch;
 
-  /// What the top bar calls this address — `Receive` for the wallet's default,
-  /// `Receive 14` when `T4`'s list opened a particular one. A QR with no name
-  /// over it is a QR the user cannot check against the row they tapped.
+  /// How long the handout record waits for the address list before going in
+  /// anyway. The seam is a local read with no network in it, so a wait this
+  /// long already means it is never answering.
+  static const Duration recordAfter = Duration(seconds: 3);
+
+  /// Which `receive/N` slot [fetch] answers with. It names the pill, marks the
+  /// picker's current row, and is what [onGivenOut] records.
+  final int index;
+
+  /// The wallet's receive window. **Null draws no pill** — the screen falls
+  /// back to the caps label it shipped before the picker existed, so a widget
+  /// test and any build without the seam still render a working Receive rather
+  /// than a control that opens nothing (§8).
+  final Future<List<WalletAddressDto>> Function()? addresses;
+
+  /// Record that this install has now shown `index`'s address to someone. Null
+  /// in a test; `main.dart` logs a failure rather than putting a file-system
+  /// fault in front of a user waiting to be paid.
+  final void Function(int index)? onGivenOut;
+
+  /// What the top bar calls this screen. It stays `Receive` even when a
+  /// particular address is open: the **pill** names the address, and saying it
+  /// twice on one surface is BG-19. The parameter survives for a caller that
+  /// opens this screen with no pill at all.
   final String title;
 
   /// Hands the address to another app. **Null hides the control** rather than
@@ -73,6 +108,92 @@ class ReceiveScreen extends StatefulWidget {
 
 class _ReceiveScreenState extends State<ReceiveScreen> {
   late Future<String> _address = widget.fetch();
+  late int _index = widget.index;
+  late String _label = ReceivePicker.labelFor(widget.index);
+  ReceiveCaption? _caption;
+
+  /// Indices this screen has already recorded, so the three paths that can
+  /// record one — the list answering, the deadline, and leaving — cannot
+  /// record the same handout twice.
+  final _recorded = <int>{};
+  Timer? _recordTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    final seam = widget.addresses;
+    if (seam == null) {
+      _record(_index);
+      return;
+    }
+    // **The caption is read BEFORE the handout is recorded.** Otherwise an
+    // address a user has just opened for the first time would describe itself
+    // as used in the same breath as being shown — true a millisecond later,
+    // and useless to the person deciding whether to give it out.
+    final opened = _index;
+    seam()
+        .then(
+          (rows) {
+            if (mounted) setState(() => _caption = _captionOf(rows, opened));
+          },
+          // A caption is an extra; the address is not. A failure is silent
+          // here and stated in the sheet, which is where someone went looking
+          // for the list.
+          onError: (Object _) {},
+        )
+        .whenComplete(() => _record(opened));
+    // **And the record does not wait on it forever.** A seam that never
+    // settles would otherwise leave a QR on the glass and nothing written
+    // down, which is the one direction this record must not fail in
+    // (`consensus`, this sitting). `dispose` is the third and last chance.
+    _recordTimer = Timer(ReceiveScreen.recordAfter, () => _record(opened));
+  }
+
+  @override
+  void dispose() {
+    _recordTimer?.cancel();
+    // Leaving is the last moment to write it down, and by then the QR has
+    // certainly been on the glass.
+    _record(widget.index);
+    super.dispose();
+  }
+
+  /// Write down that this install has shown `index`'s address to someone.
+  void _record(int index) {
+    if (!_recorded.add(index)) return;
+    widget.onGivenOut?.call(index);
+  }
+
+  static ReceiveCaption? _captionOf(List<WalletAddressDto> rows, int index) {
+    for (final a in rows) {
+      if (a.index == index) return ReceivePicker.captionFor(a);
+    }
+    return null;
+  }
+
+  /// Open the picker and take what it hands back.
+  ///
+  /// The chosen row carries its own address, so nothing is re-derived between
+  /// the row a user tapped and the QR they get — the same rule `T4`'s list
+  /// already follows.
+  Future<void> _pick() async {
+    final seam = widget.addresses;
+    if (seam == null) return;
+    KvHaptic.selection();
+    final chosen = await ReceivePicker.open(
+      context,
+      addresses: seam,
+      selected: _index,
+    );
+    if (chosen == null || !mounted) return;
+    setState(() {
+      _index = chosen.index;
+      _label = ReceivePicker.labelFor(chosen.index);
+      _caption = ReceivePicker.captionFor(chosen);
+      _address = Future.value(chosen.address);
+    });
+    _record(chosen.index);
+  }
 
   /// The retry exists because *"could not load"* with no way forward is an
   /// error message that does not say what to do (BG-11). The future is held in
@@ -154,6 +275,13 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         snapshot.connectionState != ConnectionState.done;
                     final address = snapshot.data;
                     return _Body(
+                      head: widget.addresses == null
+                          ? null
+                          : _AddressPill(
+                              label: _label,
+                              caption: _caption,
+                              onTap: _pick,
+                            ),
                       address: waiting ? null : address,
                       error: waiting || address != null
                           ? null
@@ -179,12 +307,17 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
 class _Body extends StatelessWidget {
   const _Body({
+    required this.head,
     required this.address,
     required this.error,
     required this.onRetry,
     required this.onCopy,
     required this.onShare,
   });
+
+  /// The pill that names this address and opens the picker. Null when there is
+  /// no address seam, and then the card wears the caps label instead.
+  final Widget? head;
 
   /// Null while the address has not arrived — waiting or failed.
   final String? address;
@@ -214,26 +347,49 @@ class _Body extends StatelessWidget {
               const SizedBox(height: KvSpace.s),
               Entrance(
                 child: Container(
-                  padding: const EdgeInsets.all(cardPad),
+                  padding: EdgeInsets.fromLTRB(
+                    cardPad,
+                    // **The pill's target overhangs the card's padding.** The
+                    // render seats the pill 18 dp below the card's top edge
+                    // (94 → 112, measured at 2×) and draws it 35.5 tall — under
+                    // BG-12's floor. So the control keeps a 52 dp box and the
+                    // padding gives back the 8.25 that box adds above the ink:
+                    // the visual lands exactly where the picture puts it and
+                    // the target is still legal. The same trade `KvSegmented`
+                    // makes with its 36 dp track.
+                    head == null
+                        ? cardPad
+                        : 18 - (_AddressPill.target - _AddressPill.pill) / 2,
+                    cardPad,
+                    cardPad,
+                  ),
                   decoration: BoxDecoration(
                     color: KvColor.plate,
                     borderRadius: BorderRadius.circular(KvRadius.plateHero),
                   ),
                   child: Column(
                     children: [
-                      const Text(
-                        'YOUR ADDRESS',
-                        style: TextStyle(
-                          fontFamily: KvFont.ui,
-                          fontSize: 11,
-                          height: 16 / 11,
-                          letterSpacing: 1.1,
-                          fontWeight: FontWeight.w600,
-                          fontVariations: KvWeight.w600,
-                          color: KvColor.inkMeta,
+                      if (head case final head?)
+                        head
+                      else
+                        const Text(
+                          'YOUR ADDRESS',
+                          style: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 11,
+                            height: 16 / 11,
+                            letterSpacing: 1.1,
+                            fontWeight: FontWeight.w600,
+                            fontVariations: KvWeight.w600,
+                            color: KvColor.inkMeta,
+                          ),
                         ),
+                      // The render puts 14 dp between the caption's line box
+                      // and the QR (caption ink to 168, QR at 188); the caps
+                      // label keeps the 22 it always had.
+                      SizedBox(
+                        height: head == null ? KvSpace.s22 : KvSpace.s14,
                       ),
-                      const SizedBox(height: KvSpace.s22),
                       // **The footprint is the constant** — and the face
                       // inside it crosses rather than cuts (BG-24). The
                       // outgoing child is `Positioned` so it sizes nothing: a
@@ -460,4 +616,198 @@ class _Unavailable extends StatelessWidget {
       ],
     );
   }
+}
+
+/// **The address's own name, and the door to the others** (`Receive Address ·
+/// Main (default)`, measured at 2×: a 81 × 35.5 pill centred at the card's top,
+/// its caption 11 dp below).
+///
+/// The pill is the only place this screen names the address, which is why the
+/// top bar stays `Receive` (BG-19). Under it sits one line about the address —
+/// which state it is in and one checkable fact — and that line **reserves its
+/// height before it arrives**, so the QR below never moves under a hand already
+/// on its way to it (BG-24).
+class _AddressPill extends StatefulWidget {
+  const _AddressPill({
+    required this.label,
+    required this.caption,
+    required this.onTap,
+  });
+
+  final String label;
+
+  /// Null until the address list lands, and null for good if it fails. The
+  /// address is not in doubt either way — only the sentence about it.
+  final ReceiveCaption? caption;
+
+  final VoidCallback onTap;
+
+  /// The visual, measured (35.5, drawn at 36 — the round `KvSegmented` took
+  /// from its own 36.75 track).
+  static const double pill = 36;
+
+  /// BG-12's floor. The extra 16 is transparent overhang, and the card's top
+  /// padding gives back the half of it that sits above the ink.
+  static const double target = KvSpace.touchTarget;
+
+  /// The caption's line box **at 1.0×**, reserved whether or not there is a
+  /// caption.
+  ///
+  /// Reserving it as a constant was a clip: the caption's own line height
+  /// scales with the text scaler while a fixed box does not, so at 1.3× a
+  /// 23 dp line was painted into an 18 dp box and `overflow: ellipsis` cut
+  /// five dp off the bottom — *"not handed out yet"* rendered with its
+  /// descenders sheared. `takeException` never fires on that and no finder can
+  /// see it (L131's class); it was found in a preview frame at the floor. Use
+  /// [captionBox], never this number directly.
+  static const double captionLine = 18;
+
+  /// [captionLine] under the reader's own text scale.
+  static double captionBox(BuildContext context) =>
+      MediaQuery.textScalerOf(context).scale(captionLine);
+
+  @override
+  State<_AddressPill> createState() => _AddressPillState();
+}
+
+class _AddressPillState extends State<_AddressPill> {
+  bool _down = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final caption = widget.caption;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          height: _AddressPill.target,
+          child: Center(
+            child: Semantics(
+              button: true,
+              label: caption == null
+                  ? '${widget.label}. Change address'
+                  : '${widget.label}, ${caption.spoken}. Change address',
+              child: ExcludeSemantics(
+                // `GestureDetector`, not `InkWell` — the house rule: there is
+                // no ripple in this language and an ink response would only
+                // add a `Material` dependency.
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.onTap,
+                  onTapDown: (_) => setState(() => _down = true),
+                  onTapUp: (_) => setState(() => _down = false),
+                  onTapCancel: () => setState(() => _down = false),
+                  child: Container(
+                    height: _AddressPill.pill,
+                    padding: const EdgeInsets.only(
+                      left: KvSpace.m,
+                      right: KvSpace.s14,
+                    ),
+                    decoration: BoxDecoration(
+                      color: _down ? KvColor.chipPressed : KvColor.chip,
+                      borderRadius: BorderRadius.circular(
+                        _AddressPill.pill / 2,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          widget.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontFamily: KvFont.ui,
+                            // Cap 10.5 dp off the render ÷ Jakarta's 0.773.
+                            fontSize: 14,
+                            height: 20 / 14,
+                            fontWeight: FontWeight.w600,
+                            fontVariations: KvWeight.w600,
+                            color: KvColor.ink,
+                          ),
+                        ),
+                        const SizedBox(width: KvSpace.xs),
+                        // §2a's one chevron, turned a quarter — the same mark
+                        // `back` uses the other way round. "This opens."
+                        const RotatedBox(
+                          quarterTurns: 1,
+                          child: KvGlyphIcon(
+                            KvGlyph.chevron,
+                            size: KvSpace.m,
+                            tone: KvColor.inkMeta,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        SizedBox(
+          height: _AddressPill.captionBox(context),
+          // **The footprint is the constant and the face crosses** (BG-24):
+          // the line arrives a frame or two after the address, and a caption
+          // that snapped in would be the only thing on the screen that moved
+          // without being touched.
+          child: AnimatedSwitcher(
+            duration: KvMotion.fast,
+            switchInCurve: KvMotion.out,
+            switchOutCurve: KvMotion.out,
+            child: caption == null
+                ? const SizedBox.shrink()
+                : ExcludeSemantics(
+                    key: ValueKey(caption.spoken),
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          // The render marks a fresh address with the same ring
+                          // the sheet seats beside every fresh row — one mark,
+                          // one meaning, on both surfaces (BG-21).
+                          if (caption.fresh)
+                            const WidgetSpan(
+                              alignment: PlaceholderAlignment.middle,
+                              child: Padding(
+                                padding: EdgeInsets.only(right: KvSpace.xs),
+                                child: KvGlyphIcon(
+                                  KvGlyph.circleDashed,
+                                  size: 14,
+                                  tone: KvColor.inkMeta,
+                                ),
+                              ),
+                            ),
+                          TextSpan(text: '${caption.state} · ', style: _meta),
+                          // BG-30: the figure is mono, the words are not. The
+                          // space belongs to the WORDS — a mono space is wider
+                          // than the UI face's and put the count adrift.
+                          if (caption.figure case final n?)
+                            TextSpan(
+                              text: '$n',
+                              style: _meta.copyWith(fontFamily: KvFont.mono),
+                            ),
+                          TextSpan(
+                            text: caption.figure == null
+                                ? caption.words
+                                : ' ${caption.words}',
+                            style: _meta,
+                          ),
+                        ],
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  static const TextStyle _meta = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 13,
+    height: _AddressPill.captionLine / 13,
+    color: KvColor.inkMeta,
+  );
 }

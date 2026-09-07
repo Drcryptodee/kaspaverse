@@ -824,6 +824,13 @@ void main() {
             balanceSompi: BigInt.from(funded[i] ?? 0),
             lockedSompi: BigInt.from(lockedRow && i == 7 ? 150000000 : 0),
             settling: settlingRow && i == 3,
+            // A locked coin is still a coin the fold counted — a row with
+            // 1.5 KAS locked and a coin count of zero is a world production
+            // cannot produce (`consensus`, this sitting).
+            coinCount: funded.containsKey(i) || (lockedRow && i == 7) ? 1 : 0,
+            // Only the default has been handed out, which is a fresh wallet
+            // that has opened Receive once.
+            givenOut: i == 0,
           ),
       ];
     }
@@ -835,7 +842,7 @@ void main() {
       Future<SignableSummaryDto> Function()? consolidate,
       Future<List<WalletAddressDto>> Function()? listAddresses,
       Future<ConsolidateEstimateDto> Function()? consolidateEstimate,
-      Widget Function(String address, String label)? receiveRoute,
+      Widget Function(String address, int index)? receiveRoute,
       Listenable? coinsChanged,
       double height = 2400,
     }) async {
@@ -1211,6 +1218,8 @@ void main() {
                         balanceSompi: BigInt.from(108200000),
                         lockedSompi: BigInt.zero,
                         settling: false,
+                        coinCount: 1,
+                        givenOut: false,
                       )
                     else
                       a,
@@ -1322,12 +1331,12 @@ void main() {
 
     testWidgets('tapping an address opens Receive over THAT address, never '
         'the default', (tester) async {
-      final opened = <(String, String)>[];
+      final opened = <(String, int)>[];
       await pumpWallet(
         tester,
         listAddresses: () async => addressList(),
-        receiveRoute: (address, label) {
-          opened.add((address, label));
+        receiveRoute: (address, index) {
+          opened.add((address, index));
           return const Scaffold(body: Text('receive'));
         },
       );
@@ -1337,8 +1346,11 @@ void main() {
       expect(opened.single.$1, contains('qr14'));
       expect(
         opened.single.$2,
-        'Receive 14',
-        reason: 'the QR must say WHICH address it is',
+        14,
+        reason:
+            'Receive names the address from the index, and records the '
+            'handout against it — a wrong index would caption one address '
+            'and mark another',
       );
     });
 

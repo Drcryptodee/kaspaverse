@@ -14,6 +14,7 @@
 //! Nothing secret-shaped crosses to Dart: every public fn returns `()`, `bool`,
 //! `VaultStatus` (bools + non-secret counters), or `Result<_, AppError>`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -496,6 +497,173 @@ pub(crate) fn set_scan_high_water(receive_hi: u32, change_hi: u32) -> Result<(),
     bytes[..4].copy_from_slice(&receive_hi.to_le_bytes());
     bytes[4..].copy_from_slice(&change_hi.to_le_bytes());
     atomic_write(&scan_window_path()?, &bytes).map_err(|e| AppError::io("write scan window", e))
+}
+
+/// App-private path for the receive indices **this install has put in front of a
+/// human** (D-293): the same `wallet/` subdir, a list of public indices, no
+/// encryption (INV-3).
+///
+/// **A third meaning, and it must not pretend to be either of the other two.**
+/// `change.cursor` counts change indices this app burned on its own sends
+/// (D-041). `scan.window` records where money was found ON CHAIN. This file
+/// records neither — it says *this phone handed this address out*, which is a
+/// fact this app owns outright and no other party can answer.
+///
+/// It exists because the obvious question has no offline answer. A Kaspa node is
+/// a UTXO-state machine: it says what an address HOLDS, never what it once
+/// received (`kaspaverse_chain::discovery`'s module doc says this at length, and
+/// INV-8 forbids asking an indexer instead). So a mature balance of zero is
+/// equally *never seen* and *used and swept*, and the receive picker must not
+/// claim an address is unseen by the chain. It claims something narrower and
+/// true: **this phone has not given it out**.
+pub(crate) fn given_receive_path() -> Result<PathBuf, AppError> {
+    Ok(vault_dir()?.join("wallet").join("receive.given"))
+}
+
+/// The widest receive index this file will store or report back.
+///
+/// The receive window is `discovered mark + GAP_LIMIT`, so nothing past
+/// `MAX_SCAN_MARK + GAP_LIMIT` can ever be derived — let alone shown to anyone.
+/// `wallet.rs` pins that relationship with a `const` assert rather than leaving
+/// the two numbers to drift apart in separate files.
+pub(crate) const MAX_GIVEN_INDEX: u32 = MAX_GIVEN_ENTRIES as u32 - 1;
+
+/// Entries this app will keep, and **the axis both ceilings come from**.
+/// Handing out 4 096 addresses from one phone is far past any real use, and the
+/// cap is what stops a file that only ever grows. At the ceiling nothing is
+/// added and the log says so: one more address reads as fresh, which is the
+/// picker knowing less than it might — never a file its own reader cannot
+/// parse.
+///
+/// [`MAX_GIVEN_INDEX`] is derived from it rather than stated beside it. Written
+/// as two independent `4096`s, the admissible index space was 0…4096 — **4 097
+/// values into a 4 096-entry store**, a count and an index sharing a ceiling,
+/// which is exactly the scar D-132 / L86 record (`consensus`, this sitting).
+pub(crate) const MAX_GIVEN_ENTRIES: usize = 4096;
+
+/// This process's own view, so a failed disk write never costs the session what
+/// it already knows. The [`SCAN_MARKS`] discipline, for the same reason.
+static GIVEN_RECEIVE: Mutex<Option<BTreeSet<u32>>> = Mutex::new(None);
+
+/// The receive indices this install has handed out — memory unioned with disk.
+///
+/// **A malformed file is not discarded whole.** Entries that parse and are in
+/// range are kept and the rest dropped, where [`persisted_count`] reads one
+/// impossible value as "unset". The asymmetry is deliberate: dropping a good
+/// entry would file a handed-out address under *fresh*, which is the direction
+/// that misleads a user into giving the same address to two people. Keeping a
+/// stray one only hides an address from the fresh list, which costs nothing.
+pub(crate) fn given_receive_indices() -> BTreeSet<u32> {
+    let memo = GIVEN_RECEIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut set = memo.clone().unwrap_or_default();
+    // On the READ path a failed disk read leaves the memo's view standing:
+    // reporting fewer handouts costs a row its place in the used list, where
+    // refusing outright would take a working sheet down with a file system.
+    // The WRITE path is the one that must refuse, and it does.
+    if let Ok(disk) = given_on_disk() {
+        set.extend(disk);
+    }
+    set
+}
+
+/// Read at most [`MAX_GIVEN_ENTRIES`] entries' worth of bytes.
+///
+/// **The one variable-length file in `wallet/`** — every sibling is a fixed 4
+/// or 8 bytes — so it is the one place a read sizes its allocation from
+/// something on disk. The `BTreeSet` it feeds is already bounded; the READ is
+/// what is not, and that is exactly the path [`persisted_count`]'s doc names:
+/// an allocation big enough to reach `handle_alloc_error` is a **SIGABRT**,
+/// which is worse than the caught panic INV-2 forbids and which `catch_unwind`
+/// cannot catch. Nobody but this app should be able to grow the file, and an
+/// attacker who can already holds `vault.kvsb` — but the bound is one line and
+/// this class of failure is not one to leave resting on who has write access
+/// (`ffi-leak`, this sitting).
+fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    let cap = (MAX_GIVEN_ENTRIES * 4) as u64;
+    let mut bytes = Vec::new();
+    file.take(cap).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 == cap {
+        log::warn!("vault: receive.given is at or past its {cap}-byte cap — reading the head only");
+    }
+    Ok(bytes)
+}
+
+/// The disk half of the record, parsed and filtered.
+///
+/// **A missing file is an empty record; anything else is an ERROR the caller
+/// must respect.** Conflating the two is how a transient `EIO` erases
+/// everything: the reader would come back memo-only and the very next write
+/// would put that singleton over a file holding a hundred real entries, and all
+/// hundred would read as FRESH for good. The memo exists so a failed *write*
+/// costs the session nothing; a failed *read* must not cost it the disk
+/// (`wallet-security`, this sitting).
+fn given_on_disk() -> Result<BTreeSet<u32>, AppError> {
+    let path = given_receive_path()?;
+    let bytes = match read_capped(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(AppError::io("read given receive indices", e)),
+    };
+    let mut set = BTreeSet::new();
+    for chunk in bytes.chunks_exact(4) {
+        let index = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if index <= MAX_GIVEN_INDEX {
+            set.insert(index);
+        }
+    }
+    Ok(set)
+}
+
+/// Record that this install has put `index`'s address in front of someone.
+///
+/// **Written when the Receive screen DISPLAYS an address**, not when it is
+/// copied or shared. The QR is the commonest way an address is handed over and
+/// no tap of ours precedes a camera, so a mark on copy would miss the main case
+/// entirely. The trade is one-way and taken in the safe direction: an address
+/// merely looked at is filed as given out for good, which costs a user one entry
+/// moved between two lists — where the other error hands one address to two
+/// people while calling it fresh.
+///
+/// Writes unconditionally, including for an index already in the set, so a write
+/// that failed once heals the next time the same address is opened.
+pub(crate) fn mark_receive_given(index: u32) -> Result<(), AppError> {
+    if index > MAX_GIVEN_INDEX {
+        log::warn!(
+            "vault: receive index {index} is past its {MAX_GIVEN_INDEX} ceiling — not recorded"
+        );
+        return Ok(());
+    }
+    // **The whole read-modify-write under ONE guard** — [`set_scan_high_water`]'s
+    // discipline, and for the same reason it has it. This is called `unawaited`
+    // from two places in `main.dart` and runs on an FRB worker, so two handouts
+    // can land inside one `atomic_write` window; with the lock dropped between
+    // the read and the write, each would serialise a snapshot taken before the
+    // other's insert and the later write would erase the earlier index from
+    // BOTH the memo and the disk. A handed-out address filed under FRESH is the
+    // one direction this record must not fail in (`wallet-security`).
+    let mut memo = GIVEN_RECEIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut set = memo.clone().unwrap_or_default();
+    // `?`, not a swallow: a record that could not be READ is never overwritten.
+    set.extend(given_on_disk()?);
+    set.insert(index);
+    if set.len() > MAX_GIVEN_ENTRIES {
+        log::warn!(
+            "vault: {MAX_GIVEN_ENTRIES} handed-out receive addresses recorded — \
+             not recording index {index}; it will read as fresh"
+        );
+        return Ok(());
+    }
+    let mut bytes = Vec::with_capacity(set.len() * 4);
+    for i in &set {
+        bytes.extend_from_slice(&i.to_le_bytes());
+    }
+    // The memo takes the new set BEFORE the write, so a failed write still
+    // leaves the session knowing what it just handed out.
+    *memo = Some(set);
+    atomic_write(&given_receive_path()?, &bytes)
+        .map_err(|e| AppError::io("write given receive indices", e))
 }
 
 /// Derive the public receive + change address window from the unlocked vault,
@@ -1033,6 +1201,12 @@ pub fn lock_vault() {
     // Visible and unspendable, which is the exact state this whole mechanism
     // exists to prevent. The memo only ever grows, and there is one wallet per
     // install, so keeping it can only widen.
+    //
+    // `GIVEN_RECEIVE` survives for the sibling reason and is named here so the
+    // next tidy-up does not sweep it in: clearing it makes a handed-out address
+    // read as FRESH on the re-unlock, and under-marking is the one direction
+    // the receive picker must not fail in. It holds public indices, it only
+    // grows, and there is one wallet per install.
     broadcast_status();
 }
 
@@ -1190,6 +1364,10 @@ pub(crate) mod tests {
         // vault state), so a test that widened the window would otherwise hand
         // the next test a wallet that had already found funds.
         *SCAN_MARKS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // Same reasoning for the handed-out set: it is process state, so a
+        // test that recorded a handout would otherwise hand the next test a
+        // wallet that had already given an address away.
+        *GIVEN_RECEIVE.lock().unwrap_or_else(PoisonError::into_inner) = None;
         (guard, dir)
     }
 
@@ -1327,6 +1505,120 @@ pub(crate) mod tests {
         assert_eq!(change_cursor(), MAX_CHANGE_CURSOR);
         set_change_cursor(u32::MAX).unwrap();
         assert_eq!(change_cursor(), MAX_CHANGE_CURSOR);
+    }
+
+    #[test]
+    fn the_handed_out_set_round_trips_and_survives_a_torn_file() {
+        let (_g, dir) = enter();
+        // Nothing handed out is the honest reading of a wallet that has never
+        // opened Receive — not "everything is used".
+        assert!(given_receive_indices().is_empty());
+
+        // Out of order in, sorted and complete out.
+        for index in [5u32, 0, 3, 5] {
+            mark_receive_given(index).unwrap();
+        }
+        assert_eq!(
+            given_receive_indices().into_iter().collect::<Vec<_>>(),
+            vec![0, 3, 5]
+        );
+
+        // Past the ceiling nothing is written and nothing throws: the address
+        // reads as fresh, which is the picker knowing less rather than a file
+        // its own reader would reject.
+        mark_receive_given(MAX_GIVEN_INDEX + 1).unwrap();
+        assert!(!given_receive_indices().contains(&(MAX_GIVEN_INDEX + 1)));
+
+        // A file with a trailing partial entry and one impossible index keeps
+        // every entry that parses and is in range. Dropping a good one would
+        // file a handed-out address under *fresh*, which is the direction that
+        // misleads.
+        *GIVEN_RECEIVE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAB, 0xCD]);
+        fs::create_dir_all(dir.join("wallet")).unwrap();
+        fs::write(dir.join("wallet").join("receive.given"), &bytes).unwrap();
+        assert_eq!(
+            given_receive_indices().into_iter().collect::<Vec<_>>(),
+            vec![7, 9]
+        );
+    }
+
+    #[test]
+    fn concurrent_handouts_do_not_erase_each_other() {
+        let (_g, _dir) = enter();
+        // **The lost update this is here to forbid.** `note_address_given` is
+        // fired `unawaited` from two places on the Receive screen and runs on
+        // an FRB worker, so two handouts land inside one `atomic_write` window.
+        // With the lock dropped between the disk read and the write, each
+        // writer serialises a snapshot taken before the other's insert and the
+        // later write erases the earlier index from both memo and disk — a
+        // handed-out address reading FRESH, which is the one direction this
+        // record must not fail in.
+        let threads: Vec<_> = (0u32..8)
+            .map(|i| std::thread::spawn(move || mark_receive_given(i).unwrap()))
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(
+            given_receive_indices().into_iter().collect::<Vec<_>>(),
+            (0u32..8).collect::<Vec<_>>()
+        );
+
+        // And the same holds after the memo is dropped, which is the half that
+        // proves the DISK carries all eight rather than the process memory.
+        *GIVEN_RECEIVE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        assert_eq!(given_receive_indices().len(), 8);
+    }
+
+    #[test]
+    fn the_handed_out_read_is_bounded_by_its_own_ceiling() {
+        let (_g, dir) = enter();
+        *GIVEN_RECEIVE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // **The byte cap, isolated from the index ceiling.** The head is
+        // `MAX_GIVEN_ENTRIES` copies of one valid index and the tail is a
+        // second valid index, so only a reader that stops at its own ceiling
+        // can miss the second — this is the only variable-length file in
+        // `wallet/`, and an unbounded read there is the SIGABRT path
+        // `persisted_count`'s doc already names.
+        let mut bytes = Vec::new();
+        for _ in 0..MAX_GIVEN_ENTRIES {
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        fs::create_dir_all(dir.join("wallet")).unwrap();
+        fs::write(dir.join("wallet").join("receive.given"), &bytes).unwrap();
+
+        let set = given_receive_indices();
+        assert_eq!(
+            set.into_iter().collect::<Vec<_>>(),
+            vec![1],
+            "everything past the byte cap is unread, so it reads as fresh — \
+             the safe direction is the one that shows less, never more"
+        );
+    }
+
+    #[test]
+    fn the_index_ceiling_is_written_and_read_at_both_of_its_edges() {
+        let (_g, _dir) = enter();
+        // Ceiling−1, the ceiling itself, and past it. The middle case is the
+        // one a single "past the ceiling" assertion misses, and the one the
+        // `const` asserts in `wallet.rs` exist to keep reachable.
+        for index in [MAX_GIVEN_INDEX - 1, MAX_GIVEN_INDEX] {
+            mark_receive_given(index).unwrap();
+            assert!(given_receive_indices().contains(&index), "{index} is legal");
+        }
+        mark_receive_given(MAX_GIVEN_INDEX + 1).unwrap();
+        assert!(!given_receive_indices().contains(&(MAX_GIVEN_INDEX + 1)));
+        // And the whole admissible index space fits the store: 0..=ceiling is
+        // exactly `MAX_GIVEN_ENTRIES` values, so a full record is never one
+        // entry too big for its own cap (D-132 / L86 — a count and an index
+        // must not share a ceiling).
+        assert_eq!(MAX_GIVEN_INDEX as usize + 1, MAX_GIVEN_ENTRIES);
     }
 
     #[test]

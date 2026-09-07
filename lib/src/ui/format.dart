@@ -297,6 +297,20 @@ String kasCanonical(BigInt sompi, {int minFraction = 2}) {
   return '$integer.${trimFraction(parts.fraction, min: minFraction)}';
 }
 
+/// Sompi → the KAS a **screen reader says**, grouped as the eye would read it.
+///
+/// Lifted out of `wallet_screen.dart` at UX-R4b, where the receive picker was
+/// about to grow a second one — and its second one was `sompi / BigInt.from(1e8)`,
+/// which is a **double**: it rounds where every figure in this app floors, and
+/// past ~4.5 × 10⁷ KAS the quotient stops being exact, so the spoken figure
+/// diverges from the printed one. That is the rule `kv_amount.dart` states in
+/// its own words — spoken and printed are the same figure — broken by the
+/// arithmetic this file exists to be the only site of (`consensus`, D-293).
+String kasSpoken(BigInt sompi) {
+  final parts = kasParts(sompi);
+  return '${parts.integer}.${trimFraction(parts.fraction)}';
+}
+
 /// A wall-clock stamp for a receipt — `30 Aug 2026, 02:48`.
 ///
 /// **Local time, from the chain's own moment.** The caller passes the unix

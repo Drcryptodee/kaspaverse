@@ -380,10 +380,15 @@ fn kas_exact(sompi: u64) -> String {
 /// else in this wallet already is.
 ///
 /// **The one-way valve this closes.** `receive/0` is three things at once: the
-/// only address the wallet ever hands out (`vault_receive_address` derives
-/// exactly this and never rotates), the §0.7 binding of every conversation, and
-/// therefore the address every transport send must pin `input[0]` to (D2/L47,
-/// D-067). Money arrives there. Sending change to a fresh `change/N` meant the
+/// wallet's DEFAULT address and the one it hands out unless asked otherwise,
+/// the §0.7 binding of every conversation, and therefore the address every
+/// transport send must pin `input[0]` to (D2/L47, D-067). *(UX-R4b corrected
+/// the first clause, which read "the only address the wallet ever hands out".
+/// It stopped being true when the receive picker shipped: a user can now be
+/// paid at any address in the watch window. The valve's reasoning is unchanged
+/// — change still comes home, which is what refills the identity slot — but a
+/// premise that has quietly gone false is how the next reader concludes the
+/// valve is unnecessary. `wallet-security`, item 19.)* Money arrives there. Sending change to a fresh `change/N` meant the
 /// FIRST outgoing payment swept those coins away and put them somewhere the
 /// messages lane may not spend from — so a wallet with a healthy balance had an
 /// identity address holding zero UTXOs, and every message, handshake and backup

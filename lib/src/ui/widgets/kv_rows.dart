@@ -23,7 +23,17 @@ class KvRowContainer extends StatelessWidget {
     this.header,
     this.divided = true,
     this.inset = KvRowContainer.padding,
+    this.ground = KvColor.plate,
   });
+
+  /// The ground it paints. `plate` is a card on a screen; **`chip` is a card
+  /// inside a sheet** (§1.1), which had no way to be said until the receive
+  /// picker put a card on a `plate` sheet and drew nothing at all — two
+  /// identical `#121717` surfaces, one nominally on top of the other
+  /// (`ux-auditor`, D-293). A caller on a lighter ground must re-tone what
+  /// sits on it: `inkMeta` is 4.30 on `chip` and BG-14 forbids it carrying
+  /// information there.
+  final Color ground;
 
   /// A hairline between children. Off for a card that holds one composed
   /// block — `T5`'s node row, the own-node card — where a rule would divide
@@ -54,7 +64,7 @@ class KvRowContainer extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: KvColor.plate,
+        color: ground,
         borderRadius: BorderRadius.circular(KvRadius.plate),
       ),
       child: Padding(
@@ -155,6 +165,165 @@ class KvRowDisc extends StatelessWidget {
       child: KvGlyphIcon(mark, size: size * 0.5, tone: tone, stroke: stroke),
     );
   }
+}
+
+/// **The word under a trailing figure** — `Locked`, `Pending`: what the number
+/// above it is not saying.
+///
+/// BG-7's amber, because both readings mean *this is not settled money you can
+/// move right now*, and never `ok`, because nothing here has settled. Promoted
+/// out of `wallet_screen.dart` at UX-R4b for the receive picker, which draws
+/// the same word beside the same figure (BG-21).
+class KvRowMeta extends StatelessWidget {
+  const KvRowMeta(this.word, {super.key});
+
+  final String word;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    word,
+    style: const TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 11,
+      height: 16 / 11,
+      fontWeight: FontWeight.w600,
+      fontVariations: KvWeight.w600,
+      color: KvColor.warn,
+    ),
+  );
+}
+
+/// **`12 more fresh addresses · Show`** — the row that opens a fold.
+///
+/// One figure, the words that give it meaning, and the word that opens it. The
+/// figure is mono and the words are not (BG-30); the **whole row** is the
+/// target at BG-12's 52, which is why it is a `SizedBox` and not a text button.
+///
+/// Promoted out of `wallet_screen.dart` at UX-R4b. The receive picker's copy
+/// had already drifted in three ways nobody would have caught by eye — `Show`
+/// in `primary` 13 instead of `ink` 14, no gap at all between the count and
+/// the word, and no `maxLines`, so at 320 dp / 1.3× the count wrapped into two
+/// lines pressed against `Show` (`ux-auditor`, D-293). Two copies of a row is
+/// how two screens start disagreeing about what opening a fold looks like
+/// (BG-21).
+class KvFoldRow extends StatelessWidget {
+  const KvFoldRow({
+    super.key,
+    required this.figure,
+    required this.words,
+    required this.onTap,
+    required this.semanticLabel,
+    this.action = 'Show',
+    this.tone = KvColor.inkMeta,
+  });
+
+  /// The count. Mono, and never grouped — a fold holds tens, not thousands.
+  final int figure;
+
+  /// What the count is of, with its own leading space.
+  final String words;
+
+  /// The word that opens it.
+  final String action;
+
+  /// The count line's ink. `inkMeta` on `plate`; **`inkDim` on `chip`**, where
+  /// `inkMeta` measures 4.30 and BG-14 forbids it carrying information.
+  final Color tone;
+
+  final String semanticLabel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: semanticLabel,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: SizedBox(
+            height: KvSpace.touchTarget,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(
+                          text: '$figure',
+                          style: const TextStyle(
+                            fontFamily: KvFont.mono,
+                            fontWeight: FontWeight.w500,
+                            fontVariations: KvWeight.w500,
+                          ),
+                        ),
+                        TextSpan(text: words),
+                      ],
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: KvFont.ui,
+                      fontSize: 13,
+                      height: 18 / 13,
+                      color: tone,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: KvSpace.sm),
+                Text(
+                  action,
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 14,
+                    height: 20 / 14,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.ink,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **`Default`** — the badge on the one address the wallet hands out on its own.
+///
+/// Promoted out of `wallet_screen.dart` at UX-R4b, where it was `T4`'s private
+/// shape: the receive picker draws the same badge on the same row for the same
+/// reason, and a second copy is how two surfaces start disagreeing about what
+/// the wallet's default address looks like (BG-21).
+///
+/// `okTint` ground with `ok` ink — BG-7's green used as a *state*, not a
+/// decoration: this address is the one already in play.
+class KvDefaultChip extends StatelessWidget {
+  const KvDefaultChip({super.key});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: KvSpace.s, vertical: 2),
+    decoration: BoxDecoration(
+      color: KvColor.okTint,
+      borderRadius: BorderRadius.circular(KvRadius.control),
+    ),
+    child: const Text(
+      'Default',
+      maxLines: 1,
+      style: TextStyle(
+        fontFamily: KvFont.ui,
+        fontSize: 11,
+        height: 16 / 11,
+        fontWeight: FontWeight.w600,
+        fontVariations: KvWeight.w600,
+        color: KvColor.ok,
+      ),
+    ),
+  );
 }
 
 /// **One row, 64 dp** (§4, BG-33).
@@ -311,12 +480,23 @@ class _KvRowState extends State<KvRow> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (widget.badge case final badge?)
-                    Row(
-                      children: [
-                        Flexible(child: _title(title)),
-                        const SizedBox(width: KvSpace.s),
-                        badge,
-                      ],
+                    // **A `Wrap`, not a `Row`** — `KvSectionHeader`'s lesson
+                    // one file over, and the same floor found it: under a
+                    // `Row` the title took `Flexible` and the badge its
+                    // intrinsic width, so a narrow title column could not
+                    // give the badge room and the row overflowed by 5.2 dp at
+                    // 320 dp / 1.3× (the receive picker, whose rows carry a
+                    // disc, a balance AND a check beside the same badge `T4`
+                    // fits comfortably). Shrinking the badge instead would
+                    // have set `Default` below BG-14's 11 dp floor or
+                    // ellipsised a two-syllable word. A `Wrap` needs no
+                    // threshold: the badge sits beside the title while there
+                    // is room and drops beneath it the moment there is not.
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: KvSpace.s,
+                      runSpacing: 2,
+                      children: [_title(title), badge],
                     )
                   else
                     _title(title),

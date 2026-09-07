@@ -96,8 +96,12 @@ class WalletSettingsScope {
 
   /// Opens Receive over **one** address — the list hands it the address the
   /// user tapped, so the QR is never a different address than the row.
-  /// `label` is what the top bar calls it (`Receive`, `Receive 14`).
-  final Widget Function(String address, String label)? receiveRoute;
+  ///
+  /// `index` is the `receive/N` slot, and it is not decoration: Receive names
+  /// the address from it and records the handout against it (UX-R4b). The
+  /// stand-in row, which has no list to take an index from, passes 0 — the one
+  /// address the wallet can always name.
+  final Widget Function(String address, int index)? receiveRoute;
 
   /// Merge coins: Rust builds and stashes the plan, the screen opens the ONE
   /// signing surface over its summary. All three seams present ⇒ the row

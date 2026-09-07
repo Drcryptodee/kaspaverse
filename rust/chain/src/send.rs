@@ -1265,12 +1265,12 @@ pub struct AddressHolding {
     pub locked_sompi: u64,
     /// Coins here, spendable and locked together.
     ///
-    /// **No production reader** — it crossed the FFI until INV-12 took it off
-    /// a surface that never drew it. It stays because it is the fold's own
-    /// invariant: the tests assert *three coins at one address sum, and the
-    /// COUNT is coins not addresses*, which is the attribution rule the whole
-    /// function exists to keep, and a rule with nothing to assert against is a
-    /// rule with no test.
+    /// It is also the fold's own invariant, which is why it survived a spell
+    /// with no reader at all: the tests assert *three coins at one address sum,
+    /// and the COUNT is coins not addresses*, the attribution rule this whole
+    /// function exists to keep. It now has a reader as well — the receive
+    /// picker prints it, because a count of what is HERE is the honest half of
+    /// what a render drew as "14 received" (`bridge::api::wallet`, D-293).
     pub coin_count: u32,
 }
 

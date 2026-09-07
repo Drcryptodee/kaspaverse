@@ -3874,7 +3874,7 @@ async fn await_spendable_at(
     // computed once — after the fast path, so an ordinary send never pays for a
     // derivation only a refusal needs.
     //
-    // `receive/0` is the identity address, the only one the wallet ever shows.
+    // `receive/0` is the identity address and the wallet's default (UX-R4b: no longer the only one it shows — the receive picker offers the whole window, and this branch's copy names `Main` for that reason).
     // Anything else is a conversation bound to the slot that decrypted its
     // handshake, or one a restore payload bound to a change branch
     // (`restored_conversation`). Those cannot be named to the user — the app
@@ -3915,8 +3915,14 @@ async fn await_spendable_at(
             // one thing is invisible from here — a coinbase in stasis
             // (`settling_at`'s named blind spot). Prescribing "receive some KAS"
             // as the ONLY way forward would be false for a miner.
-            "your wallet address has no spendable coins yet, and nothing on the way that I can see \
-             — receive some KAS to it to send from here"
+            // And it NAMES the address, which it did not have to before
+            // UX-R4b: with a receive picker on the glass, "your wallet
+            // address" no longer identifies one thing to a user who may have
+            // just been paid at `Receive 05`. `Main` is the picker's own word
+            // for `receive/0` (L92's rider — the refusal's wording is in
+            // scope).
+            "Main, your default address, has no spendable coins yet, and nothing on the way that \
+             I can see — receive some KAS to Main to send messages from here"
         } else {
             // A conversation bound somewhere other than receive/0. Both halves
             // of the refill/drain question, said out loud (wallet-security
