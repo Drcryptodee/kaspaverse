@@ -30,11 +30,11 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaspaverse_chain::{
-    compose_bcast, compose_comm_wire, compose_handshake_wire, compose_self_stash_wire,
+    compose_bcast, compose_comm_wire_in, compose_handshake_wire, compose_self_stash_wire,
     decode_envelope_body, parse_payload, resolve_return_address, split_comm_body, AcceptanceEvent,
     Address, ChainError, ConversationRecord, ConversationStatus, KeyBranch, MessageDirection,
     MessageRecord, PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore,
-    UtxoEntryReference, WalletEngine, WatchSource, HANDSHAKE_BOND_SOMPI,
+    UtxoEntryReference, WalletEngine, WatchSource, WireNamespace, HANDSHAKE_BOND_SOMPI,
     STASH_SCOPE_SAVED_HANDSHAKE,
 };
 use kaspaverse_core::attachment::Attachment;
@@ -294,6 +294,10 @@ enum TransportIntent {
         reseal: Vec<u8>,
         sealed_to: (KeyBranch, u32),
         timestamp_ms: u64,
+        /// The namespace the comm was composed in (§K11), recorded on its
+        /// row so the thread's own history says which dialect each message
+        /// went out in.
+        wire: WireNamespace,
     },
     /// The D-138 conversation backup. Records what the snapshot covered and
     /// touches NOTHING else — no conversation, no message row.
@@ -341,6 +345,32 @@ fn stash_intent(nonce: u64, intent: TransportIntent) {
     *PENDING_INTENT
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some((nonce, intent));
+}
+
+/// The invitation a stashed Accept would refund, if the stash under `nonce` is
+/// one. Read without consuming — the commit's pre-broadcast guard.
+fn pending_accept_target(nonce: u64) -> Option<String> {
+    let guard = PENDING_INTENT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match guard.as_ref() {
+        Some((
+            stored,
+            TransportIntent::Accept {
+                conversation_id, ..
+            },
+        )) if *stored == nonce => Some(conversation_id.clone()),
+        _ => None,
+    }
+}
+
+/// Is the invitation an Accept was prepared against no longer there to accept?
+/// True when the row is gone (folded into another conversation, or erased) or
+/// is no longer awaiting an accept. Pure over the store; tested.
+fn accept_target_missing(store: &TransportStore, conversation_id: &str) -> bool {
+    !store
+        .conversation(conversation_id)
+        .is_some_and(|c| c.status == ConversationStatus::PendingInbound)
 }
 
 fn take_intent(nonce: u64) -> Option<TransportIntent> {
@@ -1225,6 +1255,8 @@ async fn fill_walks(
             let event = TransportEvent {
                 txid: Some(row.tx_id.clone()),
                 kind: "handshake".to_string(),
+                // The Kasia indexer serves `ciph_msg` rows only (§K7 addendum).
+                namespace: WireNamespace::CiphMsg,
                 body,
                 // The address WE swept, not the indexer's `receiver` claim.
                 // The relevance gate exists to prove a row is ours; feeding
@@ -1327,6 +1359,7 @@ async fn fill_walks(
             let event = TransportEvent {
                 txid: Some(row.tx_id.clone()),
                 kind: "comm".to_string(),
+                namespace: WireNamespace::CiphMsg,
                 body,
                 addresses: Vec::new(),
                 block_time_ms: Some(row.block_time),
@@ -1778,6 +1811,31 @@ pub async fn transport_start() -> Result<(), AppError> {
         .replace(task);
     if let Some(old) = old {
         old.abort();
+    }
+
+    // ONE ROW PER CONTACT (D-141), for rows the old fold lane already minted —
+    // see `backfill_invitation_sender` for the lane and the store's
+    // `merge_duplicate_contacts` for the rule. Idempotent and cheap (one pass
+    // over the conversation set). Runs HERE — after the hub swap and after the
+    // previous inbound task is aborted — so the log has one writer while it
+    // runs: before the swap, a re-unlock's old hub was still reachable through
+    // `hub()` and its fold task, and either could have appended a frame to a
+    // conversation this pass had just removed, orphaning that row for good
+    // (`wallet-security-auditor`, 2026-09-07). Counts only in the log: a report
+    // about folding user threads carries none of their content.
+    {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        match store.merge_duplicate_contacts() {
+            Ok(report) if report.contacts > 0 => log::info!(
+                "transport-hub: {} contact(s) held more than one conversation — {} row(s) \
+                 folded, {} message(s) re-homed (D-141)",
+                report.contacts,
+                report.rows_folded,
+                report.messages_rehomed
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("transport-hub: contact merge failed at start: {e}"),
+        }
     }
 
     // Arm the live cursor (the BlockAdded scan now persists scan progress), then
@@ -2498,6 +2556,8 @@ struct ParkedAcceptance {
     /// The payload's own timestamp, so a deferred row sorts where the
     /// immediate one would have.
     unix_ms: u64,
+    /// The namespace the acceptance rode under, for its row (§K11).
+    wire: WireNamespace,
 }
 
 /// Acceptances awaiting their sender, keyed by txid.
@@ -2795,6 +2855,15 @@ fn apply_parked_acceptance(txid: &str, sender: &str) {
         return;
     };
     let Some(existing) = store.conversation(&claim.conversation_id) else {
+        // The row was folded into another (D-305) or erased while the claim
+        // waited. Not silent: the claim was parked WITHOUT a row (the
+        // `AwaitSender` arm stores nothing), so what recovers the alias is
+        // D-142's adoption from their next comm, not this lane — and a one-shot
+        // claim consumed with no effect is exactly the event that must say so.
+        log::info!(
+            "transport-intake: acceptance tx={txid} names a conversation that no longer exists — \
+             claim dropped"
+        );
         return;
     };
     // THE GATE — the same function the fold's Complete arm calls, not a second
@@ -2845,6 +2914,7 @@ fn apply_parked_acceptance(txid: &str, sender: &str) {
         alias_on_wire: None,
         sealed_to: None,
         provenance: RowSource::NodeScanned,
+        wire: claim.wire,
     }));
     drop(store);
     log::info!("transport-intake: acceptance tx={txid} confirmed by sender — conversation active");
@@ -2925,13 +2995,47 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     };
     let conversation_id = existing.conversation_id.clone();
     let conversation = ConversationRecord {
-        contact_address: sender,
+        contact_address: sender.clone(),
         ..existing
     };
     warn_store(store.upsert_conversation(conversation));
+    // ONE ROW PER CONTACT (D-141), on the lane the rule was missing from.
+    //
+    // The fold applies the address-keyed rule only when the node can name the
+    // sender AT fold time, and on the live lane it never can — the return-
+    // address lookup needs the bond's own activity record, which lands later.
+    // So a handshake from a contact we already hold minted a second row beside
+    // the first, and that pair is what `superseded_by` and "Start over" were
+    // built to paper over. Measured on the founder's device 2026-09-07: our
+    // request of 08-23 and the counterparty's handshake back of 08-24, held
+    // as two rows for a fortnight. Now that the sender IS known, the merge
+    // runs here: the invitation folds into the conversation it answers (or
+    // the one it refreshes), with the population's own semantics — no accept
+    // card, no second bond, the newest alias wins.
+    let folded = match store.merge_contact(&sender) {
+        Ok(folded) => folded,
+        Err(e) => {
+            log::warn!("transport-hub: contact merge failed: {e}");
+            None
+        }
+    };
     drop(store);
     log::info!("transport-intake: recorded the sender of an invitation (tx={txid})");
-    ping(&conversation_id);
+    match folded {
+        Some((host, report)) => {
+            log::info!(
+                "transport-intake: that invitation is from a contact we already hold — folded \
+                 into their conversation ({} row(s), {} message(s) re-homed; D-141)",
+                report.rows_folded,
+                report.messages_rehomed
+            );
+            ping(&host);
+            if host != conversation_id {
+                ping(&conversation_id);
+            }
+        }
+        None => ping(&conversation_id),
+    }
 }
 
 fn may_unhide(status: ConversationStatus, tombstoned: bool) -> bool {
@@ -3037,10 +3141,18 @@ async fn handle_inbound(
                 &event.addresses,
                 event.block_time_ms,
                 origin,
+                event.namespace,
             )
             .await
         }
-        "comm" => handle_inbound_comm(hub, &txid, &event.body, event.block_time_ms, origin),
+        "comm" => handle_inbound_comm(
+            hub,
+            &txid,
+            &event.body,
+            event.block_time_ms,
+            origin,
+            event.namespace,
+        ),
         // `self_stash` (D-138) is FILL-ONLY, deliberately — this arm is where
         // it lands and where it must keep landing. Our own backups reach here
         // the moment our node accepts them (they self-send to a watched
@@ -3074,6 +3186,7 @@ async fn handle_inbound_handshake(
     addresses: &[String],
     block_time_ms: Option<u64>,
     origin: EventOrigin,
+    wire: WireNamespace,
 ) -> FoldOutcome {
     // Dedup BEFORE any crypto: DAG re-delivery, our own outbound handshakes
     // echoing back through the scan (stored at commit — Own/Outbound rows
@@ -3175,6 +3288,7 @@ async fn handle_inbound_handshake(
                 alias_on_wire: None,
                 sealed_to: None,
                 provenance: RowSource::NodeScanned,
+                wire,
             };
             match store.override_message(record) {
                 Ok(Some(_)) => {}
@@ -3364,6 +3478,7 @@ async fn handle_inbound_handshake(
                         alias_on_wire: None,
                         sealed_to: None,
                         provenance: origin.row_source(),
+                        wire,
                     }));
                     drop(store);
                     watch_acceptance(txid, block_time_ms);
@@ -3398,6 +3513,7 @@ async fn handle_inbound_handshake(
                                 bound_index: slot.1,
                                 envelope: envelope_bytes,
                                 unix_ms: payload.timestamp,
+                                wire,
                             },
                         );
                         if let Some(tracker) = dag::tracker_handle() {
@@ -3466,6 +3582,7 @@ async fn handle_inbound_handshake(
                     alias_on_wire: None,
                     sealed_to: None,
                     provenance: origin.row_source(),
+                    wire,
                 }));
                 drop(store);
                 log::info!(
@@ -3541,6 +3658,7 @@ async fn handle_inbound_handshake(
         alias_on_wire: None,
         sealed_to: None,
         provenance: origin.row_source(),
+        wire,
     }));
     drop(store);
     watch_acceptance(txid, block_time_ms);
@@ -3554,6 +3672,7 @@ fn handle_inbound_comm(
     body: &[u8],
     block_time_ms: Option<u64>,
     origin: EventOrigin,
+    wire: WireNamespace,
 ) -> FoldOutcome {
     // DAG re-delivery / our own sent row echoing back: pre-crypto skip —
     // except a NODE event over a stored indexer claim (`FillSourced`) or
@@ -3703,6 +3822,7 @@ fn handle_inbound_comm(
         alias_on_wire: Some(alias),
         sealed_to,
         provenance: origin.row_source(),
+        wire,
     };
 
     // OVERRIDE mode (V5, finding 14): the node-resolved conversation is the
@@ -4818,6 +4938,55 @@ pub async fn transport_prepare_accept(
         .await
         .map_err(AppError::chain)?;
     let dest = validate_mainnet_address(&sender)?;
+    // ONE ROW PER CONTACT, AT THE SPEND (`wallet-security-auditor`,
+    // 2026-09-07). The sender fact arrives in two places — the backfill lane
+    // and right here — and a rule keyed on it must run in both (L186). If this
+    // address already has a conversation, their handshake IS the answer to it
+    // (or a refresh of it): the fold's D-139 arm and the merge both take the
+    // accept card away for exactly that case, and this ceremony must not be
+    // the one path that still pays a second 0.2 KAS for it. Write the address
+    // the node just named, fold, and refuse if this row was the one folded.
+    {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        let others = store
+            .conversations_for_contact_address(&sender)
+            .iter()
+            .any(|c| c.conversation_id != conversation_id);
+        if others {
+            if let Some(row) = store.conversation(&conversation_id).cloned() {
+                if row.contact_address.is_empty() {
+                    warn_store(store.upsert_conversation(ConversationRecord {
+                        contact_address: sender.clone(),
+                        ..row
+                    }));
+                }
+            }
+            let folded = match store.merge_contact(&sender) {
+                Ok(folded) => folded,
+                Err(e) => {
+                    log::warn!("transport-hub: contact merge failed: {e}");
+                    None
+                }
+            };
+            let still_acceptable = !accept_target_missing(&store, &conversation_id);
+            drop(store);
+            if let Some((host, _)) = folded.as_ref() {
+                ping(host);
+            }
+            if !still_acceptable {
+                ping(&conversation_id);
+                log::info!(
+                    "transport-send: accept refused — the invitation is from a contact we \
+                     already hold and was folded into that conversation (D-305)"
+                );
+                return Err(AppError::msg(
+                    "this request is from a contact you already have a conversation with — it \
+                     has been folded into that conversation, so there is nothing to accept. \
+                     Open the conversation and send.",
+                ));
+            }
+        }
+    }
     let recipient_x_only = x_only_of(&dest)?;
 
     let my_alias = fresh_alias();
@@ -4935,7 +5104,7 @@ async fn prepare_comm_plaintext(
     text: String,
 ) -> Result<SignableSummaryDto, AppError> {
     let hub = hub()?;
-    let (contact_address, my_alias, bound) = {
+    let (contact_address, my_alias, bound, wire) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         let conversation = store
             .conversation(&conversation_id)
@@ -4978,6 +5147,12 @@ async fn prepare_comm_plaintext(
                 to_core_branch(conversation.bound_branch),
                 conversation.bound_index,
             ),
+            // ANSWER IN THEIR DIALECT (§K11). KaChat 4.0 writes `kchat:1:`
+            // and may no longer look at `ciph_msg:`; Kasia has never looked
+            // at `kchat:`. The store derives which one this counterparty
+            // speaks from their newest inbound comm — `ciph_msg` until they
+            // have said anything, which is also what a stranger gets.
+            store.conversation_wire(&conversation_id),
         )
     };
     // The recipient address is the ENCRYPTION target only — the envelope is
@@ -5016,7 +5191,8 @@ async fn prepare_comm_plaintext(
         })?;
 
     let envelope = encrypt(&recipient_x_only, text.as_bytes()).map_err(AppError::core)?;
-    let wire = compose_comm_wire(&my_alias, &envelope.to_bytes()).map_err(AppError::chain)?;
+    let wire_bytes =
+        compose_comm_wire_in(wire, &my_alias, &envelope.to_bytes()).map_err(AppError::chain)?;
 
     let reseal = encrypt(&x_only_of(&own_address)?, text.as_bytes())
         .map_err(AppError::core)?
@@ -5026,7 +5202,7 @@ async fn prepare_comm_plaintext(
     prepare_transport_send(
         own_address.clone(), // SELF-SEND (D-069): value returns as change — cost = fee
         floor,
-        wire,
+        wire_bytes,
         own_address, // source discipline: input[0] + change = the same bound addr
         priority,
         TransportIntent::Comm {
@@ -5035,6 +5211,7 @@ async fn prepare_comm_plaintext(
             reseal,
             sealed_to: (to_key_branch(bound.0), bound.1),
             timestamp_ms,
+            wire,
         },
         PinPolicy::Default,
     )
@@ -5307,6 +5484,36 @@ pub fn transport_stash_state() -> Result<StashStateDto, AppError> {
 /// as the payment path — one shared implementation. On a CLEAN broadcast the
 /// stashed intent folds into the transport store (conversation + sent row).
 pub async fn transport_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
+    // THE ROW MUST STILL EXIST BEFORE THE MONEY MOVES (`wallet-security-auditor`,
+    // 2026-09-07). An Accept's 0.2 KAS refund is prepared against an invitation
+    // row, and a whole confirm-and-sign dwell passes before this call. The
+    // backfill merge (D-305) can fold that row into a conversation we already
+    // hold inside the dwell — the same activity record fires both — and the
+    // Accept arm of `apply_intent` would then find no row to record the alias
+    // the acceptance announced: money gone for a conversation that no longer
+    // exists, and an alias the counterparty now listens on held nowhere.
+    // Refuse BEFORE the broadcast, abandon the stash, and say why.
+    if let Some(conversation_id) = pending_accept_target(nonce) {
+        let missing = match hub() {
+            Ok(hub) => {
+                let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+                accept_target_missing(&store, &conversation_id)
+            }
+            Err(_) => true,
+        };
+        if missing {
+            transport_abandon();
+            ping(&conversation_id);
+            log::info!(
+                "transport-send: accept commit refused — its invitation was folded into an \
+                 existing conversation during the ceremony; nothing was sent (D-305)"
+            );
+            return Err(AppError::msg(
+                "this request was folded into a conversation you already have while you \
+                 were confirming — nothing was sent. Open the conversation and send.",
+            ));
+        }
+    }
     let prepared = take_stashed(&PENDING_TRANSPORT, nonce)?;
     let intent = take_intent(nonce);
     let outcome = commit_and_advance(prepared).await;
@@ -5393,6 +5600,9 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 alias_on_wire: None,
                 sealed_to,
                 provenance: RowSource::Own,
+                // We compose every handshake in `ciph_msg` (§K11): a stranger's
+                // client is unknown, and KaChat still documents that form.
+                wire: WireNamespace::CiphMsg,
             }));
             drop(store);
             ping(&conversation_id);
@@ -5466,7 +5676,19 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                     alias_on_wire: None,
                     sealed_to,
                     provenance: RowSource::Own,
+                    // We compose every handshake in `ciph_msg` (§K11): a stranger's
+                    // client is unknown, and KaChat still documents that form.
+                    wire: WireNamespace::CiphMsg,
                 }));
+            } else {
+                // The commit guard refuses before broadcast when the row is
+                // gone, so reaching here means the row vanished INSIDE the
+                // broadcast. Never silent: the refund has left and the alias it
+                // announced has no row to live on.
+                log::warn!(
+                    "transport-send: accept committed but its invitation row is gone — the \
+                     alias it announced is not recorded (tx={txid})"
+                );
             }
             drop(store);
             ping(&conversation_id);
@@ -5477,6 +5699,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
             reseal,
             sealed_to,
             timestamp_ms,
+            wire,
         } => {
             warn_store(store.record_message(MessageRecord {
                 txid: txid.to_string(),
@@ -5488,6 +5711,7 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 alias_on_wire: Some(alias_on_wire),
                 sealed_to: Some(sealed_to),
                 provenance: RowSource::Own,
+                wire,
             }));
             if let Some(existing) = store.conversation(&conversation_id) {
                 let mut conversation = existing.clone();
@@ -6875,6 +7099,7 @@ mod tests {
         let dto = to_dto(TransportEvent {
             txid: Some("ab".repeat(32)),
             kind: "bcast".into(),
+            namespace: WireNamespace::CiphMsg,
             body: b"kv-dev:hi".to_vec(),
             addresses: vec!["kaspa:qz...".into()],
             block_time_ms: None,
@@ -6909,6 +7134,7 @@ mod tests {
             alias_on_wire: None,
             sealed_to: None,
             provenance: RowSource::Own,
+            wire: WireNamespace::CiphMsg,
         }
     }
 
@@ -7562,6 +7788,7 @@ mod tests {
             bound_index: 0,
             envelope: vec![0xAB, 0xCD],
             unix_ms: 1_700_000_000_000,
+            wire: WireNamespace::CiphMsg,
         };
         PENDING_ACCEPTANCE
             .lock()
@@ -7633,6 +7860,76 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kv-stash-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         (TransportStore::load(dir.clone()).unwrap(), dir)
+    }
+
+    /// `wallet-security-auditor` 2026-09-07: an Accept prepared against an
+    /// invitation must find that invitation still there before the refund
+    /// broadcasts. Gone (folded by the merge, or erased) or no longer awaiting
+    /// an accept ⇒ the commit refuses; only a live `PendingInbound` row passes.
+    #[test]
+    fn an_accept_whose_invitation_was_folded_is_refused_before_broadcast() {
+        let (mut store, dir) = stash_store("accept-guard");
+        assert!(
+            accept_target_missing(&store, "never-existed"),
+            "no row ⇒ nothing to accept"
+        );
+        let mut invitation = ConversationRecord {
+            conversation_id: "inv".to_string(),
+            contact_address: String::new(),
+            my_alias: String::new(),
+            their_alias: Some("822deb62da52".to_string()),
+            status: ConversationStatus::PendingInbound,
+            initiated_by_me: false,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 150,
+            last_activity_unix_ms: 150,
+            handshake_txid: Some("hs".to_string()),
+        };
+        store.upsert_conversation(invitation.clone()).unwrap();
+        assert!(
+            !accept_target_missing(&store, "inv"),
+            "a live invitation passes"
+        );
+
+        // The founder's shape: our own request to the same address exists, the
+        // sender resolves, and the merge folds the invitation into it.
+        store
+            .upsert_conversation(ConversationRecord {
+                conversation_id: "ours".to_string(),
+                contact_address:
+                    "kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr"
+                        .to_string(),
+                my_alias: "5f06f494ee33".to_string(),
+                their_alias: None,
+                status: ConversationStatus::PendingOutbound,
+                initiated_by_me: true,
+                bound_branch: KeyBranch::Receive,
+                bound_index: 0,
+                created_unix_ms: 100,
+                last_activity_unix_ms: 100,
+                handshake_txid: Some("our-hs".to_string()),
+            })
+            .unwrap();
+        invitation.contact_address =
+            "kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr".to_string();
+        store.upsert_conversation(invitation).unwrap();
+        let (host, _) = store
+            .merge_contact("kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr")
+            .unwrap()
+            .expect("two rows fold");
+        assert_eq!(host, "ours");
+        assert!(
+            accept_target_missing(&store, "inv"),
+            "folded away ⇒ the commit refuses before the money moves"
+        );
+        // …and a row that is present but no longer awaiting an accept refuses too.
+        assert!(
+            accept_target_missing(&store, "ours"),
+            "Active is not acceptable"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// CORRECTION 6 TO THE LIVE POPULATION, and the rule that replaced it.

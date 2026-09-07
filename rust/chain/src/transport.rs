@@ -17,6 +17,7 @@
 //! ours to log. Nothing in this module logs payload contents (§4 watch-out:
 //! treat message content like key material for logging purposes).
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use kaspa_addresses::Prefix;
 use kaspa_consensus_core::tx::Transaction;
 use kaspa_txscript::extract_script_pub_key_address;
@@ -25,8 +26,61 @@ use kaspa_wrpc_client::prelude::{RpcBlock, RpcTransaction};
 use crate::error::{ChainError, Result};
 use crate::Rpc;
 
-/// The wire namespace every payload message rides under (ASCII on-wire).
+/// The wire namespace the Kasia population rides under (ASCII on-wire).
 pub const CIPH_MSG_PREFIX: &[u8] = b"ciph_msg:";
+/// The SECOND namespace on the wire. **KaChat 4.0** (App Store 2026-08-27)
+/// moved its emission from `ciph_msg:1:` to `kchat:1:` on 2026-08-29 — same
+/// grammar, same kinds, same 12-hex aliases, same base64 comm body, same
+/// envelope layout, same self-send shape. Only this token changed, and nothing
+/// but the chain records it: KaChat's own site still documents `ciph_msg:1:`,
+/// the Kasia indexer serves nothing under it, and Kasia web cannot see it
+/// (kasia_messaging §K11, measured 2026-09-07).
+pub const KCHAT_PREFIX: &[u8] = b"kchat:";
+
+/// Which namespace a payload rode under.
+///
+/// Two clients, one grammar (`<namespace>:1:<kind>:…`), two spellings of the
+/// namespace. We READ both, and we ANSWER a conversation in the namespace its
+/// counterparty last spoke — a KaChat 4.0 user's client may no longer look at
+/// `ciph_msg:` at all, and a Kasia user's client has never looked at `kchat:`.
+/// The dialect is a fact about the counterparty's software, learned from
+/// their traffic, never a setting.
+///
+/// Borsh law (kvlog.rs): this rides inside [`crate::MessageRecord`], so
+/// variants are append-only and positional — never reorder or remove.
+/// `CiphMsg` is `0` and the default, because every row written before this
+/// type existed could only have arrived under that prefix.
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireNamespace {
+    /// `ciph_msg:` — Kasia web, the Kasia indexer, KaChat until 2026-08-29.
+    #[default]
+    CiphMsg,
+    /// `kchat:` — KaChat from 4.0 (first seen on chain 2026-08-29 14:13:18Z).
+    KChat,
+}
+
+impl WireNamespace {
+    /// Every namespace the scan matches, in the order they are tried. The
+    /// prefixes share no leading byte, so order cannot change a match.
+    pub const ALL: [WireNamespace; 2] = [WireNamespace::CiphMsg, WireNamespace::KChat];
+
+    /// The on-wire prefix, colon included.
+    pub const fn prefix(self) -> &'static [u8] {
+        match self {
+            WireNamespace::CiphMsg => CIPH_MSG_PREFIX,
+            WireNamespace::KChat => KCHAT_PREFIX,
+        }
+    }
+
+    /// The namespace token without its colon — for log lines and the dev
+    /// wire view, never for composing (that goes through [`Self::prefix`]).
+    pub const fn token(self) -> &'static str {
+        match self {
+            WireNamespace::CiphMsg => "ciph_msg",
+            WireNamespace::KChat => "kchat",
+        }
+    }
+}
 /// Protocol version 1 token, as it appears after the namespace.
 const WIRE_V1: &[u8] = b"1:";
 /// A kind token must terminate with `:` within this many bytes — the longest
@@ -54,6 +108,10 @@ pub struct TransportEvent {
     /// [`KIND_LEGACY`] / [`KIND_UNKNOWN`]. Unknown kinds still cross — the
     /// forward-compat rule (§0.5): downstream renders them opaque, never drops.
     pub kind: String,
+    /// The namespace the payload rode under (§K11). Carried so the store can
+    /// record which dialect a counterparty speaks and the send path can answer
+    /// in it.
+    pub namespace: WireNamespace,
     /// Raw body bytes after `ciph_msg:1:<kind>:` (for legacy/unknown forms, the
     /// whole remainder). Ciphertext or plaintext — passed through untouched.
     pub body: Vec<u8>,
@@ -71,23 +129,38 @@ pub struct TransportEvent {
 /// by the receive scan and the send-side summary decode (B7: the confirm
 /// renders what the BUILT tx actually carries, via this same parser).
 pub fn parse_payload(payload: &[u8]) -> Option<(String, &[u8])> {
-    let rest = payload.strip_prefix(CIPH_MSG_PREFIX)?;
+    parse_payload_in(payload).map(|(_, kind, body)| (kind, body))
+}
+
+/// [`parse_payload`], keeping the namespace the payload matched under. Both
+/// namespaces share one grammar past their prefix; the only asymmetry is the
+/// unversioned form, which is a real Kasia generation (`ciph_msg:{bytes}`,
+/// [`KIND_LEGACY`]) and has never been seen under `kchat:` — there it is
+/// opaque [`KIND_UNKNOWN`], because "legacy" names a specific population and
+/// a label that is wrong is worse than one that says nothing.
+pub fn parse_payload_in(payload: &[u8]) -> Option<(WireNamespace, String, &[u8])> {
+    let (namespace, rest) = WireNamespace::ALL
+        .iter()
+        .find_map(|ns| payload.strip_prefix(ns.prefix()).map(|rest| (*ns, rest)))?;
     let Some(v1) = rest.strip_prefix(WIRE_V1) else {
-        // Unversioned legacy form: everything after the namespace is body.
-        return Some((KIND_LEGACY.to_string(), rest));
+        return Some(match namespace {
+            // Unversioned legacy form: everything after the namespace is body.
+            WireNamespace::CiphMsg => (namespace, KIND_LEGACY.to_string(), rest),
+            WireNamespace::KChat => (namespace, KIND_UNKNOWN.to_string(), rest),
+        });
     };
     let cap = v1.len().min(KIND_TOKEN_CAP);
     match v1[..cap].iter().position(|&b| b == b':') {
         Some(pos) => {
             let kind = String::from_utf8_lossy(&v1[..pos]).into_owned();
-            Some((kind, &v1[pos + 1..]))
+            Some((namespace, kind, &v1[pos + 1..]))
         }
         // No kind delimiter within the cap: opaque unknown, nothing dropped.
-        None => Some((KIND_UNKNOWN.to_string(), v1)),
+        None => Some((namespace, KIND_UNKNOWN.to_string(), v1)),
     }
 }
 
-/// Scan one block's transactions for `ciph_msg:` payloads. Runs on every
+/// Scan one block's transactions for `ciph_msg:` / `kchat:` payloads. Runs on every
 /// BlockAdded notification (~10 blocks/s), so the non-match path is one prefix
 /// compare per tx; ids/addresses are resolved only for matches (sparse).
 pub fn scan_block(block: &RpcBlock, prefix: Prefix) -> Vec<TransportEvent> {
@@ -104,10 +177,11 @@ fn scan_transaction(
     prefix: Prefix,
     block_time_ms: Option<u64>,
 ) -> Option<TransportEvent> {
-    let (kind, body) = parse_payload(&tx.payload)?;
+    let (namespace, kind, body) = parse_payload_in(&tx.payload)?;
     Some(TransportEvent {
         txid: resolve_txid(tx),
         kind,
+        namespace,
         body: body.to_vec(),
         addresses: output_addresses(tx, prefix),
         block_time_ms,
@@ -272,6 +346,17 @@ pub fn strip_stash_scope(body: &[u8]) -> Option<&[u8]> {
 /// wire law. Refuses non-sealed bodies (§4 type separation — validated on
 /// the RAW envelope before encoding).
 pub fn compose_comm_wire(alias: &str, sealed_envelope: &[u8]) -> Result<Vec<u8>> {
+    compose_comm_wire_in(WireNamespace::CiphMsg, alias, sealed_envelope)
+}
+
+/// [`compose_comm_wire`] in a chosen namespace — the counterparty's dialect
+/// (§K11), which the store derives from their most recent inbound comm.
+/// Everything past the prefix is byte-identical between the two.
+pub fn compose_comm_wire_in(
+    namespace: WireNamespace,
+    alias: &str,
+    sealed_envelope: &[u8],
+) -> Result<Vec<u8>> {
     if alias.is_empty() || alias.as_bytes().contains(&b':') {
         return Err(ChainError::Message(
             "conversation alias must be non-empty without ':'".into(),
@@ -283,10 +368,10 @@ pub fn compose_comm_wire(alias: &str, sealed_envelope: &[u8]) -> Result<Vec<u8>>
         ));
     }
     let body = encode_base64(sealed_envelope);
-    let mut wire = Vec::with_capacity(
-        CIPH_MSG_PREFIX.len() + WIRE_V1.len() + 5 + alias.len() + 1 + body.len(),
-    );
-    wire.extend_from_slice(CIPH_MSG_PREFIX);
+    let prefix = namespace.prefix();
+    let mut wire =
+        Vec::with_capacity(prefix.len() + WIRE_V1.len() + 5 + alias.len() + 1 + body.len());
+    wire.extend_from_slice(prefix);
     wire.extend_from_slice(WIRE_V1);
     wire.extend_from_slice(b"comm:");
     wire.extend_from_slice(alias.as_bytes());
@@ -546,6 +631,93 @@ mod tests {
         let (kind, body) = parse_payload(b"ciph_msg:1:zap:xyz").unwrap();
         assert_eq!(kind, "zap");
         assert_eq!(body, b"xyz");
+    }
+
+    /// §K11: KaChat 4.0's namespace parses under the SAME grammar, and the
+    /// scan says which one it saw. `kchat:` has no unversioned generation, so
+    /// a version-less remainder there is opaque-unknown, not "legacy".
+    #[test]
+    fn kchat_namespace_parses_with_the_same_grammar() {
+        let (ns, kind, body) = parse_payload_in(b"kchat:1:comm:822deb62da52:QUJD").unwrap();
+        assert_eq!(ns, WireNamespace::KChat);
+        assert_eq!(kind, "comm");
+        assert_eq!(body, b"822deb62da52:QUJD");
+
+        let (ns, kind, body) = parse_payload_in(b"kchat:1:handshake:\x00\x01raw").unwrap();
+        assert_eq!(ns, WireNamespace::KChat);
+        assert_eq!(kind, "handshake");
+        assert_eq!(body, b"\x00\x01raw");
+
+        // The namespace-blind wrapper sees exactly what it sees for ciph_msg.
+        assert_eq!(
+            parse_payload(b"kchat:1:comm:a:b"),
+            Some(("comm".to_string(), &b"a:b"[..]))
+        );
+        let (ns, kind, _) = parse_payload_in(b"ciph_msg:1:comm:a:b").unwrap();
+        assert_eq!((ns, kind.as_str()), (WireNamespace::CiphMsg, "comm"));
+
+        // A future kind crosses verbatim under either namespace (§0.5).
+        let (ns, kind, body) = parse_payload_in(b"kchat:1:post:xyz").unwrap();
+        assert_eq!(
+            (ns, kind.as_str(), body),
+            (WireNamespace::KChat, "post", &b"xyz"[..])
+        );
+
+        // Version-less under kchat: unknown, lossless — never "legacy".
+        let (ns, kind, body) = parse_payload_in(b"kchat:junk").unwrap();
+        assert_eq!(
+            (ns, kind.as_str(), body),
+            (WireNamespace::KChat, KIND_UNKNOWN, &b"junk"[..])
+        );
+        let (ns, kind, _) = parse_payload_in(b"ciph_msg:junk").unwrap();
+        assert_eq!((ns, kind.as_str()), (WireNamespace::CiphMsg, KIND_LEGACY));
+
+        // Prefix discipline is per-byte and from byte 0, for both.
+        assert_eq!(parse_payload_in(b"kchatX1:comm:a:b"), None);
+        assert_eq!(parse_payload_in(b"xkchat:1:comm:a:b"), None);
+        assert_eq!(parse_payload_in(b"kcha"), None);
+    }
+
+    /// Composing in either namespace round-trips through the scan parser,
+    /// the head splitter and the body normaliser to the same envelope bytes.
+    #[test]
+    fn compose_comm_wire_in_round_trips_both_namespaces() {
+        let mut sealed = vec![0x11u8; MIN_SEALED_LEN + 7];
+        sealed[12] = 0x02; // SEC1 tag at the ephemeral key's first byte
+        for ns in WireNamespace::ALL {
+            let wire = compose_comm_wire_in(ns, "5f06f494ee33", &sealed).unwrap();
+            assert!(wire.starts_with(ns.prefix()));
+            let (seen, kind, body) = parse_payload_in(&wire).unwrap();
+            assert_eq!(seen, ns);
+            assert_eq!(kind, "comm");
+            let (alias, text) = split_comm_body(body).unwrap();
+            assert_eq!(alias, "5f06f494ee33");
+            assert_eq!(decode_envelope_body(text), sealed);
+        }
+        // The default compose IS the ciph_msg one — existing callers unchanged.
+        assert_eq!(
+            compose_comm_wire("a1", &sealed).unwrap(),
+            compose_comm_wire_in(WireNamespace::CiphMsg, "a1", &sealed).unwrap()
+        );
+        // Past the prefix the two are byte-identical.
+        let kasia = compose_comm_wire_in(WireNamespace::CiphMsg, "a1", &sealed).unwrap();
+        let kachat = compose_comm_wire_in(WireNamespace::KChat, "a1", &sealed).unwrap();
+        assert_eq!(
+            &kasia[CIPH_MSG_PREFIX.len()..],
+            &kachat[KCHAT_PREFIX.len()..]
+        );
+    }
+
+    #[test]
+    fn scan_matches_kchat_and_records_the_namespace() {
+        let kasia = tx_with(0, b"ciph_msg:1:bcast:kv-dev:hi");
+        let kachat = tx_with(0, b"kchat:1:bcast:kv-dev:hi");
+        let events = scan_block(&block_of(vec![kasia, kachat]), Prefix::Mainnet);
+        assert_eq!(events.len(), 2, "both namespaces cross the scan");
+        assert_eq!(events[0].namespace, WireNamespace::CiphMsg);
+        assert_eq!(events[1].namespace, WireNamespace::KChat);
+        assert_eq!(events[0].kind, events[1].kind);
+        assert_eq!(events[0].body, events[1].body);
     }
 
     #[test]

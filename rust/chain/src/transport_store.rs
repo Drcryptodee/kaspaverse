@@ -41,6 +41,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::error::Result;
 use crate::kvlog::Log;
+use crate::transport::WireNamespace;
 
 /// Which derivation branch a conversation's bound key lives on. Mirrors
 /// `kaspaverse-core::Branch` (this crate deliberately has no core
@@ -144,15 +145,16 @@ pub enum RowSource {
 /// One stored message: sealed bytes plus public routing metadata. See the
 /// module docs for the at-rest law.
 ///
-/// **Trailing-optional field law (V5):** [`Self::provenance`] is decoded by a
-/// manual [`BorshDeserialize`] that treats end-of-input as "field absent"
-/// (pre-V5 frame ⇒ [`RowSource::Unknown`]) — the record-level twin of the
+/// **Trailing-optional field law (V5, extended V6):** [`Self::provenance`]
+/// and [`Self::wire`] are decoded by a manual [`BorshDeserialize`] that treats
+/// end-of-input as "field absent" (pre-V5 frame ⇒ [`RowSource::Unknown`];
+/// pre-V6 frame ⇒ [`WireNamespace::CiphMsg`]) — the record-level twin of the
 /// kvlog frame-compatibility law, needed because `replay()` STOPS at the
-/// first undecodable frame (a naive new field would replay every pre-V5 log
+/// first undecodable frame (a naive new field would replay every older log
 /// to zero rows). Corollaries: new fields are append-only, each must be
-/// readable-as-absent-on-EOF, and `MessageRecord` must remain the FINAL
-/// borsh element of any enclosing frame (true today: it only ever rides
-/// `Frame::Upsert`'s single payload slot).
+/// readable-as-absent-on-EOF in declaration order, and `MessageRecord` must
+/// remain the FINAL borsh element of any enclosing frame (true today: it only
+/// ever rides `Frame::Upsert`'s single payload slot).
 #[derive(BorshSerialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageRecord {
     /// The dedup key (D-065 law — never envelope bytes/hash).
@@ -170,9 +172,13 @@ pub struct MessageRecord {
     /// binding later rebinds (a rebind must never strand old rows). Inbound
     /// rows carry `None` (they open with the conversation's bound slot).
     pub sealed_to: Option<(KeyBranch, u32)>,
-    /// Row provenance (V5, finding 14). MUST stay the last field — see the
-    /// trailing-optional law above.
+    /// Row provenance (V5, finding 14). Trailing-optional — see the law above.
     pub provenance: RowSource,
+    /// The namespace the row rode under (V6, kasia_messaging §K11): which
+    /// dialect the counterparty's client speaks, learned from their traffic.
+    /// Absent on every frame written before V6, which is correct — the scan
+    /// matched nothing but `ciph_msg:` until then. MUST stay the last field.
+    pub wire: WireNamespace,
 }
 
 impl BorshDeserialize for MessageRecord {
@@ -201,6 +207,15 @@ impl BorshDeserialize for MessageRecord {
         } else {
             RowSource::deserialize_reader(&mut &tag[..])?
         };
+        // V6, same law, same technique: a V5 frame ENDS here. (A pre-V5 frame
+        // ended one field earlier and the read above already returned 0; this
+        // read returns 0 again — end-of-input is sticky, so the two absences
+        // compose without a flag.)
+        let wire = if reader.read(&mut tag)? == 0 {
+            WireNamespace::CiphMsg
+        } else {
+            WireNamespace::deserialize_reader(&mut &tag[..])?
+        };
         Ok(Self {
             txid,
             conversation_id,
@@ -211,8 +226,20 @@ impl BorshDeserialize for MessageRecord {
             alias_on_wire,
             sealed_to,
             provenance,
+            wire,
         })
     }
+}
+
+/// What [`TransportStore::merge_duplicate_contacts`] folded. Counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContactMergeReport {
+    /// Contact addresses that held more than one row.
+    pub contacts: usize,
+    /// Rows folded away (each contact keeps exactly one).
+    pub rows_folded: usize,
+    /// Message rows re-homed onto the kept conversation.
+    pub messages_rehomed: usize,
 }
 
 /// What a [`TransportStore::wipe`] destroyed. Counts only — a report about
@@ -558,6 +585,12 @@ impl TransportStore {
         // takes that button away and strands their money with no other route
         // to it (`wallet-security-auditor`, 2026-08-17). Their bond is not
         // ours to strand because we happen to have a newer thread.
+        //
+        // D-305 NARROWS the row set this rule ever sees: an invitation from an
+        // address we already hold a conversation with is FOLDED into that
+        // conversation by [`Self::merge_contact`] (no accept card survives —
+        // the population's own semantics for a repeat handshake), so the
+        // invitations that reach here are ones with no other row to fold into.
         if row.status == ConversationStatus::PendingInbound {
             return None;
         }
@@ -648,6 +681,264 @@ impl TransportStore {
     /// hypothetical: it cost a live thread in July 2026 (D-141).
     pub fn remove_conversation(&mut self, conversation_id: &str) -> Result<()> {
         self.conversations.remove(conversation_id)
+    }
+
+    /// When a conversation's alias in `direction` was last put on the wire:
+    /// the newest surviving handshake row in that direction (`Outbound` = our
+    /// handshake or acceptance, so OUR alias; `Inbound` = theirs, so THEIRS),
+    /// falling back to the row's establishment when none survives. A reused
+    /// request re-announces our alias on every retry without moving
+    /// `created_unix_ms`, which is why this reads the rows and not the clock.
+    fn announced_at(&self, row: &ConversationRecord, direction: MessageDirection) -> u64 {
+        self.messages
+            .records
+            .values()
+            .filter(|m| {
+                m.conversation_id == row.conversation_id
+                    && m.direction == direction
+                    && m.kind == StoredKind::Handshake
+                    && !self.messages.is_tombstoned(&m.txid)
+            })
+            .map(|m| m.unix_ms)
+            .max()
+            .unwrap_or(row.created_unix_ms)
+    }
+
+    /// The wire dialect this conversation's counterparty speaks — the
+    /// namespace of their most recent inbound comm, `ciph_msg` until they have
+    /// said anything (kasia_messaging §K11).
+    ///
+    /// **Derived, never stored on the conversation.** [`ConversationRecord`]
+    /// is positional borsh with no trailing-field law, and a stored flag would
+    /// go stale the day the counterparty updates their app; the newest thing
+    /// they sent is the only honest evidence of what they run. Inbound comms
+    /// only: our own rows say what WE chose, handshakes say nothing (we
+    /// compose those in `ciph_msg` for everyone), and a reorg ghost is a
+    /// transaction the chain took back.
+    pub fn conversation_wire(&self, conversation_id: &str) -> WireNamespace {
+        self.messages
+            .records
+            .values()
+            .filter(|m| {
+                m.conversation_id == conversation_id
+                    && m.direction == MessageDirection::Inbound
+                    && m.kind == StoredKind::Comm
+                    && !self.messages.is_tombstoned(&m.txid)
+            })
+            .max_by(|a, b| a.unix_ms.cmp(&b.unix_ms).then(a.txid.cmp(&b.txid)))
+            .map_or(WireNamespace::CiphMsg, |m| m.wire)
+    }
+
+    /// Move one message row onto another conversation. The row keeps its txid
+    /// (the dedup key), its sealed bytes, its clock and its ghost flag — only
+    /// the thread it belongs to changes. `false` when there is no such row or
+    /// it is already there (no log growth).
+    pub fn rehome_message(&mut self, txid: &str, conversation_id: &str) -> Result<bool> {
+        let Some(existing) = self.messages.records.get(txid) else {
+            return Ok(false);
+        };
+        if existing.conversation_id == conversation_id {
+            return Ok(false);
+        }
+        let moved = MessageRecord {
+            conversation_id: conversation_id.to_string(),
+            ..existing.clone()
+        };
+        self.messages.upsert(txid.to_string(), moved)?;
+        Ok(true)
+    }
+
+    /// **One conversation per contact address** — D-141's rule ("the
+    /// counterparty's address is the conversation key") applied to the rows
+    /// this store already holds.
+    ///
+    /// Duplicates arose on one lane: an inbound handshake from an address we
+    /// already talk to is folded before our node can name its sender, so the
+    /// address-keyed merge is skipped and a fresh invitation is minted beside
+    /// the row it belongs to. Measured on the founder's device 2026-09-07: a
+    /// conversation we opened on 08-23 and the counterparty's own handshake
+    /// back on 08-24, held as two rows for a fortnight — one that could read
+    /// and one that could never complete. `superseded_by` was built to paper
+    /// over exactly that pair. The live population never holds two: Kasia's
+    /// `processHandshake` looks up "strictly by sender address" and updates
+    /// the alias in place (`conversation-manager-service.ts:181-213`).
+    ///
+    /// **Which row is kept** (the host), best first: one we can SEND in
+    /// (`my_alias` set), then one that can READ (`their_alias` set), then
+    /// `Active`, then visible, then the NEWER `created_unix_ms` — the last
+    /// announced alias pair is the one a Kasia-class client is listening on —
+    /// then the lowest id for determinism.
+    ///
+    /// **What the host takes from each folded row — the NEWEST announcement
+    /// of each alias wins, in both directions.** Their alias and the slot they
+    /// sealed to, when the host has none or the folded row's newest inbound
+    /// handshake is later (a wipe-and-rehandshake carries a NEW alias, and
+    /// the old one is monitored by nobody); OUR alias when the host has none
+    /// or the folded row's newest outbound handshake is later (a *Start over*
+    /// mints a fresh alias and pays 0.2 KAS to announce it — a Kasia-class
+    /// counterparty refreshes ours in place on that handshake and fetches
+    /// comms by it, so keeping the older one is deafness); the handshake txid
+    /// when the host has none; the earliest establishment and the latest
+    /// activity. A host that ends up holding both aliases and an address is
+    /// `Active` unless it is an invitation still owed an accept.
+    ///
+    /// **Hidden means two things and the merge keeps both** (D-142): a hidden
+    /// invitation is a block, and the block protects an accept card — so it
+    /// carries only while the host IS one; otherwise a hidden host is a mute,
+    /// and it comes back if the user could see any of the rows that fold
+    /// into it.
+    ///
+    /// **No bond moves.** Folding a `PendingInbound` row into a conversation
+    /// we opened takes the accept card away, which is correct: their
+    /// handshake already refunded ours, and arming a second refund would pay
+    /// them twice for one conversation. Folding one into an `Active` row
+    /// leaves their second bond with us, which is the live population's own
+    /// semantics for a repeat handshake (D-139/D-141).
+    ///
+    /// Every write is a durable frame; a failure part-way leaves a store that
+    /// is still consistent (rows re-homed onto a host that exists), and the
+    /// next start re-runs the pass.
+    pub fn merge_duplicate_contacts(&mut self) -> Result<ContactMergeReport> {
+        let mut addresses: Vec<String> = self
+            .conversations
+            .records
+            .values()
+            .filter(|c| !c.contact_address.is_empty())
+            .map(|c| c.contact_address.clone())
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        let mut report = ContactMergeReport::default();
+        for address in addresses {
+            if let Some((_, one)) = self.merge_contact(&address)? {
+                report.contacts += 1;
+                report.rows_folded += one.rows_folded;
+                report.messages_rehomed += one.messages_rehomed;
+            }
+        }
+        Ok(report)
+    }
+
+    /// [`Self::merge_duplicate_contacts`] for one address. Returns the kept
+    /// row's id with the counts, or `None` when there was nothing to fold.
+    pub fn merge_contact(&mut self, address: &str) -> Result<Option<(String, ContactMergeReport)>> {
+        if address.is_empty() {
+            return Ok(None);
+        }
+        let mut rows: Vec<(ConversationRecord, bool)> = self
+            .conversations
+            .records
+            .values()
+            .filter(|c| c.contact_address == address)
+            .map(|c| {
+                (
+                    c.clone(),
+                    self.conversations.is_tombstoned(&c.conversation_id),
+                )
+            })
+            .collect();
+        if rows.len() < 2 {
+            return Ok(None);
+        }
+        rows.sort_by(|(a, a_hidden), (b, b_hidden)| {
+            merge_rank(a, *a_hidden)
+                .cmp(&merge_rank(b, *b_hidden))
+                // Reversed id order so the LOWEST id sorts last among equals,
+                // where `pop` finds it.
+                .then_with(|| b.conversation_id.cmp(&a.conversation_id))
+        });
+        let Some((mut host, host_hidden)) = rows.pop() else {
+            return Ok(None);
+        };
+        // The block protects an ACCEPT CARD, so it carries only while the host
+        // is still one (`consensus-auditor`, 2026-09-07). On a pre-D-305 store
+        // the counterparty's own answer sat as an "Unknown sender" card — the
+        // very thing a user dismisses — and carrying that dismissal onto the
+        // conversation they opened and paid for would hide it with no gesture
+        // to bring it back (hide has no manual restore; only their next
+        // message reopens a mute, and a KaChat-4.0 contact may never send
+        // one). Once no card survives, nothing is being protected.
+        let blocked = host.status == ConversationStatus::PendingInbound
+            && (host_hidden
+                || rows
+                    .iter()
+                    .any(|(c, hidden)| *hidden && c.status == ConversationStatus::PendingInbound));
+        let any_visible = !host_hidden || rows.iter().any(|(_, hidden)| !hidden);
+
+        // Announcement times, snapshotted BEFORE the loop lowers `created`
+        // (`consensus-auditor`, 2026-09-07: comparing against a value the loop
+        // itself mutates let an older invitation read as "announced later" on
+        // the third row). One rule for both aliases: the newest announcement
+        // wins, because a Kasia-class client refreshes the alias in place on
+        // every handshake it sees (`conversation-manager-service.ts:181-213`)
+        // and fetches comms by (sender, alias) — an alias nobody listens on
+        // is deafness, not history.
+        let mut theirs_at = self.announced_at(&host, MessageDirection::Inbound);
+        let mut mine_at = self.announced_at(&host, MessageDirection::Outbound);
+        let mut created = host.created_unix_ms;
+        let mut last = host.last_activity_unix_ms;
+
+        let mut report = ContactMergeReport {
+            contacts: 1,
+            ..ContactMergeReport::default()
+        };
+        for (dup, _) in &rows {
+            let dup_theirs_at = self.announced_at(dup, MessageDirection::Inbound);
+            let dup_mine_at = self.announced_at(dup, MessageDirection::Outbound);
+            if let Some(alias) = dup.their_alias.as_ref() {
+                if host.their_alias.is_none() || dup_theirs_at > theirs_at {
+                    host.their_alias = Some(alias.clone());
+                    host.bound_branch = dup.bound_branch;
+                    host.bound_index = dup.bound_index;
+                    theirs_at = dup_theirs_at;
+                }
+            }
+            if !dup.my_alias.is_empty() && (host.my_alias.is_empty() || dup_mine_at > mine_at) {
+                host.my_alias = dup.my_alias.clone();
+                mine_at = dup_mine_at;
+            }
+            if host.handshake_txid.is_none() {
+                host.handshake_txid = dup.handshake_txid.clone();
+            }
+            created = created.min(dup.created_unix_ms);
+            last = last.max(dup.last_activity_unix_ms);
+        }
+        host.created_unix_ms = created;
+        host.last_activity_unix_ms = last;
+        if host.status != ConversationStatus::PendingInbound
+            && !host.my_alias.is_empty()
+            && host.their_alias.is_some()
+        {
+            host.status = ConversationStatus::Active;
+        }
+
+        // Writes, in an order that never strands a row: the host first (so
+        // every re-homed message lands on a conversation that exists), then
+        // the messages, then the folded rows.
+        let host_id = host.conversation_id.clone();
+        self.conversations.upsert(host_id.clone(), host)?;
+        for (dup, _) in &rows {
+            let txids: Vec<String> = self
+                .messages
+                .records
+                .values()
+                .filter(|m| m.conversation_id == dup.conversation_id)
+                .map(|m| m.txid.clone())
+                .collect();
+            for txid in txids {
+                if self.rehome_message(&txid, &host_id)? {
+                    report.messages_rehomed += 1;
+                }
+            }
+            self.conversations.remove(&dup.conversation_id)?;
+            report.rows_folded += 1;
+        }
+        if blocked {
+            self.conversations.tombstone(&host_id)?;
+        } else if any_visible {
+            self.conversations.untombstone(&host_id)?;
+        }
+        Ok(Some((host_id, report)))
     }
 
     // ── messages ─────────────────────────────────────────────────────────
@@ -803,6 +1094,19 @@ impl std::fmt::Debug for TransportStore {
             self.messages.records.len()
         )
     }
+}
+
+/// The host-selection key for [`TransportStore::merge_contact`] — greater is
+/// better, in the order the doc there gives. A tuple so the precedence is
+/// visible rather than encoded in a chain of `then`s.
+fn merge_rank(c: &ConversationRecord, hidden: bool) -> (bool, bool, bool, bool, u64) {
+    (
+        !c.my_alias.is_empty(),
+        c.their_alias.is_some(),
+        c.status == ConversationStatus::Active,
+        !hidden,
+        c.created_unix_ms,
+    )
 }
 
 #[cfg(test)]
@@ -1510,6 +1814,33 @@ mod tests {
             alias_on_wire: Some("fa6d1afa79e1".to_string()),
             sealed_to: None,
             provenance,
+            wire: WireNamespace::CiphMsg,
+        }
+    }
+
+    /// A row shaped like the ones the merge cases below fold.
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        id: &str,
+        status: ConversationStatus,
+        by_me: bool,
+        my_alias: &str,
+        their_alias: Option<&str>,
+        created: u64,
+    ) -> ConversationRecord {
+        ConversationRecord {
+            conversation_id: id.to_string(),
+            contact_address: "kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr"
+                .to_string(),
+            my_alias: my_alias.to_string(),
+            their_alias: their_alias.map(str::to_string),
+            status,
+            initiated_by_me: by_me,
+            bound_branch: KeyBranch::Receive,
+            bound_index: if their_alias.is_some() { 3 } else { 0 },
+            created_unix_ms: created,
+            last_activity_unix_ms: created,
+            handshake_txid: Some(format!("hs-{id}")),
         }
     }
 
@@ -1862,6 +2193,656 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// V6's anti-history-loss pin: a V5 frame (provenance present, no wire)
+    /// and a pre-V5 frame (neither) both load complete, and the absent wire
+    /// reads as `ciph_msg` — the only prefix the scan matched before V6.
+    #[test]
+    fn pre_v6_message_frames_replay_with_ciph_msg_wire() {
+        #[derive(BorshSerialize)]
+        struct V5MessageRecord {
+            txid: String,
+            conversation_id: String,
+            direction: MessageDirection,
+            kind: StoredKind,
+            envelope: Vec<u8>,
+            unix_ms: u64,
+            alias_on_wire: Option<String>,
+            sealed_to: Option<(KeyBranch, u32)>,
+            provenance: RowSource,
+        }
+        let record = V5MessageRecord {
+            txid: "tx-v5".to_string(),
+            conversation_id: "c1".to_string(),
+            direction: MessageDirection::Inbound,
+            kind: StoredKind::Comm,
+            envelope: vec![5u8; 61],
+            unix_ms: 500,
+            alias_on_wire: Some("822deb62da52".to_string()),
+            sealed_to: None,
+            provenance: RowSource::NodeScanned,
+        };
+        let body = borsh::to_vec(&(0u8, record)).unwrap();
+        let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(&body);
+
+        let dir = test_dir("prev6");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("messages.kvlog"), &frame).unwrap();
+
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let row = store.message("tx-v5").expect("the V5 frame loads");
+        assert_eq!(row.provenance, RowSource::NodeScanned, "V5 field intact");
+        assert_eq!(row.wire, WireNamespace::CiphMsg, "absent ⇒ ciph_msg");
+
+        // A NEW write round-trips with the namespace, beside the old frame.
+        let mut kachat = message_from("tx-k", "c1", 600, 9, RowSource::NodeScanned);
+        kachat.wire = WireNamespace::KChat;
+        store.record_message(kachat).unwrap();
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert_eq!(reloaded.message("tx-k").unwrap().wire, WireNamespace::KChat);
+        assert_eq!(
+            reloaded.message("tx-v5").unwrap().wire,
+            WireNamespace::CiphMsg
+        );
+        assert_eq!(reloaded.messages_for("c1").len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt WIRE tag (present but invalid) is a hard decode error, like
+    /// a corrupt provenance tag — never a live row wearing the default.
+    #[test]
+    fn a_corrupt_wire_tag_never_masquerades_as_ciph_msg() {
+        let dir = test_dir("badwire");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .record_message(message("tx-good", "c1", 1, 1))
+            .unwrap();
+        store.record_message(message("tx-bad", "c1", 2, 2)).unwrap();
+
+        // The last byte of the last frame is now the wire tag.
+        let path = dir.join("messages.kvlog");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] = 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(reloaded.message("tx-good").is_some());
+        assert!(reloaded.message("tx-bad").is_none(), "dropped at replay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §K11: the dialect follows the counterparty's NEWEST inbound comm —
+    /// not our own rows, not handshakes, not reorg ghosts — and is `ciph_msg`
+    /// until they have spoken.
+    #[test]
+    fn conversation_wire_follows_the_latest_inbound_comm() {
+        let dir = test_dir("dialect");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        assert_eq!(
+            store.conversation_wire("c1"),
+            WireNamespace::CiphMsg,
+            "silent ⇒ ciph_msg"
+        );
+
+        store.record_message(message("in-1", "c1", 100, 1)).unwrap();
+        assert_eq!(store.conversation_wire("c1"), WireNamespace::CiphMsg);
+
+        let mut later = message("in-2", "c1", 200, 2);
+        later.wire = WireNamespace::KChat;
+        store.record_message(later).unwrap();
+        assert_eq!(
+            store.conversation_wire("c1"),
+            WireNamespace::KChat,
+            "they moved"
+        );
+
+        // Our own row in either dialect says nothing about THEM.
+        let mut ours = message("out-1", "c1", 300, 3);
+        ours.direction = MessageDirection::Outbound;
+        ours.wire = WireNamespace::CiphMsg;
+        store.record_message(ours).unwrap();
+        assert_eq!(store.conversation_wire("c1"), WireNamespace::KChat);
+
+        // A handshake row carries no dialect evidence either.
+        let mut hs = message("hs-1", "c1", 400, 4);
+        hs.kind = StoredKind::Handshake;
+        store.record_message(hs).unwrap();
+        assert_eq!(store.conversation_wire("c1"), WireNamespace::KChat);
+
+        // A ghosted newest row is a transaction the chain took back.
+        store.tombstone_message("in-2").unwrap();
+        assert_eq!(store.conversation_wire("c1"), WireNamespace::CiphMsg);
+        store.untombstone_message("in-2").unwrap();
+        assert_eq!(store.conversation_wire("c1"), WireNamespace::KChat);
+
+        // Another conversation is another counterparty.
+        assert_eq!(store.conversation_wire("c2"), WireNamespace::CiphMsg);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rehome_message_moves_a_row_and_keeps_its_ghost_flag() {
+        let dir = test_dir("rehome");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.record_message(message("tx1", "old", 1, 1)).unwrap();
+        store.tombstone_message("tx1").unwrap();
+
+        assert!(store.rehome_message("tx1", "new").unwrap());
+        assert!(
+            !store.rehome_message("tx1", "new").unwrap(),
+            "already there"
+        );
+        assert!(
+            !store.rehome_message("nope", "new").unwrap(),
+            "unknown txid"
+        );
+
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(reloaded.messages_for("old").is_empty());
+        let moved = &reloaded.messages_for("new")[0];
+        assert_eq!(moved.txid, "tx1");
+        assert_eq!(moved.envelope[60], 1, "bytes untouched");
+        assert!(reloaded.is_message_tombstoned("tx1"), "ghost flag survives");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Case A — the founder's device, 2026-09-07: a thread we opened that never
+    /// completed (visible) beside the counterparty's own thread that could
+    /// read (hidden by Start over). One row, the readable pair, visible, with
+    /// every message under it.
+    #[test]
+    fn merge_folds_our_stuck_request_into_the_thread_that_can_read() {
+        let dir = test_dir("merge-a");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let ours = row(
+            "e734",
+            ConversationStatus::PendingOutbound,
+            true,
+            "5f06f494ee33",
+            None,
+            100,
+        );
+        let theirs = row(
+            "f6ef",
+            ConversationStatus::Active,
+            false,
+            "fff0e2b54564",
+            Some("822deb62da52"),
+            200,
+        );
+        store.upsert_conversation(ours).unwrap();
+        store.upsert_conversation(theirs).unwrap();
+        store.tombstone_conversation("f6ef").unwrap();
+        let mut sent = message("out-1", "e734", 300, 1);
+        sent.direction = MessageDirection::Outbound;
+        store.record_message(sent).unwrap();
+        // Our re-handshake (Start over, 09-07): the newest announcement of OUR
+        // alias, on a row whose `created` never moved.
+        let mut hs = message("hs", "e734", 310, 2);
+        hs.kind = StoredKind::Handshake;
+        hs.direction = MessageDirection::Outbound;
+        store.record_message(hs).unwrap();
+
+        let report = store.merge_duplicate_contacts().unwrap();
+        assert_eq!(
+            report,
+            ContactMergeReport {
+                contacts: 1,
+                rows_folded: 1,
+                messages_rehomed: 2
+            }
+        );
+
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(
+            reloaded.conversation("e734").is_none(),
+            "the stuck row is gone"
+        );
+        let kept = reloaded
+            .conversation("f6ef")
+            .expect("the readable row is kept");
+        assert_eq!(kept.status, ConversationStatus::Active);
+        assert_eq!(
+            kept.my_alias, "5f06f494ee33",
+            "the alias we announced LAST — the one a Kasia-class client now listens on"
+        );
+        assert_eq!(kept.their_alias.as_deref(), Some("822deb62da52"));
+        assert_eq!(kept.created_unix_ms, 100, "earliest establishment");
+        assert_eq!(kept.last_activity_unix_ms, 200);
+        assert!(
+            !reloaded.is_conversation_tombstoned("f6ef"),
+            "the user could see the other row"
+        );
+        assert_eq!(
+            reloaded.messages_for("f6ef").len(),
+            2,
+            "every message re-homed"
+        );
+        assert!(reloaded.superseded_by("f6ef").is_none());
+        // Idempotent.
+        let mut again = reloaded;
+        assert_eq!(
+            again.merge_duplicate_contacts().unwrap(),
+            ContactMergeReport::default()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Case B — their handshake back to a request we opened, folded before the
+    /// sender resolved: the invitation folds into OUR row, which activates
+    /// with their alias and the slot they sealed to. No accept card survives,
+    /// because their handshake already refunded our bond.
+    #[test]
+    fn merge_activates_our_request_from_their_late_resolved_invitation() {
+        let dir = test_dir("merge-b");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "ours",
+                ConversationStatus::PendingOutbound,
+                true,
+                "5f06f494ee33",
+                None,
+                100,
+            ))
+            .unwrap();
+        store
+            .upsert_conversation(row(
+                "inv",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("822deb62da52"),
+                150,
+            ))
+            .unwrap();
+        let mut hs = message("their-hs", "inv", 150, 1);
+        hs.kind = StoredKind::Handshake;
+        store.record_message(hs).unwrap();
+
+        let address = row("x", ConversationStatus::Active, true, "", None, 0).contact_address;
+        let (host, report) = store
+            .merge_contact(&address)
+            .unwrap()
+            .expect("two rows fold");
+        assert_eq!(host, "ours");
+        assert_eq!(
+            report,
+            ContactMergeReport {
+                contacts: 1,
+                rows_folded: 1,
+                messages_rehomed: 1
+            }
+        );
+        let kept = store.conversation("ours").expect("our row is the host");
+        assert!(store.conversation("inv").is_none());
+        assert_eq!(kept.status, ConversationStatus::Active);
+        assert_eq!(kept.my_alias, "5f06f494ee33");
+        assert_eq!(kept.their_alias.as_deref(), Some("822deb62da52"));
+        assert_eq!(
+            (kept.bound_branch, kept.bound_index),
+            (KeyBranch::Receive, 3),
+            "rebound to the slot they sealed to"
+        );
+        assert_eq!(store.messages_for("ours").len(), 1);
+        assert!(
+            store
+                .list_conversations()
+                .iter()
+                .all(|c| c.status != ConversationStatus::PendingInbound),
+            "no accept card"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Case C — they wiped and re-handshaked with a NEW alias while we held an
+    /// Active thread: the new alias replaces the old one in place (Kasia's
+    /// own `theirAlias = payload.alias`), and there is still one row.
+    #[test]
+    fn merge_takes_the_newer_alias_from_a_re_handshake() {
+        let dir = test_dir("merge-c");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "live",
+                ConversationStatus::Active,
+                false,
+                "fff0e2b54564",
+                Some("old0old0old0"),
+                100,
+            ))
+            .unwrap();
+        store
+            .upsert_conversation(row(
+                "inv",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("new1new1new1"),
+                900,
+            ))
+            .unwrap();
+        store.merge_duplicate_contacts().unwrap();
+        let kept = store.conversation("live").unwrap();
+        assert_eq!(
+            kept.their_alias.as_deref(),
+            Some("new1new1new1"),
+            "the pair they now listen on"
+        );
+        assert_eq!(kept.status, ConversationStatus::Active);
+        assert_eq!(kept.my_alias, "fff0e2b54564");
+        assert!(store.conversation("inv").is_none());
+
+        // …but an OLDER invitation (an archive replay) does not overwrite a
+        // live alias.
+        store
+            .upsert_conversation(row(
+                "stale",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("stalestale00"),
+                50,
+            ))
+            .unwrap();
+        store.merge_duplicate_contacts().unwrap();
+        assert_eq!(
+            store.conversation("live").unwrap().their_alias.as_deref(),
+            Some("new1new1new1")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Case D — two Active threads with one contact (their wipe + our accept
+    /// of the fresh invitation, the 2026-08-17 shape): the NEWER pair hosts,
+    /// the older thread's messages come along.
+    #[test]
+    fn merge_keeps_the_newest_active_pair() {
+        let dir = test_dir("merge-d");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "old",
+                ConversationStatus::Active,
+                true,
+                "aaaaaaaaaaaa",
+                Some("111111111111"),
+                100,
+            ))
+            .unwrap();
+        store
+            .upsert_conversation(row(
+                "new",
+                ConversationStatus::Active,
+                false,
+                "bbbbbbbbbbbb",
+                Some("222222222222"),
+                200,
+            ))
+            .unwrap();
+        store
+            .record_message(message("m-old", "old", 120, 1))
+            .unwrap();
+        store
+            .record_message(message("m-new", "new", 220, 2))
+            .unwrap();
+        let report = store.merge_duplicate_contacts().unwrap();
+        assert_eq!(report.messages_rehomed, 1);
+        let kept = store.conversation("new").expect("newest pair hosts");
+        assert_eq!(
+            (kept.my_alias.as_str(), kept.their_alias.as_deref()),
+            ("bbbbbbbbbbbb", Some("222222222222"))
+        );
+        assert_eq!(kept.created_unix_ms, 100);
+        assert_eq!(store.messages_for("new").len(), 2);
+        assert!(store.conversation("old").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dismissed invitation stays dismissed (D-142's block): a second
+    /// invitation from the same address folds into the hidden one and stays
+    /// hidden — the user's exit from a money-spending card is not revocable
+    /// by the party they dismissed.
+    #[test]
+    fn merge_keeps_a_dismissed_invitation_dismissed() {
+        let dir = test_dir("merge-block");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "first",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("111111111111"),
+                100,
+            ))
+            .unwrap();
+        store.tombstone_conversation("first").unwrap();
+        store
+            .upsert_conversation(row(
+                "second",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("222222222222"),
+                200,
+            ))
+            .unwrap();
+        store.merge_duplicate_contacts().unwrap();
+        let live: Vec<ConversationRecord> = store.list_conversations();
+        assert_eq!(live.len(), 1);
+        let kept = &live[0];
+        assert_eq!(
+            kept.status,
+            ConversationStatus::PendingInbound,
+            "still owed an accept, never auto-active"
+        );
+        assert!(
+            store.is_conversation_tombstoned(&kept.conversation_id),
+            "blocked stays blocked"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rows with no address (an invitation whose sender is still unknown)
+    /// are never folded — there is nothing to key them on.
+    #[test]
+    fn merge_ignores_address_less_rows_and_singletons() {
+        let dir = test_dir("merge-none");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let mut a = row(
+            "a",
+            ConversationStatus::PendingInbound,
+            false,
+            "",
+            Some("111111111111"),
+            1,
+        );
+        a.contact_address.clear();
+        let mut b = row(
+            "b",
+            ConversationStatus::PendingInbound,
+            false,
+            "",
+            Some("222222222222"),
+            2,
+        );
+        b.contact_address.clear();
+        store.upsert_conversation(a).unwrap();
+        store.upsert_conversation(b).unwrap();
+        store
+            .upsert_conversation(row(
+                "solo",
+                ConversationStatus::Active,
+                true,
+                "cccccccccccc",
+                Some("333333333333"),
+                3,
+            ))
+            .unwrap();
+        assert_eq!(
+            store.merge_duplicate_contacts().unwrap(),
+            ContactMergeReport::default()
+        );
+        assert_eq!(store.list_conversations().len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `consensus-auditor` 2026-09-07 (a): a Start over hid the working thread
+    /// (aliases intact) and paid 0.2 KAS to announce a NEW alias on a fresh
+    /// request. The readable row hosts, but it carries the alias the user
+    /// just announced — not the one nobody listens on any more.
+    #[test]
+    fn merge_keeps_the_alias_we_announced_last_when_the_older_row_hosts() {
+        let dir = test_dir("merge-announce");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "old",
+                ConversationStatus::Active,
+                false,
+                "m1m1m1m1m1m1",
+                Some("t1t1t1t1t1t1"),
+                100,
+            ))
+            .unwrap();
+        store.tombstone_conversation("old").unwrap();
+        store
+            .upsert_conversation(row(
+                "new",
+                ConversationStatus::PendingOutbound,
+                true,
+                "m2m2m2m2m2m2",
+                None,
+                200,
+            ))
+            .unwrap();
+        let mut ours = message("our-hs", "new", 200, 1);
+        ours.kind = StoredKind::Handshake;
+        ours.direction = MessageDirection::Outbound;
+        store.record_message(ours).unwrap();
+
+        store.merge_duplicate_contacts().unwrap();
+        let kept = store.conversation("old").expect("the readable row hosts");
+        assert_eq!(kept.my_alias, "m2m2m2m2m2m2", "OUR newest announcement");
+        assert_eq!(
+            kept.their_alias.as_deref(),
+            Some("t1t1t1t1t1t1"),
+            "THEIR only announcement"
+        );
+        assert!(
+            !store.is_conversation_tombstoned("old"),
+            "un-hidden: the user could see the request"
+        );
+        assert_eq!(kept.status, ConversationStatus::Active);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `consensus-auditor` 2026-09-07 (b): three rows. Lowering `created` on
+    /// the first fold must not make the second fold read as "announced
+    /// later" — the host keeps the alias that was genuinely announced last.
+    #[test]
+    fn merge_compares_announcements_against_a_snapshot_not_the_lowered_clock() {
+        let dir = test_dir("merge-three");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "host",
+                ConversationStatus::Active,
+                true,
+                "mmmmmmmmmmmm",
+                Some("t3t3t3t3t3t3"),
+                900,
+            ))
+            .unwrap();
+        store
+            .upsert_conversation(row(
+                "inv1",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("t1t1t1t1t1t1"),
+                100,
+            ))
+            .unwrap();
+        store
+            .upsert_conversation(row(
+                "inv2",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("t2t2t2t2t2t2"),
+                500,
+            ))
+            .unwrap();
+        store.merge_duplicate_contacts().unwrap();
+        let kept = store.conversation("host").unwrap();
+        assert_eq!(
+            kept.their_alias.as_deref(),
+            Some("t3t3t3t3t3t3"),
+            "the newest announcement, whatever order the folds ran in"
+        );
+        assert_eq!(
+            kept.created_unix_ms, 100,
+            "earliest establishment still wins for the clock"
+        );
+        assert_eq!(store.list_conversations().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `consensus-auditor` 2026-09-07 (c): a dismissed "Unknown sender" card
+    /// beside the request we opened and paid for. The block protected a card;
+    /// no card survives the fold, so the conversation the user can see stays
+    /// visible — and is now Active with the alias that card carried.
+    #[test]
+    fn merge_does_not_carry_a_dismissed_card_block_onto_our_own_request() {
+        let dir = test_dir("merge-nocarry");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(row(
+                "ours",
+                ConversationStatus::PendingOutbound,
+                true,
+                "mmmmmmmmmmmm",
+                None,
+                100,
+            ))
+            .unwrap();
+        store
+            .upsert_conversation(row(
+                "card",
+                ConversationStatus::PendingInbound,
+                false,
+                "",
+                Some("tttttttttttt"),
+                150,
+            ))
+            .unwrap();
+        store.tombstone_conversation("card").unwrap();
+        store.merge_duplicate_contacts().unwrap();
+        let kept = store.conversation("ours").expect("our request hosts");
+        assert_eq!(kept.status, ConversationStatus::Active);
+        assert_eq!(kept.their_alias.as_deref(), Some("tttttttttttt"));
+        assert!(
+            !store.is_conversation_tombstoned("ours"),
+            "visible: nothing left to block"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn provenance_round_trips_across_reload() {
         let dir = test_dir("prov");
