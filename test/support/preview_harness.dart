@@ -186,6 +186,32 @@ bool get previewRequested => Platform.environment['KV_PREVIEW'] == '1';
 /// `debugShowCheckedModeBanner` is off: the banner is a corner of every
 /// screenshot that is not the app, and it was the second thing this harness's
 /// first probe caught.
+/// **Shadows, in a harness that renders pictures for people to judge.**
+///
+/// `flutter_test` sets `debugDisableShadows = true` for every test, so that
+/// goldens do not drift with a rasteriser's blur. It is the right default for
+/// an assertion and the wrong one for a preview: **every frame this catalogue
+/// has ever produced was drawn with shadows off** — the orb's halo, the sheet's
+/// `layerShadow`, the drawer's lift. The mark's glow was found missing from the
+/// launcher icon it was being exported into, which is how this surfaced
+/// (D-294).
+///
+/// **Restore it INSIDE the test body**, never in `tearDown`: the framework
+/// verifies its painting globals at the end of the body itself and fails the
+/// test with *"the value of a painting debug variable was changed"*. That is
+/// what [withShadows] is for.
+void previewShadows({required bool on}) => debugDisableShadows = !on;
+
+/// Run `body` with shadows painting, and put the global back whatever happens.
+Future<T> withShadows<T>(Future<T> Function() body) async {
+  previewShadows(on: true);
+  try {
+    return await body();
+  } finally {
+    previewShadows(on: false);
+  }
+}
+
 Future<void> renderSurface(
   WidgetTester tester, {
   required String name,

@@ -1,7 +1,18 @@
 // lib/src/ui/widgets/kv_mark.dart
-// KaspaVerse mark — LOCKED 2026-09-06 (Design Bible §4a / §4a.1, D-291).
-// The two paths below ARE the mark. Do not redraw, trace, tidy or substitute.
-// Pure Dart: no asset, no icon font, no package (BG-16, BG-25).
+// KaspaVerse mark — FINAL 2026-09-07 (Design Bible §4a / §4a.1, D-294).
+// The two paths below ARE the mark, transcribed from the founder's own SVG
+// artwork (D-294). Do not redraw, trace, tidy or substitute. Pure Dart: no
+// asset, no icon font, no package (BG-16, BG-25).
+//
+// THE ARTWORK IS THE AUTHORITY, and this file is its transcription. That SVG is
+// a 160 box: a disc at (80, 80) r 73.4 in `primary`, and the K on its own
+// 100-unit grid placed by `translate(74 80) scale(1.18) translate(-50.5 -50)`
+// at stroke 14, round caps and joins, in `plate`. Every ratio below is that
+// transform solved for a disc of `size` dp, so the widget and the file agree by
+// construction rather than by eye. **The one thing NOT taken from it is the
+// glow** — the export blooms around the disc and the founder ruled to keep
+// ours (`orbHalo`, §1.8): *"lets use our glow value but retain the exact design
+// drawn."*
 //
 // NOTHING MIRRORS THESE COORDINATES. The header carried that claim from
 // 2026-09-03 to 2026-09-06 naming `RevealActivity.kt` and an adaptive-icon SVG;
@@ -35,26 +46,40 @@ class KvMark extends StatelessWidget {
   /// Splash only: halo breathes 3.2 s. Respects disableAnimations.
   final bool breathe;
 
-  /// Stroke in 100-grid units. **One weight at every size** (founder ruling,
-  /// D-250, amended D-291).
+  /// The disc's diameter in the artwork's own 160 box (`r 73.4`). Every ratio
+  /// on this class is the SVG's transform divided by it, so the widget cannot
+  /// drift from the file it was transcribed from.
+  static const double _artDisc = 146.8;
+
+  /// The artwork's grid → SVG scale (`scale(1.18)`).
+  static const double _artScale = 1.18;
+
+  /// The 100-unit glyph grid as a fraction of the disc's diameter — the
+  /// painter's box. **0.804, where it used to be 0.62**: the artwork sets the
+  /// K's ink at 66 % of the disc's height, which is a nominal grid three
+  /// quarters wider than the one the mark shipped with.
+  static const double glyphBoxRatio = 100 * _artScale / _artDisc;
+
+  /// How far LEFT of the disc's centre that box sits, as a fraction of the
+  /// diameter. The artwork seats the K six units left of centre
+  /// (`translate(74 80)` against a centre of 80) **and** its grid is centred on
+  /// x 50.5 rather than 50, so the offset is `−(0.5 · 1.18 + 6) / 146.8`. It is
+  /// not decoration: the K's ink is wider on the chevron's side, and the disc
+  /// looks off-centre without it.
+  static const double glyphShiftRatio = -(0.5 * _artScale + 6) / _artDisc;
+
+  /// Stroke in 100-grid units: **14 at every size**, which is the number in the
+  /// artwork (`stroke-width="14"`).
   ///
-  /// The v4.1 ladder climbed to 14 and 16 as the mark shrank, on the stated
-  /// reasoning that a heavier stroke made "the gap survive". It does the
-  /// opposite: the two paths' closest approach is **fixed at 14.374 units**, so
-  /// every unit of stroke is a unit of gap spent, and at 16 they overlapped by
-  /// 1.63 and the K read as one shape (Bible §9.12).
-  ///
-  /// **D-250's arithmetic is what chose this number; only its conclusion
-  /// changed.** It set a flat 12 for *touching but not quite touching*; the
-  /// founder asked on 2026-09-06 for *more weight and touch at the centre*,
-  /// which is one move rather than two — two strokes centred 14.374 apart meet
-  /// at exactly that width. **14.4 is a kiss**: the paths make contact at their
-  /// closest point and overlap by 0.026 of a unit, which is a fortieth of a
-  /// pixel at 176 dp. Chosen from fourteen rendered candidates, not argued —
-  /// **D-291**, variant W2.
-  /// Dial it here and nowhere else: below 14.374 the contact opens into a gap,
-  /// and D-250's ceiling of 16 still holds.
-  static double strokeUnitsFor(double size) => 14.4;
+  /// The delivery's README asks for **16 below 40 dp** and it was drawn that
+  /// way first. On the ladder it is visibly worse: the artwork's chevron apex
+  /// already sits at x 64, *inside* the stem, so at 24 and 28 dp the extra two
+  /// units close the counter between the arms and the K reads as one dark blob.
+  /// The founder's instruction was *"retain the exact design drawn"*, and the
+  /// design as drawn is 14. Same conclusion D-250 reached from the other
+  /// geometry, for a different reason: there, weight ate a gap; here it eats a
+  /// counter.
+  static double strokeUnitsFor(double size) => 14;
 
   /// Halo per §1.8: 14 px @ 36 % at 40 dp, 8 px at 25, none below 24.
   static List<BoxShadow> orbHalo(double size, {double t = 0}) {
@@ -69,9 +94,19 @@ class KvMark extends StatelessWidget {
     ];
   }
 
+  /// The launcher tile's corner, as a fraction of its side — **measured off the
+  /// founder's own icon** (the straight top edge begins at 250 of 1024). The
+  /// artwork's corner is a squircle and this is a circular arc, which is the
+  /// one place the tile is a reading of the picture rather than a copy: it
+  /// meets the edge at the same point and eases into it a shade sooner.
+  static const double tileRadiusRatio = 0.244;
+
+  /// The disc inside that tile, measured the same way: 690 of 1024.
+  static const double tileDiscRatio = 0.674;
+
   @override
   Widget build(BuildContext context) {
-    final glyphBox = size * 0.62;
+    final glyphBox = size * glyphBoxRatio;
     final units = strokeUnitsFor(size);
     switch (style) {
       case KvMarkStyle.bare:
@@ -79,37 +114,36 @@ class KvMark extends StatelessWidget {
           child: SizedBox.square(
             dimension: size,
             child: Center(
-              child: CustomPaint(
-                size: Size.square(glyphBox),
-                painter: _KPainter(KvColor.primaryMuted, units),
+              child: _Glyph(
+                size: size,
+                glyphBox: glyphBox,
+                units: units,
+                ink: KvColor.primaryMuted,
               ),
             ),
           ),
         );
       case KvMarkStyle.tile:
-        // **`tile` is a fixed 64 dp and ignores [size] — by spec, not by
-        // oversight.** §4a defines the icon tile as one object: `abyss` 64,
-        // radius 18, `plateEdge` rim, the 40 orb inside; there is no other size
-        // of it. Documented rather than silently accepted (`ux-auditor`,
-        // UX-R0), and asserted so a caller passing 24 finds out here instead of
-        // wondering why nothing changed.
-        assert(
-          size == 64,
-          'KvMarkStyle.tile is 64 dp by §4a; got $size. Use KvMarkStyle.orb '
-          'for any other size.',
-        );
-        return Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            color: KvColor.abyss,
-            // 18 is KvRadius.key — the tile shares the keypad key's rounding at
-            // 27% of side, which is what §3 means by "the icon tile at 64".
-            borderRadius: BorderRadius.circular(KvRadius.key),
-            border: Border.all(color: KvColor.plateEdge),
+        // **This IS the app icon** — the founder's own words for it: *"the logo,
+        // glow, in a rounded corner containment"*. It used to be a fixed 64 dp
+        // object with a `plateEdge` rim, drawn from §4a; the rim is gone because
+        // the artwork has none, and the size is free because the launcher wants
+        // it at five densities and the About screen wants it small. **One tile,
+        // one set of ratios**: two would be how the icon on the home screen and
+        // the icon in the app start disagreeing (BG-21), and the launcher
+        // rasters are generated from this very widget so they cannot drift from
+        // it (D-294).
+        return RepaintBoundary(
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              color: KvColor.abyss,
+              borderRadius: BorderRadius.circular(size * tileRadiusRatio),
+            ),
+            alignment: Alignment.center,
+            child: KvMark(size: size * tileDiscRatio, halo: halo),
           ),
-          alignment: Alignment.center,
-          child: const KvMark(size: 40),
         );
       case KvMarkStyle.orb:
         final disc = _Orb(
@@ -146,9 +180,13 @@ class _Orb extends StatelessWidget {
           boxShadow: halo ? KvMark.orbHalo(size, t: t) : const [],
         ),
         alignment: Alignment.center,
-        child: CustomPaint(
-          size: Size.square(glyphBox),
-          painter: _KPainter(KvColor.abyss, units),
+        // The artwork's ink is `plate`, not `abyss` — the Deep ground rather
+        // than black, and it is what the SVG paints.
+        child: _Glyph(
+          size: size,
+          glyphBox: glyphBox,
+          units: units,
+          ink: KvColor.plate,
         ),
       ),
     );
@@ -199,13 +237,37 @@ class _BreathingState extends State<_Breathing>
       animation: curved,
       builder: (context, _) => _Orb(
         size: widget.size,
-        glyphBox: widget.size * 0.62,
+        glyphBox: widget.size * KvMark.glyphBoxRatio,
         units: KvMark.strokeUnitsFor(widget.size),
         halo: true,
         t: curved.value,
       ),
     );
   }
+}
+
+/// The K, in the seat the artwork gives it: a `glyphBox` square shifted left of
+/// the disc's centre by [KvMark.glyphShiftRatio]. Extracted so the orb, the bare
+/// mark and the breathing splash cannot each place it slightly differently.
+class _Glyph extends StatelessWidget {
+  const _Glyph({
+    required this.size,
+    required this.glyphBox,
+    required this.units,
+    required this.ink,
+  });
+
+  final double size, glyphBox, units;
+  final Color ink;
+
+  @override
+  Widget build(BuildContext context) => Transform.translate(
+    offset: Offset(size * KvMark.glyphShiftRatio, 0),
+    child: CustomPaint(
+      size: Size.square(glyphBox),
+      painter: _KPainter(ink, units),
+    ),
+  );
 }
 
 class _KPainter extends CustomPainter {
@@ -230,19 +292,20 @@ class _KPainter extends CustomPainter {
       ..moveTo(71.5 * k, 15.5 * k)
       ..cubicTo(74 * k, 39 * k, 74 * k, 62 * k, 71.5 * k, 84.5 * k);
 
-    // Chevron — **W2** (D-291). Two moves from the straight polyline it was:
-    // the arms reach the stem's own span (15.5 → 84.5 rather than 20.5 → 81),
-    // which steepens them 43.0° → 38.9° off vertical; and each carries a
-    // one-unit bow **toward the stem**, so the mark reads as a drawn arrowhead
-    // rather than a folded line. Half the stem's own 1.9, which is what *"the
-    // `>` gets 1% curve, not the other `|`"* asked for.
+    // Chevron — **straight, and its apex reaches INTO the stem** (D-294,
+    // `kaspaverse-mark.svg`: `M32 20.5 64 49.5 29.5 81`). The apex at x 64 with
+    // a 14-unit stroke overlaps the stem's own band, so the two paths make a
+    // join rather than a kiss — which is why the stroke may thicken at small
+    // sizes without the K closing into one shape.
     //
-    // The apex stays at (59, 49.5) — moving it would move the contact point,
-    // and the contact is the whole reason the stroke is 14.4.
+    // The founder drew this and ruled it final on 2026-09-07: *"The logo is not
+    // wrong. that is the perfect design i came up with."* It supersedes W2, the
+    // curve-curve variant chosen from the rendered candidates at D-291 — an
+    // earlier round of the same question, settled by the artwork.
     final chevron = Path()
-      ..moveTo(32 * k, 16 * k)
-      ..cubicTo(42.04 * k, 26.33 * k, 51.04 * k, 37.5 * k, 59 * k, 49.5 * k)
-      ..cubicTo(50.18 * k, 61.87 * k, 40.35 * k, 73.37 * k, 29.5 * k, 84 * k);
+      ..moveTo(32 * k, 20.5 * k)
+      ..lineTo(64 * k, 49.5 * k)
+      ..lineTo(29.5 * k, 81 * k);
 
     c.drawPath(stem, p);
     c.drawPath(chevron, p);

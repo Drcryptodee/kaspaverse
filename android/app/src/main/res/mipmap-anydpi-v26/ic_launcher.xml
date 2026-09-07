@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The adaptive launcher icon (D-294).
+
+  Two layers on the 108 dp canvas Android masks to whatever shape the launcher
+  wants. The background is the Deep ground as a flat colour rather than a
+  raster — one value, no resampling, and it is already the colour the OS paints
+  before Flutter's first frame (`values/colors.xml`, hand-mirrored from
+  KvColor.abyss; §9.1's standing obligation applies to that file, not this one).
+
+  The foreground is generated from `KvMark` itself by
+  `test/preview/app_icon_export_test.dart`, so the icon on the home screen and
+  the mark inside the app cannot drift. Its disc is 56.8 % of the canvas —
+  inside the 66 % the mask always shows — with the halo free to bleed past it,
+  because a glow is exactly the thing a mask may eat.
+
+  No <monochrome>: a themed icon needs a silhouette, and this mark's silhouette
+  is a plain circle with the K knocked out of it. Recorded in IDEAS_BACKLOG
+  rather than shipped as a teal-tinted dot.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/kv_abyss" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

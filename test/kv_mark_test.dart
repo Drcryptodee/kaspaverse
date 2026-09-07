@@ -5,13 +5,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 
-/// **`KvMark` is LOCKED** (Bible §4a, 2026-09-03, D-247). The two paths below
-/// are the mark; they are not to be redrawn, traced, "cleaned up", optically
-/// corrected or replaced with a font glyph, in Dart, Kotlin or SVG.
+/// **`KvMark` is FINAL** (Bible §4a, D-294, founder's own artwork). The two
+/// paths below are the mark; they are not to be redrawn, traced, "cleaned up",
+/// optically corrected or replaced with a font glyph, in Dart, Kotlin or SVG.
 ///
-/// A lock with no test is a wish. These are the guards §4a.1 asks for, minus
-/// the golden comparison against the adaptive-icon SVG — that raster does not
-/// exist yet and is recorded as owed rather than faked (`UX_R_REGISTER.md` §5).
+/// A lock with no test is a wish. These are the guards §4a.1 asks for — and the
+/// one §5 recorded as owed, the comparison against the artwork raster, is now
+/// **built**: `test/preview/mark_artwork_probe_test.dart` renders the mark at
+/// the SVG's own scale and `tools/mark_diff.py` differences the two. The last
+/// run put the K's ink within **0.034 %** of the artwork's.
 void main() {
   /// The two path strings from §4a, restated here **on purpose**. This is the
   /// one place in the codebase permitted to duplicate them: a guard that reads
@@ -20,40 +22,56 @@ void main() {
   Path stem(double k) => Path()
     ..moveTo(71.5 * k, 15.5 * k)
     ..cubicTo(74 * k, 39 * k, 74 * k, 62 * k, 71.5 * k, 84.5 * k);
-  // **W2** (D-291): the arms reach the stem's own span and each carries a
-  // one-unit bow toward the stem. Kept in step with `kv_mark.dart` by hand —
-  // which is the point of measuring rather than asserting below.
+  // The artwork's own polyline (`M32 20.5 64 49.5 29.5 81`). Kept in step with
+  // `kv_mark.dart` by hand — which is the point of measuring rather than
+  // asserting below.
   Path chevron(double k) => Path()
-    ..moveTo(32 * k, 16 * k)
-    ..cubicTo(42.04 * k, 26.33 * k, 51.04 * k, 37.5 * k, 59 * k, 49.5 * k)
-    ..cubicTo(50.18 * k, 61.87 * k, 40.35 * k, 73.37 * k, 29.5 * k, 84 * k);
+    ..moveTo(32 * k, 20.5 * k)
+    ..lineTo(64 * k, 49.5 * k)
+    ..lineTo(29.5 * k, 81 * k);
 
   group('KvMark — the locked geometry (§4a)', () {
-    test('one stroke weight at every size (D-250, amended D-291)', () {
-      // The v4.1 ladder (12 / 14 / 16) closed the gap it claimed to protect;
-      // §9.12 has the measurement. One weight, and D-291 raises it to the
-      // width at which the two paths MEET rather than clear each other.
-      for (final size in const <double>[176, 120, 96, 64, 40, 28, 24]) {
-        expect(
-          KvMark.strokeUnitsFor(size),
-          14.4,
-          reason: 'the mark has one stroke weight; $size dp disagreed',
-        );
+    test('the stroke is the artwork\'s 14, at every size', () {
+      // The delivery's README asks for 16 below 40 dp and the mark was drawn
+      // that way first. It reads as a blob at 24 and 28: the artwork's apex is
+      // already inside the stem, so the extra weight closes the counter between
+      // the chevron's arms. Looked at on the ladder, then reverted — *"retain
+      // the exact design drawn"*, and the drawing says 14.
+      for (final size in const <double>[176, 120, 96, 64, 40, 28, 24, 16]) {
+        expect(KvMark.strokeUnitsFor(size), 14, reason: 'at $size dp');
       }
-      // Constant, not a ladder that happens to agree on the canon sizes.
-      for (var s = 20.0; s <= 200; s += 0.5) {
-        expect(KvMark.strokeUnitsFor(s), 14.4, reason: 'at $s dp');
+      // Flat, not a ladder that happens to agree on the canon sizes.
+      for (var s = 16.0; s <= 200; s += 0.5) {
+        expect(KvMark.strokeUnitsFor(s), 14, reason: 'at $s dp');
       }
     });
 
-    test('the two strokes TOUCH, and the contact is measured (D-291)', () {
-      // **§4a used to define the mark as "two strokes that never touch"** and
-      // D-291 reverses that on the founder's word: *more weight, and touch at
-      // the centre.* The property is the same shape as before — measured off
-      // the paths, never asserted — with the sign flipped: what was a
-      // clearance of 2.374 is now an overlap, and it is the SAME 14.374 that
-      // decides both. D-250's arithmetic chose D-291's number.
-      const grid = 1.0; // measure in raw grid units
+    test('the K sits where the artwork puts it, not where it is convenient', () {
+      // `translate(74 80) scale(1.18) translate(-50.5 -50)` inside a 160 box
+      // whose disc is r 73.4, solved for a disc of `size` dp. Restated here on
+      // purpose — a guard that reads its expectation from the thing it guards
+      // cannot fail.
+      expect(KvMark.glyphBoxRatio, closeTo(100 * 1.18 / 146.8, 1e-12));
+      expect(KvMark.glyphShiftRatio, closeTo(-(0.59 + 6) / 146.8, 1e-12));
+      // Which is to say: a grid three quarters wider than the 0.62 the mark
+      // shipped with, seated 4.5 % of the diameter left of centre because the
+      // K's ink is wider on the chevron's side.
+      expect(KvMark.glyphBoxRatio, closeTo(0.8038, 0.0002));
+      expect(KvMark.glyphShiftRatio, closeTo(-0.0449, 0.0002));
+    });
+
+    test('the chevron JOINS the stem, and the overlap is measured', () {
+      // **The artwork's apex reaches into the stem.** Measured off the paths,
+      // never asserted: the closest centre-to-centre approach is well inside
+      // one stroke width, so the two shapes fuse at the join at every size —
+      // which is what lets the stroke thicken at 24 dp without the K reading as
+      // one blob (the thing D-250's ladder actually got wrong was a geometry
+      // where the paths merely kissed).
+      //
+      // Sampled at 0.1. The coarser 0.25 step once missed a true minimum by
+      // 0.04 and reported a clearance where the geometry had an overlap — the
+      // instrument disagreeing with the thing it measures.
+      const grid = 1.0;
       final chevPoints = <Offset>[];
       for (final metric in chevron(grid).computeMetrics()) {
         for (var d = 0.0; d <= metric.length; d += 0.1) {
@@ -70,45 +88,22 @@ void main() {
           }
         }
       }
-      // The closest approach, centre to centre. The apex is unmoved at
-      // (59, 49.5) and the stem is untouched, so this is still D-250's own
-      // number — which is exactly why the stroke could be set from it.
-      //
-      // **Sampled at 0.1, not 0.25.** The coarser step missed the true minimum
-      // by 0.04 and reported a CLEARANCE where the analytic geometry has an
-      // overlap — the instrument disagreeing with the thing it measures, which
-      // is the one failure a measured test must not have. The minimum sits at
-      // the chevron's apex (an exact cubic endpoint, always sampled) against
-      // the stem's own bow at (73.37, 49.46); analytically 14.37374.
+      // The apex (64, 49.5) against the stem's own bow at about (73.4, 49.5).
       expect(
         centreline,
-        closeTo(14.374, 0.15),
-        reason: 'moving the apex would move the contact and unmake the stroke',
+        closeTo(9.4, 0.3),
+        reason: 'moving the apex changes what kind of mark this is',
       );
 
-      // Clearance = centreline - stroke (half a stroke painted from each
-      // side). NEGATIVE now, by design: the strokes overlap.
-      double clearance(double size) => centreline - KvMark.strokeUnitsFor(size);
-
+      // Overlap = stroke − centreline, half a stroke painted from each side.
+      // Positive at every canon size, which is what "join" means.
       for (final size in const <double>[176, 120, 96, 64, 40, 28, 24]) {
         expect(
-          clearance(size),
-          lessThanOrEqualTo(0),
-          reason: 'the two strokes must MEET at $size dp (§4a, D-291)',
-        );
-        // ...and only just. D-250 measured 16 as an overlap of 1.63 units,
-        // where "the K read as one shape"; this is a fortieth of that, and the
-        // guard is what keeps a future nudge from drifting toward it.
-        expect(
-          clearance(size).abs(),
-          lessThan(0.2),
-          reason: 'a KISS, not a weld; $size dp overlapped too far',
+          KvMark.strokeUnitsFor(size) - centreline,
+          greaterThan(3),
+          reason: 'the chevron must MEET the stem at $size dp (§4a, D-294)',
         );
       }
-      // On glass at the tightest canon size the overlap is about
-      // `0.026 * 24 * 0.0062` dp — four thousandths of a pixel. The contact is
-      // real in the geometry and invisible as a blob, which is the brief.
-      expect(clearance(24).abs() * 24 * 0.0062, lessThan(0.01));
     });
 
     testWidgets('the orb is FLAT — no gradient, highlight or rim (BG-4)', (
@@ -180,53 +175,40 @@ void main() {
       );
     });
 
-    test('the mark reaches for no font, asset or icon package (BG-16, BG-25)', () {
-      // BG-25's lint in the form the project can run: the K has one
-      // implementation and it is two paths. Read the shipped file rather than
-      // trusting a memory of it (item 0).
-      final src = File('lib/src/ui/widgets/kv_mark.dart').readAsStringSync();
-      for (final forbidden in const [
-        'Icons.',
-        'AssetImage',
-        'SvgPicture',
-        'IconData',
-        'package:flutter_svg',
-      ]) {
+    test(
+      'the mark reaches for no font, asset or icon package (BG-16, BG-25)',
+      () {
+        // BG-25's lint in the form the project can run: the K has one
+        // implementation and it is two paths. Read the shipped file rather than
+        // trusting a memory of it (item 0).
+        final src = File('lib/src/ui/widgets/kv_mark.dart').readAsStringSync();
+        for (final forbidden in const [
+          'Icons.',
+          'AssetImage',
+          'SvgPicture',
+          'IconData',
+          'package:flutter_svg',
+        ]) {
+          expect(
+            src.contains(forbidden),
+            isFalse,
+            reason:
+                'kv_mark.dart must not reach for $forbidden — the K is two paths',
+          );
+        }
+        // And the artwork's two path strings are actually the ones in the file:
+        // `M71.5 15.5 C74 39 74 62 71.5 84.5` and `M32 20.5 64 49.5 29.5 81`.
+        expect(src, contains('moveTo(71.5 * k, 15.5 * k)'));
         expect(
-          src.contains(forbidden),
-          isFalse,
-          reason:
-              'kv_mark.dart must not reach for $forbidden — the K is two paths',
+          src,
+          contains(
+            'cubicTo(74 * k, 39 * k, 74 * k, 62 * k, 71.5 * k, 84.5 * k)',
+          ),
         );
-      }
-      // And the two locked path strings are actually the ones in the file.
-      expect(src, contains('moveTo(71.5 * k, 15.5 * k)'));
-      expect(
-        src,
-        contains('cubicTo(74 * k, 39 * k, 74 * k, 62 * k, 71.5 * k, 84.5 * k)'),
-      );
-      // W2 (D-291): two cubics, not a polyline. The `lineTo` pair that
-      // used to be here is gone on purpose — a chevron that reverted to
-      // straight arms would pass every OTHER assertion in this file, so the
-      // source strings are what pin the curve.
-      expect(src, contains('moveTo(32 * k, 16 * k)'));
-      expect(
-        src,
-        contains(
-          'cubicTo(42.04 * k, 26.33 * k, 51.04 * k, 37.5 * k, 59 * k, 49.5 * k)',
-        ),
-      );
-      expect(
-        src,
-        contains(
-          'cubicTo(50.18 * k, 61.87 * k, 40.35 * k, 73.37 * k, 29.5 * k, 84 * k)',
-        ),
-      );
-      expect(
-        src,
-        isNot(contains('lineTo')),
-        reason: 'the chevron is drawn, not folded',
-      );
-    });
+        expect(src, contains('moveTo(32 * k, 20.5 * k)'));
+        expect(src, contains('lineTo(64 * k, 49.5 * k)'));
+        expect(src, contains('lineTo(29.5 * k, 81 * k)'));
+      },
+    );
   });
 }
