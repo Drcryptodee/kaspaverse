@@ -161,6 +161,32 @@ impl PreparedSend {
             .unwrap_or_default()
     }
 
+    /// **Does every output of every built leg pay one of `owned`?**
+    ///
+    /// The self-send question, asked of the ARTIFACT rather than of the
+    /// argument that requested it. `SendSummary::destination` is the address
+    /// handed to `prepare_send_inner` echoed back — true, and useful, but it
+    /// is a statement about the request. This decodes each built output's
+    /// script with the pin's own standard decoder ([`pays_to`]'s reader), so a
+    /// caller that must not broadcast without a human — there is exactly one,
+    /// the messaging composer with its confirm sheet turned off — can gate on
+    /// what was actually built.
+    ///
+    /// **Every output, not any**: change is an output too, and on a self-send
+    /// both the payment and the change go to the same bound address (D-069),
+    /// so a chain that paid a stranger ANYWHERE fails this. A non-standard
+    /// output decodes to nothing and therefore fails, which is the safe
+    /// direction: this answers *"is this provably confined"*, never *"is this
+    /// provably not"*.
+    pub fn pays_only(&self, owned: &Address) -> bool {
+        self.pending.iter().all(|pt| {
+            pt.transaction().outputs.iter().all(|output| {
+                extract_script_pub_key_address(&output.script_public_key, owned.prefix)
+                    .is_ok_and(|decoded| &decoded == owned)
+            })
+        })
+    }
+
     /// Sign + broadcast every leg, IN ORDER (a batch tx's output funds the next
     /// leg). Signing happens in Rust only; only the tx id leaves. A leg failure
     /// after an earlier broadcast returns a typed partial result (B6) — never a
@@ -663,71 +689,39 @@ impl WalletEngine {
             .map(Into::into)
             .collect();
         let pinned = priority.unwrap_or_default();
-        let ridered = spend_policy::select_spend_priority(
+
+        // BOTH shapes are always generated, and the second generation is no
+        // longer just the leg check. The pinned Generator is the only judge of
+        // either limit — nothing here prices anything (INV-9); generation is
+        // side-effect-free, so the losing chain simply drops.
+        //
+        // The comparison's failure may never become the send's failure. Not
+        // theoretical: the riderless order stops one coin earlier and leaves
+        // SMALLER change, and the pin's `calculate_mass`
+        // (generator.rs:970-972) errors before the storage-mass input-relief
+        // block at :849 can pull another input — so on the founder's own
+        // measured wallet, moving the amount 0.01 KAS (100.90 → 100.91) kills
+        // the cheap shape while the ridden one builds in a single transaction.
+        // Found by the consensus audit of that change; the cliff is frozen in
+        // `a_refusing_comparison_shape_never_refuses_the_send`, and the
+        // `.ok()` that holds it now lives in `shipped_two_shape`.
+        let (pending, summary) = shipped_two_shape(
             &mature,
             &pinned,
-            spend_policy::RIDER_LIMIT,
             exclude,
-        );
-
-        let (pending, summary) = {
-            let (ridden, ridden_summary) = generate_chain(
-                &context,
-                ridered,
-                &change,
-                PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
-                Fees::SenderPays(0),
-                payload.clone(),
-                signer.clone(),
-            )?;
-            // BOTH shapes are always generated now, and the second generation
-            // is no longer just the leg check. The pinned Generator is the only
-            // judge of either limit — nothing here prices anything (INV-9);
-            // generation is side-effect-free, so the losing chain simply drops.
-            //
-            // **The comparison shape is a QUESTION, never a gate**, so it is
-            // `.ok()` and not `?`. Its failure is a fact about a transaction we
-            // may never ship, and propagating it would refuse a payment the
-            // ridden shape already built. Not theoretical: the riderless order
-            // stops one coin earlier and leaves SMALLER change, and the pin's
-            // `calculate_mass` (generator.rs:970-972) errors before the
-            // storage-mass input-relief block at :849 can pull another input —
-            // so on the founder's own measured wallet, moving the amount 0.01
-            // KAS (100.90 → 100.91) kills the cheap shape while the ridden one
-            // builds in a single transaction. Found by the consensus audit of
-            // this change; the cliff is frozen in
-            // `a_refusing_comparison_shape_never_refuses_the_send`.
-            let comparison = generate_chain(
-                &context,
-                spend_policy::select_spend_priority(&mature, &pinned, 0, exclude),
-                &change,
-                PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
-                Fees::SenderPays(0),
-                payload.clone(),
-                signer.clone(),
-            )
-            .ok();
-            shipped_shape((ridden, ridden_summary), comparison, || {
-                let order = spend_policy::select_spend_priority(
-                    &mature,
-                    &pinned,
-                    spend_policy::RIDER_LIMIT,
-                    exclude,
-                );
-                let order = (!order.is_empty()).then_some(order);
-                // Same law as the comparison generation: the floor is a
-                // DECORATION on a decision, and `riderless_wins` already fails
-                // closed onto the riders when it is unknown
-                // (`an_unknown_floor_keeps_the_riders`). A probe error may not
-                // become the send's error.
-                search_minimum(
-                    |amount| probe_context(&context, &change, amount, order.as_deref()),
-                    free_balance(&mature, exclude),
+            |order| {
+                generate_chain(
+                    &context,
+                    order,
+                    &change,
+                    PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                    Fees::SenderPays(0),
+                    payload.clone(),
+                    signer.clone(),
                 )
-                .ok()
-                .flatten()
-            })
-        };
+            },
+            || spend_floor(&context, &mature, &pinned, &change, exclude),
+        )?;
 
         Ok(finish_prepared_send(
             pending,
@@ -1027,6 +1021,76 @@ fn wallet_coins_consumed(
 /// fragments worth more than their pickup make the cheap shape fail
 /// [`riderless_is_candidate`] before it is reached. Desktop numbers; the device
 /// is arm64 and slower, and the margin is wide enough that it does not matter.
+/// **Build both shapes and settle on the one that ships** — the decision
+/// [`WalletEngine::prepare_send_inner`] makes for a real send and the one
+/// [`WalletEngine::fee_preview_inner`] makes for the figure that precedes it,
+/// run from one body so the two cannot answer differently.
+///
+/// They used to be two copies of the same eight lines. That is a live hazard
+/// rather than an aesthetic one: the two shapes were measured **0.001118 KAS
+/// apart** on the founder's own wallet (see [`WalletEngine::fee_preview`]), so
+/// any drift between the copies is a wallet quoting one fee and charging
+/// another, on a funds surface, with nothing to catch it. A third copy was
+/// about to be written for the message composer's live fee; this is that copy
+/// not being written.
+///
+/// `build` is the caller's door — [`generate_chain`] with a signer for a send
+/// that may be broadcast, [`price_chain`] without one for a figure that may
+/// not. Keeping it a parameter is what preserves [`generate_chain`]'s
+/// mandatory signer: nothing here can reach the shippable door by defaulting
+/// an argument.
+///
+/// **The riderless shape is a QUESTION, never a gate** — its failure is a fact
+/// about a transaction we may never ship, so it is `.ok()`, and only the
+/// ridden build's failure propagates.
+fn shipped_two_shape(
+    mature: &[UtxoEntryReference],
+    pinned: &[UtxoEntryReference],
+    exclude: &[Address],
+    build: impl Fn(Vec<UtxoEntryReference>) -> Result<(Vec<PendingTransaction>, GeneratorSummary)>,
+    floor: impl FnOnce() -> Option<u64>,
+) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
+    let ridden = build(spend_policy::select_spend_priority(
+        mature,
+        pinned,
+        spend_policy::RIDER_LIMIT,
+        exclude,
+    ))?;
+    let comparison = build(spend_policy::select_spend_priority(
+        mature, pinned, 0, exclude,
+    ))
+    .ok();
+    Ok(shipped_shape(ridden, comparison, floor))
+}
+
+/// The floor closure both callers hand [`shipped_two_shape`], built once.
+///
+/// It is a DECORATION on a decision — `riderless_wins` already fails closed
+/// onto the riders when the floor is unknown
+/// (`an_unknown_floor_keeps_the_riders`), so a probe error may not become the
+/// send's error. It stays a separate function rather than living inside
+/// [`shipped_two_shape`] so that the two-shape law itself — ridden `?`,
+/// riderless `.ok()` — needs no `UtxoContext` and is therefore provable
+/// offline (`consensus-auditor`, this sitting: extracting the decision made it
+/// testable without a live context, and an untested law is a one-line read).
+fn spend_floor(
+    context: &kaspa_wallet_core::utxo::UtxoContext,
+    mature: &[UtxoEntryReference],
+    pinned: &[UtxoEntryReference],
+    change: &Address,
+    exclude: &[Address],
+) -> Option<u64> {
+    let order =
+        spend_policy::select_spend_priority(mature, pinned, spend_policy::RIDER_LIMIT, exclude);
+    let order = (!order.is_empty()).then_some(order);
+    search_minimum(
+        |amount| probe_context(context, change, amount, order.as_deref()),
+        free_balance(mature, exclude),
+    )
+    .ok()
+    .flatten()
+}
+
 fn shipped_shape(
     ridden: (Vec<PendingTransaction>, GeneratorSummary),
     comparison: Option<(Vec<PendingTransaction>, GeneratorSummary)>,
@@ -2744,50 +2808,82 @@ impl WalletEngine {
         amount_sompi: u64,
         exclude: &[Address],
     ) -> Result<Option<u64>> {
+        self.fee_preview_inner(destination, change, amount_sompi, &[], None, exclude)
+    }
+
+    /// **The fee a PINNED, payload-bearing send would cost** — the messaging
+    /// composer's live figure, and the mirror of [`Self::fee_preview`] for the
+    /// lane [`Self::prepare_send_pinned`] serves.
+    ///
+    /// Two things make a comm's fee a different number from a payment's of the
+    /// same value, and both are arguments here rather than assumptions:
+    ///
+    ///  - **the payload.** The wire bytes are most of a message transaction —
+    ///    the namespace token, the alias head and the base64 envelope — and
+    ///    the Generator hardens the payload component of the mass for
+    ///    normalized transient bytes. A figure priced without them is a figure
+    ///    about a different transaction.
+    ///  - **the pin.** input[0] must be the conversation's bound address
+    ///    (D-067), so the spend ORDER is not the wallet's free choice, and the
+    ///    order decides which coins are drawn and therefore the mass.
+    ///
+    /// `pinned` is filtered through the real path's own
+    /// [`pinned_priority_or_refuse`], so a pin that the send would refuse
+    /// prices as `None` rather than as a fee for a transaction that will never
+    /// be built. Signerless, stash-free and read-only, like its sibling — it
+    /// may be called on every keystroke.
+    pub fn fee_preview_pinned(
+        &self,
+        destination: Address,
+        change: Address,
+        amount_sompi: u64,
+        pinned: &[UtxoEntryReference],
+        payload: Option<Vec<u8>>,
+        exclude: &[Address],
+    ) -> Result<Option<u64>> {
+        // An all-covenant pin is a refusal on the real path, so it is no fee
+        // here — never a number for a send that cannot happen.
+        let Ok(pinned) = pinned_priority_or_refuse(pinned.to_vec()) else {
+            return Ok(None);
+        };
+        self.fee_preview_inner(destination, change, amount_sompi, &pinned, payload, exclude)
+    }
+
+    /// The shared body of both previews: one snapshot, the same two-shape
+    /// decision the prepare runs ([`shipped_two_shape`]), the same covenant
+    /// fence, and the Generator's own aggregate fee.
+    fn fee_preview_inner(
+        &self,
+        destination: Address,
+        change: Address,
+        amount_sompi: u64,
+        pinned: &[UtxoEntryReference],
+        payload: Option<Vec<u8>>,
+        exclude: &[Address],
+    ) -> Result<Option<u64>> {
         if amount_sompi == 0 {
             return Ok(None);
         }
         let context = self.context();
         let mature = mature_snapshot_sync(&context)?;
-        let payment = || -> PaymentDestination {
-            PaymentOutputs::from((destination.clone(), amount_sompi)).into()
-        };
-        let Ok(ridden) = price_chain(
-            &context,
-            spend_policy::select_spend_priority(&mature, &[], spend_policy::RIDER_LIMIT, exclude),
-            &change,
-            payment(),
-            Fees::SenderPays(0),
-            None,
+        let Ok((pending, summary)) = shipped_two_shape(
+            &mature,
+            pinned,
+            exclude,
+            |order| {
+                price_chain(
+                    &context,
+                    order,
+                    &change,
+                    PaymentOutputs::from((destination.clone(), amount_sompi)).into(),
+                    Fees::SenderPays(0),
+                    payload.clone(),
+                )
+            },
+            || spend_floor(&context, &mature, pinned, &change, exclude),
         ) else {
             return Ok(None);
         };
-        // The comparison shape is a QUESTION, never a gate — the same law the
-        // real path applies to it.
-        let comparison = price_chain(
-            &context,
-            spend_policy::select_spend_priority(&mature, &[], 0, exclude),
-            &change,
-            payment(),
-            Fees::SenderPays(0),
-            None,
-        )
-        .ok();
-        let (pending, summary) = shipped_shape(ridden, comparison, || {
-            let order = spend_policy::select_spend_priority(
-                &mature,
-                &[],
-                spend_policy::RIDER_LIMIT,
-                exclude,
-            );
-            let order = (!order.is_empty()).then_some(order);
-            search_minimum(
-                |amount| probe_context(&context, &change, amount, order.as_deref()),
-                free_balance(&mature, exclude),
-            )
-            .ok()
-            .flatten()
-        });
         if covenant_fence(&pending).is_err() {
             return Ok(None);
         }
@@ -4034,10 +4130,14 @@ mod tests {
     /// FACT (this cliff is real, at this wallet, at this amount) and it drives
     /// the decision seam [`shipped_shape`] with the `None` the failure
     /// produces, asserting the ridden chain ships and that the floor lookup is
-    /// never even reached. What no offline test can reach is
-    /// `prepare_send_inner` itself — it needs a live `UtxoContext` — so that
-    /// the production call site says `.ok()` and not `?` remains a one-line
-    /// read, not a proof.
+    /// never even reached.
+    ///
+    /// **The production law itself is now proved one test down.** It used to
+    /// live inline in `prepare_send_inner`, which needs a live `UtxoContext`,
+    /// so the `.ok()`-not-`?` was a one-line read rather than a proof;
+    /// extracting it into [`shipped_two_shape`] — and hoisting the floor out
+    /// to [`spend_floor`] so no context is needed at all — made it reachable
+    /// offline (`consensus-auditor`, 2026-09-08).
     #[test]
     fn a_refusing_comparison_shape_never_refuses_the_send() {
         let pool: Vec<UtxoEntryReference> = [48_152_400u64, 100_000_000, 10_000_000_000]
@@ -4080,6 +4180,73 @@ mod tests {
         });
         assert_eq!(shipped.len(), 1, "the send ships the proven chain");
         assert_eq!(shipped_summary.aggregated_utxos(), 3);
+    }
+
+    /// **The two-shape law itself, on the real function both send paths run.**
+    ///
+    /// [`shipped_two_shape`] is what the payment prepare and the messaging fee
+    /// preview now share, so the asymmetry between the two builds — the ridden
+    /// one propagates its error, the riderless one is a QUESTION and its
+    /// failure is swallowed — is a property of production code rather than of
+    /// a copy of it. Both directions, and the floor's own fence.
+    #[test]
+    fn the_shipped_two_shape_law_holds_in_both_directions() {
+        let pool: Vec<UtxoEntryReference> = [48_152_400u64, 100_000_000, 10_000_000_000]
+            .into_iter()
+            .map(UtxoEntryReference::simulated)
+            .collect();
+        let build_at = |kas: f64| {
+            let pool = pool.clone();
+            move |order: Vec<UtxoEntryReference>| {
+                let generator = offline_generator_over(&pool, order, kas, addr(CHANGE));
+                let mut pending = Vec::new();
+                loop {
+                    match generator.generate_transaction() {
+                        Ok(Some(tx)) => pending.push(tx),
+                        Ok(None) => break,
+                        Err(e) => return Err(map_generate_error(e)),
+                    }
+                }
+                Ok((pending, generator.summary()))
+            }
+        };
+
+        // A RIDERLESS refusal is a question that went unanswered: the send
+        // still ships, and the floor is never consulted because the decision
+        // was already made. This is the 100.91 cliff, and it is why the
+        // production call site says `.ok()`.
+        let (shipped, summary) = shipped_two_shape(&pool, &[], &[], build_at(100.91), || {
+            panic!("a shape that never built must not trigger a floor lookup")
+        })
+        .expect("the ridden shape builds, so the send ships");
+        assert_eq!(shipped.len(), 1);
+        assert_eq!(summary.aggregated_utxos(), 3);
+
+        // A RIDDEN refusal is the send's own refusal and propagates. Asking
+        // for more than the pool holds refuses on both shapes; the error the
+        // caller sees is the ridden one, never a swallowed `None`.
+        let far_too_much = shipped_two_shape(&pool, &[], &[], build_at(9_999_999.0), || {
+            panic!("a refused ridden shape must not reach the floor either")
+        });
+        assert!(
+            far_too_much.is_err(),
+            "the ridden shape's failure IS the send's failure"
+        );
+
+        // And on an ordinary amount where both shapes build, the floor closure
+        // is the caller's — handed in, not computed inside — which is what
+        // keeps a live `UtxoContext` out of this law entirely.
+        let mut floor_asked = false;
+        let (ordinary, _) = shipped_two_shape(&pool, &[], &[], build_at(1.0), || {
+            floor_asked = true;
+            None
+        })
+        .expect("an ordinary send builds on both shapes");
+        assert!(!ordinary.is_empty());
+        // Whether it was asked depends on `riderless_is_candidate`, which has
+        // its own tests; what this asserts is that the closure REACHED here at
+        // all rather than being reconstructed inside.
+        let _ = floor_asked;
     }
 
     /// The other side of the rule: a speck worth LESS than the fee to pick it

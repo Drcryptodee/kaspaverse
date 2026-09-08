@@ -33,7 +33,26 @@ class KvToggle extends StatelessWidget {
     required this.onChanged,
     this.disabledReason,
     this.bare = false,
+    this.ground = KvColor.plate,
+    this.leading,
   });
+
+  /// **The surface this row is actually drawn on**, so [sub] can meet BG-14
+  /// against it.
+  ///
+  /// `inkMeta` is 4.30:1 on `chip` and §1.4 forbids it there — the sub-line is
+  /// the sentence that says what each switch position means, which is the one
+  /// string on a toggle that must be readable. This is `KvRow`'s own fix
+  /// (`kv_rows.dart`, UX-R5) arriving in the part next door, where a `bare`
+  /// toggle inside a `chip` card had been failing the same way
+  /// (`ux-auditor` BLOCK, 2026-09-08).
+  final Color ground;
+
+  /// An optional disc, for a toggle that sits among rows that have one.
+  ///
+  /// A card whose rows start at two different insets has a ragged left edge,
+  /// and a switch is not exempt from the alignment its neighbours keep.
+  final Widget? leading;
 
   /// No card of its own: the row sits inside a card that also holds the
   /// controls the switch governs (`T5`'s own-node card, founder on glass
@@ -118,6 +137,12 @@ class KvToggle extends StatelessWidget {
                 opacity: enabled ? 1 : KvFreshness.opacityStale,
                 child: Row(
                   children: [
+                    // Same seat and same gap `KvRow` gives its leading, so a
+                    // toggle among disc-led rows keeps their left edge.
+                    if (leading case final disc?) ...[
+                      disc,
+                      const SizedBox(width: KvSpace.sm),
+                    ],
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -129,17 +154,27 @@ class KvToggle extends StatelessWidget {
                               fontSize: 15,
                               height: 20 / 15,
                               fontWeight: FontWeight.w600,
+                              // A variable face needs the axis set too, or the
+                              // weight is a synthesis rather than the cut
+                              // (L150).
+                              fontVariations: KvWeight.w600,
                               color: KvColor.ink,
                             ),
                           ),
                           const SizedBox(height: KvSpace.xs),
                           Text(
                             sub,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontFamily: KvFont.ui,
                               fontSize: 12,
                               height: 17 / 12,
-                              color: KvColor.inkMeta,
+                              fontWeight: FontWeight.w400,
+                              fontVariations: KvWeight.w400,
+                              // BG-14 on the ground it is drawn on: 4.30 for
+                              // `inkMeta` on `chip`, against 7.36 for `inkDim`.
+                              color: ground == KvColor.chip
+                                  ? KvColor.inkDim
+                                  : KvColor.inkMeta,
                             ),
                           ),
                         ],

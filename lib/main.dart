@@ -192,6 +192,11 @@ class KaspaVerseApp extends StatelessWidget {
       builder: (context, child) => KvWindow(child: child!),
       home: AppShell(
         status: VaultService.instance.status,
+        // **A lock discards what was decrypted, on both sides of the FFI**
+        // (BG-13). Rust drops its keys; this drops the message previews the
+        // conversation list holds since D-303 — an app-lifetime singleton that
+        // no screen owns, so nothing else would.
+        onLeftHome: MessagingService.instance.dropDecrypted,
         initializing: const KvSplash(),
         // P1.4: onboarding (create/restore) + the passphrase unlock screen the
         // locked surface hands off to. The create ceremony's native word reveal

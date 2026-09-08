@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard;
 
@@ -22,6 +24,7 @@ import '../widgets/kv_rows.dart';
 import '../widgets/kv_search_field.dart';
 import '../widgets/kv_sheet.dart';
 import '../widgets/kv_tabs.dart';
+import '../widgets/kv_toggle.dart';
 import '../widgets/kv_two_pane.dart';
 import 'history_fill_sheet.dart';
 import 'thread_screen.dart';
@@ -210,7 +213,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
           conversationId: conversation.conversationId,
           contactLabel: contactLabel(conversation),
           contactAddress: conversation.contactAddress,
-          superseded: conversation.superseded,
           messaging: _messaging,
         ),
       ),
@@ -245,19 +247,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
           label: contactLabel(conversation),
           bond: _bond,
           canName: conversation.contactAddress.isNotEmpty,
-          // Active rows ONLY. On an invitation, "start over" would hide the card
-          // permanently — `may_unhide` refuses `PendingInbound` — and spend 0.2
-          // KAS of ours while stranding the 0.2 KAS bond they already paid, which
-          // only Accept can return.
-          // Never on a REPLACED row. Start over retires every Active thread with
-          // this contact — including the working successor the card body has
-          // just told the user to open. Highest-cost mis-tap in the surface,
-          // offered on the card the app itself labelled broken. Costs no exit:
-          // the successor is always sendable, and Start over is available there.
-          canStartOver:
-              conversation.status == 'active' &&
-              conversation.contactAddress.isNotEmpty &&
-              !conversation.superseded,
           // Nothing to clear on an invitation but the handshake row, which is
           // deliberately kept (a bond gate reads it) — so it would report "0
           // messages cleared" over a card that visibly still has a row on it.
@@ -268,68 +257,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (!mounted || action == null) return;
     if (action == 'name') {
       await _nameContact(conversation);
-    } else if (action == 'restart') {
-      await _startOver(conversation);
     } else if (action == 'clear') {
       await _clearMessages(conversation);
     } else if (action == 'hide') {
       await _hide(conversation);
     }
-  }
-
-  /// The per-contact exit (INV-6): hide this thread, then send them a fresh
-  /// contact request.
-  ///
-  /// **It has to be its own door, and that is the point.** Going through
-  /// `_addContact` cannot work: `existingConversation` finds the hidden row,
-  /// un-hides it (the only thing that restores a hidden conversation) and
-  /// hands it straight back — so "hide it, then re-invite" was "hide it, then
-  /// un-hide it", and a contact whose only live thread was broken had no exit
-  /// but deleting every conversation they had.
-  ///
-  /// **`startOver` is ONE Rust call, not hide-then-invite from here.** Doing it
-  /// as two half-applied in exactly the case it exists for: with two live
-  /// threads on one address, hiding one leaves the other Active and the
-  /// handshake then refuses — after the first thread's messages are already
-  /// gone. Rust retires them all, so the prepare that follows succeeds by
-  /// construction. A failure aborts before any spend.
-  Future<void> _startOver(ConversationDto conversation) async {
-    final confirmed = await Navigator.of(context).push<bool>(
-      KvSheetRoute<bool>(
-        builder: (_) =>
-            _StartOverSheet(label: contactLabel(conversation), bond: _bond),
-      ),
-    );
-    if (confirmed != true) return;
-    final WipeReportDto retired;
-    try {
-      retired = await _messaging.startOver(conversation.contactAddress);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(displayError(e))));
-      return;
-    }
-    if (!mounted) return;
-    // The sheet promised the messages do not come back. Without a durable floor
-    // an opt-in history catch-up can return them, and the user is the only one
-    // who can act on that — so it rides the CONFIRM SHEET's own note, not a
-    // SnackBar. A SnackBar here is buried within a frame: `_runPrepare` opens a
-    // modal bottom sheet over exactly where it renders, on the one path that
-    // also spends 0.2 KAS.
-    final bond =
-        'Carries a ${kasCanonical(_bond)} KAS bond — the network norm. It '
-        'comes back when they accept; if their app still has you as a contact '
-        'it may complete the chat silently and the bond is not returned.';
-    await _runPrepare(
-      () => _messaging.prepareHandshake(conversation.contactAddress),
-      preparingObject: 'contact request',
-      contextNote: retired.floorPersisted
-          ? bond
-          : 'Your old messages were deleted, but history catch-up could not be '
-                'stopped for them — they may come back. $bond',
-    );
   }
 
   /// The total erase: every conversation, every message, every local trace.
@@ -564,7 +496,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _messageSettings() async {
     KvHaptic.selection();
     final action = await Navigator.of(context).push<String>(
-      KvSheetRoute<String>(builder: (_) => _MessageSettingsSheet(bond: _bond)),
+      KvSheetRoute<String>(
+        builder: (_) =>
+            _MessageSettingsSheet(bond: _bond, messaging: _messaging),
+      ),
     );
     if (!mounted || action == null) return;
     if (action == 'history') {
@@ -763,7 +698,6 @@ class _RowActionsSheet extends StatelessWidget {
     required this.label,
     required this.canName,
     required this.bond,
-    this.canStartOver = false,
     this.canClear = true,
   });
 
@@ -777,7 +711,6 @@ class _RowActionsSheet extends StatelessWidget {
   /// the thread, and hiding an invitation is permanent — it would bury the only
   /// route to refunding the bond the counterparty already paid, while spending
   /// one of ours. On a replaced row it would retire the working successor too.
-  final bool canStartOver;
 
   /// An invitation's only message row is its handshake, which the clear
   /// deliberately keeps (a bond gate reads it) — so clearing one is a no-op
@@ -813,24 +746,6 @@ class _RowActionsSheet extends StatelessWidget {
                 tone: KvColor.etch,
               ),
               onTap: () => Navigator.of(context).pop('name'),
-            ),
-          if (canStartOver)
-            KvRow(
-              dense: true,
-              ground: KvColor.chip,
-              titleLines: 2,
-              leading: const KvRowDisc.neutral(mark: KvGlyph.userPlus),
-              title: 'Start over with this contact',
-              sub:
-                  'Deletes your messages and sends a new request '
-                  '(${kasCanonical(bond)} KAS)',
-              subLines: 2,
-              trailing: const KvGlyphIcon(
-                KvGlyph.chevron,
-                size: 20,
-                tone: KvColor.etch,
-              ),
-              onTap: () => Navigator.of(context).pop('restart'),
             ),
           KvRow(
             dense: true,
@@ -897,30 +812,31 @@ String contactLabel(ConversationDto c) {
       : truncateAddressPayload(c.contactAddress);
 }
 
-/// **One conversation, as `M1` draws it** — the person disc, their name, one
-/// line saying what this row IS, and the time of its last activity.
+/// **One conversation, as `M1` draws it** — the person disc, their name, the
+/// last thing said in the thread, the time of it, and how much of it is
+/// unread.
 ///
-/// ## What the render asks for that this build does not draw
+/// ## The second line, and the figure under the time
 ///
-/// `M1`'s second line is the **last message** (*"Got it, thank you — confirmed
-/// on my side"*) and its trailing column carries an **unread count**. Neither
-/// is drawn here, and neither is a styling decision:
+/// Both are the founder's ruling of 2026-09-08 (D-303), and both were declined
+/// at D-302 on engineering grounds that have since been paid rather than
+/// argued away: the preview is **produced in Rust**, one bounded line per
+/// conversation from the store's own newest row, and the count is derived from
+/// a device-local read watermark. Neither is computed here — this row draws
+/// what `ConversationDto` carries.
 ///
-///  - **The preview.** `transport_conversations` is registered in the Source
-///    of Truth as *public-wire-class data only*, and message bodies are
-///    `MessageRecord.envelope` — sealed at rest (§0.4), opened on view, inside
-///    the thread's own state object, which disposes them with the screen. A
-///    preview means opening the newest envelope of every conversation on every
-///    list refresh and holding that plaintext in a list widget that outlives
-///    any thread. That is a custody change, not a layout one.
-///  - **The count.** There is **no read state anywhere in the stack** — not in
-///    `TransportStore`, not on the DTO, not in the service. A number here
-///    would have nothing behind it.
+/// **The tone of the preview says whether it has been read**, which is the
+/// render's own rule and not an invention: `M1` sets `Mara`'s and
+/// `Dev fund`'s previews in `inkMeta` and `Jonas`'s and `Anna`'s — the two
+/// rows carrying a count — in `inkDim` (sampled off the render at 4×:
+/// `#7A8583` against `#A6B0AE`, exactly the two tokens). So an unread row is
+/// brighter, the count is the same news said twice, and the row survives
+/// greyscale (BG-14).
 ///
-/// So the second line carries what the row honestly knows, which is its
-/// **state** — an invitation, a replaced thread, one awaiting their accept —
-/// and nothing at all where the row has no news. An openable conversation is
-/// one line and a time, and that is the whole row.
+/// **A row with no message falls back to its state** — an invitation, one
+/// awaiting their accept — because that is the honest news for a thread where
+/// nothing has been said. `pending_out`'s *Awaiting their accept* has moved
+/// off this line entirely and onto the disc, as an amber clock (D-303).
 ///
 /// **The address is deliberately NOT here, and this was reconsidered rather
 /// than assumed.** A name is a local label over an address (D-049), and the
@@ -958,25 +874,35 @@ class _ConversationRow extends StatelessWidget {
     final expired = c.status == 'pending_in' && c.inviteExpired;
     final pendingIn = c.status == 'pending_in' && !expired;
     final pendingOut = c.status == 'pending_out';
-    // Rust's derived rule: a newer live thread with this same contact exists,
-    // so this one's alias reaches nobody. It stays open and readable — the
-    // history is real — but it can no longer be typed in.
-    final replaced = c.superseded;
     final initial = c.contactName?.trim();
+    final unread = c.unread;
 
     // ORDER MATTERS, AND IT MUST MATCH THE ACTION CHAIN BELOW. When the label
     // said one thing and the body another, a `pending_in` row could render
-    // "Wants to connect" over the Replaced body — losing its Accept button and
-    // with it the only route to refunding the counterparty's bond.
+    // "Wants to connect" over another state's body — losing its Accept button
+    // and with it the only route to refunding the counterparty's bond.
+    //
+    // **`pending_out` keeps its sentence, and gains the disc.** D-303 moved
+    // *Awaiting their accept* onto the contact's disc as an amber clock — the
+    // founder's own suggestion — and the point of that was to free this line
+    // for the LAST MESSAGE. On a thread we have already sent into, the preview
+    // wins and the clock carries the state. On one where nothing has been said
+    // there is no preview to show, and a row whose only news is a 12 dp badge
+    // states nothing in words (BG-20, `ux-auditor`) — so the sentence is the
+    // fallback rather than the deletion.
     final String? state = expired
         ? 'Invitation expired'
         : pendingIn
         ? 'Wants to connect'
-        : replaced
-        ? 'Replaced by a newer thread'
         : pendingOut
         ? 'Awaiting their accept'
         : null;
+
+    // **A request's state outranks its preview**, because a request is a
+    // question about a stranger and its second line has to be the question.
+    // Everywhere else the last message wins, and the state is the fallback for
+    // a thread where nothing has been said yet.
+    final String? sub = (pendingIn || expired) ? state : (c.preview ?? state);
 
     // A request or an expired invitation is answered on the row, so the row
     // itself is not a door — its actions are (BG-12: one target, one act).
@@ -996,7 +922,18 @@ class _ConversationRow extends StatelessWidget {
       children: [
         Semantics(
           button: opens,
-          label: state == null ? contactLabel(c) : '${contactLabel(c)}, $state',
+          // **The state and the count travel in the label**, because neither
+          // the amber clock nor the count badge is a target a screen reader
+          // can reach — they are marks (BG-12). What a sighted user reads off
+          // the disc and the trailing column, a listening one hears here.
+          label: [
+            contactLabel(c),
+            // `state` already carries *awaiting their accept*; naming it twice
+            // is BG-19's own case, and the disc badge is drawn only where that
+            // sentence is not (see `badge` below).
+            ?sub,
+            if (unread > 0) '$unread unread',
+          ].join(', '),
           child: ExcludeSemantics(
             child: KvRow(
               dense: true,
@@ -1014,7 +951,24 @@ class _ConversationRow extends StatelessWidget {
               // not the same object as a contact with no name.
               leading: pendingIn || expired
                   ? const KvRowDisc.neutral(mark: KvGlyph.userPlus)
-                  : KvContactAvatar(name: initial, size: KvRowDisc.person),
+                  : KvContactAvatar(
+                      name: initial,
+                      size: KvRowDisc.person,
+                      // **Amber, because BG-7 gives `warn` to *not yet
+                      // certain*** — which an unanswered handshake is. This is
+                      // the same test the render's five hue-tinted discs
+                      // failed at D-302: they named no state, this one does.
+                      //
+                      // **One fact, one carrier** (BG-19). The badge earns its
+                      // seat exactly where the sentence is gone: a thread we
+                      // have already sent into shows the last message on the
+                      // second line, so the state has nowhere else to live and
+                      // the disc carries it. A thread with nothing said keeps
+                      // the words and needs no mark beside them.
+                      badge: pendingOut && c.preview != null
+                          ? KvGlyph.clock
+                          : null,
+                    ),
               title: contactLabel(c),
               // **An unnamed contact's name IS a key, so it is drawn as one.**
               // `contactLabel` returns an already-truncated
@@ -1036,25 +990,45 @@ class _ConversationRow extends StatelessWidget {
                       fontSize: 13,
                     )
                   : null,
-              subWidget: state == null
+              subWidget: sub == null
                   ? null
                   : Text(
-                      state,
-                      // Two lines: at 320 dp / 1.3× `Replaced by a newer
-                      // thread` came out `Replaced by a new…`, losing the word
-                      // that names the state (BG-20/BG-14, `ux-auditor`).
-                      maxLines: 2,
+                      sub,
+                      // **One line, and the `…` is the render's own**
+                      // (`Dev fund`: *"Q3 grant released · 150 K…"*). Rust has
+                      // already bounded this string for custody; what
+                      // ellipsises here is the frame, which is narrower than
+                      // that bound in every window class.
+                      //
+                      // A state sentence gets THREE, because at 320 dp / 1.3×
+                      // the sub-line's box measures 133.2 dp: `Invitation
+                      // expired` came out `Invitation expir…` at one line, and
+                      // `Awaiting their accept` still exceeded two
+                      // (`ux-auditor`, measured). A sentence that ellipsises
+                      // loses the word that names the state (BG-20/BG-14);
+                      // a preview is meant to end in `…` and takes one.
+                      maxLines: c.preview == null && sub == state ? 3 : 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: KvFont.ui,
-                        fontSize: 12,
-                        height: 16 / 12,
+                        // `M1`, measured at 4×: the `G` of *"Got it…"* is a
+                        // 10.0 dp cap, ÷ Jakarta's 0.773 = 12.9.
+                        fontSize: 13,
+                        height: 17 / 13,
                         fontWeight: FontWeight.w400,
                         fontVariations: KvWeight.w400,
-                        color: KvColor.inkMeta,
+                        // The render's own rule (see the class note): an
+                        // unread row is brighter.
+                        color: unread > 0 ? KvColor.inkDim : KvColor.inkMeta,
                       ),
                     ),
               trailing: _When(unixMs: c.lastActivityUnixMs),
+              // **The count sits UNDER the time**, which is where the founder
+              // put it (*"the number will show under the time"*) and where
+              // `M1` draws it — `KvRow`'s trailing column already stacks a
+              // value over a meta line for the ledger, so this is that seat
+              // and not a second one.
+              trailingMeta: unread > 0 ? _Unread(count: unread) : null,
               // A record's own time is not a value, so the trailing column
               // needs none of `KvRow`'s width for a figure — leaving it to
               // the name, which is the part that ellipsises.
@@ -1086,10 +1060,63 @@ class _ConversationRow extends StatelessWidget {
   }
 }
 
+/// **How many inbound messages are unread**, under the time (`M1`, and the
+/// founder's own placement: *"the number will show under the time"*).
+///
+/// **A bare figure, not a badge**, which is what the render draws: sampled at
+/// 4×, `Jonas`'s `1` and `Anna`'s `3` are teal digits on the plate with no
+/// pill behind them, right-aligned to the same gutter as the time above.
+/// `primaryMuted` exactly (`#70C7BA`), not `primary` — §1.5's own split: this
+/// says *who and what is alive*, it is not something to press.
+///
+/// Mono, because BG-30 names a **count** among the things set in the mono
+/// face; tabular, so a row's digits do not shift the gutter as the number
+/// changes under it.
+///
+/// A count of zero never reaches here — the row passes `null` and draws
+/// nothing at all, because an empty badge is a claim that there is news.
+class _Unread extends StatelessWidget {
+  const _Unread({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      // Rust counts rows; this only renders. A three-figure count is a real
+      // thread on a phone left alone for a week, so nothing is capped here —
+      // `KvRow`'s trailing cap bounds the column, and a wider number simply
+      // takes more of it.
+      '$count',
+      maxLines: 1,
+      textAlign: TextAlign.end,
+      style: const TextStyle(
+        fontFamily: KvFont.mono,
+        // `M1`, measured at 4×: `Jonas`'s `1` is 8.75 dp of ink,
+        // ÷ JetBrains Mono's 0.739 = 11.8.
+        fontSize: 12,
+        height: 16 / 12,
+        fontWeight: FontWeight.w500,
+        fontVariations: KvWeight.w500,
+        color: KvColor.primaryMuted,
+        fontFeatures: [FontFeature.tabularFigures()],
+      ),
+    );
+  }
+}
+
 /// A conversation's last activity, in the trailing column — `09:44` today,
 /// `Yesterday`, a weekday inside the week, then a date (`M1`, which draws all
-/// four). The clock is mono and the words are not: BG-30 sets a figure in the
-/// mono face and words in the UI face, and `Yesterday` is not a figure.
+/// four).
+///
+/// **All four are mono**, which is a correction to what shipped: this used to
+/// set `Yesterday` and `Mon` in the UI face on the reasoning that a word is
+/// not a figure. BG-30's list is *"every amount, address, hash, height, DAA,
+/// latency, count, **time and date**"*, and `M1` sets the whole column in
+/// JetBrains Mono — sampled at 4×, `Yesterday`'s letterforms and uniform
+/// advances are unmistakably mono against the Jakarta name above them. The
+/// column is one object, a timestamp, and it is read as one. The render wins
+/// where it and a reading of the Bible differ (D-259).
 class _When extends StatelessWidget {
   const _When({required this.unixMs});
 
@@ -1102,30 +1129,29 @@ class _When extends StatelessWidget {
     final day = DateTime(at.year, at.month, at.day);
     final today = DateTime(now.year, now.month, now.day);
     final days = today.difference(day).inDays;
-    final (String text, bool mono) = days == 0
-        ? (
-            '${at.hour.toString().padLeft(2, '0')}:'
-                '${at.minute.toString().padLeft(2, '0')}',
-            true,
-          )
+    final String text = days == 0
+        ? '${at.hour.toString().padLeft(2, '0')}:'
+              '${at.minute.toString().padLeft(2, '0')}'
         : days == 1
-        ? ('Yesterday', false)
+        ? 'Yesterday'
         : days < 7
-        ? (_weekdays[at.weekday - 1], false)
-        : ('${at.day} ${_months[at.month - 1]}', true);
+        ? _weekdays[at.weekday - 1]
+        : '${at.day} ${_months[at.month - 1]}';
     return Text(
       text,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       textAlign: TextAlign.end,
-      style: TextStyle(
-        fontFamily: mono ? KvFont.mono : KvFont.ui,
+      // §2's `metaMono` is 500, and this column is the same object as the
+      // count below it — one face, one weight (`ux-auditor`, 2026-09-08).
+      style: const TextStyle(
+        fontFamily: KvFont.mono,
         fontSize: 12,
         height: 16 / 12,
-        fontWeight: FontWeight.w400,
-        fontVariations: KvWeight.w400,
+        fontWeight: FontWeight.w500,
+        fontVariations: KvWeight.w500,
         color: KvColor.inkMeta,
-        fontFeatures: mono ? const [FontFeature.tabularFigures()] : null,
+        fontFeatures: [FontFeature.tabularFigures()],
       ),
     );
   }
@@ -1484,34 +1510,6 @@ class _HideSheet extends StatelessWidget {
   }
 }
 
-class _StartOverSheet extends StatelessWidget {
-  const _StartOverSheet({required this.label, required this.bond});
-
-  final String label;
-
-  /// The price of the request this sheet is about to send, from Rust.
-  final BigInt bond;
-
-  @override
-  Widget build(BuildContext context) {
-    return _ConfirmSheet(
-      title: 'Start over',
-      act: 'Review request',
-      subject: label,
-      body: Text(
-        'Deletes your messages with this contact — every conversation you '
-        'have with them — hides those threads, and sends a fresh contact '
-        'request carrying the usual ${kasCanonical(bond)} KAS bond.\n\n'
-        'Use this when messages stop getting through. It works best when they '
-        'have also cleared their side — an app that still has you as a '
-        'contact may accept silently and send nothing back, in which case the '
-        'bond is not returned. A thread comes back if they write to it again '
-        '— the messages do not.',
-      ),
-    );
-  }
-}
-
 class _WipeAllSheet extends StatelessWidget {
   const _WipeAllSheet({required this.preview, required this.bond});
 
@@ -1833,13 +1831,89 @@ class _Field extends StatelessWidget {
   }
 }
 
-class _MessageSettingsSheet extends StatelessWidget {
-  const _MessageSettingsSheet({required this.bond});
+/// **The founder's toggle, said once.**
+///
+/// It renders on two surfaces — the message sending ceremony and `M5` — and
+/// the two had already drifted apart inside the diff that introduced them
+/// (*"Messages stop here to be confirmed"* against an ungrammatical *"Messages
+/// stop to be confirmed"*), which is BG-21's own case: one fact, one string
+/// (`ux-auditor`, 2026-09-08).
+const String signingToggleTitle = 'Turn off signing for messages';
+
+/// What each position of [signingToggleTitle] actually means.
+///
+/// The label names the ACT, so the switch reads ON when signing is OFF — which
+/// is exactly why the sub-line states the state outright rather than leaving
+/// the user to infer it from a switch position.
+///
+/// **Both halves say what IS, and neither says "here".** It renders on the
+/// sending sheet and in message settings, so a word that points at the surface
+/// is true on one and false on the other — and the earlier pair had drifted
+/// into exactly that, one variant carrying "here" and the other dropping it
+/// into ungrammar (`ux-auditor`, 2026-09-08).
+String signingToggleSub(bool signing) => signing
+    ? 'Every message stops to be confirmed. The contact request, the '
+          'acceptance and every payment always do.'
+    : 'Messages send as soon as you tap, for the fee shown above the send '
+          'button.';
+
+class _MessageSettingsSheet extends StatefulWidget {
+  const _MessageSettingsSheet({required this.bond, required this.messaging});
 
   final BigInt bond;
+  final MessagingService messaging;
+
+  @override
+  State<_MessageSettingsSheet> createState() => _MessageSettingsSheetState();
+}
+
+class _MessageSettingsSheetState extends State<_MessageSettingsSheet> {
+  /// Null until read — the row is absent rather than guessed at (BG-24).
+  bool? _signing;
+
+  /// Why the last flip did not stick, said under the row rather than in a
+  /// toast (§4: this language has no toasts).
+  String? _signingError;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadSigning());
+  }
+
+  Future<void> _loadSigning() async {
+    try {
+      final signing = await widget.messaging.messageSigning();
+      if (mounted) setState(() => _signing = signing);
+    } catch (_) {
+      if (mounted) setState(() => _signing = true);
+    }
+  }
+
+  Future<void> _setSigning(bool signing) async {
+    KvHaptic.selection();
+    setState(() {
+      _signing = signing;
+      _signingError = null;
+    });
+    try {
+      await widget.messaging.setMessageSigning(signing);
+    } catch (e) {
+      // The switch springs back to what is actually stored, and the sub-line
+      // says why — a reason that vanishes on a timer is not a reason
+      // (`ux-auditor`, 2026-09-08).
+      if (!mounted) return;
+      setState(() {
+        _signing = !signing;
+        _signingError = displayError(e);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final bond = widget.bond;
+    final signing = _signing;
     return KvSheet(
       title: 'Message settings',
       cancelLabel: 'Close',
@@ -1847,113 +1921,178 @@ class _MessageSettingsSheet extends StatelessWidget {
       // sheet's exit closes rather than cancels anything — a quiet one.
       cancelTone: KvColor.inkDim,
       onCancel: () => Navigator.of(context).pop(),
-      child: KvRowContainer(
-        // Inside a sheet, so `chip` — a `plate` card on a `plate` panel draws
-        // nothing at all (§1.1, D-293).
-        ground: KvColor.chip,
-        children: [
-          KvRow(
-            dense: true,
-            ground: KvColor.chip,
-            // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
-            // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
-            // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
-            // a new call site).
-            titleLines: 2,
-            leading: const KvRowDisc.neutral(mark: KvGlyph.history),
-            title: 'History & backup',
-            sub:
-                'Fill in what the node missed, and park your contacts on '
-                'chain',
-            subLines: 2,
-            trailing: const KvGlyphIcon(
-              KvGlyph.chevron,
-              size: 20,
-              tone: KvColor.etch,
-            ),
-            onTap: () => Navigator.of(context).pop('history'),
-          ),
-          KvRow(
-            dense: true,
-            ground: KvColor.chip,
-            // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
-            // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
-            // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
-            // a new call site).
-            titleLines: 2,
-            leading: const KvRowDisc.neutral(mark: KvGlyph.userPlus),
-            title: 'Handshake bond',
-            sub:
-                'What a stranger posts to reach you — returned when you '
-                'accept',
-            // Three, not two. `T2`'s rule: an explanation that ellipsises is
-            // worse than no explanation, and this one names the condition on
-            // getting the money back.
-            subLines: 3,
-            // The default 132 is sized for a balance; this figure is four
-            // characters and a unit, and the room it held in reserve was
-            // ellipsising the sentence beside it (D-293's rule, the same trade
-            // the address row makes).
-            trailingCap: 80,
-            // **The figure is mono, the unit is not** (BG-30). Set wholly
-            // mono it also wrapped to `0.20` / `KAS` at 320 dp / 1.3×, which
-            // BG-5 forbids outright — `_RequestsGloss` one class away already
-            // did it correctly (`ux-auditor` BLOCK, UX-R5).
-            trailing: Text.rich(
-              TextSpan(
+      // **The caller supplies the scroll** — `KvSheet` flexes its body, it
+      // does not scroll it. Six rows fit comfortably at 393 × 852 and do not
+      // at 915 × 412, where the whole sheet has 262 dp of body to work in;
+      // without this the landscape frame clipped the last row outright, which
+      // is content that cannot be seen. Found in the frame, not by a test.
+      // **And it says there is more.** At 915 × 412 the sheet's body is 262 dp
+      // and the last row — the one irreversible gesture on this surface — was
+      // cut through its letterforms with nothing to indicate a scroll
+      // (`ux-auditor`, 2026-09-08). `KvScrollEdge` is the house part that says
+      // it, at five other call sites already.
+      child: KvScrollEdge(
+        // The sheet's own panel (`KvSheet` paints `plate`), not the page's
+        // ground — the fade has to dissolve into what is actually behind it.
+        ground: KvColor.plate,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // **The mirror of the sending sheet's toggle** (founder ruling,
+              // 2026-09-08). It is here because the other one is only reachable
+              // by starting a send: a user who turned confirming off must be
+              // able to turn it back on without first composing a message they
+              // do not want to send.
+              //
+              // **Its own container, not a row among the three below.** A
+              // setting you change in place and a door you open are different
+              // objects, and `KvToggle` carries no disc while all three rows
+              // below do — sharing one card left the switch's title starting
+              // 54 dp left of theirs, a ragged edge inside a single plate. Seen
+              // in the 393 frame, which is the only place it is visible.
+              // **It eases in** (BG-24): the preference is read
+              // asynchronously, so without this a ~70 dp card appears between
+              // two frames and shoves the three rows below it down.
+              AnimatedSize(
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : KvMotion.calm,
+                curve: KvMotion.curve,
+                alignment: Alignment.topCenter,
+                child: signing == null
+                    ? const SizedBox(width: double.infinity)
+                    : KvRowContainer(
+                        ground: KvColor.chip,
+                        children: [
+                          KvToggle(
+                            bare: true,
+                            ground: KvColor.chip,
+                            // The disc its neighbours have, so the card below starts
+                            // its rows on the same left edge this one does.
+                            leading: const KvRowDisc.neutral(
+                              mark: KvGlyph.shield,
+                            ),
+                            on: !signing,
+                            title: signingToggleTitle,
+                            sub: _signingError ?? signingToggleSub(signing),
+                            onChanged: (off) => _setSigning(!off),
+                          ),
+                        ],
+                      ),
+              ),
+              if (signing != null) const SizedBox(height: KvSpace.m),
+              KvRowContainer(
+                // Inside a sheet, so `chip` — a `plate` card on a `plate` panel
+                // draws nothing at all (§1.1, D-293).
+                ground: KvColor.chip,
                 children: [
-                  TextSpan(
-                    text: kasCanonical(bond),
-                    style: const TextStyle(
-                      fontFamily: KvFont.mono,
-                      fontFeatures: [FontFeature.tabularFigures()],
+                  KvRow(
+                    dense: true,
+                    ground: KvColor.chip,
+                    // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
+                    // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
+                    // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
+                    // a new call site).
+                    titleLines: 2,
+                    leading: const KvRowDisc.neutral(mark: KvGlyph.history),
+                    title: 'History & backup',
+                    sub:
+                        'Fill in what the node missed, and park your contacts on '
+                        'chain',
+                    subLines: 2,
+                    trailing: const KvGlyphIcon(
+                      KvGlyph.chevron,
+                      size: 20,
+                      tone: KvColor.etch,
+                    ),
+                    onTap: () => Navigator.of(context).pop('history'),
+                  ),
+                  KvRow(
+                    dense: true,
+                    ground: KvColor.chip,
+                    // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
+                    // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
+                    // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
+                    // a new call site).
+                    titleLines: 2,
+                    leading: const KvRowDisc.neutral(mark: KvGlyph.userPlus),
+                    title: 'Handshake bond',
+                    sub:
+                        'What a stranger posts to reach you — returned when you '
+                        'accept',
+                    // Three, not two. `T2`'s rule: an explanation that ellipsises is
+                    // worse than no explanation, and this one names the condition on
+                    // getting the money back.
+                    subLines: 3,
+                    // The default 132 is sized for a balance; this figure is four
+                    // characters and a unit, and the room it held in reserve was
+                    // ellipsising the sentence beside it (D-293's rule, the same trade
+                    // the address row makes).
+                    trailingCap: 80,
+                    // **The figure is mono, the unit is not** (BG-30). Set wholly
+                    // mono it also wrapped to `0.20` / `KAS` at 320 dp / 1.3×, which
+                    // BG-5 forbids outright — `_RequestsGloss` one class away already
+                    // did it correctly (`ux-auditor` BLOCK, UX-R5).
+                    trailing: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: kasCanonical(bond),
+                            style: const TextStyle(
+                              fontFamily: KvFont.mono,
+                              fontFeatures: [FontFeature.tabularFigures()],
+                            ),
+                          ),
+                          const TextSpan(
+                            text: ' KAS',
+                            style: TextStyle(fontFamily: KvFont.ui),
+                          ),
+                        ],
+                      ),
+                      maxLines: 1,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 18 / 13,
+                        color: KvColor.inkDim,
+                      ),
                     ),
                   ),
-                  const TextSpan(
-                    text: ' KAS',
-                    style: TextStyle(fontFamily: KvFont.ui),
+                  KvRow(
+                    dense: true,
+                    ground: KvColor.chip,
+                    // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
+                    // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
+                    // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
+                    // a new call site).
+                    titleLines: 2,
+                    // **`risk`, and the only place on this sheet that takes it.**
+                    // §3 rations the hue to fund risk and DESTRUCTION, and this is the
+                    // app's single irreversible gesture — the `PopupMenuItem` it
+                    // replaced already painted its mark `KvColor.error` for exactly
+                    // that reason. A neutral disc would make the erase look like the
+                    // two rows above it, which are a sheet and a figure. The mark is
+                    // `trash`, added for it: `close` says *dismiss*, and BG-25 asks
+                    // the app to own the mark rather than borrow a near-enough one.
+                    leading: const KvRowDisc(
+                      mark: KvGlyph.trash,
+                      tint: KvColor.riskTint,
+                      tone: KvColor.risk,
+                    ),
+                    title: 'Delete all messages',
+                    sub: 'Every conversation, on this device',
+                    trailing: const KvGlyphIcon(
+                      KvGlyph.chevron,
+                      size: 20,
+                      tone: KvColor.etch,
+                    ),
+                    onTap: () => Navigator.of(context).pop('wipe'),
                   ),
                 ],
               ),
-              maxLines: 1,
-              style: const TextStyle(
-                fontSize: 13,
-                height: 18 / 13,
-                color: KvColor.inkDim,
-              ),
-            ),
+            ],
           ),
-          KvRow(
-            dense: true,
-            ground: KvColor.chip,
-            // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
-            // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
-            // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
-            // a new call site).
-            titleLines: 2,
-            // **`risk`, and the only place on this sheet that takes it.**
-            // §3 rations the hue to fund risk and DESTRUCTION, and this is the
-            // app's single irreversible gesture — the `PopupMenuItem` it
-            // replaced already painted its mark `KvColor.error` for exactly
-            // that reason. A neutral disc would make the erase look like the
-            // two rows above it, which are a sheet and a figure. The mark is
-            // `trash`, added for it: `close` says *dismiss*, and BG-25 asks
-            // the app to own the mark rather than borrow a near-enough one.
-            leading: const KvRowDisc(
-              mark: KvGlyph.trash,
-              tint: KvColor.riskTint,
-              tone: KvColor.risk,
-            ),
-            title: 'Delete all messages',
-            sub: 'Every conversation, on this device',
-            trailing: const KvGlyphIcon(
-              KvGlyph.chevron,
-              size: 20,
-              tone: KvColor.etch,
-            ),
-            onTap: () => Navigator.of(context).pop('wipe'),
-          ),
-        ],
+        ),
       ),
     );
   }

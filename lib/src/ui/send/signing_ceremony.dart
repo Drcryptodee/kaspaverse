@@ -26,6 +26,7 @@ import '../widgets/kv_hold.dart';
 import '../widgets/kv_sheet.dart';
 import '../widgets/kv_status_chip.dart';
 import '../widgets/kv_two_pane.dart';
+import '../widgets/kv_reading.dart';
 
 /// THE signing ceremony (consensus B7, BG-6) — **one surface for every mode**:
 /// paying, accepting, staking, merging, emptying, messaging.
@@ -80,7 +81,25 @@ class SigningCeremony extends StatefulWidget {
     this.explorerUrl,
     this.openUrl,
     this.onSendAnother,
+    this.footer,
   });
+
+  /// **One optional control under the truth card, before the hold.**
+  ///
+  /// It exists for exactly one thing (founder ruling, 2026-09-08): *"on the
+  /// sending sheet for messaging, there is a toggle that says something like
+  /// 'Turn off signing for messages'"*. The ceremony is where a user meets the
+  /// step they may want fewer of, so it is where they are offered the choice.
+  ///
+  /// **It sits BELOW every fact and ABOVE the hold**, which is the only
+  /// placement that reads honestly: the numbers are still what is being
+  /// confirmed, and the offer to stop being asked comes after them, never in
+  /// place of them. It never renders on the receipt — once a transaction is
+  /// signed, a preference about confirming it is noise.
+  ///
+  /// Generic on purpose: this widget knows nothing about messages, and the
+  /// lane that owns the preference supplies the control.
+  final Widget? footer;
 
   final SignableSummaryDto summary;
   final Future<SendOutcomeDto> Function(BigInt nonce) commit;
@@ -183,6 +202,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
   VoidCallback? onSendAnother,
   FiatScope? fiat,
   ContactsScope? contacts,
+  Widget? footer,
 }) {
   return Navigator.of(context).push(
     // **A sheet route, so the page underneath stays on screen** — scrimmed and
@@ -202,6 +222,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
         explorerUrl: explorerUrl,
         openUrl: openUrl,
         onSendAnother: onSendAnother,
+        footer: footer,
         fiat: fiat,
         contacts: contacts,
       ),
@@ -749,10 +770,22 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // `shrinkWrap`, so a short restatement makes a short sheet and a long one
       // scrolls inside the 90 % cap — the height is the content's, never the
       // window's.
-      child: ListView(
-        shrinkWrap: true,
-        padding: EdgeInsets.zero, // `KvSheet` owns the gutter (D-284)
-        children: _truthRows(context),
+      //
+      // **And it says when there is more.** At 320 dp / 1.3× a restatement
+      // long enough to scroll cut BG-6's own *"Once this is signed it cannot
+      // be reversed"* through its letterforms with nothing to indicate the
+      // scroll — a clip is not an overflow, and it is the last line before a
+      // hold that commits money (`ux-auditor`, 2026-09-08; the messages
+      // settings sheet took the same fix in the same sitting). `KvScrollEdge`
+      // is the house part that says it.
+      child: KvScrollEdge(
+        // `KvSheet`'s own panel — the fade dissolves into what is behind it.
+        ground: KvColor.plate,
+        child: ListView(
+          shrinkWrap: true,
+          padding: EdgeInsets.zero, // `KvSheet` owns the gutter (D-284)
+          children: _truthRows(context),
+        ),
       ),
     );
   }
@@ -962,12 +995,22 @@ class _SigningCeremonyState extends State<SigningCeremony>
       ),
       // The `≈` price, centred under the figure it restates (`S7`, founder
       // 2026-09-04) — the same sompi, never a second arithmetic.
-      const SizedBox(height: KvSpace.xs),
-      KvFiatLine(
-        fiat: widget.fiat,
-        sompi: returnsToSelf ? s.feeSompi : s.totalSompi,
-        alignment: MainAxisAlignment.center,
-      ),
+      //
+      // **Never on a self-send, because the figure above it is then a FEE.**
+      // BG-5 v4.8: fiat does not price a fee, and an unknown amount restates
+      // as `≈ —` rather than `$0.00` — a message's fee is small enough that a
+      // real rate rounds it to zero dollars, so this printed `≈ $0.00` under
+      // the one number the sheet exists to show. It is the surface the
+      // messaging signing toggle is read on, which is what turned a
+      // pre-existing line into a judged frame (`ux-auditor` BLOCK, 2026-09-08).
+      if (!returnsToSelf) ...[
+        const SizedBox(height: KvSpace.xs),
+        KvFiatLine(
+          fiat: widget.fiat,
+          sompi: s.totalSompi,
+          alignment: MainAxisAlignment.center,
+        ),
+      ],
 
       // Kind-derived plain-English lines, each citing only the DTO's own
       // built-tx numbers (B7: the summary stays the single source).
@@ -1120,6 +1163,12 @@ class _SigningCeremonyState extends State<SigningCeremony>
         words: 'Once this is signed it cannot be reversed.',
         maxLines: null,
       ),
+      // The lane's own control, last — after everything being confirmed and
+      // before the hold that confirms it (see [SigningCeremony.footer]).
+      if (widget.footer case final footer?) ...[
+        const SizedBox(height: KvSpace.l),
+        footer,
+      ],
     ];
   }
 }

@@ -188,6 +188,20 @@ enum KvGlyph {
   /// which is Lucide's own geometry and not a reading of it. `M1`'s foot
   /// action, `M2`'s request discs and `M3`'s explainer all carry it.
   userPlus,
+
+  /// Waiting on somebody else. Lucide `clock`.
+  ///
+  /// **Not [history]**, which is a clock with a rewind arrow around it and
+  /// means *what already happened*. This one is the plain dial and means
+  /// *not yet* — it badges the contact disc of a handshake the counterparty
+  /// has not answered (D-303, founder: *"let the profile icon of contacts
+  /// awaiting accept show a time icon in amber"*).
+  clock,
+
+  /// Send this message. Lucide `send` — the paper plane, and the whole of the
+  /// composer's commit control now that the word beside it is gone (founder,
+  /// 2026-09-08: *"The send button can be a send icon only"*).
+  send,
 }
 
 /// One glyph, painted.
@@ -595,6 +609,15 @@ class KvGlyphPainter extends CustomPainter {
         path(const ['M2 21a8 8 0 0 1 13.292-6']);
         circle(10, 8, 5);
         path(const ['M19 16v6', 'M22 19h-6']);
+      case KvGlyph.clock:
+        path(const ['M12 6v6l4 2']);
+        circle(12, 12, 10);
+      case KvGlyph.send:
+        path(const [
+          'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635'
+              'l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z',
+          'm21.854 2.147-10.94 10.939',
+        ]);
     }
   }
 

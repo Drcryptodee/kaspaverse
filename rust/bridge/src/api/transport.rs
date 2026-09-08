@@ -29,13 +29,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kaspaverse_chain::prefs::MessagePrefs;
 use kaspaverse_chain::{
     compose_bcast, compose_comm_wire_in, compose_handshake_wire, compose_self_stash_wire,
     decode_envelope_body, parse_payload, resolve_return_address, split_comm_body, AcceptanceEvent,
     Address, ChainError, ConversationRecord, ConversationStatus, KeyBranch, MessageDirection,
-    MessageRecord, PreparedSend, RowSource, SignerT, StoredKind, TransportEvent, TransportStore,
-    UtxoEntryReference, WalletEngine, WatchSource, WireNamespace, HANDSHAKE_BOND_SOMPI,
-    STASH_SCOPE_SAVED_HANDSHAKE,
+    MessageRecord, PreparedSend, ReadMarks, RowSource, SignerT, StoredKind, TransportEvent,
+    TransportStore, UtxoEntryReference, WalletEngine, WatchSource, WireNamespace,
+    HANDSHAKE_BOND_SOMPI, STASH_SCOPE_SAVED_HANDSHAKE,
 };
 use kaspaverse_core::attachment::Attachment;
 use kaspaverse_core::frames::{
@@ -72,9 +73,16 @@ pub struct TransportEventDto {
     pub addresses: Vec<String>,
 }
 
-/// A conversation row for the contacts surface. Every field is public-wire-
-/// class data (addresses/txids on-chain, aliases on-wire, local ids/status).
-#[derive(Clone, Debug)]
+/// A conversation row for the contacts surface.
+///
+/// **Two fields are NOT public-wire-class, and the rest are.** Addresses,
+/// txids, aliases, ids and status are all on-chain or on-wire; `preview` is
+/// decrypted message text (D-303) and `contact_name` is a label the user typed
+/// about a real person. That is why this type has a hand-written [`Debug`]
+/// instead of a derived one — see it for the reasoning — and why SOT §11's row
+/// for `transport_conversations` was amended in the same commit that added the
+/// preview rather than left claiming what it claimed before.
+#[derive(Clone)]
 pub struct ConversationDto {
     pub conversation_id: String,
     /// Counterparty address — empty on an inbound-pending row until the
@@ -98,20 +106,62 @@ pub struct ConversationDto {
     /// The local name the user gave this address, when they gave one. Device
     /// only — never on the wire, never in a backup.
     pub contact_name: Option<String>,
-    /// This thread has been REPLACED by a newer live one with the same
-    /// counterparty, and typing here would reach nobody.
+    /// **The last thing said in this thread, as one bounded line** — `M1`'s
+    /// second row (founder ruling, 2026-09-08 / D-303).
     ///
-    /// A conversation is a pair of locally-minted aliases, and the protocol's
-    /// only repair is for one side to forget and re-handshake. When they do,
-    /// we correctly accept the new handshake — and the old row is left holding
-    /// an alias no one monitors any more. Sending into it succeeds at every
-    /// layer we control (built, signed, broadcast, fee paid) and is read by no
-    /// one. This bool is what lets the UI say so instead of the user
-    /// discovering it hours later.
+    /// **This is decrypted user content, and it is the only field on this DTO
+    /// that is.** Everything else here is public-wire-class; this one opens
+    /// the newest envelope per conversation under the same vault gate
+    /// [`transport_thread`] opens a thread with, and it exists outside a
+    /// thread's lifetime, which is why `wallet-security-auditor` is mandatory
+    /// on the change that introduced it and why SOT §11's clause on this
+    /// function was amended in the same commit.
     ///
-    /// Derived per pull from the record set, never stored — see
-    /// `TransportStore::superseded_by`.
-    pub superseded: bool,
+    /// **Bounded in Rust, ellipsised by the widget.** The cap here
+    /// ([`PREVIEW_CHARS`]) is a CUSTODY bound — how much plaintext may leave
+    /// the vault per row — not a visual one; the row still applies its own
+    /// `TextOverflow.ellipsis`, because every frame this app supports is
+    /// narrower than the cap and `M1` draws the `…`.
+    ///
+    /// `None` in three honest cases, and the row then falls back to the state
+    /// line it drew before this field existed: the vault is locked, the thread
+    /// holds no message rows at all, or the newest row is a handshake (whose
+    /// news IS the row's state — *Wants to connect*, *Awaiting their accept*).
+    pub preview: Option<String>,
+    /// Inbound messages in this thread past the device's read mark — `M1`'s
+    /// figure under the time. `0` draws nothing at all, never an empty badge.
+    ///
+    /// Derived per pull from the rows and the mark, never stored, so it cannot
+    /// disagree with the thread it counts.
+    pub unread: u32,
+}
+
+/// **Counts and shapes, never content** — the same posture `TransportStore`
+/// carries one crate over, for the same reason.
+///
+/// A derived `Debug` would put a stranger's message text and a real person's
+/// name into any `{:?}` that ever reaches this type: a log line, a panic
+/// message, or a container printed whole. None exists today, which is exactly
+/// when it is cheap to make impossible (`wallet-security-auditor`, this
+/// sitting; §4's plaintext-logging discipline).
+impl std::fmt::Debug for ConversationDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConversationDto")
+            .field("conversation_id", &self.conversation_id)
+            .field("contact_address", &self.contact_address)
+            .field("my_alias", &self.my_alias)
+            .field("their_alias", &self.their_alias)
+            .field("status", &self.status)
+            .field("initiated_by_me", &self.initiated_by_me)
+            .field("created_unix_ms", &self.created_unix_ms)
+            .field("last_activity_unix_ms", &self.last_activity_unix_ms)
+            .field("invite_expired", &self.invite_expired)
+            // Both redacted: how many characters, never which.
+            .field("contact_name", &self.contact_name.as_ref().map(|n| n.len()))
+            .field("preview", &self.preview.as_ref().map(|p| p.chars().count()))
+            .field("unread", &self.unread)
+            .finish()
+    }
 }
 
 /// A file a counterparty sent. Every field here is OURS: the name is scrubbed
@@ -140,7 +190,7 @@ pub struct AttachmentDto {
 /// cross this bridge (user content post-decrypt, D-056; ffi-leak pre-cleared
 /// shape). Produced only by [`transport_thread`] (decrypt-on-view, §0.4):
 /// Dart renders and drops it; nothing here is cached, logged, or persisted.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ThreadMessageDto {
     pub txid: String,
     /// `handshake` (a system row — no body) or `comm`.
@@ -178,6 +228,29 @@ pub struct ThreadMessageDto {
     /// type with Borsh positional law on it, and widening its blast radius to
     /// the FFI buys nothing the label does not.
     pub provenance: String,
+}
+
+/// **Counts and shapes, never content** — the same posture `ConversationDto`
+/// and `TransportStore` carry, and for the same reason: a derived `Debug` puts
+/// a decrypted message into any `{:?}` that ever reaches this type, and the
+/// module's own log tripwire matches identifier NAMES, so `log::info!("row
+/// {row:?}")` walks straight past it (`ffi-leak-auditor`, this sitting —
+/// hardening one of three DTOs created the asymmetry this closes).
+impl std::fmt::Debug for ThreadMessageDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadMessageDto")
+            .field("txid", &self.txid)
+            .field("kind", &self.kind)
+            .field("outbound", &self.outbound)
+            .field("unix_ms", &self.unix_ms)
+            .field("text", &self.text.chars().count())
+            .field("readable", &self.readable)
+            .field("frame", &self.frame.is_some())
+            .field("attachment", &self.attachment.is_some())
+            .field("tombstoned", &self.tombstoned)
+            .field("provenance", &self.provenance)
+            .finish()
+    }
 }
 
 /// The five acceptance states a chip can wear (V2). Field-less — FRB 2.12
@@ -3005,8 +3078,9 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     // sender AT fold time, and on the live lane it never can — the return-
     // address lookup needs the bond's own activity record, which lands later.
     // So a handshake from a contact we already hold minted a second row beside
-    // the first, and that pair is what `superseded_by` and "Start over" were
-    // built to paper over. Measured on the founder's device 2026-09-07: our
+    // the first, and that pair is what the derived `superseded_by` rule and
+    // the "Start over" gesture were built to paper over — both since removed,
+    // because this merge is what makes them unnecessary (D-305). Measured on the founder's device 2026-09-07: our
     // request of 08-23 and the counterparty's handshake back of 08-24, held
     // as two rows for a fortnight. Now that the sender IS known, the merge
     // runs here: the invitation folds into the conversation it answers (or
@@ -4566,10 +4640,7 @@ pub fn transport_existing_conversation(
     // address.
     let found = rows
         .iter()
-        .find(|c| {
-            comm_sendable(c.status, c.initiated_by_me, &c.contact_address, &c.my_alias)
-                && store.superseded_by(&c.conversation_id).is_none()
-        })
+        .find(|c| comm_sendable(c.status, c.initiated_by_me, &c.contact_address, &c.my_alias))
         .map(|c| (c.conversation_id.clone(), c.status));
 
     // Only when no live thread exists: THEIR invitation outranks sending one
@@ -4589,16 +4660,17 @@ pub fn transport_existing_conversation(
     }
 
     // `found` was computed above, before the invitation branch, because a live
-    // thread outranks it. It is a conversation the user could actually TALK in
-    // — decided by the same predicate the send path uses, not a second copy of
-    // the rule — and it must be the LIVE one.
-    // `conversations_for_contact_address` sorts oldest-established first (an
-    // inbound fold wants the row it can complete), so on a contact who
-    // re-handshaked after wiping their client, a bare `find` routes the user
-    // into the replaced thread: the exact dead end this function exists to
-    // avoid, reached by answering "you already have this contact" with the one
-    // row that no longer works. Skipping superseded rows uses the same derived
-    // rule the send path refuses on, so the two can never disagree.
+    // thread outranks it. It is a conversation the user could actually TALK in,
+    // decided by the same predicate the send path uses rather than a second
+    // copy of the rule.
+    //
+    // It used to have to skip *superseded* rows as well —
+    // `conversations_for_contact_address` sorts oldest-established first, so on
+    // a contact who had re-handshaked after wiping their client a bare `find`
+    // routed the user into the replaced thread. **There is no such pair any
+    // more** (D-305): `TransportStore::merge_contact` folds duplicate rows per
+    // contact at every door one can arrive through, so these rows are one row,
+    // and the oldest-first sort has nothing stale to land on.
     let Some((conversation_id, status)) = found else {
         return Ok(None);
     };
@@ -4663,10 +4735,24 @@ pub fn transport_attachment_bytes(
 }
 
 /// A file's bytes plus the safe base name to write them under.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AttachmentBytesDto {
     pub name: String,
     pub bytes: Vec<u8>,
+}
+
+/// **A size, never the file** — the strictest case of the posture
+/// `ConversationDto` and `ThreadMessageDto` carry, because `bytes` is a whole
+/// decrypted attachment rather than one line of it. A derived `Debug` here
+/// would put a counterparty's file into a log with one `{:?}`
+/// (`ffi-leak-auditor`, this sitting).
+impl std::fmt::Debug for AttachmentBytesDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachmentBytesDto")
+            .field("name", &self.name.len())
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// Name (or rename) a contact. An empty name clears it back to the address.
@@ -5092,22 +5178,57 @@ fn comm_sendable(
     state_allows && !contact_address.is_empty() && !my_alias.is_empty()
 }
 
-/// The shared self-send comm PREPARE (D-069). Seal `text` to the contact,
-/// self-send the computed floor to our OWN bound address (input[0] + change =
-/// that address, D2/D-068), and stash the built-but-unsigned plan. Every
-/// comm-carried plaintext — a plain message OR a `kv:1:` game frame — funnels
-/// through here, so the tx-construction / self-send / source-address path is
-/// IDENTICAL for all of them; only the plaintext bytes differ (frames are
-/// hints, never a new send path — the send-path audit surface is unchanged).
-async fn prepare_comm_plaintext(
-    conversation_id: String,
-    text: String,
-) -> Result<SignableSummaryDto, AppError> {
+/// **Everything a comm send needs, built once** — the shared body of the
+/// message PREPARE and of the live fee figure above the send button.
+///
+/// The two must price the same transaction or the glass lies about what a tap
+/// will cost, and "the same" is not loose here: the namespace token, the alias
+/// head and the base64 envelope are most of a message's mass, and the pinned
+/// spend order decides which coins are drawn. So both go through this, and
+/// neither composes a wire of its own.
+///
+/// The one thing that legitimately differs between a preview and a prepare is
+/// the envelope's random nonce — and an envelope's LENGTH is fixed by its
+/// layout (`nonce(12) ‖ SEC1 key(33) ‖ ct+tag`), so the mass, and therefore
+/// the fee, is identical.
+struct CommPlan {
+    /// The conversation's bound address: the self-send destination, the
+    /// input[0] source and the change target, all one address (D-069).
+    own_address: Address,
+    /// The pinned spend order — input[0] identity (D-067).
+    priority: Vec<UtxoEntryReference>,
+    /// The anti-dust floor for THIS wallet's live coin shape (D-054), probed
+    /// against the same pinned order the send will use.
+    floor: u64,
+    /// The composed wire bytes, in the dialect this counterparty speaks.
+    wire_bytes: Vec<u8>,
+    my_alias: String,
+    bound: KeySlot,
+    wire: WireNamespace,
+}
+
+/// Build the plan, or say honestly why not.
+///
+/// `waiting` is the difference between the two callers and it is the only one:
+///
+///  - the PREPARE waits for the bound address's coins to mature
+///    ([`await_spendable_at`], which polls and can spend a maturity window),
+///    because a user who has tapped send is owed the send rather than a
+///    refusal about a clock;
+///  - the PREVIEW never waits. It runs on a keystroke, so it takes one look at
+///    the mature set and gives up if it is empty. No fee appears, and the tap
+///    behind it still routes through the ceremony, which produces the real
+///    sentence.
+async fn plan_comm(
+    conversation_id: &str,
+    text: &str,
+    waiting: bool,
+) -> Result<Option<CommPlan>, AppError> {
     let hub = hub()?;
     let (contact_address, my_alias, bound, wire) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         let conversation = store
-            .conversation(&conversation_id)
+            .conversation(conversation_id)
             .ok_or_else(|| AppError::msg("conversation not found"))?;
         if !comm_sendable(
             conversation.status,
@@ -5122,24 +5243,6 @@ async fn prepare_comm_plaintext(
                 _ => "this conversation isn't ready to send yet",
             }));
         }
-        // REFUSE A REPLACED THREAD — the one failure this lane cannot detect
-        // downstream. Every other refusal above describes a state we can see;
-        // this one describes a state only the COUNTERPARTY can see. Their
-        // client wiped and re-handshaked, so it monitors the new alias pair
-        // and nothing else, while this row still holds a perfectly valid alias
-        // of ours. The send would build, sign, broadcast, pay its fee and
-        // arrive nowhere, reporting success at every step.
-        //
-        // Refusing costs the user nothing — the live thread is right there and
-        // the message re-types in seconds. Not refusing costs a fee and a
-        // message they believe was delivered, which is how this was found:
-        // hours of one-way silence with no error anywhere.
-        if store.superseded_by(&conversation_id).is_some() {
-            return Err(AppError::msg(
-                "this conversation has been replaced — your contact started a new one, and only \
-                 that thread reaches them. Open the newer conversation with them and send there.",
-            ));
-        }
         (
             conversation.contact_address.clone(),
             conversation.my_alias.clone(),
@@ -5152,7 +5255,7 @@ async fn prepare_comm_plaintext(
             // at `kchat:`. The store derives which one this counterparty
             // speaks from their newest inbound comm — `ciph_msg` until they
             // have said anything, which is also what a stranger gets.
-            store.conversation_wire(&conversation_id),
+            store.conversation_wire(conversation_id),
         )
     };
     // The recipient address is the ENCRYPTION target only — the envelope is
@@ -5164,11 +5267,6 @@ async fn prepare_comm_plaintext(
     // keeps seeing one identity and the value never leaves our wallet.
     let own_address = vault::wallet_address_at(bound.0, bound.1)?;
 
-    // The self-send output still clears Kaspa's anti-dust floor (storage mass is
-    // charged on every output, ours included) — the honest computed minimum for
-    // THIS wallet's live coin shape (D-054), recomputed per send. The probe
-    // already models payment-to-own_address + change-to-own_address, exactly the
-    // self-send shape, so the floor it finds is the one that gets built.
     let engine = wallet::engine_handle()
         .ok_or_else(|| AppError::msg("wallet is still connecting — try again in a moment"))?;
     // FIRST, because the floor below is measured over the mature UTXO set and
@@ -5176,7 +5274,24 @@ async fn prepare_comm_plaintext(
     // wallet has no floor at all — `minimum_sendable` answers `None` and the
     // send dies blaming the user's coin shape for a clock. The set travels down
     // into `prepare_transport_send`, so the budget is spent once.
-    let priority = await_spendable_at(&engine, &own_address).await?;
+    let priority = if waiting {
+        await_spendable_at(&engine, &own_address).await?
+    } else {
+        let mature = engine
+            .mature_utxos_at(&own_address)
+            .await
+            .map_err(AppError::chain)?;
+        if mature.is_empty() {
+            return Ok(None);
+        }
+        mature
+    };
+    // The self-send output still clears Kaspa's anti-dust floor (storage mass is
+    // charged on every output, ours included) — the honest computed minimum for
+    // THIS wallet's live coin shape (D-054), recomputed per send. The probe
+    // already models payment-to-own_address + change-to-own_address, exactly the
+    // self-send shape, so the floor it finds is the one that gets built.
+    //
     // The floor is probed with the SAME pinned set the send below will pin, so
     // it prices the pinned spend order, not a hypothetical plain one.
     let floor = engine
@@ -5185,37 +5300,345 @@ async fn prepare_comm_plaintext(
             &priority,
             &crate::api::send::spend_exclusions(),
         )
-        .map_err(AppError::chain)?
-        .ok_or_else(|| {
-            AppError::msg("your balance can't cover a message right now (anti-dust floor)")
-        })?;
+        .map_err(AppError::chain)?;
+    let Some(floor) = floor else {
+        if !waiting {
+            return Ok(None);
+        }
+        return Err(AppError::msg(
+            "your balance can't cover a message right now (anti-dust floor)",
+        ));
+    };
 
     let envelope = encrypt(&recipient_x_only, text.as_bytes()).map_err(AppError::core)?;
     let wire_bytes =
         compose_comm_wire_in(wire, &my_alias, &envelope.to_bytes()).map_err(AppError::chain)?;
 
-    let reseal = encrypt(&x_only_of(&own_address)?, text.as_bytes())
+    Ok(Some(CommPlan {
+        own_address,
+        priority,
+        floor,
+        wire_bytes,
+        my_alias,
+        bound,
+        wire,
+    }))
+}
+
+/// The shared self-send comm PREPARE (D-069). Seal `text` to the contact,
+/// self-send the computed floor to our OWN bound address (input[0] + change =
+/// that address, D2/D-068), and stash the built-but-unsigned plan. Every
+/// comm-carried plaintext — a plain message OR a `kv:1:` game frame — funnels
+/// through here, so the tx-construction / self-send / source-address path is
+/// IDENTICAL for all of them; only the plaintext bytes differ (frames are
+/// hints, never a new send path — the send-path audit surface is unchanged).
+async fn prepare_comm_plaintext(
+    conversation_id: String,
+    text: String,
+) -> Result<SignableSummaryDto, AppError> {
+    // `waiting`, so `None` is unreachable on this arm: every "no plan" case
+    // above is an `Err` with its own sentence when the caller has tapped send.
+    let plan = plan_comm(&conversation_id, &text, true)
+        .await?
+        .ok_or_else(|| AppError::msg("this conversation isn't ready to send yet"))?;
+
+    // The re-seal is the LOCAL copy — it never rides the wire, so the preview
+    // does not pay for it and it is built only here.
+    let reseal = encrypt(&x_only_of(&plan.own_address)?, text.as_bytes())
         .map_err(AppError::core)?
         .to_bytes();
 
     let timestamp_ms = now_unix_ms();
     prepare_transport_send(
-        own_address.clone(), // SELF-SEND (D-069): value returns as change — cost = fee
-        floor,
-        wire_bytes,
-        own_address, // source discipline: input[0] + change = the same bound addr
-        priority,
+        plan.own_address.clone(), // SELF-SEND (D-069): value returns as change — cost = fee
+        plan.floor,
+        plan.wire_bytes,
+        plan.own_address, // source discipline: input[0] + change = the same bound addr
+        plan.priority,
         TransportIntent::Comm {
             conversation_id,
-            alias_on_wire: my_alias,
+            alias_on_wire: plan.my_alias,
             reseal,
-            sealed_to: (to_key_branch(bound.0), bound.1),
+            sealed_to: (to_key_branch(plan.bound.0), plan.bound.1),
             timestamp_ms,
-            wire,
+            wire: plan.wire,
         },
         PinPolicy::Default,
     )
     .await
+}
+
+/// **What this exact message would cost, priced by the Generator now** — the
+/// figure that streams above the send button as the user types (founder
+/// ruling, 2026-09-08: *"direct fee estimates where the numbers change the way
+/// it does on the send screen … the fee must be tiny above the send button"*).
+///
+/// It is the send screen's `send_fee_preview` for the messaging lane, and it
+/// keeps that function's whole contract: signerless, stash-free, read-only,
+/// safe to call on every keystroke, and **built rather than estimated** — the
+/// same [`plan_comm`] the prepare runs, priced through the same two-shape
+/// decision (`chain::send::shipped_two_shape`) the ceremony's figure comes
+/// from.
+///
+/// `None` — and the glass shows no figure — whenever no transaction can be
+/// built right now: the bound address has no mature coins yet, the wallet is
+/// below the anti-dust floor, the engine is not up, or the pinned coins are
+/// covenant-fenced. **A missing figure never blocks the send**: the tap falls
+/// through to the confirm ceremony, which states Rust's own reason. A figure
+/// this cannot produce is one the user is not asked to act on.
+pub async fn transport_comm_fee_preview(
+    conversation_id: String,
+    text: String,
+) -> Result<Option<u64>, AppError> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(plan) = plan_comm(&conversation_id, &text, false).await? else {
+        return Ok(None);
+    };
+    let Some(engine) = wallet::engine_handle() else {
+        return Ok(None);
+    };
+    engine
+        .fee_preview_pinned(
+            plan.own_address.clone(),
+            plan.own_address,
+            plan.floor,
+            &plan.priority,
+            Some(plan.wire_bytes),
+            &crate::api::send::spend_exclusions(),
+        )
+        .map_err(AppError::chain)
+}
+
+/// **Does sending a message stop at the confirm sheet?** `true` by default.
+///
+/// The preference behind the founder's *"Turn off signing for messages"*
+/// toggle — see [`kaspaverse_chain::prefs::MessagePrefs`] for what it does and
+/// does not govern (the ceremony, never the signature).
+pub fn transport_message_signing() -> Result<bool, AppError> {
+    let dir = vault::transport_store_dir()?;
+    Ok(MessagePrefs::load(&dir).sign_messages)
+}
+
+/// Set it. Persisted durably, because the safe state is the ceremony and a
+/// torn write may not be able to remove one.
+pub fn transport_set_message_signing(sign_messages: bool) -> Result<(), AppError> {
+    let dir = vault::transport_store_dir()?;
+    MessagePrefs { sign_messages }
+        .save(&dir)
+        .map_err(AppError::chain)?;
+    log::info!(
+        "transport: message confirm ceremony is now {}",
+        if sign_messages { "on" } else { "off" }
+    );
+    Ok(())
+}
+
+/// **Send a message without the confirm sheet** — the whole of what turning
+/// signing off buys, and the only door in this bridge that broadcasts without
+/// one.
+///
+/// Founder ruling, 2026-09-08: *"users who prefer not signing everytime they
+/// want to send a message can absolutely do so."* This is that, built with the
+/// bounds it needs rather than as an exception carved out of the ceremony.
+///
+/// **Every gate is here, in Rust, and none of them is in Dart.** A Dart bug, a
+/// hostile deep link or a future call site cannot reach a ceremony-free
+/// broadcast for anything but a plain message, because there is nothing else
+/// to call:
+///
+/// 1. **The preference must actually be off.** If the user has the ceremony
+///    on, this refuses rather than honouring a caller that skipped it.
+/// 2. **It builds its own intent.** The plaintext goes through
+///    [`prepare_comm_plaintext`], so the kind is `Comm` by construction — a
+///    handshake, an accept (which refunds a counterparty's bond), a stash and
+///    a payment are not expressible here.
+/// 3. **The built chain must be confined to this conversation's own address.**
+///    Every output of every leg is decoded with the pin's own standard script
+///    reader and compared against the bound address read from the store BEFORE
+///    the build (`PreparedSend::pays_only`) — so a chain that paid anybody else
+///    is refused with the money still in the wallet, and a rebinding mid-flight
+///    fails closed. The summary's kind and destination are checked too, but
+///    those are echoes of the intent; this one is the artifact.
+/// 4. **The fee must be under
+///    [`MessagePrefs::UNCEREMONIOUS_FEE_CEILING`].** Above it the caller is
+///    told to use the sheet, and the sheet shows the figure. This is what
+///    keeps the toggle honest on the payload-variable lane — a large
+///    attachment or a chained build costs real money and gets a second look.
+///
+/// A refusal ABANDONS the stash before returning, so nothing is left half-
+/// prepared for a later commit to find.
+pub async fn transport_send_comm_now(
+    conversation_id: String,
+    text: String,
+) -> Result<SendOutcomeDto, AppError> {
+    if text.trim().is_empty() {
+        return Err(AppError::msg("enter a message"));
+    }
+    let dir = vault::transport_store_dir()?;
+    let sign_messages = MessagePrefs::load(&dir).sign_messages;
+    if sign_messages {
+        return Err(AppError::msg(UNCEREMONIOUS_OFF));
+    }
+    // The bound address this conversation's self-send MUST land on, read
+    // before the build so the check below compares against the store's own
+    // answer rather than against the build's. A rebinding mid-flight fails
+    // closed.
+    let expected = {
+        let hub = hub()?;
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        let conversation = store
+            .conversation(&conversation_id)
+            .ok_or_else(|| AppError::msg("conversation not found"))?;
+        vault::wallet_address_at(
+            to_core_branch(conversation.bound_branch),
+            conversation.bound_index,
+        )?
+    };
+
+    let summary = prepare_comm_plaintext(conversation_id, text).await?;
+
+    // ── The gate runs on the BUILT plan, before any broadcast. ────────────
+    //
+    // **The confinement question is asked of the ARTIFACT**, and it is asked
+    // first because it is the strongest thing said here. `summary.kind` and
+    // `summary.destination` are echoes of the intent and of the argument that
+    // built it — real, and they prove the conversation's binding did not move
+    // between the store read and the build — but this is the only broadcast
+    // door in the bridge with no human in it, so the decisive check decodes
+    // the built outputs with the pin's own standard script reader
+    // (`ffi-leak-auditor` BLOCK, this sitting: the doc claimed this check and
+    // the call did not exist).
+    let confined = {
+        let guard = PENDING_TRANSPORT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match guard.as_ref() {
+            Some((stored, prepared)) if *stored == summary.nonce => prepared.pays_only(&expected),
+            // No plan under this nonce is not a pass. Something replaced the
+            // stash between the prepare and here; `transport_commit` would
+            // refuse it too, and refusing now keeps the reason honest.
+            _ => false,
+        }
+    };
+    if !confined {
+        transport_abandon();
+        log::warn!(
+            "transport-send: unceremonious send refused — the built chain has an output this \
+             conversation's own address does not own"
+        );
+        return Err(AppError::msg(UNCEREMONIOUS_NEEDS_CONFIRMING));
+    }
+    if let Some(refusal) = unceremonious_refusal(&summary, &expected.to_string(), sign_messages) {
+        transport_abandon();
+        log::warn!(
+            "transport-send: unceremonious send refused — {}",
+            refusal.why
+        );
+        return Err(AppError::msg(match refusal.kind {
+            // The only refusal that can name a figure, and the figure is the
+            // whole reason it exists.
+            UncerimoniousRefusal::FEE => format!(
+                "this message costs {} KAS — more than messages usually do, so it needs \
+                 confirming",
+                format_kas(summary.fee_sompi)
+            ),
+            _ => refusal.said.to_string(),
+        }));
+    }
+    transport_commit(summary.nonce).await
+}
+
+/// What the caller is told when the preference still says *confirm*. Named,
+/// because Dart matches nothing on it and a human reads it.
+const UNCEREMONIOUS_OFF: &str = "message signing is on — confirm this send on the sheet";
+
+/// The sentence every post-build refusal shares.
+///
+/// **It does not say "use the sheet".** In the only state that produces these,
+/// the user has turned the sheet off — so the caller's job is to open it
+/// anyway, and it does (`thread_screen._send` falls through to the confirm
+/// ceremony on a refusal from this door). A sentence prescribing a control the
+/// user has removed is a dead end (`wallet-security-auditor`, this sitting).
+const UNCEREMONIOUS_NEEDS_CONFIRMING: &str = "this send needs confirming";
+
+/// Why an unceremonious send was refused, and what to say about it.
+struct UncerimoniousRefusal {
+    /// The log line — diagnostic, never user-facing, never content.
+    why: &'static str,
+    /// The sentence the user reads, unless the caller substitutes a figure.
+    said: &'static str,
+    /// Which arm fired, so the caller can decide to say more.
+    kind: u8,
+}
+
+impl UncerimoniousRefusal {
+    const PREFERENCE: u8 = 0;
+    const KIND: u8 = 1;
+    const DESTINATION: u8 = 2;
+    const FEE: u8 = 3;
+}
+
+/// **The intent-level half of the gate on the only ceremony-free broadcast
+/// door, as a pure function** — so all four arms are exercised rather than
+/// asserted about.
+///
+/// **What this proves, stated exactly**, because the difference matters:
+/// `summary.kind` is `kind_of_intent`'s answer and `summary.destination` is
+/// the address handed to the build echoed back, so those two arms prove the
+/// intent was a comm and that the conversation's binding did not move between
+/// the store read and the build. They do **not** read the built outputs.
+/// `summary.fee_sompi` IS a built figure — the Generator's aggregate, so a
+/// chained build is priced whole rather than one leg at a time.
+///
+/// The artifact-level half runs at the call site and runs FIRST:
+/// `PreparedSend::pays_only` decodes every output of every built leg
+/// (`ffi-leak-auditor` · `consensus-auditor`, this sitting).
+///
+/// `None` means every bound holds and the plan may be committed.
+fn unceremonious_refusal(
+    summary: &SignableSummaryDto,
+    expected: &str,
+    sign_messages: bool,
+) -> Option<UncerimoniousRefusal> {
+    // 1. The preference must actually be off. A caller that skipped it is a
+    //    bug, and it is refused rather than honoured.
+    if sign_messages {
+        return Some(UncerimoniousRefusal {
+            why: "the preference still says confirm",
+            said: UNCEREMONIOUS_OFF,
+            kind: UncerimoniousRefusal::PREFERENCE,
+        });
+    }
+    // 2. A comm is a self-send frame. A bond, a refund and a payment are all
+    //    other kinds and none of them may pass here.
+    if summary.kind != SignableKind::SelfSendFrame {
+        return Some(UncerimoniousRefusal {
+            why: "the built transaction is not a self-send frame",
+            said: UNCEREMONIOUS_NEEDS_CONFIRMING,
+            kind: UncerimoniousRefusal::KIND,
+        });
+    }
+    // 3. And it pays THIS conversation's own bound address. A build that paid
+    //    anybody else is refused with the money still in the wallet.
+    if summary.destination != expected {
+        return Some(UncerimoniousRefusal {
+            why: "the built transaction pays an address that is not this conversation's own",
+            said: UNCEREMONIOUS_NEEDS_CONFIRMING,
+            kind: UncerimoniousRefusal::DESTINATION,
+        });
+    }
+    // 4. The ceiling. `fee_sompi` is the Generator's AGGREGATE fee, so a
+    //    chained build is priced whole rather than one leg at a time.
+    if summary.fee_sompi > MessagePrefs::UNCEREMONIOUS_FEE_CEILING {
+        return Some(UncerimoniousRefusal {
+            why: "the fee is above the unceremonious ceiling",
+            said: UNCEREMONIOUS_NEEDS_CONFIRMING,
+            kind: UncerimoniousRefusal::FEE,
+        });
+    }
+    None
 }
 
 /// Phase 1 — compose a `kv:1:challenge` (Attack & Defend) as a self-send comm.
@@ -5623,9 +6046,10 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 // Re-stamp establishment on OUR clock at the moment the
                 // conversation actually becomes one.
                 //
-                // `created_unix_ms` now ORDERS things — `superseded_by` uses
-                // it to decide which of two threads with one contact is live,
-                // and a losing thread is refused. Until this line the value on
+                // `created_unix_ms` ORDERS things — it is a tiebreak in
+                // `TransportStore::merge_contact`'s host rank, deciding which
+                // of two rows for one contact keeps its identity when they
+                // fold. Until this line the value on
                 // an inbound row came from `block_time_ms` at fold, which on
                 // the fill lane is an INDEXER's claim (`transport.rs`'s fill
                 // rows pass the indexer's `block_time` straight through). The
@@ -5641,18 +6065,22 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 // ordering**: this stamp makes a freshly-accepted row the newest
                 // Active one for its contact, which is correct only because that
                 // function looks for a live thread BEFORE it offers an
-                // invitation. Reverting either one alone re-opens the case where
-                // accepting a stale invitation supersedes a working thread.
+                // invitation.
                 //
                 // **Monotone within its comparison set, not merely "now".** A
                 // device clock correction backwards between two establishments
-                // with one contact would otherwise invert the comparison, and
-                // `superseded_by` would refuse the live thread and route the
-                // user into the dead one with full confidence — the original
-                // bug, endorsed by the fix for it (`consensus-auditor`,
-                // 2026-08-17). Stepping past the newest Active row for this
-                // same contact costs nothing when the clock is sane and is the
-                // whole guarantee when it is not.
+                // with one contact would otherwise invert the comparison. The
+                // rule that read it used to be `superseded_by`, which would
+                // then refuse the live thread and route the user into the dead
+                // one with full confidence — the original bug, endorsed by the
+                // fix for it (`consensus-auditor`, 2026-08-17). That rule was
+                // removed with D-305's repair wave, and the monotonicity is
+                // kept rather than dropped with it: `merge_contact` now reads
+                // the same field to pick which of two folding rows is the
+                // host, so an inverted comparison would choose the wrong
+                // identity to keep. Stepping past the newest Active row for
+                // this same contact costs nothing when the clock is sane and
+                // is the whole guarantee when it is not.
                 let newest_for_contact = store
                     .conversations_for_contact_address(&conversation.contact_address)
                     .into_iter()
@@ -5769,15 +6197,17 @@ pub fn transport_abandon() {
 /// Is this invitation one the user could still Accept — and therefore one no
 /// other gesture may quietly step around?
 ///
-/// **Three gates asked this question and two of them asked it differently.**
-/// `transport_existing_conversation` routes to Accept, `transport_prepare_handshake`
-/// refuses a second bond because Accept is available, and `transport_start_over`
-/// must not destroy history for a request that Accept would answer. When the
-/// spend gate tightened to an allowlist (`accept_provenance_ok`) and these did
-/// not, the app could refuse a handshake saying "accept their invitation
-/// instead" while Accept refused saying "your node has no record of this" —
-/// two contradictory refusals and an unreachable address (INV-6,
-/// `wallet-security-auditor`, 2026-08-17).
+/// **Gates asked this question and asked it differently.**
+/// `transport_existing_conversation` routes to Accept and
+/// `transport_prepare_handshake` refuses a second bond because Accept is
+/// available. (A third, `transport_start_over`, also had to not destroy
+/// history for a request Accept would answer; it was removed with D-305's
+/// repair wave, and this predicate is unchanged by that — the two remaining
+/// callers are why it exists.) When the spend gate tightened to an allowlist
+/// (`accept_provenance_ok`) and these did not, the app could refuse a
+/// handshake saying "accept their invitation instead" while Accept refused
+/// saying "your node has no record of this" — two contradictory refusals and
+/// an unreachable address (INV-6, `wallet-security-auditor`, 2026-08-17).
 ///
 /// `handshake_txid` presence is implied: `accept_provenance_ok` needs the row
 /// it names.
@@ -5866,7 +6296,187 @@ pub(crate) fn drain_exclusions() -> Result<Vec<Address>, AppError> {
         .collect()
 }
 
+/// **The read marks, seeded once on the build that introduces them.**
+///
+/// An upgrade must not invent unread messages. Every conversation on this
+/// device predates the feature and has already been read *on this device*, so
+/// the first pull with no `read.marks` file writes a mark at each thread's
+/// newest inbound row and reports nothing unread. Only genuinely new arrivals
+/// count after that.
+///
+/// The seed is keyed on the FILE being unusable, not on a conversation's mark
+/// being absent — a per-conversation fallback would silently swallow the first
+/// message of every new contact, which is the one message a count exists to
+/// announce.
+///
+/// A failed write is not a failed pull: the marks are re-seeded next time and
+/// the list still renders, so this returns the marks either way.
+fn read_marks(store: &TransportStore) -> ReadMarks {
+    let Some(dir) = vault::transport_store_dir().ok() else {
+        return ReadMarks::default();
+    };
+    // **Absent OR unreadable**, not merely absent: a torn write must re-seed
+    // rather than leave every thread on the device reading as unread
+    // (`consensus-auditor`, this sitting).
+    if let Some(marks) = ReadMarks::read(&dir) {
+        return marks;
+    }
+    let mut marks = ReadMarks::default();
+    for conversation in store.list_conversations() {
+        if let Some(newest) = store.newest_inbound(&conversation.conversation_id) {
+            marks.advance(&conversation.conversation_id, newest.unix_ms, &newest.txid);
+        }
+    }
+    log::info!(
+        "transport: seeded read marks for {} conversation(s) on first use",
+        marks.marks.len()
+    );
+    if let Err(e) = marks.save(&dir) {
+        log::warn!("transport: could not persist the seeded read marks ({e})");
+    }
+    marks
+}
+
+/// **Everything inbound in this conversation has now been seen.**
+///
+/// Called by the open thread — on its first frame with rows, and on each new
+/// arrival while it is visible. **Never by the list**, which draws a row
+/// without showing what is in it.
+///
+/// Idempotent and forward-only ([`ReadMarks::advance`]): a stale pull, a
+/// re-entered thread or an out-of-order ping can only re-assert a mark, never
+/// rewind one and bring back a count the user has already cleared.
+///
+/// Returns whether the mark actually moved, so a caller can skip a re-pull it
+/// does not need. The list is pinged when it did, because that is the moment
+/// a badge disappears.
+pub fn transport_mark_read(conversation_id: String) -> Result<bool, AppError> {
+    let hub = hub()?;
+    let dir = vault::transport_store_dir()?;
+    let newest = {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store
+            .newest_inbound(&conversation_id)
+            .map(|m| (m.unix_ms, m.txid.clone()))
+    };
+    // Nothing inbound is nothing to mark, and writing a mark anyway would
+    // stamp a thread the counterparty has never written in.
+    let Some((unix_ms, txid)) = newest else {
+        return Ok(false);
+    };
+    let mut marks = ReadMarks::load(&dir);
+    if !marks.advance(&conversation_id, unix_ms, &txid) {
+        return Ok(false);
+    }
+    marks.save(&dir).map_err(AppError::chain)?;
+    ping(&conversation_id);
+    Ok(true)
+}
+
+/// **How much decrypted text one conversation row may carry.**
+///
+/// A CUSTODY bound, not a layout one — how much plaintext leaves the vault per
+/// row on a list refresh. The widest single column this app renders is the
+/// unfolded tablet's 700 dp (`R3`), which holds about 107 characters of the
+/// preview's 13 px Jakarta; this clears that with room, so the `…` a user
+/// actually sees is always the widget's own ellipsis against the real frame
+/// and never a Rust truncation pretending to be one.
+const PREVIEW_CHARS: usize = 120;
+
+/// **One conversation's last line, opened and bounded** (D-303).
+///
+/// The whole decrypt-on-view discipline of [`thread_row`], for one row, with
+/// everything a list cannot use left sealed: no frame fields, no attachment
+/// bytes, no per-row `AttachmentDto`. What comes back is a single line already
+/// safe to draw.
+///
+/// Every branch is a DECIDED answer rather than a default, because a list row
+/// falling through to an empty string is indistinguishable from a message that
+/// says nothing:
+///
+///  - a handshake or legacy row ⇒ `None`, and the row draws the state it drew
+///    before previews existed (*Wants to connect*, *Awaiting their accept*).
+///    Those sentences already exist on the glass and in one place; minting a
+///    second set here would be two copies of one string;
+///  - a file ⇒ the noun the thread's own card uses, never the JSON body;
+///  - a `kv:1:` frame ⇒ its generated human line, which is what the bubble
+///    shows too;
+///  - an envelope no key opens ⇒ *Encrypted message*, which is the truth;
+///  - a locked vault ⇒ `None` for every row, so the list still renders.
+///
+/// **Whitespace-collapsed before it is cut.** A message may be many lines, and
+/// a raw newline inside a single-line `Text` forges structure into the row —
+/// the same reasoning `sanitize_name` applies to a name the user types.
+fn preview_line(hub: &TransportHub, bound: KeySlot, record: &MessageRecord) -> Option<String> {
+    if record.kind != StoredKind::Comm {
+        return None;
+    }
+    let envelope = Envelope::from_bytes(&record.envelope).ok()?;
+    let slot = record
+        .sealed_to
+        .map(|(b, i)| (to_core_branch(b), i))
+        .unwrap_or(bound);
+    let plaintext = match open_with_fallback(hub, slot, &envelope) {
+        Ok(plaintext) => plaintext,
+        // A locked vault is not a broken row: the list shows state lines until
+        // it is unlocked, exactly as it did before this field existed.
+        Err(CoreError::VaultLocked) => return None,
+        Err(_) => return Some("Encrypted message".to_string()),
+    };
+    let body = String::from_utf8_lossy(&plaintext).into_owned();
+    // A file body is the WHOLE plaintext, so it is tested before the frame
+    // split — otherwise a row previews a wall of base64.
+    // Named `preview`, not `line`: the tripwire above matches on identifier,
+    // and a plaintext-bearing local wants a name the guard can see.
+    let preview = match Attachment::parse(&body) {
+        Some(Ok(file)) => file.kind.as_token().to_string(),
+        Some(Err(_)) => "Attachment".to_string(),
+        None => split_frame(&body).0,
+    };
+    bound_preview(&preview)
+}
+
+/// Collapse a message body to ONE bounded display line.
+///
+/// Pure, so the shaping is testable without a vault: the decrypt above is the
+/// part that needs one, and this is the part that has to be right about a
+/// counterparty's bytes.
+///
+/// **Whitespace-collapsed before it is cut.** A message may be many lines, and
+/// a raw newline inside a single-line `Text` forges structure into the row —
+/// the same reasoning `sanitize_name` applies to a name the user types. It
+/// also folds the runs of spaces a padded body would otherwise spend the
+/// whole budget on.
+///
+/// **Cut char-wise, never byte-wise**: a slice inside a UTF-8 code point is a
+/// panic, and this is the one path that carries a stranger's text.
+///
+/// `None` for a body that is nothing but whitespace — the row then shows its
+/// state rather than a blank second line pretending to be a message.
+fn bound_preview(line: &str) -> Option<String> {
+    let collapsed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(if collapsed.chars().count() > PREVIEW_CHARS {
+        collapsed.chars().take(PREVIEW_CHARS).collect::<String>() + "…"
+    } else {
+        collapsed
+    })
+}
+
 /// All conversations, most recently active first.
+///
+/// **This is the one function on this bridge that returns decrypted user
+/// content for rows the user is not looking at** ([`ConversationDto::preview`]
+/// — D-303 rules the feature; `wallet-security-auditor` returned CONCERNS on
+/// this shape 2026-09-08 and every finding was taken here or in the caller).
+/// The custody rules that follow from it: the plaintext is bounded per row
+/// ([`PREVIEW_CHARS`]), it is never logged (see this DTO's hand-written
+/// `Debug`), it is not produced at all while the vault is locked, and the
+/// caller **drops it when the vault locks** — `MessagingService.dropDecrypted`,
+/// driven from the shell's own leave-home transition, because the list that
+/// holds these lines is an app-lifetime singleton no screen owns.
 pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
     let hub = hub()?;
     let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -5876,6 +6486,10 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
     let names = vault::transport_store_dir()
         .map(|dir| kaspaverse_chain::ContactNames::load(&dir))
         .unwrap_or_default();
+    let marks = read_marks(&store);
+    // One pass over every stored row for both of `M1`'s answers, rather than
+    // `messages_for` once per listed conversation.
+    let mut tails = store.conversation_tails(&marks);
     Ok(store
         .list_conversations()
         .into_iter()
@@ -5895,7 +6509,19 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
                 .get(&c.contact_address)
                 .map(kaspaverse_chain::sanitize_name)
                 .filter(|n| !n.is_empty()),
-            superseded: store.superseded_by(&c.conversation_id).is_some(),
+            preview: tails
+                .get(&c.conversation_id)
+                .and_then(|tail| tail.newest.as_ref())
+                .and_then(|newest| {
+                    preview_line(
+                        &hub,
+                        (to_core_branch(c.bound_branch), c.bound_index),
+                        newest,
+                    )
+                }),
+            unread: tails
+                .remove(&c.conversation_id)
+                .map_or(0, |tail| tail.unread),
             conversation_id: c.conversation_id,
             contact_address: c.contact_address,
             my_alias: c.my_alias,
@@ -6089,151 +6715,6 @@ pub struct WipeReportDto {
 #[flutter_rust_bridge::frb(sync)]
 pub fn transport_handshake_bond_sompi() -> u64 {
     HANDSHAKE_BOND_SOMPI
-}
-
-/// Retire every live conversation with one contact, so a fresh contact request
-/// to them can be minted. The per-contact exit (INV-6).
-///
-/// **One operation, because two were worse than none.** The gesture is
-/// "hide the broken thread, then invite them again", and doing that from Dart
-/// as two calls half-applies in exactly the case it exists for: with TWO live
-/// conversations against one address — the situation this whole change is
-/// about — hiding one leaves the other `Active`, and
-/// [`transport_prepare_handshake`] then refuses, having already destroyed the
-/// first thread's messages. The user loses history and sends nothing
-/// (`consensus-auditor`, 2026-08-17). Retiring them ALL first makes the
-/// following prepare succeed by construction.
-///
-/// **Tombstone, never delete.** Every row keeps the counterparty's alias, so
-/// if they write to an old thread it comes back with its binding intact — the
-/// July regression is not re-opened here.
-///
-/// **Messages ARE destroyed**, the same purge [`transport_hide_conversation`]
-/// performs, because that is what hiding a thread means in this app. The
-/// caller's copy must say so.
-///
-/// **`Active` rows only.** An unaccepted invitation is deliberately untouched:
-/// hiding one is permanent (`may_unhide` refuses `PendingInbound`), and it is
-/// the only route to refunding the 0.2 KAS bond the counterparty already paid.
-/// Retiring it to send our own handshake would spend 0.2 KAS of ours to strand
-/// 0.2 KAS of theirs.
-///
-/// **Deliberately does NOT call `transport_abandon`, unlike the total wipe.**
-/// The wipe must, because its Handshake arm would upsert a prepare-time
-/// snapshot into an emptied store and mint back a conversation the user
-/// erased. Here it cannot: `PENDING_INTENT` is a single slot, a staged
-/// handshake to this same contact cannot coexist with this call's own
-/// invitation/Active preconditions, and a staged Comm confirm writes a NEW
-/// message row rather than restoring an erased one.
-///
-/// Returns what was retired AND whether the catch-up floor is durable. That
-/// last flag is not decoration: this sheet promises "the messages do not [come
-/// back]", and without a persisted floor an opt-in history catch-up can hand
-/// them back. Zero conversations is a success — there was nothing live to
-/// retire, and the caller may go straight to the handshake.
-pub fn transport_start_over(contact_address: String) -> Result<WipeReportDto, AppError> {
-    let dest = validate_mainnet_address(&contact_address)?;
-    let hub = hub()?;
-
-    // ONE set, computed ONCE, under a lock held across the whole operation.
-    //
-    // This read the set, dropped the lock to seal, and re-derived it — and the
-    // gap was two file operations wide, one of them an fsync. A conversation
-    // turning `Active` inside it (an inbound comm firing `unhide_on_inbound`,
-    // an accept completing) landed in the retire set but never in the floored
-    // set: its messages destroyed, its comm cursor untouched, and the next fill
-    // handing that history back from a third-party indexer (INV-8). The
-    // function exists BECAUSE doing this in two steps half-applies, and it was
-    // reproducing that internally (`consensus-auditor`, 2026-08-17, round 5).
-    //
-    // Lock order is `store` then `ERASE_GATE`, which is the only ordering
-    // anywhere in this file — nothing takes the store while holding the gate,
-    // so this cannot deadlock. `seal_erasure` is sync, so no `.await` crosses
-    // the guard (L7).
-    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-
-    let rows: Vec<ConversationRecord> = store
-        .conversations_for_contact_address(&dest.to_string())
-        .into_iter()
-        .cloned()
-        .collect();
-
-    // REFUSE BEFORE DESTROYING, not after.
-    //
-    // The handshake that follows this call refuses when an acceptable
-    // invitation from the same contact exists — and by then we would have
-    // purged the messages and tombstoned the threads for a request that never
-    // went out. That is the exact scenario the feature exists for (they wiped,
-    // re-handshaked, and an invitation now sits beside a stale Active row), so
-    // it is not a corner (`wallet-security-auditor`, 2026-08-17). Same sentence
-    // as the prepare's, because it is the same fact.
-    if rows.iter().any(|c| invitation_is_acceptable(&store, c)) {
-        return Err(AppError::msg(
-            "this address already invited you — accept their invitation instead. \
-             That returns the bond they paid and opens the conversation; sending \
-             your own would spend a second one. If you would rather not, \
-             long-press the request and hide it first.",
-        ));
-    }
-
-    let targets: Vec<String> = rows
-        .iter()
-        .filter(|c| c.status == ConversationStatus::Active)
-        .filter(|c| !store.is_conversation_tombstoned(&c.conversation_id))
-        .map(|c| c.conversation_id.clone())
-        .collect();
-
-    // This purges messages, so it is a content destruction like the other two
-    // and seals the same way — otherwise an in-flight fill re-folds the very
-    // history we retire, and `unhide_on_inbound` brings the dead thread back.
-    // No global floor: only these conversations' comm cursors move, because a
-    // start-over is a statement about one contact, and raising the global floor
-    // would stop catch-up for every other conversation the user still wants.
-    let floor_persisted = seal_erasure(|cursors| {
-        let floor = now_unix_ms();
-        for id in &targets {
-            let entry = cursors.comms.entry(id.clone()).or_default();
-            *entry = (*entry).max(floor);
-        }
-    });
-
-    let mut purged = 0usize;
-    for conversation_id in &targets {
-        let txids: Vec<String> = store
-            .messages_for(conversation_id)
-            .into_iter()
-            .map(|m| m.txid)
-            .collect();
-        for txid in txids {
-            // Counted, and a write failure stops the whole call — the same
-            // honesty `transport_clear_messages` owes, for the same reason:
-            // the caller renders this number as "messages deleted".
-            store.remove_message(&txid).map_err(AppError::chain)?;
-            purged += 1;
-        }
-        store
-            .tombstone_conversation(conversation_id)
-            .map_err(AppError::chain)?;
-    }
-    drop(store);
-
-    log::info!(
-        "transport-start-over: {} live conversation(s) retired for one contact, \
-         {purged} message row(s) purged, floor_persisted={floor_persisted}",
-        targets.len()
-    );
-    for conversation_id in &targets {
-        ping(conversation_id);
-    }
-    Ok(WipeReportDto {
-        conversations: u32::try_from(targets.len()).unwrap_or(u32::MAX),
-        messages: u32::try_from(purged).unwrap_or(u32::MAX),
-        side_files_cleared: 0,
-        // Active rows only — start-over refuses outright when an acceptable
-        // invitation exists, so none is ever destroyed here.
-        pending_bonds: 0,
-        floor_persisted,
-    })
 }
 
 /// What [`transport_wipe_all`] would destroy, without destroying it.
@@ -6824,6 +7305,171 @@ fn to_dto(event: TransportEvent) -> TransportEventDto {
 mod tests {
     use super::*;
 
+    /// The row's second line is shaped for a list, not for a thread: one
+    /// line, bounded, and never blank where a message exists.
+    #[test]
+    fn a_preview_is_one_collapsed_line_inside_the_custody_bound() {
+        assert_eq!(
+            bound_preview("Got it, thank you — confirmed on my side"),
+            Some("Got it, thank you — confirmed on my side".to_string())
+        );
+        // A multi-line message cannot forge a second row.
+        assert_eq!(
+            bound_preview("first line\nsecond line"),
+            Some("first line second line".to_string())
+        );
+        // Runs of padding do not get to spend the budget.
+        assert_eq!(
+            bound_preview("   spaced   out   "),
+            Some("spaced out".to_string())
+        );
+        // Whitespace alone is no news at all — the row shows its state.
+        assert!(bound_preview("").is_none());
+        assert!(bound_preview("  \n\t ").is_none());
+
+        // The bound holds, and the marker says it was cut.
+        let long = "x".repeat(PREVIEW_CHARS + 40);
+        let cut = bound_preview(&long).expect("a long body still previews");
+        assert_eq!(cut.chars().count(), PREVIEW_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        // Exactly at the bound is NOT cut — an off-by-one here would put an
+        // ellipsis on a message that fits.
+        let exact = "y".repeat(PREVIEW_CHARS);
+        assert_eq!(bound_preview(&exact), Some(exact));
+    }
+
+    /// The cut is char-wise. A byte-wise slice of a multi-byte body panics,
+    /// and the bodies here are written by strangers.
+    #[test]
+    fn a_preview_never_cuts_inside_a_code_point() {
+        // Emoji are 4 bytes each: a byte-wise take would land mid-sequence.
+        let body = "🙂".repeat(PREVIEW_CHARS + 10);
+        let cut = bound_preview(&body).expect("previewed");
+        assert_eq!(cut.chars().count(), PREVIEW_CHARS + 1);
+        assert!(cut.starts_with('🙂'));
+        // And a body whose characters are wider than one byte still counts in
+        // characters, not bytes — otherwise a Japanese message would be cut to
+        // a third of a Latin one.
+        let jp = "あ".repeat(40);
+        assert_eq!(bound_preview(&jp), Some(jp));
+    }
+
+    /// **All four arms of the only ceremony-free broadcast door.**
+    ///
+    /// This is the gate that stands where a confirm sheet used to, so each arm
+    /// is exercised rather than asserted about — the checklist's own point: an
+    /// untested refusal is a refusal nobody has seen fire.
+    #[test]
+    fn the_unceremonious_gate_refuses_every_way_it_can() {
+        let own = "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf";
+        let other = "kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr";
+        let plan = |kind: SignableKind, destination: &str, fee: u64| SignableSummaryDto {
+            nonce: 1,
+            kind,
+            destination: destination.to_string(),
+            amount_sompi: 20_000,
+            fee_sompi: fee,
+            total_sompi: 20_000 + fee,
+            mass: 2036,
+            tx_count: 1,
+            utxo_count: 1,
+            resulting_coins: 0,
+            payload_len: Some(214),
+            payload_kind: Some("comm".to_string()),
+            fee_strategy: crate::api::send::FeeStrategyKind::SenderPays,
+            priority_fee_sompi: 0,
+            typical_amount_sompi: None,
+            typical_now_utxos: None,
+            typical_now_fee_sompi: None,
+            typical_after_fee_sompi: None,
+        };
+        let ok = plan(SignableKind::SelfSendFrame, own, 14_300);
+
+        // The whole point: an ordinary message, with the preference off, goes.
+        assert!(unceremonious_refusal(&ok, own, false).is_none());
+
+        // 1. The preference still says confirm — refused even though the plan
+        //    is otherwise perfect. A caller that skipped the sheet is a bug.
+        assert_eq!(
+            unceremonious_refusal(&ok, own, true).map(|r| r.kind),
+            Some(UncerimoniousRefusal::PREFERENCE)
+        );
+
+        // 2. Not a self-send frame. A bond, a refund and a payment all land
+        //    here — the acceptance especially, which moves a counterparty's
+        //    money and must never leave without being confirmed.
+        for kind in [
+            SignableKind::Bond,
+            SignableKind::BondRefund,
+            SignableKind::Payment,
+            SignableKind::Bcast,
+        ] {
+            assert_eq!(
+                unceremonious_refusal(&plan(kind, own, 14_300), own, false).map(|r| r.kind),
+                Some(UncerimoniousRefusal::KIND),
+                "{kind:?} must never send without confirming"
+            );
+        }
+
+        // 3. Built to pay somebody who is not this conversation's own bound
+        //    address — refused with the money still in the wallet.
+        assert_eq!(
+            unceremonious_refusal(
+                &plan(SignableKind::SelfSendFrame, other, 14_300),
+                own,
+                false
+            )
+            .map(|r| r.kind),
+            Some(UncerimoniousRefusal::DESTINATION)
+        );
+
+        // 4. The ceiling, on both sides of it. AT the ceiling still passes —
+        //    the bound is "more than", and an off-by-one here would refuse a
+        //    send the constant says is fine.
+        let ceiling = MessagePrefs::UNCEREMONIOUS_FEE_CEILING;
+        assert!(unceremonious_refusal(
+            &plan(SignableKind::SelfSendFrame, own, ceiling),
+            own,
+            false
+        )
+        .is_none());
+        assert_eq!(
+            unceremonious_refusal(
+                &plan(SignableKind::SelfSendFrame, own, ceiling + 1),
+                own,
+                false
+            )
+            .map(|r| r.kind),
+            Some(UncerimoniousRefusal::FEE)
+        );
+    }
+
+    /// No refusal from this door may prescribe the sheet the user has turned
+    /// off — the caller opens it instead (`thread_screen._send`).
+    #[test]
+    fn a_post_build_refusal_never_prescribes_a_control_the_user_removed() {
+        assert!(!UNCEREMONIOUS_NEEDS_CONFIRMING.contains("sheet"));
+        // The preference arm MAY name it: in that state the sheet is on.
+        assert!(UNCEREMONIOUS_OFF.contains("sheet"));
+    }
+
+    /// The one bound the founder's toggle rests on: with the confirm sheet
+    /// off, the ceiling has to print as a figure the refusal can say out loud.
+    ///
+    /// The two INEQUALITIES that place it — above an ordinary message's fee
+    /// and an order of magnitude under the handshake bond — are `const`
+    /// assertions beside the constant itself, where they fail at compile time
+    /// rather than in a test run (a runtime `assert!` over two constants is
+    /// also what clippy's `assertions_on_constants` objects to, correctly:
+    /// nothing about it needs a test binary).
+    #[test]
+    fn the_unceremonious_ceiling_prints_as_a_figure_a_refusal_can_state() {
+        assert_eq!(
+            format_kas(MessagePrefs::UNCEREMONIOUS_FEE_CEILING),
+            "0.00100000"
+        );
+    }
+
     /// A block header timestamp is whatever the answering node said, and
     /// nothing upstream bounds it. Dart's `DateTime.fromMillisecondsSinceEpoch`
     /// THROWS outside 100,000,000 days either side of the epoch, and the
@@ -7244,7 +7890,15 @@ mod tests {
             "the scanner found only {} log calls — it has stopped matching",
             calls.len()
         );
-        const CONTENT: [&str; 3] = ["text", "plaintext", "body"];
+        // WIDENED AGAIN (`ffi-leak-auditor`, 2026-09-08): `preview` is a
+        // plaintext-bearing name this module did not have until D-303, and it
+        // is now a FIELD that crosses the FFI — so the guard has to know the
+        // word or a future `log::warn!("preview {preview}")` walks past it.
+        // Checked before adding: no existing log line in this module contains
+        // a whole-word `preview` (`wipe_preview` and `fee_preview_pinned` are
+        // `_`-joined and fail the boundary test), so this is a widening with
+        // no false positives.
+        const CONTENT: [&str; 4] = ["text", "plaintext", "body", "preview"];
         // WIDENED (`ffi-leak-auditor`, 2026-08-17). The original words caught
         // message BODIES and nothing else, while §4's discipline is that
         // identities stay out of logcat too — an address ties the device to an

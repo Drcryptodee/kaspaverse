@@ -23,6 +23,7 @@ class AppShell extends StatefulWidget {
     required this.onboarding,
     required this.locked,
     required this.home,
+    this.onLeftHome,
   });
 
   final ValueListenable<vault_api.VaultStatus?> status;
@@ -30,6 +31,14 @@ class AppShell extends StatefulWidget {
   final Widget onboarding;
   final Widget locked;
   final Widget home;
+
+  /// **Fired the moment the shell leaves `home`** — a background lock, a
+  /// manual lock, a wipe. Injected rather than reached for, so the shell keeps
+  /// no service dependency and the routing stays testable without one.
+  ///
+  /// Its one production job is dropping decrypted content that outlives a
+  /// screen: `MessagingService.dropDecrypted` (see [_AppShellState._onStatusChanged]).
+  final VoidCallback? onLeftHome;
 
   /// Stable key per shell state — drives the cross-fade and is the testable
   /// name of the routing decision.
@@ -65,9 +74,17 @@ class _AppShellState extends State<AppShell> {
   /// so the locked surface is actually shown, never hidden behind a stale
   /// money screen. The vault already refuses operations while locked; this makes
   /// the UI tell the truth (the founder's device find, 2026-06-15).
+  ///
+  /// **And drop the decrypted message previews with it.** Since D-303 the
+  /// conversation list carries one decrypted line per thread, held in an
+  /// app-lifetime singleton no screen owns — so popping the routes hides it
+  /// without discarding it, and BG-13 says a lock is a discard
+  /// (`wallet-security-auditor`, 2026-09-08). Rust drops its keys here; this
+  /// is the Dart half of the same drop.
   void _onStatusChanged() {
     final key = AppShell.routeKey(widget.status.value);
     if (key != 'home' && _lastKey == 'home') {
+      widget.onLeftHome?.call();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           Navigator.maybeOf(context)?.popUntil((route) => route.isFirst);

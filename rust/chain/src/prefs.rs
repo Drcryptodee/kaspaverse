@@ -37,6 +37,7 @@ use crate::history_fill::write_json_durable;
 
 const EXPLORER_CONFIG_FILE: &str = "explorer.config";
 const RATE_CONFIG_FILE: &str = "rate.config";
+const MESSAGE_PREFS_FILE: &str = "message.prefs";
 
 /// The placeholder a transaction template must carry.
 pub const TXID_PLACEHOLDER: &str = "{txid}";
@@ -451,9 +452,136 @@ fn check_price(price: f64) -> Result<f64> {
     Ok(price)
 }
 
+// ── Messages ───────────────────────────────────────────────────────────────
+
+/// **Whether sending a message stops for the confirm ceremony.**
+///
+/// Founder ruling, 2026-09-08: *"to send the message requires signing by
+/// default, but on the sending sheet for messaging, there is a toggle that
+/// says something like 'Turn off signing for messages', so that users who
+/// prefer not signing everytime they want to send a message can absolutely do
+/// so."*
+///
+/// **What it turns off is the CEREMONY, never the signature.** Cryptographic
+/// signing happens in Rust, behind the vault, for every transaction this
+/// wallet broadcasts, and no preference reaches it (INV-2). What this flag
+/// governs is the hold-to-confirm sheet that stands between *prepare* and
+/// *commit* — the disclosure step. Turned off, a message sends on the tap, for
+/// the fee already on the glass above the send button.
+///
+/// **Scoped in Rust, not in Dart.** The bridge's only unceremonious door
+/// (`transport_send_comm_now`) refuses anything that is not a comm-class
+/// self-send to the conversation's own bound address, and refuses a fee above
+/// [`MessagePrefs::UNCEREMONIOUS_FEE_CEILING`]. A handshake, an accept, a
+/// stash and a payment are all unreachable from it whatever this flag says.
+///
+/// **Default ON**, and the write is durable for the same reason
+/// [`RateConfig::save`]'s is, with the sign the same way round: the safe state
+/// is the ceremony, so a truncated write must not be able to turn it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessagePrefs {
+    /// `true` (the default) ⇒ every message send stops at the confirm sheet.
+    pub sign_messages: bool,
+}
+
+impl Default for MessagePrefs {
+    fn default() -> Self {
+        Self {
+            sign_messages: true,
+        }
+    }
+}
+
+impl MessagePrefs {
+    /// The most a message may cost and still send without the sheet.
+    ///
+    /// **0.001 KAS.** A plain message on this wallet prices in the
+    /// 0.0001–0.0003 KAS band — the anti-dust floor plus the payload's mass —
+    /// so this sits roughly an order of magnitude above an ordinary send and
+    /// well under anything a user would want to spend unasked. Above it the
+    /// ceremony appears with the figure, whatever the preference says: the
+    /// cases that reach here are the ones worth a second look — a large
+    /// attachment, a chained transaction, a fragmented coin shape, or a fee
+    /// regime this build has never seen.
+    ///
+    /// It bounds the ONE thing turning the sheet off gives up, which is a
+    /// second chance to see the price. The live figure above the send button
+    /// is the first.
+    pub const UNCEREMONIOUS_FEE_CEILING: u64 = 100_000;
+
+    /// Where the ceiling sits, checked by the COMPILER rather than by a test
+    /// run — a bound between two constants has nothing to observe at runtime,
+    /// and stated here it cannot be moved without the placement being
+    /// re-argued in the same edit.
+    ///
+    /// Above an ordinary message (0.0001–0.0003 KAS = 10_000–30_000 sompi —
+    /// an empirical band, so correctly a literal), and an order of magnitude
+    /// under the handshake bond, which is the smallest spend this app ever
+    /// asks a user to confirm. **The bond is NAMED, never copied**: hardcoding
+    /// its present value would let the bond move while this assertion still
+    /// passed and the stated relationship silently broke (`consensus-auditor`,
+    /// this sitting).
+    const _CEILING_CLEARS_A_MESSAGE: () = assert!(Self::UNCEREMONIOUS_FEE_CEILING > 30_000);
+    const _CEILING_IS_UNDER_A_BOND: () =
+        assert!(Self::UNCEREMONIOUS_FEE_CEILING < crate::transport::HANDSHAKE_BOND_SOMPI / 10);
+
+    /// Infallible: an absent or unreadable file is the default, which is the
+    /// ceremony ON. A user who cannot be asked is asked.
+    pub fn load(dir: &Path) -> Self {
+        let Ok(bytes) = std::fs::read(dir.join(MESSAGE_PREFS_FILE)) else {
+            return Self::default();
+        };
+        serde_json::from_slice::<Self>(&bytes).unwrap_or_else(|_| {
+            log::warn!(
+                "prefs: the stored message-signing choice is unreadable ({} bytes) — keeping the \
+                 confirm step",
+                bytes.len()
+            );
+            Self::default()
+        })
+    }
+
+    /// Durable: the fallback is the ceremony, so a half-written file may not
+    /// be able to remove one.
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        write_json_durable(&dir.join(MESSAGE_PREFS_FILE), self)
+    }
+
+    pub fn path(dir: &Path) -> PathBuf {
+        dir.join(MESSAGE_PREFS_FILE)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The safe state is the ceremony, in every direction a file can fail.
+    #[test]
+    fn message_signing_defaults_on_and_survives_a_missing_or_corrupt_file() {
+        let d = tmp("message-signing");
+        assert!(
+            MessagePrefs::load(&d).sign_messages,
+            "absent file ⇒ confirm"
+        );
+
+        std::fs::write(MessagePrefs::path(&d), b"{ not json").unwrap();
+        assert!(MessagePrefs::load(&d).sign_messages, "corrupt ⇒ confirm");
+
+        MessagePrefs {
+            sign_messages: false,
+        }
+        .save(&d)
+        .unwrap();
+        assert!(!MessagePrefs::load(&d).sign_messages, "the user's choice");
+
+        MessagePrefs {
+            sign_messages: true,
+        }
+        .save(&d)
+        .unwrap();
+        assert!(MessagePrefs::load(&d).sign_messages, "and back again");
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kv-prefs-{name}"));

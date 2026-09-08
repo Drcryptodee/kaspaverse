@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 877532845;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 952081653;
 
 // Section: executor
 
@@ -1819,6 +1819,47 @@ fn wire__crate__api__transport__transport_clear_messages_impl(
         },
     )
 }
+fn wire__crate__api__transport__transport_comm_fee_preview_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_comm_fee_preview",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_conversation_id = <String>::sse_decode(&mut deserializer);
+            let api_text = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::error::AppError>(
+                    (move || async move {
+                        let output_ok = crate::api::transport::transport_comm_fee_preview(
+                            api_conversation_id,
+                            api_text,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__transport__transport_commit_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2150,6 +2191,72 @@ fn wire__crate__api__transport__transport_hide_conversation_impl(
         },
     )
 }
+fn wire__crate__api__transport__transport_mark_read_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_mark_read",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_conversation_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::AppError>((move || {
+                    let output_ok =
+                        crate::api::transport::transport_mark_read(api_conversation_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__transport__transport_message_signing_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_message_signing",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::AppError>((move || {
+                    let output_ok = crate::api::transport::transport_message_signing()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__transport__transport_prepare_accept_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2470,6 +2577,47 @@ fn wire__crate__api__transport__transport_prepare_taunt_impl(
         },
     )
 }
+fn wire__crate__api__transport__transport_send_comm_now_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_send_comm_now",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_conversation_id = <String>::sse_decode(&mut deserializer);
+            let api_text = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::error::AppError>(
+                    (move || async move {
+                        let output_ok = crate::api::transport::transport_send_comm_now(
+                            api_conversation_id,
+                            api_text,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__transport__transport_set_contact_name_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2542,6 +2690,40 @@ fn wire__crate__api__transport__transport_set_fill_config_impl(
         },
     )
 }
+fn wire__crate__api__transport__transport_set_message_signing_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "transport_set_message_signing",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_sign_messages = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::AppError>((move || {
+                    let output_ok =
+                        crate::api::transport::transport_set_message_signing(api_sign_messages)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__transport__transport_start_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2573,40 +2755,6 @@ fn wire__crate__api__transport__transport_start_impl(
                     })()
                     .await,
                 )
-            }
-        },
-    )
-}
-fn wire__crate__api__transport__transport_start_over_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "transport_start_over",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_contact_address = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, crate::api::error::AppError>((move || {
-                    let output_ok =
-                        crate::api::transport::transport_start_over(api_contact_address)?;
-                    Ok(output_ok)
-                })())
             }
         },
     )
@@ -3400,7 +3548,8 @@ impl SseDecode for crate::api::transport::ConversationDto {
         let mut var_lastActivityUnixMs = <u64>::sse_decode(deserializer);
         let mut var_inviteExpired = <bool>::sse_decode(deserializer);
         let mut var_contactName = <Option<String>>::sse_decode(deserializer);
-        let mut var_superseded = <bool>::sse_decode(deserializer);
+        let mut var_preview = <Option<String>>::sse_decode(deserializer);
+        let mut var_unread = <u32>::sse_decode(deserializer);
         return crate::api::transport::ConversationDto {
             conversation_id: var_conversationId,
             contact_address: var_contactAddress,
@@ -3412,7 +3561,8 @@ impl SseDecode for crate::api::transport::ConversationDto {
             last_activity_unix_ms: var_lastActivityUnixMs,
             invite_expired: var_inviteExpired,
             contact_name: var_contactName,
-            superseded: var_superseded,
+            preview: var_preview,
+            unread: var_unread,
         };
     }
 }
@@ -4413,173 +4563,194 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__transport__transport_commit_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__transport__transport_contact_names_impl(
+        52 => wire__crate__api__transport__transport_comm_fee_preview_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__api__transport__transport_conversations_impl(
+        53 => wire__crate__api__transport__transport_commit_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__transport__transport_contact_names_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__transport__transport_existing_conversation_impl(
+        55 => wire__crate__api__transport__transport_conversations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__transport__transport_fill_config_impl(
+        56 => wire__crate__api__transport__transport_existing_conversation_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => {
+        57 => wire__crate__api__transport__transport_fill_config_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        58 => {
             wire__crate__api__transport__transport_fill_now_impl(port, ptr, rust_vec_len, data_len)
         }
-        58 => wire__crate__api__transport__transport_fill_status_impl(
+        59 => wire__crate__api__transport__transport_fill_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => {
+        60 => {
             wire__crate__api__transport__transport_gap_age_impl(port, ptr, rust_vec_len, data_len)
         }
-        61 => wire__crate__api__transport__transport_hide_conversation_impl(
+        62 => wire__crate__api__transport__transport_hide_conversation_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__api__transport__transport_prepare_accept_impl(
+        63 => {
+            wire__crate__api__transport__transport_mark_read_impl(port, ptr, rust_vec_len, data_len)
+        }
+        64 => wire__crate__api__transport__transport_message_signing_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__api__transport__transport_prepare_bcast_impl(
+        65 => wire__crate__api__transport__transport_prepare_accept_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__transport__transport_prepare_challenge_impl(
+        66 => wire__crate__api__transport__transport_prepare_bcast_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => wire__crate__api__transport__transport_prepare_challenge_accept_impl(
+        67 => wire__crate__api__transport__transport_prepare_challenge_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__api__transport__transport_prepare_comm_impl(
+        68 => wire__crate__api__transport__transport_prepare_challenge_accept_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__api__transport__transport_prepare_handshake_impl(
+        69 => wire__crate__api__transport__transport_prepare_comm_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__api__transport__transport_prepare_stash_impl(
+        70 => wire__crate__api__transport__transport_prepare_handshake_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__api__transport__transport_prepare_taunt_impl(
+        71 => wire__crate__api__transport__transport_prepare_stash_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => wire__crate__api__transport__transport_set_contact_name_impl(
+        72 => wire__crate__api__transport__transport_prepare_taunt_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => wire__crate__api__transport__transport_set_fill_config_impl(
+        73 => wire__crate__api__transport__transport_send_comm_now_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => wire__crate__api__transport__transport_start_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__transport__transport_start_over_impl(
+        74 => wire__crate__api__transport__transport_set_contact_name_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        74 => wire__crate__api__transport__transport_stash_state_impl(
+        75 => wire__crate__api__transport__transport_set_fill_config_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__api__transport__transport_thread_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__transport__transport_thread_since_impl(
+        76 => wire__crate__api__transport__transport_set_message_signing_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        77 => {
+        77 => wire__crate__api__transport__transport_start_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__transport__transport_stash_state_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        79 => wire__crate__api__transport__transport_thread_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__transport__transport_thread_since_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        81 => {
             wire__crate__api__transport__transport_wipe_all_impl(port, ptr, rust_vec_len, data_len)
         }
-        78 => wire__crate__api__transport__transport_wipe_preview_impl(
+        82 => wire__crate__api__transport__transport_wipe_preview_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        79 => wire__crate__api__transport__tx_acceptance_status_impl(
+        83 => wire__crate__api__transport__tx_acceptance_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        80 => wire__crate__api__wallet__ui_mark_impl(port, ptr, rust_vec_len, data_len),
-        81 => {
+        84 => wire__crate__api__wallet__ui_mark_impl(port, ptr, rust_vec_len, data_len),
+        85 => {
             wire__crate__api__vault__unlock_with_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
-        82 => wire__crate__api__vault__vault_exists_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__vault__vault_kdf_params_starting_grid_impl(
+        86 => wire__crate__api__vault__vault_exists_impl(port, ptr, rust_vec_len, data_len),
+        87 => wire__crate__api__vault__vault_kdf_params_starting_grid_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => {
+        88 => {
             wire__crate__api__vault__vault_kdf_params_tuned_impl(port, ptr, rust_vec_len, data_len)
         }
-        85 => {
+        89 => {
             wire__crate__api__vault__vault_lock_grace_secs_impl(port, ptr, rust_vec_len, data_len)
         }
-        86 => {
+        90 => {
             wire__crate__api__vault__vault_receive_address_impl(port, ptr, rust_vec_len, data_len)
         }
-        87 => wire__crate__api__vault__vault_status_default_impl(port, ptr, rust_vec_len, data_len),
-        88 => wire__crate__api__vault__vault_status_stream_impl(port, ptr, rust_vec_len, data_len),
-        89 => wire__crate__api__wallet__wallet_snapshot_default_impl(
+        91 => wire__crate__api__vault__vault_status_default_impl(port, ptr, rust_vec_len, data_len),
+        92 => wire__crate__api__vault__vault_status_stream_impl(port, ptr, rust_vec_len, data_len),
+        93 => wire__crate__api__wallet__wallet_snapshot_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        90 => wire__crate__api__wallet__wallet_snapshot_now_impl(port, ptr, rust_vec_len, data_len),
+        94 => wire__crate__api__wallet__wallet_snapshot_now_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4593,7 +4764,7 @@ fn pde_ffi_dispatcher_sync_impl(
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
         25 => wire__crate__api__wallet__maturity_thresholds_impl(ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__transport__transport_handshake_bond_sompi_impl(
+        61 => wire__crate__api__transport__transport_handshake_bond_sompi_impl(
             ptr,
             rust_vec_len,
             data_len,
@@ -4795,7 +4966,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::transport::ConversationDto {
             self.last_activity_unix_ms.into_into_dart().into_dart(),
             self.invite_expired.into_into_dart().into_dart(),
             self.contact_name.into_into_dart().into_dart(),
-            self.superseded.into_into_dart().into_dart(),
+            self.preview.into_into_dart().into_dart(),
+            self.unread.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5749,7 +5921,8 @@ impl SseEncode for crate::api::transport::ConversationDto {
         <u64>::sse_encode(self.last_activity_unix_ms, serializer);
         <bool>::sse_encode(self.invite_expired, serializer);
         <Option<String>>::sse_encode(self.contact_name, serializer);
-        <bool>::sse_encode(self.superseded, serializer);
+        <Option<String>>::sse_encode(self.preview, serializer);
+        <u32>::sse_encode(self.unread, serializer);
     }
 }
 

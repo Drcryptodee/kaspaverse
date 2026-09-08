@@ -33,11 +33,43 @@ import 'kv_sheet.dart';
 /// **The two are visibly different on purpose** — a stranger must never
 /// inherit the face of somebody you know.
 class KvContactAvatar extends StatelessWidget {
-  const KvContactAvatar({super.key, this.name, this.size = KvSpace.rowDisc});
+  const KvContactAvatar({
+    super.key,
+    this.name,
+    this.size = KvSpace.rowDisc,
+    this.badge,
+    this.badgeTone = KvColor.warn,
+    this.badgeGround = KvColor.plate,
+  });
 
   /// Null renders the stranger.
   final String? name;
   final double size;
+
+  /// **A state badge on the disc's lower-right corner** (D-303, the founder's
+  /// own suggestion: *"let the profile icon of contacts awaiting accept show a
+  /// time icon in amber"*).
+  ///
+  /// It rides the disc rather than sitting beside it because a row that is
+  /// already a door may not grow a second object competing for the same
+  /// thumb. **It is deliberately below BG-12's 52 dp floor** — 20 dp on a 44 dp
+  /// disc — which is what says it is a MARK and not a target: the state it
+  /// draws travels in the row's semantic label, and the thread states it in
+  /// full. A badge that could be pressed would owe an action, and there is
+  /// none: waiting is not something a user can do anything about.
+  ///
+  /// Null draws nothing at all, and the disc is exactly what it was.
+  final KvGlyph? badge;
+
+  /// The badge's ink. [KvColor.warn] by default, which BG-7 gives to *not yet
+  /// certain* — an unanswered handshake is exactly that, which is why this hue
+  /// is earned here and was not on the render's five tinted discs (D-302).
+  final Color badgeTone;
+
+  /// The surface the badge is cut out of, so it reads as a badge rather than
+  /// as a smudge over the monogram. It must be the colour of the plate the
+  /// disc is actually drawn on — the ring is a hole in the disc, not a border.
+  final Color badgeGround;
 
   /// The letter a name shows. **Grapheme-aware enough for the real cases**:
   /// `characters` would be the complete answer, and the first UTF-16 code unit
@@ -51,10 +83,15 @@ class KvContactAvatar extends StatelessWidget {
     return trimmed.substring(0, pair ? 2 : 1).toUpperCase();
   }
 
+  /// The badge's diameter as a fraction of the disc — 20 dp on the 44 dp
+  /// contact disc, which is the smallest a 2.5 dp Lucide stroke stays legible
+  /// at (BG-25's own floor test) and well under BG-12's target floor.
+  static const double _badgeRatio = 20 / 44;
+
   @override
   Widget build(BuildContext context) {
     final known = name;
-    return Container(
+    final disc = Container(
       width: size,
       height: size,
       decoration: const BoxDecoration(
@@ -80,6 +117,51 @@ class KvContactAvatar extends StatelessWidget {
                   color: KvColor.ink,
                 ),
               ),
+      ),
+    );
+    final mark = badge;
+    if (mark == null) return disc;
+    // **The badge takes the text scaler, because it replaced words.**
+    //
+    // A glyph is normally fixed — it is a mark, not type. This one is not
+    // decoration: it is the whole visible carrier of *awaiting their accept*
+    // on the disc, so at 1.3× it would have stayed 12 dp while every sentence
+    // around it grew (`ux-auditor`, 2026-09-08 — measured identical at 393 and
+    // at 320 dp / 1.3×). Clamped, so a large scaler cannot swallow the
+    // monogram underneath it.
+    final scale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 1.35);
+    final badgeSize = size * _badgeRatio * scale;
+    // **The badge overhangs the disc, so the `Stack` is not clipped.** Sized
+    // to the disc and drawn past its corner, the mark sits half on the disc
+    // and half on the plate, which is what makes it read as applied TO the
+    // disc rather than drawn inside it.
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          disc,
+          Positioned(
+            right: -badgeSize * 0.1,
+            bottom: -badgeSize * 0.1,
+            child: Container(
+              width: badgeSize,
+              height: badgeSize,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: badgeGround,
+              ),
+              child: Center(
+                child: KvGlyphIcon(
+                  mark,
+                  size: badgeSize * 0.72,
+                  tone: badgeTone,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

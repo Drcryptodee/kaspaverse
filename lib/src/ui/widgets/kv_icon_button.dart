@@ -20,6 +20,9 @@ class KvIconButton extends StatefulWidget {
     required this.onTap,
     this.quarterTurns = 0,
     this.tone,
+    this.fill,
+    this.fillPressed,
+    this.hint,
   });
 
   final KvGlyph mark;
@@ -38,6 +41,27 @@ class KvIconButton extends StatefulWidget {
   /// Null ⇒ **not a control at all**, and it renders as a plain disc rather
   /// than as a live-looking button that swallows a tap (BG-12).
   final VoidCallback? onTap;
+
+  /// **The disc's fill, for the one icon button that COMMITS something.**
+  ///
+  /// Null is the default and the ordinary case: `plate`, pressing to `chip`,
+  /// which is what every icon button in the chrome is. The thread's send mark
+  /// passes `primary` because BG-27 lights a control that has something to
+  /// commit — and it passes `plate` back when the draft is empty, which is the
+  /// same rule saying the opposite thing.
+  ///
+  /// It is a parameter rather than a second widget because this app has **one**
+  /// icon control (BG-21): a second one would be a second press feel, a second
+  /// target rule and a second thing to keep in step with §4.
+  final Color? fill;
+
+  /// The pressed fill. Null pairs with [fill]'s own default (`chip`), so a
+  /// caller that lights the disc states both or neither.
+  final Color? fillPressed;
+
+  /// What a screen reader adds after [label] — the reason a control cannot be
+  /// used, in words (BG-12: *a disabled control says why*).
+  final String? hint;
 
   @override
   State<KvIconButton> createState() => _KvIconButtonState();
@@ -59,7 +83,9 @@ class _KvIconButtonState extends State<KvIconButton> {
       height: KvSpace.iconButton,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: _down ? KvColor.chip : KvColor.plate,
+        color: _down
+            ? (widget.fillPressed ?? KvColor.chip)
+            : (widget.fill ?? KvColor.plate),
         shape: BoxShape.circle,
       ),
       child: const SizedBox.shrink(),
@@ -80,14 +106,26 @@ class _KvIconButtonState extends State<KvIconButton> {
     );
     final tap = widget.onTap;
     if (tap == null) {
-      return SizedBox.square(
-        dimension: KvSpace.touchTarget,
-        child: Center(child: content),
+      // Still announced, and still says why it cannot be used — an inert
+      // control that a screen reader cannot even find is worse than a lit one
+      // that refuses (BG-12, and UX-R5's own `ExcludeSemantics` finding).
+      return Semantics(
+        button: true,
+        enabled: false,
+        label: widget.label,
+        hint: widget.hint,
+        child: ExcludeSemantics(
+          child: SizedBox.square(
+            dimension: KvSpace.touchTarget,
+            child: Center(child: content),
+          ),
+        ),
       );
     }
     return Semantics(
       button: true,
       label: widget.label,
+      hint: widget.hint,
       child: ExcludeSemantics(
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,

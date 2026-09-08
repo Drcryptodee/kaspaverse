@@ -93,6 +93,27 @@ class MessagingService {
       transportCommit(nonce: nonce);
 
   @visibleForTesting
+  static Future<BigInt?> Function(String conversationId, String text)
+  commFeePreviewFn = (conversationId, text) =>
+      transportCommFeePreview(conversationId: conversationId, text: text);
+
+  @visibleForTesting
+  static Future<SendOutcomeDto> Function(String conversationId, String text)
+  sendCommNowFn = (conversationId, text) =>
+      transportSendCommNow(conversationId: conversationId, text: text);
+
+  @visibleForTesting
+  static Future<bool> Function() messageSigningFn = transportMessageSigning;
+
+  @visibleForTesting
+  static Future<void> Function(bool sign) setMessageSigningFn = (sign) =>
+      transportSetMessageSigning(signMessages: sign);
+
+  @visibleForTesting
+  static Future<bool> Function(String conversationId) markReadFn =
+      (conversationId) => transportMarkRead(conversationId: conversationId);
+
+  @visibleForTesting
   static Future<void> Function() abandonFn = transportAbandon;
 
   // V2b history-fill seams (D-074).
@@ -163,11 +184,12 @@ class MessagingService {
   @visibleForTesting
   static Future<WipeReportDto> Function() wipePreviewFn = transportWipePreview;
 
-  @visibleForTesting
-  static Future<WipeReportDto> Function(String contactAddress) startOverFn =
-      (contactAddress) => transportStartOver(contactAddress: contactAddress);
-
-  /// All conversations, most recently active first (public-wire-class data).
+  /// All conversations, most recently active first.
+  ///
+  /// **Not public-wire-class since D-303.** `ConversationDto.preview` is one
+  /// decrypted line per thread, so this notifier holds message content — which
+  /// is why [dropDecrypted] exists and why the shell calls it the moment the
+  /// vault leaves `home`.
   final ValueNotifier<List<ConversationDto>> conversations = ValueNotifier(
     const <ConversationDto>[],
   );
@@ -268,10 +290,27 @@ class MessagingService {
     }
   }
 
+  /// **Bumped by [dropDecrypted], captured by [refresh].**
+  ///
+  /// A refresh in flight when the vault locks would otherwise land AFTER the
+  /// drop and re-install the decrypted previews into an app-lifetime notifier,
+  /// which is exactly the residue the drop exists to prevent — and it is
+  /// reachable in the foreground, because the lock is timer-driven and a ping
+  /// can be decrypting one envelope per conversation at that moment
+  /// (`ffi-leak-auditor`, this sitting).
+  int _contentEpoch = 0;
+
   /// Re-pull the conversation list (cheap; store-backed in Rust).
+  ///
+  /// The answer carries one decrypted line per conversation
+  /// (`ConversationDto.preview`, D-303), so a late answer is dropped rather
+  /// than assigned — see [_contentEpoch].
   Future<void> refresh() async {
+    final epoch = _contentEpoch;
     try {
-      conversations.value = await conversationsFn();
+      final rows = await conversationsFn();
+      if (epoch != _contentEpoch) return;
+      conversations.value = rows;
     } on AppError catch (e) {
       error.value = e.message;
     }
@@ -403,6 +442,39 @@ class MessagingService {
 
   Future<SendOutcomeDto> commit(BigInt nonce) => commitFn(nonce);
 
+  /// **What this exact message would cost, right now** — the composer's live
+  /// figure. Signerless, stash-free and safe on every keystroke; `null`
+  /// whenever no transaction can be built, and the caller then shows no
+  /// figure rather than a guess.
+  ///
+  /// Deliberately does NOT touch [error]: a fee that cannot be quoted is not
+  /// a failure the user has to be told about — the send itself will say what
+  /// is wrong, in Rust's own words, if they go on to tap it.
+  Future<BigInt?> commFeePreview(String conversationId, String text) =>
+      commFeePreviewFn(conversationId, text);
+
+  /// **Send a message with no confirm sheet** — only reachable when the user
+  /// has turned message signing off, and refused by Rust otherwise.
+  ///
+  /// Every bound lives in Rust (`transport_send_comm_now`): the preference,
+  /// the comm-class scope, the self-send destination check on the BUILT
+  /// transaction, and the fee ceiling. Nothing here decides anything; a
+  /// refusal comes back as an [AppError] with the sentence to show.
+  Future<SendOutcomeDto> sendCommNow(String conversationId, String text) =>
+      sendCommNowFn(conversationId, text);
+
+  /// Whether sending a message stops at the confirm sheet. `true` by default.
+  Future<bool> messageSigning() => messageSigningFn();
+
+  /// Set it, and refresh nothing — the preference changes a ceremony, not a
+  /// conversation.
+  Future<void> setMessageSigning(bool sign) => setMessageSigningFn(sign);
+
+  /// **Everything inbound in this thread has been seen.** Called by the open
+  /// thread only; the list never marks. Idempotent and forward-only in Rust.
+  /// Returns whether the mark moved, which is when a badge disappears.
+  Future<bool> markRead(String conversationId) => markReadFn(conversationId);
+
   Future<void> abandon() => abandonFn();
 
   /// Hide (tombstone) a conversation locally — the zombie-cleanup affordance
@@ -430,24 +502,6 @@ class MessagingService {
       final cleared = await clearMessagesFn(conversationId);
       await refresh();
       return cleared;
-    } on AppError catch (e) {
-      error.value = e.message;
-      await refresh();
-      rethrow;
-    }
-  }
-
-  /// Retire every live conversation with one contact so a fresh contact
-  /// request can be sent. ONE Rust call, not hide-then-invite from here: with
-  /// two live threads on one address, hiding one leaves the other Active and
-  /// the handshake then refuses — after the first thread's messages are gone.
-  /// Rethrows, because the caller must not send a request believing the old
-  /// threads were retired when they were not.
-  Future<WipeReportDto> startOver(String contactAddress) async {
-    try {
-      final retired = await startOverFn(contactAddress);
-      await refresh();
-      return retired;
     } on AppError catch (e) {
       error.value = e.message;
       await refresh();
@@ -483,6 +537,30 @@ class MessagingService {
       await refresh();
       rethrow;
     }
+  }
+
+  /// **Drop every decrypted line this service is holding** — called when the
+  /// vault locks.
+  ///
+  /// `ConversationDto.preview` is decrypted message text (D-303), and this
+  /// service is an app-lifetime singleton whose `conversations` notifier is
+  /// not owned by any screen. Rust drops its keys on a lock and the widget
+  /// tree is swapped for the locked surface, but the plaintext itself would
+  /// otherwise sit in this list for the life of the process — surviving a
+  /// background lock, which BG-13 defines as *a discard, not a pause*
+  /// (`wallet-security-auditor`, this sitting).
+  ///
+  /// **Content only.** The subscription and the fill/gap facts are public-wire
+  /// class and cost a re-pull to rebuild for nothing; what must not survive a
+  /// lock is what was said. A re-pull after unlock refills the list, and
+  /// `transport_conversations` refuses to produce previews while locked
+  /// anyway, so an early one is simply blank.
+  void dropDecrypted() {
+    // FIRST, and unconditionally: a refresh already in flight must not land
+    // after this, even when the list is currently empty.
+    _contentEpoch++;
+    if (conversations.value.isEmpty) return;
+    conversations.value = const <ConversationDto>[];
   }
 
   @visibleForTesting

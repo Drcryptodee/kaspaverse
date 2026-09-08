@@ -22,8 +22,9 @@ ConversationDto conversation(
   String id, {
   String status = 'active',
   bool inviteExpired = false,
-  bool superseded = false,
   String? contactName,
+  String? preview,
+  int unread = 0,
   String address =
       'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf',
 }) => ConversationDto(
@@ -37,7 +38,8 @@ ConversationDto conversation(
   lastActivityUnixMs: BigInt.two,
   inviteExpired: inviteExpired,
   contactName: contactName,
-  superseded: superseded,
+  preview: preview,
+  unread: unread,
 );
 
 ThreadMessageDto message(
@@ -194,6 +196,20 @@ void main() {
     );
     MessagingService.abandonFn = () async {};
     MessagingService.hideFn = (_) async {};
+    // The composer's live fee and the founder's signing toggle. The DEFAULTS
+    // are the shipped posture: a real quote, and the confirm ceremony ON — so
+    // every test that does not say otherwise exercises the path the app ships
+    // with, and the two tests about the toggle turn it off explicitly.
+    MessagingService.commFeePreviewFn = (_, _) async => BigInt.from(14300);
+    MessagingService.messageSigningFn = () async => true;
+    MessagingService.setMessageSigningFn = (_) async {};
+    MessagingService.sendCommNowFn = (_, _) async => const SendOutcomeDto(
+      finalTxid: 'ab',
+      submitted: 1,
+      total: 1,
+      partial: false,
+    );
+    MessagingService.markReadFn = (_) async => false;
     // V2b fill seams: default = no gap, fill off, no run (the fresh-install
     // §0 posture) — individual tests override.
     MessagingService.gapAgeFn = () async => null;
@@ -989,74 +1005,6 @@ void main() {
       expect(find.text('Wants to connect'), findsOneWidget);
     });
 
-    /// THE SILENT LANE, MADE LOUD.
-    ///
-    /// The founder's device, 2026-08-17: two live conversations against one
-    /// contact because they wiped their client and re-handshaked. The older
-    /// row still said "Active" and still had a composer, and every message
-    /// typed into it was broadcast to an alias nobody monitors. Nothing
-    /// errored — that is why it took hours to notice.
-    testWidgets('a replaced conversation says so and keeps its history', (
-      tester,
-    ) async {
-      MessagingService.conversationsFn = () async => [
-        conversation('old', superseded: true),
-        conversation('new'),
-      ];
-      await MessagingService.instance.refresh();
-      await tester.pumpWidget(
-        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
-      );
-      await tester.pumpAndSettle();
-
-      // It is named, not merely dimmed — and only the replaced one is. Both
-      // rows are drawn; exactly one carries the line.
-      expect(find.byType(KvRow), findsNWidgets(2));
-      expect(find.text('Replaced by a newer thread'), findsOneWidget);
-
-      // **The row no longer carries the paragraph, and nothing was lost.**
-      // It used to explain what happened, what it means and where to go, in
-      // three lines inside a list row. `M4`'s own `_ReplacedNotice` says all
-      // three where they are actionable — in the seat the composer would have
-      // occupied, at the moment the user tries to type — so the row states the
-      // fact and the thread states the consequence.
-      //
-      // Still openable, and it opens READ-ONLY: the history is real and the
-      // user came looking for it. Hiding the row instead would answer a lost
-      // message by deleting the evidence.
-      MessagingService.threadSinceFn = (_, _) async => delta(const []);
-      await tester.tap(_row('Replaced by a newer thread'));
-      await tester.pumpAndSettle();
-      expect(
-        tester.widget<ThreadScreen>(find.byType(ThreadScreen)).superseded,
-        isTrue,
-      );
-    });
-
-    testWidgets('a replaced thread offers no composer to type into', (
-      tester,
-    ) async {
-      MessagingService.threadSinceFn = (_, _) async => delta([message('t1')]);
-      await tester.pumpWidget(
-        MaterialApp(
-          builder: _kvWindow,
-          home: ThreadScreen(
-            conversationId: 'old',
-            contactLabel: 'kaspa:qq…',
-            superseded: true,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // The words are still there — this is not a deletion.
-      expect(find.textContaining('hello over L1'), findsOneWidget);
-      // But there is nowhere to type and nothing to send.
-      expect(find.byType(TextField), findsNothing);
-      expect(find.text('Send'), findsNothing);
-      expect(find.textContaining('would not reach them'), findsOneWidget);
-    });
-
     testWidgets('delete-all names the count and what it cannot reach', (
       tester,
     ) async {
@@ -1205,75 +1153,6 @@ void main() {
       expect(find.textContaining('6 messages cleared'), findsOneWidget);
     });
 
-    /// THE PER-CONTACT EXIT (INV-6). One Rust call, because doing it as
-    /// hide-then-invite half-applied in exactly the case it exists for: with
-    /// two live threads on one address, hiding one left the other Active and
-    /// the handshake then refused — after the first thread's messages were
-    /// already destroyed.
-    testWidgets('start over retires the old threads before it invites', (
-      tester,
-    ) async {
-      final calls = <String>[];
-      MessagingService.startOverFn = (address) async {
-        calls.add('startOver:$address');
-        return WipeReportDto(
-          conversations: 2,
-          messages: 11,
-          pendingBonds: 0,
-          sideFilesCleared: 0,
-          floorPersisted: true,
-        );
-      };
-      MessagingService.prepareHandshakeFn = (address) async {
-        calls.add('handshake:$address');
-        throw const AppError(message: 'stop here');
-      };
-      MessagingService.conversationsFn = () async => [conversation('c1')];
-      await MessagingService.instance.refresh();
-      await tester.pumpWidget(
-        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.longPress(_row());
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Start over with this contact'));
-      await tester.pumpAndSettle();
-
-      // The consent has to name the destruction, not call it hiding.
-      expect(find.textContaining('every conversation'), findsOneWidget);
-      // And the reason it might not work — an app that still remembers you.
-      expect(find.textContaining('may accept silently'), findsOneWidget);
-      expect(calls, isEmpty, reason: 'the sheet alone does nothing');
-
-      await tester.tap(find.text('Review request'));
-      await tester.pumpAndSettle();
-
-      // Order is the whole property: retire, THEN invite.
-      expect(calls, [
-        'startOver:${conversation('c1').contactAddress}',
-        'handshake:${conversation('c1').contactAddress}',
-      ]);
-    });
-
-    testWidgets('start over is not offered on an invitation', (tester) async {
-      MessagingService.conversationsFn = () async => [
-        conversation('c1', status: 'pending_in'),
-      ];
-      await MessagingService.instance.refresh();
-      await tester.pumpWidget(
-        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
-      );
-      await tester.pumpAndSettle();
-      await openRequests(tester);
-
-      await tester.longPress(_row());
-      await tester.pumpAndSettle();
-      // Hiding an invitation is permanent, and it is the only route to
-      // refunding the bond they already paid.
-      expect(find.text('Start over with this contact'), findsNothing);
-    });
-
     /// A DURABILITY FAILURE GETS ITS OWN SENTENCE ON ALL THREE PATHS.
     ///
     /// The floor is what stops the next history catch-up handing the messages
@@ -1341,38 +1220,6 @@ void main() {
       expect(find.text('4 messages cleared.'), findsNothing);
     });
 
-    testWidgets('start over warns in the CONFIRM SHEET, not under it', (
-      tester,
-    ) async {
-      MessagingService.startOverFn = (_) async => WipeReportDto(
-        conversations: 1,
-        messages: 5,
-        pendingBonds: 0,
-        sideFilesCleared: 0,
-        floorPersisted: false,
-      );
-      // The ceremony must actually OPEN — the note lives in the sheet, so a
-      // prepare that throws would prove nothing about where the warning went.
-      MessagingService.prepareHandshakeFn = (_) async => summary();
-      MessagingService.conversationsFn = () async => [conversation('c1')];
-      await MessagingService.instance.refresh();
-      await tester.pumpWidget(
-        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.longPress(_row());
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Start over with this contact'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Review request'));
-      await tester.pumpAndSettle();
-
-      // A SnackBar here would be covered by the confirm sheet within a frame;
-      // the note travels INTO the sheet instead.
-      expect(find.textContaining('may come back'), findsWidgets);
-    });
-
     /// SOMEBODY ELSE'S MONEY GETS ITS OWN SENTENCE.
     ///
     /// An unanswered request holds a 0.2 KAS bond the sender paid, and Accept
@@ -1438,23 +1285,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('unanswered contact'), findsNothing);
-    });
-
-    /// Start over retires EVERY live thread with the contact, so on a replaced
-    /// row it would take the working successor the card just pointed at.
-    testWidgets('start over is not offered on a replaced row', (tester) async {
-      MessagingService.conversationsFn = () async => [
-        conversation('old', superseded: true),
-      ];
-      await MessagingService.instance.refresh();
-      await tester.pumpWidget(
-        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.longPress(_row());
-      await tester.pumpAndSettle();
-      expect(find.text('Start over with this contact'), findsNothing);
     });
 
     testWidgets('both tabs render at zero, each saying its own thing', (
@@ -1939,7 +1769,7 @@ void main() {
       // The pill is gated on the draft now (BG-27) — it arms on the first
       // character, so the frame has to land before the tap.
       await tester.pump();
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.bySemanticsLabel('Send'));
       await tester.pumpAndSettle();
 
       expect(sentText, 'challenge you to RPS');

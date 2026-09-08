@@ -30,6 +30,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
@@ -53,8 +54,12 @@ import '../support/maturity.dart';
 const _addr =
     'kaspa:qz5a8jtqt3l3nf8zxve9eu0qtrkewc5e0yn465djghw4438jqdecc6jzqunth';
 
-SignableSummaryDto _summary() => SignableSummaryDto(
-  kind: SignableKind.payment,
+SignableSummaryDto _summary({
+  SignableKind kind = SignableKind.payment,
+  String? payloadKind,
+  int payloadLen = 0,
+}) => SignableSummaryDto(
+  kind: kind,
   destination: _addr,
   amountSompi: BigInt.from(1240000000),
   feeSompi: BigInt.from(315400),
@@ -62,11 +67,12 @@ SignableSummaryDto _summary() => SignableSummaryDto(
   mass: BigInt.from(2036),
   txCount: 1,
   utxoCount: 2,
-  payloadLen: 0,
+  payloadLen: payloadLen,
   // Null, not `'none'`: a payment carries no payload, and a fixture that
   // says `none` puts a line on the ceremony that the shipped path never
-  // draws — a preview lying about the surface it exists to show.
-  payloadKind: null,
+  // draws — a preview lying about the surface it exists to show. A MESSAGE
+  // does carry one, and passes it.
+  payloadKind: payloadKind,
   nonce: BigInt.one,
   resultingCoins: 1,
   feeStrategy: FeeStrategyKind.senderPays,
@@ -107,10 +113,11 @@ ConversationDto _conv(
   String id, {
   String status = 'active',
   String? name,
-  bool superseded = false,
   bool expired = false,
   int agoMinutes = 3,
   String address = _addr,
+  String? preview,
+  int unread = 0,
 }) => ConversationDto(
   conversationId: id,
   contactAddress: status == 'pending_in' ? '' : address,
@@ -126,17 +133,52 @@ ConversationDto _conv(
   ),
   inviteExpired: expired,
   contactName: name,
-  superseded: superseded,
+  preview: preview,
+  unread: unread,
 );
 
 Widget _chats({bool requests = false, bool empty = false}) {
   MessagingService.conversationsFn = () async => empty
       ? const []
       : [
-          _conv('c1', name: 'Mara'),
-          _conv('c2', name: 'Jonas', agoMinutes: 60 * 26),
-          _conv('c3', name: 'Dev fund', agoMinutes: 60 * 24 * 3),
-          _conv('c4', name: 'Anna', agoMinutes: 60 * 24 * 4, superseded: true),
+          // **`M1`'s own rows, previews and counts included** — the render
+          // draws these five and this fixture is a transcription of it, so a
+          // frame that differs from the picture is a defect rather than a
+          // different sample.
+          _conv(
+            'c1',
+            name: 'Mara',
+            preview: 'Got it, thank you — confirmed on my side',
+          ),
+          _conv(
+            'c2',
+            name: 'Jonas',
+            agoMinutes: 60 * 26,
+            preview: 'Sent — thanks for waiting',
+            unread: 1,
+          ),
+          // The long one. Rust bounds the string for custody; what puts the
+          // `…` on the glass is the FRAME, so this row is the one that proves
+          // the ellipsis at every geometry.
+          _conv(
+            'c3',
+            name: 'Dev fund',
+            agoMinutes: 60 * 24 * 3,
+            preview:
+                'Q3 grant released · 150 KAS to the treasury multisig, with '
+                'the remainder scheduled for the next epoch',
+          ),
+          _conv(
+            'c4',
+            name: 'Anna',
+            agoMinutes: 60 * 24 * 4,
+            preview: 'Can you resend the invoice?',
+            unread: 3,
+          ),
+          // **A thread awaiting their accept**, so the amber clock badge on
+          // the disc is in the frame rather than only in a widget test — it
+          // is a mark whose whole job is to be seen.
+          _conv('c6', name: 'Tomas', status: 'pending_out', agoMinutes: 60 * 5),
           // **One UNNAMED contact, deliberately.** Every chat in this fixture
           // had a name, so the floor frame never drew a row whose title is an
           // address — which is why a title that ellipsised `kaspa:qz7u…ellj43pf`
@@ -172,6 +214,8 @@ Widget _thread() {
     _msg('t2', now - 86400000 - 1800000, 'Will do tonight.', outbound: true),
     _msg('t3', now - 900000, 'Sent — thanks for waiting.', outbound: true),
   ];
+  MessagingService.commFeePreviewFn = (_, _) async => BigInt.from(14300);
+  MessagingService.messageSigningFn = () async => true;
   MessagingService.threadSinceFn = (_, _) async => ThreadDeltaDto(
     messages: rows,
     statuses: [
@@ -500,6 +544,59 @@ Widget _ceremonyOverSend({bool book = true}) => Stack(
     ),
   ],
 );
+
+/// **The MESSAGE sending sheet** — the same ceremony over the thread, carrying
+/// the founder's signing toggle (2026-09-08).
+///
+/// It is a self-send, so the sheet leads with the fee and says the value
+/// returns; the toggle sits last, under every fact and above the hold. This is
+/// the funds surface the toggle changes, so it gets its own frame rather than
+/// being judged from a widget test.
+Widget _messageCeremony() => Stack(
+  children: [
+    _thread(),
+    SigningCeremony(
+      title: 'Confirm message',
+      summary: _summary(
+        kind: SignableKind.selfSendFrame,
+        payloadKind: 'comm',
+        payloadLen: 214,
+      ),
+      commit: (_) async => _sent(),
+      abandon: () async {},
+      fiat: _fiat(),
+      footer: _PreviewSigningToggle(),
+    ),
+  ],
+);
+
+/// The toggle exactly as the thread builds it, without the service round trip
+/// a preview run has no native library for.
+class _PreviewSigningToggle extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) => KvToggle(
+    bare: true,
+    ground: KvColor.plate,
+    on: false,
+    // The shipped strings, not a copy — a fixture that paraphrases is a frame
+    // of a screen that does not exist.
+    title: signingToggleTitle,
+    sub: signingToggleSub(true),
+    onChanged: (_) {},
+  );
+}
+
+/// **Scroll the message ceremony to its foot**, at the floor geometry where
+/// its restatement no longer fits in one view.
+///
+/// A clip that scrolls is reachable and a clip that does not is a defect, and
+/// the difference is not visible in a resting frame — so it gets one of its
+/// own (`ux-auditor`, 2026-09-08).
+Future<void> _scrollTheCeremony(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.drag(find.byType(ListView).last, const Offset(0, -260));
+  await tester.pumpAndSettle();
+}
 
 /// All the way to the receipt (`S8`).
 Future<void> _completeASend(WidgetTester tester) async {
@@ -897,6 +994,20 @@ Future<void> _openHistorySheet(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// **Type into the composer, so the fee and the lit send mark are in a frame.**
+///
+/// An empty composer is the honest resting state and it is what
+/// `messages__thread` shows — but it draws neither of the two things this
+/// sitting built there. A control that only ever appears mid-interaction is
+/// exactly the kind that ships wrong, so it gets a frame of its own.
+Future<void> _typeADraft(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextField), 'on my way — ten minutes');
+  // Past the composer's 250 ms fee debounce, so the quote has landed.
+  await tester.pump(const Duration(milliseconds: 400));
+  await tester.pumpAndSettle();
+}
+
 Future<void> _openMessageSettings(WidgetTester tester) async {
   await tester.pumpAndSettle();
   await tester.tap(find.bySemanticsLabel('Message settings'));
@@ -1067,6 +1178,9 @@ void main() {
     );
     surface('messages__empty', () => _chats(empty: true));
     framedSurface('messages__thread', _thread);
+    // The composer mid-draft: the live fee above the mark, and the mark lit
+    // (BG-27) — neither of which the resting frame above can show.
+    framedSurface('messages__composing', _thread, act: _typeADraft);
     framedSurface('messages__history', _chats, act: _openHistorySheet);
     framedSurface(
       'messages__handshake',
@@ -1105,6 +1219,14 @@ void main() {
     // the hold part-way round, which is the state BG-6 is about.
     framedSurface('ceremony__review', _ceremonyOverSend);
     framedSurface('ceremony__holding', _ceremonyOverSend, act: _armTheHold);
+    // The message ceremony, with the signing toggle under the facts.
+    framedSurface('ceremony__message', _messageCeremony);
+    // Its foot, where the toggle lives at the floor geometry.
+    framedSurface(
+      'ceremony__message_foot',
+      _messageCeremony,
+      act: _scrollTheCeremony,
+    );
 
     // **The receipt** (`S8`): a place, not a modal.
     framedSurface('ceremony__sent', _ceremonyOverSend, act: _completeASend);

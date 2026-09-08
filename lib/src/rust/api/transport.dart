@@ -8,8 +8,8 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `branch_token`, `build`, `chain_stamp`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `prepare_comm_plaintext`, `prepare_transport_send`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `ParkedAcceptance`, `PinPolicy`, `ReplayGap`, `TransportHub`, `TransportIntent`
+// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `bound_preview`, `branch_token`, `build`, `chain_stamp`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `read_marks`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `ParkedAcceptance`, `PinPolicy`, `ReplayGap`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
@@ -185,6 +185,89 @@ Future<SignableSummaryDto> transportPrepareComm({
   text: text,
 );
 
+/// **What this exact message would cost, priced by the Generator now** — the
+/// figure that streams above the send button as the user types (founder
+/// ruling, 2026-09-08: *"direct fee estimates where the numbers change the way
+/// it does on the send screen … the fee must be tiny above the send button"*).
+///
+/// It is the send screen's `send_fee_preview` for the messaging lane, and it
+/// keeps that function's whole contract: signerless, stash-free, read-only,
+/// safe to call on every keystroke, and **built rather than estimated** — the
+/// same [`plan_comm`] the prepare runs, priced through the same two-shape
+/// decision (`chain::send::shipped_two_shape`) the ceremony's figure comes
+/// from.
+///
+/// `None` — and the glass shows no figure — whenever no transaction can be
+/// built right now: the bound address has no mature coins yet, the wallet is
+/// below the anti-dust floor, the engine is not up, or the pinned coins are
+/// covenant-fenced. **A missing figure never blocks the send**: the tap falls
+/// through to the confirm ceremony, which states Rust's own reason. A figure
+/// this cannot produce is one the user is not asked to act on.
+Future<BigInt?> transportCommFeePreview({
+  required String conversationId,
+  required String text,
+}) => RustLib.instance.api.crateApiTransportTransportCommFeePreview(
+  conversationId: conversationId,
+  text: text,
+);
+
+/// **Does sending a message stop at the confirm sheet?** `true` by default.
+///
+/// The preference behind the founder's *"Turn off signing for messages"*
+/// toggle — see [`kaspaverse_chain::prefs::MessagePrefs`] for what it does and
+/// does not govern (the ceremony, never the signature).
+Future<bool> transportMessageSigning() =>
+    RustLib.instance.api.crateApiTransportTransportMessageSigning();
+
+/// Set it. Persisted durably, because the safe state is the ceremony and a
+/// torn write may not be able to remove one.
+Future<void> transportSetMessageSigning({required bool signMessages}) => RustLib
+    .instance
+    .api
+    .crateApiTransportTransportSetMessageSigning(signMessages: signMessages);
+
+/// **Send a message without the confirm sheet** — the whole of what turning
+/// signing off buys, and the only door in this bridge that broadcasts without
+/// one.
+///
+/// Founder ruling, 2026-09-08: *"users who prefer not signing everytime they
+/// want to send a message can absolutely do so."* This is that, built with the
+/// bounds it needs rather than as an exception carved out of the ceremony.
+///
+/// **Every gate is here, in Rust, and none of them is in Dart.** A Dart bug, a
+/// hostile deep link or a future call site cannot reach a ceremony-free
+/// broadcast for anything but a plain message, because there is nothing else
+/// to call:
+///
+/// 1. **The preference must actually be off.** If the user has the ceremony
+///    on, this refuses rather than honouring a caller that skipped it.
+/// 2. **It builds its own intent.** The plaintext goes through
+///    [`prepare_comm_plaintext`], so the kind is `Comm` by construction — a
+///    handshake, an accept (which refunds a counterparty's bond), a stash and
+///    a payment are not expressible here.
+/// 3. **The built chain must be confined to this conversation's own address.**
+///    Every output of every leg is decoded with the pin's own standard script
+///    reader and compared against the bound address read from the store BEFORE
+///    the build (`PreparedSend::pays_only`) — so a chain that paid anybody else
+///    is refused with the money still in the wallet, and a rebinding mid-flight
+///    fails closed. The summary's kind and destination are checked too, but
+///    those are echoes of the intent; this one is the artifact.
+/// 4. **The fee must be under
+///    [`MessagePrefs::UNCEREMONIOUS_FEE_CEILING`].** Above it the caller is
+///    told to use the sheet, and the sheet shows the figure. This is what
+///    keeps the toggle honest on the payload-variable lane — a large
+///    attachment or a chained build costs real money and gets a second look.
+///
+/// A refusal ABANDONS the stash before returning, so nothing is left half-
+/// prepared for a later commit to find.
+Future<SendOutcomeDto> transportSendCommNow({
+  required String conversationId,
+  required String text,
+}) => RustLib.instance.api.crateApiTransportTransportSendCommNow(
+  conversationId: conversationId,
+  text: text,
+);
+
 /// Phase 1 — compose a `kv:1:challenge` (Attack & Defend) as a self-send comm.
 /// `stake` is a DISPLAY value in KAS (`None` ⇒ a friendly, no-stake duel); it
 /// binds NO value here — frames are hints, the real wager binds at the P3
@@ -261,7 +344,36 @@ Future<SendOutcomeDto> transportCommit({required BigInt nonce}) =>
 Future<void> transportAbandon() =>
     RustLib.instance.api.crateApiTransportTransportAbandon();
 
+/// **Everything inbound in this conversation has now been seen.**
+///
+/// Called by the open thread — on its first frame with rows, and on each new
+/// arrival while it is visible. **Never by the list**, which draws a row
+/// without showing what is in it.
+///
+/// Idempotent and forward-only ([`ReadMarks::advance`]): a stale pull, a
+/// re-entered thread or an out-of-order ping can only re-assert a mark, never
+/// rewind one and bring back a count the user has already cleared.
+///
+/// Returns whether the mark actually moved, so a caller can skip a re-pull it
+/// does not need. The list is pinged when it did, because that is the moment
+/// a badge disappears.
+Future<bool> transportMarkRead({required String conversationId}) => RustLib
+    .instance
+    .api
+    .crateApiTransportTransportMarkRead(conversationId: conversationId);
+
 /// All conversations, most recently active first.
+///
+/// **This is the one function on this bridge that returns decrypted user
+/// content for rows the user is not looking at** ([`ConversationDto::preview`]
+/// — D-303 rules the feature; `wallet-security-auditor` returned CONCERNS on
+/// this shape 2026-09-08 and every finding was taken here or in the caller).
+/// The custody rules that follow from it: the plaintext is bounded per row
+/// ([`PREVIEW_CHARS`]), it is never logged (see this DTO's hand-written
+/// `Debug`), it is not produced at all while the vault is locked, and the
+/// caller **drops it when the vault locks** — `MessagingService.dropDecrypted`,
+/// driven from the shell's own leave-home transition, because the list that
+/// holds these lines is an app-lifetime singleton no screen owns.
 Future<List<ConversationDto>> transportConversations() =>
     RustLib.instance.api.crateApiTransportTransportConversations();
 
@@ -331,51 +443,6 @@ Future<WipeReportDto> transportClearMessages({
 /// price in its first frame and never has to paint a number it does not have.
 BigInt transportHandshakeBondSompi() =>
     RustLib.instance.api.crateApiTransportTransportHandshakeBondSompi();
-
-/// Retire every live conversation with one contact, so a fresh contact request
-/// to them can be minted. The per-contact exit (INV-6).
-///
-/// **One operation, because two were worse than none.** The gesture is
-/// "hide the broken thread, then invite them again", and doing that from Dart
-/// as two calls half-applies in exactly the case it exists for: with TWO live
-/// conversations against one address — the situation this whole change is
-/// about — hiding one leaves the other `Active`, and
-/// [`transport_prepare_handshake`] then refuses, having already destroyed the
-/// first thread's messages. The user loses history and sends nothing
-/// (`consensus-auditor`, 2026-08-17). Retiring them ALL first makes the
-/// following prepare succeed by construction.
-///
-/// **Tombstone, never delete.** Every row keeps the counterparty's alias, so
-/// if they write to an old thread it comes back with its binding intact — the
-/// July regression is not re-opened here.
-///
-/// **Messages ARE destroyed**, the same purge [`transport_hide_conversation`]
-/// performs, because that is what hiding a thread means in this app. The
-/// caller's copy must say so.
-///
-/// **`Active` rows only.** An unaccepted invitation is deliberately untouched:
-/// hiding one is permanent (`may_unhide` refuses `PendingInbound`), and it is
-/// the only route to refunding the 0.2 KAS bond the counterparty already paid.
-/// Retiring it to send our own handshake would spend 0.2 KAS of ours to strand
-/// 0.2 KAS of theirs.
-///
-/// **Deliberately does NOT call `transport_abandon`, unlike the total wipe.**
-/// The wipe must, because its Handshake arm would upsert a prepare-time
-/// snapshot into an emptied store and mint back a conversation the user
-/// erased. Here it cannot: `PENDING_INTENT` is a single slot, a staged
-/// handshake to this same contact cannot coexist with this call's own
-/// invitation/Active preconditions, and a staged Comm confirm writes a NEW
-/// message row rather than restoring an erased one.
-///
-/// Returns what was retired AND whether the catch-up floor is durable. That
-/// last flag is not decoration: this sheet promises "the messages do not [come
-/// back]", and without a persisted floor an opt-in history catch-up can hand
-/// them back. Zero conversations is a success — there was nothing live to
-/// retire, and the caller may go straight to the handshake.
-Future<WipeReportDto> transportStartOver({required String contactAddress}) =>
-    RustLib.instance.api.crateApiTransportTransportStartOver(
-      contactAddress: contactAddress,
-    );
 
 /// What [`transport_wipe_all`] would destroy, without destroying it.
 ///
@@ -617,8 +684,15 @@ class ContactRouteDto {
           acceptFirst == other.acceptFirst;
 }
 
-/// A conversation row for the contacts surface. Every field is public-wire-
-/// class data (addresses/txids on-chain, aliases on-wire, local ids/status).
+/// A conversation row for the contacts surface.
+///
+/// **Two fields are NOT public-wire-class, and the rest are.** Addresses,
+/// txids, aliases, ids and status are all on-chain or on-wire; `preview` is
+/// decrypted message text (D-303) and `contact_name` is a label the user typed
+/// about a real person. That is why this type has a hand-written [`Debug`]
+/// instead of a derived one — see it for the reasoning — and why SOT §11's row
+/// for `transport_conversations` was amended in the same commit that added the
+/// preview rather than left claiming what it claimed before.
 class ConversationDto {
   final String conversationId;
 
@@ -647,20 +721,35 @@ class ConversationDto {
   /// only — never on the wire, never in a backup.
   final String? contactName;
 
-  /// This thread has been REPLACED by a newer live one with the same
-  /// counterparty, and typing here would reach nobody.
+  /// **The last thing said in this thread, as one bounded line** — `M1`'s
+  /// second row (founder ruling, 2026-09-08 / D-303).
   ///
-  /// A conversation is a pair of locally-minted aliases, and the protocol's
-  /// only repair is for one side to forget and re-handshake. When they do,
-  /// we correctly accept the new handshake — and the old row is left holding
-  /// an alias no one monitors any more. Sending into it succeeds at every
-  /// layer we control (built, signed, broadcast, fee paid) and is read by no
-  /// one. This bool is what lets the UI say so instead of the user
-  /// discovering it hours later.
+  /// **This is decrypted user content, and it is the only field on this DTO
+  /// that is.** Everything else here is public-wire-class; this one opens
+  /// the newest envelope per conversation under the same vault gate
+  /// [`transport_thread`] opens a thread with, and it exists outside a
+  /// thread's lifetime, which is why `wallet-security-auditor` is mandatory
+  /// on the change that introduced it and why SOT §11's clause on this
+  /// function was amended in the same commit.
   ///
-  /// Derived per pull from the record set, never stored — see
-  /// `TransportStore::superseded_by`.
-  final bool superseded;
+  /// **Bounded in Rust, ellipsised by the widget.** The cap here
+  /// ([`PREVIEW_CHARS`]) is a CUSTODY bound — how much plaintext may leave
+  /// the vault per row — not a visual one; the row still applies its own
+  /// `TextOverflow.ellipsis`, because every frame this app supports is
+  /// narrower than the cap and `M1` draws the `…`.
+  ///
+  /// `None` in three honest cases, and the row then falls back to the state
+  /// line it drew before this field existed: the vault is locked, the thread
+  /// holds no message rows at all, or the newest row is a handshake (whose
+  /// news IS the row's state — *Wants to connect*, *Awaiting their accept*).
+  final String? preview;
+
+  /// Inbound messages in this thread past the device's read mark — `M1`'s
+  /// figure under the time. `0` draws nothing at all, never an empty badge.
+  ///
+  /// Derived per pull from the rows and the mark, never stored, so it cannot
+  /// disagree with the thread it counts.
+  final int unread;
 
   const ConversationDto({
     required this.conversationId,
@@ -673,7 +762,8 @@ class ConversationDto {
     required this.lastActivityUnixMs,
     required this.inviteExpired,
     this.contactName,
-    required this.superseded,
+    this.preview,
+    required this.unread,
   });
 
   @override
@@ -688,7 +778,8 @@ class ConversationDto {
       lastActivityUnixMs.hashCode ^
       inviteExpired.hashCode ^
       contactName.hashCode ^
-      superseded.hashCode;
+      preview.hashCode ^
+      unread.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -705,7 +796,8 @@ class ConversationDto {
           lastActivityUnixMs == other.lastActivityUnixMs &&
           inviteExpired == other.inviteExpired &&
           contactName == other.contactName &&
-          superseded == other.superseded;
+          preview == other.preview &&
+          unread == other.unread;
 }
 
 /// The user's fill posture, for the settings surface. `default_endpoint`

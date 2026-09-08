@@ -20,6 +20,7 @@ pub mod link;
 mod link_rpc;
 pub mod node_config;
 pub mod prefs;
+pub mod read_marks;
 mod send;
 pub mod spans;
 mod spend_policy;
@@ -35,6 +36,7 @@ pub use dag_monitor::{DagEvent, DagMonitor, LinkProbe, PROBE_TIMEOUT};
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};
 pub use node_config::NodeConfig;
+pub use read_marks::{ReadMark, ReadMarks};
 // The signed-tx DTO the retention/escalation path carries (a broadcast public
 // tx — no key material). Named here so the bridge never imports rpc-core.
 pub use kaspa_wrpc_client::prelude::RpcTransaction;
@@ -47,8 +49,8 @@ pub use transport::{
     HANDSHAKE_BOND_SOMPI, KCHAT_PREFIX, KIND_LEGACY, KIND_UNKNOWN, STASH_SCOPE_SAVED_HANDSHAKE,
 };
 pub use transport_store::{
-    ContactMergeReport, ConversationRecord, ConversationStatus, KeyBranch, MessageDirection,
-    MessageRecord, RowSource, StoredKind, TransportStore, WipeReport,
+    ContactMergeReport, ConversationRecord, ConversationStatus, ConversationTail, KeyBranch,
+    MessageDirection, MessageRecord, RowSource, StoredKind, TransportStore, WipeReport,
 };
 pub use wallet_sync::{
     maturity_params, ActivityDirection, ActivityMaturity, MaturityParams, WalletActivityRecord,

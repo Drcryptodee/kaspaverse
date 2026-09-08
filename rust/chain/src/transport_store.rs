@@ -35,12 +35,14 @@
 //! because a late re-acceptance must bring the row back. Frames are hints
 //! (§0.3), nothing here bears value.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::error::Result;
 use crate::kvlog::Log;
+use crate::read_marks::ReadMarks;
 use crate::transport::WireNamespace;
 
 /// Which derivation branch a conversation's bound key lives on. Mirrors
@@ -92,10 +94,10 @@ pub struct ConversationRecord {
     /// handshake's BLOCK time (indexer-claimed on a fill-sourced row, node
     /// truth once our own scan overrides it); on the transition to `Active`
     /// the accept re-stamps it from our LOCAL clock. That is deliberate: this
-    /// field now orders which of two threads with one contact is live
-    /// (`superseded_by`), and an ordering key must not be a value an archive
-    /// supplied. `invite_expired` reads the pending-side value only, so the
-    /// pruning-horizon gate is unaffected.
+    /// field ORDERS rows against one contact — it is a tiebreak in
+    /// [`TransportStore::merge_contact`]'s host rank — and an ordering key
+    /// must not be a value an archive supplied. `invite_expired` reads the
+    /// pending-side value only, so the pruning-horizon gate is unaffected.
     pub created_unix_ms: u64,
     pub last_activity_unix_ms: u64,
     /// The establishing handshake tx (inbound rows: the bond tx — also the
@@ -229,6 +231,18 @@ impl BorshDeserialize for MessageRecord {
             wire,
         })
     }
+}
+
+/// One conversation's tail, as `M1`'s row needs it: what was last said, and
+/// how much of it has not been read. Both derived per pull, neither stored.
+#[derive(Debug, Clone, Default)]
+pub struct ConversationTail {
+    /// The newest live row in the thread — inbound or outbound, never a reorg
+    /// ghost. `None` for a conversation that holds no messages at all (an
+    /// invitation nobody has answered).
+    pub newest: Option<MessageRecord>,
+    /// Inbound comm rows sitting past this conversation's read mark.
+    pub unread: u32,
 }
 
 /// What [`TransportStore::merge_duplicate_contacts`] folded. Counts only.
@@ -534,94 +548,6 @@ impl TransportStore {
         }
     }
 
-    /// The LIVE conversation that has replaced this one with the same
-    /// counterparty, if any — the row a message typed here would have to go
-    /// through to arrive.
-    ///
-    /// ## Why this is derived and not a stored flag
-    ///
-    /// A Kasia-family conversation is a pair of locally-minted aliases. The
-    /// protocol's only repair for a broken one is for a side to FORGET and
-    /// re-handshake — a client that still remembers you answers a repeat
-    /// handshake with silence (`conversation-manager-service.ts:181-213`), so
-    /// forgetting is the mechanism, not a mistake. We therefore must keep
-    /// accepting a fresh handshake from an address we already talk to.
-    ///
-    /// What we must NOT do is keep the old row sendable afterwards. Measured
-    /// on the founder's device 2026-08-17: the counterparty wiped and
-    /// re-handshaked at 2026-08-15 21:34:38Z, 78 seconds after the last
-    /// message on the old row. Both conversations were left `Active` against
-    /// the same address, both listed, both sendable — and the old one's alias
-    /// is monitored by nobody. Every message typed there is built, signed,
-    /// broadcast, charged a fee, and read by no one. Silence is the whole
-    /// failure mode: nothing errors.
-    ///
-    /// Derived rather than stored because [`ConversationRecord`] is
-    /// `#[derive(BorshDeserialize)]` and positional — appending a field makes
-    /// every existing frame undecodable and `replay()` stops at the first
-    /// failure, replaying a live device to zero conversations. The rule needs
-    /// no migration: it reads correctly against records written months ago.
-    ///
-    /// Newest-wins by `created_unix_ms`, because establishment order is the
-    /// only thing that says which alias pair the counterparty is actually
-    /// listening on. `conversation_id` breaks a tie so the answer is
-    /// deterministic rather than HashMap-ordered.
-    ///
-    /// A tombstoned successor cannot supersede anything: the user hid it, so
-    /// it is not somewhere their messages should be routed either.
-    pub fn superseded_by(&self, conversation_id: &str) -> Option<&ConversationRecord> {
-        let row = self.conversations.records.get(conversation_id)?;
-        // No address, nothing to be superseded BY — a PendingInbound row that
-        // has not resolved its sender shares no identity with anything.
-        if row.contact_address.is_empty() {
-            return None;
-        }
-        // AN INVITATION IS NEVER SUPERSEDED, however many live threads we have
-        // with that address.
-        //
-        // "Superseded" means "do not type here" — a statement about SENDING.
-        // The action on a `PendingInbound` row is Accept, which returns the
-        // 0.2 KAS bond the counterparty already paid. Marking one superseded
-        // takes that button away and strands their money with no other route
-        // to it (`wallet-security-auditor`, 2026-08-17). Their bond is not
-        // ours to strand because we happen to have a newer thread.
-        //
-        // D-305 NARROWS the row set this rule ever sees: an invitation from an
-        // address we already hold a conversation with is FOLDED into that
-        // conversation by [`Self::merge_contact`] (no accept card survives —
-        // the population's own semantics for a repeat handshake), so the
-        // invitations that reach here are ones with no other row to fold into.
-        if row.status == ConversationStatus::PendingInbound {
-            return None;
-        }
-        self.conversations
-            .records
-            .values()
-            .filter(|c| {
-                c.conversation_id != row.conversation_id
-                    && c.contact_address == row.contact_address
-                    && c.status == ConversationStatus::Active
-                    // Sendable, not merely Active. The refusal this rule
-                    // drives points the user at the successor, so a successor
-                    // that would ALSO refuse turns one dead end into two —
-                    // exactly the no-exit shape INV-6 forbids. An `Active` row
-                    // with an empty alias is narrow (only the restore path can
-                    // mint one) but it is reachable, and the send gate's own
-                    // predicate requires the alias.
-                    && !c.my_alias.is_empty()
-                    && !self.conversations.is_tombstoned(&c.conversation_id)
-            })
-            .filter(|c| {
-                (c.created_unix_ms, c.conversation_id.as_str())
-                    > (row.created_unix_ms, row.conversation_id.as_str())
-            })
-            .max_by(|a, b| {
-                a.created_unix_ms
-                    .cmp(&b.created_unix_ms)
-                    .then_with(|| a.conversation_id.cmp(&b.conversation_id))
-            })
-    }
-
     /// Whether any conversation knows WHO it is talking to but not what alias
     /// they write under — the precondition for learning an alias back from an
     /// inbound message.
@@ -729,6 +655,68 @@ impl TransportStore {
             .map_or(WireNamespace::CiphMsg, |m| m.wire)
     }
 
+    /// **The two things `M1`'s row asks of the message set** — the newest live
+    /// row in each conversation, and how many inbound comms sit past that
+    /// conversation's read mark — answered in ONE pass over every stored row.
+    ///
+    /// A pass per conversation would be `messages_for` in a loop: it clones
+    /// and sorts the whole record set once for every row on the list, which is
+    /// quadratic in a store that grows forever. This walks the map once and
+    /// keeps a running maximum per thread, so the list costs the same whether
+    /// the user has four conversations or forty.
+    ///
+    /// **Ghosts are skipped in both answers.** A reorg-tombstoned row is a
+    /// transaction the chain took back: it may not be previewed as the last
+    /// thing said, and it may not be counted as something to read.
+    ///
+    /// The newest row is inbound OR outbound — a thread whose last word was
+    /// ours previews ours, which is what every messenger does and what `M1`'s
+    /// own rows imply. Only the COUNT is inbound-only: you do not have unread
+    /// messages from yourself.
+    ///
+    /// Nothing here decrypts. The envelope travels with the record and is
+    /// opened by the caller under the vault gate.
+    pub fn conversation_tails(&self, marks: &ReadMarks) -> HashMap<String, ConversationTail> {
+        let mut tails: HashMap<String, ConversationTail> = HashMap::new();
+        for record in self.messages.records.values() {
+            if self.messages.is_tombstoned(&record.txid) {
+                continue;
+            }
+            let tail = tails.entry(record.conversation_id.clone()).or_default();
+            let newer = tail.newest.as_ref().is_none_or(|held| {
+                (held.unix_ms, held.txid.as_str()) < (record.unix_ms, record.txid.as_str())
+            });
+            if newer {
+                tail.newest = Some(record.clone());
+            }
+            let unread = record.direction == MessageDirection::Inbound
+                && record.kind == StoredKind::Comm
+                && marks
+                    .get(&record.conversation_id)
+                    .is_none_or(|mark| mark.precedes(record.unix_ms, &record.txid));
+            if unread {
+                tail.unread = tail.unread.saturating_add(1);
+            }
+        }
+        tails
+    }
+
+    /// The newest inbound comm in one conversation — the row a read mark is
+    /// set TO when the user has the thread open. `None` when they have said
+    /// nothing yet, which is also when there is nothing to mark.
+    pub fn newest_inbound(&self, conversation_id: &str) -> Option<&MessageRecord> {
+        self.messages
+            .records
+            .values()
+            .filter(|m| {
+                m.conversation_id == conversation_id
+                    && m.direction == MessageDirection::Inbound
+                    && m.kind == StoredKind::Comm
+                    && !self.messages.is_tombstoned(&m.txid)
+            })
+            .max_by(|a, b| a.unix_ms.cmp(&b.unix_ms).then(a.txid.cmp(&b.txid)))
+    }
+
     /// Move one message row onto another conversation. The row keeps its txid
     /// (the dedup key), its sealed bytes, its clock and its ghost flag — only
     /// the thread it belongs to changes. `false` when there is no such row or
@@ -758,8 +746,9 @@ impl TransportStore {
     /// the row it belongs to. Measured on the founder's device 2026-09-07: a
     /// conversation we opened on 08-23 and the counterparty's own handshake
     /// back on 08-24, held as two rows for a fortnight — one that could read
-    /// and one that could never complete. `superseded_by` was built to paper
-    /// over exactly that pair. The live population never holds two: Kasia's
+    /// and one that could never complete. A derived `superseded_by` rule and
+    /// a *Start over* gesture were both built to paper over exactly that pair,
+    /// and both were removed once this fold was proven on glass (D-305). The live population never holds two: Kasia's
     /// `processHandshake` looks up "strictly by sender address" and updates
     /// the alias in place (`conversation-manager-service.ts:181-213`).
     ///
@@ -1519,62 +1508,6 @@ mod tests {
         );
     }
 
-    /// AN INVITATION KEEPS ITS ACCEPT BUTTON, WHATEVER ELSE WE HAVE.
-    ///
-    /// Accepting is the only route to refunding the 0.2 KAS bond the
-    /// counterparty already paid. Marking a `PendingInbound` row superseded
-    /// took that button off the card and stranded their money with no other
-    /// way to it — the card rendered the "Replaced" body instead.
-    #[test]
-    fn an_invitation_is_never_superseded_so_its_bond_can_always_be_refunded() {
-        let dir = test_dir("superseded-never-an-invitation");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        // An invitation that HAS resolved its sender — the case that could
-        // actually collide with a live thread on the same address.
-        let mut invitation = conversation("invitation", 10);
-        invitation.contact_address = KASIA.to_string();
-        invitation.created_unix_ms = 100;
-        invitation.status = ConversationStatus::PendingInbound;
-        invitation.my_alias = String::new();
-        invitation.initiated_by_me = false;
-        store.upsert_conversation(invitation).unwrap();
-
-        let mut live = conversation("live", 20);
-        live.contact_address = KASIA.to_string();
-        live.created_unix_ms = 200;
-        store.upsert_conversation(live).unwrap();
-
-        assert!(
-            store.superseded_by("invitation").is_none(),
-            "an unaccepted invitation must never be marked replaced — accepting \
-             it is how their bond comes back"
-        );
-    }
-
-    /// A successor that cannot itself be sent in must not silence anything —
-    /// pointing a refusal at a second refusal is a no-exit (INV-6).
-    #[test]
-    fn an_aliasless_successor_supersedes_nothing() {
-        let dir = test_dir("superseded-needs-alias");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        let mut old = conversation("old", 10);
-        old.contact_address = KASIA.to_string();
-        old.created_unix_ms = 100;
-        store.upsert_conversation(old).unwrap();
-
-        // Active, same contact, newer — but with no alias of ours it has
-        // nothing to put on the wire, so `comm_sendable` refuses it too.
-        let mut mute = conversation("mute", 20);
-        mute.contact_address = KASIA.to_string();
-        mute.created_unix_ms = 200;
-        mute.my_alias = String::new();
-        store.upsert_conversation(mute).unwrap();
-
-        assert!(store.superseded_by("old").is_none());
-    }
-
     /// Wiping an empty store is a no-op success, not an error — the user may
     /// press it twice, and the second press must not look like a failure.
     #[test]
@@ -1586,174 +1519,7 @@ mod tests {
         assert_eq!(store.wipe().unwrap(), WipeReport::default());
     }
 
-    /// THE FOUNDER'S DEVICE, 2026-08-17 — the shape this rule exists for.
-    ///
-    /// Pulled with `run-as` and decoded: two `Active` rows against
-    /// `kaspa:qqwsnxvu…`, the second created 78 seconds after the last message
-    /// on the first, because the counterparty wiped its state and re-handshaked.
-    /// Both listed, both sendable, and only the newer alias pair is monitored
-    /// by anyone. The timestamps below are the real ones.
-    #[test]
-    fn a_replaced_conversation_names_its_successor() {
-        let dir = test_dir("superseded-founder-shape");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        let mut old = conversation("ec272a74601a639f52d7c3ac7a4beafb", 1_755_293_600_000);
-        old.contact_address = KASIA.to_string();
-        old.my_alias = "8caa5e3c79ff".to_string();
-        old.created_unix_ms = 1_755_124_758_000; // 2026-08-13 22:39:18Z
-        store.upsert_conversation(old).unwrap();
-
-        let mut new = conversation("be2aefdb54ce91378e2047029ed7f26d", 1_755_376_251_000);
-        new.contact_address = KASIA.to_string();
-        new.my_alias = "cf53a09c0d81".to_string();
-        new.created_unix_ms = 1_755_293_678_000; // 2026-08-15 21:34:38Z
-        store.upsert_conversation(new).unwrap();
-
-        assert_eq!(
-            store
-                .superseded_by("ec272a74601a639f52d7c3ac7a4beafb")
-                .map(|c| c.conversation_id.as_str()),
-            Some("be2aefdb54ce91378e2047029ed7f26d"),
-            "the old row must name the thread that replaced it"
-        );
-        assert!(
-            store
-                .superseded_by("be2aefdb54ce91378e2047029ed7f26d")
-                .is_none(),
-            "the live row is superseded by nothing — otherwise both go silent"
-        );
-    }
-
-    /// A successor the user HID cannot claim traffic either. Hiding it says
-    /// "not here"; routing the user's typing into it would say the opposite.
-    #[test]
-    fn a_hidden_successor_supersedes_nothing() {
-        let dir = test_dir("superseded-hidden-successor");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        let mut old = conversation("old", 10);
-        old.contact_address = KASIA.to_string();
-        old.created_unix_ms = 100;
-        store.upsert_conversation(old).unwrap();
-
-        let mut new = conversation("new", 20);
-        new.contact_address = KASIA.to_string();
-        new.created_unix_ms = 200;
-        store.upsert_conversation(new).unwrap();
-        assert!(store.tombstone_conversation("new").unwrap());
-
-        assert!(
-            store.superseded_by("old").is_none(),
-            "a hidden successor must not silence the row it replaced"
-        );
-    }
-
-    /// Only an `Active` row replaces anything. An invitation we have not
-    /// accepted has no alias of ours on the wire, so nothing routes to it —
-    /// letting it supersede would break a working thread for a card the user
-    /// never touched.
-    #[test]
-    fn only_an_active_successor_supersedes() {
-        let dir = test_dir("superseded-needs-active");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        let mut old = conversation("old", 10);
-        old.contact_address = KASIA.to_string();
-        old.created_unix_ms = 100;
-        store.upsert_conversation(old).unwrap();
-
-        let mut pending = conversation("pending", 20);
-        pending.contact_address = KASIA.to_string();
-        pending.created_unix_ms = 200;
-        pending.status = ConversationStatus::PendingInbound;
-        pending.my_alias = String::new();
-        store.upsert_conversation(pending).unwrap();
-
-        assert!(store.superseded_by("old").is_none());
-    }
-
-    /// Different counterparties share nothing. The address is the identity.
-    #[test]
-    fn distinct_contacts_never_supersede_each_other() {
-        let dir = test_dir("superseded-distinct");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        let mut a = conversation("a", 10);
-        a.contact_address = KASIA.to_string();
-        a.created_unix_ms = 100;
-        store.upsert_conversation(a).unwrap();
-
-        let mut b = conversation("b", 20);
-        b.contact_address = KACHAT.to_string();
-        b.created_unix_ms = 200;
-        store.upsert_conversation(b).unwrap();
-
-        assert!(store.superseded_by("a").is_none());
-        assert!(store.superseded_by("b").is_none());
-    }
-
-    /// A `PendingInbound` row carries no contact address until its accept
-    /// resolves the sender. Empty is not a value — every unresolved invitation
-    /// would otherwise supersede every other one.
-    #[test]
-    fn an_addressless_row_is_never_superseded() {
-        let dir = test_dir("superseded-addressless");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        let mut orphan = conversation("orphan", 10);
-        orphan.contact_address = String::new();
-        orphan.created_unix_ms = 100;
-        orphan.status = ConversationStatus::PendingInbound;
-        store.upsert_conversation(orphan).unwrap();
-
-        let mut other = conversation("other", 20);
-        other.contact_address = String::new();
-        other.created_unix_ms = 200;
-        store.upsert_conversation(other).unwrap();
-
-        assert!(store.superseded_by("orphan").is_none());
-    }
-
-    /// Two rows minted in the same millisecond must still resolve to ONE
-    /// answer, and the same answer every call — the record set is a HashMap.
-    #[test]
-    fn an_equal_creation_time_breaks_deterministically_on_id() {
-        let dir = test_dir("superseded-tiebreak");
-        let mut store = TransportStore::load(dir).unwrap();
-
-        for id in ["aaa", "bbb", "ccc"] {
-            let mut c = conversation(id, 10);
-            c.contact_address = KASIA.to_string();
-            c.created_unix_ms = 500;
-            store.upsert_conversation(c).unwrap();
-        }
-
-        assert_eq!(
-            store
-                .superseded_by("aaa")
-                .map(|c| c.conversation_id.as_str()),
-            Some("ccc"),
-            "highest id wins the tie, every time"
-        );
-        assert!(
-            store.superseded_by("ccc").is_none(),
-            "the tie-break winner is superseded by nobody — no cycles"
-        );
-        // Called repeatedly: a HashMap-ordered answer would eventually differ.
-        for _ in 0..64 {
-            assert_eq!(
-                store
-                    .superseded_by("bbb")
-                    .map(|c| c.conversation_id.as_str()),
-                Some("ccc")
-            );
-        }
-    }
-
-    /// The founder's Kasia counterpart.
-    const KASIA: &str = "kaspa:qqwsnxvukqew5hx5r7y5dr938hnw7hmgs7ca87zlvwlrps6rxdy2ja3xknpvj";
-    /// A different counterparty entirely.
+    /// The founder's KaChat counterpart.
     const KACHAT: &str = "kaspa:qqcwl7zlmt6d3cwwvmsdkktfnkd2r0mzx4pu4xcvfdfpnukka7ezy4zn86jlr";
 
     fn test_dir(tag: &str) -> PathBuf {
@@ -2324,6 +2090,141 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `M1`'s two questions, answered in one pass — and the four rows that
+    /// have to be excluded from one answer or the other.
+    #[test]
+    fn conversation_tails_pick_the_newest_live_row_and_count_only_unread_inbound() {
+        let dir = test_dir("tails");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let marks = ReadMarks::default();
+
+        // Nothing stored at all: no tail, which is a row with no preview.
+        assert!(store.conversation_tails(&marks).is_empty());
+
+        store.record_message(message("in-1", "c1", 100, 1)).unwrap();
+        store.record_message(message("in-2", "c1", 200, 2)).unwrap();
+        // The newest word is OURS — a thread previews its last line whoever
+        // said it, so this row wins the preview and counts toward nothing.
+        let mut ours = message("out-1", "c1", 300, 3);
+        ours.direction = MessageDirection::Outbound;
+        store.record_message(ours).unwrap();
+        // Another conversation entirely, to prove the pass separates them.
+        store.record_message(message("in-9", "c2", 150, 9)).unwrap();
+
+        let tails = store.conversation_tails(&marks);
+        let c1 = tails.get("c1").expect("c1");
+        assert_eq!(c1.newest.as_ref().unwrap().txid, "out-1");
+        assert_eq!(c1.unread, 2, "two inbound, and never our own row");
+        assert_eq!(tails.get("c2").unwrap().unread, 1);
+
+        // A read mark clears what sits at or before it.
+        let mut marks = ReadMarks::default();
+        marks.advance("c1", 100, "in-1");
+        assert_eq!(
+            store.conversation_tails(&marks).get("c1").unwrap().unread,
+            1
+        );
+        marks.advance("c1", 300, "out-1");
+        assert_eq!(
+            store.conversation_tails(&marks).get("c1").unwrap().unread,
+            0
+        );
+        assert_eq!(
+            store.conversation_tails(&marks).get("c2").unwrap().unread,
+            1,
+            "a mark is per conversation, never global"
+        );
+
+        // A handshake row can be the newest thing in a thread (it previews as
+        // the row's state), but it is never something to READ.
+        let mut hs = message("hs-1", "c1", 400, 4);
+        hs.kind = StoredKind::Handshake;
+        store.record_message(hs).unwrap();
+        let tails = store.conversation_tails(&marks);
+        assert_eq!(
+            tails.get("c1").unwrap().newest.as_ref().unwrap().txid,
+            "hs-1"
+        );
+        assert_eq!(tails.get("c1").unwrap().unread, 0);
+
+        // A reorg ghost is a transaction the chain took back: out of BOTH
+        // answers, and back into both when it is re-accepted.
+        store.tombstone_message("hs-1").unwrap();
+        let marks = ReadMarks::default();
+        let tails = store.conversation_tails(&marks);
+        assert_eq!(
+            tails.get("c1").unwrap().newest.as_ref().unwrap().txid,
+            "out-1"
+        );
+        assert_eq!(tails.get("c1").unwrap().unread, 2);
+        store.tombstone_message("in-2").unwrap();
+        assert_eq!(
+            store.conversation_tails(&marks).get("c1").unwrap().unread,
+            1
+        );
+        store.untombstone_message("in-2").unwrap();
+        assert_eq!(
+            store.conversation_tails(&marks).get("c1").unwrap().unread,
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two rows in ONE block share a millisecond, and only the txid orders
+    /// them — the case a timestamp-only watermark cannot express.
+    #[test]
+    fn a_mark_inside_one_block_clears_only_the_rows_up_to_it() {
+        let dir = test_dir("tails-block");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        for txid in ["aa", "bb", "cc"] {
+            store.record_message(message(txid, "c1", 500, 1)).unwrap();
+        }
+        let mut marks = ReadMarks::default();
+        marks.advance("c1", 500, "bb");
+        assert_eq!(
+            store.conversation_tails(&marks).get("c1").unwrap().unread,
+            1,
+            "only `cc` sits past the mark"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newest_inbound_is_what_a_read_mark_is_set_to() {
+        let dir = test_dir("newest-in");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        // Nothing to mark in a thread nobody has written to.
+        assert!(store.newest_inbound("c1").is_none());
+
+        store.record_message(message("in-1", "c1", 100, 1)).unwrap();
+        let mut ours = message("out-1", "c1", 900, 2);
+        ours.direction = MessageDirection::Outbound;
+        store.record_message(ours).unwrap();
+        let mut hs = message("hs-1", "c1", 950, 3);
+        hs.kind = StoredKind::Handshake;
+        store.record_message(hs).unwrap();
+        assert_eq!(
+            store.newest_inbound("c1").map(|m| m.txid.as_str()),
+            Some("in-1"),
+            "our own rows and handshakes are not something to have read"
+        );
+
+        store.record_message(message("in-2", "c1", 200, 4)).unwrap();
+        assert_eq!(
+            store.newest_inbound("c1").map(|m| m.txid.as_str()),
+            Some("in-2")
+        );
+        // A ghost cannot be the row a mark is set to, or un-ghosting it would
+        // leave the mark already past a message never seen.
+        store.tombstone_message("in-2").unwrap();
+        assert_eq!(
+            store.newest_inbound("c1").map(|m| m.txid.as_str()),
+            Some("in-1")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rehome_message_moves_a_row_and_keeps_its_ghost_flag() {
         let dir = test_dir("rehome");
@@ -2423,7 +2324,15 @@ mod tests {
             2,
             "every message re-homed"
         );
-        assert!(reloaded.superseded_by("f6ef").is_none());
+        assert_eq!(
+            reloaded
+                .conversations_for_contact_address(KACHAT)
+                .iter()
+                .filter(|c| !reloaded.is_conversation_tombstoned(&c.conversation_id))
+                .count(),
+            1,
+            "one row per contact — nothing left for a supersession rule to name"
+        );
         // Idempotent.
         let mut again = reloaded;
         assert_eq!(

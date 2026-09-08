@@ -72,6 +72,10 @@ Future<SendOutcomeDto?> runConfirmSend(
   required Future<void> Function() abandon,
   String? title,
   String? contextNote,
+
+  /// Passed straight through to [SigningCeremony.footer] — the messages lane's
+  /// signing toggle, and nothing else so far.
+  Widget? footer,
   // REQUIRED, with no default on purpose. Every default that could be written
   // here is documented two doc-comments down as never correct on any shipped
   // path — this card precedes a message, a contact request, an acceptance or a
@@ -124,6 +128,7 @@ Future<SendOutcomeDto?> runConfirmSend(
     abandon: abandon,
     title: title,
     contextNote: contextNote,
+    footer: footer,
   );
 }
 

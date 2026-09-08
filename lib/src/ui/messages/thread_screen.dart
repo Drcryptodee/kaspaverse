@@ -1,11 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
+import 'contacts_screen.dart' show signingToggleSub, signingToggleTitle;
 import '../send/confirm_send_flow.dart';
 import '../error_text.dart';
+import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_address.dart';
@@ -16,6 +21,7 @@ import '../widgets/kv_icon_button.dart';
 import '../widgets/kv_loader.dart';
 import '../widgets/kv_rows.dart';
 import '../widgets/kv_tabs.dart';
+import '../widgets/kv_toggle.dart';
 import '../widgets/kv_sheet.dart';
 import '../widgets/kv_two_pane.dart';
 import '../widgets/tx_status_chip.dart';
@@ -52,7 +58,6 @@ class ThreadScreen extends StatefulWidget {
     required this.conversationId,
     required this.contactLabel,
     this.contactAddress = '',
-    this.superseded = false,
     this.messaging,
   });
 
@@ -63,13 +68,6 @@ class ThreadScreen extends StatefulWidget {
   /// whose sender the node has not resolved yet — the bar then names the
   /// person and claims no key, which is the honest half of the pair.
   final String contactAddress;
-
-  /// A newer live conversation with this same contact exists, so this thread's
-  /// alias reaches nobody. Read-only: the history is real and stays readable,
-  /// but the composer is replaced by a notice. Passed in rather than re-fetched
-  /// because the list already holds the answer and the send path in Rust
-  /// refuses independently — this is the courtesy, not the guarantee.
-  final bool superseded;
 
   /// Test seam; defaults to the singleton.
   final MessagingService? messaging;
@@ -120,6 +118,56 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// except to decide whether there is anything to commit.
   String _draft = '';
 
+  // ── The live fee (founder, 2026-09-08), on the send screen's pattern ──────
+  //
+  // Not a second mechanism: `send_screen.dart` already prices a transaction as
+  // it is typed, and every part of that shape is load-bearing rather than
+  // stylistic, so all of it is carried over — the 250 ms debounce, the token
+  // that stops a slow answer overwriting a newer one, and holding the last
+  // quote (dimmed) while a fresh probe runs so the figure never tweens through
+  // numbers the Generator did not quote.
+
+  /// The quote to draw: the current one, or the previous one while a probe is
+  /// in flight. Null when there is nothing to price at all.
+  BigInt? _fee;
+
+  /// **The exact text [_fee] was quoted for.**
+  ///
+  /// The figure deliberately survives a keystroke, so the row never blinks and
+  /// never tweens through numbers the Generator did not quote. That
+  /// is right for a DISPLAY and wrong for a decision: the whole safety
+  /// argument for turning the confirm sheet off is that the price was on the
+  /// glass first, and a quote for an earlier draft is not that price
+  /// (`consensus-auditor`, this sitting). The unceremonious send arm requires
+  /// this to equal what it is about to send.
+  String? _feeFor;
+
+  /// A probe is running, so [_fee] is the PREVIOUS answer.
+  bool _feePending = false;
+
+  /// **A send is in flight.** The one re-entry guard on a funds surface whose
+  /// confirm sheet may be turned off — see [_send].
+  bool _sending = false;
+
+  /// **Why the last send did not go**, said at the composer.
+  ///
+  /// It exists because the signing toggle can remove the sheet, and the sheet
+  /// is where every refusal used to be read. Cleared on the next keystroke, so
+  /// it never outlives the draft it was about.
+  String? _sendRefusal;
+
+  Timer? _feeDebounce;
+
+  /// Only the newest probe may land. Without it a slow answer for `hi` can
+  /// return after a fast one for `hi there` and leave a true number against
+  /// the wrong text — worse than no number.
+  int _feeToken = 0;
+
+  /// Long enough that a run of keystrokes makes ONE probe, short enough that
+  /// the figure feels live. The probe builds a real transaction, so it is not
+  /// free. Same number as the send screen's, deliberately.
+  static const Duration _feeDebounceFor = Duration(milliseconds: 250);
+
   @override
   void initState() {
     super.initState();
@@ -130,6 +178,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   void _onDraft() {
     final draft = _compose.text;
+    _repriceFee();
+    if (_sendRefusal != null) setState(() => _sendRefusal = null);
     // Only when the ANSWER changes — a rebuild per keystroke over a thread
     // list is what BG-18's own rule warns about.
     if (draft.trim().isEmpty != _draft.trim().isEmpty) {
@@ -139,10 +189,61 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
+  /// Re-price what is typed now.
+  ///
+  /// An emptied field clears the figure outright rather than leaving the fee
+  /// of a message that no longer exists; anything else keeps the standing
+  /// quote on screen and asks Rust, which prices **the exact wire this send
+  /// would build** — the namespace, the alias head and the sealed envelope
+  /// included. [_feeFor] is what stops a held quote being acted on.
+  void _repriceFee() {
+    _feeDebounce?.cancel();
+    final token = ++_feeToken;
+    final text = _compose.text.trim();
+    if (text.isEmpty) {
+      if (_fee != null || _feePending) {
+        setState(() {
+          _fee = null;
+          _feeFor = null;
+          _feePending = false;
+        });
+      }
+      return;
+    }
+    if (!_feePending) setState(() => _feePending = true);
+    _feeDebounce = Timer(_feeDebounceFor, () async {
+      try {
+        final fee = await _messaging.commFeePreview(
+          widget.conversationId,
+          text,
+        );
+        if (!mounted || token != _feeToken) return;
+        // Both in ONE `setState`, so no frame ever holds a figure beside the
+        // wrong text — which is the whole point of keeping the pair.
+        setState(() {
+          _fee = fee;
+          _feeFor = fee == null ? null : text;
+          _feePending = false;
+        });
+      } catch (_) {
+        // No fee is a real answer and a failed probe is not a number. The
+        // send still works: with no figure the tap routes through the confirm
+        // sheet, which states Rust's own reason.
+        if (!mounted || token != _feeToken) return;
+        setState(() {
+          _fee = null;
+          _feeFor = null;
+          _feePending = false;
+        });
+      }
+    });
+  }
+
   @override
   void dispose() {
     _messaging.lastPing.removeListener(_onPing);
     _compose.removeListener(_onDraft);
+    _feeDebounce?.cancel();
     _compose.dispose();
     _scroll.dispose();
     // The decrypted rows die with this state object (§0.4 — view-scoped) — and
@@ -169,6 +270,20 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   void _onPing() {
     if (_messaging.lastPing.value == widget.conversationId) _pull();
+  }
+
+  /// Move this conversation's read mark to its newest inbound row.
+  ///
+  /// Fire-and-forget by design: the count is a courtesy, and a device that
+  /// cannot write the mark must still render the thread. Rust pings the list
+  /// itself when the mark actually moves, which is the moment a badge goes.
+  Future<void> _markRead() async {
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
+    try {
+      await _messaging.markRead(widget.conversationId);
+    } catch (_) {
+      // A watermark that could not be written costs a badge, never a message.
+    }
   }
 
   /// Chip state for a row: outbound comm rows ride the tracker's answer;
@@ -224,6 +339,19 @@ class _ThreadScreenState extends State<ThreadScreen> {
         if (!mounted) return;
         _merge(delta);
       }
+      // **The rows are now on screen, so they have been read.**
+      //
+      // Here and nowhere else: this runs on the thread's first frame with rows
+      // and on every delta while the thread is the visible route — which is
+      // exactly the founder's condition, that the user could actually see
+      // them. A ping alone is not enough (`lastPing` is a `ValueNotifier` and
+      // skips an equal value, L48), so the mark rides the PULL the ping
+      // caused rather than the ping.
+      //
+      // Backgrounding the app with the thread open does not mark what arrives
+      // meanwhile: the route is no longer being looked at, and Rust's own
+      // forward-only rule means a later mark simply catches up.
+      unawaited(_markRead());
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || !_scroll.hasClients) return;
         final bottom = _scroll.position.maxScrollExtent;
@@ -266,6 +394,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
   Future<bool> _confirmSend({
     required Future<SignableSummaryDto> Function() prepare,
     required String title,
+    Widget? footer,
   }) async {
     try {
       final outcome = await runConfirmSend(
@@ -274,6 +403,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
         commit: _messaging.commit,
         abandon: _messaging.abandon,
         title: title,
+        // The founder's toggle, on the one sheet it governs — supplied by the
+        // plain-message caller, never by this shared funnel.
+        footer: footer,
         // Every send this funnel makes lands in the thread as a message —
         // the comm frame, the challenge, the taunt and the accept alike.
         preparingObject: 'message',
@@ -289,12 +421,106 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
+  /// **The send, and the one place the founder's toggle changes anything.**
+  ///
+  /// Four doors, and only one of them skips the sheet:
+  ///
+  ///  - **signing on** (the default) ⇒ the confirm ceremony, unchanged;
+  ///  - **signing off, and a fee on the glass** ⇒ straight to Rust's
+  ///    unceremonious door, which re-checks the preference, the comm-class
+  ///    scope, the built transaction's own destination and the fee ceiling
+  ///    before anything is broadcast;
+  ///  - **signing off, no fee quoted** ⇒ **the ceremony anyway.** The live
+  ///    figure is the only price disclosure once the sheet is gone, so a send
+  ///    with no figure has had none — and the sheet is also what turns "no
+  ///    quote" into Rust's own sentence about why;
+  ///  - **the ceiling tripped** ⇒ Rust refuses with the figure in words, and
+  ///    the tap falls back to the sheet, which shows it in full.
+  ///
+  /// The preference is read HERE rather than held in state: it can be changed
+  /// on the sending sheet itself and in message settings, and a cached copy is
+  /// how those two disagree.
   Future<void> _send() async {
     final text = _compose.text.trim();
-    if (text.isEmpty) return;
+    // **The re-entry guard.** With the ceremony on, the modal sheet absorbed a
+    // second tap; turning it off removed that without anything replacing it,
+    // and a double tap would then either broadcast twice — two messages, two
+    // fees, nothing confirmed — or overwrite the single `PENDING_TRANSPORT`
+    // slot and fail the first commit on a stale nonce
+    // (`wallet-security-auditor`, this sitting). A sheet is also a lock.
+    if (text.isEmpty || _sending) return;
+    KvHaptic.selection();
+    setState(() => _sending = true);
+    try {
+      await _sendInner(text);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _sendInner(String text) async {
+    var ceremony = true;
+    try {
+      ceremony = await _messaging.messageSigning();
+    } catch (_) {
+      // An unreadable preference is the ceremony. The safe state is the one
+      // that asks (`MessagePrefs::load`'s own posture, restated).
+    }
+    if (!mounted) return;
+
+    // **The quote must be for THIS text, and settled.**
+    //
+    // `_fee` is deliberately held across a keystroke so the figure does not
+    // blink. That is right for a display and wrong for a decision: sending
+    // inside the debounce would
+    // broadcast, with no sheet, a message whose fee the user has never seen,
+    // and the price on the glass is the entire safety argument for turning the
+    // sheet off (`consensus-auditor`, this sitting). Anything else falls
+    // through to the ceremony, which prices it in front of them.
+    if (!ceremony && _fee != null && !_feePending && _feeFor == text) {
+      try {
+        final outcome = await _messaging.sendCommNow(
+          widget.conversationId,
+          text,
+        );
+        if (!mounted) return;
+        if (outcome.submitted > 0) {
+          _compose.clear();
+          await _pull();
+          return;
+        }
+      } on AppError catch (e) {
+        if (!mounted) return;
+        // **A refusal from the ceremony-free door OPENS the ceremony.**
+        //
+        // Every post-build refusal — an unexpected kind, a destination that is
+        // not this conversation's own, a fee over the ceiling — is a case
+        // worth a second look, and the sheet IS the second look. Showing the
+        // sentence and stopping would leave the user tapping into the same
+        // refusal with the control that could resolve it turned off
+        // (`wallet-security-auditor`, this sitting).
+        //
+        // The sentence still rides the composer, because it says WHY the sheet
+        // appeared when the user had turned it off — the fee refusal names the
+        // figure, which is the whole reason that arm exists.
+        setState(() => _sendRefusal = e.message);
+      }
+      // Fell through: refused after the build, or submitted nothing and threw
+      // nothing. Either way the ceremony is the honest next step rather than a
+      // report of a send that did not happen.
+      if (!mounted) return;
+    }
+
     final sent = await _confirmSend(
       prepare: () => _messaging.prepareComm(widget.conversationId, text),
       title: 'Confirm message',
+      // **The toggle rides the PLAIN MESSAGE ceremony only.** This funnel is
+      // shared with the challenge, the taunt and the challenge-accept, and the
+      // preference governs none of them — a switch on a sheet it does not
+      // change is a control that lies (`wallet-security-auditor`, this
+      // sitting). Challenge-accept especially: P3 turns that into a staked
+      // commitment.
+      footer: _SigningToggle(messaging: _messaging),
     );
     if (sent) _compose.clear();
   }
@@ -427,182 +653,156 @@ class _ThreadScreenState extends State<ThreadScreen> {
               ),
             ),
             Expanded(child: KvColumn(gutter: false, child: _body(theme))),
-            if (widget.superseded)
-              _ReplacedNotice(theme: theme)
-            else
-              KvColumn(
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    top: KvSpace.s,
-                    bottom: KvSpace.l,
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Flexible(
-                        fit: FlexFit.tight,
-                        child: Container(
-                          constraints: const BoxConstraints(
-                            minHeight: KvSpace.touchTarget,
-                            minWidth: _fieldMin,
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: KvSpace.s20,
-                            vertical: KvSpace.sm,
-                          ),
-                          decoration: BoxDecoration(
-                            color: KvColor.plate,
-                            borderRadius: BorderRadius.circular(
-                              KvRadius.control,
+            // **A refusal belongs where the send was attempted.** With the
+            // confirm sheet turned off there is no other surface to carry
+            // one, and a SnackBar over a composer is gone before a thumb has
+            // moved.
+            //
+            // **And it EASES**, rather than appearing between two frames and
+            // shoving the composer down — the comment claimed motion this had
+            // to grow (BG-24, `ux-auditor`). `AnimatedSize` over an empty box
+            // is the house's own way of saying *nothing appears without the
+            // motion that accounts for it*, and reduced motion collapses it.
+            AnimatedSize(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : KvMotion.calm,
+              curve: KvMotion.curve,
+              alignment: Alignment.bottomCenter,
+              child: _sendRefusal == null
+                  ? const SizedBox(width: double.infinity)
+                  : KvColumn(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: KvSpace.s),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Padding(
+                              padding: EdgeInsets.only(top: 2),
+                              child: KvGlyphIcon(
+                                KvGlyph.info,
+                                size: 16,
+                                tone: KvColor.warn,
+                              ),
                             ),
-                          ),
-                          child: TextField(
-                            controller: _compose,
-                            minLines: 1,
-                            maxLines: 4,
-                            textInputAction: TextInputAction.newline,
-                            cursorColor: KvColor.primary,
-                            style: const TextStyle(
-                              fontFamily: KvFont.ui,
-                              fontSize: 15,
-                              height: 20 / 15,
-                              fontWeight: FontWeight.w400,
-                              fontVariations: KvWeight.w400,
-                              color: KvColor.ink,
+                            const SizedBox(width: KvSpace.s),
+                            Expanded(
+                              child: Text(
+                                _sendRefusal ?? '',
+                                style: const TextStyle(
+                                  fontFamily: KvFont.ui,
+                                  fontSize: 13,
+                                  height: 18 / 13,
+                                  fontWeight: FontWeight.w400,
+                                  fontVariations: KvWeight.w400,
+                                  color: KvColor.warnInk,
+                                ),
+                              ),
                             ),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              contentPadding: EdgeInsets.zero,
-                              hintText: 'Message',
-                              hintStyle: TextStyle(
+                          ],
+                        ),
+                      ),
+                    ),
+            ),
+            KvColumn(
+              child: Padding(
+                padding: const EdgeInsets.only(
+                  top: KvSpace.s,
+                  bottom: KvSpace.l,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // **One right edge** (A11, the founder's own ragged-edge
+                    // finding): the mark is a 44 dp disc centred in a 52 dp
+                    // target, so a figure right-aligned to the ROW overhangs
+                    // the disc it belongs to by the 4 dp inset.
+                    Padding(
+                      padding: const EdgeInsets.only(
+                        right: (KvSpace.touchTarget - KvSpace.iconButton) / 2,
+                        bottom: 2,
+                      ),
+                      child: _ComposerFee(sompi: _fee),
+                    ),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        // **The field takes the row.** It was `Flexible` beside an
+                        // intrinsic pill whose label could be a 21-character
+                        // refusal, which is how the composer once measured 0.0 dp
+                        // at 320 dp / 1.3× (L131). Now the only thing beside it is
+                        // a fixed-width control, so the field's width is stated by
+                        // subtraction rather than negotiated.
+                        Expanded(
+                          child: Container(
+                            constraints: const BoxConstraints(
+                              minHeight: KvSpace.touchTarget,
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: KvSpace.s20,
+                              vertical: KvSpace.sm,
+                            ),
+                            decoration: BoxDecoration(
+                              color: KvColor.plate,
+                              borderRadius: BorderRadius.circular(
+                                KvRadius.control,
+                              ),
+                            ),
+                            child: TextField(
+                              controller: _compose,
+                              minLines: 1,
+                              maxLines: 4,
+                              textInputAction: TextInputAction.newline,
+                              cursorColor: KvColor.primary,
+                              style: const TextStyle(
                                 fontFamily: KvFont.ui,
                                 fontSize: 15,
                                 height: 20 / 15,
                                 fontWeight: FontWeight.w400,
                                 fontVariations: KvWeight.w400,
-                                color: KvColor.inkMeta,
+                                color: KvColor.ink,
+                              ),
+                              decoration: const InputDecoration(
+                                isDense: true,
+                                border: InputBorder.none,
+                                enabledBorder: InputBorder.none,
+                                focusedBorder: InputBorder.none,
+                                contentPadding: EdgeInsets.zero,
+                                hintText: 'Message',
+                                hintStyle: TextStyle(
+                                  fontFamily: KvFont.ui,
+                                  fontSize: 15,
+                                  height: 20 / 15,
+                                  fontWeight: FontWeight.w400,
+                                  fontVariations: KvWeight.w400,
+                                  color: KvColor.inkMeta,
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: KvSpace.touchGap),
-                      // **`M4` prints `0.0001 KAS` under `Send` and this
-                      // build does not.** A comm is a SELF-SEND: the value
-                      // returns to the wallet and only the network fee is
-                      // spent, so there is no fixed amount to print — and the
-                      // fee itself is not known until Rust has built the
-                      // transaction, which happens after this tap. A figure
-                      // here would be a claim about a spend nobody has priced
-                      // yet, on the control that commits it. The words are
-                      // what the app can back; the ceremony behind the tap
-                      // shows the real figure before anything is signed.
-                      // **The pill sizes to its own content**, with `M4`'s
-                      // 108 dp as the floor rather than the answer. The render
-                      // measures 108 around `0.0001 KAS`; this pill carries
-                      // different words, and forcing the render's number onto
-                      // them broke one — the frame rendered `Networ / k fee`,
-                      // the top bar's defect again. What the render actually
-                      // fixes is the PROPORTION: a compact pill beside a field
-                      // that takes the rest, which an intrinsic width keeps at
-                      // every window class.
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(
-                          minWidth: _sendWidth,
-                          maxWidth: _sendMax,
+                        const SizedBox(width: KvSpace.touchGap),
+                        _SendMark(
+                          armed: _draft.trim().isNotEmpty && !_sending,
+                          // A disabled control says WHY, and the two reasons
+                          // it can be disabled are different facts (BG-12).
+                          reason: _sending
+                              ? 'Sending…'
+                              : 'Write a message first',
+                          onTap: _send,
                         ),
-                        child: IntrinsicWidth(
-                          child: KvAction(
-                            label: 'Send',
-                            primary: true,
-                            // **BG-27: a control with nothing to commit is
-                            // not lit.** It was unconditionally teal and its
-                            // tap returned silently on an empty draft, which
-                            // is D-185's own gate — a control that looks live
-                            // and does nothing teaches distrust of every
-                            // other control on the screen (`ux-auditor`
-                            // BLOCK, UX-R5). `_compose` is now listened to,
-                            // so the pill arms on the first character.
-                            disabledReason: _draft.trim().isEmpty
-                                ? 'Write a message first'
-                                : null,
-                            // The pill is 108 dp beside a field; the reason is
-                            // 21 characters. It paints the verb and announces
-                            // the reason (see [KvAction.disabledLabel]).
-                            disabledLabel: 'Send',
-                            // Not an unmade choice.
-                            disabledMark: false,
-                            // **`M4` draws an arrow here and this build does
-                            // not**, and it is a trade rather than an
-                            // omission. The mark costs 26 dp (18 + the gap),
-                            // and at 320 dp / 1.3× those 26 dp came out of the
-                            // field beside it — the composer's own placeholder
-                            // rendered `Messag / e`. Between an arrow beside
-                            // the word `Send` and the line that says what
-                            // sending costs, the words are the information and
-                            // the arrow is the decoration. Said in the sitting.
-                            labelWidget: const Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  'Send',
-                                  style: TextStyle(
-                                    fontFamily: KvFont.ui,
-                                    fontSize: 15,
-                                    height: 18 / 15,
-                                    fontWeight: FontWeight.w700,
-                                    fontVariations: KvWeight.w700,
-                                    color: KvColor.onPrimary,
-                                  ),
-                                ),
-                                Text(
-                                  'Network fee',
-                                  style: TextStyle(
-                                    fontFamily: KvFont.ui,
-                                    fontSize: 11,
-                                    height: 14 / 11,
-                                    fontWeight: FontWeight.w500,
-                                    fontVariations: KvWeight.w500,
-                                    color: KvColor.onPrimary,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            onTap: () {
-                              KvHaptic.selection();
-                              _send();
-                            },
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
+            ),
           ],
         ),
       ),
     );
   }
-
-  /// `M4` measures the send pill at x 260.0..368.0 — 108 dp beside a field
-  /// that takes the rest of the column.
-  static const double _sendWidth = 108;
-
-  /// The widest the pill may grow, and the least the field may shrink to.
-  ///
-  /// Both are stated rather than emergent. The pill's label is variable — a
-  /// verb, or a refusal — and a `Row` whose only flex child is the field hands
-  /// an unbounded intrinsic sibling everything: at 320 dp / 1.3× the disabled
-  /// label's 21 characters took the whole row and the message field measured
-  /// **0.0 dp**, its hint painting at zero width, which `find.text` still
-  /// matches and no presence assertion can see (L131, `ux-auditor` BLOCK,
-  /// UX-R5).
-  static const double _sendMax = 148;
-  static const double _fieldMin = 96;
 
   /// The thread's own overflow. The arcade composer used to be a permanent
   /// icon in the composer row, where it competed with the two controls the
@@ -612,9 +812,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
   Future<void> _threadActions() async {
     KvHaptic.selection();
     final action = await Navigator.of(context).push<String>(
-      KvSheetRoute<String>(
-        builder: (_) => _ThreadActionsSheet(superseded: widget.superseded),
-      ),
+      KvSheetRoute<String>(builder: (_) => const _ThreadActionsSheet()),
     );
     if (!mounted || action == null) return;
     if (action == 'arcade') await _openArcadeComposer();
@@ -788,36 +986,286 @@ String _clock(BuildContext context, BigInt unixMs) =>
       alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
     );
 
-/// What stands where the composer was on a replaced thread.
+/// **"Turn off signing for messages"**, on the message sending sheet — the
+/// founder's ruling of 2026-09-08, in his own words: *"users who prefer not
+/// signing everytime they want to send a message can absolutely do so (dont
+/// argue this. i want it)."*
 ///
-/// A disabled text field would still read as "type here" and leave the user
-/// wondering why nothing happens. Replacing it outright says the thread is
-/// closed, and says why — which is the whole point: the failure this prevents
-/// was silent, and silence is what made it cost hours.
-class _ReplacedNotice extends StatelessWidget {
-  const _ReplacedNotice({required this.theme});
+/// ## What it turns off, said plainly because the word matters
+///
+/// **The ceremony, never the signature.** Every transaction this wallet
+/// broadcasts is signed in Rust behind the vault, and no preference reaches
+/// that (INV-2). What this removes is the confirm step — the sheet you are
+/// reading it on. With it off, a message sends on the tap, for the fee already
+/// shown above the send button.
+///
+/// ## The bounds, all of which live in Rust
+///
+/// `transport_send_comm_now` is the only unceremonious door in the bridge, and
+/// it refuses anything that is not a plain message: a handshake, an acceptance
+/// (which refunds a counterparty's bond), a stash and a payment are not
+/// expressible through it. It re-reads this preference, re-checks the BUILT
+/// transaction's kind and destination against the conversation's own bound
+/// address, and refuses a fee above the ceiling — which is what keeps the
+/// toggle honest on a lane whose payload can be a large attachment.
+///
+/// **Default on**, mirrored in message settings so it can be turned back on
+/// without first sending something, and read fresh on every send so the two
+/// surfaces cannot disagree.
+class _SigningToggle extends StatefulWidget {
+  const _SigningToggle({required this.messaging});
 
-  final ThemeData theme;
+  final MessagingService messaging;
+
+  @override
+  State<_SigningToggle> createState() => _SigningToggleState();
+}
+
+class _SigningToggleState extends State<_SigningToggle> {
+  /// Null until the preference has been read. The row does not render at all
+  /// until then: a switch that flicks from a guess to the truth on the second
+  /// frame is a control lying about the state it governs (BG-24).
+  bool? _signing;
+
+  /// Why the last flip did not stick, said under the row.
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    try {
+      final signing = await widget.messaging.messageSigning();
+      if (mounted) setState(() => _signing = signing);
+    } catch (_) {
+      // Unreadable ⇒ the ceremony, which is the state you are already in.
+      if (mounted) setState(() => _signing = true);
+    }
+  }
+
+  Future<void> _set(bool signing) async {
+    KvHaptic.selection();
+    setState(() {
+      _signing = signing;
+      _error = null;
+    });
+    try {
+      await widget.messaging.setMessageSigning(signing);
+    } catch (e) {
+      // The write failed, so the row goes back to what is actually stored
+      // rather than showing a choice the device did not keep — and it says so
+      // where it happened. §4: this language has no toasts, and a reason that
+      // vanishes on a timer is not a reason (`ux-auditor`, 2026-09-08).
+      if (!mounted) return;
+      setState(() {
+        _signing = !signing;
+        _error = displayError(e);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(KvSpace.m),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const KvGlyphIcon(KvGlyph.history, size: 20, tone: KvColor.inkMeta),
-          const SizedBox(width: KvSpace.s),
-          Expanded(
-            child: Text(
-              'This conversation was replaced. Your contact started a new one '
-              'with you — messages sent here would not reach them. Open the '
-              'newer thread from the contacts list.',
-              style: theme.textTheme.bodySmall?.copyWith(color: KvColor.inkDim),
+    final signing = _signing;
+    // **It eases in** (BG-24). The preference is read asynchronously, so
+    // without this a ~70 dp control appears between two frames and grows the
+    // sheet immediately before the hold that commits money — the same defect
+    // the composer's refusal line was wrapped for in this sitting
+    // (`ux-auditor`, 2026-09-08).
+    return AnimatedSize(
+      duration: MediaQuery.disableAnimationsOf(context)
+          ? Duration.zero
+          : KvMotion.calm,
+      curve: KvMotion.curve,
+      alignment: Alignment.topCenter,
+      child: signing == null
+          ? const SizedBox(width: double.infinity)
+          : _row(signing),
+    );
+  }
+
+  Widget _row(bool signing) {
+    return KvToggle(
+      bare: true,
+      // The ceremony's body sits on `plate`, so `inkMeta` is legal here —
+      // stated rather than defaulted, because the same control on `chip` in
+      // message settings is not (BG-14, §1.4).
+      ground: KvColor.plate,
+      // **The switch is ON when signing is OFF**, because the founder's label
+      // names the ACT ("turn off signing"), not the state. A toggle whose
+      // label and position disagree is the classic settings defect, so the
+      // sub-line below says what each position means outright.
+      on: !signing,
+      // One fact, one string — shared with `M5`'s mirror (BG-21).
+      title: signingToggleTitle,
+      // A failed write speaks here, in the seat the sub-line already owns —
+      // the switch has already sprung back, and this says why.
+      sub: _error ?? signingToggleSub(signing),
+      onChanged: (off) => _set(!off),
+    );
+  }
+}
+
+/// **What this message will cost, streaming as it is typed** — tiny, above the
+/// send mark (founder, 2026-09-08: *"the fee must be tiny above the send
+/// button"*).
+///
+/// It is the send screen's `_FeeRow` at composer scale and under the same two
+/// laws, which is why it is a sibling and not a copy of the idea:
+///
+///  - **money never streams.** The figure is crossfaded, never counted up: a
+///    counter tweening toward a fee renders values the Generator never quoted,
+///    on a surface that commits money.
+///  - **an unknown fee is nothing, never zero.** No quote yet, a locked
+///    vault, a bound address with no mature coins — the slot is empty and the
+///    send falls through to the confirm sheet, which states Rust's own reason.
+///    `0.0000` here would be a wallet claiming this message is free.
+///
+/// **The slot holds its height whether or not there is a figure** (BG-24), so
+/// nothing below it moves on the first keystroke. Opacity is the only thing
+/// that changes, and it changes between 0 and 1 — never to a dim.
+class _ComposerFee extends StatelessWidget {
+  const _ComposerFee({required this.sompi});
+
+  /// The current quote, or the last one while a fresh probe is in flight.
+  ///
+  /// **It is never marked as stale on the glass**, and it does not need to be:
+  /// a held quote reads as the last thing the Generator said, which is true,
+  /// and the send arm refuses to act on one that is not for the text in the
+  /// field. Marking it cost 1.93:1 at this size, which is what removed it.
+  final BigInt? sompi;
+
+  /// Measured off the composer, not chosen: the mark below is 44 dp of visual
+  /// control, and this line is the smallest the Bible allows a figure with a
+  /// unit to be set at — 11 dp, which clears BG-14's floor.
+  static const double _size = 11;
+
+  @override
+  Widget build(BuildContext context) {
+    final fee = sompi;
+    return SizedBox(
+      // **Its own full-width line, above the composer row.**
+      //
+      // It began beside the send mark, in a non-flex column next to an
+      // `Expanded` field — so the field's width was negotiated against a
+      // string that changes as the user types: measured off the frames,
+      // 299 → 271 dp at 393 on the first keystroke, and 228 → 177 dp at
+      // 320 dp / 1.3×, which is what wrapped a short draft onto two lines
+      // (BG-24, `ux-auditor` BLOCK; this comment used to assert the opposite
+      // as settled fact, which is the scar the fix is for).
+      //
+      // A 52 dp slot beside the mark was the other candidate and it fails
+      // differently: `0.000143 KAS` scaled into the control's own width lands
+      // near 8.7 dp, under BG-14's 11 dp floor. A full-width line owes the
+      // field nothing, holds the figure at full size, and still puts it
+      // exactly where the founder asked — *"tiny above the send button"* —
+      // because it right-aligns to the same edge the mark does.
+      //
+      // **The height takes the scaler.** Measured with a `TextPainter`: this
+      // line box is 14.0 / 16.0 / 18.0 dp at 1.0 / 1.15 / 1.3, so a fixed 14
+      // clips from 1.15 upward and the digits survive 1.0 by 0.35 dp
+      // (`ux-auditor`, measured). This is the figure BG-6's new exception
+      // rests on; it may not be the thing that clips.
+      height: MediaQuery.textScalerOf(context).scale(14),
+      child: AnimatedOpacity(
+        duration: KvMotion.fast,
+        curve: KvMotion.curve,
+        // **Full strength or nothing.** It used to dim to 45% while a probe
+        // ran, which at 11 dp `inkMeta` on `abyss` is 1.93:1 — the row §1.4
+        // records as failing, held for the whole debounce on every keystroke
+        // run (`ux-auditor` BLOCK). The pending state costs nothing to say
+        // this way: the send arm already refuses to act on a quote that is not
+        // for the text in the field, so a figure on screen is never the thing
+        // a decision rests on unless it is current.
+        opacity: fee == null ? 0 : 1,
+        // **The figure is mono, the unit is Jakarta** (BG-30) — the same two
+        // faces `M5`'s bond row sets, one class over. The figure is trimmed by
+        // [kasCanonical], which is the send screen's own rule, so one payment
+        // and one message never print a fee two ways.
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: fee == null ? '' : kasCanonical(fee),
+                  style: const TextStyle(
+                    fontFamily: KvFont.mono,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+                TextSpan(
+                  text: fee == null ? '' : ' KAS',
+                  style: const TextStyle(fontFamily: KvFont.ui),
+                ),
+              ],
+            ),
+            maxLines: 1,
+            textAlign: TextAlign.end,
+            // §2 sets `metaMono` at 500. (The face itself declares wght
+            // 100–800 with a 400 default — read from the variable font's
+            // `fvar`, not remembered; an earlier comment here claimed the
+            // range started at 500.)
+            style: const TextStyle(
+              fontSize: _size,
+              height: 14 / _size,
+              fontWeight: FontWeight.w500,
+              fontVariations: KvWeight.w500,
+              color: KvColor.inkMeta,
             ),
           ),
-        ],
+        ),
       ),
+    );
+  }
+}
+
+/// **The send control: a mark, and nothing else** (founder, 2026-09-08: *"a
+/// nice send button that isnt taking too much space … The send button can be a
+/// send icon only"*).
+///
+/// It replaces a pill that carried the word `Send` over the words `Network
+/// fee`, and the trade is deliberate: the fee is now a real figure above the
+/// control, so the words under the verb had nothing left to say, and the
+/// ~104 dp they were spending goes to the field — which is the other half of
+/// the same ruling (*"i want the text input in a chat to be wider"*).
+///
+/// **It is [KvIconButton], not a new control.** This app has one icon button —
+/// 44 dp of drawn disc inside a 52 dp target, one press feel — and the only
+/// thing the composer needed was for it to be able to LIGHT (BG-27), which is
+/// now a parameter on that part rather than a second widget here.
+///
+/// Unarmed it is a `plate` disc with an `etch` mark and no tap at all, and it
+/// says why in words: a control that looks live and does nothing teaches
+/// distrust of every other control on the screen (D-185).
+class _SendMark extends StatelessWidget {
+  const _SendMark({
+    required this.armed,
+    required this.reason,
+    required this.onTap,
+  });
+
+  final bool armed;
+
+  /// Why it cannot be pressed, when it cannot. Two different facts — an empty
+  /// draft, and a send already in flight — and a screen reader is told which.
+  final String reason;
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return KvIconButton(
+      mark: KvGlyph.send,
+      label: 'Send',
+      hint: armed ? null : reason,
+      tone: armed ? KvColor.onPrimary : KvColor.etch,
+      fill: armed ? KvColor.primary : KvColor.plate,
+      fillPressed: armed ? KvColor.primaryPressed : KvColor.chip,
+      onTap: armed ? onTap : null,
     );
   }
 }
@@ -2124,12 +2572,7 @@ String? _nameOf(String label) {
 /// as a permanent icon: `M4` draws two controls in that row and this is where
 /// the third went.
 class _ThreadActionsSheet extends StatelessWidget {
-  const _ThreadActionsSheet({required this.superseded});
-
-  /// A replaced thread can be read and cannot be typed in, so it can carry no
-  /// action that composes. Offering one would be a control that looks live and
-  /// fails behind the confirm (BG-12).
-  final bool superseded;
+  const _ThreadActionsSheet();
 
   @override
   Widget build(BuildContext context) {
@@ -2141,31 +2584,19 @@ class _ThreadActionsSheet extends StatelessWidget {
       child: KvRowContainer(
         ground: KvColor.chip,
         children: [
-          if (superseded)
-            const KvRow(
-              dense: true,
-              ground: KvColor.chip,
-              leading: KvRowDisc.neutral(mark: KvGlyph.history),
-              title: 'Read only',
-              sub:
-                  'They started a newer conversation with you — open that '
-                  'thread to message them',
-              subLines: 3,
-            )
-          else
-            KvRow(
-              dense: true,
-              ground: KvColor.chip,
-              leading: const KvRowDisc.neutral(mark: KvGlyph.games),
-              title: 'Challenge or taunt',
-              sub: 'Send a duel invitation or a jab',
-              trailing: const KvGlyphIcon(
-                KvGlyph.chevron,
-                size: 20,
-                tone: KvColor.etch,
-              ),
-              onTap: () => Navigator.of(context).pop('arcade'),
+          KvRow(
+            dense: true,
+            ground: KvColor.chip,
+            leading: const KvRowDisc.neutral(mark: KvGlyph.games),
+            title: 'Challenge or taunt',
+            sub: 'Send a duel invitation or a jab',
+            trailing: const KvGlyphIcon(
+              KvGlyph.chevron,
+              size: 20,
+              tone: KvColor.etch,
             ),
+            onTap: () => Navigator.of(context).pop('arcade'),
+          ),
         ],
       ),
     );
