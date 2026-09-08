@@ -495,33 +495,52 @@ impl Default for MessagePrefs {
 impl MessagePrefs {
     /// The most a message may cost and still send without the sheet.
     ///
-    /// **0.001 KAS.** A plain message on this wallet prices in the
-    /// 0.0001–0.0003 KAS band — the anti-dust floor plus the payload's mass —
-    /// so this sits roughly an order of magnitude above an ordinary send and
-    /// well under anything a user would want to spend unasked. Above it the
-    /// ceremony appears with the figure, whatever the preference says: the
-    /// cases that reach here are the ones worth a second look — a large
-    /// attachment, a chained transaction, a fragmented coin shape, or a fee
-    /// regime this build has never seen.
+    /// **0.01 KAS, and the figure is MEASURED rather than estimated.** The
+    /// first cut said 0.001 on a stated band of 0.0001–0.0003 KAS; the founder's
+    /// own wallet says otherwise, read off chain from his real sends on
+    /// 2026-09-08:
+    ///
+    /// | payload | fee (sompi) |
+    /// |:--|--:|
+    /// | `kchat:1:comm` ×3 | 173_803 · 174_203 · 175_003 |
+    /// | `ciph_msg:1:comm` ×3 | 227_000 · 229_400 · 235_000 |
+    /// | `ciph_msg:1:handshake` | 357_200 |
+    ///
+    /// A real message costs **0.0017–0.0024 KAS**, so the original ceiling sat
+    /// *below* every message this wallet has ever sent: the toggle would have
+    /// been inert, every send falling back to the sheet it exists to remove.
+    /// Only the device could settle that — the estimate came from a render.
+    ///
+    /// This clears the dearest observed message by ~4× and stays 20× under the
+    /// 0.2 KAS handshake bond. Above it the ceremony appears with the figure,
+    /// whatever the preference says, and the cases that reach there are the
+    /// ones worth a second look: a large attachment, a chained transaction, a
+    /// fragmented coin shape, or a fee regime this build has never seen. The
+    /// worst a single unasked tap can spend is this, and a comm is a self-send
+    /// — the value returns, so the fee is the whole cost.
     ///
     /// It bounds the ONE thing turning the sheet off gives up, which is a
     /// second chance to see the price. The live figure above the send button
     /// is the first.
-    pub const UNCEREMONIOUS_FEE_CEILING: u64 = 100_000;
+    pub const UNCEREMONIOUS_FEE_CEILING: u64 = 1_000_000;
 
     /// Where the ceiling sits, checked by the COMPILER rather than by a test
     /// run — a bound between two constants has nothing to observe at runtime,
     /// and stated here it cannot be moved without the placement being
     /// re-argued in the same edit.
     ///
-    /// Above an ordinary message (0.0001–0.0003 KAS = 10_000–30_000 sompi —
-    /// an empirical band, so correctly a literal), and an order of magnitude
-    /// under the handshake bond, which is the smallest spend this app ever
-    /// asks a user to confirm. **The bond is NAMED, never copied**: hardcoding
-    /// its present value would let the bond move while this assertion still
-    /// passed and the stated relationship silently broke (`consensus-auditor`,
-    /// this sitting).
-    const _CEILING_CLEARS_A_MESSAGE: () = assert!(Self::UNCEREMONIOUS_FEE_CEILING > 30_000);
+    /// Above the dearest message this wallet has actually sent (235_000 sompi,
+    /// on chain — an empirical figure, so correctly a literal), and an order of
+    /// magnitude under the handshake bond, which is the smallest spend this app
+    /// ever asks a user to confirm. **The bond is NAMED, never copied**:
+    /// hardcoding its present value would let the bond move while this
+    /// assertion still passed and the stated relationship silently broke
+    /// (`consensus-auditor`, this sitting).
+    ///
+    /// The lower bound is what catches the defect glass found: a ceiling set
+    /// from an estimate sat under every real message, and the compiler can hold
+    /// that line now that a measurement exists.
+    const _CEILING_CLEARS_A_MESSAGE: () = assert!(Self::UNCEREMONIOUS_FEE_CEILING > 235_000);
     const _CEILING_IS_UNDER_A_BOND: () =
         assert!(Self::UNCEREMONIOUS_FEE_CEILING < crate::transport::HANDSHAKE_BOND_SOMPI / 10);
 

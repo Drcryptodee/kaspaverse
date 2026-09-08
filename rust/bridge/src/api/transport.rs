@@ -7466,7 +7466,7 @@ mod tests {
     fn the_unceremonious_ceiling_prints_as_a_figure_a_refusal_can_state() {
         assert_eq!(
             format_kas(MessagePrefs::UNCEREMONIOUS_FEE_CEILING),
-            "0.00100000"
+            "0.01000000"
         );
     }
 
