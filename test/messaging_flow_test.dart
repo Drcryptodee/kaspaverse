@@ -742,7 +742,24 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // **The list says it with a dot, not with a plate** (founder,
+      // 2026-09-08). The sentence itself moved to the row it is about; what
+      // the messages screen keeps is the mark on its settings button — and
+      // the mark carries the sentence in its semantic hint, because a dot a
+      // screen reader cannot read is decoration, not a signal.
+      expect(find.textContaining('may be missing'), findsNothing);
+      final mark = tester.widget<KvIconButton>(_iconButton('Message settings'));
+      expect(mark.alert, isTrue);
+      expect(mark.hint, contains('may be missing'));
+
+      // Through the door, the sentence is under the row it belongs to, and it
+      // pushes the screen's one irreversible gesture down.
+      await _tapMessageSettings(tester);
       expect(find.textContaining('may be missing'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.textContaining('may be missing')).dy,
+        lessThan(tester.getTopLeft(find.text('Delete all messages')).dy),
+      );
 
       await tester.tap(find.textContaining('may be missing'));
       await tester.pumpAndSettle();
@@ -754,8 +771,16 @@ void main() {
       // which matters: **turning the archive ON opens the disclosure by
       // itself**, so nobody can consent to a cost they cannot see. Closed
       // while it is off is a short sheet; open the moment it is on is the law.
-      expect(find.text('History & backup'), findsOneWidget);
-      expect(find.byType(KvToggle), findsOneWidget);
+      // Twice, and that is right: the row the sheet was opened from is still
+      // behind it, and the sheet wears the same name. Same for the toggles —
+      // the settings screen's own signing switch is behind the sheet, so the
+      // archive one is addressed by what it says.
+      expect(find.text('History & backup'), findsNWidgets(2));
+      final archiveToggle = find.widgetWithText(
+        KvToggle,
+        'Recover missed messages from an archive',
+      );
+      expect(archiveToggle, findsOneWidget);
       expect(
         find.bySemanticsLabel(
           'Explain Recovering what your node no longer holds',
@@ -777,7 +802,7 @@ void main() {
         newRows: 2,
         atUnixMs: BigInt.one,
       );
-      await tester.tap(find.byType(KvToggle));
+      await tester.tap(archiveToggle);
       await tester.pumpAndSettle();
       expect(find.textContaining('2 recovered messages'), findsOneWidget);
       // **The law: consent is never given blind.** Turning it on opened the
@@ -789,10 +814,18 @@ void main() {
       // D-070 clause 3: the hosted default is replaceable, not a dependency).
       expect(find.textContaining('indexer.kasia.fyi'), findsOneWidget);
 
-      // The complete fill heals the banner (notice logic; live via merge).
+      // The complete fill heals the notice (notice logic; live via merge) —
+      // on the settings screen the sheet came from, and on the mark two
+      // screens back, because both read the one truth.
       await tester.tap(find.text('Messages')); // dismiss the sheet
       await tester.pumpAndSettle();
       expect(find.textContaining('may be missing'), findsNothing);
+      await tester.tap(_iconButton('Back'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<KvIconButton>(_iconButton('Message settings')).alert,
+        isFalse,
+      );
     });
 
     /// **D-074's requirement, through the door it moved to.** History & backup

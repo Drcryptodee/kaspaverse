@@ -94,128 +94,138 @@ String? backupNotice(StashStateDto? state, {required bool archiveEnabled}) {
   return null;
 }
 
-/// Slim tappable banner above the conversation list — renders only when
-/// [historyNotice] or [backupNotice] has something honest to say; tapping
-/// opens the sheet.
-class HistoryNoticeBanner extends StatelessWidget {
-  const HistoryNoticeBanner({
-    super.key,
-    required this.messaging,
-    this.onBackUp,
-  });
+/// **What the history surfaces have to say right now**, or null when they are
+/// quiet — one truth read in two places: the mark on the messages screen's
+/// settings button, and the line under `History & backup` in Message settings.
+///
+/// ONE notice, never two stacked. A history gap is the more urgent of the pair
+/// — it is about messages already missing rather than a risk — so it wins, and
+/// the backup line surfaces once history is whole.
+String? historyAlert(MessagingService messaging) =>
+    historyNotice(
+      gap: messaging.gapAge.value,
+      config: messaging.fillConfig.value,
+      report: messaging.lastFill.value,
+    ) ??
+    backupNotice(
+      messaging.stashState.value,
+      archiveEnabled: messaging.fillConfig.value?.enabled ?? false,
+    );
 
-  final MessagingService messaging;
+/// The four seams [historyAlert] reads, for a caller that must rebuild when any
+/// of them moves.
+Listenable historyAlertListenable(MessagingService messaging) =>
+    Listenable.merge([
+      messaging.gapAge,
+      messaging.fillConfig,
+      messaging.lastFill,
+      messaging.stashState,
+    ]);
 
-  /// Runs the backup confirm ceremony. Owned by the caller because the sheet
-  /// pops before the confirm sheet opens.
-  final VoidCallback? onBackUp;
+/// **The honest gap notice, seated under `History & backup`** (D-074: never
+/// silence; D-088 makes the ~30 h bound a stated fact).
+///
+/// Founder ruling, 2026-09-08: *"could you fix the history backup thingy that
+/// shows under 'search people or addresses' input in messages screen. i saw it
+/// and it was off. Maybe move it to message settings screen so when need be, it
+/// shows under 'history and backup' as a notice so it pushes 'delete all
+/// messages' down."*
+///
+/// **Two defects, one seat.** On the conversation list it was a `plate` banner
+/// that added its own [KvSpace.gutter] inside a [KvColumn] that had already
+/// applied the class gutter — so it drew 32 dp in from an edge the search field
+/// above it and the chats card below it both met at 16, a narrower plate wedged
+/// between two wider ones. It was also the app's one rippling object: a
+/// `Material` + `InkWell` in a language that has no ripple ([KvRow]: *a pressed
+/// row lifts one step, and that is the whole interaction*).
+///
+/// So it is now a bare line — no plate of its own, the [KvRowContainer]'s
+/// hairline above it and its 20 dp inset around it. Rendering it is the
+/// caller's decision, because a container draws that hairline between whatever
+/// children it is handed and a self-erasing child would leave a rule with
+/// nothing under it.
+///
+/// **The messages screen is not left silent**: its settings mark wears the
+/// [KvIconButton.alert] dot for exactly the states this line speaks in.
+class HistoryNoticeLine extends StatefulWidget {
+  const HistoryNoticeLine({super.key, required this.text, this.onTap});
+
+  /// The sentence, from [historyAlert].
+  final String text;
+
+  /// Opens the sheet. Null makes the line a record rather than a door — but
+  /// both notices end in *Tap to …*, so a caller that quiets the gesture owes
+  /// the reader another way through.
+  final VoidCallback? onTap;
+
+  @override
+  State<HistoryNoticeLine> createState() => _HistoryNoticeLineState();
+}
+
+class _HistoryNoticeLineState extends State<HistoryNoticeLine> {
+  bool _down = false;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    return AnimatedBuilder(
-      animation: Listenable.merge([
-        messaging.gapAge,
-        messaging.fillConfig,
-        messaging.lastFill,
-        messaging.stashState,
-      ]),
-      builder: (context, _) {
-        // ONE banner, never two stacked. A history gap is the more urgent of
-        // the pair — it is about messages already missing rather than a risk —
-        // so it wins, and the backup line surfaces once history is whole.
-        final text =
-            historyNotice(
-              gap: messaging.gapAge.value,
-              config: messaging.fillConfig.value,
-              report: messaging.lastFill.value,
-            ) ??
-            backupNotice(
-              messaging.stashState.value,
-              archiveEnabled: messaging.fillConfig.value?.enabled ?? false,
-            );
-        // AnimatedSwitcher so the notice resolves (fill completes → banner
-        // dissolves) instead of popping; opacity-only under reduced motion
-        // (§6 — the TxStatusChip contract, exactly).
-        return AnimatedSwitcher(
-          duration: KvMotion.normal,
-          switchInCurve: KvMotion.out,
-          switchOutCurve: KvMotion.out,
-          transitionBuilder: (child, animation) {
-            final fade = FadeTransition(opacity: animation, child: child);
-            if (reduced) return fade;
-            return SizeTransition(
-              sizeFactor: animation,
-              axisAlignment: -1.0,
-              child: fade,
-            );
-          },
-          child: text == null
-              ? const SizedBox.shrink()
-              : Padding(
-                  key: ValueKey(text),
-                  padding: const EdgeInsets.fromLTRB(
-                    KvSpace.gutter,
-                    KvSpace.s,
-                    KvSpace.gutter,
-                    0,
-                  ),
-                  child: Material(
-                    // **A plate on the ground has no edge** — BG-4 as amended
-                    // (Deep V6), which reversed the v3.1 reasoning this
-                    // comment used to quote. The tone step from `abyss` IS the
-                    // boundary; drawing a hairline as well says it twice
-                    // (`ux-auditor` BLOCK, UX-R5).
-                    color: KvColor.plate,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(KvRadius.plate),
-                    ),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(KvRadius.plate),
-                      onTap: () {
-                        KvHaptic.selection();
-                        showHistoryFillSheet(
-                          context,
-                          messaging,
-                          onBackUp: onBackUp,
-                        );
-                      },
-                      child: Container(
-                        constraints: const BoxConstraints(
-                          minHeight: KvSpace.touchTarget,
-                        ),
-                        padding: const EdgeInsets.all(KvSpace.sm),
-                        child: Row(
-                          children: [
-                            const KvGlyphIcon(
-                              KvGlyph.history,
-                              size: 18,
-                              tone: KvColor.inkMeta,
-                            ),
-                            const SizedBox(width: KvSpace.s),
-                            Expanded(
-                              child: Text(
-                                text,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: KvColor.inkDim,
-                                  fontFamily: KvFont.ui,
-                                ),
-                              ),
-                            ),
-                            const KvGlyphIcon(
-                              KvGlyph.chevron,
-                              size: 18,
-                              tone: KvColor.inkMeta,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
+    // **A door, so it takes a door's box** (BG-12). The sentences it carries
+    // run to two and three lines at phone width and clear the floor on their
+    // own, but a wide window can fit one — and a 39 dp target that only
+    // *usually* measures 58 is a target that fails on the frame nobody checks.
+    final body = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: KvSpace.s10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // **`warn`, and it is earned** — BG-7 gives amber to *not yet
+            // certain: stale, degraded, check this*, which is what a gap in
+            // history is. The words stay `inkDim`: the hue marks the line, it
+            // does not shout the sentence.
+            const Padding(
+              padding: EdgeInsets.only(top: 1),
+              child: KvGlyphIcon(KvGlyph.info, size: 16, tone: KvColor.warn),
+            ),
+            const SizedBox(width: KvSpace.sm),
+            Expanded(
+              child: Text(
+                widget.text,
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 19 / 13,
+                  color: KvColor.inkDim,
                 ),
-        );
-      },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    final tap = widget.onTap;
+    if (tap == null) return body;
+    return Semantics(
+      button: true,
+      label: widget.text,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            KvHaptic.selection();
+            tap();
+          },
+          onTapDown: (_) => setState(() => _down = true),
+          onTapUp: (_) => setState(() => _down = false),
+          onTapCancel: () => setState(() => _down = false),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: _down ? KvColor.chipPressed : Colors.transparent,
+              borderRadius: BorderRadius.circular(KvRadius.row),
+            ),
+            child: body,
+          ),
+        ),
+      ),
     );
   }
 }

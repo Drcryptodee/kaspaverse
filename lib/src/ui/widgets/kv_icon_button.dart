@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 import 'kv_glyph.dart';
+import 'kv_status_chip.dart';
 
 /// **A 44 dp disc inside a 52 dp target** (§4, BG-12).
 ///
@@ -23,6 +24,7 @@ class KvIconButton extends StatefulWidget {
     this.fill,
     this.fillPressed,
     this.hint,
+    this.alert = false,
   });
 
   final KvGlyph mark;
@@ -60,8 +62,24 @@ class KvIconButton extends StatefulWidget {
   final Color? fillPressed;
 
   /// What a screen reader adds after [label] — the reason a control cannot be
-  /// used, in words (BG-12: *a disabled control says why*).
+  /// used, or what [alert] is about, in words (BG-12: *a disabled control says
+  /// why*; and a dot a screen reader cannot read is not a signal, it is
+  /// decoration).
   final String? hint;
+
+  /// **A dot on the disc's shoulder: there is something behind this door.**
+  ///
+  /// The messages screen's settings mark wears it while history may be
+  /// incomplete (D-074: never silence). The full sentence lives where the
+  /// control leads — under `History & backup` in Message settings — because a
+  /// bar has no room for one and a banner that says it on the list drew 32 dp
+  /// in from an edge everything beside it met at 16 (founder, 2026-09-08).
+  ///
+  /// It is [KvLamp]'s own anatomy in `warn`: the 8 dp dot with the 3 dp ring of
+  /// its tint that §1.5 gives a hue standing alone, not a second badge
+  /// vocabulary (BG-21). A MARK, never a target — what it means travels in
+  /// [hint], which is where a screen reader will actually find it.
+  final bool alert;
 
   @override
   State<KvIconButton> createState() => _KvIconButtonState();
@@ -91,6 +109,11 @@ class _KvIconButtonState extends State<KvIconButton> {
       child: const SizedBox.shrink(),
     );
     final content = Stack(
+      // The dot rides the disc's shoulder and overhangs it by a dp, so it
+      // reads as applied to the mark rather than sitting inside it. The 52 dp
+      // target holds a 44 dp disc, so the overhang spends slack the box
+      // already had and the neighbour gap does not move.
+      clipBehavior: Clip.none,
       alignment: Alignment.center,
       children: [
         disc,
@@ -102,6 +125,12 @@ class _KvIconButtonState extends State<KvIconButton> {
             tone: widget.tone ?? KvColor.ink,
           ),
         ),
+        if (widget.alert)
+          const Positioned(
+            top: -1,
+            right: -1,
+            child: KvLamp.hued(color: KvColor.warn, ring: KvColor.warnTint),
+          ),
       ],
     );
     final tap = widget.onTap;

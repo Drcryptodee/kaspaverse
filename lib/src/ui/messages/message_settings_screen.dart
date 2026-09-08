@@ -145,27 +145,61 @@ class _MessageSettingsScreenState extends State<MessageSettingsScreen> {
                               ),
                       ),
                       const KvSectionHeader('History'),
-                      KvRowContainer(
-                        children: [
-                          KvRow(
-                            // A label WRAPS; only a number may not (BG-14).
-                            titleLines: 2,
-                            leading: const KvRowDisc.neutral(
-                              mark: KvGlyph.history,
-                            ),
-                            title: 'History & backup',
-                            sub:
-                                'Fill in what the node missed, and park your '
-                                'contacts on chain',
-                            subLines: 2,
-                            trailing: const KvGlyphIcon(
-                              KvGlyph.chevron,
-                              size: 20,
-                              tone: KvColor.etch,
-                            ),
-                            onTap: () => runMessageHistory(context, _messaging),
-                          ),
-                        ],
+                      // **The gap notice's seat** (founder, 2026-09-08). It had
+                      // been a banner under the conversation list's search
+                      // field, drawing 32 dp in from an edge everything around
+                      // it met at 16; it belongs to this row, so it hangs under
+                      // it — inside the same card, over the container's own
+                      // hairline — and pushes `Delete all messages` down for
+                      // exactly as long as it has something to say.
+                      //
+                      // It eases, like the signing row above it: the four seams
+                      // it reads answer after the first frame, and a notice
+                      // that appears between two frames shoves the app's one
+                      // irreversible gesture out from under a thumb already on
+                      // its way down (BG-24).
+                      AnimatedSize(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : KvMotion.calm,
+                        curve: KvMotion.curve,
+                        alignment: Alignment.topCenter,
+                        child: AnimatedBuilder(
+                          animation: historyAlertListenable(_messaging),
+                          builder: (context, _) {
+                            final alert = historyAlert(_messaging);
+                            return KvRowContainer(
+                              children: [
+                                KvRow(
+                                  // A label WRAPS; only a number may not
+                                  // (BG-14).
+                                  titleLines: 2,
+                                  leading: const KvRowDisc.neutral(
+                                    mark: KvGlyph.history,
+                                  ),
+                                  title: 'History & backup',
+                                  sub:
+                                      'Fill in what the node missed, and park '
+                                      'your contacts on chain',
+                                  subLines: 2,
+                                  trailing: const KvGlyphIcon(
+                                    KvGlyph.chevron,
+                                    size: 20,
+                                    tone: KvColor.etch,
+                                  ),
+                                  onTap: () =>
+                                      runMessageHistory(context, _messaging),
+                                ),
+                                if (alert != null)
+                                  HistoryNoticeLine(
+                                    text: alert,
+                                    onTap: () =>
+                                        runMessageHistory(context, _messaging),
+                                  ),
+                              ],
+                            );
+                          },
+                        ),
                       ),
                       const KvSectionHeader('Danger'),
                       KvRowContainer(

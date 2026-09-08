@@ -160,23 +160,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
     );
   }
 
-  /// The D-138 backup (`self_stash`): park every conversation on chain, sealed
-  /// to our own key, so a restore-from-seed finds contacts and not just money.
-  Future<void> _backUp() async {
-    await _runPrepare(
-      _messaging.prepareStash,
-      // A backup is not a message, and the shared ceremony would otherwise
-      // call it one — on the confirm sheet AND on the card before it.
-      title: 'Confirm backup',
-      preparingObject: 'backup',
-      contextNote:
-          'Parks your conversation list on Kaspa, sealed to your own key, so '
-          'your recovery phrase can bring your contacts back too. The amount '
-          'returns to you — only the network fee is spent.',
-    );
-    await _messaging.refreshFillState();
-  }
-
   /// The shared ceremony over [runConfirmSend] (V5): the summary — mode,
   /// title, payload facts included — is Rust's decode (B7); this surface
   /// keeps only its own error style (snackbar) and list refresh.
@@ -464,11 +447,25 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   // `Messag / es`, a word broken mid-syllable — D-285's
                   // finding one file over, found the same way, in the floor
                   // frame.
-                  KvIconButton(
-                    mark: KvGlyph.kebab,
-                    label: 'Message settings',
-                    tone: KvColor.inkNav,
-                    onTap: _messageSettings,
+                  // **The one thing this screen still says about history.**
+                  // The gap notice's sentence moved to the row it belongs to
+                  // (Message settings › History & backup, founder 2026-09-08);
+                  // what stays here is the dot, so the screen is never silent
+                  // about messages that may be missing (D-074, D-088) and the
+                  // list is never interrupted by a plate to say it.
+                  AnimatedBuilder(
+                    animation: historyAlertListenable(_messaging),
+                    builder: (context, _) {
+                      final alert = historyAlert(_messaging);
+                      return KvIconButton(
+                        mark: KvGlyph.kebab,
+                        label: 'Message settings',
+                        tone: KvColor.inkNav,
+                        alert: alert != null,
+                        hint: alert,
+                        onTap: _messageSettings,
+                      );
+                    },
                   ),
                 ],
               ),
@@ -509,13 +506,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
                           onChanged: (q) => setState(() => _query = q),
                         ),
                         const SizedBox(height: KvSpace.m),
-                        // The honest gap notice (D-074: never silence) —
-                        // renders only when history may be incomplete; tap
-                        // opens the fill sheet.
-                        HistoryNoticeBanner(
-                          messaging: _messaging,
-                          onBackUp: _backUp,
-                        ),
                         Expanded(
                           child: KvScrollEdge(
                             ground: KvColor.abyss,
