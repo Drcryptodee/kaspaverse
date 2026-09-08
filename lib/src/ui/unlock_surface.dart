@@ -7,6 +7,7 @@ import 'passphrase_unlock_screen.dart';
 import 'theme/kv_page_route.dart';
 import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
+import 'widgets/kv_glyph.dart';
 import 'widgets/kv_loader.dart';
 
 /// The locked-state surface (P1.3 shell, decision D-036: biometric-first). A
@@ -215,7 +216,7 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const CeremonyMark(Icons.lock_outline),
+                const CeremonyMark(KvGlyph.lock),
                 const SizedBox(height: KvSpace.l),
                 Text('Vault locked', style: theme.textTheme.headlineSmall),
                 const SizedBox(height: KvSpace.s),

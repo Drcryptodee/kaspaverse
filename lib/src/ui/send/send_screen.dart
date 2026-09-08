@@ -1109,7 +1109,7 @@ class _CheckedLine extends StatelessWidget {
               children: [
                 const Expanded(child: _ValidLine()),
                 if (name == null)
-                  KvContactAction(label: 'Save as contact', onTap: onSave),
+                  KvTextAction(label: 'Save as contact', onTap: onSave),
               ],
             ),
             if (name != null) ...[

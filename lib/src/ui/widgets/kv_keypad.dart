@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
 import 'haptics.dart';
 import 'kv_glyph.dart';
@@ -159,8 +160,33 @@ class KvKeypad extends StatelessWidget {
   /// Receives exactly one character per press. Never the accumulated value.
   final ValueChanged<String> onChar;
 
+  /// **§3a's `short` row, built** — *phone landscape: keypad keys 48*.
+  ///
+  /// The rule has been in the law since Deep V6 and nothing implemented it, so
+  /// every keypad drew its portrait height in landscape. `O7` in the 915 × 412
+  /// frame overflowed by 3 dp with the suggestion strip and the counter row
+  /// under it — found in a preview frame at a geometry, which is where
+  /// geometry defects are found.
+  ///
+  /// **The secret skin only, and the amount pad's short rule is still owed.**
+  /// Not laziness: the amount pad shares its screen with a figure and one
+  /// pill and has slack at 412, while a secret keyboard sits under a ceremony
+  /// that also needs a body. Moving both would re-tone a `expanded short`
+  /// frame UX-R2 already earned its tick on, without the founder looking at
+  /// it. Written down rather than half-done (register §20).
+  ///
+  /// 48 is under BG-12's 52 dp floor, and §3a is the law's own exception for
+  /// this class — the same document that sets the floor sets this number.
+  double _keyHeight(BuildContext context) {
+    if (skin != KvKeypadSkin.secret) return skin.keyHeight;
+    return KvWindow.of(context).heightClass == KvHeightClass.short
+        ? 48
+        : skin.keyHeight;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final keyHeight = _keyHeight(context);
     final keys = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -175,7 +201,12 @@ class KvKeypad extends StatelessWidget {
                   if (i > 0) SizedBox(width: skin.gap),
                   Expanded(
                     flex: rows[r][i].flex,
-                    child: _KeyCap(cap: rows[r][i], skin: skin, onChar: onChar),
+                    child: _KeyCap(
+                      cap: rows[r][i],
+                      skin: skin,
+                      height: keyHeight,
+                      onChar: onChar,
+                    ),
                   ),
                 ],
               ],
@@ -184,13 +215,20 @@ class KvKeypad extends StatelessWidget {
       ],
     );
 
-    // The secret skin sits on a bed: it replaces the system keyboard at the
-    // bottom of a screen, and a keyboard floating on the void reads as a
-    // dialog. The plain pad is part of its screen and takes no container —
-    // BG-1, a container is earned.
+    // **Neither skin takes a bed** (BG-1: a container is earned).
+    //
+    // The secret skin used to sit on a `plate` slab, on the argument that a
+    // keyboard floating on the void reads as a dialog. `O2` and `O7` both draw
+    // it bare on the ground — caps in `plate` directly on `abyss`, sampled at
+    // 4× — and there is no void to float on: the ground IS the screen, and the
+    // slab was a second surface under caps already a step lighter than it,
+    // which is a container drawn around something already contained. The
+    // founder's render outranks the reasoning that put it there (D-259).
+    //
+    // The 4 dp of side air stays: `O7` seats its keys at x 29 inside a content
+    // column that starts at 25, which is exactly this padding.
     if (skin == KvKeypadSkin.plain) return keys;
-    return Container(
-      color: KvColor.surface,
+    return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: KvSpace.xs,
         vertical: KvSpace.s,
@@ -204,10 +242,19 @@ class KvKeypad extends StatelessWidget {
 /// the press feel are the primitive's, and only the type and the height are
 /// the skin's.
 class _KeyCap extends StatelessWidget {
-  const _KeyCap({required this.cap, required this.skin, required this.onChar});
+  const _KeyCap({
+    required this.cap,
+    required this.skin,
+    required this.height,
+    required this.onChar,
+  });
 
   final KvKey cap;
   final KvKeypadSkin skin;
+
+  /// The cap's box, resolved by the pad from the window's height class.
+  final double height;
+
   final ValueChanged<String> onChar;
 
   /// The cap itself: a drawn mark, or the type. **The mark is sized from the
@@ -280,7 +327,7 @@ class _KeyCap extends StatelessWidget {
           borderRadius: BorderRadius.circular(KvRadius.key),
           onTap: press,
           child: Container(
-            height: skin.keyHeight,
+            height: height,
             alignment: Alignment.center,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(KvRadius.key),

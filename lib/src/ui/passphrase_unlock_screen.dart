@@ -98,9 +98,20 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
           child: Column(
             children: [
               Expanded(
-                child: Padding(
+                // **A scroll escape, because the inner column had none.**
+                // Framed for the first time at UX-R6 — this screen was
+                // re-toned by two changes that sitting made under it
+                // (`CeremonyMark`'s ground and the secret keypad's bed), and a
+                // re-tone with no picture is a re-tone nobody looked at. The
+                // 915 × 412 frame overflowed by 50 dp, pre-existing and
+                // invisible until somebody rendered it. `mainAxisSize.min`
+                // keeps the centring the `Expanded` gives it at every
+                // geometry that fits. **The screen itself is R7's** — this is
+                // the overflow only, not its rebuild.
+                child: SingleChildScrollView(
                   padding: const EdgeInsets.all(KvSpace.gutter),
                   child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(

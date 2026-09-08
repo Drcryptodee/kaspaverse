@@ -35,6 +35,14 @@ import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
+import 'package:kaspaverse/src/ui/onboarding_surface.dart';
+import 'package:kaspaverse/src/ui/create_screen.dart';
+import 'package:kaspaverse/src/ui/restore_screen.dart';
+import 'package:kaspaverse/src/ui/unlock_surface.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/passphrase_unlock_screen.dart';
+import 'package:kaspaverse/src/ui/secret/bip39_wordlist.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart' show KvToggle;
 import '../support/preview_harness.dart';
 import '../support/maturity.dart';
 
@@ -1278,6 +1286,58 @@ void main() {
       act: _completeASend,
     );
 
+    // ── UX-R6 · onboarding, create and restore (`O1`–`O7`) ───────────────
+    //
+    // Every seam injected, so a preview run never touches the vault, the
+    // ceremony channel or a biometric prompt. `O3` and `O4` are absent on
+    // purpose and it is not an omission: the word reveal and its quiz are a
+    // separate FLAG_SECURE Activity (D-039) and no Flutter harness can render
+    // them — they are settled on glass, and nowhere else.
+    framedSurface('onboarding__welcome', () => const OnboardingSurface());
+    framedSurface('onboarding__passphrase', _createScreen);
+    framedSurface('onboarding__extra_word', _createScreen, act: _toExtraWord);
+    framedSurface(
+      'onboarding__extra_word_on',
+      _createScreen,
+      act: _openTheExtraWord,
+    );
+    framedSurface('onboarding__biometrics', _createScreen, act: _toBiometrics);
+    framedSurface('restore__words', _restoreScreen);
+    framedSurface('restore__typing', _restoreScreen, act: _typeAWord);
+    framedSurface('restore__picked', _restoreScreen, act: _pickWords);
+    // **The four steps that had no frame at any geometry** — and one of them
+    // is the typo trap, which is the whole safety property of the restore
+    // ceremony (`ux-auditor`, UX-R6: *four of restore's five steps have no
+    // frame*). The address preview is where a wrong word becomes visible as a
+    // different wallet, and it was unlooked-at.
+    framedSurface('restore__extra_word', _restoreScreen, act: _toRestoreExtra);
+    framedSurface('restore__preview', _restoreScreen, act: _toRestorePreview);
+    framedSurface(
+      'restore__passphrase',
+      _restoreScreen,
+      act: _toRestorePassphrase,
+    );
+    framedSurface(
+      'restore__biometrics',
+      _restoreScreen,
+      act: _toRestoreBiometrics,
+    );
+    // The locked vault — R7's screen, framed here because this sitting moved
+    // two things under it: `CeremonyMark`'s ground, and the secret keypad's
+    // bed. A re-tone with no picture is a re-tone nobody looked at.
+    framedSurface(
+      'unlock__surface',
+      () => UnlockSurface(probe: () async => true, unlock: () async => true),
+    );
+    framedSurface(
+      'unlock__passphrase',
+      () => PassphraseUnlockScreen(
+        unlock: (p) async {},
+        checkAccessibility: () async => false,
+        setSecure: ({required bool enable}) async {},
+      ),
+    );
+
     surface(
       'address__chunked',
       () => const Scaffold(
@@ -1448,3 +1508,138 @@ Widget _comingSoon() => const Scaffold(
     ),
   ),
 );
+
+// ── UX-R6 fixtures ────────────────────────────────────────────────────────
+
+/// The create ceremony with every platform seam injected: the native reveal
+/// answers `true` without an Activity, the seal writes nothing, and the
+/// biometric probe reports a phone that can offer enrolment.
+Widget _createScreen() => CreateScreen(
+  begin: () async {},
+  reveal: () async => true,
+  abandon: () async {},
+  seal: (p, x) async {},
+  biometricStatus: () async => 'ready',
+  enroll: () async => true,
+  checkAccessibility: () async => false,
+  setSecure: ({required bool enable}) async {},
+);
+
+Widget _restoreScreen() => RestoreScreen(
+  wordlist: const Bip39Wordlist.forTest([
+    'gravity',
+    'grace',
+    'grain',
+    'grant',
+    'anchor',
+    'orbit',
+    'ripple',
+  ]),
+  setSecure: ({required bool enable}) async {},
+  checkAccessibility: () async => false,
+  preview: (phrase, extra) async =>
+      'kaspa:qz0k5x8m3n7p2q9r4s6t1u8v3w5y7z2a4b6c8d0e2f4g6h8j',
+  commit: (phrase, extra, pass) async {},
+  biometricStatus: () async => 'ready',
+  enroll: () async => true,
+);
+
+Future<void> _settleCeremony(WidgetTester tester) async {
+  // Not `pumpAndSettle`: the guard and the preparing beat spin an infinite
+  // animation, which would hang it.
+  for (var i = 0; i < 15; i++) {
+    await tester.pump(const Duration(milliseconds: 20));
+  }
+}
+
+/// Tap something that may be under the fold. The short landscape frame gives
+/// a ceremony ~350 dp of body under a pinned keyboard, so every control on
+/// these screens is reached rather than aimed at.
+Future<void> _reachCeremony(WidgetTester tester, Finder f) async {
+  await tester.ensureVisible(f.first);
+  await _settleCeremony(tester);
+  await tester.tap(f.first);
+  await _settleCeremony(tester);
+}
+
+Future<void> _typePassphrase(WidgetTester tester) async {
+  await _settleCeremony(tester);
+  for (final c in ['s', 'e', 'v', 'e', 'n', 'p', 'a', 's', 's']) {
+    await tester.tap(find.text(c).first);
+    await _settleCeremony(tester);
+  }
+}
+
+/// `O5`, as it opens: the question, the switch off, one way on.
+Future<void> _toExtraWord(WidgetTester tester) async {
+  await _typePassphrase(tester);
+  await _reachCeremony(tester, find.text('Next'));
+}
+
+/// `O5` with the switch thrown — the fields, the notice plate and the skip.
+Future<void> _openTheExtraWord(WidgetTester tester) async {
+  await _toExtraWord(tester);
+  await _reachCeremony(tester, find.byType(KvToggle));
+  for (final c in ['h', 'a', 'r', 'b', 'o', 'u', 'r']) {
+    await tester.tap(find.text(c).first);
+    await _settleCeremony(tester);
+  }
+}
+
+/// `O6`, reached the way a user reaches it: through the seal.
+Future<void> _toBiometrics(WidgetTester tester) async {
+  await _toExtraWord(tester);
+  await _reachCeremony(tester, find.text('Continue — 12 words only'));
+}
+
+/// `O7` mid-word: the prefix in its own chip, the suggestions above the keys.
+Future<void> _typeAWord(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  for (final c in ['g', 'r', 'a']) {
+    await _reachCeremony(tester, find.text(c));
+  }
+}
+
+/// `O7` with a tray that has grown — the geometry the pinned foot exists for.
+Future<void> _pickWords(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  for (var i = 0; i < 7; i++) {
+    await _reachCeremony(tester, find.text('g'));
+    await _reachCeremony(tester, find.text('grace'));
+  }
+}
+
+/// Fill the tray, then leave the words with the switch in the given position.
+Future<void> _restoreWords(WidgetTester tester, {required bool extra}) async {
+  await tester.pumpAndSettle();
+  if (extra) {
+    await _reachCeremony(tester, find.text('13th word'));
+  }
+  for (var i = 0; i < 12; i++) {
+    await _reachCeremony(tester, find.text('g'));
+    await _reachCeremony(tester, find.text('grace'));
+  }
+  await _reachCeremony(tester, find.widgetWithText(KvAction, 'Continue'));
+}
+
+Future<void> _toRestoreExtra(WidgetTester tester) =>
+    _restoreWords(tester, extra: true);
+
+Future<void> _toRestorePreview(WidgetTester tester) =>
+    _restoreWords(tester, extra: false);
+
+Future<void> _toRestorePassphrase(WidgetTester tester) async {
+  await _toRestorePreview(tester);
+  await _reachCeremony(
+    tester,
+    find.widgetWithText(KvAction, 'This is my wallet'),
+  );
+}
+
+Future<void> _toRestoreBiometrics(WidgetTester tester) async {
+  await _toRestorePassphrase(tester);
+  for (final c in ['s', 'e', 'v', 'e', 'n']) {
+    await _reachCeremony(tester, find.text(c));
+  }
+  await _reachCeremony(tester, find.widgetWithText(KvAction, 'Restore wallet'));
+}

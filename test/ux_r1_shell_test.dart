@@ -111,6 +111,18 @@ void main() {
             'founder asked for exactly that behaviour here (2026-09-07: '
             '"clicking on show literally does what All does in wallet '
             'settings")',
+        'lib/src/ui/onboarding_surface.dart':
+            'the welcome screen reads the viewport HEIGHT — never a width, '
+            'and never to choose a layout — so its two blocks can sit at the '
+            'two ends of the frame with a scroll escape under them. `O1` '
+            'draws the mark and the statement 197 dp down and the pair of '
+            'verbs in the thumb arc, and at 320 dp / 1.3× the `display` '
+            'heading alone is three 52 dp lines. It is the ONE screen in the '
+            'group with no pinned foot to push against — `create_screen` and '
+            '`restore_screen` both hold their bar and their acts in a Column '
+            'and give the scroll an `Expanded`, which needs no measurement at '
+            'all (UX-R6; the first version of this reason claimed those two '
+            'carried the same pattern, and they do not — item 0 / L130)',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

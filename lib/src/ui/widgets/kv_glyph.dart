@@ -162,6 +162,21 @@ enum KvGlyph {
   /// nine contours at 2.5 in a 20 dp box read as a smudge (§2a, weights by job).
   fingerprint,
 
+  /// **Face unlock**, the other half of the biometrics pair. Lucide
+  /// `scan-face`: four bracket corners around a face, whose two eyes and smile
+  /// are the same three strokes [smile] draws — the eyes zero-length and
+  /// round-capped, which is how §2a rule 4 puts a dot inside a mark.
+  ///
+  /// Illustrative like [fingerprint] and for the same reason: `O6` seats the
+  /// pair at 104 dp, where 2.5 on a 24 grid reads as wire. It takes
+  /// [KvGlyphSpec.strokeIllustrative] at that size.
+  ///
+  /// **Not [scan]**, which is a scan LINE and means *open the camera*. The
+  /// brackets are shared; what is inside them is the whole difference, and a
+  /// mark that identified two different acts would have stopped identifying
+  /// either (§2a rule 3).
+  face,
+
   /// Dismiss, clear, close. Lucide `x`.
   close,
 
@@ -633,6 +648,17 @@ class KvGlyphPainter extends CustomPainter {
       case KvGlyph.smile:
         circle(12, 12, 10);
         path(const ['M8 14s1.5 2 4 2 4-2 4-2']);
+        path(const ['M9 9h.01', 'M15 9h.01']);
+      case KvGlyph.face:
+        // Lucide `scan-face`. The four corners are the frame; the smile and
+        // the two dots are `smile`'s own strokes without its ring.
+        path(const [
+          'M3 7V5a2 2 0 0 1 2-2h2',
+          'M17 3h2a2 2 0 0 1 2 2v2',
+          'M21 17v2a2 2 0 0 1-2 2h-2',
+          'M7 21H5a2 2 0 0 1-2-2v-2',
+          'M8 14s1.5 2 4 2 4-2 4-2',
+        ]);
         path(const ['M9 9h.01', 'M15 9h.01']);
       case KvGlyph.keyboard:
         path(const [

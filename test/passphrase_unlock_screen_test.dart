@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/passphrase_unlock_screen.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 
@@ -12,6 +13,10 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
+        // The app mounts `KvWindow` at its root and the keypad reads its
+        // height class for §3a's `short` key size; `KvWindow.of` asserts
+        // rather than guessing (UX-R6).
+        builder: (context, page) => KvWindow(child: page!),
         home: PassphraseUnlockScreen(
           setSecure: ({required bool enable}) async {},
           checkAccessibility: () async => false,
@@ -29,6 +34,10 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
+        // The app mounts `KvWindow` at its root and the keypad reads its
+        // height class for §3a's `short` key size; `KvWindow.of` asserts
+        // rather than guessing (UX-R6).
+        builder: (context, page) => KvWindow(child: page!),
         home: PassphraseUnlockScreen(
           setSecure: ({required bool enable}) async {},
           checkAccessibility: () async => true,

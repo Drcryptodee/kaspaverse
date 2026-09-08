@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/format.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
@@ -16,8 +17,13 @@ import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 /// two skins into two keyboards — a second emit path, a skin that accumulates
 /// what it typed, a press that does not feel the same — is asserted against
 /// here rather than in either caller.
+// **`KvWindow` is mounted, because the app mounts it and the pad now reads
+// it.** §3a's `short` row gives a keypad 48 dp keys in phone landscape, and
+// `KvWindow.of` asserts rather than guessing a class — so a bare host is a
+// fixture that does not match the app it claims to test (L125).
 Widget _host(Widget child) => MaterialApp(
   theme: kvDarkTheme(),
+  builder: (context, page) => KvWindow(child: page!),
   home: Scaffold(body: child),
 );
 

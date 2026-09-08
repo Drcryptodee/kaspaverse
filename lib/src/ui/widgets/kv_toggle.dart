@@ -89,11 +89,6 @@ class KvToggle extends StatelessWidget {
       enabled || disabledReason != null,
       'A disabled control always says why, in words (BG-12).',
     );
-    // BG-9: reduced motion collapses movement, and nothing in the pinned SDK
-    // does this for an implicit animation — every moving thing in this app
-    // honours it by hand.
-    final reduced = MediaQuery.disableAnimationsOf(context);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -181,39 +176,7 @@ class KvToggle extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: KvSpace.sm),
-                    AnimatedContainer(
-                      duration: reduced ? Duration.zero : KvMotion.fast,
-                      curve: KvMotion.out,
-                      width: trackWidth,
-                      height: trackHeight,
-                      padding: const EdgeInsets.all(trackInset),
-                      alignment: on
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      // `T5`, measured: the resting track is a filled grey
-                      // (42,52,51) — `edgeHi` as a fill — under an `inkMeta`
-                      // knob, and it carries no border (founder on glass
-                      // 2026-09-05).
-                      decoration: BoxDecoration(
-                        color: on ? KvColor.ok : KvColor.edgeHi,
-                        borderRadius: BorderRadius.circular(KvRadius.control),
-                      ),
-                      child: Container(
-                        width: thumb,
-                        height: thumb,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          // **`okTint` when on, not `abyss`** (founder, on
-                          // glass 2026-09-06). The knob sits on the `ok`
-                          // track, and the page's own black under a green
-                          // track reads as a hole punched in the control;
-                          // `okTint` is the deep green that belongs to that
-                          // surface, so the knob reads as part of the switch
-                          // rather than as a gap in it.
-                          color: on ? KvColor.okTint : KvColor.inkMeta,
-                        ),
-                      ),
-                    ),
+                    KvSwitch(on: on),
                   ],
                 ),
               ),
@@ -233,6 +196,58 @@ class KvToggle extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// **The switch alone**, without the row that usually carries it.
+///
+/// `KvToggle` is a whole row — title, sub-line, target — and that is right in
+/// a settings card. `O7` needs the control on its own beside two words in a
+/// header line, so the switch is a part rather than a private detail of the
+/// row, and both draw the identical object (BG-21 / L143: two switches in one
+/// app is how two switches start disagreeing).
+///
+/// A mark, not a target: it paints and animates and nothing more. Whatever
+/// seats it owns the tap, the semantics and BG-12's 52 dp.
+class KvSwitch extends StatelessWidget {
+  const KvSwitch({super.key, required this.on});
+
+  final bool on;
+
+  @override
+  Widget build(BuildContext context) {
+    // BG-9: reduced motion collapses movement, and nothing in the pinned SDK
+    // does this for an implicit animation — every moving thing in this app
+    // honours it by hand.
+    final reduced = MediaQuery.disableAnimationsOf(context);
+    return AnimatedContainer(
+      duration: reduced ? Duration.zero : KvMotion.fast,
+      curve: KvMotion.out,
+      width: KvToggle.trackWidth,
+      height: KvToggle.trackHeight,
+      padding: const EdgeInsets.all(KvToggle.trackInset),
+      alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+      // `T5`, measured: the resting track is a filled grey (42,52,51) —
+      // `edgeHi` as a fill — under an `inkMeta` knob, and it carries no
+      // border (founder on glass 2026-09-05).
+      decoration: BoxDecoration(
+        color: on ? KvColor.ok : KvColor.edgeHi,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+      ),
+      child: Container(
+        width: KvToggle.thumb,
+        height: KvToggle.thumb,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          // **`okTint` when on, not `abyss`** (founder, on glass 2026-09-06).
+          // The knob sits on the `ok` track, and the page's own black under a
+          // green track reads as a hole punched in the control; `okTint` is
+          // the deep green that belongs to that surface, so the knob reads as
+          // part of the switch rather than as a gap in it.
+          color: on ? KvColor.okTint : KvColor.inkMeta,
+        ),
+      ),
     );
   }
 }

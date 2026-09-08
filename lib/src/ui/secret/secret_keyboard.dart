@@ -78,21 +78,32 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
     final rows = showingSymbols
         ? SecretKeyboard._symbolPages[_symbolPage]
         : SecretKeyboard._letterRows;
+    // **The word picker has no control row: its one command rides the last
+    // letter row** (`O7`, which draws `l z x c v b n m ⌫` as one run).
+    //
+    // A fourth row holding a single full-width backspace cost 56 dp on the
+    // screen that has the least of it — the restore ceremony carries a tray
+    // that grows, a suggestion strip and a counter — and it drew a key three
+    // hundred dp wide for a command whose whole meaning is *one character*.
+    // The full-ASCII pad keeps its control row: shift, symbols and space have
+    // nowhere else to go.
+    final letterRowsOnly = !_full && !showingSymbols;
     return KvKeypad(
       skin: KvKeypadSkin.secret,
       onChar: showingSymbols ? widget.onChar : _emit,
       rows: [
-        for (final row in rows)
+        for (var r = 0; r < rows.length; r++)
           [
-            for (final ch in row.split(''))
+            for (final ch in rows[r].split(''))
               KvKey.char(
                 showingSymbols || !_shift ? ch : ch.toUpperCase(),
                 // The cap shows the case that will be typed; on a shifted
                 // letter row the emitted character IS the cap, so the two can
                 // never disagree.
               ),
+            if (letterRowsOnly && r == rows.length - 1) _backspace(),
           ],
-        _controlRow(),
+        if (!letterRowsOnly) _controlRow(),
       ],
     );
   }
@@ -126,11 +137,13 @@ class _SecretKeyboardState extends State<SecretKeyboard> {
     // Only on the full-ASCII keyboard: BIP39 words are single lowercase
     // tokens, so a space in the word picker could only ever be a mistake.
     if (_full) KvKey.command('space', flex: 6, onTap: () => widget.onChar(' ')),
-    KvKey.command(
-      'Backspace',
-      mark: KvGlyph.backspace,
-      flex: 3,
-      onTap: widget.onBackspace,
-    ),
+    _backspace(),
   ];
+
+  KvKey _backspace() => KvKey.command(
+    'Backspace',
+    mark: KvGlyph.backspace,
+    flex: 3,
+    onTap: widget.onBackspace,
+  );
 }

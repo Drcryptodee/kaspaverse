@@ -61,6 +61,12 @@ class RevealActivity : Activity() {
     private val cWarning = Color.parseColor("#E0B15C")    // KvColor.warn
     private val cControl = Color.parseColor("#121717")    // KvColor.control -> plate
     private val cEdgeHi = Color.parseColor("#2A3433")     // KvColor.edgeHi
+    // Added at UX-R6, sampled off `O3` and `O4` at 4x: the raised pill's
+    // ground, the reveal control's ink, the mask's dots and a word's index.
+    private val cChip = Color.parseColor("#1A2120")          // KvColor.chip
+    private val cPrimaryMuted = Color.parseColor("#70C7BA")  // KvColor.primaryMuted
+    private val cEtch = Color.parseColor("#4B5553")          // KvColor.etch
+    private val cInkMeta = Color.parseColor("#7A8583")       // KvColor.inkMeta
     // Ink on a `primary` fill has its own token in Deep V6 (§1.3) rather than
     // borrowing the ground. Not a contrast fix — `abyss` on `primary` still
     // measures 12.93:1 and `onPrimary` measures 11.31:1, both far above AA —
@@ -159,6 +165,19 @@ class RevealActivity : Activity() {
 
     private val wordViews = arrayOfNulls<TextView>(12)
 
+    /**
+     * The four-dot masks, one per cell — **drawn, not typed**.
+     *
+     * The mask was the six literal characters `••••••`, which the UX register
+     * carried as a debt into UX-R6 alongside its twin in `restore_screen.dart`.
+     * design_system.md §4 says a **fixed four-dot** mask in `etch`, and the
+     * number is the law's rather than the word's for a reason: a mask whose
+     * width tracks the FONT is a mask whose width can track the word, and the
+     * length of a BIP39 word narrows the candidate set for anyone glancing at
+     * the screen. Four discs, always, whatever is behind them.
+     */
+    private val dotRows = arrayOfNulls<View>(12)
+
     // Verify quiz: confirm the word at each of N distinct positions, in order.
     private val QUIZ_POSITIONS = 4
     private val QUIZ_COLS = 3
@@ -232,6 +251,14 @@ class RevealActivity : Activity() {
                 .split(' ')
                 .filter { it.isNotEmpty() }
                 .toTypedArray()
+            // **Twelve, and `createWordCount` in `lib/src/ui/create_screen.dart`
+            // is the same number written a second time.** Nothing couples them:
+            // this one fails the ceremony loudly if Rust ever changes, and that
+            // one only decides whether the extra word is called a *13th* or a
+            // *25th* on the screen and on the user's paper. If this line moves,
+            // move that constant in the same commit — a wrong ordinal is not a
+            // fund risk, it is a wrong label on the one piece of paper that
+            // restores the wallet (`wallet-security-auditor`, UX-R6).
             require(w.size == 12) { "expected 12 words, got ${w.size}" }
             return w
         } finally {
@@ -318,10 +345,20 @@ class RevealActivity : Activity() {
 
         // Muted until the words have actually been on the glass; the tap is never
         // dead — it says what is missing (L87's class: no silent disabled control).
-        val cont = styledButton("I've written them down", cControl, cTextSecondary, stroke = cEdgeHi)
+        // Before the words have been seen this is the raised form — `chip`
+        // with `ink` — not a stroked outline, which in Deep V6 is the DISABLED
+        // register and this control is not disabled (it answers, in words).
+        val cont = styledButton("I've written them down", cChip, cTextPrimary)
         val hint = body("")
 
-        val hold = styledButton("Hold to reveal", cControl, cTextPrimary, stroke = cEdgeHi)
+        // `O3`'s own pill, sampled at 4x: `chip` under `primaryMuted`. It
+        // carries no mark — the render draws an eye, and `KvGlyph` lives in
+        // Dart. A second hand-mirrored copy of a Lucide path in a file with no
+        // lane comparing it to the original is precisely the drift this file's
+        // own header warns about for the palette, and the palette at least has
+        // a lane now. The words carry the meaning (§1.2a: a control is
+        // identified by its text, never by its mark).
+        val hold = styledButton("Hold to reveal", cChip, cPrimaryMuted)
         hold.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -375,48 +412,103 @@ class RevealActivity : Activity() {
         hint.text = ""
     }
 
+    /**
+     * `O3`'s grid: **three columns of 52 dp cards**, 8 dp apart.
+     *
+     * It was two columns of bare rows — a list wearing a grid's name. The
+     * render draws twelve `plate` cards at radius 16 with a mono index and the
+     * mask beside it, which is design_system.md §4's `KvWordGrid` row exactly;
+     * the Dart side has no call site for that part (this screen is the only
+     * place recovery words are ever shown), so the specification lands here.
+     */
     private fun buildGrid(): View {
-        val cols = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val left = column().apply { layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) }
-        val right = column().apply { layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f) }
-        for (i in 0 until 6) left.addView(wordCell(i))
-        for (i in 6 until 12) right.addView(wordCell(i))
-        cols.addView(left)
-        cols.addView(right)
-        return cols
+        val grid = column()
+        for (r in 0 until 4) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply {
+                    if (r > 0) topMargin = dp(8)
+                }
+            }
+            for (c in 0 until 3) {
+                val cell = wordCell(r * 3 + c)
+                cell.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
+                    if (c > 0) marginStart = dp(8)
+                }
+                row.addView(cell)
+            }
+            grid.addView(row)
+        }
+        return grid
+    }
+
+    /** One 6 dp `etch` disc of the fixed mask. */
+    private fun maskDot() = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply {
+            marginStart = dp(5)
+        }
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(cEtch)
+        }
     }
 
     private fun wordCell(i: Int): View {
-        val row = LinearLayout(this).apply {
+        val card = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(8), dp(4), dp(8))
+            minimumHeight = dp(52)
+            setPadding(dp(12), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(cSurfaceAlt) // KvColor.plate
+            }
         }
         val num = TextView(this).apply {
             text = "${i + 1}"
-            setTextColor(cTextSecondary)
+            setTextColor(cInkMeta)
             typeface = faceMono
             textSize = 13f
-            width = dp(28)
+            minWidth = dp(20)
         }
+        val dots = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            repeat(4) { addView(maskDot()) }
+        }
+        dotRows[i] = dots
         val word = TextView(this).apply {
             typeface = faceMono
             // 16, not §2's 13. A recovery word is copied onto paper once and
             // never again; legibility beats the type ramp here, and the ramp
             // was written for screens you read, not screens you transcribe.
             textSize = 16f
+            setTextColor(cTextPrimary)
+            visibility = View.GONE
+            setPadding(dp(6), 0, 0, 0)
         }
         wordViews[i] = word
-        row.addView(num)
-        row.addView(word)
-        return row
+        card.addView(num)
+        card.addView(dots)
+        card.addView(word)
+        return card
     }
 
+    /**
+     * Swap the mask for the word, and back.
+     *
+     * **The two are different views**, so the masked state holds no word at
+     * all — where the old cell wrote `••••••` into the same `TextView` the
+     * word would later occupy, and the teardown's `v?.text = ""` was the only
+     * thing standing between a paused Activity and a live word `String` in a
+     * detached view. That teardown still runs; this just gives it less to do.
+     */
     private fun refreshGrid() {
         val w = words ?: return
         for (i in 0 until 12) {
-            wordViews[i]?.text = if (revealed) w[i] else "••••••"
-            wordViews[i]?.setTextColor(if (revealed) cTextPrimary else cTextSecondary)
+            wordViews[i]?.text = if (revealed) w[i] else ""
+            wordViews[i]?.visibility = if (revealed) View.VISIBLE else View.GONE
+            dotRows[i]?.visibility = if (revealed) View.GONE else View.VISIBLE
         }
     }
 
@@ -542,9 +634,14 @@ class RevealActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) }
             }
             rowWords.forEachIndexed { c, word ->
-                val chip = styledButton(word, cControl, cTextPrimary, stroke = cEdgeHi).apply {
-                    typeface = faceMono
-                    textSize = 14f
+                // `O4`'s word bank: a `chip` stadium with the word in `ink`,
+                // set in Jakarta — a recovery word here is being READ and
+                // recognised, not checked character by character, and BG-30
+                // gives a word the word face.
+                val chip = styledButton(word, cChip, cTextPrimary).apply {
+                    typeface = uiWeight(600)
+                    textSize = 16f
+                    minHeight = dp(48)
                     setPadding(dp(4), dp(12), dp(4), dp(12))
                     layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
                         if (c > 0) marginStart = dp(8)
@@ -604,8 +701,7 @@ class RevealActivity : Activity() {
                 c.setTextColor(cTextPrimary)
                 c.background = GradientDrawable().apply {
                     cornerRadius = dp(100).toFloat()
-                    setColor(cControl)
-                    setStroke(dp(1), cEdgeHi)
+                    setColor(cChip)
                 }
             }
             val left = QUIZ_MAX_WRONG - quizWrong
@@ -635,7 +731,11 @@ class RevealActivity : Activity() {
             )
         )
         root.addView(spacer(dp(24)))
-        val back = styledButton("Go back", cControl, cTextPrimary, stroke = cEdgeHi)
+        // The raised form (`chip` + `ink`), not `plate` with an `edgeHi`
+        // stroke — which in Deep V6 is the DISABLED register, and this is the
+        // only way off a screen the app has just refused to draw
+        // (`ux-auditor`, UX-R6).
+        val back = styledButton("Go back", cChip, cTextPrimary)
         back.setOnClickListener { finishWith(false) }
         root.addView(back)
         setContentView(root)
@@ -659,13 +759,23 @@ class RevealActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(MATCH, h)
     }
 
+    /**
+     * §2's `display` role — Jakarta **30 / 34, 800, −0.025em** — which is what
+     * `O1`–`O7` all draw and what the Dart side of this group now sets.
+     *
+     * It was `screenTitle` at 22 / 600, a whole register below the Flutter
+     * screens either side of it: the user met a 30 dp heading on the
+     * passphrase step, a 22 dp one here, and a 30 dp one again on the next.
+     * Nothing failed; the ceremony simply looked like two apps.
+     */
     private fun heading(t: String) = TextView(this).apply {
         text = t
         setTextColor(cTextPrimary)
-        textSize = 22f
-        typeface = uiWeight(600)
-        letterSpacing = -0.009f
-        setPadding(0, 0, 0, dp(8))
+        textSize = 30f
+        typeface = uiWeight(800)
+        letterSpacing = -0.025f
+        setLineSpacing(0f, 34f / 30f)
+        setPadding(0, 0, 0, dp(12))
     }
 
     private fun body(t: String) = TextView(this).apply {
@@ -704,10 +814,14 @@ class RevealActivity : Activity() {
             background = bg
             isAllCaps = false
             typeface = uiWeight(600)
-            textSize = 15f
-            minHeight = dp(48)
+            textSize = 16f
+            // **56, the house control height** — every pill in the app shares
+            // one, by the founder's ruling of 2026-09-08 (`KvSpace.control`,
+            // `KvHold.ceremony`). It was 48, which is `O3`'s own drawn height
+            // for the reveal pill and predates the ruling.
+            minHeight = dp(56)
             stateListAnimator = null
-            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setPadding(dp(20), dp(12), dp(20), dp(12))
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
         }
     }

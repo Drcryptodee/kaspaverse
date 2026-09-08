@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/restore_screen.dart';
 import 'package:kaspaverse/src/ui/secret/bip39_wordlist.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
+import 'package:kaspaverse/src/ui/secret/word_parts.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 
 // Deliverable 2 (restore + decoy/typo address preview). Render smoke through the
 // guard with injected seams; the restore CORRECTNESS (vectors, decoy property)
@@ -22,6 +26,10 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
+        // The app mounts `KvWindow` at its root (UX-R1) and `KvColumn`
+        // asserts rather than falling back to a compact guess, so a host that
+        // renders a Deep V6 screen mounts it too.
+        builder: (context, page) => KvWindow(child: page!),
         home: RestoreScreen(
           wordlist: wordlist,
           setSecure: ({required bool enable}) async {},
@@ -32,10 +40,12 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Word 1 of 12'), findsOneWidget);
+    // `O7` puts the count in the bar, as `1 of 12` — mono figures, Jakarta
+    // between them (BG-30), so it is one rich run rather than three widgets.
+    expect(find.text('1 of 12', findRichText: true), findsOneWidget);
     expect(find.byType(SecretKeyboard), findsOneWidget);
-    // The 12/24 word-count toggle is present.
-    expect(find.widgetWithText(SegmentedButton<int>, '24'), findsOneWidget);
+    // The 12/24 length choice is the house segmented (§4), not Material's.
+    expect(find.widgetWithText(KvSegmented, '24'), findsOneWidget);
   });
 
   testWidgets('refuses to render under an active accessibility service', (
@@ -43,6 +53,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
+        builder: (context, page) => KvWindow(child: page!),
         home: RestoreScreen(
           wordlist: wordlist,
           setSecure: ({required bool enable}) async {},
@@ -70,8 +81,17 @@ void main() {
     required Future<String> Function() biometricStatus,
     Future<bool> Function()? enroll,
   }) async {
+    tester.view.physicalSize = const Size(393, 851);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
     await tester.pumpWidget(
       MaterialApp(
+        // The app mounts `KvWindow` at its root (UX-R1) and `KvColumn` asserts
+        // rather than falling back to a compact guess.
+        builder: (context, page) => KvWindow(child: page!),
         home: Scaffold(
           body: Builder(
             builder: (ctx) => Center(
@@ -99,24 +119,40 @@ void main() {
     await tester.tap(find.text('home'));
     await tester.pumpAndSettle();
 
+    Future<void> reach(Finder f) async {
+      await tester.ensureVisible(f);
+      await tester.pumpAndSettle();
+      await tester.tap(f);
+      await tester.pumpAndSettle();
+    }
+
     // 12 words, PICKED from the filtered suggestions — the phrase is never
     // typed, and never exists as a Dart String (INV-3).
     for (var i = 0; i < 12; i++) {
       await tester.tap(find.text('a')); // filter prefix
       await tester.pumpAndSettle();
-      await tester.tap(find.text('abandon')); // the suggestion chip
+      await tester.tap(
+        find.widgetWithText(KvSuggestion, 'abandon'),
+      ); // the suggestion pill
       await tester.pumpAndSettle();
     }
-    await tester.tap(find.widgetWithText(FilledButton, 'Continue'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Show my address'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'This is my wallet'));
-    await tester.pumpAndSettle();
+    await reach(find.widgetWithText(KvAction, 'Continue'));
+    // **The address is DERIVED on this path, and this assertion is why the
+    // test exists.** Its first version walked here, commented that the words
+    // go straight to the address, and asserted nothing about the address — so
+    // it certified a screen that rendered an empty plate under *Is this your
+    // wallet?* with a live confirm beneath it. The injected `preview` seam was
+    // never invoked and `qtestaddress` was never looked for
+    // (`wallet-security-auditor` BLOCK, UX-R6).
+    expect(
+      find.textContaining('qtestaddress', findRichText: true),
+      findsOneWidget,
+      reason: 'the preview must show a derived address, never an empty plate',
+    );
+    await reach(find.widgetWithText(KvAction, 'This is my wallet'));
     await tester.tap(find.text('a')); // passphrase "a"
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Restore wallet'));
-    await tester.pumpAndSettle();
+    await reach(find.widgetWithText(KvAction, 'Restore wallet'));
   }
 
   testWidgets('a restored wallet is OFFERED biometric enrolment', (
@@ -130,9 +166,9 @@ void main() {
     );
 
     // THE regression. Before Track 2 this pumped straight past to home.
-    expect(find.text('Unlock with your fingerprint?'), findsOneWidget);
+    expect(find.text('Open with biometrics?'), findsOneWidget);
 
-    await tester.tap(find.text('Enable fingerprint unlock'));
+    await tester.tap(find.text('Use biometrics'));
     await tester.pumpAndSettle();
     expect(enrollCalls, 1);
     expect(find.text('home'), findsOneWidget); // enrolled → popped to home
@@ -147,7 +183,7 @@ void main() {
       // `false` as "no sensor", so the step vanished and nothing said why. It is
       // the commonest state on a fresh phone and the only one a user can fix.
       expect(find.textContaining('Android Settings'), findsOneWidget);
-      expect(find.text('Enable fingerprint unlock'), findsNothing);
+      expect(find.text('Use biometrics'), findsNothing);
       await tester.tap(find.text('Continue'));
       await tester.pumpAndSettle();
       expect(find.text('home'), findsOneWidget);
@@ -170,13 +206,13 @@ void main() {
       biometricStatus: () async => 'ready',
       enroll: () async => throw PlatformException(code: 'cancelled'),
     );
-    await tester.tap(find.text('Enable fingerprint unlock'));
+    await tester.tap(find.text('Use biometrics'));
     await tester.pumpAndSettle();
 
     // Backing out of a system prompt is a CHOICE. No banner, and the offer is
     // still there — a wallet that shows an error for this is lying.
     expect(find.textContaining("didn't complete"), findsNothing);
-    expect(find.text('Enable fingerprint unlock'), findsOneWidget);
+    expect(find.text('Use biometrics'), findsOneWidget);
   });
 
   testWidgets('a FAILED enrolment says so instead of silently going home', (
@@ -187,7 +223,7 @@ void main() {
       biometricStatus: () async => 'ready',
       enroll: () async => throw PlatformException(code: 'vault'),
     );
-    await tester.tap(find.text('Enable fingerprint unlock'));
+    await tester.tap(find.text('Use biometrics'));
     await tester.pumpAndSettle();
 
     // The lifecycle race, surfaced: the vault re-locked while the prompt held

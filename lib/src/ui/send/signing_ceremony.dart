@@ -1887,7 +1887,7 @@ class _ReceiptHead extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (name == null)
-              KvContactAction(
+              KvTextAction(
                 label: 'Save as contact',
                 tone: KvColor.primaryMuted,
                 onTap: onSaveContact,

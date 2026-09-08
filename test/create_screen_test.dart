@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/create_screen.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
 /// Seam-driven walk of the create ceremony (the native reveal + biometric are
 /// device-proven on glass; here we prove the Flutter flow + that the passphrase
@@ -17,9 +20,38 @@ void main() {
     }
   }
 
+  /// Tap something that may be under the fold.
+  ///
+  /// `O5` with the switch on is a scrolling screen — heading, explainer, the
+  /// switch card, two fields, the notice plate and two controls do not stand
+  /// in one view under a pinned keyboard, and the render is drawn without one.
+  /// A test that taps blind at a fixed geometry is asserting the fold, not the
+  /// flow.
+  Future<void> reach(WidgetTester tester, Finder f) async {
+    await tester.ensureVisible(f);
+    await settle(tester);
+    await tester.tap(f);
+    await settle(tester);
+  }
+
   Future<void> pumpHost(WidgetTester tester, Widget screen) async {
+    // **A phone, not the 800x600 desktop default.** These are full-height
+    // ceremonies with a keyboard pinned to the foot, and the harness default is
+    // a geometry no phone has: at 600 dp tall the primary sat below the fold,
+    // so a tap that a user could never miss missed in the test. 393x851 is the
+    // design's own reference frame (the floor gets its own test, below).
+    tester.view.physicalSize = const Size(393, 851);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
     await tester.pumpWidget(
       MaterialApp(
+        // The app mounts `KvWindow` at its root (UX-R1) and `KvColumn`
+        // asserts rather than falling back to a compact guess, so a host that
+        // renders a Deep V6 screen mounts it too.
+        builder: (context, page) => KvWindow(child: page!),
         home: Scaffold(
           body: Builder(
             builder: (ctx) => Center(
@@ -59,7 +91,7 @@ void main() {
 
     expect(abandonCalls, greaterThanOrEqualTo(1));
     expect(find.text('open'), findsOneWidget); // popped back to the host
-    expect(find.text('Set a passphrase'), findsNothing);
+    expect(find.text('Choose an unlock passphrase'), findsNothing);
   });
 
   testWidgets('reveal → passphrase → skip extra → seal (no biometric) → home', (
@@ -86,7 +118,7 @@ void main() {
     );
     await settle(tester);
 
-    expect(find.text('Set a passphrase'), findsOneWidget);
+    expect(find.text('Choose an unlock passphrase'), findsOneWidget);
     await tester.tap(
       find.text('a'),
     ); // type passphrase "a" on the no-IME keyboard
@@ -94,9 +126,10 @@ void main() {
     await tester.tap(find.text('Next'));
     await settle(tester);
 
-    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
-    await tester.tap(find.text('Skip'));
-    await settle(tester);
+    expect(find.text('Add a 13th word?'), findsOneWidget);
+    // The switch is off, so the primary IS the way past — and it names what
+    // it will do rather than saying "Next" twice on two different screens.
+    await reach(tester, find.text('Continue — 12 words only'));
 
     expect(sealedPass, equals(Uint8List.fromList([0x61]))); // 'a'
     expect(sealedExtra, isEmpty); // skipped
@@ -132,20 +165,22 @@ void main() {
     await settle(tester);
     await tester.tap(find.text('Next'));
     await settle(tester);
+    await reach(tester, find.byType(KvToggle)); // opt in to the 13th word
     await tester.tap(find.text('b')); // extra word "b"
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
-    await settle(tester);
+    await reach(
+      tester,
+      find.widgetWithText(KvAction, 'Continue with 13th word'),
+    );
     await tester.tap(find.text('b')); // confirm-repeat, matching
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
-    await settle(tester);
+    await reach(tester, find.widgetWithText(KvAction, 'Create wallet'));
 
     expect(sealedPass, equals(Uint8List.fromList([0x61]))); // 'a'
     expect(sealedExtra, equals(Uint8List.fromList([0x62]))); // 'b'
-    expect(find.text('Unlock with your fingerprint?'), findsOneWidget);
+    expect(find.text('Open with biometrics?'), findsOneWidget);
 
-    await tester.tap(find.text('Enable fingerprint unlock'));
+    await tester.tap(find.text('Use biometrics'));
     await settle(tester);
 
     expect(enrollCalls, 1);
@@ -191,8 +226,11 @@ void main() {
     );
     await settle(tester);
     await press(find.text('a')); // passphrase
-    await press(find.widgetWithText(FilledButton, 'Next'));
-    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
+    await press(find.widgetWithText(KvAction, 'Next'));
+    expect(find.text('Add a 13th word?'), findsOneWidget);
+    // `O5`'s switch. The extra word is opted INTO — it is seed-determining and
+    // unrecoverable — so the fields and the keyboard only exist once it is on.
+    await press(find.byType(KvToggle));
   }
 
   testWidgets('a mistyped extra word is caught instead of sealed', (
@@ -203,23 +241,26 @@ void main() {
 
     await tester.tap(find.text('b')); // entry: "b"
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
-    await settle(tester);
+    await reach(
+      tester,
+      find.widgetWithText(KvAction, 'Continue with 13th word'),
+    );
 
-    expect(find.text('Type the extra word again'), findsOneWidget);
+    expect(find.text('Create wallet'), findsOneWidget);
     await tester.tap(find.text('c')); // confirm: "c" — the typo
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
-    await settle(tester);
+    await reach(tester, find.widgetWithText(KvAction, 'Create wallet'));
 
     // Nothing sealed, and the user is back at the entry with BOTH buffers
     // wiped: a mismatch means one of the two is wrong and neither the user nor
     // the app can see which, so re-typing only the copy would let them
     // "correct" it until it matched a first entry that was itself the typo.
     expect(sealCalls, 0);
-    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
+    expect(find.text('Add a 13th word?'), findsOneWidget);
     expect(find.textContaining("didn't match"), findsOneWidget);
-    expect(find.text('Use the keyboard below'), findsOneWidget); // 0 dots
+    // BOTH fields back to their placeholders: zero dots in either.
+    expect(find.text('Type it here'), findsOneWidget);
+    expect(find.text('Type it again'), findsOneWidget);
   });
 
   testWidgets('the mismatch reason is ON SCREEN on a small phone at 1.3x', (
@@ -249,9 +290,9 @@ void main() {
 
     await toExtraWord(tester, onSeal: (_) {}, tap: tapScrolled);
     await tapScrolled(find.text('b'));
-    await tapScrolled(find.widgetWithText(FilledButton, 'Next'));
+    await tapScrolled(find.widgetWithText(KvAction, 'Continue with 13th word'));
     await tapScrolled(find.text('c'));
-    await tapScrolled(find.widgetWithText(FilledButton, 'Create wallet'));
+    await tapScrolled(find.widgetWithText(KvAction, 'Create wallet'));
 
     final message = find.textContaining("didn't match");
     expect(message, findsOneWidget);
@@ -277,14 +318,15 @@ void main() {
       await tester.tap(find.text(c));
       await settle(tester);
     }
-    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
-    await settle(tester);
+    await reach(
+      tester,
+      find.widgetWithText(KvAction, 'Continue with 13th word'),
+    );
     for (final c in ['b', 'c']) {
       await tester.tap(find.text(c));
       await settle(tester);
     }
-    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
-    await settle(tester);
+    await reach(tester, find.widgetWithText(KvAction, 'Create wallet'));
 
     expect(sealedExtra, equals(Uint8List.fromList([0x62, 0x63]))); // 'bc'
   });
@@ -297,14 +339,15 @@ void main() {
 
     await tester.tap(find.text('b'));
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
-    await settle(tester);
+    await reach(
+      tester,
+      find.widgetWithText(KvAction, 'Continue with 13th word'),
+    );
     for (final c in ['b', 'b']) {
       await tester.tap(find.text(c));
       await settle(tester);
     }
-    await tester.tap(find.widgetWithText(FilledButton, 'Create wallet'));
-    await settle(tester);
+    await reach(tester, find.widgetWithText(KvAction, 'Create wallet'));
 
     expect(sealCalls, 0);
     expect(find.textContaining("didn't match"), findsOneWidget);
@@ -316,15 +359,19 @@ void main() {
     await toExtraWord(tester, onSeal: (_) {});
     await tester.tap(find.text('b'));
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
-    await settle(tester);
-    await tester.tap(find.byType(BackButton));
-    await settle(tester);
+    await reach(
+      tester,
+      find.widgetWithText(KvAction, 'Continue with 13th word'),
+    );
+    await reach(tester, find.bySemanticsLabel('Back'));
 
     // Back at the entry, which still holds the word — only the half-typed
     // confirm is wiped.
-    expect(find.text('Add an extra word? (optional)'), findsOneWidget);
-    expect(find.byIcon(Icons.circle), findsOneWidget); // one dot: "b" survived
+    expect(find.text('Add a 13th word?'), findsOneWidget);
+    // One dot in the entry field: "b" survived; the confirm shows its
+    // placeholder because the half-typed copy did not.
+    expect(find.text('Type it again'), findsOneWidget);
+    expect(find.text('Type it here'), findsNothing);
   });
 
   testWidgets('Skip still seals an empty extra word with no confirm step', (
@@ -334,11 +381,13 @@ void main() {
     // untouched by the confirm gate.
     Uint8List? sealedExtra;
     await toExtraWord(tester, onSeal: (x) => sealedExtra = x);
-    await tester.tap(find.text('Skip'));
-    await settle(tester);
+    // The switch is ON here — `toExtraWord` flips it — so this is the plain
+    // text way past a step the user has already opened, which is the path the
+    // audit's constraint is about.
+    await reach(tester, find.text('Skip — 12 words only'));
 
     expect(sealedExtra, isEmpty);
-    expect(find.text('Type the extra word again'), findsNothing);
+    expect(find.widgetWithText(KvAction, 'Create wallet'), findsNothing);
   });
 
   testWidgets('an empty entry is not sealed by the primary button', (
@@ -346,8 +395,10 @@ void main() {
   ) async {
     var sealCalls = 0;
     await toExtraWord(tester, onSeal: (_) => sealCalls++);
-    await tester.tap(find.widgetWithText(FilledButton, 'Next'));
-    await settle(tester);
+    await reach(
+      tester,
+      find.widgetWithText(KvAction, 'Continue with 13th word'),
+    );
 
     expect(sealCalls, 0); // Skip owns the empty path, and says so
     expect(find.textContaining('or tap Skip'), findsOneWidget);
@@ -383,8 +434,7 @@ void main() {
     await settle(tester);
     await tester.tap(find.text('Next'));
     await settle(tester);
-    await tester.tap(find.text('Skip'));
-    await settle(tester);
+    await reach(tester, find.text('Continue — 12 words only'));
   }
 
   testWidgets('no fingerprint enrolled on the phone is explained, not skipped', (
@@ -394,7 +444,7 @@ void main() {
     // The commonest state on a fresh phone, and the only one the user can fix.
     // As a bool it was indistinguishable from "no sensor" and vanished.
     expect(find.textContaining('Android Settings'), findsOneWidget);
-    expect(find.text('Enable fingerprint unlock'), findsNothing);
+    expect(find.text('Use biometrics'), findsNothing);
   });
 
   testWidgets('a probe that cannot run is unknown, never a confident no', (
@@ -417,10 +467,10 @@ void main() {
         biometricStatus: () async => 'ready',
         enroll: () async => throw PlatformException(code: 'cancelled'),
       );
-      await tester.tap(find.text('Enable fingerprint unlock'));
+      await tester.tap(find.text('Use biometrics'));
       await settle(tester);
       expect(find.textContaining("didn't complete"), findsNothing);
-      expect(find.text('Enable fingerprint unlock'), findsOneWidget);
+      expect(find.text('Use biometrics'), findsOneWidget);
       expect(find.text('open'), findsNothing, reason: 'a cancel must not pop');
     },
   );
@@ -433,7 +483,7 @@ void main() {
       biometricStatus: () async => 'ready',
       enroll: () async => throw PlatformException(code: 'vault'),
     );
-    await tester.tap(find.text('Enable fingerprint unlock'));
+    await tester.tap(find.text('Use biometrics'));
     await settle(tester);
     // The suspected lifecycle race, made visible rather than swallowed.
     expect(

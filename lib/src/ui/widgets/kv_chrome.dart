@@ -28,10 +28,23 @@ class KvTopBar extends StatelessWidget {
     this.trailing,
     this.avatar,
     this.subtitle,
+    this.centre,
     this.page = false,
   });
 
   final String title;
+
+  /// **A reading in the title's seat**, for a screen whose name is not a word.
+  ///
+  /// `O2`–`O6` draw no title at all: the centre of the onboarding bar carries
+  /// [KvSteps], because *step 3 of 5* is what a create ceremony's chrome has
+  /// to say and "Create wallet" repeated five times is not. The widget takes
+  /// the same `Expanded` seat the title would, so it centres on exactly the
+  /// line every other screen's title centres on.
+  ///
+  /// [title] is still required and still what a screen reader is told, so a
+  /// bar can never be nameless — it only stops PAINTING the name.
+  final Widget? centre;
 
   /// **The root register** (§2 `pageTitle`, `T1 · Settings` measured).
   ///
@@ -125,7 +138,14 @@ class KvTopBar extends StatelessWidget {
           ] else if (page)
             const SizedBox(width: KvSpace.xs),
           Expanded(
-            child: subtitle == null
+            child: centre != null
+                ? Semantics(
+                    // The bar still announces the screen; the centre object
+                    // announces the reading. Two labels, one row, in order.
+                    label: title,
+                    child: Center(child: centre),
+                  )
+                : subtitle == null
                 ? _fitted(context)
                 : Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -831,6 +851,75 @@ class _KvActionState extends State<KvAction> {
 /// actions that emit — two laws on one object, and `S6a` settles it: the render
 /// paints both glyph and word at `#49eacb`. It is a ghost action that happens
 /// to sit in a chip, and it spends one of this screen's three emissions.
+
+/// **A quiet text action** — words in a 52 dp target, and no pill.
+///
+/// Jakarta 14 / 600 in `inkDim`, `primaryMuted` where it is the only offer in
+/// its seat. It was `KvContactAction`, private to `S6b`'s *Save as contact*,
+/// until UX-R6 found the onboarding group needs exactly this object three
+/// times and none of them is about a contact: `O4`'s *Show me the words
+/// again*, `O5`'s **Skip — 12 words only**, `O6`'s *Passphrase only*.
+///
+/// **The founder's standing ruling lives here**: the way past an optional step
+/// is plain text, never a second pill competing with the primary. A pill says
+/// *this is a thing you want*; the skip is a thing the user may not need at
+/// all, and two pills of equal weight on a custody screen make the wrong one
+/// as easy to hit as the right one (BG-12's thumb-arc clause, one layer up).
+///
+/// [onTap] may be null — the control then still occupies its seat and says
+/// nothing, which is what a busy ceremony needs from it.
+class KvTextAction extends StatelessWidget {
+  const KvTextAction({
+    super.key,
+    required this.label,
+    required this.onTap,
+    this.tone = KvColor.inkDim,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+  final Color tone;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTap: onTap,
+    child: Semantics(
+      button: true,
+      enabled: onTap != null,
+      // **Measured, not assumed** (item 0 / L121). A 19.0 dp line box inside
+      // 16 dp of padding is **51.0**, one dp under BG-12's floor — carried
+      // verbatim from `KvContactAction`, where the comment claimed 52 and
+      // nobody had multiplied it out. An extraction is new code for its new
+      // callers, and this one has five (`ux-auditor`, UX-R6).
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.s,
+            vertical: KvSpace.m,
+          ),
+          child: Align(
+            alignment: Alignment.center,
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 14,
+                height: 19 / 14,
+                fontWeight: FontWeight.w600,
+                fontVariations: KvWeight.w600,
+                color: onTap == null ? KvColor.etch : tone,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class KvPasteChip extends StatelessWidget {
   const KvPasteChip({
     super.key,

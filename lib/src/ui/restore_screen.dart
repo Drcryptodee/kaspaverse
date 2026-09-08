@@ -3,15 +3,23 @@ import 'package:flutter/services.dart';
 
 import '../services/vault_service.dart';
 import 'biometric_copy.dart';
-import 'format.dart';
+import 'extra_word_copy.dart';
 import 'secret/bip39_wordlist.dart';
+import 'secret/masked_dots.dart';
 import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
+import 'secret/word_parts.dart';
+import 'theme/kv_window.dart';
 import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
 import 'widgets/haptics.dart';
+import 'widgets/kv_address.dart';
+import 'widgets/kv_chrome.dart';
 import 'widgets/kv_loader.dart';
+import 'widgets/kv_tabs.dart';
+import 'widgets/kv_toggle.dart';
+import 'widgets/kv_two_pane.dart';
 
 /// The restore ceremony's steps.
 ///
@@ -93,6 +101,17 @@ class _RestoreScreenState extends State<RestoreScreen>
   /// your typing stays possible and is a deliberate act with a known duration.
   bool _wordsRevealed = false;
 
+  /// **Whether this wallet was made with an extra word** — `O7`'s switch.
+  ///
+  /// Off by default. It governs only whether the extra-word STEP is offered:
+  /// off goes straight from the words to the address preview, which is exactly
+  /// what leaving that step blank did before, minus a screen nobody with a
+  /// plain phrase needed. The bytes handed to `restorePreview` and
+  /// `restoreAndPersist` are identical either way — an untouched buffer and a
+  /// wiped one snapshot to the same empty `Uint8List` — and the address
+  /// preview remains the net that catches a user who had one and said no.
+  bool _use25th = false;
+
   /// Why Path A is (un)available, resolved once after the commit.
   String _biometricStatus = 'unknown';
 
@@ -168,6 +187,70 @@ class _RestoreScreenState extends State<RestoreScreen>
       } else if (_indices.isNotEmpty) {
         _indices.removeLast();
       }
+      // **The hold pill's OTHER unmount route.** It is mounted only while
+      // there is something to reveal, so erasing the last word with one finger
+      // while another holds the pill disposes the recognizer mid-press —
+      // firing neither `onEnd` nor `onCancel`, exactly as tapping Continue
+      // does — and the latch would survive. Re-picking a word would then draw
+      // the phrase unmasked with no finger down. Same multi-touch shape as the
+      // Continue guard below, and as the scar in `RevealActivity`
+      // (`ffi-leak-auditor`, UX-R6).
+      if (_indices.isEmpty) _wordsRevealed = false;
+    });
+  }
+
+  /// **Leaving the words — and the address is DERIVED either way.**
+  ///
+  /// `ffi-leak-auditor` + `wallet-security-auditor` BLOCK, UX-R6: the first
+  /// draft of the switch routed the off path straight to `_Step.preview`,
+  /// which is the one step that cannot draw itself. `_runPreview` has exactly
+  /// one job and one caller, and skipping it left `_previewAddress` null — an
+  /// **empty plate under the words *Is this your wallet?*** with a live
+  /// `This is my wallet` beneath it. Permanent false assurance on the one
+  /// screen that exists to catch a wrong word, and a wrong restore is a brick:
+  /// Rust refuses to seal over an existing blob and there is no delete path.
+  ///
+  /// It also skipped the **Rust-side validation** — `MnemonicCeremony::restore`
+  /// runs inside `restore_preview`, so a bad checksum would have surfaced as a
+  /// generic commit failure instead of *"Those words are not a valid recovery
+  /// phrase"*.
+  ///
+  /// At HEAD this was structurally impossible: the words step always went to
+  /// the extra-word step and that step's only action was the preview. The
+  /// switch made a second route, and a second route to a screen that renders
+  /// state somebody else computes needs the same computation.
+  Future<void> _leaveWords() async {
+    // Clear the hold latch on the way out. A long-press held with one finger
+    // while another taps Continue disposes the recognizer without ever firing
+    // `onEnd`, so the flag would survive — and coming back would then render
+    // the whole phrase unmasked with no hold at all. Same multi-touch shape
+    // already scarred in RevealActivity.
+    setState(() => _wordsRevealed = false);
+    if (_use25th) {
+      // Entering the step wipes, so a second visit types onto an empty
+      // buffer rather than appending to the first one (see `_enterExtraWord`).
+      _enterExtraWord();
+      return;
+    }
+    _extra.wipe();
+    await _runPreview();
+  }
+
+  /// Entering the extra-word step **starts from empty**.
+  ///
+  /// `wallet-security-auditor` BLOCK, UX-R6. Neither way out of this step
+  /// wiped `_extra`, and both ways back in re-entered with it loaded — so a
+  /// user who retyped **appended**, sealing `word+word` as the PBKDF2 salt.
+  /// Restore has no confirm-repeat, so the only net was the preview address;
+  /// and the preview's own remedy — *a word or the extra word is wrong, go
+  /// back and fix it* — is exactly what sends the user back to retype. Each
+  /// round doubled the salt, the address stayed wrong, and the app's own
+  /// advice made it worse.
+  void _enterExtraWord() {
+    _extra.wipe();
+    setState(() {
+      _step = _Step.extraWord;
+      _message = null;
     });
   }
 
@@ -296,6 +379,115 @@ class _RestoreScreenState extends State<RestoreScreen>
     if (mounted) Navigator.of(context).pop();
   }
 
+  // ── views (`O7`, and the group's shared `O2` / `O6` legs) ────────────────
+
+  /// §2 `display`, the onboarding rung.
+  static const TextStyle _display = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 30,
+    height: 34 / 30,
+    fontWeight: FontWeight.w800,
+    fontVariations: KvWeight.w800,
+    letterSpacing: -0.75,
+    color: KvColor.ink,
+  );
+
+  static const TextStyle _body = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 15,
+    height: 22 / 15,
+    color: KvColor.inkDim,
+  );
+
+  /// **A smaller register at `short`.** `display` is a phone-portrait rung; at
+  /// 915 × 412 the body is ~42 dp and a 34 dp line with a descender is cut at
+  /// the fold — type clipped through its glyphs, which is the thing BG-14
+  /// refuses. §3a's `short` class is the chrome giving way, and this is the
+  /// chrome: the heading keeps its job at `barTitle`'s size.
+  TextStyle get _headingStyle => _short
+      ? const TextStyle(
+          fontFamily: KvFont.ui,
+          fontSize: 18,
+          height: 22 / 18,
+          fontWeight: FontWeight.w700,
+          fontVariations: KvWeight.w700,
+          letterSpacing: -0.18,
+          color: KvColor.ink,
+        )
+      : _display;
+
+  Widget _heading(String text, {TextAlign align = TextAlign.start}) => SizedBox(
+    width: double.infinity,
+    child: Text(text, style: _headingStyle, textAlign: align),
+  );
+
+  /// **§3a's `short` class: phone landscape, where the chrome gives way.**
+  ///
+  /// The law's own row for `< 480` dp of height says *onboarding illustration
+  /// discs drop*, and the reason generalises: at 915 × 412 a ceremony's bar,
+  /// its pinned keyboard and its foot take 383 of the 412, leaving ~110 dp of
+  /// body. Spent on a `display` heading and a four-line explainer, that body
+  /// shows the user nothing they did not already know and hides the one thing
+  /// the screen is about — the words they have entered.
+  ///
+  /// So at `short` the **explainer drops** and the heading stays. The
+  /// explainer is the sentence you read once; the heading is what the screen
+  /// is asking, and `O6`'s heading IS the question. Nothing is clipped either
+  /// way — the body scrolls — this is about what the first 110 dp are spent
+  /// on. Found in the 915 × 412 frame, which is the geometry that finds it.
+  bool get _short => KvWindow.of(context).heightClass == KvHeightClass.short;
+
+  Widget _sub(String text, {TextAlign align = TextAlign.start}) {
+    if (_short) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: KvSpace.sm),
+      child: SizedBox(
+        width: double.infinity,
+        child: Text(text, style: _body, textAlign: align),
+      ),
+    );
+  }
+
+  Widget _reason() {
+    final message = _message;
+    if (message == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: KvSpace.m),
+      child: Text(message, style: _body),
+    );
+  }
+
+  /// **`7 of 24`** — `O7`'s bar reading. BG-30: the figures are mono, the
+  /// word between them is not.
+  Widget _counter() {
+    final at = _indices.length + (_indices.length == _target ? 0 : 1);
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: '$at', style: _figure),
+          const TextSpan(text: ' of ', style: _word),
+          TextSpan(text: '$_target', style: _figure),
+        ],
+      ),
+      maxLines: 1,
+    );
+  }
+
+  static const TextStyle _figure = TextStyle(
+    fontFamily: KvFont.mono,
+    fontSize: 15,
+    height: 20 / 15,
+    fontWeight: FontWeight.w500,
+    fontVariations: KvWeight.w500,
+    color: KvColor.inkDim,
+  );
+  static const TextStyle _word = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 15,
+    height: 20 / 15,
+    color: KvColor.inkMeta,
+  );
+
   @override
   Widget build(BuildContext context) {
     // OUTSIDE the guard. The enrol step runs after the wallet is committed and
@@ -309,499 +501,526 @@ class _RestoreScreenState extends State<RestoreScreen>
     // restore is still under way, and it suppresses the back arrow that one
     // step earlier meant *abandon the restore*.
     if (_step == _Step.enrolling) {
-      return Scaffold(
-        appBar: AppBar(
-          title: const Text('Almost done'),
-          automaticallyImplyLeading: false,
-        ),
-        body: SafeArea(child: _enrollStep()),
+      return _page(
+        title: 'Almost done',
+        onBack: null,
+        children: _enrollBody(),
+        foot: _enrollFoot(),
       );
     }
     return SecretScreenGuard(
       title: 'your recovery words',
       setSecure: widget.setSecure,
       checkAccessibility: widget.checkAccessibility,
-      child: Scaffold(
-        appBar: AppBar(title: const Text('Restore wallet')),
-        body: SafeArea(child: _body()),
-      ),
+      child: _wordlist == null
+          ? Scaffold(
+              backgroundColor: KvColor.abyss,
+              body: const SafeArea(child: Center(child: KvLoader())),
+            )
+          : switch (_step) {
+              _Step.words => _wordsStep(),
+              _Step.extraWord => _extraWordStep(),
+              _Step.preview => _previewStep(),
+              _Step.passphrase => _passphraseStep(),
+              _Step.enrolling => const SizedBox.shrink(), // handled above
+            },
     );
   }
 
-  Widget _body() {
-    if (_wordlist == null) {
-      return const Center(child: KvLoader());
-    }
-    switch (_step) {
-      case _Step.words:
-        return _wordsStep();
-      case _Step.extraWord:
-        return _extraWordStep();
-      case _Step.preview:
-        return _previewStep();
-      case _Step.passphrase:
-        return _passphraseStep();
-      case _Step.enrolling:
-        return _enrollStep();
-    }
-  }
-
-  // ── step: the Path-A offer (mirrors create_screen.dart's `_enroll`) ───────
-  Widget _enrollStep() {
-    final theme = Theme.of(context);
-    final ready = _biometricStatus == biometricReady;
-    // Scrollable. At 1.3× on a 360×640 phone this step overflowed by
-    // 206 px with a failure message showing — `enrollFailureCopy` AND
-    // the "Not now" exit laid out entirely off-screen, so tapping
-    // Enable and failing produced no visible change at all. That is
-    // verbatim the defect the honest-degrade fix was written to end
-    // (ux-auditor, Track 2 re-audit).
-    // `Center` inside a `SingleChildScrollView` is a vertical no-op — the scroll
-    // view hands its child unbounded height — so the overflow fix alone would
-    // top-align this step in every case, leaving ~182 dp of dead space below
-    // "Not now" on a 411×731 phone. The min-height constraint restores the
-    // centring while keeping the overflow escape (ux-auditor, Track 2 re-audit).
-    return LayoutBuilder(
-      builder: (context, constraints) => SingleChildScrollView(
-        padding: const EdgeInsets.all(KvSpace.gutter),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            minHeight: constraints.maxHeight - KvSpace.gutter * 2,
+  /// The group's page: ground, bar, clamped column, optional pinned foot.
+  Widget _page({
+    required String title,
+    required List<Widget> children,
+    Widget? centre,
+    Widget? foot,
+    VoidCallback? onBack,
+    bool defaultBack = false,
+  }) => Scaffold(
+    backgroundColor: KvColor.abyss,
+    body: SafeArea(
+      child: Column(
+        children: [
+          KvTopBar(
+            title: title,
+            centre: centre,
+            onBack: defaultBack
+                ? () => Navigator.of(context).maybePop()
+                : onBack,
           ),
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const CeremonyMark(Icons.fingerprint),
-                const SizedBox(height: KvSpace.l),
-                Text(
-                  ready
-                      ? 'Unlock with your fingerprint?'
-                      : 'Fingerprint unlock, when you want it',
-                  style: theme.textTheme.headlineSmall,
-                  textAlign: TextAlign.center,
+          Expanded(
+            child: KvColumn(
+              child: SingleChildScrollView(
+                // **No air at `short`.** 48 dp of top-and-bottom padding is
+                // right on a phone and is more than the whole body at
+                // 915 × 412, where a bar and a pinned foot leave ~42
+                // (`ux-auditor` BLOCK, UX-R6).
+                padding: EdgeInsets.symmetric(vertical: _short ? 0 : KvSpace.l),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: children,
                 ),
-                const SizedBox(height: KvSpace.s),
-                Text(
-                  ready
-                      ? 'Add a fingerprint to unlock quickly next time. Your '
-                            'passphrase still works as a backup.'
-                      : biometricUnavailableCopy(_biometricStatus),
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: KvSpace.xl),
-                if (ready)
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: _busy ? null : _runEnroll,
-                      child: Text(
-                        _busy ? 'Setting up…' : 'Enable fingerprint unlock',
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: KvSpace.s),
-                TextButton(
-                  onPressed: _busy ? null : _finish,
-                  child: Text(ready ? 'Not now' : 'Continue'),
-                ),
-                if (_message != null) ...[
-                  const SizedBox(height: KvSpace.m),
-                  Text(
-                    _message!,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textSecondary,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ],
+              ),
             ),
           ),
-        ),
+          // Inside the column's gutter — a part in a clamped column owns no
+          // horizontal air of its own (L195).
+          if (foot != null) KvColumn(child: foot),
+        ],
       ),
+    ),
+  );
+
+  // ── `O6 · Biometrics` — the same step the create ceremony ends on ────────
+  List<Widget> _enrollBody() {
+    final ready = _biometricStatus == biometricReady;
+    return [
+      // §3a's own words for this class: *onboarding illustration discs drop*.
+      if (!_short) ...[
+        const SizedBox(height: KvSpace.xl),
+        const Center(child: CeremonyMarkPair()),
+        const SizedBox(height: KvSpace.xl),
+      ],
+      _heading(
+        ready ? 'Open with biometrics?' : 'Biometrics, when you want them',
+        align: TextAlign.center,
+      ),
+      _sub(
+        ready
+            ? 'Face, fingerprint — whatever this phone offers. Your keys stay '
+                  'sealed in its hardware either way; this only opens the app '
+                  'faster.'
+            : biometricUnavailableCopy(_biometricStatus),
+        align: TextAlign.center,
+      ),
+      _reason(),
+    ];
+  }
+
+  /// The two ways on, in the thumb arc — `create_screen`'s twin (BG-21: the
+  /// identical step in two ceremonies is one composition).
+  Widget _enrollFoot() {
+    final ready = _biometricStatus == biometricReady;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (ready)
+          KvAction(
+            label: _busy ? 'Setting up…' : 'Use biometrics',
+            primary: true,
+            onTap: _busy ? () {} : _runEnroll,
+            disabledReason: _busy ? 'Setting up…' : null,
+          ),
+        Center(
+          child: KvTextAction(
+            label: ready ? 'Passphrase only' : 'Continue',
+            onTap: _busy ? null : _finish,
+          ),
+        ),
+        const SizedBox(height: KvSpace.s),
+      ],
     );
   }
 
-  // ── step: pick words ──────────────────────────────────────────────────────
+  // ── `O7 · Restore` — pick the words ──────────────────────────────────────
+
+  /// **The render draws the tray unmasked, and this build masks it.**
+  ///
+  /// `O7` shows its chips reading `anchor`, `gravity`, `orbit` — which is what
+  /// the screen looks like WHILE the reveal is held, and a render can only
+  /// draw one state. Masked by default with reveal-on-hold is BG-10's own
+  /// register and an auditor fix besides: a restore is exactly when someone is
+  /// reading from paper in a room they may not control, and a phrase left
+  /// legible for as long as entry takes is worth the wallet. The hold pill is
+  /// `O3`'s own — a `chip` stadium with the `eye` mark and a `primaryMuted`
+  /// label — so the two screens that show recovery words show them the same
+  /// way.
   Widget _wordsStep() {
-    final theme = Theme.of(context);
     final suggestions = _wordlist!.startingWith(_filter);
     final complete = _indices.length == _target;
-    return Column(
+    final left = _target - _indices.length;
+    return _page(
+      title: 'Restore wallet',
+      centre: _counter(),
+      defaultBack: true,
       children: [
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.all(KvSpace.gutter),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Word ${_indices.length + (complete ? 0 : 1)} of $_target',
-                      style: theme.textTheme.titleMedium,
-                    ),
-                    SegmentedButton<int>(
-                      segments: const [
-                        ButtonSegment(value: 12, label: Text('12')),
-                        ButtonSegment(value: 24, label: Text('24')),
-                      ],
-                      selected: {_target},
-                      onSelectionChanged: _indices.isEmpty
-                          ? (s) {
-                              KvHaptic.selection(); // toggle (§7)
-                              setState(() => _target = s.first);
-                            }
-                          : null,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: KvSpace.m),
-                // The picked words are the part that GROWS (up to 24 chips, and
-                // more at large text scale), so they take the slack and scroll
-                // inside it. A `Spacer` here made the growth overflow instead:
-                // once chips + the bottom block exceeded the step, the content
-                // that could not be seen was silently clipped — on the surface
-                // where the user is checking a recovery phrase word by word.
-                if (_indices.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: KvSpace.s),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      // Hold, not toggle. A toggle can be left on and walked
-                      // away from; a hold has the duration the user is actually
-                      // present for, which is the property that matters on a
-                      // phrase worth the wallet.
-                      child: GestureDetector(
-                        // Opaque + a 48 dp floor: the first version's hit area
-                        // was just the glyph and its label, about 20 dp tall, so
-                        // it had to be aimed at rather than pressed. 48 dp is
-                        // the design system's minimum target, and `opaque`
-                        // makes the whole strip — including the gap between
-                        // icon and text — take the press.
-                        behavior: HitTestBehavior.opaque,
-                        onLongPressStart: (_) =>
-                            setState(() => _wordsRevealed = true),
-                        onLongPressEnd: (_) =>
-                            setState(() => _wordsRevealed = false),
-                        onLongPressCancel: () =>
-                            setState(() => _wordsRevealed = false),
-                        child: SizedBox(
-                          height: KvSpace.control - KvSpace.s,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                _wordsRevealed
-                                    ? Icons.visibility_outlined
-                                    : Icons.visibility_off_outlined,
-                                size: KvSpace.m,
-                                color: KvColor.textSecondary,
-                              ),
-                              const SizedBox(width: KvSpace.xs),
-                              Text(
-                                _wordsRevealed
-                                    ? 'Showing — release to hide'
-                                    : 'Hold to check your words',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: KvColor.textSecondary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: Wrap(
-                      spacing: KvSpace.s,
-                      runSpacing: KvSpace.s,
-                      children: [
-                        for (var k = 0; k < _indices.length; k++)
-                          Chip(
-                            label: Text(
-                              _wordsRevealed
-                                  ? '${k + 1}. ${_wordlist!.words[_indices[k]]}'
-                                  // Fixed-width mask: a per-word length would
-                                  // leak the length of every word in the
-                                  // phrase, which narrows the candidate set for
-                                  // anyone who glances at the screen.
-                                  : '${k + 1}. ••••••',
-                              style: theme.textTheme.bodySmall,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: KvSpace.m),
-                if (_message != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: KvSpace.s),
-                    child: Text(
-                      _message!,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: KvColor.textSecondary,
-                      ),
-                    ),
-                  ),
-                if (complete) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: KvSpace.s),
-                    child: Text(
-                      'All $_target words are in. Use backspace to change the last one.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: KvColor.textSecondary,
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () => setState(() {
-                        // Clear the hold latch on the way out. A long-press
-                        // held with one finger while another taps Continue
-                        // disposes the recognizer without ever firing
-                        // onLongPressEnd, so the flag would survive — and
-                        // coming back would then render the whole phrase
-                        // unmasked with no hold at all. Same multi-touch shape
-                        // already scarred in RevealActivity.
-                        _wordsRevealed = false;
-                        _step = _Step.extraWord;
-                      }),
-                      child: const Text('Continue'),
-                    ),
-                  ),
-                ] else if (_filter.isNotEmpty)
-                  SizedBox(
-                    height: KvSpace.touchTarget,
-                    child: ListView(
-                      scrollDirection: Axis.horizontal,
-                      children: [
-                        for (final w in suggestions)
-                          Padding(
-                            padding: const EdgeInsets.only(right: KvSpace.s),
-                            child: ActionChip(
-                              label: Text(w, style: theme.textTheme.bodyLarge),
-                              onPressed: () => _select(w),
-                            ),
-                          ),
-                      ],
-                    ),
-                  )
-                else
-                  Text(
-                    'Type each word, then tap it from the suggestions.',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textTertiary,
-                    ),
-                  ),
-              ],
+        _heading('Enter your recovery words'),
+        _sub(
+          'Type a few letters and tap the word — nobody should ever spell one '
+          'wrong.',
+        ),
+        const SizedBox(height: KvSpace.l),
+        _lengthRow(),
+        const SizedBox(height: KvSpace.m),
+        _tray(),
+        const SizedBox(height: KvSpace.m),
+        if (_indices.isNotEmpty)
+          Center(
+            child: KvRevealHold(
+              revealed: _wordsRevealed,
+              onChanged: (r) => setState(() => _wordsRevealed = r),
             ),
           ),
-        ),
-        // Rendered while there is anything to UNDO, not only while there is
-        // something left to add. Its ⌫ is the only caller of `_wordsBackspace`,
-        // and unmounting it at exactly `complete` took away the sole way to
-        // un-pick a word — so the preview trap's own remedy button, "Go back and
-        // fix a word", returned the user to a step where no word could be
-        // changed (product-audit run 1, F5).
-        // Always mounted once a word has been picked — its ⌫ is the only
-        // caller of `_wordsBackspace`, so unmounting it at `complete` took away
-        // the sole way to un-pick a word and left the preview trap's own
-        // "Go back and fix a word" remedy pointing at a step that could not fix
-        // one (product-audit run 1, F5).
-        //
-        // Letters are inert once complete: the suggestion strip is not rendered
-        // there, so a keystroke would silently fill `_filter` and then have to
-        // be drained by ⌫ before it reached a word — a stretch where nothing
-        // the user does responds, which is the defect wearing a smaller hat.
-        SecretKeyboard(
-          mode: SecretKeyboardMode.lowercaseLetters,
-          onChar: complete ? (_) {} : (c) => setState(() => _filter += c),
-          onBackspace: _wordsBackspace,
-        ),
+        _reason(),
       ],
-    );
-  }
-
-  // ── step: optional extra word ─────────────────────────────────────────────
-  Widget _extraWordStep() {
-    final theme = Theme.of(context);
-    return Column(
-      children: [
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.all(KvSpace.gutter),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  'Extra word (optional)',
-                  style: theme.textTheme.headlineSmall,
-                ),
-                const SizedBox(height: KvSpace.s),
-                Text(
-                  'If you protected this wallet with a 13th/25th word, enter it. '
-                  'Leave blank if you did not — the address on the next screen '
-                  'will confirm you got it right.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: KvSpace.l),
-                ValueListenableBuilder<int>(
-                  valueListenable: _extra.length,
-                  builder: (context, n, _) => Text(
-                    n == 0 ? 'No extra word' : '$n characters entered',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textTertiary,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: KvSpace.l),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _busy ? null : _runPreview,
-                    child: Text(_busy ? 'Checking…' : 'Show my address'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        SecretKeyboard(
-          onChar: (c) => _extra.appendChar(c),
-          onBackspace: _extra.backspace,
-        ),
-      ],
-    );
-  }
-
-  // ── step: address preview (the decoy/typo trap) ───────────────────────────
-  Widget _previewStep() {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.all(KvSpace.gutter),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+      foot: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Is this your wallet?', style: theme.textTheme.headlineSmall),
-          const SizedBox(height: KvSpace.s),
-          Text(
-            'These words open the wallet at the address below. If it is not the '
-            'one you expect, a word or the extra word is wrong — go back and fix '
-            'it.',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: KvColor.textSecondary,
-            ),
-            textAlign: TextAlign.center,
+          // **What to do next is PINNED above the keyboard, never laid out
+          // after the tray** (L191). The tray grows by a chip a word — up to
+          // twenty-four, more at 1.3× — so a suggestion strip placed under it
+          // inherits its motion and walks off the bottom of the screen: at the
+          // reference geometry the twelfth word's suggestions sat at y 586
+          // behind the keyboard, findable by a test and untappable by a
+          // thumb. The seat is fixed and its occupant changes.
+          Padding(
+            padding: const EdgeInsets.only(bottom: KvSpace.sm),
+            child: complete
+                ? KvAction(
+                    label: _busy ? 'Checking…' : 'Continue',
+                    primary: true,
+                    onTap: _busy ? () {} : _leaveWords,
+                    disabledReason: _busy ? 'Checking…' : null,
+                  )
+                : _filter.isNotEmpty
+                ? _suggestions(suggestions)
+                // **A minimum, not a height.** Fixed at the pill's 48 the
+                // sentence wrapped to two lines at 320 dp / 1.3× and the
+                // second one was cut in half — a clipped instruction on the
+                // screen that is teaching the user how to enter a recovery
+                // phrase. A label wraps; only a figure may not (BG-14).
+                : ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      minHeight: KvSuggestion.height,
+                    ),
+                    child: Center(
+                      child: Text(
+                        'Type each word, then tap it from the suggestions.',
+                        textAlign: TextAlign.center,
+                        style: _body.copyWith(color: KvColor.inkMeta),
+                      ),
+                    ),
+                  ),
           ),
-          const SizedBox(height: KvSpace.l),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(KvSpace.m),
-            decoration: BoxDecoration(
-              color: KvColor.surfaceAlt,
-              borderRadius: BorderRadius.circular(KvRadius.data),
-            ),
-            child: SelectableText(
-              chunkAddress(_previewAddress ?? ''),
-              style: theme.textTheme.bodyLarge?.copyWith(
-                color: KvColor.primary,
+          // Letters are inert once complete: the suggestion strip is not
+          // rendered there, so a keystroke would silently fill `_filter` and
+          // then have to be drained by ⌫ before it reached a word — a stretch
+          // where nothing the user does responds.
+          SecretKeyboard(
+            mode: SecretKeyboardMode.lowercaseLetters,
+            onChar: complete ? (_) {} : (c) => setState(() => _filter += c),
+            onBackspace: _wordsBackspace,
+          ),
+          // `O7`'s foot: the undo on the left, what is left to do on the
+          // right. **`Remove last` is rendered whenever there is anything to
+          // undo**, not only while there is something left to add — its
+          // twin on the keyboard is the only other caller of
+          // `_wordsBackspace`, and unmounting it at exactly `complete` once
+          // took away the sole way to un-pick a word, leaving the preview
+          // trap's own "Go back and fix a word" remedy pointing at a step
+          // that could not fix one (product-audit run 1, F5).
+          // **At `short` the foot's counter goes and the bar's stays.** The
+          // two say one thing — `8 of 12` and `5 to go` are the same fact —
+          // and 412 dp of landscape leaves the body 17 dp once the keyboard,
+          // the suggestion strip and this row have taken theirs. Dropping the
+          // duplicate is what puts the first row of the tray back on the
+          // glass. Both are kept everywhere else: the render draws both, and
+          // whether one of them is redundant at every geometry is his call on
+          // glass, not one to take here (register §20).
+          if (!_short)
+            Padding(
+              padding: const EdgeInsets.only(bottom: KvSpace.s),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  if (_indices.isNotEmpty || _filter.isNotEmpty)
+                    KvTextAction(
+                      label: 'Remove last',
+                      tone: KvColor.ink,
+                      onTap: _wordsBackspace,
+                    )
+                  else
+                    const SizedBox.shrink(),
+                  Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(text: '$left', style: _figure),
+                        const TextSpan(text: ' to go', style: _word),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              textAlign: TextAlign.center,
             ),
-          ),
-          const SizedBox(height: KvSpace.l),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: () => setState(() => _step = _Step.passphrase),
-              child: const Text('This is my wallet'),
-            ),
-          ),
-          const SizedBox(height: KvSpace.sm),
-          TextButton(
-            onPressed: () => setState(() {
-              _wordsRevealed = false; // re-entering masked, never latched on
-              _step = _Step.words;
-              _previewAddress = null;
-            }),
-            child: const Text('Go back and fix a word'),
-          ),
         ],
       ),
     );
   }
 
-  // ── step: set passphrase, then commit ─────────────────────────────────────
-  Widget _passphraseStep() {
-    final theme = Theme.of(context);
-    return Column(
-      children: [
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.all(KvSpace.gutter),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+  /// `O7`'s header line: the length choice, and whether an extra word is in
+  /// play. Both are settings about the phrase, and the render puts them on one
+  /// line above the tray because both stop being changeable once it fills.
+  Widget _lengthRow() => Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: [
+      KvSegmented(
+        options: const [KvSegmentedOption('12'), KvSegmentedOption('24')],
+        index: _target == 12 ? 0 : 1,
+        onSelect: (i) {
+          // Locked once a word is in: changing the target mid-phrase would
+          // silently redefine what "complete" means.
+          if (_indices.isNotEmpty) return;
+          KvHaptic.selection();
+          setState(() => _target = i == 0 ? 12 : 24);
+        },
+      ),
+      Semantics(
+        toggled: _use25th,
+        label: extraWordToggle(_target),
+        button: true,
+        excludeSemantics: true,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            KvHaptic.selection();
+            setState(() {
+              _use25th = !_use25th;
+              if (!_use25th) _extra.wipe();
+            });
+          },
+          child: SizedBox(
+            height: KvSpace.touchTarget,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Text('Set a passphrase', style: theme.textTheme.headlineSmall),
-                const SizedBox(height: KvSpace.s),
                 Text(
-                  'This passphrase encrypts the wallet on THIS device. You will '
-                  'enter it to unlock.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: KvColor.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: KvSpace.l),
-                ValueListenableBuilder<int>(
-                  valueListenable: _passphrase.length,
-                  builder: (context, n, _) => Text(
-                    n == 0 ? 'Use the keyboard below' : '$n characters',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textTertiary,
-                    ),
+                  '${extraWordOrdinal(_target)} word',
+                  style: const TextStyle(
+                    fontFamily: KvFont.ui,
+                    fontSize: 15,
+                    height: 20 / 15,
+                    fontWeight: FontWeight.w600,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.inkDim,
                   ),
                 ),
-                const SizedBox(height: KvSpace.l),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _busy ? null : _runCommit,
-                    child: Text(_busy ? 'Restoring…' : 'Restore wallet'),
-                  ),
-                ),
-                if (_message != null) ...[
-                  const SizedBox(height: KvSpace.m),
-                  Text(
-                    _message!,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: KvColor.textSecondary,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
+                const SizedBox(width: KvSpace.sm),
+                KvSwitch(on: _use25th),
               ],
             ),
           ),
         ),
+      ),
+    ],
+  );
+
+  /// The picked words, and the one being typed. `O7`'s `plate` card.
+  Widget _tray() => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(KvSpace.sm),
+    decoration: BoxDecoration(
+      color: KvColor.plate,
+      borderRadius: BorderRadius.circular(KvRadius.plate),
+    ),
+    child: Wrap(
+      spacing: KvSpace.s,
+      runSpacing: KvSpace.s,
+      children: [
+        for (var k = 0; k < _indices.length; k++)
+          KvWordChip(
+            index: k + 1,
+            word: _wordsRevealed ? _wordlist!.words[_indices[k]] : null,
+          ),
+        if (_indices.length < _target)
+          KvWordChip.typing(index: _indices.length + 1, prefix: _filter),
+      ],
+    ),
+  );
+
+  Widget _suggestions(List<String> words) => SizedBox(
+    height: KvSuggestion.height,
+    child: ListView(
+      scrollDirection: Axis.horizontal,
+      children: [
+        for (final w in words)
+          Padding(
+            padding: const EdgeInsets.only(right: KvSpace.s),
+            child: KvSuggestion(word: w, onTap: () => _select(w)),
+          ),
+      ],
+    ),
+  );
+
+  // ── step: the optional extra word ────────────────────────────────────────
+  Widget _extraWordStep() => _page(
+    title: 'Restore wallet',
+    onBack: () => setState(() => _step = _Step.words),
+    children: [
+      _heading(extraWordHeading(_target)),
+      _sub(
+        'Enter the extra word you chose when this wallet was made. Case and '
+        'spaces matter, and the address on the next screen is what tells you '
+        'it was right.',
+      ),
+      KvSectionHeader('Your ${extraWordOrdinal(_target)} word'),
+      KvSecretField(
+        length: _extra.length,
+        active: true,
+        placeholder: 'Type it here',
+      ),
+      _reason(),
+    ],
+    // Pinned, like every other act in this group — the BG-21 half of the
+    // finding that moved `O5`'s two acts out of a scrolling body.
+    foot: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: KvSpace.sm),
+          child: KvAction(
+            label: _busy ? 'Checking…' : 'Show my address',
+            primary: true,
+            onTap: _busy ? () {} : _runPreview,
+            disabledReason: _busy ? 'Checking…' : null,
+          ),
+        ),
+        // **Inert while the ceremony is in flight.** `_runPreview` and
+        // `_runCommit` wipe deliberately and then `await` a platform lane with
+        // this keyboard still mounted; an ungated key press writes bytes back
+        // in AFTER the wipe, and nothing wipes them again until dispose. The
+        // words step already uses this idiom for `complete`
+        // (`ffi-leak-auditor`, UX-R6).
         SecretKeyboard(
-          onChar: (c) => _passphrase.appendChar(c),
-          onBackspace: _passphrase.backspace,
+          onChar: _busy ? (_) {} : _extra.appendChar,
+          onBackspace: _busy ? () {} : _extra.backspace,
         ),
       ],
-    );
-  }
+    ),
+  );
+
+  // ── step: address preview (the decoy/typo trap) ──────────────────────────
+  Widget _previewStep() => _page(
+    title: 'Restore wallet',
+    onBack: () {
+      setState(() {
+        _wordsRevealed = false; // re-entering masked, never latched on
+        _previewAddress = null;
+      });
+      if (_use25th) {
+        _enterExtraWord();
+      } else {
+        setState(() => _step = _Step.words);
+      }
+    },
+    children: [
+      _heading('Is this your wallet?'),
+      _sub(
+        'These words open the wallet at the address below. If it is not the '
+        'one you expect, a word or the extra word is wrong — go back and fix '
+        'it.',
+      ),
+      const KvSectionHeader('First address'),
+      // **Chunked, and selectable.** This is the one address in the app a
+      // user checks character by character against a wallet they already
+      // know, which is the whole reason the step exists: a typo'd word opens
+      // a visibly DIFFERENT wallet rather than a silently empty one. The
+      // widget paints its own plate.
+      KvAddress(
+        _previewAddress ?? '',
+        form: KvAddressForm.chunked,
+        selectable: true,
+      ),
+      _reason(),
+      const SizedBox(height: KvSpace.l),
+      KvAction(
+        label: 'This is my wallet',
+        primary: true,
+        onTap: () => setState(() => _step = _Step.passphrase),
+      ),
+      const SizedBox(height: KvSpace.s),
+      Center(
+        child: KvTextAction(
+          label: 'Go back and fix a word',
+          onTap: () => setState(() {
+            _wordsRevealed = false;
+            _step = _Step.words;
+            _previewAddress = null;
+            // The remedy this button offers is *retype the word*, so it must
+            // not hand the user a buffer that will append to it.
+            _extra.wipe();
+          }),
+        ),
+      ),
+    ],
+  );
+
+  // ── step: set passphrase, then commit (`O2`'s form) ──────────────────────
+  Widget _passphraseStep() => _page(
+    title: 'Restore wallet',
+    onBack: () => setState(() => _step = _Step.preview),
+    children: [
+      _heading('Choose an unlock passphrase'),
+      _sub(
+        'It opens this app on this phone only — it is not your recovery '
+        'phrase; those are the words you have just entered.',
+      ),
+      const SizedBox(height: KvSpace.xl),
+      Center(
+        child: MaskedDots(
+          length: _passphrase.length,
+          emptyHint: 'Type it on the keyboard below',
+        ),
+      ),
+      _reason(),
+      const SizedBox(height: KvSpace.l),
+      KvAction(
+        label: _busy ? 'Restoring…' : 'Restore wallet',
+        primary: true,
+        onTap: _busy ? () {} : _runCommit,
+        disabledReason: _busy ? 'Restoring…' : null,
+      ),
+    ],
+    foot: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SecretKeyboard(
+          onChar: _busy ? (_) {} : _passphrase.appendChar,
+          onBackspace: _busy ? () {} : _passphrase.backspace,
+        ),
+        // **It drops at `short`, and the heading is why.** 412 dp of
+        // landscape less a bar, a pill and a 220 dp keypad leaves ~76: with
+        // this line the screen's own heading scrolled out entirely and the
+        // passphrase step said nothing about what it was asking for. Of the
+        // two, the caption is the one whose subject is visible anyway — the
+        // keyboard is on the glass, in the app, plainly not the phone's — and
+        // the heading is the archetype's *one instruction*.
+        //
+        // **`inkMeta`, and this is the one place the build wins over the
+        // render.** `O2` sets this line in `etch`, which measures **2.53:1 on
+        // `abyss`** — under the 3:1 non-text floor and far under 4.5. `etch` is
+        // decorative by definition (§1.3), and this string is the screen's
+        // sovereignty disclosure: it is the sentence that says why this
+        // keyboard looks unlike the phone's. §4's `KvSectionHeader` gloss row
+        // already settled the identical case in the same words — *`etch` on an
+        // information-bearing string is a BG-14 refusal* (`ux-auditor` BLOCK,
+        // UX-R6).
+        if (!_short)
+          const Padding(
+            padding: EdgeInsets.only(bottom: KvSpace.s),
+            child: Text(
+              'In-app keypad — the system keyboard never sees this',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                height: 16 / 12,
+                color: KvColor.inkMeta,
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
 }

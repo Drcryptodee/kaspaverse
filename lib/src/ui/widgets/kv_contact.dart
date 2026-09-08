@@ -261,49 +261,6 @@ class KvContactName extends StatelessWidget {
   );
 }
 
-/// A quiet text action — `Save as contact` (`S6b`), and the receipt's version
-/// of the same offer.
-class KvContactAction extends StatelessWidget {
-  const KvContactAction({
-    super.key,
-    required this.label,
-    required this.onTap,
-    this.tone = KvColor.inkDim,
-  });
-
-  final String label;
-  final VoidCallback onTap;
-  final Color tone;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    behavior: HitTestBehavior.opaque,
-    onTap: onTap,
-    child: Semantics(
-      button: true,
-      child: Padding(
-        // BG-12's 52 dp floor around a 19 dp line: a quiet control is still a
-        // control.
-        padding: const EdgeInsets.symmetric(
-          horizontal: KvSpace.s,
-          vertical: KvSpace.m,
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 14,
-            height: 19 / 14,
-            fontWeight: FontWeight.w600,
-            fontVariations: KvWeight.w600,
-            color: tone,
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
 /// Name an address, or rename one (`S6b`'s *Save as contact*).
 ///
 /// Returns the name that was saved, `''` when the user cleared it, or null
