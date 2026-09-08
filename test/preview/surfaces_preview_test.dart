@@ -137,7 +137,7 @@ ConversationDto _conv(
   unread: unread,
 );
 
-Widget _chats({bool requests = false, bool empty = false}) {
+Widget _chats({bool requests = false, bool empty = false, int? gapMinutes}) {
   MessagingService.conversationsFn = () async => empty
       ? const []
       : [
@@ -189,7 +189,12 @@ Widget _chats({bool requests = false, bool empty = false}) {
           _conv('r1', status: 'pending_in', agoMinutes: 120),
           _conv('r2', status: 'pending_in', agoMinutes: 60 * 30),
         ];
-  MessagingService.gapAgeFn = () async => null;
+  // **A gap, when a case asks for one.** The history notice renders only when
+  // history may be incomplete, so the resting fixture cannot draw it and the
+  // one surface built for it would have no frame at all (D-309).
+  MessagingService.gapAgeFn = () async => gapMinutes == null
+      ? null
+      : GapAgeDto(gapMinutes: BigInt.from(gapMinutes), beyondHorizon: false);
   MessagingService.fillConfigFn = () async =>
       const FillConfigDto(enabled: false, endpoint: '', defaultEndpoint: '');
   MessagingService.fillStatusFn = () async => null;
@@ -1214,6 +1219,18 @@ void main() {
       () => NewHandshakeScreen(bond: BigInt.from(20000000)),
     );
     framedSurface('messages__settings', _chats, act: _openMessageSettings);
+    // **The notice in its only seat** (D-309). It hangs under `History &
+    // backup`, inside the card and over the container's own hairline, and it
+    // pushes `Delete all messages` down for as long as it has something to
+    // say — none of which the quiet frame above can show.
+    framedSurface(
+      'messages__settings_notice',
+      () => _chats(gapMinutes: 235),
+      act: _openMessageSettings,
+    );
+    // And the other half of the same truth: the list says it with the dot on
+    // its settings mark, never with a plate under the search field.
+    framedSurface('messages__chats_alert', () => _chats(gapMinutes: 235));
     // The confirm ceremony, which had no frame at all.
     framedSurface('messages__confirm', _chats, act: _openHideConfirm);
 
