@@ -748,10 +748,21 @@ void main() {
       await tester.pumpAndSettle();
       // The sheet: title, toggle, and the disclosure's two load-bearing
       // claims — what the operator LEARNS and what they can NEVER do.
+      //
+      // **The cost lives behind the info mark now** (founder, 2026-09-08 —
+      // BG-34), and D-074's "never silence" is kept by the half of that rule
+      // which matters: **turning the archive ON opens the disclosure by
+      // itself**, so nobody can consent to a cost they cannot see. Closed
+      // while it is off is a short sheet; open the moment it is on is the law.
       expect(find.text('History & backup'), findsOneWidget);
       expect(find.byType(KvToggle), findsOneWidget);
-      expect(find.textContaining('operator learns'), findsOneWidget);
-      expect(find.textContaining('never'), findsWidgets);
+      expect(
+        find.bySemanticsLabel(
+          'Explain Recovering what your node no longer holds',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('operator learns'), findsNothing);
 
       // Flip it on: config saves, a fill runs, the sheet reports counts.
       MessagingService.fillConfigFn = () async => const FillConfigDto(
@@ -769,6 +780,11 @@ void main() {
       await tester.tap(find.byType(KvToggle));
       await tester.pumpAndSettle();
       expect(find.textContaining('2 recovered messages'), findsOneWidget);
+      // **The law: consent is never given blind.** Turning it on opened the
+      // disclosure by itself, so the cost is on screen at the moment it starts
+      // being paid (D-074, BG-34's own exception clause).
+      expect(find.textContaining('operator learns'), findsOneWidget);
+      expect(find.textContaining('never'), findsWidgets);
       // The endpoint surface appears with the enabled state (configurable —
       // D-070 clause 3: the hosted default is replaceable, not a dependency).
       expect(find.textContaining('indexer.kasia.fyi'), findsOneWidget);

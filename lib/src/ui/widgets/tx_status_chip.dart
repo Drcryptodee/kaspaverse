@@ -78,14 +78,17 @@ class TxStatusChip extends StatefulWidget {
   /// How long `Accepted` stays on screen before it dissolves.
   ///
   /// Founder ruling, 2026-09-08: *"accepted will only show for say; 2 seconds
-  /// and it dissapears."* It is an ARRIVAL, not a status — the message reaching
-  /// the chain is a moment, and a moment is announced and then over. What
-  /// remains afterwards is the delivered mark in the bubble, which is a fact
-  /// rather than an event.
+  /// and it dissapears"* — **raised to 10 the same day**, after he watched it.
+  /// Two seconds is long enough to notice a label and not long enough to read
+  /// one while looking at the message it belongs to.
+  ///
+  /// It is an ARRIVAL, not a status — the message reaching the chain is a
+  /// moment, and a moment is announced and then over. What remains afterwards
+  /// is the delivered mark in the bubble, which is a fact rather than an event.
   ///
   /// `stalled` is untouched by this: *Not accepted yet* is a standing
   /// condition and stays until it stops being true.
-  static const Duration acceptedDwell = Duration(seconds: 2);
+  static const Duration acceptedDwell = Duration(seconds: 10);
 
   final TxChipState state;
 
@@ -104,23 +107,39 @@ class TxStatusChip extends StatefulWidget {
 class _TxStatusChipState extends State<TxStatusChip> {
   /// The `Accepted` dwell has elapsed for the state currently held.
   bool _spent = false;
+
+  /// This row has already announced its arrival once — see [didUpdateWidget].
+  bool _seenAccepted = false;
   Timer? _dwell;
 
   @override
   void initState() {
     super.initState();
+    _seenAccepted = widget.state == TxChipState.accepted;
     _armDwell();
   }
 
   @override
   void didUpdateWidget(TxStatusChip old) {
     super.didUpdateWidget(old);
-    // A CHANGE of state re-arms; a rebuild at the same state does not, so a
-    // thread re-pull cannot resurrect a chip whose moment has passed.
-    if (old.state != widget.state) {
-      _spent = false;
-      _armDwell();
-    }
+    if (old.state == widget.state) return;
+    // **A chip that has already said `Accepted` never says it again.**
+    //
+    // The founder saw it flash: *"it comes and go within millisecond and
+    // stablizes to say accepted"*. The cause is that a thread pull can hand
+    // this widget `none` for a frame — a delta whose statuses have not landed
+    // yet, or an acceptance that momentarily reads back as unwatched — and the
+    // old rule re-armed on ANY change, so the label tore out and back in with
+    // a full `AnimatedSwitcher` crossfade each way.
+    //
+    // Latching the arrival makes the transition one-way: once accepted, this
+    // chip's only remaining move is to spend its dwell and dissolve. A real
+    // regression to `stalled` still shows, because that is a different state
+    // and a standing condition rather than a moment.
+    if (_seenAccepted && widget.state != TxChipState.stalled) return;
+    if (widget.state == TxChipState.accepted) _seenAccepted = true;
+    _spent = false;
+    _armDwell();
   }
 
   void _armDwell() {
@@ -138,9 +157,17 @@ class _TxStatusChipState extends State<TxStatusChip> {
   }
 
   /// What is actually drawn — the widget's state until its dwell is spent.
-  TxChipState get _shown => _spent && widget.state == TxChipState.accepted
-      ? TxChipState.none
-      : widget.state;
+  TxChipState get _shown {
+    if (_spent && _seenAccepted && widget.state != TxChipState.stalled) {
+      return TxChipState.none;
+    }
+    // A momentary `none` from a half-landed pull does not blank a chip that is
+    // mid-dwell — it holds `Accepted` until the dwell says otherwise.
+    if (_seenAccepted && widget.state == TxChipState.none) {
+      return TxChipState.accepted;
+    }
+    return widget.state;
+  }
 
   @override
   Widget build(BuildContext context) {

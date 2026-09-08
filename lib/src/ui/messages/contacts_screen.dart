@@ -620,8 +620,7 @@ class _NewHandshakeActionState extends State<_NewHandshakeAction> {
   bool _open = false;
 
   /// The collapsed square. [KvSpace.touchTarget] exactly, so shrinking the
-  /// control never shrinks its target (BG-12), and the house's own control
-  /// radius so it reads as the same object the pill is.
+  /// control never shrinks its target (BG-12).
   static const double _compact = KvSpace.touchTarget;
 
   Future<void> _tap() async {
@@ -663,7 +662,15 @@ class _NewHandshakeActionState extends State<_NewHandshakeAction> {
                       height: _compact,
                       decoration: BoxDecoration(
                         color: KvColor.primary,
-                        borderRadius: BorderRadius.circular(KvRadius.control),
+                        // **A rounded square, not a disc** (founder,
+                        // 2026-09-08: *"i want border radius to be the same
+                        // border radius that square or rectangle cards
+                        // have"*). `KvRadius.control` is 999, which on a
+                        // square is a circle — and a circle is what §4
+                        // reserves for a disc. [KvRadius.inner] 22 is the
+                        // house's own card corner and is what the pill it
+                        // opens into is cut from.
+                        borderRadius: BorderRadius.circular(KvRadius.inner),
                       ),
                       child: const Center(
                         child: KvGlyphIcon(

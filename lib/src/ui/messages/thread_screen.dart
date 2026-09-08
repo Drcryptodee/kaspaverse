@@ -174,6 +174,22 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// user whose first action in a thread is the emoji key.
   double _keyboardHeight = 0;
 
+  /// How much of the thread's viewport was taken from the bottom last frame —
+  /// the system keyboard, or our emoji panel standing in for it.
+  ///
+  /// **This is what makes the thread move up with the keyboard.** `Scaffold`
+  /// resizes for the inset, so the composer stays visible — but the list keeps
+  /// its scroll offset, and a shorter viewport at the same offset means the
+  /// bottom of the conversation slides below the fold. The founder had to
+  /// scroll down to see what he had just been reading: *"the keyboard just
+  /// comes up to cover the text … let it be like whatsapp or standard, where
+  /// it pushes the last chat or wherever they are on the thread screen up."*
+  ///
+  /// So every time that space GROWS, the list is nudged by exactly the same
+  /// amount: the reader keeps looking at what they were looking at, and the
+  /// content appears to be pushed up rather than covered.
+  double _bottomSpace = 0;
+
   /// The keyboard has been asked for and has not arrived yet, so our panel
   /// stays up underneath it.
   ///
@@ -211,6 +227,37 @@ class _ThreadScreenState extends State<ThreadScreen> {
     // for the same space for a frame.
     _composeFocus.unfocus();
     setState(() => _emojiUp = true);
+  }
+
+  /// **Delete the character before the cursor**, the way a keyboard's own
+  /// backspace does — and grapheme-wise, so one tap removes one emoji rather
+  /// than half of a surrogate pair or a lone skin-tone modifier.
+  void _backspace() {
+    final value = _compose.value;
+    final sel = value.selection;
+    final text = value.text;
+    if (text.isEmpty) return;
+    // A selection is replaced by nothing; a caret eats what is behind it.
+    if (sel.isValid && !sel.isCollapsed) {
+      _compose.value = value.copyWith(
+        text: text.replaceRange(sel.start, sel.end, ''),
+        selection: TextSelection.collapsed(offset: sel.start),
+        composing: TextRange.empty,
+      );
+      return;
+    }
+    final at = sel.isValid ? sel.start : text.length;
+    if (at == 0) return;
+    // `characters` counts what a reader calls a character: an emoji built of a
+    // base, a zero-width joiner and a modifier goes in one tap, which is the
+    // whole point on this panel.
+    final before = text.substring(0, at);
+    final kept = before.characters.skipLast(1).toString();
+    _compose.value = value.copyWith(
+      text: kept + text.substring(at),
+      selection: TextSelection.collapsed(offset: kept.length),
+      composing: TextRange.empty,
+    );
   }
 
   /// Insert an emoji at the cursor, or at the end when the field has never
@@ -728,12 +775,46 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // **Latch the keyboard's height while it is up.** Read in `build` rather
-    // than through `WidgetsBindingObserver`: the inset already rebuilds this
-    // widget on every frame of the keyboard's own animation, so this sees the
-    // settled value without a second subscription to keep in step.
-    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    // **Latch the keyboard's height while it is up — from the ROOT view.**
+    //
+    // `MediaQuery.viewInsetsOf(context)` is the wrong reader here and it is
+    // wrong silently: `Scaffold` with `resizeToAvoidBottomInset` (the default)
+    // strips the bottom view inset from its body's `MediaQuery` precisely
+    // because it has already resized for it — so a read from inside the body
+    // is always 0, the latch never fires, and the panel falls back to a
+    // guessed height. That is the *"not tall enough"* the founder saw.
+    //
+    // `View.of(context)` is the window itself, below every widget that
+    // consumes insets, and its `viewInsets` are physical pixels — hence the
+    // divide by `devicePixelRatio`.
+    final view = View.of(context);
+    final inset = view.viewInsets.bottom / view.devicePixelRatio;
     if (inset > 0 && inset != _keyboardHeight) _keyboardHeight = inset;
+    // **Keep the reader where they were as the bottom space changes.** Our
+    // panel and the keyboard are the same kind of event to the list, so both
+    // are measured here and neither needs to know about the other.
+    final taken = inset > 0
+        ? inset
+        : (_emojiUp
+              ? (_keyboardHeight > 0 ? _keyboardHeight : _panelFallback)
+              : 0.0);
+    if (taken != _bottomSpace) {
+      final delta = taken - _bottomSpace;
+      _bottomSpace = taken;
+      if (delta > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scroll.hasClients) return;
+          final target = (_scroll.position.pixels + delta).clamp(
+            0.0,
+            _scroll.position.maxScrollExtent,
+          );
+          // Jump, never animate: this rides the keyboard's OWN animation, and
+          // a second easing on top of it is the wobble every chat app that
+          // gets this wrong has.
+          _scroll.jumpTo(target);
+        });
+      }
+    }
     // The keyboard has arrived — our panel can go now, and only now.
     if (_awaitingKeyboard && inset > 0) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -851,7 +932,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 // under it. Nothing reflows as the message grows; the box just
                 // gets taller.
                 child: Container(
-                  padding: const EdgeInsets.fromLTRB(14, 10, 8, 8),
+                  padding: const EdgeInsets.fromLTRB(14, 10, 8, 6),
                   decoration: BoxDecoration(
                     color: KvColor.plate,
                     borderRadius: BorderRadius.circular(KvRadius.bubble),
@@ -896,7 +977,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: KvSpace.xs),
+                      // **A tiny gap, not a breath** (founder, 2026-09-08:
+                      // *"reduce the padding between the message input and the
+                      // emoji/send icon … just a tiny gap"*). The row below
+                      // belongs to the box the words are in; separating them
+                      // made it read as a second object.
+                      const SizedBox(height: 2),
                       // **The controls' own row, pinned to the bottom.** The
                       // fee sits at its left because that is the one piece of
                       // empty space in the box and it puts the price
@@ -911,7 +997,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                             showingEmoji: _emojiUp,
                             onTap: _toggleEmoji,
                           ),
-                          const SizedBox(width: KvSpace.xs),
+                          // The two marks are one control group, so they sit
+                          // together rather than evenly spread across the row.
                           _SendMark(
                             armed: _draft.trim().isNotEmpty && !_sending,
                             // A disabled control says WHY, and the two reasons
@@ -945,6 +1032,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                           ? _keyboardHeight
                           : _panelFallback,
                       onPick: _insertEmoji,
+                      onBackspace: _backspace,
                     )
                   : const SizedBox(width: double.infinity),
             ),
@@ -1650,12 +1738,27 @@ class _EmojiKey extends StatelessWidget {
 /// A curated set rather than the whole Unicode table: these are the ones people
 /// actually send, they cost no dependency and no font (Android draws them from
 /// the system emoji font), and a grid of two thousand glyphs is a scroll nobody
-/// finishes. Six rows of a category at a time, one tap to insert.
+/// finishes.
+///
+/// **A GRID, not a `Wrap`.** The first cut laid fixed-width cells out with
+/// `Wrap`, which leaves whatever does not divide the row as a ragged gap on the
+/// right — the founder saw it immediately (*"no unnecessary gaps to the right
+/// as it kinda is"*). A grid divides the width it is given, so the columns are
+/// even at every geometry and the last one lands on the edge.
 class _EmojiPanel extends StatelessWidget {
-  const _EmojiPanel({required this.height, required this.onPick});
+  const _EmojiPanel({
+    required this.height,
+    required this.onPick,
+    required this.onBackspace,
+  });
 
   final double height;
   final ValueChanged<String> onPick;
+
+  /// **A keyboard has a backspace, so this does** (founder, 2026-09-08). An
+  /// emoji is easy to tap twice and there is no other way back without
+  /// dismissing the panel to reach the real keyboard.
+  final VoidCallback onBackspace;
 
   /// Grouped the way a keyboard groups them, most-used first.
   static const List<(String, List<String>)> groups = [
@@ -1714,10 +1817,10 @@ class _EmojiPanel extends StatelessWidget {
         '😰',
         '😥',
         '😓',
-        '🤗',
         '🫡',
         '🫠',
         '🥳',
+        '😴',
       ],
     ),
     (
@@ -1873,60 +1976,98 @@ class _EmojiPanel extends StatelessWidget {
     ),
   ];
 
+  /// The backspace strip's height, taken off the scroll so the key is always
+  /// reachable rather than scrolling away with the glyphs.
+  static const double _footHeight = 44;
+
   @override
   Widget build(BuildContext context) {
-    // **One scroll with captions, not tabs.** A tab bar over six categories
-    // costs a row of chrome and a decision before a single emoji is reached;
-    // scrolling past a caption costs neither, and the set is small enough that
-    // the whole thing is a few flicks.
     return SizedBox(
       height: height,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          KvSpace.s,
-          KvSpace.s,
-          KvSpace.s,
-          KvSpace.m,
-        ),
+      child: Column(
         children: [
-          for (final (name, set) in groups) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                KvSpace.s,
-                KvSpace.s,
-                KvSpace.s,
-                KvSpace.xs,
-              ),
-              child: Text(
-                name.toUpperCase(),
-                style: const TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 11,
-                  height: 16 / 11,
-                  letterSpacing: 1.1,
-                  fontWeight: FontWeight.w600,
-                  fontVariations: KvWeight.w600,
-                  color: KvColor.inkMeta,
-                ),
-              ),
-            ),
-            Wrap(
-              children: [
-                for (final e in set)
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => onPick(e),
-                    child: SizedBox(
-                      width: 44,
-                      height: 40,
-                      child: Center(
-                        child: Text(e, style: const TextStyle(fontSize: 24)),
+          Expanded(
+            child: CustomScrollView(
+              slivers: [
+                for (final (name, set) in groups) ...[
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        KvSpace.xs,
+                        KvSpace.sm,
+                        KvSpace.xs,
+                        KvSpace.xs,
+                      ),
+                      child: Text(
+                        name.toUpperCase(),
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 11,
+                          height: 16 / 11,
+                          letterSpacing: 1.1,
+                          fontWeight: FontWeight.w600,
+                          fontVariations: KvWeight.w600,
+                          color: KvColor.inkMeta,
+                        ),
                       ),
                     ),
                   ),
+                  SliverGrid(
+                    // Eight to a row, which is what a phone keyboard uses and
+                    // what keeps a 24 dp glyph comfortably tappable at 320 dp.
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 8,
+                          childAspectRatio: 1.05,
+                        ),
+                    delegate: SliverChildBuilderDelegate(
+                      (context, i) => GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => onPick(set[i]),
+                        child: Center(
+                          child: Text(
+                            set[i],
+                            style: const TextStyle(fontSize: 24),
+                          ),
+                        ),
+                      ),
+                      childCount: set.length,
+                    ),
+                  ),
+                ],
+                const SliverToBoxAdapter(child: SizedBox(height: KvSpace.s)),
               ],
             ),
-          ],
+          ),
+          SizedBox(
+            height: _footHeight,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Semantics(
+                  button: true,
+                  label: 'Backspace',
+                  child: ExcludeSemantics(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onBackspace,
+                      child: const SizedBox(
+                        width: KvSpace.touchTarget,
+                        height: _footHeight,
+                        child: Center(
+                          child: KvGlyphIcon(
+                            KvGlyph.backspace,
+                            size: 22,
+                            tone: KvColor.inkDim,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

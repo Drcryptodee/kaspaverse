@@ -487,13 +487,45 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
             const SizedBox(height: KvSpace.l),
             const KvHairline(),
             const SizedBox(height: KvSpace.l),
-            const KvDisclosure(
+            // **One mark, both paragraphs** (founder, 2026-09-08: *"minimize
+            // it too so that on tap of the info button of 'recover what your
+            // node no longer holds' expands it"*). What a node forgets and
+            // what an archive learns are the same subject, and splitting them
+            // put two marks on one idea.
+            //
+            // **It opens itself the moment the archive is ON.** BG-34 hides
+            // explanation and never consent, and while the archive is running
+            // this text stops being *what would happen* and becomes *what is
+            // happening* — the `ValueKey` re-evaluates that on every flip, so
+            // the disclosure a user consented to is never the one they cannot
+            // see. That is D-074's "never silence" kept, at a third of the
+            // height.
+            KvDisclosure(
+              key: ValueKey(_enabled),
+              initiallyOpen: _enabled,
               title: 'Recovering what your node no longer holds',
               detail:
                   'Your Kaspa node only keeps recent history (about 30 '
                   'hours). Messages sent while the app is closed longer than '
                   'that — or past the quick catch-up window — need an archive '
-                  'to recover.',
+                  'to recover.\n\n'
+                  'What the archive operator learns: which addresses and '
+                  'conversation tags you look up, and when you check.\n\n'
+                  'What they can never do: read your messages. Everything '
+                  'stays sealed to keys they do not have.\n\n'
+                  'What they also learn when you back up conversations: that '
+                  'your main address parked a backup, and roughly how many '
+                  'contacts it holds (from its size). Not who they are — that '
+                  'stays sealed to your own key.\n\n'
+                  'What they CAN do: leave history out, and add a message of '
+                  'their own. Your receive address is the key messages are '
+                  'sealed to, and it is what the wallet hands them to search '
+                  'on — so a dishonest archive can write something your '
+                  'wallet will open, and stamp any transaction ID and time on '
+                  'it. Anything an archive supplies is labelled in the thread '
+                  'until your own node has seen it.\n\n'
+                  'Off, everything works against your node alone — only '
+                  'history past its horizon stays unrecoverable.',
             ),
             const SizedBox(height: KvSpace.m),
             // **`KvToggle`, not `SwitchListTile`** (D-206, landed at UX-3).
@@ -521,54 +553,6 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
             ),
             const SizedBox(height: KvSpace.s),
             // The privacy disclosure — the price and the guarantee, plainly.
-            Container(
-              padding: const EdgeInsets.all(KvSpace.m),
-              decoration: BoxDecoration(
-                // `chip` INSIDE a sheet (§1.1, D-293) — the alias it used
-                // resolves to the same colour, but the name said `surfaceAlt`,
-                // which is a Black Glass token this file was the last user of.
-                color: KvColor.chip,
-                borderRadius: BorderRadius.circular(KvRadius.inner),
-              ),
-              // **BG-34 does NOT apply here, and the attempt to apply it is
-              // the rule's worked example.**
-              //
-              // This was briefly put behind an info mark, opening only while
-              // the archive was on. A test written for D-074 refused it, and
-              // the test was right: this text is the CONSENT for the toggle
-              // beside it, so it has to be readable BEFORE the flip, not
-              // after. BG-34 hides explanation and never consequence — and
-              // the consequence of a choice a user is being offered is the
-              // most consequential thing on the surface.
-              //
-              // The rule earned its exception clause here rather than in the
-              // abstract; the two headings above it (how a backup works, why
-              // a node loses history) are explanation and are correctly
-              // behind their marks.
-              child: Text(
-                'What the archive operator learns: which addresses and '
-                'conversation tags you look up, and when you check.\n\n'
-                'What they can never do: read your messages. Everything stays '
-                'sealed to keys they do not have.\n\n'
-                'What they also learn when you back up conversations: that '
-                'your main address parked a backup, and roughly how many '
-                'contacts it holds (from its size). Not who they are — that '
-                'stays sealed to your own key.\n\n'
-                'What they CAN do: leave history out, and add a message of '
-                'their own. Your receive address is the key messages are '
-                'sealed to, and it is what the wallet hands them to search '
-                'on — so a dishonest archive can write something your wallet '
-                'will open, and stamp any transaction ID and time on it. '
-                'Anything an archive supplies is labelled in the thread until '
-                'your own node has seen it.\n\n'
-                'Off, everything works against your node alone — only '
-                'history past its horizon stays unrecoverable.',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: KvColor.inkDim,
-                  fontFamily: KvFont.ui,
-                ),
-              ),
-            ),
             if (_enabled) ...[
               const SizedBox(height: KvSpace.m),
               TextField(
