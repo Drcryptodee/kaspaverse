@@ -372,6 +372,8 @@ class KvRow extends StatefulWidget {
     this.dense = false,
     this.ground = KvColor.plate,
     this.trailingCap = KvRow.trailingMax,
+    this.trailingTop = false,
+    this.tone,
     this.subLines = 1,
     this.titleLines = 1,
   }) : assert(
@@ -505,6 +507,30 @@ class KvRow extends StatefulWidget {
   /// `FittedBox` and can give way; the address has neither.
   final double trailingCap;
 
+  /// **Top-align the trailing column instead of centring it.**
+  ///
+  /// A ledger row's figure is the row's subject and sits on its middle. A
+  /// messages row's time is not: it belongs to the NAME, and `M1` draws the two
+  /// sharing a baseline (measured at 4×: `Mara` and `09:44` both end at
+  /// 235.25 dp). Centred, a two-line trailing column drops the time below the
+  /// name it qualifies — founder, 2026-09-08: *"move the time a little bit up
+  /// so its more neater (perhaps same line with name or address)"*.
+  final bool trailingTop;
+
+  /// **The row's WORDS take a hue** — for the one row on a sheet that destroys
+  /// something.
+  ///
+  /// §3 rations `risk` to fund risk and destruction, and this is how a row
+  /// spends it: the title and the sub-line together, so the danger is in the
+  /// sentence and not only in a disc beside it. Founder, 2026-09-08: *"make
+  /// red color the whole 'Delete all messages' and its sub text (so user have
+  /// a feel of the danger color)"*.
+  ///
+  /// Null is every other row, and every other row stays `ink` over `inkDim`.
+  /// The sub-line takes the same hue at [KvColor.riskDim]-weight rather than
+  /// full `risk`, so the two lines still read as a title and its gloss.
+  final Color? tone;
+
   @override
   State<KvRow> createState() => _KvRowState();
 }
@@ -522,7 +548,7 @@ class _KvRowState extends State<KvRow> {
       height: 20 / (widget.dense ? 15 : 16),
       fontWeight: FontWeight.w600,
       fontVariations: KvWeight.w600,
-      color: KvColor.ink,
+      color: widget.tone ?? KvColor.ink,
     ),
   );
 
@@ -583,11 +609,19 @@ class _KvRowState extends State<KvRow> {
                         fontSize: widget.dense ? 12 : 13,
                         height:
                             (widget.dense ? 17 : 18) / (widget.dense ? 12 : 13),
+                        // A toned row carries the hue in both lines, at 78%
+                        // on the gloss so the pair still reads as a title and
+                        // its explanation rather than two shouts.
+                        //
                         // BG-14 on the ground it is actually drawn on: 4.30
                         // for `inkMeta` on `chip`, against 7.36 for `inkDim`.
-                        color: widget.ground == KvColor.chip
-                            ? KvColor.inkDim
-                            : KvColor.inkMeta,
+                        color: switch (widget.tone) {
+                          final tone? => tone.withValues(alpha: 0.78),
+                          _ =>
+                            widget.ground == KvColor.chip
+                                ? KvColor.inkDim
+                                : KvColor.inkMeta,
+                        },
                       ),
                     ),
                 ],
@@ -625,7 +659,9 @@ class _KvRowState extends State<KvRow> {
                 constraints: BoxConstraints(maxWidth: widget.trailingCap),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisAlignment: widget.trailingTop
+                      ? MainAxisAlignment.start
+                      : MainAxisAlignment.center,
                   mainAxisSize: MainAxisSize.min,
                   children: [?trail, ?meta],
                 ),

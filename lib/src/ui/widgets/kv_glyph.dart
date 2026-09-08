@@ -202,6 +202,22 @@ enum KvGlyph {
   /// composer's commit control now that the word beside it is gone (founder,
   /// 2026-09-08: *"The send button can be a send icon only"*).
   send,
+
+  /// **Delivered** — Lucide `check-check`, the double tick every messenger
+  /// draws (founder, 2026-09-08). Inside the bubble's bottom-right corner, in
+  /// the time's own ink.
+  ///
+  /// It means *a block accepted this*, which on a public ledger is the moment
+  /// the message becomes retrievable by its recipient — the most this app can
+  /// honestly claim. It is not *read*; nothing in this protocol says that.
+  checkDouble,
+
+  /// Bring the phone's emoji keyboard up. Lucide `smile`.
+  smile,
+
+  /// Go back to the letters. Lucide `keyboard` — the pair `smile` toggles to,
+  /// so the composer's one trailing control says which way it goes.
+  keyboard,
 }
 
 /// One glyph, painted.
@@ -612,6 +628,24 @@ class KvGlyphPainter extends CustomPainter {
       case KvGlyph.clock:
         path(const ['M12 6v6l4 2']);
         circle(12, 12, 10);
+      case KvGlyph.checkDouble:
+        path(const ['M18 6 7 17l-5-5', 'm22 10-7.5 7.5L13 16']);
+      case KvGlyph.smile:
+        circle(12, 12, 10);
+        path(const ['M8 14s1.5 2 4 2 4-2 4-2']);
+        path(const ['M9 9h.01', 'M15 9h.01']);
+      case KvGlyph.keyboard:
+        path(const [
+          'M10 8h.01',
+          'M12 12h.01',
+          'M14 8h.01',
+          'M16 12h.01',
+          'M18 8h.01',
+          'M6 8h.01',
+          'M7 16h10',
+          'M8 12h.01',
+        ]);
+        rect(2, 4, 20, 16, 2);
       case KvGlyph.send:
         path(const [
           'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635'

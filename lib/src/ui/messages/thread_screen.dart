@@ -149,6 +149,64 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// confirm sheet may be turned off — see [_send].
   bool _sending = false;
 
+  /// The composer's focus, so the emoji key can take the system keyboard down
+  /// and put it back.
+  final FocusNode _composeFocus = FocusNode();
+
+  /// The in-app emoji panel is open, which is also when the trailing key wears
+  /// the keyboard mark instead of the smile.
+  bool _emojiUp = false;
+
+  /// The composer field's resting height.
+  ///
+  /// **44, down from 52** (founder, 2026-09-08: *"the height of the pill shaped
+  /// input, the height is not giving"*). 52 is [KvSpace.touchTarget] and it is
+  /// the right floor for a CONTROL; a text field is a surface you type into,
+  /// its target is its whole area, and at 52 with 12 dp of vertical padding the
+  /// words floated in the middle of it. 44 with 8 fills the pill.
+  static const double _fieldHeight = 44;
+
+  /// **Swap the system keyboard for the emoji panel, and back.**
+  ///
+  /// Android has no public API to open the IME's own emoji page — that is a
+  /// keyboard's private surface, and Gboard's emoji key is Gboard's. So the
+  /// panel is ours: it works on every keyboard the user might have, it cannot
+  /// be taken away by an IME update, and it costs no dependency (which at this
+  /// tier would need a `dependency-steward` verdict of its own). The behaviour
+  /// he described is unchanged — a smile that becomes a keyboard, and back.
+  void _toggleEmoji() {
+    KvHaptic.selection();
+    if (_emojiUp) {
+      setState(() => _emojiUp = false);
+      _composeFocus.requestFocus();
+      return;
+    }
+    // Take the system keyboard down FIRST, then open ours, or the two fight
+    // for the same space for a frame.
+    _composeFocus.unfocus();
+    setState(() => _emojiUp = true);
+  }
+
+  /// Insert an emoji at the cursor, or at the end when the field has never
+  /// been focused. The selection lands after it, so a run of taps types a run.
+  void _insertEmoji(String emoji) {
+    final value = _compose.value;
+    final sel = value.selection;
+    if (!sel.isValid) {
+      _compose.text = value.text + emoji;
+      _compose.selection = TextSelection.collapsed(
+        offset: _compose.text.length,
+      );
+      return;
+    }
+    final text = value.text.replaceRange(sel.start, sel.end, emoji);
+    _compose.value = value.copyWith(
+      text: text,
+      selection: TextSelection.collapsed(offset: sel.start + emoji.length),
+      composing: TextRange.empty,
+    );
+  }
+
   /// **Why the last send did not go**, said at the composer.
   ///
   /// It exists because the signing toggle can remove the sheet, and the sheet
@@ -173,7 +231,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
     super.initState();
     _messaging.lastPing.addListener(_onPing);
     _compose.addListener(_onDraft);
+    _composeFocus.addListener(_onComposeFocus);
     _pull();
+  }
+
+  void _onComposeFocus() {
+    // Focus means the system keyboard is coming up, so ours goes down. This
+    // covers the tap-into-the-field case without the field having to know the
+    // panel exists.
+    if (_composeFocus.hasFocus && _emojiUp) setState(() => _emojiUp = false);
   }
 
   void _onDraft() {
@@ -244,6 +310,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _messaging.lastPing.removeListener(_onPing);
     _compose.removeListener(_onDraft);
     _feeDebounce?.cancel();
+    _composeFocus.removeListener(_onComposeFocus);
+    _composeFocus.dispose();
     _compose.dispose();
     _scroll.dispose();
     // The decrypted rows die with this state object (§0.4 — view-scoped) — and
@@ -291,6 +359,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
   TxChipState _chipFor(ThreadMessageDto m) {
     if (!m.outbound || m.kind != 'comm') return TxChipState.none;
     return chipStateOfAcceptance(_statuses[m.txid]?.acceptance?.kind);
+  }
+
+  /// **Delivered** — the double check inside an outbound bubble.
+  ///
+  /// Outbound comm rows only. A handshake is not something anyone said, and a
+  /// message they sent US needs no delivery report from us.
+  bool _deliveredFor(ThreadMessageDto m) {
+    if (!m.outbound || m.kind != 'comm') return false;
+    return deliveredOfAcceptance(_statuses[m.txid]?.acceptance?.kind);
   }
 
   /// Ghost truth: the live status map wins over the decrypt-time flag.
@@ -728,61 +805,79 @@ class _ThreadScreenState extends State<ThreadScreen> {
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        // **The field takes the row.** It was `Flexible` beside an
-                        // intrinsic pill whose label could be a 21-character
-                        // refusal, which is how the composer once measured 0.0 dp
-                        // at 320 dp / 1.3× (L131). Now the only thing beside it is
-                        // a fixed-width control, so the field's width is stated by
-                        // subtraction rather than negotiated.
+                        // **The field takes everything the mark does not.**
                         Expanded(
                           child: Container(
                             constraints: const BoxConstraints(
-                              minHeight: KvSpace.touchTarget,
+                              minHeight: _fieldHeight,
                             ),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: KvSpace.s20,
-                              vertical: KvSpace.sm,
-                            ),
+                            // **Tight** (founder, 2026-09-08: *"the padding on
+                            // top, right, bottom, left, is just too much for
+                            // my liking. reduce it, doesnt really need
+                            // padding"*). It was 20 horizontal and 12
+                            // vertical inside a 52 dp minimum, so the words
+                            // sat in the middle of a tall pill with air all
+                            // round them. 14 / 8 in a 44 dp pill fills it the
+                            // way WhatsApp and Telegram do, and the height it
+                            // gives back goes to the thread.
+                            padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
                             decoration: BoxDecoration(
                               color: KvColor.plate,
                               borderRadius: BorderRadius.circular(
-                                KvRadius.control,
+                                KvRadius.pill,
                               ),
                             ),
-                            child: TextField(
-                              controller: _compose,
-                              minLines: 1,
-                              maxLines: 4,
-                              textInputAction: TextInputAction.newline,
-                              cursorColor: KvColor.primary,
-                              style: const TextStyle(
-                                fontFamily: KvFont.ui,
-                                fontSize: 15,
-                                height: 20 / 15,
-                                fontWeight: FontWeight.w400,
-                                fontVariations: KvWeight.w400,
-                                color: KvColor.ink,
-                              ),
-                              decoration: const InputDecoration(
-                                isDense: true,
-                                border: InputBorder.none,
-                                enabledBorder: InputBorder.none,
-                                focusedBorder: InputBorder.none,
-                                contentPadding: EdgeInsets.zero,
-                                hintText: 'Message',
-                                hintStyle: TextStyle(
-                                  fontFamily: KvFont.ui,
-                                  fontSize: 15,
-                                  height: 20 / 15,
-                                  fontWeight: FontWeight.w400,
-                                  fontVariations: KvWeight.w400,
-                                  color: KvColor.inkMeta,
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    controller: _compose,
+                                    focusNode: _composeFocus,
+                                    minLines: 1,
+                                    maxLines: 4,
+                                    keyboardType: TextInputType.multiline,
+                                    textInputAction: TextInputAction.newline,
+                                    cursorColor: KvColor.primary,
+                                    style: const TextStyle(
+                                      fontFamily: KvFont.ui,
+                                      fontSize: 15,
+                                      height: 20 / 15,
+                                      fontWeight: FontWeight.w400,
+                                      fontVariations: KvWeight.w400,
+                                      color: KvColor.ink,
+                                    ),
+                                    decoration: const InputDecoration(
+                                      isDense: true,
+                                      border: InputBorder.none,
+                                      enabledBorder: InputBorder.none,
+                                      focusedBorder: InputBorder.none,
+                                      contentPadding: EdgeInsets.zero,
+                                      hintText: 'Message',
+                                      hintStyle: TextStyle(
+                                        fontFamily: KvFont.ui,
+                                        fontSize: 15,
+                                        height: 20 / 15,
+                                        fontWeight: FontWeight.w400,
+                                        fontVariations: KvWeight.w400,
+                                        color: KvColor.inkMeta,
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                // **The emoji key, inside the field at its far
+                                // right** (founder, 2026-09-08). It toggles to
+                                // a keyboard mark while the emoji panel is up,
+                                // so the one control says which way it goes.
+                                _EmojiKey(
+                                  showingEmoji: _emojiUp,
+                                  onTap: _toggleEmoji,
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                        const SizedBox(width: KvSpace.touchGap),
+                        const SizedBox(width: KvSpace.s),
                         _SendMark(
                           armed: _draft.trim().isNotEmpty && !_sending,
                           // A disabled control says WHY, and the two reasons
@@ -797,6 +892,20 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   ],
                 ),
               ),
+            ),
+            // **Our emoji panel takes the keyboard's place, never the
+            // thread's.** It opens where the system keyboard was, so the
+            // messages above do not move when you switch between them —
+            // which is the whole reason the keyboard goes down first.
+            AnimatedSize(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : KvMotion.enter,
+              curve: KvMotion.curve,
+              alignment: Alignment.topCenter,
+              child: _emojiUp
+                  ? _EmojiPanel(height: 260, onPick: _insertEmoji)
+                  : const SizedBox(width: double.infinity),
             ),
           ],
         ),
@@ -914,6 +1023,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
           archiveBoundary: archiveBoundary,
           allAboveRestored: allAboveRestored,
           chip: _chipFor(m),
+          delivered: _deliveredFor(m),
+          acceptedUnixMs: _statuses[m.txid]?.acceptance?.acceptedUnixMs,
           ghost: _ghostFor(m),
           declined: m.frame != null && _declined.contains(m.frame!.id),
           onAccept: _acceptChallenge,
@@ -1223,24 +1334,22 @@ class _ComposerFee extends StatelessWidget {
   }
 }
 
-/// **The send control: a mark, and nothing else** (founder, 2026-09-08: *"a
-/// nice send button that isnt taking too much space … The send button can be a
-/// send icon only"*).
+/// **The send control: a mark on the ground, and nothing else** (founder,
+/// 2026-09-08: *"does it need to be in a teal or grey circle? why not make it
+/// simply the send icon only, that lights up teal to send. so that we can even
+/// widen the text input more"*).
 ///
-/// It replaces a pill that carried the word `Send` over the words `Network
-/// fee`, and the trade is deliberate: the fee is now a real figure above the
-/// control, so the words under the verb had nothing left to say, and the
-/// ~104 dp they were spending goes to the field — which is the other half of
-/// the same ruling (*"i want the text input in a chat to be wider"*).
+/// The disc went for the reason he gives: it was 44 dp of painted circle whose
+/// only job was to carry a 20 dp mark, and the ring around that mark came out
+/// of the field beside it. **The target did not go** — it is still
+/// [KvSpace.touchTarget] wide of tappable area (BG-12); what is drawn inside it
+/// is now just the glyph.
 ///
-/// **It is [KvIconButton], not a new control.** This app has one icon button —
-/// 44 dp of drawn disc inside a 52 dp target, one press feel — and the only
-/// thing the composer needed was for it to be able to LIGHT (BG-27), which is
-/// now a parameter on that part rather than a second widget here.
-///
-/// Unarmed it is a `plate` disc with an `etch` mark and no tap at all, and it
-/// says why in words: a control that looks live and does nothing teaches
-/// distrust of every other control on the screen (D-185).
+/// **BG-27 still decides the ink, which is the whole signal.** `primary` when
+/// there is something to commit, `etch` when there is not — the same rule the
+/// disc carried, now said in one channel instead of two. That is also why this
+/// is no longer [KvIconButton]: that part IS a 44 dp disc by its own
+/// definition, and borrowing it to draw no disc would make its geometry a lie.
 class _SendMark extends StatelessWidget {
   const _SendMark({
     required this.armed,
@@ -1258,14 +1367,32 @@ class _SendMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return KvIconButton(
-      mark: KvGlyph.send,
+    return Semantics(
+      button: true,
+      enabled: armed,
       label: 'Send',
       hint: armed ? null : reason,
-      tone: armed ? KvColor.onPrimary : KvColor.etch,
-      fill: armed ? KvColor.primary : KvColor.plate,
-      fillPressed: armed ? KvColor.primaryPressed : KvColor.chip,
-      onTap: armed ? onTap : null,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: armed ? onTap : null,
+          child: SizedBox(
+            width: KvSpace.touchTarget,
+            height: _ThreadScreenState._fieldHeight,
+            child: Center(
+              child: AnimatedSwitcher(
+                duration: KvMotion.fast,
+                child: KvGlyphIcon(
+                  KvGlyph.send,
+                  key: ValueKey(armed),
+                  size: 24,
+                  tone: armed ? KvColor.primary : KvColor.etch,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1315,16 +1442,36 @@ class _DaySeparator extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: KvSpace.l, bottom: KvSpace.sm),
       child: Center(
-        child: Text(
-          _label().toUpperCase(),
-          style: const TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 11,
-            height: 16 / 11,
-            letterSpacing: 1.1,
-            fontWeight: FontWeight.w600,
-            fontVariations: KvWeight.w600,
-            color: KvColor.inkMeta,
+        child: Container(
+          // **In a pill, not bare on the ground** (founder, 2026-09-08).
+          //
+          // UX-R5 took the chip OFF this label on the reasoning that a
+          // boundary around a label is a boundary around nothing. That was
+          // right for a divider and wrong for this: a day separator floats
+          // over a scrolling column of bubbles, and a bare caps line reads as
+          // a message that lost its bubble. The pill says *this is chrome, not
+          // something anyone said* — which is exactly what a boundary is for.
+          decoration: BoxDecoration(
+            color: KvColor.chip,
+            borderRadius: BorderRadius.circular(KvRadius.pill),
+          ),
+          padding: const EdgeInsets.symmetric(
+            horizontal: KvSpace.sm,
+            vertical: KvSpace.xs,
+          ),
+          child: Text(
+            _label().toUpperCase(),
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 11,
+              height: 16 / 11,
+              letterSpacing: 1.1,
+              fontWeight: FontWeight.w600,
+              fontVariations: KvWeight.w600,
+              // `inkDim` on `chip`, never `inkMeta` — 4.30 against 7.36, and
+              // §1.4 forbids the first on this ground (BG-14).
+              color: KvColor.inkDim,
+            ),
           ),
         ),
       ),
@@ -1419,10 +1566,419 @@ BorderRadius _bubbleRadius({required bool outbound, required bool tail}) {
 /// The share stays ~78 %: a bubble that spans its column reads as a document,
 /// and the visible opposite margin is what makes a thread read as a
 /// conversation.
+/// **The composer's trailing key: a smile, or a keyboard while ours is up.**
+///
+/// Founder ruling, 2026-09-08. One control, two marks, and the mark always
+/// names where the tap GOES rather than where you are — which is the way every
+/// messenger draws it and the only reading that survives being pressed twice.
+///
+/// It sits inside the field's pill, at its far right, and it is deliberately
+/// smaller than [KvSpace.touchTarget] as a mark while its tap area is not: the
+/// field is 44 tall, and a 52 dp control inside it would set the height of the
+/// thing it lives in.
+class _EmojiKey extends StatelessWidget {
+  const _EmojiKey({required this.showingEmoji, required this.onTap});
+
+  final bool showingEmoji;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: showingEmoji ? 'Show the keyboard' : 'Show emoji',
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: SizedBox(
+            width: 34,
+            height: 28,
+            child: Center(
+              child: KvGlyphIcon(
+                showingEmoji ? KvGlyph.keyboard : KvGlyph.smile,
+                size: 20,
+                tone: KvColor.inkMeta,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **The emoji panel** — ours, not the keyboard's (see `_toggleEmoji` for why).
+///
+/// A curated set rather than the whole Unicode table: these are the ones people
+/// actually send, they cost no dependency and no font (Android draws them from
+/// the system emoji font), and a grid of two thousand glyphs is a scroll nobody
+/// finishes. Six rows of a category at a time, one tap to insert.
+class _EmojiPanel extends StatelessWidget {
+  const _EmojiPanel({required this.height, required this.onPick});
+
+  final double height;
+  final ValueChanged<String> onPick;
+
+  /// Grouped the way a keyboard groups them, most-used first.
+  static const List<(String, List<String>)> groups = [
+    (
+      'Smileys',
+      [
+        '😀',
+        '😃',
+        '😄',
+        '😁',
+        '😆',
+        '😅',
+        '🤣',
+        '😂',
+        '🙂',
+        '🙃',
+        '😉',
+        '😊',
+        '😇',
+        '🥰',
+        '😍',
+        '🤩',
+        '😘',
+        '😗',
+        '😚',
+        '😙',
+        '🥲',
+        '😋',
+        '😛',
+        '😜',
+        '🤪',
+        '😝',
+        '🤗',
+        '🤭',
+        '🤔',
+        '🤐',
+        '😐',
+        '😑',
+        '😶',
+        '😏',
+        '😒',
+        '🙄',
+        '😬',
+        '😮',
+        '😯',
+        '😲',
+        '😳',
+        '🥺',
+        '😢',
+        '😭',
+        '😤',
+        '😠',
+        '😡',
+        '🤯',
+        '😱',
+        '😰',
+        '😥',
+        '😓',
+        '🤗',
+        '🫡',
+        '🫠',
+        '🥳',
+      ],
+    ),
+    (
+      'People',
+      [
+        '👍',
+        '👎',
+        '👌',
+        '🤌',
+        '✌️',
+        '🤞',
+        '🤟',
+        '🤙',
+        '👈',
+        '👉',
+        '👆',
+        '👇',
+        '☝️',
+        '✋',
+        '🤚',
+        '🖐️',
+        '🖖',
+        '👋',
+        '🤝',
+        '🙏',
+        '💪',
+        '🫶',
+        '👏',
+        '🙌',
+        '🤲',
+        '🫂',
+        '👀',
+        '🧠',
+      ],
+    ),
+    (
+      'Hearts',
+      [
+        '❤️',
+        '🧡',
+        '💛',
+        '💚',
+        '💙',
+        '💜',
+        '🖤',
+        '🤍',
+        '🤎',
+        '💔',
+        '❣️',
+        '💕',
+        '💞',
+        '💓',
+        '💗',
+        '💖',
+        '💘',
+        '💝',
+        '💯',
+        '💢',
+        '💥',
+        '💫',
+        '💦',
+        '💨',
+        '🔥',
+        '✨',
+        '⭐',
+        '🌟',
+      ],
+    ),
+    (
+      'Things',
+      [
+        '🎉',
+        '🎊',
+        '🎁',
+        '🏆',
+        '🥇',
+        '⚡',
+        '💡',
+        '🔑',
+        '🔒',
+        '📌',
+        '📎',
+        '📷',
+        '🎧',
+        '🎮',
+        '⚽',
+        '🏀',
+        '🚀',
+        '✈️',
+        '🚗',
+        '🏠',
+        '🌍',
+        '🌙',
+        '☀️',
+        '⛅',
+        '🌧️',
+        '❄️',
+        '🍀',
+        '🌸',
+      ],
+    ),
+    (
+      'Food',
+      [
+        '🍎',
+        '🍌',
+        '🍇',
+        '🍓',
+        '🍉',
+        '🍒',
+        '🥑',
+        '🍞',
+        '🧀',
+        '🍔',
+        '🍟',
+        '🍕',
+        '🌮',
+        '🍣',
+        '🍜',
+        '🍰',
+        '🍩',
+        '🍪',
+        '☕',
+        '🍵',
+        '🍺',
+        '🍻',
+        '🥂',
+        '🍷',
+        '🥤',
+        '🧊',
+        '🍫',
+        '🍿',
+      ],
+    ),
+    (
+      'Money',
+      [
+        '💰',
+        '💵',
+        '💸',
+        '💳',
+        '🪙',
+        '📈',
+        '📉',
+        '📊',
+        '🧾',
+        '⚖️',
+        '🤑',
+        '💎',
+        '🏦',
+        '🔗',
+      ],
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    // **One scroll with captions, not tabs.** A tab bar over six categories
+    // costs a row of chrome and a decision before a single emoji is reached;
+    // scrolling past a caption costs neither, and the set is small enough that
+    // the whole thing is a few flicks.
+    return SizedBox(
+      height: height,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(
+          KvSpace.s,
+          KvSpace.s,
+          KvSpace.s,
+          KvSpace.m,
+        ),
+        children: [
+          for (final (name, set) in groups) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                KvSpace.s,
+                KvSpace.s,
+                KvSpace.s,
+                KvSpace.xs,
+              ),
+              child: Text(
+                name.toUpperCase(),
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 11,
+                  height: 16 / 11,
+                  letterSpacing: 1.1,
+                  fontWeight: FontWeight.w600,
+                  fontVariations: KvWeight.w600,
+                  color: KvColor.inkMeta,
+                ),
+              ),
+            ),
+            Wrap(
+              children: [
+                for (final e in set)
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => onPick(e),
+                    child: SizedBox(
+                      width: 44,
+                      height: 40,
+                      child: Center(
+                        child: Text(e, style: const TextStyle(fontSize: 24)),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// **A message, with the delivered mark tucked into its bottom-right corner.**
+///
+/// Founder ruling, 2026-09-08: *"the placement for it should be inside the chat
+/// bubble … at the right corner bottom of the bubble, same color that is used
+/// for the time"*, and — the constraint that shapes the whole part — *"dont
+/// increase any padding, just slap it"*.
+///
+/// **So it costs no height in the common case.** The technique is the one
+/// WhatsApp and Telegram use: an invisible inline span the width of the mark is
+/// appended to the LAST line only, and the mark is painted into the corner over
+/// it. A last line with room keeps the mark on it; a last line that is full
+/// pushes the reserve — and only the reserve — onto a new one, which is the
+/// same behaviour those apps have and the only case where the bubble grows.
+///
+/// Reserving with padding instead would have indented every line; a `Column`
+/// with a trailing row would have added a line's height to every message. Both
+/// were tried on paper and both are what "don't increase any padding" rules
+/// out.
+class _BubbleText extends StatelessWidget {
+  const _BubbleText({
+    required this.text,
+    required this.delivered,
+    required this.style,
+  });
+
+  final String text;
+  final bool delivered;
+  final TextStyle? style;
+
+  /// The mark's box, and the gap before it. Small on purpose — it is the
+  /// bubble's fourth signal, behind the words, the side and the time.
+  static const double _mark = 14;
+  static const double _gap = 6;
+
+  @override
+  Widget build(BuildContext context) {
+    final body = Text(text, style: style);
+    if (!delivered) return body;
+    return Stack(
+      children: [
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(text: text),
+              // The reserve. `WidgetSpan` participates in line breaking, so
+              // this is what keeps the last line from running under the mark.
+              const WidgetSpan(child: SizedBox(width: _mark + _gap, height: 1)),
+            ],
+          ),
+          style: style,
+        ),
+        Positioned(
+          right: 0,
+          bottom: 0,
+          child: KvGlyphIcon(
+            KvGlyph.checkDouble,
+            size: _mark,
+            // The time's own ink, which is what he asked for and also what
+            // keeps a fourth signal from competing with the words.
+            tone: KvColor.inkMeta,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _BubbleWidth extends StatelessWidget {
   const _BubbleWidth({required this.child});
 
-  static const double share = 0.78;
+  /// **How much of the column a bubble may take.**
+  ///
+  /// Raised from 0.78 on the founder's own measurement (2026-09-08): a message
+  /// he sent took **five lines here and four in WhatsApp and Telegram**, with
+  /// the fifth holding one word. The cap was the cause — 0.78 of the column
+  /// minus 12 dp of padding each side left markedly less text width than
+  /// either of those apps gives, and greedy wrapping then spends a whole line
+  /// on the word that would not fit.
+  ///
+  /// 0.84 with the tighter padding below restores roughly the width they use,
+  /// while still leaving the ragged edge that says a bubble is a bubble rather
+  /// than a full-width paragraph.
+  static const double share = 0.84;
 
   final Widget child;
 
@@ -1456,6 +2012,8 @@ class _MessageRow extends StatelessWidget {
     this.archiveBoundary = false,
     this.allAboveRestored = false,
     this.chip = TxChipState.none,
+    this.delivered = false,
+    this.acceptedUnixMs,
     this.ghost = false,
     this.onAccept,
     this.onDecline,
@@ -1491,6 +2049,21 @@ class _MessageRow extends StatelessWidget {
 
   /// V2 status chip for outbound rows ([TxChipState.none] renders nothing).
   final TxChipState chip;
+
+  /// A block has accepted this message — the double check inside the bubble.
+  /// Outbound rows only: a message somebody sent US was delivered by
+  /// definition, and marking it would be telling them their own news.
+  final bool delivered;
+
+  /// **The accepting block's own header timestamp**, when the chain has one.
+  ///
+  /// Founder ruling, 2026-09-08: *"make the accepted honest the exact time a
+  /// block finds it (very honest and just right on time!)"*. The row's own
+  /// `unix_ms` is when THIS DEVICE recorded the send; this is when the network
+  /// took it, and once the two are both known the honest one wins. Null until
+  /// acceptance lands, or where the accepting block could not be fetched — the
+  /// clock then keeps saying what it can back.
+  final BigInt? acceptedUnixMs;
 
   /// V2 reorg ghost: the accepting block was displaced and hasn't returned —
   /// the row dims to the BG-8 stale opacity with an honest line, and lifts
@@ -1533,15 +2106,13 @@ class _MessageRow extends StatelessWidget {
     // anyone said — and never on an unreadable one, where we hold a txid and
     // no message.
     final withTime = showTime && m.kind != 'handshake';
+    // **The chip comes BEFORE the clock** (founder, 2026-09-08: *"let it show
+    // before the time, not after it so that time can retain its position"*).
+    // That ordering is the whole point of a transient label: `Accepted` arrives
+    // to the LEFT of the clock, holds two seconds and dissolves, and the clock
+    // has not moved — where a trailing chip would shove it sideways on the way
+    // in and back on the way out.
     final meta = <Widget>[
-      if (withTime)
-        Text(
-          _clock(context, m.unixMs),
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: KvColor.inkMeta,
-            fontFamily: KvFont.mono,
-          ),
-        ),
       if (ghost)
         Text(
           'Displaced by the network',
@@ -1549,6 +2120,16 @@ class _MessageRow extends StatelessWidget {
         )
       else if (chip != TxChipState.none)
         TxStatusChip(state: chip),
+      if (withTime)
+        Text(
+          // The chain's own moment where it is known, this device's where it
+          // is not (see [acceptedUnixMs]).
+          _clock(context, acceptedUnixMs ?? m.unixMs),
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: KvColor.inkMeta,
+            fontFamily: KvFont.mono,
+          ),
+        ),
     ];
     if (meta.isEmpty) return ghosted;
     return Column(
@@ -1675,18 +2256,24 @@ class _MessageRow extends StatelessWidget {
                   ? () => _copyMessage(context, m.text)
                   : null,
               child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: KvSpace.sm,
-                  vertical: KvSpace.sm,
-                ),
+                // **Tighter, and tighter at the top than the bottom**
+                // (founder, 2026-09-08: *"reduce the padding top of the bubble
+                // that houses the text, adds unnecessary height to the
+                // message"*). 12 all round put a band of empty plate above
+                // every line of every message; 10 horizontal buys text width
+                // back for the wrap, and 6 over 8 sits the words optically
+                // centred, because a line box already carries leading above
+                // the cap that it does not carry below the baseline.
+                padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
                 decoration: _bubbleDecoration(outbound: m.outbound, tail: tail),
                 child: m.readable
-                    ? Text(
-                        m.text,
-                        // Leading, not size: §4 owns the ramp, but a paragraph
-                        // inside a bubble needs more air between lines than a
-                        // label in a row does.
+                    ? _BubbleText(
+                        text: m.text,
+                        delivered: delivered,
                         style: theme.textTheme.bodyMedium?.copyWith(
+                          // Leading, not size: §4 owns the ramp, but a
+                          // paragraph inside a bubble needs more air between
+                          // lines than a label in a row does.
                           height: 1.35,
                         ),
                       )

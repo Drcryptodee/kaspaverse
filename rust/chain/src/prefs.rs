@@ -511,8 +511,17 @@ impl MessagePrefs {
     /// been inert, every send falling back to the sheet it exists to remove.
     /// Only the device could settle that — the estimate came from a render.
     ///
-    /// This clears the dearest observed message by ~4× and stays 20× under the
-    /// 0.2 KAS handshake bond. Above it the ceremony appears with the figure,
+    /// **Raised to 0.05 KAS on the founder's ruling, 2026-09-08**, once he had
+    /// watched the toggle work at the measured figure: *"good thing you set it
+    /// to 0.001, and i saw it worked well. so yeah since thats confirmed, bump
+    /// it up to 0.05 (later in future, we may increase it when we add other
+    /// features like sending a document or picture which i saw takes up to
+    /// like > 0.05 KAS)."*
+    ///
+    /// That clears the dearest observed message by ~21× and still sits 4×
+    /// under the 0.2 KAS handshake bond. An attachment is the next thing to
+    /// measure, and it wants its own number rather than this one moved
+    /// again (IDEAS_BACKLOG 2026-09-08b). Above it the ceremony appears with the figure,
     /// whatever the preference says, and the cases that reach there are the
     /// ones worth a second look: a large attachment, a chained transaction, a
     /// fragmented coin shape, or a fee regime this build has never seen. The
@@ -522,7 +531,7 @@ impl MessagePrefs {
     /// It bounds the ONE thing turning the sheet off gives up, which is a
     /// second chance to see the price. The live figure above the send button
     /// is the first.
-    pub const UNCEREMONIOUS_FEE_CEILING: u64 = 1_000_000;
+    pub const UNCEREMONIOUS_FEE_CEILING: u64 = 5_000_000;
 
     /// Where the ceiling sits, checked by the COMPILER rather than by a test
     /// run — a bound between two constants has nothing to observe at runtime,
@@ -531,8 +540,8 @@ impl MessagePrefs {
     ///
     /// Above the dearest message this wallet has actually sent (235_000 sompi,
     /// on chain — an empirical figure, so correctly a literal), and an order of
-    /// magnitude under the handshake bond, which is the smallest spend this app
-    /// ever asks a user to confirm. **The bond is NAMED, never copied**:
+    /// under the handshake bond, which is the smallest spend this app ever asks
+    /// a user to confirm. **The bond is NAMED, never copied**:
     /// hardcoding its present value would let the bond move while this
     /// assertion still passed and the stated relationship silently broke
     /// (`consensus-auditor`, this sitting).

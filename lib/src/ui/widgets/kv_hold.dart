@@ -129,15 +129,23 @@ class KvHold extends StatelessWidget {
   /// §4: the badge's outer diameter.
   static const double badge = 46;
 
-  /// **The height on the signing ceremony — 64, where a control is 56.**
+  /// **The height on the signing ceremony — 56, the same as every other pill.**
   ///
-  /// Founder, on glass 2026-09-07: *"give it a few more height … so it looks
-  /// well fitted and not kinda small."* BG-12 sets a control at 56 and this is
-  /// the one control the whole app is arranged around: an irreversible send,
-  /// held for 800 ms, carrying a 46 dp ring badge that leaves only 5 dp of
-  /// clearance at 56 and a comfortable 9 at 64. It is also `KvSpace.row`, so
-  /// the number is one the house already keeps.
-  static const double ceremony = 64;
+  /// **This reverses a founder ruling with a founder ruling**, and both are
+  /// recorded because that is how a decision gets to move. On glass
+  /// 2026-09-07 he asked for more: *"give it a few more height … so it looks
+  /// well fitted and not kinda small"*, and it went to 64. On 2026-09-08, with
+  /// the messaging surface beside it: *"can you reduce the signing sheet's hold
+  /// to sign button height? let the height be just exactly like the 'new
+  /// handshake' button … every pill shaped button like that must share the
+  /// same sizing for consistency."*
+  ///
+  /// Consistency won, and the reasoning that had bought the 64 is spent
+  /// rather than lost: the 46 dp ring badge leaves 5 dp of clearance here
+  /// instead of 9, which is tight and legal — [badge] and [badgeDisc] are
+  /// unchanged, so if it ever reads cramped the badge is what gives, not the
+  /// height every other control on the screen shares.
+  static const double ceremony = KvSpace.control;
 
   /// The `plate` disc inside it (§4).
   static const double badgeDisc = 38;

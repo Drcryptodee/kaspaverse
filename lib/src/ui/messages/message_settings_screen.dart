@@ -1,0 +1,418 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../services/contacts_service.dart';
+import '../../services/messaging_service.dart';
+import '../../rust/api/send.dart';
+import '../../rust/api/transport.dart';
+import '../error_text.dart';
+import '../format.dart';
+import '../send/confirm_send_flow.dart';
+import '../theme/tokens.dart';
+import '../widgets/haptics.dart';
+import '../widgets/kv_chrome.dart';
+import '../widgets/kv_glyph.dart';
+import '../widgets/kv_reading.dart';
+import '../widgets/kv_rows.dart';
+import '../widgets/kv_sheet.dart';
+import '../widgets/kv_toggle.dart';
+import '../widgets/kv_two_pane.dart';
+import 'contacts_screen.dart' show signingToggleSub, signingToggleTitle;
+import 'history_fill_sheet.dart';
+
+/// **Message settings — a screen in Settings, not a sheet on the thread.**
+///
+/// Founder ruling, 2026-09-08: *"Move the message settings sheet content into
+/// 'Messages' in settings screen. the 'App' section (move the settings there
+/// too and delete the coming soon thingy now that we have message settings)."*
+///
+/// It had been a sheet reached from the messages overflow, and Settings' own
+/// `Messages` row was a *Coming soon* page whose sub-line said the settings
+/// were *"not built yet"* — which was true of the location and not of the
+/// settings. One home, and both doors open it (24d).
+///
+/// **The flows it runs live here as free functions** ([runMessageBackUp],
+/// [runMessageWipe]) rather than as methods of whichever screen mounted it:
+/// they are a ceremony and a confirm over `MessagingService`, they need no
+/// screen state, and leaving them on the contacts screen is what would have
+/// made this page impossible to reach from Settings.
+class MessageSettingsScreen extends StatefulWidget {
+  const MessageSettingsScreen({super.key, this.messaging});
+
+  /// Test seam; defaults to the singleton.
+  final MessagingService? messaging;
+
+  @override
+  State<MessageSettingsScreen> createState() => _MessageSettingsScreenState();
+}
+
+class _MessageSettingsScreenState extends State<MessageSettingsScreen> {
+  MessagingService get _messaging =>
+      widget.messaging ?? MessagingService.instance;
+
+  /// Null until the preference has been read — the row is absent rather than
+  /// guessed at, because a switch that flicks from a guess to the truth on the
+  /// second frame is a control lying about the state it governs (BG-24).
+  bool? _signing;
+
+  /// Why the last flip did not stick, said under the row rather than in a
+  /// toast (§4: this language has no toasts).
+  String? _signingError;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadSigning());
+  }
+
+  Future<void> _loadSigning() async {
+    try {
+      final signing = await _messaging.messageSigning();
+      if (mounted) setState(() => _signing = signing);
+    } catch (_) {
+      // Unreadable reads as the ceremony, which is the safe state and the one
+      // Rust falls back to as well.
+      if (mounted) setState(() => _signing = true);
+    }
+  }
+
+  Future<void> _setSigning(bool signing) async {
+    KvHaptic.selection();
+    setState(() {
+      _signing = signing;
+      _signingError = null;
+    });
+    try {
+      await _messaging.setMessageSigning(signing);
+    } catch (e) {
+      // The switch springs back to what is actually stored, and the sub-line
+      // says why.
+      if (!mounted) return;
+      setState(() {
+        _signing = !signing;
+        _signingError = displayError(e);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final signing = _signing;
+    return Scaffold(
+      backgroundColor: KvColor.abyss,
+      body: SafeArea(
+        child: Column(
+          children: [
+            KvTopBar(
+              title: 'Messages',
+              onBack: () => Navigator.of(context).maybePop(),
+            ),
+            Expanded(
+              child: KvColumn(
+                child: KvScrollEdge(
+                  ground: KvColor.abyss,
+                  child: ListView(
+                    padding: const EdgeInsets.only(
+                      top: KvSpace.xs,
+                      bottom: KvSpace.l,
+                    ),
+                    children: [
+                      const KvSectionHeader('Sending'),
+                      // **It eases in** (BG-24): the preference is read
+                      // asynchronously, so without this a ~70 dp card appears
+                      // between two frames and shoves what is below it down.
+                      AnimatedSize(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : KvMotion.calm,
+                        curve: KvMotion.curve,
+                        alignment: Alignment.topCenter,
+                        child: signing == null
+                            ? const SizedBox(width: double.infinity)
+                            : KvRowContainer(
+                                children: [
+                                  KvToggle(
+                                    bare: true,
+                                    on: !signing,
+                                    title: signingToggleTitle,
+                                    sub:
+                                        _signingError ??
+                                        signingToggleSub(signing),
+                                    onChanged: (off) => _setSigning(!off),
+                                  ),
+                                ],
+                              ),
+                      ),
+                      const KvSectionHeader('History'),
+                      KvRowContainer(
+                        children: [
+                          KvRow(
+                            // A label WRAPS; only a number may not (BG-14).
+                            titleLines: 2,
+                            leading: const KvRowDisc.neutral(
+                              mark: KvGlyph.history,
+                            ),
+                            title: 'History & backup',
+                            sub:
+                                'Fill in what the node missed, and park your '
+                                'contacts on chain',
+                            subLines: 2,
+                            trailing: const KvGlyphIcon(
+                              KvGlyph.chevron,
+                              size: 20,
+                              tone: KvColor.etch,
+                            ),
+                            onTap: () => runMessageHistory(context, _messaging),
+                          ),
+                        ],
+                      ),
+                      const KvSectionHeader('Danger'),
+                      KvRowContainer(
+                        children: [
+                          KvRow(
+                            titleLines: 2,
+                            // **`risk`, and the only place on this screen that
+                            // takes it.** §3 rations the hue to fund risk and
+                            // DESTRUCTION, and this is the app's single
+                            // irreversible messaging gesture. The whole row
+                            // wears it, not just the disc (founder,
+                            // 2026-09-08).
+                            leading: const KvRowDisc(
+                              mark: KvGlyph.trash,
+                              tint: KvColor.riskTint,
+                              tone: KvColor.risk,
+                            ),
+                            tone: KvColor.risk,
+                            title: 'Delete all messages',
+                            sub: 'Every conversation, on this device',
+                            trailing: const KvGlyphIcon(
+                              KvGlyph.chevron,
+                              size: 20,
+                              tone: KvColor.etch,
+                            ),
+                            onTap: () => runMessageWipe(context, _messaging),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The shared prepare-and-confirm for the two spends this surface can make.
+///
+/// A free function because the flows it serves are now reachable from two
+/// screens, and neither owns the ceremony — `runConfirmSend` does.
+Future<void> _runPrepare(
+  BuildContext context,
+  MessagingService messaging,
+  Future<SignableSummaryDto> Function() prepare, {
+  required String contextNote,
+  required String preparingObject,
+  String? title,
+}) async {
+  try {
+    await runConfirmSend(
+      context,
+      prepare: prepare,
+      commit: messaging.commit,
+      abandon: messaging.abandon,
+      contextNote: contextNote,
+      title: title,
+      preparingObject: preparingObject,
+    );
+  } catch (e) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(displayError(e))));
+  }
+  await messaging.refresh();
+}
+
+/// The D-138 backup (`self_stash`): park every conversation on chain, sealed to
+/// our own key, so a restore-from-seed finds contacts and not just money.
+Future<void> runMessageBackUp(
+  BuildContext context,
+  MessagingService messaging,
+) async {
+  await _runPrepare(
+    context,
+    messaging,
+    messaging.prepareStash,
+    // A backup is not a message, and the shared ceremony would otherwise call
+    // it one — on the confirm sheet AND on the card before it.
+    title: 'Confirm backup',
+    preparingObject: 'backup',
+    contextNote:
+        'Parks your conversation list on Kaspa, sealed to your own key, so '
+        'your recovery phrase can bring your contacts back too. The amount '
+        'returns to you — only the network fee is spent.',
+  );
+  await messaging.refreshFillState();
+}
+
+/// Open the history-fill sheet with the backup wired into it.
+Future<void> runMessageHistory(
+  BuildContext context,
+  MessagingService messaging,
+) async {
+  KvHaptic.selection();
+  await showHistoryFillSheet(
+    context,
+    messaging,
+    onBackUp: () => runMessageBackUp(context, messaging),
+  );
+}
+
+/// **Erase every conversation and every message on this device.**
+///
+/// The number in the confirm is asked of Rust, never counted off a screen's
+/// list: that list filters hidden conversations and the wipe destroys them
+/// too, so the visible number would under-promise by exactly the rows the user
+/// already tried to put out of sight — and the number is the consent.
+Future<void> runMessageWipe(
+  BuildContext context,
+  MessagingService messaging,
+) async {
+  KvHaptic.selection();
+  final WipeReportDto preview;
+  try {
+    preview = await messaging.wipePreview();
+  } catch (e) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    return;
+  }
+  if (!context.mounted) return;
+  if (preview.conversations == 0 && preview.messages == 0) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('There is nothing to delete.')),
+    );
+    return;
+  }
+  // **The bond figure comes from Rust**, never a Dart literal: this sheet
+  // quotes somebody else's money that the erase makes unreturnable
+  // (`consensus-auditor` BLOCK, UX-R5).
+  final bond = messaging.handshakeBondSompi;
+  if (!context.mounted) return;
+  final confirmed = await Navigator.of(context).push<bool>(
+    KvSheetRoute<bool>(
+      builder: (_) => _WipeConfirmSheet(preview: preview, bond: bond),
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+  try {
+    final report = await messaging.wipeAll();
+    // **The address book's cache goes with the store it mirrors.** The wipe
+    // clears `contact.names` as a side file, but `ContactsService` holds the
+    // last read in memory — so the first frames of the next Send screen would
+    // paint contacts the wipe destroyed (`wallet-security-auditor`, UX-R2B).
+    await ContactsService.instance.refresh();
+    if (!context.mounted) return;
+    final deleted =
+        'Deleted ${report.conversations} conversation'
+        '${report.conversations == 1 ? '' : 's'} '
+        'and ${report.messages} message'
+        '${report.messages == 1 ? '' : 's'}.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        // The floor is what makes the erase stick against the next history
+        // catch-up. If it did not persist, the sheet's "cannot be undone" is
+        // not yet true and the user is the only one who can act on it.
+        duration: report.floorPersisted
+            ? const Duration(seconds: 4)
+            : const Duration(seconds: 10),
+        content: Text(
+          report.floorPersisted
+              ? deleted
+              : '$deleted But history catch-up could not be stopped — '
+                    'turn off History & backup, or they may come back.',
+        ),
+      ),
+    );
+  } catch (e) {
+    if (!context.mounted) return;
+    // Never a silent failure on a destructive action: the user must not walk
+    // away believing their messages are gone when they are still here.
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(displayError(e))));
+  }
+}
+
+/// **The one irreversible ceremony in the messages lane**, moved here with the
+/// settings it belongs to and **with its copy intact**.
+///
+/// Every clause below was won by an audit or a founder ruling and none of it
+/// is decoration: the count includes hidden rows (which is why it is asked of
+/// Rust and never counted off a list), the chain sentence stops the sheet
+/// implying an erase it cannot perform, the bond sentence names somebody
+/// else's money that this makes unreturnable — its figure comes from Rust
+/// because a remembered constant here was a `consensus-auditor` BLOCK — and
+/// the last paragraph is the repair instruction, which is the useful half.
+class _WipeConfirmSheet extends StatelessWidget {
+  const _WipeConfirmSheet({required this.preview, required this.bond});
+
+  /// Rust's count of what the wipe would destroy — hidden rows included.
+  final WipeReportDto preview;
+
+  /// The bond each stranded sender paid, from Rust.
+  final BigInt bond;
+
+  @override
+  Widget build(BuildContext context) {
+    final conversationCount = preview.conversations;
+    final messageCount = preview.messages;
+    final plural = conversationCount == 1 ? '' : 's';
+    return KvSheet(
+      title: 'Delete all messages',
+      onCancel: () => Navigator.of(context).pop(false),
+      foot: KvAction.destructive(
+        label: 'Delete $conversationCount conversation$plural',
+        onTap: () => Navigator.of(context).pop(true),
+      ),
+      // `KvSheet` flexes its body and leaves the scrolling to the caller,
+      // which is what keeps the act out of the scroll (D-221 §1).
+      child: SingleChildScrollView(
+        child: Text(
+          'This deletes $conversationCount conversation$plural and '
+          '$messageCount message${messageCount == 1 ? '' : 's'} from this '
+          'device, including any you have hidden. It cannot be undone.\n\n'
+          'Messages already sent stay on Kaspa permanently — this clears your '
+          'copy, not the chain, and this app will not fetch them back, '
+          'including from your backup. Your wallet and coins are not '
+          'touched.\n\n'
+          'A contact can appear again as a new request — their messages do not '
+          'come back.\n\n'
+          '${preview.pendingBonds > 0 ? 'This also deletes '
+                    '${preview.pendingBonds} unanswered contact '
+                    'request${preview.pendingBonds == 1 ? '' : 's'} — the '
+                    '${kasCanonical(bond)} KAS bond each sender paid can no '
+                    'longer be returned to them.\n\n' : ''}'
+          'To talk to someone again afterwards, one of you has to send a new '
+          'contact request. Asking them to start it is the reliable way round: '
+          'an app that still remembers you may not answer a repeat request.',
+          style: const TextStyle(
+            fontFamily: KvFont.ui,
+            fontSize: 14,
+            height: 20 / 14,
+            fontWeight: FontWeight.w400,
+            fontVariations: KvWeight.w400,
+            color: KvColor.inkDim,
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -17,6 +17,7 @@ import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_icon_button.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 
 ConversationDto conversation(
   String id, {
@@ -150,7 +151,12 @@ Finder _row([String? label]) => label == null
 /// [KvIconButton] in the bar, and the `PopupMenuButton` became `M5`'s sheet.
 /// The gestures they stand for are unchanged, so the tests keep their names
 /// and get their finders from here rather than each learning the new tree.
+/// **Two taps, since 2026-09-08.** The control is a compact mark until the
+/// first tap opens it into its pill; the second is the one that means it
+/// (founder ruling — a bond is not spent on a control you brushed past).
 Future<void> _tapNewHandshake(WidgetTester tester) async {
+  await tester.tap(find.bySemanticsLabel('New handshake'));
+  await tester.pumpAndSettle();
   await tester.tap(find.text('New handshake'));
   await tester.pumpAndSettle();
 }
@@ -160,6 +166,9 @@ Future<void> _tapHistory(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// **It pushes a screen now, not a sheet** (founder, 2026-09-08): the message
+/// settings live in Settings › App › Messages, and the messages overflow opens
+/// the same page rather than a second copy of it.
 Future<void> _tapMessageSettings(WidgetTester tester) async {
   await tester.tap(find.bySemanticsLabel('Message settings'));
   await tester.pumpAndSettle();
@@ -711,6 +720,12 @@ void main() {
       );
       await tester.pump();
       expect(find.textContaining('No conversations yet'), findsOneWidget);
+      // Compact: the mark is there and announced, the WORD arrives on the
+      // first tap (founder ruling, 2026-09-08).
+      expect(find.bySemanticsLabel('New handshake'), findsOneWidget);
+      expect(find.text('New handshake'), findsNothing);
+      await tester.tap(find.bySemanticsLabel('New handshake'));
+      await tester.pumpAndSettle();
       expect(find.text('New handshake'), findsOneWidget);
     });
 
@@ -941,7 +956,7 @@ void main() {
 
       await tester.longPress(_row());
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Name this contact'));
+      await tester.tap(find.text('Save this contact'));
       await tester.pumpAndSettle();
       // The search box on the screen behind is also a `TextField` and it is
       // EARLIER in the tree, so `.first` would have named nobody.
@@ -975,7 +990,7 @@ void main() {
       // Hiding is still offered; naming is not, because a name keys on the
       // address and this row has none until its sender is recorded.
       expect(find.text('Hide conversation'), findsOneWidget);
-      expect(find.text('Name this contact'), findsNothing);
+      expect(find.text('Save this contact'), findsNothing);
     });
 
     testWidgets('Chats holds conversations; Requests holds what wants a bond', (
@@ -1325,7 +1340,8 @@ void main() {
       // own `HANDSHAKE_BOND_SOMPI` rather than typed into the string.
       expect(find.textContaining('0.20'), findsWidgets);
       // No address is claimed before the node resolves the sender.
-      expect(find.text('Unknown sender'), findsOneWidget);
+      // The state, not a verdict on the person (founder, 2026-09-08).
+      expect(find.text('Sender not yet known'), findsOneWidget);
     });
 
     testWidgets(
@@ -1876,12 +1892,23 @@ void main() {
         await tester.pumpWidget(screen());
         await settle(tester);
 
-        expect(find.text('Pending'), findsOneWidget);
+        // **There is no `Pending`** (founder, 2026-09-08): a submitted row
+        // claims nothing for the second or two it is in flight.
+        expect(find.text('Pending'), findsNothing);
         expect(find.text('Accepted'), findsOneWidget);
         expect(find.text('Not accepted yet'), findsOneWidget);
         // Confirmed dissolves to quiet (founder-nodded); the inbound row is
         // chipless even while its watch reads submitted.
         expect(find.text('Confirmed'), findsNothing);
+        // Accepted and confirmed both wear the delivered double check; the
+        // three that have not reached a block do not, and neither does the
+        // inbound row.
+        expect(
+          find.byWidgetPredicate(
+            (w) => w is KvGlyphIcon && w.mark == KvGlyph.checkDouble,
+          ),
+          findsNWidgets(2),
+        );
       },
     );
 
@@ -1897,7 +1924,10 @@ void main() {
       expect(find.textContaining('confirmations'), findsNothing);
     });
 
-    testWidgets('a displaced send honestly reads Pending again', (
+    /// A displaced row says what happened on its own line — it does not go
+    /// back to claiming anything, and since 2026-09-08 there is no `Pending`
+    /// for it to go back TO.
+    testWidgets('a displaced send claims nothing, and is not delivered', (
       tester,
     ) async {
       MessagingService.threadSinceFn = (_, _) async => delta(
@@ -1906,7 +1936,14 @@ void main() {
       );
       await tester.pumpWidget(screen());
       await settle(tester);
-      expect(find.text('Pending'), findsOneWidget);
+      expect(find.text('Pending'), findsNothing);
+      expect(find.text('Accepted'), findsNothing);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is KvGlyphIcon && w.mark == KvGlyph.checkDouble,
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('a tombstoned row dims to the ghost with the honest line', (

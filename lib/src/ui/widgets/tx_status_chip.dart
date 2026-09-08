@@ -1,49 +1,91 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../rust/api/transport.dart';
 import '../theme/tokens.dart';
-import 'kv_breath.dart';
 
 /// The V2 chip states a transaction row can wear. `none` is the terminal
 /// quiet: a settled row carries no label (Rams #5 — only the exception is
 /// marked; founder-nodded 2026-07-09).
-enum TxChipState { pending, accepted, stalled, none }
+enum TxChipState { accepted, stalled, none }
 
 // `chipStateOf`, `gateByDepth` and `chipCounterCeiling` lived here until
 // UX-R3's second beat. The burial ladder (`KvBurial.rungFor`) reads a plain
 // `stalled` bool now, and the ceiling — `100`, the last maturity threshold
 // typed into `lib/` — gated nothing on any remaining path (D-249).
 
-/// Chip state for a thread message from its tracker status. `null` (unwatched
-/// or horizon-pruned) and `confirmed` are both the quiet terminal; `displaced`
-/// honestly re-pends (the accepting block left the chain). Pure; tested.
+/// Chip state for a thread message from its tracker status.
+///
+/// **There is no `Pending`, by founder ruling** (2026-09-08: *"remove pending
+/// entirely (we never use 'pending')"*), and removing the word removed the
+/// state rather than renaming it — a chip that says nothing while a
+/// transaction is in flight claims nothing, which is the honest posture for a
+/// second or two of network. `submitted` and `displaced` therefore both render
+/// quiet; a displaced row already says *Displaced by the network* on its own
+/// line, which is the fact that matters.
+///
+/// `confirmed` and `null` (unwatched or horizon-pruned) are the quiet terminal
+/// too — by then the delivered mark inside the bubble carries it. Pure; tested.
 TxChipState chipStateOfAcceptance(TxStatusKind? kind) {
   return switch (kind) {
     null => TxChipState.none,
     TxStatusKind.confirmed => TxChipState.none,
     TxStatusKind.accepted => TxChipState.accepted,
-    TxStatusKind.submitted => TxChipState.pending,
-    TxStatusKind.displaced => TxChipState.pending,
+    TxStatusKind.submitted => TxChipState.none,
+    TxStatusKind.displaced => TxChipState.none,
     TxStatusKind.stalled => TxChipState.stalled,
   };
 }
 
+/// **Has this message reached the chain?** — the delivered double-check
+/// (founder ruling, 2026-09-08).
+///
+/// True once a block has accepted the transaction, and it stays true: on a
+/// public ledger *accepted* is the moment the message becomes retrievable by
+/// its recipient, which is exactly what "delivered" claims and the most this
+/// app can honestly claim. It is deliberately NOT *read* — nothing in this
+/// protocol tells us that, and the mark lighting up for a read receipt is a
+/// logged future idea with a privacy question in front of it
+/// (IDEAS_BACKLOG 2026-09-08b).
+///
+/// A displaced row is not delivered: the chain took its block back.
+bool deliveredOfAcceptance(TxStatusKind? kind) => switch (kind) {
+  TxStatusKind.accepted || TxStatusKind.confirmed => true,
+  null ||
+  TxStatusKind.submitted ||
+  TxStatusKind.displaced ||
+  TxStatusKind.stalled => false,
+};
+
 /// The three-state transaction status chip (V2, founder-nodded design):
 /// dot + label, never color alone (design_system §11).
 ///
-/// - **pending** — quiet `textTertiary`, dot breathing via [KvBreath] (§8
-///   v2.2 — self-animated sine; the breath stops the instant the state
-///   resolves — BG-8-honest attention guidance).
 /// - **accepted** — `success` (the chain accepted it; on Kaspa this IS the
-///   user-meaningful confirmation, BG-6).
+///   user-meaningful confirmation, BG-6). **Transient**: it says *this just
+///   happened*, holds for [acceptedDwell], and dissolves, because a permanent
+///   label on every settled message is noise and the delivered mark inside the
+///   bubble is what carries the fact afterwards (founder ruling, 2026-09-08).
 /// - **stalled** — `warning`, steady: degraded is not "in progress". Amber is
 ///   re-rationed here from the old Pending label (semantic scarcity, §3).
 /// - **none** — the chip dissolves; a settled row stays quiet.
 ///
 /// State changes crossfade at `fast`; the dissolve to quiet takes `normal`.
 /// Vault register throughout: decelerate-only, no celebration (BG-9).
-class TxStatusChip extends StatelessWidget {
+class TxStatusChip extends StatefulWidget {
   const TxStatusChip({super.key, required this.state, this.confirmations});
+
+  /// How long `Accepted` stays on screen before it dissolves.
+  ///
+  /// Founder ruling, 2026-09-08: *"accepted will only show for say; 2 seconds
+  /// and it dissapears."* It is an ARRIVAL, not a status — the message reaching
+  /// the chain is a moment, and a moment is announced and then over. What
+  /// remains afterwards is the delivered mark in the bubble, which is a fact
+  /// rather than an event.
+  ///
+  /// `stalled` is untouched by this: *Not accepted yet* is a standing
+  /// condition and stays until it stops being true.
+  static const Duration acceptedDwell = Duration(seconds: 2);
 
   final TxChipState state;
 
@@ -56,7 +98,53 @@ class TxStatusChip extends StatelessWidget {
   final int? confirmations;
 
   @override
+  State<TxStatusChip> createState() => _TxStatusChipState();
+}
+
+class _TxStatusChipState extends State<TxStatusChip> {
+  /// The `Accepted` dwell has elapsed for the state currently held.
+  bool _spent = false;
+  Timer? _dwell;
+
+  @override
+  void initState() {
+    super.initState();
+    _armDwell();
+  }
+
+  @override
+  void didUpdateWidget(TxStatusChip old) {
+    super.didUpdateWidget(old);
+    // A CHANGE of state re-arms; a rebuild at the same state does not, so a
+    // thread re-pull cannot resurrect a chip whose moment has passed.
+    if (old.state != widget.state) {
+      _spent = false;
+      _armDwell();
+    }
+  }
+
+  void _armDwell() {
+    _dwell?.cancel();
+    if (widget.state != TxChipState.accepted) return;
+    _dwell = Timer(TxStatusChip.acceptedDwell, () {
+      if (mounted) setState(() => _spent = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _dwell?.cancel();
+    super.dispose();
+  }
+
+  /// What is actually drawn — the widget's state until its dwell is spent.
+  TxChipState get _shown => _spent && widget.state == TxChipState.accepted
+      ? TxChipState.none
+      : widget.state;
+
+  @override
   Widget build(BuildContext context) {
+    final state = _shown;
     final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     return AnimatedSwitcher(
       duration: state == TxChipState.none ? KvMotion.normal : KvMotion.fast,
@@ -73,13 +161,12 @@ class TxStatusChip extends StatelessWidget {
           child: fade,
         );
       },
-      child: KeyedSubtree(key: ValueKey(state), child: _body(context)),
+      child: KeyedSubtree(key: ValueKey(state), child: _body(context, state)),
     );
   }
 
-  Widget _body(BuildContext context) {
+  Widget _body(BuildContext context, TxChipState state) {
     var (color, label) = switch (state) {
-      TxChipState.pending => (KvColor.textTertiary, 'Pending'),
       TxChipState.accepted => (KvColor.success, 'Accepted'),
       TxChipState.stalled => (KvColor.warning, 'Not accepted yet'),
       TxChipState.none => (null, null),
@@ -87,7 +174,7 @@ class TxStatusChip extends StatelessWidget {
     if (color == null || label == null) return const SizedBox.shrink();
     // The counting states stream their depth; stalled never counts (it has
     // no depth to count) and a null depth falls back to the static word.
-    final n = confirmations;
+    final n = widget.confirmations;
     if (n != null && state != TxChipState.stalled) {
       label = '$n confirmation${n == 1 ? '' : 's'}';
     }
@@ -104,11 +191,10 @@ class TxStatusChip extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // The breath rides the dot only (the label stays legible); KvBreath
-        // freezes it to a static full-opacity dot under reduced motion — the
-        // same contract `KvCadence` keeps, and the reason a frozen meter can
-        // never be mistaken for a running one (BG-8).
-        KvBreath(active: state == TxChipState.pending, child: dot),
+        // **Nothing breathes any more.** The breath belonged to `Pending`, and
+        // the two states left are both settled facts rather than waits — one
+        // an arrival that dissolves, one a standing condition.
+        dot,
         const SizedBox(width: KvSpace.xs),
         // Bounded, so the longest label in the set — `Not accepted yet` —
         // cannot push a ledger row past its own width at 320dp / 1.3x. Every

@@ -5,7 +5,6 @@ import 'package:flutter/services.dart' show Clipboard;
 
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
-import '../../services/contacts_service.dart';
 import '../../services/messaging_service.dart';
 import '../format.dart';
 import '../send/confirm_send_flow.dart';
@@ -24,9 +23,9 @@ import '../widgets/kv_rows.dart';
 import '../widgets/kv_search_field.dart';
 import '../widgets/kv_sheet.dart';
 import '../widgets/kv_tabs.dart';
-import '../widgets/kv_toggle.dart';
 import '../widgets/kv_two_pane.dart';
 import 'history_fill_sheet.dart';
+import 'message_settings_screen.dart';
 import 'thread_screen.dart';
 
 /// Transport contacts (P2.3 — §4: transport UI, not a messenger): the
@@ -264,88 +263,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
   }
 
-  /// The total erase: every conversation, every message, every local trace.
-  ///
-  /// Irreversible, so the confirm names the COUNT rather than asking "are you
-  /// sure" — a number the user can check against what they think they have is
-  /// a far better guard than a second tap, and it costs no new widget.
-  ///
-  /// Deliberately not a hold-to-confirm: DS §3 rations the glow treatment to
-  /// primary actions and live data, and dressing a destructive erase in the
-  /// signing control's teal would say the opposite of what it does.
-  Future<void> _wipeAll() async {
-    KvHaptic.selection();
-    // Asked of Rust, never counted off this screen's list: that list filters
-    // hidden conversations and the wipe destroys them too, so the visible
-    // number would under-promise by exactly the rows the user already tried to
-    // put out of sight — and the number is the consent.
-    final WipeReportDto preview;
-
-    try {
-      preview = await _messaging.wipePreview();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(displayError(e))));
-      return;
-    }
-    if (!mounted) return;
-    if (preview.conversations == 0 && preview.messages == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('There is nothing to delete.')),
-      );
-      return;
-    }
-    final confirmed = await Navigator.of(context).push<bool>(
-      KvSheetRoute<bool>(
-        builder: (_) => _WipeAllSheet(preview: preview, bond: _bond),
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      final report = await _messaging.wipeAll();
-      // **The address book's cache goes with the store it mirrors.** The wipe
-      // clears `contact.names` as a side file, but `ContactsService` holds the
-      // last read in memory — so the first frames of the next Send screen
-      // would paint contacts the wipe destroyed, which is the exact "claim
-      // about data that no longer exists" `WipeReportDto` documents itself
-      // against (`wallet-security-auditor`, UX-R2B).
-      await ContactsService.instance.refresh();
-      if (!mounted) return;
-      final deleted =
-          'Deleted ${report.conversations} conversation'
-          '${report.conversations == 1 ? '' : 's'} '
-          'and ${report.messages} message'
-          '${report.messages == 1 ? '' : 's'}.';
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          // The floor is what makes the erase stick against the next history
-          // catch-up. If it did not persist, the sheet's "cannot be undone"
-          // is not yet true and the user is the only one who can act on it —
-          // so this is the one outcome that gets its own sentence and its own
-          // dwell time, rather than a success line that quietly isn't.
-          duration: report.floorPersisted
-              ? const Duration(seconds: 4)
-              : const Duration(seconds: 10),
-          content: Text(
-            report.floorPersisted
-                ? deleted
-                : '$deleted But history catch-up could not be stopped — '
-                      'turn off History & backup, or they may come back.',
-          ),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      // Never a silent failure on a destructive action: the user must not walk
-      // away believing their messages are gone when they are still here.
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(displayError(e))));
-    }
-  }
-
   /// Empty one thread, keep the conversation. The narrow half of "delete this
   /// chat" — the row stays listed and stays sendable, so a counterparty who
   /// never re-announces themselves is not orphaned (the reason hide
@@ -493,20 +410,18 @@ class _ContactsScreenState extends State<ContactsScreen> {
   /// `M5 · Message settings` — the overflow's sheet. It replaced a
   /// `PopupMenuButton` holding one item: a Material menu on a screen with no
   /// other Material left on it.
+  /// **The same screen Settings opens** (founder, 2026-09-08). The overflow
+  /// keeps its door because a setting you reach from the surface it governs is
+  /// worth a tap — what it no longer keeps is a second implementation of the
+  /// settings themselves.
   Future<void> _messageSettings() async {
     KvHaptic.selection();
-    final action = await Navigator.of(context).push<String>(
-      KvSheetRoute<String>(
-        builder: (_) =>
-            _MessageSettingsSheet(bond: _bond, messaging: _messaging),
+    await Navigator.of(context).push(
+      KvPageRoute<void>(
+        builder: (_) => MessageSettingsScreen(messaging: _messaging),
       ),
     );
-    if (!mounted || action == null) return;
-    if (action == 'history') {
-      await showHistoryFillSheet(context, _messaging, onBackUp: _backUp);
-    } else if (action == 'wipe') {
-      await _wipeAll();
-    }
+    if (mounted) await _messaging.refresh();
   }
 
   /// Name and address, folded to one case and matched as substrings — the two
@@ -673,19 +588,102 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   top: KvSpace.sm,
                   bottom: KvSpace.l,
                 ),
-                child: KvAction(
-                  label: 'New handshake',
-                  primary: true,
-                  mark: KvGlyph.userPlus,
-                  onTap: () {
-                    KvHaptic.selection();
-                    _addContact();
-                  },
-                ),
+                child: _NewHandshakeAction(onConfirm: _addContact),
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// **The compact New handshake control** — a mark in the bottom-right corner
+/// that opens into its own pill before it does anything (founder, 2026-09-08:
+/// *"can you minimize it? to the bottom right. like a square with border
+/// radius having only the icon, then on tap of it, it expands to the left the
+/// pill shaped it currently is and says 'New handshake' … so the teal isnt
+/// just unnecessarily maximized there"*).
+///
+/// **The second tap is the feature, not a cost.** Collapsed, this is the one
+/// lit thing on a screen otherwise made of conversations, and a full-width teal
+/// bar was spending the screen's whole emission budget (BG-2) on an action used
+/// once a week. Expanded, it says what it is before it takes a bond — so the
+/// gesture that spends 0.2 KAS now needs a deliberate second press, which is
+/// the direction a funds control should err in anyway.
+///
+/// It collapses again on a tap outside, and after the flow it opened returns,
+/// so it does not sit expanded over a list nobody is done reading.
+class _NewHandshakeAction extends StatefulWidget {
+  const _NewHandshakeAction({required this.onConfirm});
+
+  /// Runs on the SECOND tap — the one that means it.
+  final Future<void> Function() onConfirm;
+
+  @override
+  State<_NewHandshakeAction> createState() => _NewHandshakeActionState();
+}
+
+class _NewHandshakeActionState extends State<_NewHandshakeAction> {
+  bool _open = false;
+
+  /// The collapsed square. [KvSpace.touchTarget] exactly, so shrinking the
+  /// control never shrinks its target (BG-12), and the house's own control
+  /// radius so it reads as the same object the pill is.
+  static const double _compact = KvSpace.touchTarget;
+
+  Future<void> _tap() async {
+    KvHaptic.selection();
+    if (!_open) {
+      setState(() => _open = true);
+      return;
+    }
+    setState(() => _open = false);
+    await widget.onConfirm();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: AnimatedSize(
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : KvMotion.enter,
+        curve: KvMotion.curve,
+        alignment: Alignment.centerRight,
+        child: _open
+            ? KvAction(
+                label: 'New handshake',
+                primary: true,
+                mark: KvGlyph.userPlus,
+                onTap: _tap,
+              )
+            : Semantics(
+                button: true,
+                label: 'New handshake',
+                child: ExcludeSemantics(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _tap,
+                    child: Container(
+                      width: _compact,
+                      height: _compact,
+                      decoration: BoxDecoration(
+                        color: KvColor.primary,
+                        borderRadius: BorderRadius.circular(KvRadius.control),
+                      ),
+                      child: const Center(
+                        child: KvGlyphIcon(
+                          KvGlyph.userPlus,
+                          size: 24,
+                          tone: KvColor.onPrimary,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
       ),
     );
   }
@@ -738,7 +736,7 @@ class _RowActionsSheet extends StatelessWidget {
               ground: KvColor.chip,
               titleLines: 2,
               leading: const KvRowDisc.neutral(mark: KvGlyph.identity),
-              title: 'Name this contact',
+              title: 'Save this contact',
               sub: 'Shown only on this device',
               trailing: const KvGlyphIcon(
                 KvGlyph.chevron,
@@ -807,8 +805,18 @@ class _RowActionsSheet extends StatelessWidget {
 String contactLabel(ConversationDto c) {
   final name = c.contactName;
   if (name != null && name.isNotEmpty) return name;
+  // **The address IS the identity of a request** — `M2` titles each one
+  // `kaspa:qq8f…3nz7c`, and the founder asked for the same (2026-09-08:
+  // *"can the request, when received show the address?"*). It is shown the
+  // moment the node resolves the sender from the bond's `input[0]`.
+  //
+  // Until then there is genuinely nothing to show: an inbound handshake
+  // carries no address on the wire, so inventing one is the last thing a funds
+  // surface may do. The fallback therefore names the STATE rather than passing
+  // a verdict on the person — `Unknown sender` read as *we do not know who this
+  // is and never will*, when the truth is *the lookup has not landed yet*.
   return c.contactAddress.isEmpty
-      ? 'Unknown sender'
+      ? 'Sender not yet known'
       : truncateAddressPayload(c.contactAddress);
 }
 
@@ -1023,6 +1031,10 @@ class _ConversationRow extends StatelessWidget {
                       ),
                     ),
               trailing: _When(unixMs: c.lastActivityUnixMs),
+              // The time belongs to the name, so it sits on its line rather
+              // than on the row's middle (founder, 2026-09-08; `M1` draws the
+              // two sharing a baseline).
+              trailingTop: true,
               // **The count sits UNDER the time**, which is where the founder
               // put it (*"the number will show under the time"*) and where
               // `M1` draws it — `KvRow`'s trailing column already stacks a
@@ -1129,6 +1141,15 @@ class _When extends StatelessWidget {
     final day = DateTime(at.year, at.month, at.day);
     final today = DateTime(now.year, now.month, now.day);
     final days = today.difference(day).inDays;
+    // **Four forms, and a fifth for another year** (founder, 2026-09-08, who
+    // walked the whole ladder: *"on a normal day it shows you the time last
+    // texted, and on a normal week, it shows the last day texted, e.g
+    // yesterday … then Sunday, Saturday, Friday … then 01 Sept … for messages
+    // from 2025, it will say something like 29 Dec 2025"*).
+    //
+    // The year is the one that was missing, and its absence was a real
+    // ambiguity rather than a nicety: `29 Dec` on a thread nobody has touched
+    // since last year reads as this December.
     final String text = days == 0
         ? '${at.hour.toString().padLeft(2, '0')}:'
               '${at.minute.toString().padLeft(2, '0')}'
@@ -1136,7 +1157,9 @@ class _When extends StatelessWidget {
         ? 'Yesterday'
         : days < 7
         ? _weekdays[at.weekday - 1]
-        : '${at.day} ${_months[at.month - 1]}';
+        : at.year == now.year
+        ? '${at.day} ${_months[at.month - 1]}'
+        : '${at.day} ${_months[at.month - 1]} ${at.year}';
     return Text(
       text,
       maxLines: 1,
@@ -1408,7 +1431,6 @@ class _ConfirmSheet extends StatelessWidget {
     required this.act,
     required this.body,
     this.subject,
-    this.destructive = false,
   });
 
   final String title;
@@ -1422,27 +1444,22 @@ class _ConfirmSheet extends StatelessWidget {
   /// The thing being acted on — a contact's label, on its own line.
   final String? subject;
 
-  /// The total erase, and nothing else. See [KvAction.destructive]: the added
-  /// ceremony weight is a `risk` fill, because a `raised` act here reads
-  /// identical to the benign "Clear messages" confirm one gesture away and the
-  /// two do very different things.
-  final bool destructive;
-
   @override
   Widget build(BuildContext context) {
     final subject = this.subject;
     return KvSheet(
       title: title,
       onCancel: () => Navigator.of(context).pop(false),
-      foot: destructive
-          ? KvAction.destructive(
-              label: act,
-              onTap: () => Navigator.of(context).pop(true),
-            )
-          : KvAction.raised(
-              label: act,
-              onTap: () => Navigator.of(context).pop(true),
-            ),
+      // **Raised, never `destructive`.** The one gesture that took the red
+      // variant here was *Delete all messages*, and it moved to the message
+      // settings screen with the rest of the settings (founder, 2026-09-08) —
+      // so the branch went with it rather than staying as a parameter nothing
+      // passes. What is left on this sheet — hide, clear one thread — is
+      // local, reversible-by-traffic and does not spend §3's red.
+      foot: KvAction.raised(
+        label: act,
+        onTap: () => Navigator.of(context).pop(true),
+      ),
       // `KvSheet` flexes its body and leaves the scrolling to the caller,
       // which is what keeps the act out of the scroll (D-221 §1). The wipe's
       // body is five paragraphs and overflowed by 32 dp without this.
@@ -1505,52 +1522,6 @@ class _HideSheet extends StatelessWidget {
                   "Nothing is deleted on-chain and they aren't notified, so "
                   'they can still write to you — a new message brings the '
                   'thread back.',
-      ),
-    );
-  }
-}
-
-class _WipeAllSheet extends StatelessWidget {
-  const _WipeAllSheet({required this.preview, required this.bond});
-
-  /// Rust's count of what the wipe would destroy — hidden rows included.
-  final WipeReportDto preview;
-
-  /// The bond each stranded sender paid, from Rust. This sheet is the one
-  /// irreversible ceremony in the surface and the figure it quotes is
-  /// **somebody else's money** that the erase makes unreturnable — the last
-  /// place a remembered constant belongs (`consensus-auditor` BLOCK, UX-R5:
-  /// the literal survived the sweep here because it was split across two
-  /// source lines, where the grep that found the others could not see it).
-  final BigInt bond;
-
-  @override
-  Widget build(BuildContext context) {
-    final conversationCount = preview.conversations;
-    final messageCount = preview.messages;
-    final plural = conversationCount == 1 ? '' : 's';
-    return _ConfirmSheet(
-      title: 'Delete all messages',
-      act: 'Delete $conversationCount conversation$plural',
-      destructive: true,
-      body: Text(
-        'This deletes $conversationCount conversation$plural and '
-        '$messageCount message${messageCount == 1 ? '' : 's'} from this '
-        'device, including any you have hidden. It cannot be undone.\n\n'
-        'Messages already sent stay on Kaspa permanently — this clears your '
-        'copy, not the chain, and this app will not fetch them back, '
-        'including from your backup. Your wallet and coins are not '
-        'touched.\n\n'
-        'A contact can appear again as a new request — their messages do not '
-        'come back.\n\n'
-        '${preview.pendingBonds > 0 ? 'This also deletes '
-                  '${preview.pendingBonds} unanswered contact '
-                  'request${preview.pendingBonds == 1 ? '' : 's'} — the '
-                  '${kasCanonical(bond)} KAS bond each sender paid can no '
-                  'longer be returned to them.\n\n' : ''}'
-        'To talk to someone again afterwards, one of you has to send a new '
-        'contact request. Asking them to start it is the reliable way round: '
-        'an app that still remembers you may not answer a repeat request.',
       ),
     );
   }
@@ -1856,244 +1827,3 @@ String signingToggleSub(bool signing) => signing
           'acceptance and every payment always do.'
     : 'Messages send as soon as you tap, for the fee shown above the send '
           'button.';
-
-class _MessageSettingsSheet extends StatefulWidget {
-  const _MessageSettingsSheet({required this.bond, required this.messaging});
-
-  final BigInt bond;
-  final MessagingService messaging;
-
-  @override
-  State<_MessageSettingsSheet> createState() => _MessageSettingsSheetState();
-}
-
-class _MessageSettingsSheetState extends State<_MessageSettingsSheet> {
-  /// Null until read — the row is absent rather than guessed at (BG-24).
-  bool? _signing;
-
-  /// Why the last flip did not stick, said under the row rather than in a
-  /// toast (§4: this language has no toasts).
-  String? _signingError;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_loadSigning());
-  }
-
-  Future<void> _loadSigning() async {
-    try {
-      final signing = await widget.messaging.messageSigning();
-      if (mounted) setState(() => _signing = signing);
-    } catch (_) {
-      if (mounted) setState(() => _signing = true);
-    }
-  }
-
-  Future<void> _setSigning(bool signing) async {
-    KvHaptic.selection();
-    setState(() {
-      _signing = signing;
-      _signingError = null;
-    });
-    try {
-      await widget.messaging.setMessageSigning(signing);
-    } catch (e) {
-      // The switch springs back to what is actually stored, and the sub-line
-      // says why — a reason that vanishes on a timer is not a reason
-      // (`ux-auditor`, 2026-09-08).
-      if (!mounted) return;
-      setState(() {
-        _signing = !signing;
-        _signingError = displayError(e);
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bond = widget.bond;
-    final signing = _signing;
-    return KvSheet(
-      title: 'Message settings',
-      cancelLabel: 'Close',
-      // `risk` is the sheet law's default for the way out (D-277), and this
-      // sheet's exit closes rather than cancels anything — a quiet one.
-      cancelTone: KvColor.inkDim,
-      onCancel: () => Navigator.of(context).pop(),
-      // **The caller supplies the scroll** — `KvSheet` flexes its body, it
-      // does not scroll it. Six rows fit comfortably at 393 × 852 and do not
-      // at 915 × 412, where the whole sheet has 262 dp of body to work in;
-      // without this the landscape frame clipped the last row outright, which
-      // is content that cannot be seen. Found in the frame, not by a test.
-      // **And it says there is more.** At 915 × 412 the sheet's body is 262 dp
-      // and the last row — the one irreversible gesture on this surface — was
-      // cut through its letterforms with nothing to indicate a scroll
-      // (`ux-auditor`, 2026-09-08). `KvScrollEdge` is the house part that says
-      // it, at five other call sites already.
-      child: KvScrollEdge(
-        // The sheet's own panel (`KvSheet` paints `plate`), not the page's
-        // ground — the fade has to dissolve into what is actually behind it.
-        ground: KvColor.plate,
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // **The mirror of the sending sheet's toggle** (founder ruling,
-              // 2026-09-08). It is here because the other one is only reachable
-              // by starting a send: a user who turned confirming off must be
-              // able to turn it back on without first composing a message they
-              // do not want to send.
-              //
-              // **Its own container, not a row among the three below.** A
-              // setting you change in place and a door you open are different
-              // objects, and `KvToggle` carries no disc while all three rows
-              // below do — sharing one card left the switch's title starting
-              // 54 dp left of theirs, a ragged edge inside a single plate. Seen
-              // in the 393 frame, which is the only place it is visible.
-              // **It eases in** (BG-24): the preference is read
-              // asynchronously, so without this a ~70 dp card appears between
-              // two frames and shoves the three rows below it down.
-              AnimatedSize(
-                duration: MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : KvMotion.calm,
-                curve: KvMotion.curve,
-                alignment: Alignment.topCenter,
-                child: signing == null
-                    ? const SizedBox(width: double.infinity)
-                    : KvRowContainer(
-                        ground: KvColor.chip,
-                        children: [
-                          KvToggle(
-                            bare: true,
-                            ground: KvColor.chip,
-                            // The disc its neighbours have, so the card below starts
-                            // its rows on the same left edge this one does.
-                            leading: const KvRowDisc.neutral(
-                              mark: KvGlyph.shield,
-                            ),
-                            on: !signing,
-                            title: signingToggleTitle,
-                            sub: _signingError ?? signingToggleSub(signing),
-                            onChanged: (off) => _setSigning(!off),
-                          ),
-                        ],
-                      ),
-              ),
-              if (signing != null) const SizedBox(height: KvSpace.m),
-              KvRowContainer(
-                // Inside a sheet, so `chip` — a `plate` card on a `plate` panel
-                // draws nothing at all (§1.1, D-293).
-                ground: KvColor.chip,
-                children: [
-                  KvRow(
-                    dense: true,
-                    ground: KvColor.chip,
-                    // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
-                    // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
-                    // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
-                    // a new call site).
-                    titleLines: 2,
-                    leading: const KvRowDisc.neutral(mark: KvGlyph.history),
-                    title: 'History & backup',
-                    sub:
-                        'Fill in what the node missed, and park your contacts on '
-                        'chain',
-                    subLines: 2,
-                    trailing: const KvGlyphIcon(
-                      KvGlyph.chevron,
-                      size: 20,
-                      tone: KvColor.etch,
-                    ),
-                    onTap: () => Navigator.of(context).pop('history'),
-                  ),
-                  KvRow(
-                    dense: true,
-                    ground: KvColor.chip,
-                    // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
-                    // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
-                    // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
-                    // a new call site).
-                    titleLines: 2,
-                    leading: const KvRowDisc.neutral(mark: KvGlyph.userPlus),
-                    title: 'Handshake bond',
-                    sub:
-                        'What a stranger posts to reach you — returned when you '
-                        'accept',
-                    // Three, not two. `T2`'s rule: an explanation that ellipsises is
-                    // worse than no explanation, and this one names the condition on
-                    // getting the money back.
-                    subLines: 3,
-                    // The default 132 is sized for a balance; this figure is four
-                    // characters and a unit, and the room it held in reserve was
-                    // ellipsising the sentence beside it (D-293's rule, the same trade
-                    // the address row makes).
-                    trailingCap: 80,
-                    // **The figure is mono, the unit is not** (BG-30). Set wholly
-                    // mono it also wrapped to `0.20` / `KAS` at 320 dp / 1.3×, which
-                    // BG-5 forbids outright — `_RequestsGloss` one class away already
-                    // did it correctly (`ux-auditor` BLOCK, UX-R5).
-                    trailing: Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(
-                            text: kasCanonical(bond),
-                            style: const TextStyle(
-                              fontFamily: KvFont.mono,
-                              fontFeatures: [FontFeature.tabularFigures()],
-                            ),
-                          ),
-                          const TextSpan(
-                            text: ' KAS',
-                            style: TextStyle(fontFamily: KvFont.ui),
-                          ),
-                        ],
-                      ),
-                      maxLines: 1,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        height: 18 / 13,
-                        color: KvColor.inkDim,
-                      ),
-                    ),
-                  ),
-                  KvRow(
-                    dense: true,
-                    ground: KvColor.chip,
-                    // A label WRAPS; only a number may not (BG-14). At 320 dp / 1.3×
-                    // these came out `History & bac…`, `Handsh…`, `Delete all mes…` —
-                    // and `Handsh…` names nothing (`ux-auditor`, D-293's own defect at
-                    // a new call site).
-                    titleLines: 2,
-                    // **`risk`, and the only place on this sheet that takes it.**
-                    // §3 rations the hue to fund risk and DESTRUCTION, and this is the
-                    // app's single irreversible gesture — the `PopupMenuItem` it
-                    // replaced already painted its mark `KvColor.error` for exactly
-                    // that reason. A neutral disc would make the erase look like the
-                    // two rows above it, which are a sheet and a figure. The mark is
-                    // `trash`, added for it: `close` says *dismiss*, and BG-25 asks
-                    // the app to own the mark rather than borrow a near-enough one.
-                    leading: const KvRowDisc(
-                      mark: KvGlyph.trash,
-                      tint: KvColor.riskTint,
-                      tone: KvColor.risk,
-                    ),
-                    title: 'Delete all messages',
-                    sub: 'Every conversation, on this device',
-                    trailing: const KvGlyphIcon(
-                      KvGlyph.chevron,
-                      size: 20,
-                      tone: KvColor.etch,
-                    ),
-                    onTap: () => Navigator.of(context).pop('wipe'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}

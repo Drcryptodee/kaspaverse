@@ -16,6 +16,7 @@ import 'about_screen.dart';
 import 'security_screen.dart';
 import 'settings_scopes.dart';
 import 'wallet_screen.dart';
+import '../messages/message_settings_screen.dart';
 
 /// **`T1 · Settings` — the root of the settings group** (playbook §3.5,
 /// D-266).
@@ -301,26 +302,25 @@ class _SettingsScreenState extends State<SettingsScreen>
                     const KvSectionHeader('App'),
                     KvRowContainer(
                       children: [
-                        // **Four of these five doors open the house's Coming
+                        // **Three of these five doors open the house's Coming
                         // soon page, and their sub-lines say so.** The render
-                        // draws a live state under each; three of these
-                        // domains have no seam in this build and one — the
-                        // Kasia message settings — has a sheet on the thread
-                        // screen rather than a settings surface. A sub-line
-                        // that reads `Kasia · backups on · last 2 h ago` over
-                        // nothing is the one thing a trust screen may not do
-                        // (BG-11). Said in the sitting, not only here.
+                        // draws a live state under each; those three domains
+                        // have no seam in this build, and a sub-line that
+                        // reads `backups on · last 2 h ago` over nothing is
+                        // the one thing a trust screen may not do (BG-11).
+                        //
+                        // **Messages is no longer one of them** (founder,
+                        // 2026-09-08): its settings were real all along and
+                        // lived on a sheet in the messages lane, so the row
+                        // said *not built yet* about a location rather than
+                        // about a feature. They live here now, and the
+                        // messages overflow opens the same screen.
                         _door(
                           disc: const KvRowDisc.neutral(mark: KvGlyph.chat),
                           title: 'Messages',
-                          sub: 'Kasia threads · settings not built yet',
-                          onTap: () => _openComingSoon(
-                            KvGlyph.chat,
-                            'Messages',
-                            'Kasia handshakes and threads work today, from '
-                                'the drawer. Their settings — backups, who may '
-                                'reach you — will live here.',
-                          ),
+                          sub: 'Signing, history & backup, delete everything',
+                          onTap: () =>
+                              _open((_) => const MessageSettingsScreen()),
                         ),
                         _door(
                           disc: const KvRowDisc.neutral(mark: KvGlyph.palette),

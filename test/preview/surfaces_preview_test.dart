@@ -213,6 +213,17 @@ Widget _thread() {
     ),
     _msg('t2', now - 86400000 - 1800000, 'Will do tonight.', outbound: true),
     _msg('t3', now - 900000, 'Sent — thanks for waiting.', outbound: true),
+    // **The founder's own five-line message** (2026-09-08), kept verbatim as
+    // the wrap fixture: it took five lines here and four in WhatsApp and
+    // Telegram, the fifth holding one word.
+    _msg(
+      't4',
+      now - 600000,
+      "yooooooooo avi, la tu la France de la tu la casa del Carmen y me when "
+          "you're back in the field of software and the desire to have you "
+          "registered",
+      outbound: true,
+    ),
   ];
   MessagingService.commFeePreviewFn = (_, _) async => BigInt.from(14300);
   MessagingService.messageSigningFn = () async => true;
@@ -220,7 +231,17 @@ Widget _thread() {
     messages: rows,
     statuses: [
       for (final m in rows)
-        MessageStatusDto(txid: m.txid, tombstoned: false, acceptance: null),
+        // Accepted, so the frames show the delivered double check inside the
+        // bubbles and the honest block time beside them.
+        MessageStatusDto(
+          txid: m.txid,
+          tombstoned: false,
+          acceptance: TxStatusDto(
+            kind: TxStatusKind.accepted,
+            blueDepth: BigInt.from(12),
+            acceptedUnixMs: BigInt.from(m.unixMs.toInt() + 900),
+          ),
+        ),
     ],
   );
   return ThreadScreen(
@@ -1008,6 +1029,8 @@ Future<void> _typeADraft(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// It pushes a SCREEN now (founder, 2026-09-08) — the settings live in
+/// Settings › App › Messages and the overflow opens the same page.
 Future<void> _openMessageSettings(WidgetTester tester) async {
   await tester.pumpAndSettle();
   await tester.tap(find.bySemanticsLabel('Message settings'));
@@ -1186,11 +1209,7 @@ void main() {
       'messages__handshake',
       () => NewHandshakeScreen(bond: BigInt.from(20000000)),
     );
-    framedSurface(
-      'messages__settings_sheet',
-      _chats,
-      act: _openMessageSettings,
-    );
+    framedSurface('messages__settings', _chats, act: _openMessageSettings);
     // The confirm ceremony, which had no frame at all.
     framedSurface('messages__confirm', _chats, act: _openHideConfirm);
 
