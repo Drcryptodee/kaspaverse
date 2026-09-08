@@ -1009,7 +1009,11 @@ Future<void> _openHideConfirm(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// It is reached through message settings now — the bar no longer carries it
+/// (founder, 2026-09-08).
 Future<void> _openHistorySheet(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.bySemanticsLabel('Message settings'));
   await tester.pumpAndSettle();
   await tester.tap(find.bySemanticsLabel('History & backup'));
   await tester.pumpAndSettle();

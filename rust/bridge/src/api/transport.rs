@@ -1911,6 +1911,11 @@ pub async fn transport_start() -> Result<(), AppError> {
         }
     }
 
+    // **A request whose sender never resolved gets another go.** In the
+    // BACKGROUND: each retry is a bounded node lookup, and unlock must not
+    // wait on the network for a label (see `resweep_invitation_senders`).
+    tokio::spawn(resweep_invitation_senders());
+
     // Arm the live cursor (the BlockAdded scan now persists scan progress), then
     // run the catch-up replay in the BACKGROUND so unlock returns immediately
     // and missed messages surface as the walk finds them (P5/D-067). The fold
@@ -3011,6 +3016,72 @@ fn apply_parked_acceptance(txid: &str, sender: &str) {
 ///
 /// Node truth throughout: the address comes from our own node's return-address
 /// lookup, never from payload content or an indexer (INV-8).
+/// **Re-try every invitation whose sender never resolved.**
+///
+/// [`backfill_invitation_sender`] gets ONE attempt, on the acceptance event for
+/// the bond's own transaction, bounded by [`SENDER_LOOKUP_TIMEOUT`]. A node
+/// that was slow, unreachable or still catching up at that exact moment leaves
+/// the row with an empty `contact_address` **forever** — and the glass then
+/// says *Sender not yet known* permanently, which is the false permanence that
+/// wording was written to avoid. The founder asked for exactly this after
+/// seeing it (2026-09-08: *"i hope the node resolve works so make sure it
+/// probably will"*).
+///
+/// So the lookup gets a second life on every hub start: reopening the app
+/// heals a request whose sender was missed. Cheap and bounded — it runs only
+/// for rows that are still address-less, and each one is the same timed
+/// lookup, so a wallet with none pays a store read and nothing else.
+///
+/// **A resolved sender is a merge trigger** (L186's own lesson, which this
+/// lane taught): writing the address without re-running the rules keyed on it
+/// is half a backfill, so each success folds through `merge_contact` exactly
+/// as the live path does.
+async fn resweep_invitation_senders() {
+    let Ok(hub) = hub() else { return };
+    let pending: Vec<(String, String)> = {
+        let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        store
+            .list_conversations()
+            .into_iter()
+            .filter(|c| {
+                c.status == ConversationStatus::PendingInbound && c.contact_address.is_empty()
+            })
+            .filter_map(|c| c.handshake_txid.map(|txid| (c.conversation_id, txid)))
+            .collect()
+    };
+    if pending.is_empty() {
+        return;
+    }
+    log::info!(
+        "transport-intake: re-trying {} unresolved invitation sender(s) at start",
+        pending.len()
+    );
+    let mut healed = 0usize;
+    for (conversation_id, txid) in pending {
+        let Some(sender) = resolve_handshake_sender(&txid).await else {
+            continue;
+        };
+        {
+            let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(mut row) = store.conversation(&conversation_id).cloned() else {
+                continue;
+            };
+            // Someone else resolved it while we were on the RPC — leave it.
+            if !row.contact_address.is_empty() {
+                continue;
+            }
+            row.contact_address = sender.clone();
+            warn_store(store.upsert_conversation(row));
+            warn_store(store.merge_contact(&sender).map(|_| ()));
+        }
+        healed += 1;
+        ping(&conversation_id);
+    }
+    if healed > 0 {
+        log::info!("transport-intake: {healed} invitation sender(s) resolved on the re-try");
+    }
+}
+
 async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     let Ok(hub) = hub() else { return };
     // Cheap first: is there even an address-less invitation for this txid?

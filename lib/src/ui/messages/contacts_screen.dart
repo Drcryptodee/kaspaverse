@@ -448,21 +448,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // The V2b visible toggle's home (D-074): reachable ALWAYS,
-                  // not only when the gap banner shows.
-                  KvIconButton(
-                    mark: KvGlyph.history,
-                    label: 'History & backup',
-                    tone: KvColor.inkNav,
-                    onTap: () {
-                      KvHaptic.selection();
-                      showHistoryFillSheet(
-                        context,
-                        _messaging,
-                        onBackUp: _backUp,
-                      );
-                    },
-                  ),
+                  // **History & backup left this bar on 2026-09-08.** It had
+                  // been here since D-074 so the V2b toggle was reachable
+                  // always rather than only when the gap banner showed — and
+                  // that requirement is now met by Settings › App › Messages,
+                  // which is a door that does not spend a seat in the bar of
+                  // the screen it is not about. The banner still raises it in
+                  // the one case that is urgent.
                   // **No gap between them, and that is the render.** `M1`
                   // measures the two discs at x 272.0..315.8 and 324.0..367.8
                   // — 8 dp apart, which is exactly what two adjacent 52 dp

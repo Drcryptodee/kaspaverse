@@ -779,7 +779,12 @@ void main() {
       expect(find.textContaining('may be missing'), findsNothing);
     });
 
-    testWidgets('the history sheet is reachable with NO gap (visible toggle)', (
+    /// **D-074's requirement, through the door it moved to.** History & backup
+    /// must be reachable with no gap showing — the banner is the urgent case,
+    /// never the only route. It left the messages bar on 2026-09-08 (founder:
+    /// *"its already in the settings so thats good"*) and the requirement is
+    /// now met by message settings, which this walks end to end.
+    testWidgets('history & backup is reachable with NO gap, via settings', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -787,8 +792,46 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('may be missing'), findsNothing);
-      await _tapHistory(tester);
+      // The bar no longer carries it.
+      expect(find.bySemanticsLabel('History & backup'), findsNothing);
+
+      await _tapMessageSettings(tester);
       expect(find.text('History & backup'), findsOneWidget);
+      await _tapHistory(tester);
+      // The sheet itself, not the row that opened it.
+      expect(find.textContaining('Back up your conversations'), findsOneWidget);
+    });
+
+    /// The disclosure rule (founder, 2026-09-08): a long explanation waits
+    /// behind its info mark and snaps back when tapped again, so a sheet is
+    /// only as tall as what it is actually saying.
+    testWidgets('a long explanation hides behind its info mark', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
+      await _tapHistory(tester);
+
+      const detail = 'It does not rebuild your contacts';
+      expect(find.text('Back up your conversations'), findsOneWidget);
+      expect(find.textContaining(detail), findsNothing);
+
+      await tester.tap(
+        find.bySemanticsLabel('Explain Back up your conversations'),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining(detail), findsOneWidget);
+
+      await tester.tap(
+        find.bySemanticsLabel(
+          'Hide the explanation of Back up your conversations',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining(detail), findsNothing);
     });
 
     testWidgets('adding a contact you already have OPENS the thread', (

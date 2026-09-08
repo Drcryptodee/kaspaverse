@@ -157,14 +157,38 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// the keyboard mark instead of the smile.
   bool _emojiUp = false;
 
-  /// The composer field's resting height.
+  /// **The system keyboard's own height, remembered from the last time it was
+  /// up** — and the height our panel takes.
   ///
-  /// **44, down from 52** (founder, 2026-09-08: *"the height of the pill shaped
-  /// input, the height is not giving"*). 52 is [KvSpace.touchTarget] and it is
-  /// the right floor for a CONTROL; a text field is a surface you type into,
-  /// its target is its whole area, and at 52 with 12 dp of vertical padding the
-  /// words floated in the middle of it. 44 with 8 fills the pill.
-  static const double _fieldHeight = 44;
+  /// Founder, 2026-09-08: *"I want it to be the same height and lenght with the
+  /// systems keyboard height. cos when i toggle back to keyboard, there is this
+  /// bad UX jump of the keyboard which is taller than the emoji thingy."* A
+  /// fixed 260 was always going to be wrong for somebody: keyboard height is
+  /// the IME's decision, it differs per keyboard, per language, per device, and
+  /// it changes when a suggestion strip appears.
+  ///
+  /// So it is measured rather than chosen. `viewInsets.bottom` IS the keyboard
+  /// while the keyboard is up; we latch the last non-zero reading and hand our
+  /// panel the same number, so the swap is a content change under a lid that
+  /// never moves. [_panelFallback] covers the one case with no reading yet — a
+  /// user whose first action in a thread is the emoji key.
+  double _keyboardHeight = 0;
+
+  /// The keyboard has been asked for and has not arrived yet, so our panel
+  /// stays up underneath it.
+  ///
+  /// **This is what actually removes the jump.** Collapsing our panel the
+  /// instant the tap lands drops the composer to the bottom of the screen for
+  /// the two or three frames before the IME's own animation reaches it, and
+  /// that dip is the thing that reads as a jolt — matching the heights alone
+  /// does not fix it. Holding the panel until `viewInsets` goes non-zero means
+  /// the lid never moves: our panel is replaced by the keyboard behind it.
+  bool _awaitingKeyboard = false;
+
+  /// Until the keyboard has been seen once. Deliberately close to a common
+  /// Android keyboard so a first-tap panel is not wildly off; it is replaced
+  /// by the real number the first time the keyboard opens.
+  static const double _panelFallback = 260;
 
   /// **Swap the system keyboard for the emoji panel, and back.**
   ///
@@ -177,7 +201,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
   void _toggleEmoji() {
     KvHaptic.selection();
     if (_emojiUp) {
-      setState(() => _emojiUp = false);
+      // Ask for the keyboard and KEEP our panel up until it is actually
+      // there — see [_awaitingKeyboard].
+      setState(() => _awaitingKeyboard = true);
       _composeFocus.requestFocus();
       return;
     }
@@ -239,7 +265,11 @@ class _ThreadScreenState extends State<ThreadScreen> {
     // Focus means the system keyboard is coming up, so ours goes down. This
     // covers the tap-into-the-field case without the field having to know the
     // panel exists.
-    if (_composeFocus.hasFocus && _emojiUp) setState(() => _emojiUp = false);
+    // Focus alone is not the keyboard: `_toggleEmoji` requests focus and then
+    // waits for the INSET, so this must not pull the panel out from under it.
+    if (_composeFocus.hasFocus && _emojiUp && !_awaitingKeyboard) {
+      setState(() => _emojiUp = false);
+    }
   }
 
   void _onDraft() {
@@ -698,6 +728,22 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // **Latch the keyboard's height while it is up.** Read in `build` rather
+    // than through `WidgetsBindingObserver`: the inset already rebuilds this
+    // widget on every frame of the keyboard's own animation, so this sees the
+    // settled value without a second subscription to keep in step.
+    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    if (inset > 0 && inset != _keyboardHeight) _keyboardHeight = inset;
+    // The keyboard has arrived — our panel can go now, and only now.
+    if (_awaitingKeyboard && inset > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_awaitingKeyboard) return;
+        setState(() {
+          _awaitingKeyboard = false;
+          _emojiUp = false;
+        });
+      });
+    }
     final theme = Theme.of(context);
     final address = widget.contactAddress;
     final initial = _nameOf(widget.contactLabel);
@@ -785,111 +831,100 @@ class _ThreadScreenState extends State<ThreadScreen> {
               child: Padding(
                 padding: const EdgeInsets.only(
                   top: KvSpace.s,
-                  bottom: KvSpace.l,
+                  bottom: KvSpace.sm,
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // **One right edge** (A11, the founder's own ragged-edge
-                    // finding): the mark is a 44 dp disc centred in a 52 dp
-                    // target, so a figure right-aligned to the ROW overhangs
-                    // the disc it belongs to by the 4 dp inset.
-                    Padding(
-                      padding: const EdgeInsets.only(
-                        right: (KvSpace.touchTarget - KvSpace.iconButton) / 2,
-                        bottom: 2,
-                      ),
-                      child: _ComposerFee(sompi: _fee),
-                    ),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        // **The field takes everything the mark does not.**
-                        Expanded(
-                          child: Container(
-                            constraints: const BoxConstraints(
-                              minHeight: _fieldHeight,
-                            ),
-                            // **Tight** (founder, 2026-09-08: *"the padding on
-                            // top, right, bottom, left, is just too much for
-                            // my liking. reduce it, doesnt really need
-                            // padding"*). It was 20 horizontal and 12
-                            // vertical inside a 52 dp minimum, so the words
-                            // sat in the middle of a tall pill with air all
-                            // round them. 14 / 8 in a 44 dp pill fills it the
-                            // way WhatsApp and Telegram do, and the height it
-                            // gives back goes to the thread.
-                            padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-                            decoration: BoxDecoration(
-                              color: KvColor.plate,
-                              borderRadius: BorderRadius.circular(
-                                KvRadius.pill,
-                              ),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: _compose,
-                                    focusNode: _composeFocus,
-                                    minLines: 1,
-                                    maxLines: 4,
-                                    keyboardType: TextInputType.multiline,
-                                    textInputAction: TextInputAction.newline,
-                                    cursorColor: KvColor.primary,
-                                    style: const TextStyle(
-                                      fontFamily: KvFont.ui,
-                                      fontSize: 15,
-                                      height: 20 / 15,
-                                      fontWeight: FontWeight.w400,
-                                      fontVariations: KvWeight.w400,
-                                      color: KvColor.ink,
-                                    ),
-                                    decoration: const InputDecoration(
-                                      isDense: true,
-                                      border: InputBorder.none,
-                                      enabledBorder: InputBorder.none,
-                                      focusedBorder: InputBorder.none,
-                                      contentPadding: EdgeInsets.zero,
-                                      hintText: 'Message',
-                                      hintStyle: TextStyle(
-                                        fontFamily: KvFont.ui,
-                                        fontSize: 15,
-                                        height: 20 / 15,
-                                        fontWeight: FontWeight.w400,
-                                        fontVariations: KvWeight.w400,
-                                        color: KvColor.inkMeta,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                // **The emoji key, inside the field at its far
-                                // right** (founder, 2026-09-08). It toggles to
-                                // a keyboard mark while the emoji panel is up,
-                                // so the one control says which way it goes.
-                                _EmojiKey(
-                                  showingEmoji: _emojiUp,
-                                  onTap: _toggleEmoji,
-                                ),
-                              ],
-                            ),
+                // **ONE container: the words above, the controls in its
+                // bottom-right corner** (founder, 2026-09-08: *"the send
+                // button, the input, the emoji and all is in one container and
+                // the send button and emoji always stay at the bottom right
+                // corner of the chat input container, while the texts are
+                // above and clearly seen and aligned even if the texts are
+                // much"*).
+                //
+                // The shape before this was a pill with the controls INSIDE it
+                // on one line, which is WhatsApp's for a single line and comes
+                // apart the moment a message is long: the marks ride the last
+                // line, so they drift down the box as it grows and the text
+                // has to flow around them. Claude's and Gemini's composers
+                // solve it the same way this now does — the text owns its own
+                // full width at the top, and the controls own a fixed row
+                // under it. Nothing reflows as the message grows; the box just
+                // gets taller.
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(14, 10, 8, 8),
+                  decoration: BoxDecoration(
+                    color: KvColor.plate,
+                    borderRadius: BorderRadius.circular(KvRadius.bubble),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: _compose,
+                        focusNode: _composeFocus,
+                        minLines: 1,
+                        // Taller than the old four: the container no longer
+                        // has to share its line with anything, so a long
+                        // message can actually be read before it is sent.
+                        maxLines: 6,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        cursorColor: KvColor.primary,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 15,
+                          height: 20 / 15,
+                          fontWeight: FontWeight.w400,
+                          fontVariations: KvWeight.w400,
+                          color: KvColor.ink,
+                        ),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          contentPadding: EdgeInsets.zero,
+                          hintText: 'Message',
+                          hintStyle: TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 15,
+                            height: 20 / 15,
+                            fontWeight: FontWeight.w400,
+                            fontVariations: KvWeight.w400,
+                            color: KvColor.inkMeta,
                           ),
                         ),
-                        const SizedBox(width: KvSpace.s),
-                        _SendMark(
-                          armed: _draft.trim().isNotEmpty && !_sending,
-                          // A disabled control says WHY, and the two reasons
-                          // it can be disabled are different facts (BG-12).
-                          reason: _sending
-                              ? 'Sending…'
-                              : 'Write a message first',
-                          onTap: _send,
-                        ),
-                      ],
-                    ),
-                  ],
+                      ),
+                      const SizedBox(height: KvSpace.xs),
+                      // **The controls' own row, pinned to the bottom.** The
+                      // fee sits at its left because that is the one piece of
+                      // empty space in the box and it puts the price
+                      // immediately beside the control that spends it — still
+                      // tiny, still by the send mark, and no longer a floating
+                      // line above a container it does not belong to.
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Expanded(child: _ComposerFee(sompi: _fee)),
+                          _EmojiKey(
+                            showingEmoji: _emojiUp,
+                            onTap: _toggleEmoji,
+                          ),
+                          const SizedBox(width: KvSpace.xs),
+                          _SendMark(
+                            armed: _draft.trim().isNotEmpty && !_sending,
+                            // A disabled control says WHY, and the two reasons
+                            // it can be disabled are different facts (BG-12).
+                            reason: _sending
+                                ? 'Sending…'
+                                : 'Write a message first',
+                            onTap: _send,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -904,7 +939,13 @@ class _ThreadScreenState extends State<ThreadScreen> {
               curve: KvMotion.curve,
               alignment: Alignment.topCenter,
               child: _emojiUp
-                  ? _EmojiPanel(height: 260, onPick: _insertEmoji)
+                  ? _EmojiPanel(
+                      // The keyboard's own height, so the swap moves nothing.
+                      height: _keyboardHeight > 0
+                          ? _keyboardHeight
+                          : _panelFallback,
+                      onPick: _insertEmoji,
+                    )
                   : const SizedBox(width: double.infinity),
             ),
           ],
@@ -1258,22 +1299,16 @@ class _ComposerFee extends StatelessWidget {
   Widget build(BuildContext context) {
     final fee = sompi;
     return SizedBox(
-      // **Its own full-width line, above the composer row.**
+      // **In the composer's own bottom row, at its left.**
       //
-      // It began beside the send mark, in a non-flex column next to an
-      // `Expanded` field — so the field's width was negotiated against a
-      // string that changes as the user types: measured off the frames,
-      // 299 → 271 dp at 393 on the first keystroke, and 228 → 177 dp at
-      // 320 dp / 1.3×, which is what wrapped a short draft onto two lines
-      // (BG-24, `ux-auditor` BLOCK; this comment used to assert the opposite
-      // as settled fact, which is the scar the fix is for).
-      //
-      // A 52 dp slot beside the mark was the other candidate and it fails
-      // differently: `0.000143 KAS` scaled into the control's own width lands
-      // near 8.7 dp, under BG-14's 11 dp floor. A full-width line owes the
-      // field nothing, holds the figure at full size, and still puts it
-      // exactly where the founder asked — *"tiny above the send button"* —
-      // because it right-aligns to the same edge the mark does.
+      // It has moved twice and both moves were the same lesson. Beside the
+      // send mark in a non-flex column it SIZED the field next to it
+      // (measured off the frames: 299 → 271 dp at 393 on the first
+      // keystroke); on its own line above the box it held its size but
+      // floated over a container it did not belong to. Inside the box, on the
+      // row the controls own, it takes the one piece of empty space there is
+      // and costs the words nothing — that row's height is already set by the
+      // marks beside it.
       //
       // **The height takes the scaler.** Measured with a `TextPainter`: this
       // line box is 14.0 / 16.0 / 18.0 dp at 1.0 / 1.15 / 1.3, so a fixed 14
@@ -1297,7 +1332,7 @@ class _ComposerFee extends StatelessWidget {
         // [kasCanonical], which is the send screen's own rule, so one payment
         // and one message never print a fee two ways.
         child: Align(
-          alignment: Alignment.centerRight,
+          alignment: Alignment.centerLeft,
           child: Text.rich(
             TextSpan(
               children: [
@@ -1315,7 +1350,7 @@ class _ComposerFee extends StatelessWidget {
               ],
             ),
             maxLines: 1,
-            textAlign: TextAlign.end,
+            textAlign: TextAlign.start,
             // §2 sets `metaMono` at 500. (The face itself declares wght
             // 100–800 with a 400 default — read from the variable font's
             // `fvar`, not remembered; an earlier comment here claimed the
@@ -1377,8 +1412,10 @@ class _SendMark extends StatelessWidget {
           behavior: HitTestBehavior.opaque,
           onTap: armed ? onTap : null,
           child: SizedBox(
+            // Square-ish, and still BG-12's floor of tappable width — the
+            // box's own padding gives the rest of the target.
             width: KvSpace.touchTarget,
-            height: _ThreadScreenState._fieldHeight,
+            height: 36,
             child: Center(
               child: AnimatedSwitcher(
                 duration: KvMotion.fast,
@@ -1592,8 +1629,8 @@ class _EmojiKey extends StatelessWidget {
           behavior: HitTestBehavior.opaque,
           onTap: onTap,
           child: SizedBox(
-            width: 34,
-            height: 28,
+            width: 40,
+            height: 36,
             child: Center(
               child: KvGlyphIcon(
                 showingEmoji ? KvGlyph.keyboard : KvGlyph.smile,

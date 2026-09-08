@@ -6,6 +6,7 @@ import '../error_text.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_chrome.dart';
+import '../widgets/kv_disclosure.dart';
 import '../widgets/kv_glyph.dart';
 import '../widgets/kv_rows.dart';
 import '../widgets/kv_sheet.dart';
@@ -242,21 +243,17 @@ class _BackupBlock extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              'Back up your conversations',
-              style: theme.textTheme.bodyMedium,
-            ),
-            const SizedBox(height: KvSpace.s),
-            Text(
-              'Your recovery phrase rebuilds your money on any device. It does '
-              'not rebuild your contacts — those live only here. Backing up '
-              'parks them on Kaspa, sealed to your own key, so a restore finds '
-              'them too. It costs a network fee; the amount comes straight '
-              'back to you.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.inkDim,
-                fontFamily: KvFont.ui,
-              ),
+            // **The heading stands; the paragraph waits behind its mark**
+            // (founder ruling, 2026-09-08 — see [KvDisclosure] for the rule
+            // and for what may never be hidden this way).
+            const KvDisclosure(
+              title: 'Back up your conversations',
+              detail:
+                  'Your recovery phrase rebuilds your money on any device. It '
+                  'does not rebuild your contacts — those live only here. '
+                  'Backing up parks them on Kaspa, sealed to your own key, so '
+                  'a restore finds them too. It costs a network fee; the '
+                  'amount comes straight back to you.',
             ),
             const SizedBox(height: KvSpace.s),
             Text(
@@ -490,16 +487,13 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
             const SizedBox(height: KvSpace.l),
             const KvHairline(),
             const SizedBox(height: KvSpace.l),
-            Text(
-              'Your Kaspa node only keeps recent history (about 30 hours). '
-              'Messages sent while the app is closed longer than that — or '
-              'past the quick catch-up window — need an archive to recover.',
-              // Prose is Inter (§4 role map) — bare bodySmall is the mono
-              // data face here.
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: KvColor.inkDim,
-                fontFamily: KvFont.ui,
-              ),
+            const KvDisclosure(
+              title: 'Recovering what your node no longer holds',
+              detail:
+                  'Your Kaspa node only keeps recent history (about 30 '
+                  'hours). Messages sent while the app is closed longer than '
+                  'that — or past the quick catch-up window — need an archive '
+                  'to recover.',
             ),
             const SizedBox(height: KvSpace.m),
             // **`KvToggle`, not `SwitchListTile`** (D-206, landed at UX-3).
@@ -536,6 +530,21 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
                 color: KvColor.chip,
                 borderRadius: BorderRadius.circular(KvRadius.inner),
               ),
+              // **BG-34 does NOT apply here, and the attempt to apply it is
+              // the rule's worked example.**
+              //
+              // This was briefly put behind an info mark, opening only while
+              // the archive was on. A test written for D-074 refused it, and
+              // the test was right: this text is the CONSENT for the toggle
+              // beside it, so it has to be readable BEFORE the flip, not
+              // after. BG-34 hides explanation and never consequence — and
+              // the consequence of a choice a user is being offered is the
+              // most consequential thing on the surface.
+              //
+              // The rule earned its exception clause here rather than in the
+              // abstract; the two headings above it (how a backup works, why
+              // a node loses history) are explanation and are correctly
+              // behind their marks.
               child: Text(
                 'What the archive operator learns: which addresses and '
                 'conversation tags you look up, and when you check.\n\n'
