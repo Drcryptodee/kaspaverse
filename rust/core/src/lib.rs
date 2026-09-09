@@ -5,7 +5,7 @@
 //! either direction (INV-1/2/3). The flow:
 //!
 //! ```text
-//! create:  MnemonicCeremony::generate() ─┐
+//! create:  MnemonicCeremony::generate(n) ─┐
 //! restore: MnemonicCeremony::restore()  ─┴─ into_seed(extra_word) → SecretSeed
 //!          SecretSeed ─ seal_seed() → blob (at rest)         [vault.rs]
 //!          blob ─ unseal_seed() → SecretSeed                 [vault.rs]
@@ -40,7 +40,10 @@ pub use mnemonic::MnemonicCeremony;
 pub use seed::SecretSeed;
 pub use signer::{UnlockedVault, VaultSigner};
 pub use transport_keys::{KeySlot, TransportDecryptor};
-pub use vault::{seal_seed, unseal_seed, SealParams, BLOB_LEN};
+pub use vault::{
+    read_facts, seal_seed, unseal_seed, BlobFacts, InputKind, SealParams, BLOB_LEN, BLOB_LEN_V1,
+    PEPPER_LEN,
+};
 
 // Re-exported so callers name the network without depending on the kaspa
 // crates directly.

@@ -292,6 +292,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  VaultInputKind dco_decode_vault_input_kind(dynamic raw);
+
+  @protected
   VaultKdfParams dco_decode_vault_kdf_params(dynamic raw);
 
   @protected
@@ -628,6 +631,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  VaultInputKind sse_decode_vault_input_kind(SseDeserializer deserializer);
 
   @protected
   VaultKdfParams sse_decode_vault_kdf_params(SseDeserializer deserializer);
@@ -1048,6 +1054,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_vault_input_kind(
+    VaultInputKind self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_vault_kdf_params(

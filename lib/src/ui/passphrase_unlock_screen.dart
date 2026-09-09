@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../rust/api/vault.dart' as vault_api;
 import '../services/vault_service.dart';
 import 'secret/masked_dots.dart';
 import 'secret/secret_byte_buffer.dart';
@@ -8,6 +9,8 @@ import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'error_text.dart';
 import 'theme/tokens.dart';
+import 'widgets/kv_chrome.dart';
+import 'widgets/kv_keypad.dart';
 
 /// The §0.6 passphrase unlock screen (P1.4 deliverable 3) — the Path-B lane the
 /// shell's biometric-first [UnlockSurface] hands off to. FLAG_SECURE + a11y
@@ -23,12 +26,17 @@ class PassphraseUnlockScreen extends StatefulWidget {
   const PassphraseUnlockScreen({
     super.key,
     this.unlock,
+    this.inputKind,
     this.checkAccessibility,
     this.setSecure,
   });
 
   /// Test seam: run the unlock. Defaults to the real `VaultService` lane.
   final Future<void> Function(Uint8List passphrase)? unlock;
+
+  /// **Which pad this vault was sealed with** (D-312). Defaults to the lane,
+  /// which reads the blob header and answers `passphrase` on any failure.
+  final Future<vault_api.VaultInputKind> Function()? inputKind;
 
   /// Forwarded to [SecretScreenGuard] (test seams).
   final Future<bool> Function()? checkAccessibility;
@@ -43,11 +51,75 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
   bool _busy = false;
   String? _message;
 
+  /// **The pad this screen offers FIRST — never the pad it allows.**
+  ///
+  /// It starts on the keyboard and moves to the number pad only if the vault
+  /// says so, because that is the safe direction: an alphanumeric pad can enter
+  /// a PIN, and a number pad cannot enter a passphrase. Drawing digits at
+  /// somebody whose secret has letters in it would lock them out of their own
+  /// wallet while they were holding the correct answer, so [_padSwitchLabel] is
+  /// on the glass in **both** states and the byte in the header is advice.
+  vault_api.VaultInputKind _pad = vault_api.VaultInputKind.passphrase;
+  bool get _isPin => _pad == vault_api.VaultInputKind.digits;
+
+  static const int _pinLength = 6;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolvePad();
+  }
+
+  Future<void> _resolvePad() async {
+    final read = widget.inputKind ?? VaultService.instance.vaultInputKind;
+    // **Caught here, in the screen that draws the pad.** The rule is the safe
+    // direction and it belongs to the surface it protects: on ANY failure —
+    // no blob, a malformed header, a channel that did not answer — this stays
+    // on the keyboard, because the alphanumeric pad can enter a PIN and the
+    // number pad cannot enter a passphrase. A wrong guess this way costs a tap;
+    // the other way locks somebody out of their own wallet while they are
+    // holding the correct secret.
+    vault_api.VaultInputKind kind;
+    try {
+      kind = await read();
+    } catch (_) {
+      return; // keep the default
+    }
+    if (!mounted) return;
+    setState(() => _pad = kind);
+  }
+
   @override
   void dispose() {
     _buffer.dispose();
     super.dispose();
   }
+
+  /// A digit, and the sixth one unlocks — the render's own contract, and the
+  /// one every lock screen on the phone already keeps.
+  void _onPinChar(String c) {
+    if (_buffer.length.value >= _pinLength || _busy) return;
+    _buffer.appendChar(c);
+    if (_buffer.length.value >= _pinLength) _submit();
+  }
+
+  void _switchPad() {
+    // A half-typed secret does not survive the pad that was typing it, and the
+    // two pads do not share an alphabet (INV-1/3).
+    _buffer.wipe();
+    setState(() {
+      _pad = _isPin
+          ? vault_api.VaultInputKind.passphrase
+          : vault_api.VaultInputKind.digits;
+      _message = null;
+    });
+  }
+
+  /// **One act, one pair of names.** The create and restore ceremonies offer
+  /// the same swap and must not call it something else: two names for one act
+  /// is the same object wearing two faces (BG-21; `ux-auditor`, D-312).
+  String get _padSwitchLabel =>
+      _isPin ? 'Use a keyboard passphrase' : 'Use a 6-digit PIN';
 
   Future<void> _submit() async {
     if (_buffer.isEmpty || _busy) return;
@@ -63,6 +135,15 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) {
+        // **The wrong secret does not survive the attempt that spent it.** On
+        // the PIN path this is not only INV-3 hygiene: the wells stay full,
+        // `_onPinChar` early-returns at six, and there is no commit control —
+        // so a failed attempt left a pad every press of which did nothing, and
+        // a wrong six digits resident in the buffer inviting a retry that could
+        // not happen (`wallet-security-auditor`, D-312). The keyboard path
+        // clears too, because retyping from scratch is what a user does after a
+        // refusal anyway.
+        _buffer.wipe();
         setState(() {
           _busy = false;
           _message = _calmError(e);
@@ -82,14 +163,26 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
     if (isLockedOut(e)) {
       return 'Too many attempts. Wait a moment, then try again — your funds are safe.';
     }
-    return 'That passphrase did not unlock the vault. Your funds are safe — try again.';
+    // **Not "wrong passphrase" — the secret may be perfectly correct.** A
+    // device-bound vault (D-312) is unopenable on any phone but the one that
+    // sealed it, and telling somebody to try again would be telling them to
+    // keep retyping the right answer. The way out is the recovery words, and
+    // the copy says so instead of hiding it behind a retry.
+    if (isDeviceBinding(e)) {
+      return 'This wallet is locked to the phone that made it, and this phone '
+          'cannot open it. Restore from your recovery words instead — your '
+          'funds are safe.';
+    }
+    return _isPin
+        ? 'That PIN did not unlock the vault. Your funds are safe — try again.'
+        : 'That passphrase did not unlock the vault. Your funds are safe — try again.';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return SecretScreenGuard(
-      title: 'your passphrase',
+      title: _isPin ? 'your PIN' : 'your passphrase',
       setSecure: widget.setSecure,
       checkAccessibility: widget.checkAccessibility,
       child: Scaffold(
@@ -115,18 +208,30 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(
-                        'Enter your passphrase',
+                        _isPin ? 'Enter your PIN' : 'Enter your passphrase',
                         style: theme.textTheme.headlineSmall,
                       ),
                       const SizedBox(height: KvSpace.l),
-                      MaskedDots(length: _buffer.length),
+                      MaskedDots(
+                        length: _buffer.length,
+                        slots: _isPin ? _pinLength : null,
+                      ),
                       const SizedBox(height: KvSpace.l),
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton(
-                          onPressed: _busy ? null : _submit,
-                          child: Text(_busy ? 'Unlocking…' : 'Unlock'),
+                      // The PIN path unlocks itself on the sixth digit, so it
+                      // needs no commit; the keyboard path's secret has no
+                      // length the app can infer, so it does.
+                      if (!_isPin)
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: _busy ? null : _submit,
+                            child: Text(_busy ? 'Unlocking…' : 'Unlock'),
+                          ),
                         ),
+                      const SizedBox(height: KvSpace.s),
+                      KvTextAction(
+                        label: _padSwitchLabel,
+                        onTap: _busy ? null : _switchPad,
                       ),
                       if (_message != null) ...[
                         const SizedBox(height: KvSpace.m),
@@ -142,10 +247,23 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
                   ),
                 ),
               ),
-              SecretKeyboard(
-                onChar: (c) => _buffer.appendChar(c),
-                onBackspace: _buffer.backspace,
-              ),
+              if (_isPin)
+                // `O2`'s number pad is drawn inset — see
+                // `create_screen._keypad` for why this one and not the other.
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: KvSpace.gutter,
+                  ),
+                  child: KvKeypad.pin(
+                    onChar: _onPinChar,
+                    onBackspace: _buffer.backspace,
+                  ),
+                )
+              else
+                SecretKeyboard(
+                  onChar: (c) => _buffer.appendChar(c),
+                  onBackspace: _buffer.backspace,
+                ),
             ],
           ),
         ),

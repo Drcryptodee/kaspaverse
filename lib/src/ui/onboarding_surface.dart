@@ -97,17 +97,19 @@ class OnboardingSurface extends StatelessWidget {
             ),
             const SizedBox(height: KvSpace.s20),
             // **The founder wrote this line himself on glass** (UX-R6 glass
-            // beat), under the heading he kept. The old sentence argued the
-            // custody model — *answers to no one else, including us* — which
-            // is the same ground the heading above already holds. This one
-            // says what the custody model BUYS and then greets, so the two
-            // lines stop repeating each other.
+            // beat), under the heading he kept, and then cut half of it on the
+            // next look: *"remove 'Unstoppable. Instant. Yours' … keep only
+            // 'Welcome to KaspaVerse'."* What went was the claim; what stayed
+            // is the greeting. The heading above already argues the custody
+            // model, so a second line arguing it too was the repetition the
+            // first edit was meant to end — the cut finishes that job rather
+            // than reversing it.
             //
             // **20, not 15**: he measured it by eye at "about 37% more
             // bigger", and 15 x 1.37 = 20.55, which the ramp rounds to its 20
             // rung. It is a greeting, so it can be read at arm's length.
             Text(
-              'Unstoppable. Instant. Yours.\nWelcome to KaspaVerse.',
+              'Welcome to KaspaVerse.',
               style: const TextStyle(
                 fontFamily: KvFont.ui,
                 fontSize: 20,

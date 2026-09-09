@@ -341,6 +341,24 @@ class MainActivity : FlutterFragmentActivity() {
                     // the second is both the common case and the actionable one —
                     // answered as `false`, the enrolment offer simply never appears
                     // and the user is told nothing at all.
+                    // The D-312 device binding, installed for the ONE vault
+                    // operation Dart is about to run. Returns whether this phone
+                    // could produce it; the CONSEQUENCE of `false` is Rust's to
+                    // decide (`binding_for`), never a caller's — a passphrase
+                    // vault seals without it, a 6-digit PIN is refused.
+                    //
+                    // The pepper itself never returns over this channel. It goes
+                    // Kotlin -> Rust by JNI, so the hardware factor has no more
+                    // presence in the Dart heap than the seed does (INV-1/3).
+                    "installVaultPepper" -> result.success(KeystoreVault.installPepper(this))
+
+                    // **Asking must not cost what using costs.** The create and
+                    // restore screens probe this when the user picks the PIN, so
+                    // they can refuse there rather than at the seal; it does the
+                    // same work and throws the pepper away, leaving nothing
+                    // resident (`ffi-leak-auditor`, D-312).
+                    "canDeviceBind" -> result.success(KeystoreVault.canBind(this))
+
                     "biometricStatus" -> result.success(KeystoreVault.biometricStatus(this))
 
                     "pathAEnrolled" -> result.success(KeystoreVault.isEnrolled(this))

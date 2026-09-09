@@ -189,7 +189,7 @@ mod tests {
     use kaspa_consensus_core::tx::Transaction;
 
     fn unlocked_vault() -> UnlockedVault {
-        let seed = MnemonicCeremony::generate()
+        let seed = MnemonicCeremony::generate(12)
             .unwrap()
             .into_seed(b"")
             .unwrap();

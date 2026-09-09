@@ -134,6 +134,22 @@ abstract final class KvColor {
   /// Ink on a [primary] fill. 11.31:1.
   static const Color onPrimary = Color(0xFF06201B);
 
+  /// **The mark's stroke, and the one deliberate pure black in this palette.**
+  ///
+  /// Every other dark here leans teal — §1.1 makes a pure grey the defect
+  /// rather than the rule — so this token exists to say that the exception is
+  /// intentional and bounded to ONE object. The founder's ruling, 2026-09-09:
+  /// *"could you make the stroke dark? like #000000."* It supersedes his own
+  /// 2026-09-07 call that put the stroke on [abyss] (D-294's transcription
+  /// paints it `plate`), and the direction of travel is the same both times —
+  /// darker, so the teal comes out harder against it.
+  ///
+  /// It is **artwork ink, never surface ink**: nothing but [KvMark] may take
+  /// it. A pure black behind text or under a card would be the grey this
+  /// palette's first rule forbids, and the reason this one is allowed is that
+  /// the mark is a drawing rather than a surface. 15.9:1 on [primary].
+  static const Color markInk = Color(0xFF000000);
+
   // ── §1.6 Value — four hues, each with its tint ────────────────────────────
   //
   // The disc is the whole signal: a hue arrives as a 40 dp disc of its tint

@@ -290,6 +290,10 @@ class KvSecretField extends StatelessWidget {
     required this.length,
     required this.active,
     required this.placeholder,
+    this.enabled = true,
+    this.onTap,
+    this.revealed,
+    this.onReveal,
   });
 
   final ValueListenable<int> length;
@@ -301,53 +305,209 @@ class KvSecretField extends StatelessWidget {
 
   final String placeholder;
 
+  /// **Whether this field can be typed into at all**, which is a different
+  /// question from [active] and the render draws both. `O5` shows the two boxes
+  /// before the switch is on: they are what tells you *this word gets typed
+  /// twice* before you have committed to typing it once. A disabled field is
+  /// quiet and unpressable; an inactive one is live but not the one taking keys.
+  final bool enabled;
+
+  /// Take the keyboard. Null means this field cannot be focused — a disabled
+  /// field, or a screen with no focus model.
+  final VoidCallback? onTap;
+
+  /// **The characters, while a hold is down** (D-312, §3 of the R6b prompt).
+  ///
+  /// Non-null only for the duration of a press on [onReveal]'s control, and the
+  /// `String` behind it is [SecretByteBuffer.revealWhileHeld]'s ledgered
+  /// residual — read that doc before touching this. Null means masked, which is
+  /// every other moment.
+  final String? revealed;
+
+  /// Drives the trailing eye. Null draws no eye at all, which is what every
+  /// field but `O5`'s first one wants.
+  final ValueChanged<bool>? onReveal;
+
   @override
-  Widget build(BuildContext context) => Container(
-    height: KvSpace.control,
-    width: double.infinity,
-    alignment: Alignment.centerLeft,
-    // `O5` measured: the dots start 22 dp inside the field.
-    padding: const EdgeInsets.symmetric(horizontal: KvSpace.s22),
-    // **Focus is the fill, not a teal ring.** The active field carried a
-    // 1.5 dp `primary` outline and the founder read it on glass as
-    // "not-quite-it" — full-strength teal is the app's commit colour (BG-7,
-    // BG-27: lit means committable), and spending it on *which box has the
-    // caret* devalues it on the pill directly below that actually commits.
-    // The active field lifts to `chip` and takes a hairline `edgeHi`; the
-    // inactive one stays `plate` and unstroked. Same signal, quieter register,
-    // and the teal is left to mean one thing.
-    decoration: BoxDecoration(
-      color: active ? KvColor.chip : KvColor.plate,
-      borderRadius: BorderRadius.circular(KvRadius.control),
-      border: Border.all(
-        color: active ? KvColor.edgeHi : Colors.transparent,
-        width: 1,
+  Widget build(BuildContext context) {
+    final onReveal = this.onReveal;
+    final field = Container(
+      // **A minimum, not a fixed height** — because the revealed word must be
+      // ALL of it. Clipped to one line the field faded the tail of any secret
+      // wider than the box: measured at BG-14's own floor (320 dp / 1.3×) a
+      // twelve-character word lost about a third of itself, silently, on the
+      // one control whose entire purpose is reading a word back against a
+      // piece of paper. That is `KvAddress`'s ruling in §4 — *an ellipsis eats
+      // the tail, the one part a person actually checks* — arriving on a
+      // second surface (`ux-auditor` BLOCK, D-312).
+      //
+      // Growing is safe here in a way it was not on the restore tray (L200):
+      // there is one field, and what moves is everything BELOW it, by one line.
+      // Nothing changes identity or position relative to its own label, and
+      // the acts are pinned in the foot, so no control moves under the thumb.
+      constraints: const BoxConstraints(minHeight: KvSpace.control),
+      width: double.infinity,
+      alignment: Alignment.centerLeft,
+      // `O5` measured: the dots start 22 dp inside the field.
+      padding: const EdgeInsets.symmetric(
+        horizontal: KvSpace.s22,
+        vertical: KvSpace.s,
       ),
-    ),
-    child: ValueListenableBuilder<int>(
-      valueListenable: length,
-      builder: (context, n, _) => n == 0
-          ? Text(
+      // **Focus is the fill, not a teal ring.** The active field carried a
+      // 1.5 dp `primary` outline and the founder read it on glass as
+      // "not-quite-it" — full-strength teal is the app's commit colour (BG-7,
+      // BG-27: lit means committable), and spending it on *which box has the
+      // caret* devalues it on the pill directly below that actually commits.
+      // The active field lifts to `chip` and takes a hairline `edgeHi`; the
+      // inactive one stays `plate` and unstroked. Same signal, quieter register,
+      // and the teal is left to mean one thing.
+      decoration: BoxDecoration(
+        color: active && enabled ? KvColor.chip : KvColor.plate,
+        borderRadius: BorderRadius.circular(KvRadius.control),
+        border: Border.all(
+          color: active && enabled ? KvColor.edgeHi : Colors.transparent,
+          width: 1,
+        ),
+      ),
+      child: ValueListenableBuilder<int>(
+        valueListenable: length,
+        builder: (context, n, _) {
+          final shown = revealed;
+          if (shown != null && n > 0) {
+            // The ledgered residual, on the glass. Mono because it is being
+            // read back character by character against a piece of paper, which
+            // is the whole reason the eye exists.
+            //
+            // **`ExcludeSemantics`, and it is not cosmetic.** A `Text` puts its
+            // string in a `SemanticsNode` label — a second GC-heap copy held by
+            // the framework, and the one surface an accessibility or automation
+            // client reads. `SecretScreenGuard` already fails closed against an
+            // active a11y service, so this is the second fence rather than the
+            // first (`ffi-leak-auditor`, D-312). The masked path is wrapped for
+            // the opposite reason: a dot run has to ANNOUNCE its length,
+            // because it has nothing else to say.
+            return ExcludeSemantics(
+              // **Wraps, and is never truncated.** See the box above.
+              //
+              // **Mono, and the ruling is named here rather than inferred.**
+              // `KvWordChip` sets a recovery WORD in Jakarta because it is a
+              // word from a fixed list; this is an arbitrary case-sensitive
+              // string the user invented and is now checking character by
+              // character against paper, where `l`/`I`/`1` and `O`/`0` have to
+              // be distinguishable. That is what mono is for (BG-30's
+              // reasoning, applied to a string rather than a figure).
+              child: Text(
+                shown,
+                style: const TextStyle(
+                  fontFamily: KvFont.mono,
+                  fontSize: 15,
+                  height: 22 / 15,
+                  fontWeight: FontWeight.w500,
+                  fontVariations: KvWeight.w500,
+                  color: KvColor.ink,
+                ),
+              ),
+            );
+          }
+          if (n == 0) {
+            return Text(
               placeholder,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: KvFont.ui,
                 fontSize: 15,
                 height: 22 / 15,
-                // A placeholder that is not information is `etch` (§1.3).
-                color: KvColor.etch,
+                fontWeight: FontWeight.w400,
+                fontVariations: KvWeight.w400,
+                // A placeholder that is not information is `etch` (§1.3); a
+                // DISABLED field's placeholder is quieter still, because it is
+                // describing something you cannot do yet.
+                color: enabled
+                    ? KvColor.etch
+                    : KvColor.etch.withValues(alpha: 0.6),
               ),
-            )
-          : Semantics(
-              label: '$n characters entered',
-              child: KvMaskDots.length(
-                n,
-                // `O5` measured: 4.2 dp `ink` dots on a 12.75 pitch.
-                size: 4.2,
-                gap: 8.5,
-                tone: KvColor.ink,
-                alignment: WrapAlignment.start,
-              ),
+            );
+          }
+          return Semantics(
+            label: '$n characters entered',
+            child: KvMaskDots.length(
+              n,
+              // `O5` measured: 4.2 dp `ink` dots on a 12.75 pitch.
+              size: 4.2,
+              gap: 8.5,
+              tone: KvColor.ink,
+              alignment: WrapAlignment.start,
             ),
+          );
+        },
+      ),
+    );
+
+    final body = onReveal == null
+        ? field
+        : Row(
+            children: [
+              Expanded(child: field),
+              const SizedBox(width: KvSpace.s),
+              _KvFieldEye(revealed: revealed != null, onChanged: onReveal),
+            ],
+          );
+
+    final tap = onTap;
+    if (tap == null || !enabled) return body;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: tap,
+      child: body,
+    );
+  }
+}
+
+/// **`O5`'s eye** — a round chip at the end of the first field, held rather
+/// than toggled.
+///
+/// A sticky toggle would leave the extra word legible on a screen the user has
+/// walked away from, and would make the residual behind
+/// [SecretByteBuffer.revealWhileHeld] outlive the gesture it is fenced by. Held,
+/// the word is on the glass exactly as long as a finger is on the control — the
+/// same contract [KvRevealHold] keeps for the recovery words, and the same one
+/// the native reveal keeps across the process seam.
+class _KvFieldEye extends StatelessWidget {
+  const _KvFieldEye({required this.revealed, required this.onChanged});
+
+  final bool revealed;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: revealed ? 'Showing your word' : 'Hold to see your word',
+    excludeSemantics: true,
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      // Down/up, not long-press: 500 ms of nothing reads as a broken control,
+      // which is what the founder found on the reveal pill (UX-R6, L200).
+      onTapDown: (_) {
+        KvHaptic.selection();
+        onChanged(true);
+      },
+      onTapUp: (_) => onChanged(false),
+      onTapCancel: () => onChanged(false),
+      child: Container(
+        // `O5` measured: a round chip the height of the field's control box,
+        // which also clears BG-12's target floor without a hit-box hack.
+        width: KvSpace.control,
+        height: KvSpace.control,
+        alignment: Alignment.center,
+        decoration: const BoxDecoration(
+          color: KvColor.chip,
+          shape: BoxShape.circle,
+        ),
+        child: KvGlyphIcon(
+          revealed ? KvGlyph.eyeOff : KvGlyph.eye,
+          size: KvSpace.s20,
+          tone: KvColor.ink,
+        ),
+      ),
     ),
   );
 }

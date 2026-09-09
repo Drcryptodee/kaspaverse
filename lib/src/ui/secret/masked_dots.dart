@@ -15,7 +15,7 @@ import '../theme/tokens.dart';
 /// FONT rather than the law, and §4's rule is *fixed four dots* precisely so
 /// that a mask cannot leak how long the word behind it is.
 ///
-/// Two forms, because a mask answers two different questions:
+/// Three forms, because a mask answers three different questions:
 ///
 /// * [KvMaskDots.length] — **how much have I typed?** One dot per character,
 ///   growing as the buffer grows. The length is already the only thing
@@ -26,6 +26,9 @@ import '../theme/tokens.dart';
 /// * [KvMaskDots.fixed] — **a secret is here, and its length is not yours to
 ///   read.** Always [words] dots, `etch`, whatever the word is. `O3`'s grid
 ///   and `O7`'s picked-word chips.
+/// * [KvMaskDots.slots] — **how many more?** A known total, filled from the
+///   left; the rest are rings. Only a secret whose length the app fixes in
+///   advance has this form, which is the 6-digit PIN and nothing else (D-312).
 class KvMaskDots extends StatelessWidget {
   /// One dot per character of a live buffer.
   const KvMaskDots.length(
@@ -35,7 +38,7 @@ class KvMaskDots extends StatelessWidget {
     this.gap = wellGap,
     this.tone = KvColor.primary,
     this.alignment = WrapAlignment.center,
-  });
+  }) : filled = count;
 
   /// The fixed mask: [words] dots, no matter what is behind them.
   const KvMaskDots.fixed({
@@ -44,9 +47,32 @@ class KvMaskDots extends StatelessWidget {
     this.gap = wordGap,
     this.tone = KvColor.etch,
     this.alignment = WrapAlignment.start,
-  }) : count = words;
+  }) : count = words,
+       filled = words;
+
+  /// **A known number of slots, some of them filled** — `O2`'s six wells.
+  ///
+  /// The third question a mask can answer, and the one the other two cannot:
+  /// **how many more?** A PIN has a length the app knows in advance, so an empty
+  /// slot is a real place rather than an absence, and drawing it as a ring says
+  /// *six* without a sentence. The length form has no target and therefore no
+  /// rings — with no known total an empty well would be a slot that does not
+  /// exist.
+  const KvMaskDots.slots(
+    this.count,
+    this.filled, {
+    super.key,
+    this.size = wellSize,
+    this.gap = wellGap,
+    this.tone = KvColor.primary,
+    this.alignment = WrapAlignment.center,
+  });
 
   final int count;
+
+  /// How many of [count] are filled. Equal to [count] for the other two forms,
+  /// which have no unfilled state.
+  final int filled;
   final double size;
   final double gap;
   final Color tone;
@@ -75,7 +101,25 @@ class KvMaskDots extends StatelessWidget {
           Container(
             width: size,
             height: size,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: tone),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              // An unfilled slot is a ring, not a paler disc: `O2` draws it
+              // that way, and a tinted disc would read as a *dimmer value*
+              // rather than as an empty place (BG-8).
+              //
+              // **`edgeHi` at 1 dp, sampled off `O2` rather than argued.** The
+              // law contradicts itself on the empty ring — §1.2 seats `edgeHi`
+              // for "an empty radio ring", §4's selection-sheet row (D-284)
+              // says `KvRadio` is an `etch` one — so the render settles this
+              // object: `#2a3433` is `edgeHi`, at ~1.0 dp on an 18 dp well
+              // (both of which the build already matches). The conflict itself
+              // is named in `design_system.md` rather than quietly resolved
+              // here (`ux-auditor`, D-312).
+              color: i < filled ? tone : null,
+              border: i < filled
+                  ? null
+                  : Border.all(color: KvColor.edgeHi, width: 1),
+            ),
           ),
       ],
     ),
@@ -93,6 +137,7 @@ class MaskedDots extends StatelessWidget {
     super.key,
     required this.length,
     this.emptyHint = 'Use the keyboard below',
+    this.slots,
     this.size = KvMaskDots.wellSize,
     this.gap = KvMaskDots.wellGap,
     this.tone = KvColor.primary,
@@ -100,6 +145,12 @@ class MaskedDots extends StatelessWidget {
   });
 
   final ValueListenable<int> length;
+
+  /// **The known total, when there is one** (`O2`'s six). With it the run draws
+  /// [KvMaskDots.slots] and there is no empty hint, because six rings already
+  /// say what the sentence would. Without it the run grows a dot at a time and
+  /// the hint stands in before the first keystroke.
+  final int? slots;
 
   /// What stands in the dots' place before the first keystroke. It is a
   /// PLACEHOLDER, not information (§1.3), so it takes `inkMeta` — and it says
@@ -116,6 +167,20 @@ class MaskedDots extends StatelessWidget {
     return ValueListenableBuilder<int>(
       valueListenable: length,
       builder: (context, n, _) {
+        final slots = this.slots;
+        if (slots != null) {
+          return Semantics(
+            label: '$n of $slots digits entered',
+            child: KvMaskDots.slots(
+              slots,
+              n > slots ? slots : n,
+              size: size,
+              gap: gap,
+              tone: tone,
+              alignment: alignment,
+            ),
+          );
+        }
         if (n == 0) {
           return Text(
             emptyHint,
@@ -126,6 +191,8 @@ class MaskedDots extends StatelessWidget {
               fontFamily: KvFont.ui,
               fontSize: 15,
               height: 22 / 15,
+              fontWeight: FontWeight.w400,
+              fontVariations: KvWeight.w400,
               color: KvColor.inkMeta,
             ),
           );

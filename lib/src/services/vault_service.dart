@@ -161,11 +161,60 @@ class VaultService with WidgetsBindingObserver {
   /// contract as [sealAndPersist].
   Future<void> unlockWithPassphrase(Uint8List passphrase) async {
     try {
+      await installVaultPepper();
       await vault_api.unlockWithPassphrase(passphrase: passphrase);
     } finally {
       passphrase.fillRange(0, passphrase.length, 0);
     }
   }
+
+  /// **Ask the platform to hand Rust this phone's vault pepper** (D-312), for
+  /// the one operation about to run.
+  ///
+  /// The pepper itself never comes back over this channel — only whether the
+  /// binding is available. It travels Kotlin → Rust by JNI, so the hardware
+  /// factor that makes a 6-digit PIN safe has no more presence in the Dart heap
+  /// than the seed does (INV-1/3), and Rust *takes* it at the next seal or
+  /// unlock rather than holding it for the life of the process.
+  ///
+  /// A phone that cannot bind returns false and is not an error here: what that
+  /// costs is Rust's call, not this method's — a passphrase vault seals without
+  /// the binding, a PIN vault is refused. Deciding it in one place is what makes
+  /// "PIN and hardware key ship together" a property of the system rather than
+  /// of every caller's memory.
+  Future<bool> installVaultPepper() => _pepperCall('installVaultPepper');
+
+  /// **Whether this phone CAN bind — asked without leaving a pepper resident.**
+  ///
+  /// The create and restore screens call this the moment the user picks the
+  /// PIN, so a phone that cannot bind is refused there rather than at the seal
+  /// with the recovery words already written down. It does the same Keystore
+  /// work and discards the result: asking must not cost what using costs, or
+  /// the residency [installVaultPepper] is careful to bound would be undone by
+  /// the probe in front of it (`ffi-leak-auditor`, D-312).
+  Future<bool> canDeviceBind() => _pepperCall('canDeviceBind');
+
+  Future<bool> _pepperCall(String method) async {
+    try {
+      return await ceremony.invokeMethod<bool>(method) ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// **Which pad this vault's unlock screen should offer FIRST** (D-312).
+  ///
+  /// Advisory, never a gate: the screen that reads this must always offer the
+  /// other pad.
+  ///
+  /// **Throws rather than guessing.** The fallback is the unlock screen's, and
+  /// deliberately so — a lane that swallowed the failure and a seam that did
+  /// not would have two different contracts, and the test that proves the safe
+  /// direction would then be proving the lane rather than the screen.
+  Future<vault_api.VaultInputKind> vaultInputKind() =>
+      vault_api.vaultInputKind();
 
   // ── P1.4 create ceremony + restore (D-037 / D-038) ──────────────────────
   // The held phrase lives in Rust; the native reveal/verify surface reads it
@@ -181,6 +230,19 @@ class VaultService with WidgetsBindingObserver {
   /// Abandon an in-progress create ceremony (cancel / back-gesture). Idempotent.
   /// (Backgrounding also drops it: the lifecycle [lockVault] does, Rust-side.)
   Future<void> abandonCreate() => vault_api.abandonCreate();
+
+  /// **How many words the held ceremony drew** (D-312) — 12, or 24 if the user
+  /// took `O3`'s control.
+  ///
+  /// A count, not a secret: it crosses because the create screen has to name
+  /// the extra word by its ordinal, and a *13th word* label on a twenty-four
+  /// word phrase is a wrong instruction on the one piece of paper that restores
+  /// the wallet.
+  ///
+  /// **Throws rather than guessing** — the fallback is the caller's, because the
+  /// caller is the one that owns the default and knows that a failed count read
+  /// must not abandon a ceremony the user has already verified.
+  Future<int> ceremonyWordCount() => vault_api.ceremonyWordCount();
 
   /// Run the native FLAG_SECURE reveal + verify surface (D-037/D-039) for the
   /// held create ceremony. Returns true once the user has revealed the 12 words
@@ -244,7 +306,11 @@ class VaultService with WidgetsBindingObserver {
     }
   }
 
-  static const int _quizDecoyCount = 24;
+  /// **Enough to dilute the LONGER phrase.** The native board holds twice the
+  /// phrase's length (D-312), so a 24-word ceremony wants 24 decoys after
+  /// collisions with the user's own words are dropped — and collisions are
+  /// filtered natively, so a few spare are sent.
+  static const int _quizDecoyCount = 36;
 
   /// Write [bytes] to a destination the user picks in the system document
   /// picker, offering [name]. Returns the destination, or null if they backed
@@ -479,13 +545,16 @@ class VaultService with WidgetsBindingObserver {
     Uint8List passphrase,
     Uint8List extraWord, {
     vault_api.VaultKdfParams? params,
+    vault_api.VaultInputKind inputKind = vault_api.VaultInputKind.passphrase,
   }) async {
     try {
       final p = params ?? await vault_api.VaultKdfParams.tuned();
+      await installVaultPepper();
       await vault_api.sealAndPersist(
         passphrase: passphrase,
         extraWord: extraWord,
         params: p,
+        inputKind: inputKind,
       );
     } finally {
       passphrase.fillRange(0, passphrase.length, 0);
@@ -516,14 +585,17 @@ class VaultService with WidgetsBindingObserver {
     Uint8List extraWord,
     Uint8List passphrase, {
     vault_api.VaultKdfParams? params,
+    vault_api.VaultInputKind inputKind = vault_api.VaultInputKind.passphrase,
   }) async {
     try {
       final p = params ?? await vault_api.VaultKdfParams.tuned();
+      await installVaultPepper();
       await vault_api.restoreAndPersist(
         phrase: phrase,
         extraWord: extraWord,
         passphrase: passphrase,
         params: p,
+        inputKind: inputKind,
       );
     } finally {
       phrase.fillRange(0, phrase.length, 0);

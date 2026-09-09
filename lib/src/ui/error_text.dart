@@ -36,3 +36,14 @@ String displayError(Object e) {
 /// — so the lockout branch was dead code and a rate-limited user was told their
 /// passphrase was wrong instead of that they were locked out (run 1, F8).
 bool isLockedOut(Object e) => displayError(e).contains('locked out');
+
+/// **Whether the vault refused because it is bound to a phone this is not**
+/// (D-312, core `CoreError::DeviceBinding`).
+///
+/// It has to be distinguishable from a wrong secret, and only the message says
+/// so: the two are the same shape of failure to the caller and *opposite* facts
+/// to the user. One means try again; the other means this file will never open
+/// here and the way back is the recovery words. Matched on the extracted
+/// message for the same reason [isLockedOut] is (run 1, F8).
+bool isDeviceBinding(Object e) =>
+    displayError(e).contains("bound to its phone's hardware key");

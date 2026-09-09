@@ -40,4 +40,28 @@ object VaultBridge {
      * ceremony is in progress.
      */
     external fun nativeRevealCeremonyWords(): ByteArray
+
+    /**
+     * Install the D-312 device pepper for the NEXT vault operation — the 32
+     * bytes only this phone's Keystore can produce, which is what makes a
+     * 6-digit PIN safe to offer (see [KeystoreVault.devicePepper]).
+     *
+     * It comes over JNI rather than FRB for the same reason the seed does: the
+     * hardware factor must never be a Dart object (INV-1/3). Rust *takes* it at
+     * the next seal or unlock, so it is resident for one operation rather than
+     * for the life of the process.
+     *
+     * @param pepper exactly 32 bytes; the caller wipes it in `finally` (L9).
+     */
+    external fun nativeInstallVaultPepper(pepper: ByteArray): Int
+
+    /**
+     * Redraw the held create ceremony at [wordCount] words — `O3`'s `12 | 24`
+     * control (D-312). Throws if no ceremony is in progress, if a vault already
+     * exists, or if the count is not 12 or 24.
+     *
+     * The old mnemonic is zeroized Rust-side before the new one exists; call
+     * [nativeRevealCeremonyWords] afterwards to read the replacement.
+     */
+    external fun nativeRegenerateCeremony(wordCount: Int): Int
 }

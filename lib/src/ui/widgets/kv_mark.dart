@@ -7,7 +7,9 @@
 // THE ARTWORK IS THE AUTHORITY, and this file is its transcription. That SVG is
 // a 160 box: a disc at (80, 80) r 73.4 in `primary`, and the K on its own
 // 100-unit grid placed by `translate(74 80) scale(1.18) translate(-50.5 -50)`
-// at stroke 14, round caps and joins, in `plate`. Every ratio below is that
+// at stroke 14, round caps and joins, in `plate` (the founder has since
+// taken the stroke to 13 and its ink to #000000 — see `strokeUnitsFor` and
+// `KvColor.markInk`; both are his rulings on his own artwork). Every ratio below is that
 // transform solved for a disc of `size` dp, so the widget and the file agree by
 // construction rather than by eye. **The one thing NOT taken from it is the
 // glow** — the export blooms around the disc and the founder ruled to keep
@@ -84,7 +86,19 @@ class KvMark extends StatelessWidget {
   /// design as drawn is 14. Same conclusion D-250 reached from the other
   /// geometry, for a different reason: there, weight ate a gap; here it eats a
   /// counter.
-  static double strokeUnitsFor(double size) => 14;
+  /// **13 since 2026-09-09**, on the founder's own ruling about his own
+  /// artwork: *"maybe the inverted k stroke a little smaller? just a tiny bit
+  /// smaller."* One unit, which is 7 % off the weight and is the smallest
+  /// change the 100-grid can express.
+  ///
+  /// It moves the *right* way against the paragraph above: the reason 16 was
+  /// rejected is that the chevron's apex sits at x 64, inside the stem, so
+  /// extra weight closes the counter between the arms and the K blots at 24 and
+  /// 28 dp. Thirteen opens that counter rather than closing it, so the small
+  /// end of the ladder gets better, not worse — the ladder is re-rendered at
+  /// every size in `mark_candidates_test` regardless, because "it should be
+  /// fine" is not a measurement.
+  static double strokeUnitsFor(double size) => 13;
 
   /// The halo's strength on an orb inside the app. §1.8's number.
   static const double haloStrength = 0.36;
@@ -211,17 +225,23 @@ class _Orb extends StatelessWidget {
           boxShadow: halo ? KvMark.orbHalo(size, t: t, alpha: alpha) : const [],
         ),
         alignment: Alignment.center,
-        // **`abyss`, the Deep ground** — founder's ruling on glass
-        // 2026-09-07: *"let the strokes also use that color … the ground
-        // #0a0d0d color should be law for every deep cos the teal comes out
-        // well against it."* The artwork paints `plate` (#121717); this is
-        // four values darker and it is the one place the picture gives way, on
-        // his word rather than on ours.
+        // **`markInk` — pure black, and the third time this has moved, always
+        // in the same direction.** The artwork paints `plate` (#121717); his
+        // 2026-09-07 ruling took it to `abyss` (*"the ground #0a0d0d colour
+        // should be law for every deep cos the teal comes out well against
+        // it"*); his 2026-09-09 one takes it the last step, to `#000000`. The
+        // reasoning has not changed across any of the three — the darker the
+        // stroke, the harder the teal reads against it — so this is the same
+        // call arriving at its end rather than a new opinion.
+        //
+        // It is the one pure black in a palette whose first rule is that every
+        // dark leans teal; [KvColor.markInk] carries why that exception is
+        // bounded to this object.
         child: _Glyph(
           size: size,
           glyphBox: glyphBox,
           units: units,
-          ink: KvColor.abyss,
+          ink: KvColor.markInk,
         ),
       ),
     );

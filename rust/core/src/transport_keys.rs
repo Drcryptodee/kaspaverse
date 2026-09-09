@@ -210,7 +210,7 @@ mod tests {
     use kaspa_addresses::Prefix;
 
     fn unlocked_vault() -> UnlockedVault {
-        let seed = MnemonicCeremony::generate()
+        let seed = MnemonicCeremony::generate(12)
             .unwrap()
             .into_seed(b"")
             .unwrap();

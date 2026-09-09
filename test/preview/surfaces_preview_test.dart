@@ -1301,6 +1301,16 @@ void main() {
       _createScreen,
       act: _openTheExtraWord,
     );
+    // **The D-312 states, framed** — the pad choice and the reveal. Both are
+    // new geometry: the number pad is 236 dp where the keyboard is 248, the
+    // commit control disappears on the PIN path, and the revealed field GROWS.
+    // None of that had a picture until now.
+    framedSurface('onboarding__pin', _createScreen, act: _toPinPad);
+    framedSurface(
+      'onboarding__extra_word_revealed',
+      _createScreen,
+      act: _revealTheExtraWord,
+    );
     framedSurface('onboarding__biometrics', _createScreen, act: _toBiometrics);
     framedSurface('restore__words', _restoreScreen);
     framedSurface('restore__typing', _restoreScreen, act: _typeAWord);
@@ -1518,9 +1528,13 @@ Widget _createScreen() => CreateScreen(
   begin: () async {},
   reveal: () async => true,
   abandon: () async {},
-  seal: (p, x) async {},
+  seal: (p, x, k) async {},
   biometricStatus: () async => 'ready',
   enroll: () async => true,
+  // A phone that CAN hardware-bind, so the PIN is reachable at all — the
+  // refusal path is a screen of its own and belongs in the widget suite, not
+  // in a picture (D-312).
+  deviceBinding: () async => true,
   checkAccessibility: () async => false,
   setSecure: ({required bool enable}) async {},
 );
@@ -1580,10 +1594,42 @@ Future<void> _toExtraWord(WidgetTester tester) async {
 Future<void> _openTheExtraWord(WidgetTester tester) async {
   await _toExtraWord(tester);
   await _reachCeremony(tester, find.byType(KvToggle));
+  await _reachCeremony(tester, find.text('Type it here'));
   for (final c in ['h', 'a', 'r', 'b', 'o', 'u', 'r']) {
     await tester.tap(find.text(c).first);
     await _settleCeremony(tester);
   }
+}
+
+/// **`O2` on the PIN pad** (D-312): six wells, the number pad, no commit.
+///
+/// This state had no frame at any geometry, and that is exactly how a 34 dp
+/// overflow at 915 × 412 reached an auditor instead of a golden — on the one
+/// screen whose own comments record a previous BLOCK at that frame
+/// (`ux-auditor`, D-312).
+Future<void> _toPinPad(WidgetTester tester) async {
+  await _settleCeremony(tester);
+  await _reachCeremony(tester, find.text('Use a 6-digit PIN'));
+  for (final d in ['4', '8', '1']) {
+    await tester.tap(find.text(d).first);
+    await _settleCeremony(tester);
+  }
+}
+
+/// **`O5` with the eye held down** (D-312 §3) — the one state where a secret is
+/// legible, and the state that has to be looked at at every geometry, because
+/// the field grows to hold the whole word rather than fading its tail.
+Future<void> _revealTheExtraWord(WidgetTester tester) async {
+  await _openTheExtraWord(tester);
+  final eye = find.byWidgetPredicate(
+    (w) => w is KvGlyphIcon && w.mark == KvGlyph.eye,
+  );
+  await tester.ensureVisible(eye.first);
+  await _settleCeremony(tester);
+  // Held, not tapped: the reveal is a press that ends on release, so the frame
+  // has to be taken with the finger still down.
+  await tester.startGesture(tester.getCenter(eye.first));
+  await _settleCeremony(tester);
 }
 
 /// `O6`, reached the way a user reaches it: through the seal.

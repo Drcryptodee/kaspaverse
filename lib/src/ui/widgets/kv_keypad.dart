@@ -64,7 +64,9 @@ class KvKey {
     : _label = label,
       mark = null,
       onTap = null,
-      active = false;
+      active = false,
+      bare = false,
+      isGap = false;
 
   /// A key that does something to the keyboard or the buffer — shift, page,
   /// backspace, space. It emits nothing.
@@ -81,8 +83,24 @@ class KvKey {
     this.flex = 2,
     this.active = false,
     this.semantics,
+    this.bare = false,
   }) : _label = label,
-       emits = null;
+       emits = null,
+       isGap = false;
+
+  /// **A hole in the grid.** Not a key at all: it emits nothing, does nothing
+  /// and draws nothing, and exists so a row can be short without the row above
+  /// it changing width. `O2`'s pad leaves the bottom-left cell empty, which a
+  /// `Row` cannot say any other way.
+  const KvKey.gap({this.flex = 2})
+    : _label = '',
+      emits = null,
+      mark = null,
+      onTap = null,
+      active = false,
+      semantics = null,
+      bare = true,
+      isGap = true;
 
   final String? _label;
 
@@ -110,6 +128,21 @@ class KvKey {
 
   /// What a screen reader says, when the cap is a symbol rather than a word.
   final String? semantics;
+
+  /// **No plate under this cap** — the mark sits straight on the ground.
+  ///
+  /// `O2` draws its erase key this way and its ten digits with plates, and the
+  /// composition is why: on a pad of ten figures the one glyph is plainly the
+  /// odd one out, so the plate is doing nothing the shape does not already do
+  /// (BG-1 — a container is earned). It costs no reach: the cell keeps its full
+  /// box, so the touch target is the key's, not the glyph's (BG-12).
+  ///
+  /// The amount pad keeps its plate, because there the erase key sits in a
+  /// four-row grid beside a decimal point and has no such singularity.
+  final bool bare;
+
+  /// Whether this cell is a [KvKey.gap] — nothing drawn, nothing pressable.
+  final bool isGap;
 }
 
 /// The one on-screen keypad, in [skin].
@@ -150,6 +183,38 @@ class KvKeypad extends StatelessWidget {
              'Backspace',
              mark: KvGlyph.backspace,
              onTap: onBackspace,
+           ),
+         ],
+       ];
+
+  /// **`O2`'s unlock pad — the same plain skin, one row shorter of a key.**
+  ///
+  /// Not a third skin: a skin is a geometry and a cap type, and this pad's are
+  /// the amount pad's exactly (three columns, mono figures, the taller control
+  /// height). What differs is the KEYS — no decimal point, because a PIN has no
+  /// fractional part — and a keyboard that differed only in its keys and called
+  /// itself a new skin would be the homonym `settings_screen_test` and
+  /// `node_screen_test` had to count around (L201).
+  ///
+  /// The bottom-left cell is a [KvKey.gap] and the erase key is [KvKey.bare],
+  /// both measured off `O2` at 4x.
+  KvKeypad.pin({
+    super.key,
+    required this.onChar,
+    required VoidCallback onBackspace,
+  }) : skin = KvKeypadSkin.plain,
+       rows = [
+         [const KvKey.char('1'), const KvKey.char('2'), const KvKey.char('3')],
+         [const KvKey.char('4'), const KvKey.char('5'), const KvKey.char('6')],
+         [const KvKey.char('7'), const KvKey.char('8'), const KvKey.char('9')],
+         [
+           const KvKey.gap(),
+           const KvKey.char('0'),
+           KvKey.command(
+             'Backspace',
+             mark: KvGlyph.backspace,
+             onTap: onBackspace,
+             bare: true,
            ),
          ],
        ];
@@ -285,6 +350,8 @@ class _KeyCap extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A hole in the grid still occupies its cell — that is its whole job.
+    if (cap.isGap) return SizedBox(height: height);
     final theme = Theme.of(context);
     final emits = cap.emits;
     void press() {
@@ -321,7 +388,12 @@ class _KeyCap extends StatelessWidget {
       child: Material(
         // A lit key is one step lighter, with its edge and ink in `ok` — the
         // depth ramp and the value hue doing the work a brand accent used to.
-        color: cap.active ? KvColor.keyPressed : KvColor.key,
+        // A BARE cap takes no fill at all: `O2` draws its erase key on the
+        // ground, and the cell keeps its full box either way so the reach is
+        // the same (BG-12).
+        color: cap.bare
+            ? Colors.transparent
+            : (cap.active ? KvColor.keyPressed : KvColor.key),
         borderRadius: BorderRadius.circular(KvRadius.key),
         child: InkWell(
           borderRadius: BorderRadius.circular(KvRadius.key),
@@ -331,9 +403,11 @@ class _KeyCap extends StatelessWidget {
             alignment: Alignment.center,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(KvRadius.key),
-              border: Border.all(
-                color: cap.active ? KvColor.ok : KvColor.keyEdge,
-              ),
+              border: cap.bare
+                  ? null
+                  : Border.all(
+                      color: cap.active ? KvColor.ok : KvColor.keyEdge,
+                    ),
             ),
             // The cap is excluded from semantics: the `Semantics` above
             // already speaks the key, and without this a screen reader would

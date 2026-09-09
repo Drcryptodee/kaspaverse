@@ -23,8 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaspaverse_chain::Address;
 use kaspaverse_core::{
-    seal_seed, unseal_seed, Branch, KeyChain, MnemonicCeremony, Prefix, SealParams, SecretSeed,
-    UnlockedVault, VaultSigner,
+    read_facts, seal_seed, unseal_seed, Branch, CoreError, InputKind, KeyChain, MnemonicCeremony,
+    Prefix, SealParams, SecretSeed, UnlockedVault, VaultSigner, PEPPER_LEN,
 };
 use tokio::sync::broadcast::{self, error::RecvError};
 use zeroize::Zeroizing;
@@ -58,6 +58,44 @@ static LOCK_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// App-private directory the platform hands us at init; the sealed blob and the
 /// lockout counter live here (INV-3 — never SharedPreferences).
 static VAULT_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// **The device pepper (D-312), held only for the operation that needs it.**
+///
+/// 32 bytes an `AndroidKeyStore` HMAC key produced for this app on this phone.
+/// It is the hardware factor that makes a 6-digit PIN offerable: without it the
+/// sealed file is 10^6 candidates at ~679 ms each for anyone who lifts it, and
+/// `vault.lockout` cannot help because those guesses never transit the app.
+///
+/// **Kotlin pushes it in over JNI** ([`install_pepper`], from
+/// `VaultBridge.nativeInstallVaultPepper`) — never Dart, so the hardware factor
+/// has no more presence in the Dart heap than the seed does (INV-1/3). Every
+/// consumer [`take_pepper`]s it, so it is resident for the length of one seal or
+/// one unlock rather than for the life of the process: a memory scrape of a
+/// LOCKED app must not hand over the one thing that makes the PIN offline-
+/// guessable. `lock_vault` drops it too, for the case where a ceremony is
+/// abandoned between the install and the call it was installed for.
+static PEPPER: Mutex<Option<Zeroizing<Vec<u8>>>> = Mutex::new(None);
+
+/// Install the device pepper for the next vault operation. Called from the JNI
+/// lane; wrong-length input is refused here rather than in the KDF.
+///
+/// Android-only in practice — the lane that feeds it is `jni_seed`, which is
+/// compiled for Android alone, so every other target sees an unused fn. Same
+/// attribute the other three JNI-facing entries carry.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn install_pepper(pepper: Zeroizing<Vec<u8>>) -> Result<(), AppError> {
+    if pepper.len() != PEPPER_LEN {
+        return Err(AppError::msg("device pepper must be exactly 32 bytes"));
+    }
+    *PEPPER.lock().unwrap_or_else(PoisonError::into_inner) = Some(pepper);
+    Ok(())
+}
+
+/// Consume the installed pepper, if any. Taking rather than borrowing is what
+/// bounds its residency to one operation.
+fn take_pepper() -> Option<Zeroizing<Vec<u8>>> {
+    PEPPER.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
 /// Status fan-out; lazily created so `send` works without a runtime.
 static STATUS_TX: OnceLock<broadcast::Sender<VaultStatus>> = OnceLock::new();
 
@@ -87,6 +125,52 @@ pub struct VaultStatus {
     pub locked_out_until_unix: Option<u64>,
     /// Consecutive failed unlock attempts (resets to 0 on any success).
     pub failed_attempts: u32,
+}
+
+/// **What the user types to open this vault** — the founder's D-312 choice,
+/// crossing to Dart so the unlock screen can draw the right pad first.
+///
+/// Not a secret and not secret-shaped: it is a plaintext byte in the blob
+/// header, which is why it may cross at all. Mapped onto the core `InputKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultInputKind {
+    /// Any-length printable secret on the alphanumeric pad.
+    Passphrase,
+    /// Six digits on the number pad — offerable only with a device binding.
+    Digits,
+}
+
+impl From<VaultInputKind> for InputKind {
+    fn from(k: VaultInputKind) -> Self {
+        match k {
+            VaultInputKind::Passphrase => InputKind::Passphrase,
+            VaultInputKind::Digits => InputKind::Digits,
+        }
+    }
+}
+
+impl From<InputKind> for VaultInputKind {
+    fn from(k: InputKind) -> Self {
+        match k {
+            InputKind::Passphrase => VaultInputKind::Passphrase,
+            InputKind::Digits => VaultInputKind::Digits,
+        }
+    }
+}
+
+/// Which pad this vault's unlock screen should offer FIRST.
+///
+/// **Advisory, never a gate.** The screen that reads this must always offer the
+/// other pad: the byte is unauthenticated at the moment it is read (reading it
+/// needs no secret), and a number pad drawn at somebody whose secret contains
+/// letters would lock them out of their own wallet while they were holding the
+/// correct passphrase. Dart falls back to `Passphrase` on any error for the same
+/// reason — the alphanumeric pad can enter a PIN, the number pad cannot enter a
+/// passphrase, so the fallback is the one that can type either secret.
+pub fn vault_input_kind() -> Result<VaultInputKind, AppError> {
+    let blob = read_blob()?;
+    let facts = read_facts(&blob).map_err(AppError::core)?;
+    Ok(facts.input_kind.into())
 }
 
 /// Argon2id cost parameters chosen by on-device tuning (P1.2 §0.3). Mapped onto
@@ -792,8 +876,67 @@ pub fn begin_create() -> Result<(), AppError> {
     if slot.is_some() {
         return Err(AppError::msg("a create ceremony is already in progress"));
     }
-    *slot = Some(MnemonicCeremony::generate().map_err(AppError::core)?);
+    *slot = Some(MnemonicCeremony::generate(DEFAULT_WORD_COUNT).map_err(AppError::core)?);
     log::info!("create ceremony begun (12 words held; no secret values)");
+    Ok(())
+}
+
+/// **How many words a create ceremony draws unless the user says otherwise.**
+///
+/// Twelve, and D-312 did not change that — it changed only whether 24 is
+/// reachable. 12 words is 128 bits, which already saturates secp256k1's
+/// ~128-bit effective security; 24 is offered for parity with the wallets users
+/// arrive from, and **no copy anywhere may say or imply it is more secure**.
+pub const DEFAULT_WORD_COUNT: usize = 12;
+
+/// How many words the held ceremony has. A count, not a secret — the create
+/// screen needs it to name the extra word by its ordinal (a *13th* for twelve,
+/// a *25th* for twenty-four), and getting that wrong puts a wrong label on the
+/// one piece of paper that restores the wallet.
+pub fn ceremony_word_count() -> Result<u32, AppError> {
+    CREATE_CEREMONY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|c| c.word_count() as u32)
+        .ok_or_else(|| AppError::msg("no create ceremony in progress"))
+}
+
+/// **Redraw the held ceremony at a different word count** — the `12 | 24`
+/// control on `O3`, which lives on the native reveal surface (D-312).
+///
+/// Called over the JNI lane, not FRB, because the control is a native view and
+/// the words it is about to redraw never cross to Dart. The old mnemonic is
+/// dropped — zeroizing its phrase — before the new one exists, so the two are
+/// never both resident.
+///
+/// Refuses if a vault already exists or no ceremony is in progress, so this can
+/// never become a second door into creating one.
+///
+/// **Build, then swap** — and the order is the whole safety property. Dropping
+/// the old phrase first would mean an `OsRng` failure or a bad count leaves NO
+/// ceremony, while the screen that called this still shows a grid and still
+/// believes the words on it are live: the user would walk the quiz on a phrase
+/// Rust no longer holds and discover it at the seal. Building first costs one
+/// moment with two zeroize-on-drop mnemonics resident, and buys a failure that
+/// changes nothing at all (`ffi-leak-auditor`, D-312).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn regenerate_ceremony(word_count: usize) -> Result<(), AppError> {
+    if blob_path()?.exists() {
+        return Err(AppError::msg(
+            "a vault already exists; refusing to overwrite",
+        ));
+    }
+    let mut slot = CREATE_CEREMONY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if slot.is_none() {
+        return Err(AppError::msg("no create ceremony in progress"));
+    }
+    let fresh = MnemonicCeremony::generate(word_count).map_err(AppError::core)?;
+    // The assignment drops the old mnemonic, zeroizing its phrase (D-038).
+    *slot = Some(fresh);
+    log::info!("create ceremony redrawn ({word_count} words held; no secret values)");
     Ok(())
 }
 
@@ -807,6 +950,12 @@ pub fn abandon_create() {
         .is_some()
     {
         log::info!("create ceremony abandoned");
+    }
+    // A pepper installed for a seal that will now never run must not outlive
+    // it, exactly as in `lock_vault` (D-312). Abandon is the OTHER way a
+    // ceremony ends, and it was the one this was missing (`ffi-leak-auditor`).
+    if take_pepper().is_some() {
+        log::info!("device pepper dropped (ceremony abandoned)");
     }
 }
 
@@ -822,6 +971,7 @@ pub fn seal_and_persist(
     passphrase: Vec<u8>,
     extra_word: Vec<u8>,
     params: VaultKdfParams,
+    input_kind: VaultInputKind,
 ) -> Result<(), AppError> {
     let passphrase = Zeroizing::new(passphrase);
     let extra_word = Zeroizing::new(extra_word);
@@ -835,6 +985,27 @@ pub fn seal_and_persist(
             "a vault already exists; refusing to overwrite",
         ));
     }
+    // **Is there a ceremony at all** — asked before the binding, and without
+    // consuming it. A lifecycle lock landing mid-ceremony drops both the phrase
+    // AND the installed pepper, so `binding_for` running first would answer
+    // *this phone cannot hardware-bind the vault* on a phone that can: the
+    // wrong cause, on the exact failure the honest error was written for
+    // (`consensus-auditor`, D-312).
+    if CREATE_CEREMONY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_none()
+    {
+        return Err(AppError::msg("no create ceremony in progress"));
+    }
+    // **Before the ceremony is consumed**, with the other cheap checks — this
+    // function's contract is that a rejected attempt leaves the phrase HELD for
+    // a retry. Below the `take()` it was not: a PIN chosen on a phone whose
+    // Keystore hiccupped at exactly this moment would have destroyed a phrase
+    // the user had already revealed, written on paper and passed a quiz on, and
+    // handed them a different one to write down again (`ffi-leak-auditor`,
+    // D-312).
+    let pepper = binding_for(input_kind, &passphrase)?;
     // Sampled before the KDF: a lifecycle lock landing any time after this
     // point must win over the install below (F3).
     let epoch = lock_epoch();
@@ -844,7 +1015,14 @@ pub fn seal_and_persist(
         .take()
         .ok_or_else(|| AppError::msg("no create ceremony in progress"))?;
     let seed = ceremony.into_seed(&extra_word).map_err(AppError::core)?;
-    let blob = seal_seed(&seed, &passphrase, params.into()).map_err(AppError::core)?;
+    let blob = seal_seed(
+        &seed,
+        &passphrase,
+        params.into(),
+        input_kind.into(),
+        pepper.as_ref().map(|p| p.as_slice()),
+    )
+    .map_err(AppError::core)?;
     atomic_write(&blob_path()?, &blob).map_err(|e| AppError::io("write blob", e))?;
     let installed = set_vault_if_current(
         UnlockedVault::new(KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?),
@@ -862,6 +1040,116 @@ pub fn seal_and_persist(
     }
     broadcast_status();
     Ok(())
+}
+
+/// **A PIN so guessable that the lockout is the only thing standing behind it.**
+///
+/// The device binding kills the OFFLINE attack completely — without the phone
+/// there is no lane at all. What it cannot touch is a thief holding the phone,
+/// who gets `LOCKOUT_FREE_ATTEMPTS` and then roughly a guess an hour forever.
+/// Against a uniform 10^6 that is nothing; against the real distribution of
+/// human-chosen 6-digit codes it is not, because the top of that distribution is
+/// dominated by repeats and runs (`wallet-security-auditor`, D-312).
+///
+/// So the two shapes that dominate it are refused at the seal: **every digit the
+/// same** (`000000`, `111111`, …) and **a run of consecutive digits** in either
+/// direction (`123456`, `654321`, …). Ten plus two is a small blocklist, and it
+/// is deliberately small — a long list of "weak" codes teaches users to pick the
+/// eleventh-most-obvious one, and the honest defence is the lockout plus the
+/// binding, not a dictionary.
+///
+/// Refused at the SEAL rather than in a screen: the bytes are here, this is
+/// where the rule cannot be forgotten by the next caller, and a passphrase is
+/// never subject to it (any-length ASCII has no such shape).
+fn is_trivially_guessable_pin(pin: &[u8]) -> bool {
+    if pin.len() < 2 || !pin.iter().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let all_same = pin.windows(2).all(|w| w[0] == w[1]);
+    let up = pin.windows(2).all(|w| w[1] == w[0] + 1);
+    let down = pin.windows(2).all(|w| w[0] == w[1] + 1);
+    all_same || up || down
+}
+
+/// **The pepper this seal will use, and the rule that makes the PIN safe.**
+///
+/// A 6-digit PIN and the hardware binding **ship together or not at all**
+/// (D-312, the founder's own condition when he took the option). So a `Digits`
+/// vault whose phone cannot produce a pepper is refused here rather than sealed
+/// weaker than what it replaces — six digits with no hardware factor would be a
+/// real downgrade from the any-length passphrase it is offered instead of, and
+/// the one place that can enforce it is the seal.
+///
+/// A `Passphrase` vault takes the binding when it is available and seals without
+/// it when it is not: the binding only ever makes the file harder to attack off
+/// the phone, and refusing to create a wallet because a Keystore call failed
+/// would be a worse answer than creating the one we ship today.
+fn binding_for(
+    input_kind: VaultInputKind,
+    passphrase: &[u8],
+) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
+    if input_kind == VaultInputKind::Digits && is_trivially_guessable_pin(passphrase) {
+        return Err(AppError::msg(
+            "that PIN is one of the first anyone would try — pick digits that are not all the \
+             same and not in a row",
+        ));
+    }
+    let pepper = take_pepper();
+    if pepper.is_none() && input_kind == VaultInputKind::Digits {
+        return Err(AppError::msg(
+            "this phone cannot hardware-bind the vault, so a 6-digit PIN cannot be used here — \
+             choose a passphrase instead",
+        ));
+    }
+    Ok(pepper)
+}
+
+/// **Re-wrap a pre-D-312 vault, once, on the unlock that proved the secret.**
+///
+/// Called with the seed the unseal just produced and the passphrase that opened
+/// it, so nothing is guessed and nothing is asked of the user. Three properties
+/// make this safe to run against the vault on somebody's only phone:
+///
+/// 1. **It never runs eagerly.** Not on install, not on launch — only after a
+///    correct secret has already unsealed the old blob, so a failure here can
+///    never be the thing that stops a user opening their wallet.
+/// 2. **The new blob is unsealed again BEFORE the old one is replaced.** A seal
+///    that cannot be re-opened is discarded with the original untouched. It
+///    costs one extra KDF on one unlock in the app's lifetime, which is the
+///    cheapest insurance available against a bug in the derivation path this
+///    very commit introduces.
+/// 3. **Every failure is non-fatal.** The unlock already succeeded; a migration
+///    that cannot complete logs and leaves v1 on disk, and the next unlock tries
+///    again. The user is never blocked and never told anything went wrong,
+///    because from where they are standing nothing did.
+///
+/// It is deliberately NOT a `Result` — no caller may make the unlock depend on
+/// it.
+fn migrate_blob(seed: &SecretSeed, passphrase: &[u8], pepper: Option<&[u8]>) {
+    let path = match blob_path() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let params: SealParams = VaultKdfParams::tuned().into();
+    let fresh = match seal_seed(seed, passphrase, params, InputKind::Passphrase, pepper) {
+        Ok(blob) => blob,
+        Err(e) => {
+            log::warn!("vault migration: re-seal failed ({e}); v1 blob left in place");
+            return;
+        }
+    };
+    // Property 2. A re-seal that does not re-open is not written.
+    if let Err(e) = unseal_seed(&fresh, passphrase, pepper) {
+        log::warn!("vault migration: verify failed ({e}); v1 blob left in place");
+        return;
+    }
+    match atomic_write(&path, &fresh) {
+        Ok(()) => log::info!(
+            "vault migrated v1 -> v2 (device_bound={})",
+            pepper.is_some()
+        ),
+        Err(e) => log::warn!("vault migration: write failed ({e}); v1 blob left in place"),
+    }
 }
 
 /// Restore preview (deliverable 2 — the decoy/typo trap): derive the FIRST
@@ -893,6 +1181,7 @@ pub fn restore_and_persist(
     extra_word: Vec<u8>,
     passphrase: Vec<u8>,
     params: VaultKdfParams,
+    input_kind: VaultInputKind,
 ) -> Result<(), AppError> {
     let phrase = Zeroizing::new(phrase);
     let extra_word = Zeroizing::new(extra_word);
@@ -908,7 +1197,15 @@ pub fn restore_and_persist(
         .map_err(AppError::core)?
         .into_seed(&extra_word)
         .map_err(AppError::core)?;
-    let blob = seal_seed(&seed, &passphrase, params.into()).map_err(AppError::core)?;
+    let pepper = binding_for(input_kind, &passphrase)?;
+    let blob = seal_seed(
+        &seed,
+        &passphrase,
+        params.into(),
+        input_kind.into(),
+        pepper.as_ref().map(|p| p.as_slice()),
+    )
+    .map_err(AppError::core)?;
     atomic_write(&blob_path()?, &blob).map_err(|e| AppError::io("write blob", e))?;
     let installed = set_vault_if_current(
         UnlockedVault::new(KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?),
@@ -953,8 +1250,29 @@ pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
     // was racing (F3).
     let epoch = lock_epoch();
     let blob = read_blob()?;
-    match unseal_seed(&blob, &passphrase) {
+    // Taken, not borrowed: the hardware factor is resident for this call and no
+    // longer (see [`PEPPER`]). A blob that is not device-bound ignores it — the
+    // core refuses to mix a pepper into a vault sealed without one, which is
+    // what lets every pre-D-312 vault keep opening on the update that adds it.
+    let pepper = take_pepper();
+    let pepper = pepper.as_ref().map(|p| p.as_slice());
+    // **A vault that is not device-bound is still owed one**, however it got
+    // that way — a v1 blob, or a v2 one migrated on an unlock where the
+    // Keystore happened to be unavailable. Keying this on the VERSION alone
+    // made the binding a one-shot coin flip: a transient failure at the single
+    // migrating unlock left the vault permanently unbound, with no later
+    // attempt and nothing on the glass, quietly dropping the founder's
+    // condition for that user (`consensus-auditor`, D-312).
+    let needs_migration = read_facts(&blob)
+        .map(|f| f.version < 2 || (!f.device_bound && pepper.is_some()))
+        .unwrap_or(false);
+    match unseal_seed(&blob, &passphrase, pepper) {
         Ok(seed) => {
+            // Before the seed is consumed by the keychain, and only ever after
+            // the secret has been proven correct.
+            if needs_migration {
+                migrate_blob(&seed, &passphrase, pepper);
+            }
             let keychain = KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?;
             let installed = set_vault_if_current(UnlockedVault::new(keychain), epoch);
             // The passphrase was right, so the lockout resets either way —
@@ -969,6 +1287,20 @@ pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
             }
             broadcast_status();
             Ok(())
+        }
+        // **A device-binding refusal is not a failed attempt** (D-312), and
+        // counting it as one would be a real defect rather than a strict
+        // reading. The secret may be perfectly correct: what failed is that
+        // this phone could not produce the pepper — a Keystore that was
+        // transiently unavailable, or a file that came from another device. The
+        // user cannot fix it by typing anything, so every retry would burn an
+        // attempt and walk them into an hour-long lockout for a condition no
+        // amount of correct typing resolves. The lockout exists to price
+        // GUESSES; this is not one.
+        Err(e @ CoreError::DeviceBinding(_)) => {
+            log::warn!("vault unlock refused: device binding unavailable");
+            broadcast_status();
+            Err(AppError::core(e))
         }
         Err(e) => {
             lockout.failed_attempts = lockout.failed_attempts.saturating_add(1);
@@ -1014,6 +1346,12 @@ pub fn lock_vault() {
             vault.lock(); // consumes; drops the bridge's strong Arc
             log::info!("vault locked");
         }
+    }
+    // A pepper installed for a ceremony that never ran must not outlive it
+    // (D-312): the whole point of taking rather than borrowing is that the
+    // hardware factor is not resident while the app sits locked.
+    if take_pepper().is_some() {
+        log::info!("device pepper dropped (lifecycle)");
     }
     // §0.11: a background/detach mid-create must not leave the phrase resident.
     // Dropping the held ceremony zeroizes it (D-038); abandon is idempotent.
@@ -1067,7 +1405,14 @@ fn read_blob() -> Result<Vec<u8>, AppError> {
 pub fn kdf_bench_ms(params: VaultKdfParams) -> Result<u64, AppError> {
     let seed = SecretSeed::from_seed_bytes(Box::new([0u8; 64]));
     let started = std::time::Instant::now();
-    seal_seed(&seed, b"kdf-bench-dummy", params.into()).map_err(AppError::core)?;
+    seal_seed(
+        &seed,
+        b"kdf-bench-dummy",
+        params.into(),
+        InputKind::Passphrase,
+        None,
+    )
+    .map_err(AppError::core)?;
     Ok(started.elapsed().as_millis() as u64)
 }
 
@@ -1190,6 +1535,10 @@ pub(crate) mod tests {
         // vault state), so a test that widened the window would otherwise hand
         // the next test a wallet that had already found funds.
         *SCAN_MARKS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // Same reasoning for the D-312 pepper: it is process state, so a test
+        // that installed one and did not spend it would hand the next test a
+        // device binding it never asked for.
+        *PEPPER.lock().unwrap_or_else(PoisonError::into_inner) = None;
         (guard, dir)
     }
 
@@ -1482,7 +1831,7 @@ pub(crate) mod tests {
     /// retired `create_vault` (D-038).
     pub(crate) fn seal_test_vault(passphrase: Vec<u8>, params: VaultKdfParams) {
         begin_create().unwrap();
-        seal_and_persist(passphrase, Vec::new(), params).unwrap();
+        seal_and_persist(passphrase, Vec::new(), params, VaultInputKind::Passphrase).unwrap();
     }
 
     #[test]
@@ -1504,6 +1853,334 @@ pub(crate) mod tests {
         lock_vault();
     }
 
+    // ── D-312: the pad choice, the device binding, and the migration ──────
+
+    const TEST_PEPPER: [u8; 32] = [0x5Au8; 32];
+
+    fn install_test_pepper() {
+        install_pepper(Zeroizing::new(TEST_PEPPER.to_vec())).unwrap();
+    }
+
+    #[test]
+    fn a_refused_seal_leaves_the_phrase_held_for_a_retry() {
+        let (_g, _dir) = enter();
+        begin_create().unwrap();
+        // A PIN on a phone that cannot bind: the seal is refused. **The phrase
+        // must still be there.** The user has already revealed it, written it
+        // on paper and passed a quiz on it; destroying it here and handing them
+        // a different one to write down is the worst thing this function could
+        // do, and it is what the check running below the `take()` did
+        // (`ffi-leak-auditor`, D-312).
+        assert!(take_pepper().is_none());
+        assert!(seal_and_persist(
+            b"481902".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .is_err());
+        assert_eq!(
+            ceremony_word_count().unwrap(),
+            12,
+            "a refused seal destroyed the held phrase"
+        );
+
+        // …and the retry, with the binding available, seals the SAME ceremony.
+        install_test_pepper();
+        seal_and_persist(
+            b"481902".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .unwrap();
+        lock_vault();
+    }
+
+    #[test]
+    fn an_unbound_v2_vault_is_still_offered_its_binding_on_a_later_unlock() {
+        let (_g, dir) = enter();
+        // A phone whose Keystore was unavailable at the migrating unlock: the
+        // vault lands on v2 UNBOUND. Keying the migration on the version alone
+        // made that permanent — one coin flip, no retry, nothing on the glass
+        // (`consensus-auditor`, D-312).
+        seal_test_vault(b"pw".to_vec(), cheap_params());
+        let path = dir.join("vault.kvsb");
+        assert!(!read_facts(&fs::read(&path).unwrap()).unwrap().device_bound);
+        lock_vault();
+
+        // The next unlock with a working Keystore takes the offer.
+        install_test_pepper();
+        unlock_with_passphrase(b"pw".to_vec()).unwrap();
+        let facts = read_facts(&fs::read(&path).unwrap()).unwrap();
+        assert!(facts.device_bound, "the binding was never retried");
+        assert_eq!(facts.version, 2);
+        lock_vault();
+
+        // …and it opens with the pepper and refuses without it, so the retry
+        // produced a real binding rather than a flag.
+        install_test_pepper();
+        unlock_with_passphrase(b"pw".to_vec()).unwrap();
+        lock_vault();
+        assert!(unlock_with_passphrase(b"pw".to_vec()).is_err());
+    }
+
+    #[test]
+    fn a_dropped_ceremony_says_so_rather_than_blaming_the_keystore() {
+        let (_g, _dir) = enter();
+        // The lifecycle case: a lock lands between the pepper install and the
+        // seal, taking BOTH. The user must be told their setup session ended,
+        // not that their phone cannot bind — which is the wrong cause, on the
+        // exact failure the honest error exists for (`consensus-auditor`).
+        install_test_pepper();
+        lock_vault();
+        let e = seal_and_persist(
+            b"481902".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .unwrap_err();
+        assert!(
+            e.message.contains("no create ceremony"),
+            "wrong cause reported: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn a_pin_needs_the_binding_and_a_passphrase_does_not() {
+        let (_g, _dir) = enter();
+        // **The founder's own condition, enforced where every caller meets it.**
+        // Six digits with no hardware factor is 10^6 candidates at ~679 ms each
+        // for anyone who lifts the file — a downgrade from the passphrase it is
+        // offered instead of. So the PIN and the binding ship together or the
+        // PIN does not ship.
+        assert!(take_pepper().is_none(), "no pepper installed");
+        assert!(
+            binding_for(VaultInputKind::Digits, b"481902").is_err(),
+            "a PIN must not seal without the device binding"
+        );
+        // A passphrase vault seals either way: the binding only ever makes the
+        // file harder to attack off the phone, and refusing to create a wallet
+        // because a Keystore call failed would be the worse answer.
+        assert!(binding_for(VaultInputKind::Passphrase, b"pw")
+            .unwrap()
+            .is_none());
+        install_test_pepper();
+        assert!(binding_for(VaultInputKind::Passphrase, b"pw")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn the_pin_shapes_a_thief_would_try_first_are_refused() {
+        let (_g, _dir) = enter();
+        install_test_pepper();
+        // Repeats and runs, in both directions — the top of the real
+        // distribution of human-chosen codes, and the only guesses a thief
+        // holding the phone has time to make against the lockout.
+        for weak in [
+            b"000000".as_slice(),
+            b"111111",
+            b"999999",
+            b"123456",
+            b"654321",
+            b"456789",
+        ] {
+            assert!(
+                is_trivially_guessable_pin(weak),
+                "{} was not refused",
+                String::from_utf8_lossy(weak)
+            );
+        }
+        // …and nothing else is, because a long blocklist only teaches people to
+        // pick the eleventh-most-obvious code.
+        for ok in [
+            b"481902".as_slice(),
+            b"135790",
+            b"112233",
+            b"246813",
+            b"100000",
+        ] {
+            assert!(
+                !is_trivially_guessable_pin(ok),
+                "{} was refused and should not be",
+                String::from_utf8_lossy(ok)
+            );
+        }
+        // A passphrase is never subject to the rule, whatever it looks like.
+        assert!(
+            binding_for(VaultInputKind::Passphrase, b"123456").is_ok(),
+            "the shape rule is the PIN's, not every secret's"
+        );
+        // And it is enforced at the seal, where it cannot be forgotten.
+        begin_create().unwrap();
+        install_test_pepper();
+        assert!(seal_and_persist(
+            b"123456".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .is_err());
+        // …and the refusal left the written-down phrase alive, as every other
+        // refusal on this path does.
+        assert_eq!(ceremony_word_count().unwrap(), 12);
+        abandon_create();
+    }
+
+    #[test]
+    fn the_pepper_is_taken_not_borrowed() {
+        let (_g, _dir) = enter();
+        install_test_pepper();
+        assert!(take_pepper().is_some());
+        // Both ways a ceremony can end drop it — a pepper installed for a seal
+        // that will never run must not outlive it.
+        install_test_pepper();
+        abandon_create();
+        assert!(take_pepper().is_none(), "abandon did not drop the pepper");
+        // **Resident for one operation, not for the life of the process.** A
+        // memory scrape of a LOCKED app must not hand over the one thing that
+        // makes a 6-digit PIN offline-guessable.
+        assert!(take_pepper().is_none(), "the pepper outlived its operation");
+
+        // …and a ceremony abandoned between the install and the call it was
+        // installed for does not leave it resident either.
+        install_test_pepper();
+        lock_vault();
+        assert!(take_pepper().is_none(), "lock did not drop the pepper");
+    }
+
+    #[test]
+    fn a_wrong_length_pepper_is_refused_at_the_door() {
+        let (_g, _dir) = enter();
+        assert!(install_pepper(Zeroizing::new(vec![0u8; 16])).is_err());
+        assert!(take_pepper().is_none());
+    }
+
+    #[test]
+    fn a_bound_vault_needs_its_pepper_at_every_unlock() {
+        let (_g, _dir) = enter();
+        install_test_pepper();
+        begin_create().unwrap();
+        seal_and_persist(
+            b"481902".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .unwrap();
+        // The pad choice is in the blob, readable with no secret — this is what
+        // the unlock screen draws its keypad from.
+        assert_eq!(vault_input_kind().unwrap(), VaultInputKind::Digits);
+        lock_vault();
+
+        // **The file alone is not enough.** Without the pepper the right PIN
+        // does not open it, and the error is NOT "wrong passphrase": the secret
+        // was correct and this phone simply cannot produce the other half.
+        let refused = unlock_with_passphrase(b"481902".to_vec()).unwrap_err();
+        assert!(
+            refused.message.contains("bound to its phone"),
+            "expected a device-binding refusal, got: {}",
+            refused.message
+        );
+        // **…and it is not counted as a failed attempt, because it was not
+        // one.** The lockout prices GUESSES; this is a phone that could not
+        // produce its own key, which no amount of correct typing resolves.
+        // Counting it would walk a user into an hour-long lockout for a
+        // condition they cannot fix.
+        assert_eq!(current_status().failed_attempts, 0);
+
+        // The exemption is NOT a hole: a genuinely wrong secret, with the
+        // binding present, still counts. Without this line the fix above could
+        // be widened into "unseal failures do not count" and nothing would say.
+        install_test_pepper();
+        assert!(unlock_with_passphrase(b"000000".to_vec()).is_err());
+        assert_eq!(current_status().failed_attempts, 1);
+
+        install_test_pepper();
+        unlock_with_passphrase(b"481902".to_vec()).unwrap();
+        lock_vault();
+    }
+
+    #[test]
+    fn a_passphrase_vault_still_opens_with_a_pepper_in_the_room() {
+        let (_g, _dir) = enter();
+        // **The migration's subtler half.** The update that introduces the
+        // pepper has it in hand at every unlock. If it were mixed in
+        // unconditionally, every vault sealed before D-312 would stop opening
+        // on the update that shipped it — a silent, total lockout,
+        // indistinguishable from a wrong passphrase.
+        seal_test_vault(b"just-a-passphrase".to_vec(), cheap_params());
+        lock_vault();
+        install_test_pepper();
+        unlock_with_passphrase(b"just-a-passphrase".to_vec()).unwrap();
+        lock_vault();
+    }
+
+    #[test]
+    fn a_migration_writes_only_a_blob_it_has_already_re_opened() {
+        let (_g, dir) = enter();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
+        let path = dir.join("vault.kvsb");
+        let before = fs::read(&path).unwrap();
+
+        let seed = SecretSeed::from_seed_bytes(Box::new([9u8; 64]));
+        // A wrong-length pepper makes the re-seal fail. The old blob must be
+        // exactly where it was: a migration that cannot complete is a no-op,
+        // never a half-written vault, because the unlock it rides on has
+        // already succeeded and the user is not waiting on it.
+        migrate_blob(&seed, b"pw", Some(&[0u8; 7]));
+        assert_eq!(fs::read(&path).unwrap(), before, "a failed migration wrote");
+
+        // The good path replaces the file with one that has ALREADY been
+        // unsealed once, in memory, before the write.
+        migrate_blob(&seed, b"pw", Some(&TEST_PEPPER));
+        let after = fs::read(&path).unwrap();
+        assert_ne!(after, before);
+        let facts = read_facts(&after).unwrap();
+        assert_eq!(facts.version, 2);
+        assert!(facts.device_bound);
+        assert_eq!(facts.input_kind, InputKind::Passphrase);
+        // It opens, which is the property — the seed's bytes are the core's
+        // to compare, and it does (`a_v1_blob_still_opens_with_its_own
+        // _passphrase`).
+        assert!(unseal_seed(&after, b"pw", Some(&TEST_PEPPER)).is_ok());
+        assert!(
+            unseal_seed(&after, b"pw", None).is_err(),
+            "the migrated blob must be bound to this phone"
+        );
+        lock_vault();
+    }
+
+    #[test]
+    fn the_word_count_can_be_redrawn_but_never_over_a_vault() {
+        let (_g, _dir) = enter();
+        begin_create().unwrap();
+        assert_eq!(ceremony_word_count().unwrap(), 12);
+
+        regenerate_ceremony(24).unwrap();
+        assert_eq!(ceremony_word_count().unwrap(), 24);
+        regenerate_ceremony(12).unwrap();
+        assert_eq!(ceremony_word_count().unwrap(), 12);
+
+        // **Anything but 12 or 24 is refused, and the LIVE phrase survives it.**
+        // Build-then-swap: a failed redraw changes nothing, so the grid the
+        // screen is still showing is still the phrase Rust holds. The other
+        // order would have left the user walking a quiz on words that no longer
+        // existed (`ffi-leak-auditor`, D-312).
+        assert!(regenerate_ceremony(18).is_err());
+        assert_eq!(ceremony_word_count().unwrap(), 12);
+
+        // And it is never a second door into creating a wallet.
+        abandon_create();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
+        begin_create().unwrap_err();
+        assert!(regenerate_ceremony(24).is_err());
+        lock_vault();
+    }
+
     #[test]
     fn seal_refuses_to_overwrite_existing_vault() {
         let (_g, _dir) = enter();
@@ -1512,8 +2189,14 @@ pub(crate) mod tests {
         // ceremony past begin's gate, it must STILL refuse over an existing vault.
         *CREATE_CEREMONY
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(MnemonicCeremony::generate().unwrap());
-        let again = seal_and_persist(b"pw-two".to_vec(), Vec::new(), cheap_params());
+            .unwrap_or_else(PoisonError::into_inner) =
+            Some(MnemonicCeremony::generate(12).unwrap());
+        let again = seal_and_persist(
+            b"pw-two".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        );
         assert!(again.is_err(), "seal must refuse over an existing vault");
         abandon_create();
         lock_vault();
@@ -1643,7 +2326,13 @@ pub(crate) mod tests {
         let phrase = std::str::from_utf8(&revealed).unwrap();
         assert_eq!(phrase.split(' ').count(), 12, "reveal must expose 12 words");
         // Sealing consumes the ceremony, persists, leaves the vault unlocked.
-        seal_and_persist(b"correct horse".to_vec(), Vec::new(), cheap_params()).unwrap();
+        seal_and_persist(
+            b"correct horse".to_vec(),
+            Vec::new(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap();
         assert!(vault_exists());
         assert!(current_status().unlocked);
         // Consumed: the reveal lane now refuses.
@@ -1691,12 +2380,24 @@ pub(crate) mod tests {
         begin_create().unwrap();
         let non_ascii = "café".as_bytes().to_vec(); // é is non-ASCII
         assert!(
-            seal_and_persist(b"pw".to_vec(), non_ascii, cheap_params()).is_err(),
+            seal_and_persist(
+                b"pw".to_vec(),
+                non_ascii,
+                cheap_params(),
+                VaultInputKind::Passphrase,
+            )
+            .is_err(),
             "create path must refuse a non-ASCII extra word (D-031.5)"
         );
         // The rejected attempt did NOT consume the ceremony — a retry can seal.
         assert!(reveal_ceremony_words().is_ok());
-        seal_and_persist(b"pw".to_vec(), b"backup-word".to_vec(), cheap_params()).unwrap();
+        seal_and_persist(
+            b"pw".to_vec(),
+            b"backup-word".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap();
         assert!(current_status().unlocked);
         lock_vault();
     }
@@ -1734,7 +2435,14 @@ pub(crate) mod tests {
         let phrase =
             b"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
                 .to_vec();
-        restore_and_persist(phrase, Vec::new(), b"pw".to_vec(), cheap_params()).unwrap();
+        restore_and_persist(
+            phrase,
+            Vec::new(),
+            b"pw".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap();
         assert!(vault_exists());
         assert!(current_status().unlocked);
         lock_vault();

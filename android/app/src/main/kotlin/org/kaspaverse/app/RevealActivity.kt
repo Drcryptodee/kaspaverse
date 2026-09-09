@@ -11,6 +11,7 @@ import android.graphics.Typeface
 import android.os.Build
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -159,6 +160,11 @@ class RevealActivity : Activity() {
          * because `create_screen` numbers the passphrase 2 — the words come
          * first in this build, whatever order the render drew.
          */
+        /** The two counts `O3`'s control offers, and the one it starts on. */
+        private const val WORDS_12 = 12
+        private const val WORDS_24 = 24
+        private const val MAX_WORDS = WORDS_24
+
         private const val STEP_WORDS = 0
         private const val STEP_QUIZ = 1
     }
@@ -199,7 +205,10 @@ class RevealActivity : Activity() {
      */
     private var onQuiz = false
 
-    private val wordViews = arrayOfNulls<TextView>(12)
+    /// Both counts fit these: 24 is the ceiling BIP39 offers and the ceiling
+    /// `O3`'s control offers, so the arrays are sized once and the live phrase
+    /// uses its own prefix.
+    private val wordViews = arrayOfNulls<TextView>(MAX_WORDS)
 
     /**
      * The four-dot masks, one per cell — **drawn, not typed**.
@@ -212,18 +221,26 @@ class RevealActivity : Activity() {
      * length of a BIP39 word narrows the candidate set for anyone glancing at
      * the screen. Four discs, always, whatever is behind them.
      */
-    private val dotRows = arrayOfNulls<View>(12)
+    private val dotRows = arrayOfNulls<View>(MAX_WORDS)
 
     // Verify quiz: confirm the word at each of N distinct positions, in order.
     private val QUIZ_POSITIONS = 4
     private val QUIZ_COLS = 3
 
     /**
-     * Total chips on the quiz board: the user's twelve words PLUS decoys.
-     * Never fewer than twelve — see [buildChipSet] for why that floor is the
-     * whole security property.
+     * Total chips on the quiz board: **the user's words PLUS decoys, at twice
+     * the phrase's length.**
+     *
+     * It was the constant 24, which was 12 words doubled — right by arithmetic
+     * for the only phrase length that existed, and silently wrong the moment
+     * D-312 made 24 reachable: a 24-word phrase would have filled the board on
+     * its own and shipped a quiz with **zero dilution**, so an observer
+     * photographing it reads the exact multiset. Never fewer than the phrase
+     * itself — see [buildChipSet] for why that floor is the whole security
+     * property; this is the dilution ON TOP of it, and it has to scale with
+     * the thing it dilutes.
      */
-    private val QUIZ_CHIPS = 24
+    private fun quizChipCount(phraseLength: Int) = phraseLength * 2
     /** Wrong taps allowed per attempt before we send the user back to the words. */
     private val QUIZ_MAX_WRONG = 3
 
@@ -317,7 +334,9 @@ class RevealActivity : Activity() {
             // move that constant in the same commit — a wrong ordinal is not a
             // fund risk, it is a wrong label on the one piece of paper that
             // restores the wallet (`wallet-security-auditor`, UX-R6).
-            require(w.size == 12) { "expected 12 words, got ${w.size}" }
+            require(w.size == WORDS_12 || w.size == WORDS_24) {
+                "expected 12 or 24 words, got ${w.size}"
+            }
             return w
         } finally {
             bytes.fill(0) // L9 — wipe the JNI carrier the instant it is split
@@ -444,7 +463,21 @@ class RevealActivity : Activity() {
         // confusion it exists to prevent — he tried to screenshot the words and
         // got a black frame with nothing saying why (BG-8: a blocked thing says
         // it is blocked). The 12/24 control itself is UX-R6b.
-        root.addView(meta("Screenshots blocked"))
+        root.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(wordCountControl())
+                addView(
+                    meta("Screenshots blocked").apply {
+                        layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
+                            marginStart = dp(14)
+                        }
+                        gravity = Gravity.END
+                    }
+                )
+            }
+        )
         root.addView(spacer(dp(10)))
         root.addView(buildGrid())
         root.addView(spacer(dp(16)))
@@ -550,7 +583,12 @@ class RevealActivity : Activity() {
      */
     private fun buildGrid(): View {
         val grid = column()
-        for (r in 0 until 4) {
+        val n = words?.size ?: WORDS_12
+        // Three columns, and as many rows as the phrase needs — four for 12,
+        // eight for 24. The screen already scrolls, which is what makes the
+        // taller grid a layout rather than a redesign.
+        val rows = (n + 2) / 3
+        for (r in 0 until rows) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply {
@@ -558,7 +596,10 @@ class RevealActivity : Activity() {
                 }
             }
             for (c in 0 until 3) {
-                val cell = wordCell(r * 3 + c)
+                val i = r * 3 + c
+                // A phrase whose length is not a multiple of three would leave
+                // a hole; neither 12 nor 24 does, and the guard costs nothing.
+                val cell = if (i < n) wordCell(i) else View(this)
                 cell.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
                     if (c > 0) marginStart = dp(8)
                 }
@@ -567,6 +608,131 @@ class RevealActivity : Activity() {
             grid.addView(row)
         }
         return grid
+    }
+
+    /**
+     * **`O3`'s `12 words | 24 words` control** — the founder's D-312 reversal of
+     * D-028, on the screen the render puts it on.
+     *
+     * It lives here rather than on a Flutter screen because that is where the
+     * render draws it, and because the words it redraws never cross to Dart:
+     * picking 24 asks Rust for a fresh ceremony over the JNI lane and re-reads
+     * the phrase through the same door the first one came through.
+     *
+     * **No copy on this control, or anywhere near it, says or implies that 24 is
+     * more secure — because it is not.** 12 words is 128 bits of entropy, which
+     * already saturates secp256k1's ~128-bit effective security; the extra 128
+     * bits of a 24-word phrase compress back through BIP32 to a key of exactly
+     * the same strength. What the choice buys is parity with the wallets people
+     * arrive from. If a future hand adds a *recommended* or a *stronger* to
+     * either segment, that hand is adding a claim the cryptography does not
+     * support (D-312).
+     */
+    private fun wordCountControl(): View {
+        val n = words?.size ?: WORDS_12
+        // **`KvSegmented`, transcribed** — the founder's own instruction:
+        // *"look at the wallet settings screen. it has the 'With funds and All'
+        // toggle, well that is how i wanted it to be."* So this is not drawn
+        // from the render by eye any more; it is that Dart part's numbers,
+        // copied, because two controls doing one job in two languages is
+        // exactly where the app starts disagreeing with itself (BG-21).
+        //
+        // From `kv_tabs.dart`: track **36** on `plate`, inset **4** (thumb
+        // **28**) on `chip`, radius **`KvRadius.control` = 999** — a true
+        // stadium, which is what "not pill enough" meant: this drew 40/32 at
+        // radius 20 and read as a rounded card. Label ui **14 / w600 at both
+        // states**, `ink` when chosen and `inkMeta` when not, with **14** of
+        // horizontal padding. The target is `KvSpace.touchTarget` (**52**) and
+        // does not scale with the track (BG-12).
+        //
+        // The two heights are reconciled with an `InsetDrawable` rather than by
+        // choosing between them: each view is 52 tall and its BACKGROUND is
+        // inset, so what is drawn is 36/28 and what a thumb hits is 52.
+        val trackInset = dp((52 - 36) / 2)
+        val thumbInset = dp((52 - 28) / 2)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(4), 0, dp(4), 0)
+            background = InsetDrawable(
+                GradientDrawable().apply {
+                    // Half the drawn height — a stadium, never a rounded card.
+                    cornerRadius = dp(18).toFloat()
+                    setColor(cSurfaceAlt) // KvColor.plate
+                },
+                0, trackInset, 0, trackInset
+            )
+            for (count in intArrayOf(WORDS_12, WORDS_24)) {
+                val on = count == n
+                addView(
+                    TextView(this@RevealActivity).apply {
+                        text = "$count words"
+                        textSize = 14f
+                        // w600 at BOTH states: `KvSegmented` moves the COLOUR,
+                        // not the weight, and a control that also thickened
+                        // read as two different type sizes side by side.
+                        typeface = uiWeight(600)
+                        setTextColor(if (on) cTextPrimary else cInkMeta)
+                        gravity = Gravity.CENTER
+                        minHeight = dp(52)
+                        setPadding(dp(14), 0, dp(14), 0)
+                        if (on) {
+                            background = InsetDrawable(
+                                GradientDrawable().apply {
+                                    cornerRadius = dp(14).toFloat()
+                                    setColor(cChip) // KvColor.chip
+                                },
+                                0, thumbInset, 0, thumbInset
+                            )
+                        }
+                        contentDescription = "Use a $count word recovery phrase"
+                        // The live segment is the one you are NOT on; tapping
+                        // the current one would redraw a phrase for no reason,
+                        // and on this screen a redraw voids what the user may
+                        // already have written down.
+                        isClickable = !on
+                        if (!on) setOnClickListener { redrawWords(count) }
+                    }
+                )
+            }
+        }
+    }
+
+    /**
+     * Redraw the phrase at a different length.
+     *
+     * **Everything about the old one is void**, and that is the part worth being
+     * careful about: `revealedOnce` is what arms *I've written them down*, so
+     * carrying it across a redraw would let somebody reach the quiz — and the
+     * wallet — holding twelve words that no longer open anything. It resets,
+     * along with our refs to the old phrase (D-033/D-039), before the new one
+     * is read.
+     */
+    private fun redrawWords(count: Int) {
+        try {
+            VaultBridge.nativeRegenerateCeremony(count)
+        } catch (e: Throwable) {
+            // Rust refused (no ceremony, a vault appeared, a bad count, an RNG
+            // failure). **The phrase on screen really is still the live one**:
+            // `regenerate_ceremony` builds the replacement BEFORE it swaps, so
+            // a failure leaves the held ceremony exactly as it was. Leaving the
+            // grid alone is therefore honest rather than hopeful — which it was
+            // not before the Rust side was reordered (`ffi-leak-auditor`,
+            // D-312).
+            Log.w(TAG, "word count unchanged: ${e.javaClass.simpleName}")
+            return
+        }
+        clearSecrets()
+        revealed = false
+        revealedOnce = false
+        val loaded = try {
+            loadWords()
+        } catch (e: Throwable) {
+            Log.i(TAG, "no ceremony after redraw — canceling")
+            finishWith(false)
+            return
+        }
+        words = loaded
+        showReveal()
     }
 
     /** One 6 dp `etch` disc of the fixed mask. */
@@ -637,7 +803,7 @@ class RevealActivity : Activity() {
      */
     private fun refreshGrid() {
         val w = words ?: return
-        for (i in 0 until 12) {
+        for (i in w.indices) {
             wordViews[i]?.text = if (revealed) w[i] else ""
             // The long tail shrinks rather than wraps — see [wordCell].
             wordViews[i]?.textSize = if (w[i].length > 7) 13f else 15f
@@ -656,7 +822,7 @@ class RevealActivity : Activity() {
         // word) so a tapped word maps to exactly one position.
         val seen = HashSet<String>()
         val chosen = ArrayList<Int>()
-        for (p in (0 until 12).shuffled(secureShuffle)) {
+        for (p in w.indices.shuffled(secureShuffle)) {
             if (seen.add(w[p])) chosen.add(p)
             if (chosen.size == QUIZ_POSITIONS) break
         }
@@ -854,10 +1020,10 @@ class RevealActivity : Activity() {
             .distinct()
             .shuffled(secureShuffle)
         for (d in decoys) {
-            if (board.size >= QUIZ_CHIPS) break
+            if (board.size >= quizChipCount(words.size)) break
             board.add(d)
         }
-        if (board.size < QUIZ_CHIPS) {
+        if (board.size < quizChipCount(words.size)) {
             // No count interpolated: it would be `sent - collisions with the
             // phrase`, a value derived from secret material, in logcat.
             Log.i(TAG, "quiz board under-diluted — fewer decoys than asked for")

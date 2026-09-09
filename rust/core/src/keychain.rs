@@ -184,7 +184,7 @@ mod tests {
         // child per slot. Same bytes as the full per-index walk, or an inbound
         // envelope silently stops opening — and the failure would look like
         // "not for us", which is indistinguishable from the truth.
-        let seed = MnemonicCeremony::generate()
+        let seed = MnemonicCeremony::generate(12)
             .unwrap()
             .into_seed(b"")
             .unwrap();

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../rust/api/vault.dart' as vault_api;
 import '../services/vault_service.dart';
 import 'biometric_copy.dart';
 import 'extra_word_copy.dart';
@@ -16,6 +17,7 @@ import 'widgets/ceremony_mark.dart';
 import 'widgets/haptics.dart';
 import 'widgets/kv_address.dart';
 import 'widgets/kv_chrome.dart';
+import 'widgets/kv_keypad.dart';
 import 'widgets/kv_loader.dart';
 import 'widgets/kv_tabs.dart';
 import 'widgets/kv_toggle.dart';
@@ -49,6 +51,7 @@ class RestoreScreen extends StatefulWidget {
     this.commit,
     this.biometricStatus,
     this.enroll,
+    this.deviceBinding,
     this.checkAccessibility,
     this.setSecure,
   });
@@ -69,6 +72,10 @@ class RestoreScreen extends StatefulWidget {
 
   /// Run the enrolment ceremony; throws [PlatformException] with a stable code.
   final Future<bool> Function()? enroll;
+
+  /// Whether this phone can hardware-bind the vault (D-312) — the precondition
+  /// for offering a 6-digit PIN. Defaults to the real Keystore lane.
+  final Future<bool> Function()? deviceBinding;
 
   final Future<bool> Function()? checkAccessibility;
   final Future<void> Function({required bool enable})? setSecure;
@@ -114,6 +121,19 @@ class _RestoreScreenState extends State<RestoreScreen>
 
   /// Why Path A is (un)available, resolved once after the commit.
   String _biometricStatus = 'unknown';
+
+  /// **Which pad the unlock secret is typed on** (D-312) — the same choice the
+  /// create ceremony offers, because a restore seals a vault too and a wallet
+  /// that could never pick a PIN because of how it arrived would be a dead end
+  /// nothing on screen explains.
+  vault_api.VaultInputKind _pad = vault_api.VaultInputKind.passphrase;
+  bool get _isPin => _pad == vault_api.VaultInputKind.digits;
+
+  /// `O2` draws six wells.
+  static const int _pinLength = 6;
+
+  Future<bool> Function() get _bindingLane =>
+      widget.deviceBinding ?? VaultService.instance.canDeviceBind;
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -282,12 +302,22 @@ class _RestoreScreenState extends State<RestoreScreen>
   }
 
   Future<void> _runCommit() async {
+    if (_isPin && _passphrase.length.value != _pinLength) {
+      setState(() => _message = 'Enter all $_pinLength digits.');
+      return;
+    }
     if (_passphrase.isEmpty || _busy) return;
     setState(() {
       _busy = true;
       _message = null;
     });
-    final commit = widget.commit ?? VaultService.instance.restoreAndPersist;
+    // The seam keeps its three-argument shape so every injected test double
+    // still fits; the pad choice is closed over rather than added to it.
+    final commit =
+        widget.commit ??
+        (Uint8List phrase, Uint8List extra, Uint8List pass) => VaultService
+            .instance
+            .restoreAndPersist(phrase, extra, pass, inputKind: _pad);
     try {
       await commit(
         _assemblePhrase(),
@@ -1043,19 +1073,70 @@ class _RestoreScreenState extends State<RestoreScreen>
   );
 
   // ── step: set passphrase, then commit (`O2`'s form) ──────────────────────
+
+  /// **A digit, and the pill wakes on the sixth** — `O2` has no commit control
+  /// on the PIN path, but here the act it commits is the restore itself. So the
+  /// pill stays on the glass and dead, saying what it is waiting for, rather
+  /// than firing by itself: this is the screen where somebody has just typed
+  /// twelve words, and a ceremony that starts with no visible act would be a
+  /// surprise on the one screen that must not have any.
+  void _onPinChar(String c) {
+    if (_passphrase.length.value >= _pinLength) return;
+    _passphrase.appendChar(c);
+    setState(() {}); // the pill's live/dead state tracks the sixth digit
+  }
+
+  Future<void> _setPad(vault_api.VaultInputKind pad) async {
+    if (_busy || pad == _pad) return;
+    if (pad == vault_api.VaultInputKind.digits) {
+      final bound = await _bindingLane();
+      if (!mounted) return;
+      if (!bound) {
+        setState(
+          () => _message =
+              'This phone cannot lock a PIN to its own hardware, so six '
+              'digits would be far easier to break than a passphrase. Keep '
+              'the keyboard.',
+        );
+        return;
+      }
+    }
+    _passphrase.wipe();
+    setState(() {
+      _pad = pad;
+      _message = null;
+    });
+  }
+
+  /// The same pair of names the other two ceremonies use (BG-21).
+  String get _padSwitchLabel =>
+      _isPin ? 'Use a keyboard passphrase' : 'Use a 6-digit PIN';
+
   Widget _passphraseStep() => _page(
     title: 'Restore wallet',
     onBack: _handleBack,
     children: [
       _heading('Choose an unlock passphrase'),
       _sub(
-        'It opens this app on this phone only — it is not your recovery '
-        'phrase; those are the words you have just entered.',
+        _isPin
+            ? 'Six digits. It opens this app on this phone only — it is not '
+                  'your recovery phrase; those are the words you have just '
+                  'entered.'
+            // **The keyboard branch does not claim the phone.** A PIN vault
+            // is always device-bound — the seal refuses otherwise — so `O2`'s
+            // *on this phone only* is true there. A passphrase vault seals
+            // WITHOUT the binding when the Keystore is unavailable, and on
+            // that phone the same sentence is false: the file plus the
+            // passphrase opens the wallet anywhere. So this branch says only
+            // what is always true (`consensus-auditor`, D-312).
+            : 'It unlocks this app — it is not your recovery phrase; those '
+                  'are the words you have just entered.',
       ),
       const SizedBox(height: KvSpace.xl),
       Center(
         child: MaskedDots(
           length: _passphrase.length,
+          slots: _isPin ? _pinLength : null,
           emptyHint: 'Type it on the keyboard below',
         ),
       ),
@@ -1065,7 +1146,29 @@ class _RestoreScreenState extends State<RestoreScreen>
         label: _busy ? 'Restoring…' : 'Restore wallet',
         primary: true,
         onTap: _busy ? () {} : _runCommit,
-        disabledReason: _busy ? 'Restoring…' : null,
+        // **It really does track the sixth digit now.** `_onPinChar` called
+        // `setState` and this line read only `_busy`, so the pill sat fully lit
+        // at zero digits while a comment two lines up claimed otherwise — a
+        // control saying it is committable when it is not (BG-27; `ux-auditor`,
+        // D-312). `create_screen`'s `_extraWordReason` had it right two files
+        // away, which is what made it a finding rather than a preference.
+        disabledReason: _busy
+            ? 'Restoring…'
+            : (_isPin && _passphrase.length.value != _pinLength
+                  ? 'Enter all $_pinLength digits'
+                  : null),
+      ),
+      Center(
+        child: KvTextAction(
+          label: _padSwitchLabel,
+          onTap: _busy
+              ? null
+              : () => _setPad(
+                  _isPin
+                      ? vault_api.VaultInputKind.passphrase
+                      : vault_api.VaultInputKind.digits,
+                ),
+        ),
       ),
     ],
     foot: Column(
@@ -1093,10 +1196,21 @@ class _RestoreScreenState extends State<RestoreScreen>
     bleed: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SecretKeyboard(
-          onChar: _busy ? (_) {} : _passphrase.appendChar,
-          onBackspace: _busy ? () {} : _passphrase.backspace,
-        ),
+        if (_isPin)
+          // `O2`'s number pad is drawn inset — see `create_screen._keypad`.
+          KvColumn(
+            child: KvKeypad.pin(
+              onChar: _busy ? (_) {} : _onPinChar,
+              onBackspace: _busy
+                  ? () {}
+                  : () => setState(_passphrase.backspace),
+            ),
+          )
+        else
+          SecretKeyboard(
+            onChar: _busy ? (_) {} : _passphrase.appendChar,
+            onBackspace: _busy ? () {} : _passphrase.backspace,
+          ),
         if (!_short)
           KvColumn(
             child: const Padding(

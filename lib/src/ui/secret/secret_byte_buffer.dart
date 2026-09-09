@@ -71,6 +71,45 @@ class SecretByteBuffer {
     return true;
   }
 
+  /// **The characters, as text, for exactly one paint under a hold** (D-312).
+  ///
+  /// This is the one method on this class that returns a Dart `String` of the
+  /// secret, and it is a **ledgered exception to INV-3, not a hole in it**. The
+  /// precedent is D-039 as widened by D-136: the twelve recovery words already
+  /// exist as Activity-scoped Java `String`s during the native reveal,
+  /// unwipeable by design, *"accepted because the same window has the words on
+  /// the physical screen."* The extra word's reveal is the identical bargain on
+  /// a smaller secret, and the founder ruled for it after hearing the argument
+  /// against (`vault_architecture.md` §7).
+  ///
+  /// The fence, and every part of it is load-bearing:
+  ///
+  /// * **Hold, never a sticky toggle.** The caller must drive this from a press
+  ///   that ends on release, so the word is on screen only while a finger is
+  ///   down and the residual's lifetime is a gesture rather than a screen.
+  /// * **Composed at paint, dropped on release.** The returned `String` lives
+  ///   in one widget's `Text` and dies with the rebuild that hides it. Dart
+  ///   strings are immutable: this one CANNOT be zeroized, and no future
+  ///   version of this method will be able to. That is the residual, stated.
+  /// * **The byte copy IS wiped**, below — only the `String` cannot be.
+  /// * **The screen is already `FLAG_SECURE`** ([SecretScreenGuard]), so the
+  ///   exposure is an off-device camera, not a screenshot.
+  ///
+  /// What it buys: the founder's own finding that a word you cannot see is a
+  /// word you cannot check. The double entry stays as well — he asked for both
+  /// — so this adds a check rather than replacing one.
+  ///
+  /// Never call this outside a hold, never on a screen without the guard, and
+  /// never hand the result anywhere but a paint.
+  String revealWhileHeld() {
+    final copy = _store.sublist(0, _len);
+    final text = utf8.decode(copy);
+    // The bytes we CAN clear, we clear. Immediately, not at some later dispose:
+    // this copy has no other reader.
+    copy.fillRange(0, copy.length, 0);
+    return text;
+  }
+
   /// Zero the backing store and reset to empty. Safe to reuse afterwards.
   void wipe() {
     _store.fillRange(0, _store.length, 0);

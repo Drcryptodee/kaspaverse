@@ -7,10 +7,22 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `blob_path`, `broadcast_status`, `build_wallet_signer`, `chain_store_dir`, `change_cursor_path`, `change_cursor`, `current_status`, `derive_wallet_addresses`, `derive_wallet_branches`, `endpoint_cache_path`, `export_seed_for_keystore`, `from_bytes`, `is_unlocked`, `load_vault_from_seed_bytes`, `lock_epoch`, `lock_grace_path`, `lock_grace_secs`, `lockout_delay_secs`, `lockout_path`, `node_config_dir`, `now_unix`, `persisted_count`, `prefs_dir`, `read_blob`, `read_lockout`, `reveal_ceremony_words`, `scan_high_water`, `scan_window_path`, `set_change_cursor`, `set_lock_grace_secs`, `set_scan_high_water`, `set_vault_if_current`, `status_tx`, `to_bytes`, `transport_decryptor`, `transport_store_dir`, `vault_dir`, `wallet_address_at`, `wallet_store_path`, `write_lockout`
+// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `binding_for`, `blob_path`, `broadcast_status`, `build_wallet_signer`, `chain_store_dir`, `change_cursor_path`, `change_cursor`, `current_status`, `derive_wallet_addresses`, `derive_wallet_branches`, `endpoint_cache_path`, `export_seed_for_keystore`, `from_bytes`, `install_pepper`, `is_trivially_guessable_pin`, `is_unlocked`, `load_vault_from_seed_bytes`, `lock_epoch`, `lock_grace_path`, `lock_grace_secs`, `lockout_delay_secs`, `lockout_path`, `migrate_blob`, `node_config_dir`, `now_unix`, `persisted_count`, `prefs_dir`, `read_blob`, `read_lockout`, `regenerate_ceremony`, `reveal_ceremony_words`, `scan_high_water`, `scan_window_path`, `set_change_cursor`, `set_lock_grace_secs`, `set_scan_high_water`, `set_vault_if_current`, `status_tx`, `take_pepper`, `to_bytes`, `transport_decryptor`, `transport_store_dir`, `vault_dir`, `wallet_address_at`, `wallet_store_path`, `write_lockout`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Lockout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+
+/// Which pad this vault's unlock screen should offer FIRST.
+///
+/// **Advisory, never a gate.** The screen that reads this must always offer the
+/// other pad: the byte is unauthenticated at the moment it is read (reading it
+/// needs no secret), and a number pad drawn at somebody whose secret contains
+/// letters would lock them out of their own wallet while they were holding the
+/// correct passphrase. Dart falls back to `Passphrase` on any error for the same
+/// reason — the alphanumeric pad can enter a PIN, the number pad cannot enter a
+/// passphrase, so the fallback is the one that can type either secret.
+Future<VaultInputKind> vaultInputKind() =>
+    RustLib.instance.api.crateApiVaultVaultInputKind();
 
 /// The wallet's primary receive address (receive index 0), for the Receive
 /// sheet. An address is PUBLIC (derived from the account xpub) — INV-1 governs
@@ -40,6 +52,13 @@ Future<bool> vaultExists() => RustLib.instance.api.crateApiVaultVaultExists();
 /// prior one first). The phrase never crosses FRB.
 Future<void> beginCreate() => RustLib.instance.api.crateApiVaultBeginCreate();
 
+/// How many words the held ceremony has. A count, not a secret — the create
+/// screen needs it to name the extra word by its ordinal (a *13th* for twelve,
+/// a *25th* for twenty-four), and getting that wrong puts a wrong label on the
+/// one piece of paper that restores the wallet.
+Future<int> ceremonyWordCount() =>
+    RustLib.instance.api.crateApiVaultCeremonyWordCount();
+
 /// Abandon an in-progress create ceremony (back-gesture / cancel): drops the
 /// held mnemonic, zeroizing the phrase. Idempotent (a no-op if none is held).
 Future<void> abandonCreate() =>
@@ -57,10 +76,12 @@ Future<void> sealAndPersist({
   required List<int> passphrase,
   required List<int> extraWord,
   required VaultKdfParams params,
+  required VaultInputKind inputKind,
 }) => RustLib.instance.api.crateApiVaultSealAndPersist(
   passphrase: passphrase,
   extraWord: extraWord,
   params: params,
+  inputKind: inputKind,
 );
 
 /// Restore preview (deliverable 2 — the decoy/typo trap): derive the FIRST
@@ -88,11 +109,13 @@ Future<void> restoreAndPersist({
   required List<int> extraWord,
   required List<int> passphrase,
   required VaultKdfParams params,
+  required VaultInputKind inputKind,
 }) => RustLib.instance.api.crateApiVaultRestoreAndPersist(
   phrase: phrase,
   extraWord: extraWord,
   passphrase: passphrase,
   params: params,
+  inputKind: inputKind,
 );
 
 /// Unlock via passphrase (Path B). Rate-limit is checked BEFORE the KDF runs
@@ -135,6 +158,19 @@ Future<void> setVaultLockGraceSecs({required int secs}) =>
 /// (8 MiB..=256 MiB, D-031.2). Runs on FRB's worker pool like the real KDF.
 Future<BigInt> kdfBenchMs({required VaultKdfParams params}) =>
     RustLib.instance.api.crateApiVaultKdfBenchMs(params: params);
+
+/// **What the user types to open this vault** — the founder's D-312 choice,
+/// crossing to Dart so the unlock screen can draw the right pad first.
+///
+/// Not a secret and not secret-shaped: it is a plaintext byte in the blob
+/// header, which is why it may cross at all. Mapped onto the core `InputKind`.
+enum VaultInputKind {
+  /// Any-length printable secret on the alphanumeric pad.
+  passphrase,
+
+  /// Six digits on the number pad — offerable only with a device binding.
+  digits,
+}
 
 /// Argon2id cost parameters chosen by on-device tuning (P1.2 §0.3). Mapped onto
 /// the core `SealParams`, which bounds-checks them (8 MiB..=256 MiB, D-031.2).

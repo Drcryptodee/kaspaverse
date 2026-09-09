@@ -86,9 +86,15 @@ void main() {
     // regression that silently stopped producing decoys (asset renamed,
     // `load()` throwing, the count zeroed) would have stayed green while the
     // board reverted to the bare phrase. Assert the count.
+    // **36 since D-312, and the number is not arbitrary.** The native board
+    // holds twice the phrase's length, so a 24-word ceremony needs 24 decoys
+    // AFTER collisions with the user's own words are dropped natively — a few
+    // spare is what makes an under-diluted board unlikely rather than merely
+    // logged. It was 24, which was exactly enough for the only phrase length
+    // that existed before `O3`'s control.
     expect(
       decoys,
-      hasLength(24),
+      hasLength(36),
       reason:
           'the full sample must be sent — the native side does the filtering',
     );

@@ -13,6 +13,11 @@
 //!   hand the space-joined 12 words to the native FLAG_SECURE reveal/verify
 //!   surface to render; Kotlin wipes the `byte[]` after rendering (L9). The words
 //!   never reach Dart (INV-1).
+//! - `nativeInstallVaultPepper(byte[])` — the D-312 device binding: Kotlin hands
+//!   the 32 bytes only this phone's Keystore can produce, for the ONE vault
+//!   operation about to run. It comes this way rather than over FRB for the same
+//!   reason the seed does — the hardware factor that makes a 6-digit PIN safe
+//!   must not exist as a Dart object (INV-1/3).
 //!
 //! Invariants this module enforces (ffi-leak full):
 //! - **No panic crosses the boundary** (INV-2): every entry is wrapped in
@@ -33,10 +38,12 @@ use zeroize::Zeroizing;
 
 use crate::api::error::AppError;
 use crate::api::vault::{
-    export_seed_for_keystore, load_vault_from_seed_bytes, reveal_ceremony_words,
+    export_seed_for_keystore, install_pepper, load_vault_from_seed_bytes, regenerate_ceremony,
+    reveal_ceremony_words,
 };
 
 const SEED_LEN: usize = 64;
+const PEPPER_LEN: usize = kaspaverse_core::PEPPER_LEN;
 
 /// Best-effort: throw a Java exception carrying `msg`. If even this fails there
 /// is nothing left to do but return the sentinel; the caller handles a missing
@@ -168,4 +175,77 @@ fn reveal_words(env: &mut JNIEnv) -> Result<jbyteArray, AppError> {
         .map_err(|e| AppError::msg(format!("jni set_byte_array_region: {e}")))?;
     Ok(arr.into_raw())
     // `signed` and `words` zeroize here on drop.
+}
+
+/// The D-312 device binding. Installs the 32-byte pepper for the next vault
+/// operation; returns 0 on success, throws on any error. The caller wipes its
+/// `byte[]` in `finally` (L9).
+///
+/// # Safety
+/// Standard JNI contract, as above; no unwinding escapes (`catch_unwind`).
+#[no_mangle]
+pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeInstallVaultPepper(
+    mut env: JNIEnv,
+    _class: JClass,
+    pepper: JByteArray,
+) -> jint {
+    match catch_unwind(AssertUnwindSafe(|| take_pepper_from_jvm(&mut env, &pepper))) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            throw(&mut env, &e.message);
+            -1
+        }
+        Err(_) => {
+            throw(&mut env, "internal error in native seed lane (pepper)");
+            -2
+        }
+    }
+}
+
+fn take_pepper_from_jvm(env: &mut JNIEnv, pepper: &JByteArray) -> Result<(), AppError> {
+    let len = env
+        .get_array_length(pepper)
+        .map_err(|e| AppError::msg(format!("jni get_array_length: {e}")))?;
+    if len as usize != PEPPER_LEN {
+        return Err(AppError::msg("device pepper must be exactly 32 bytes"));
+    }
+    // Straight into our own zeroizing buffer (JNI bytes are i8), then
+    // reinterpreted bit-for-bit — no JNI-owned intermediate we cannot wipe.
+    let mut signed = Zeroizing::new([0i8; PEPPER_LEN]);
+    env.get_byte_array_region(pepper, 0, signed.as_mut())
+        .map_err(|e| AppError::msg(format!("jni get_byte_array_region: {e}")))?;
+    let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(signed.iter().map(|&b| b as u8).collect());
+    install_pepper(bytes)
+    // `signed` zeroizes here on drop; the installed copy is owned by the store.
+}
+
+/// The `12 | 24` control on `O3` (D-312). Redraws the held create ceremony at
+/// `word_count` words; returns 0 on success, throws on any error. The words
+/// themselves never leave Rust on this call — the caller re-reads them through
+/// [`Java_org_kaspaverse_app_VaultBridge_nativeRevealCeremonyWords`].
+///
+/// # Safety
+/// Standard JNI contract, as above; no unwinding escapes (`catch_unwind`).
+#[no_mangle]
+pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeRegenerateCeremony(
+    mut env: JNIEnv,
+    _class: JClass,
+    word_count: jint,
+) -> jint {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if word_count < 0 {
+            return Err(AppError::msg("word count must be positive"));
+        }
+        regenerate_ceremony(word_count as usize)
+    })) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            throw(&mut env, &e.message);
+            -1
+        }
+        Err(_) => {
+            throw(&mut env, "internal error in native seed lane (regenerate)");
+            -2
+        }
+    }
 }

@@ -31,18 +31,25 @@ void main() {
     ..lineTo(29.5 * k, 81 * k);
 
   group('KvMark — the locked geometry (§4a)', () {
-    test('the stroke is the artwork\'s 14, at every size', () {
+    test('the stroke is 13, flat, at every size', () {
+      // **The artwork draws 14; the founder took it to 13 on 2026-09-09** —
+      // *"maybe the inverted k stroke a little smaller? just a tiny bit
+      // smaller"* — which is one unit on the 100-grid, the smallest change it
+      // can express.
+      //
+      // What this test has always been FOR is the flatness, not the number.
       // The delivery's README asks for 16 below 40 dp and the mark was drawn
-      // that way first. It reads as a blob at 24 and 28: the artwork's apex is
-      // already inside the stem, so the extra weight closes the counter between
-      // the chevron's arms. Looked at on the ladder, then reverted — *"retain
-      // the exact design drawn"*, and the drawing says 14.
+      // that way first; it reads as a blob at 24 and 28, because the artwork's
+      // apex sits inside the stem so extra weight closes the counter between
+      // the chevron's arms. Thirteen moves the other way and the small end
+      // gets better — which is checked, not assumed, by the join assertion
+      // below and by `mark_candidates_test`'s ladder.
       for (final size in const <double>[176, 120, 96, 64, 40, 28, 24, 16]) {
-        expect(KvMark.strokeUnitsFor(size), 14, reason: 'at $size dp');
+        expect(KvMark.strokeUnitsFor(size), 13, reason: 'at $size dp');
       }
       // Flat, not a ladder that happens to agree on the canon sizes.
       for (var s = 16.0; s <= 200; s += 0.5) {
-        expect(KvMark.strokeUnitsFor(s), 14, reason: 'at $s dp');
+        expect(KvMark.strokeUnitsFor(s), 13, reason: 'at $s dp');
       }
     });
 
@@ -96,7 +103,10 @@ void main() {
       );
 
       // Overlap = stroke − centreline, half a stroke painted from each side.
-      // Positive at every canon size, which is what "join" means.
+      // Positive at every canon size, which is what "join" means — and this is
+      // the assertion that makes a stroke change safe to take on his word: at
+      // 13 the overlap is 3.6 units, so the chevron still MEETS the stem. It is
+      // also the floor a further thinning would hit first.
       for (final size in const <double>[176, 120, 96, 64, 40, 28, 24]) {
         expect(
           KvMark.strokeUnitsFor(size) - centreline,

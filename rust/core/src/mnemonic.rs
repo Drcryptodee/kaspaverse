@@ -3,7 +3,8 @@
 //! Derived from the pinned crate's own implementation and tests (INV-9):
 //! `wallet/bip32/src/mnemonic/phrase.rs` at the pin — `WordCount` (:38),
 //! `random_impl` (:116), `to_seed` (:232), and the self-zeroizing `Drop`
-//! (:240). Policy per D-028: create = 12 words; restore accepts 12 AND 24.
+//! (:240). Policy per D-312 (reversing D-028's conclusion): create offers 12
+//! AND 24, 12 by default; restore has always accepted both.
 
 use crate::error::{CoreError, Result};
 use crate::seed::SecretSeed;
@@ -23,13 +24,29 @@ use zeroize::Zeroizing;
 pub struct MnemonicCeremony(Mnemonic);
 
 impl MnemonicCeremony {
-    /// Generate a fresh 12-word mnemonic (D-028: create = 12 words —
-    /// 128-bit entropy matches secp256k1's effective security level).
+    /// Generate a fresh mnemonic of `word_count` words — **12 or 24, and 12 is
+    /// the default the caller passes** (D-312, reversing D-028's conclusion).
+    ///
+    /// **24 words does not make a Kaspa wallet harder to break, and no copy
+    /// anywhere may say or imply that it does.** D-028's arithmetic still
+    /// holds: 12 words is 128 bits of entropy, which already saturates
+    /// secp256k1's ~128-bit effective security, and 24 words' extra 128 bits
+    /// compress back through BIP32 to a key of exactly the same strength. What
+    /// the choice buys is **parity with the wallets users arrive from** —
+    /// restore has always accepted both, so refusing to create both made the
+    /// app asymmetric for no stated reason. The founder reversed the
+    /// conclusion, not the reasoning.
+    ///
     /// Entropy comes straight from the OS CSPRNG (`OsRng`, getrandom-backed —
     /// the same RNG the vault uses for salts/nonces), not a userspace PRNG.
-    pub fn generate() -> Result<Self> {
+    pub fn generate(word_count: usize) -> Result<Self> {
+        let words = match word_count {
+            12 => WordCount::Words12,
+            24 => WordCount::Words24,
+            other => return Err(CoreError::WordCount(other)),
+        };
         Ok(Self(Mnemonic::random_impl(
-            WordCount::Words12,
+            words,
             OsRng,
             Language::English,
         )?))
@@ -148,19 +165,50 @@ mod tests {
         assert_eq!(b.as_bytes(), c.as_bytes());
     }
 
+    /// **Both counts generate, and 24 is not the default anywhere.**
+    ///
+    /// D-312 reversed D-028's conclusion, not its arithmetic — the property
+    /// this pins is that the ceremony can produce either, and that anything
+    /// outside the pair is refused rather than silently rounded to one of them.
+    #[test]
+    fn generate_makes_12_or_24_and_refuses_anything_else() {
+        for n in [12usize, 24] {
+            let m = MnemonicCeremony::generate(n).unwrap();
+            assert_eq!(m.word_count(), n);
+            assert_eq!(m.words().count(), n);
+            // …and it round-trips through the restore path, which is the only
+            // way a user ever gets the wallet back.
+            let phrase = m.words().collect::<Vec<_>>().join(" ");
+            let back = MnemonicCeremony::restore(phrase.as_bytes()).unwrap();
+            assert_eq!(
+                m.into_seed(b"").unwrap().as_bytes(),
+                back.into_seed(b"").unwrap().as_bytes()
+            );
+        }
+        for bad in [0usize, 1, 11, 13, 18, 25, 48] {
+            assert!(
+                matches!(
+                    MnemonicCeremony::generate(bad),
+                    Err(CoreError::WordCount(n)) if n == bad
+                ),
+                "generate({bad}) was not refused"
+            );
+        }
+    }
+
     #[test]
     fn generate_is_12_words_and_unique() {
-        let a = MnemonicCeremony::generate().unwrap();
+        let a = MnemonicCeremony::generate(12).unwrap();
         assert_eq!(a.word_count(), 12);
         assert_eq!(a.words().count(), 12);
-        let b = MnemonicCeremony::generate().unwrap();
+        let b = MnemonicCeremony::generate(12).unwrap();
         // 128-bit entropy: a collision here means the CSPRNG is broken.
         assert!(a.words().ne(b.words()));
     }
 
     #[test]
     fn generate_round_trips_through_restore() {
-        let a = MnemonicCeremony::generate().unwrap();
+        let a = MnemonicCeremony::generate(12).unwrap();
         let phrase = a.words().collect::<Vec<_>>().join(" ");
         let b = MnemonicCeremony::restore(phrase.as_bytes()).unwrap();
         let seed_a = a.into_seed(b"").unwrap();

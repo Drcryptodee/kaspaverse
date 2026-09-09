@@ -31,6 +31,13 @@ pub enum CoreError {
     /// AEAD open failed: wrong passphrase or corrupted blob — the two are
     /// cryptographically indistinguishable, and the message says so.
     WrongPassphraseOrCorrupt,
+    /// A device-bound blob (D-312) was handed no pepper, or one of the wrong
+    /// length. Distinct from [`CoreError::WrongPassphraseOrCorrupt`] on purpose:
+    /// the secret may be perfectly correct and this phone still unable to open
+    /// the file, and telling the user "wrong passphrase" would send them to
+    /// retype a PIN that was never the problem. The reason names the condition,
+    /// never any value — the binding byte is plaintext in the header anyway.
+    DeviceBinding(&'static str),
     /// AEAD seal failed (should not happen with valid inputs).
     Seal,
     /// Signing was requested for an address never registered with this
@@ -83,6 +90,9 @@ impl fmt::Display for CoreError {
             }
             Self::WrongPassphraseOrCorrupt => {
                 f.write_str("wrong passphrase or corrupted vault data")
+            }
+            Self::DeviceBinding(what) => {
+                write!(f, "vault is bound to its phone's hardware key: {what}")
             }
             Self::Seal => f.write_str("vault seal failed"),
             Self::UnknownAddress(addr) => {

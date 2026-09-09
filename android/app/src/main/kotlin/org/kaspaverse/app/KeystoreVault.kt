@@ -14,6 +14,7 @@ import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
+import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -54,6 +55,64 @@ object KeystoreVault {
     data class Failure(val code: String, val message: String)
 
     private const val KEY_ALIAS = "kaspaverse_vault_key"
+
+    /**
+     * **The D-312 device-binding key — a second alias, and deliberately NOT the
+     * first one.**
+     *
+     * [KEY_ALIAS] is auth-gated and invalidated by a new fingerprint, because
+     * Path A *is* the biometric. This one must be neither: it exists so Path B's
+     * sealed file is worthless off this phone, and Path B is the lane that has
+     * to keep working when the biometric key dies (vault_architecture §3). An
+     * auth-gate here would make a passphrase unlock impossible without a
+     * fingerprint, which is the opposite of a fallback.
+     *
+     * What that costs, stated rather than glossed: this key is usable by
+     * anything running as this app, so it is not a defence against code
+     * execution inside our own process. What it defends is the file — an
+     * attacker who lifts `vault.kvsb` off the device (root, a forensic image, a
+     * repair shop) cannot attack the secret at all without the phone, which is
+     * what makes six digits offerable. `allowBackup="false"` stops `adb backup`
+     * and none of those.
+     *
+     * Its lifetime is the app sandbox's: uninstall, clear-data and factory reset
+     * take it, and every one of those takes `vault.kvsb` with it. So it adds no
+     * failure mode that does not already destroy the file it protects — and the
+     * recovery from all of them is the same one it always was, the written
+     * words on a new install.
+     */
+    private const val PEPPER_ALIAS = "kaspaverse_vault_pepper"
+
+    /**
+     * The message the pepper is the MAC of. A constant, so the pepper is a
+     * stable per-device secret rather than something the caller can steer: a
+     * salt-derived pepper would need the blob's salt to cross into Kotlin, and
+     * a caller-supplied MAC message is an oracle waiting for a use.
+     */
+    private const val PEPPER_LABEL = "kaspaverse-vault-pepper-v1"
+
+    /**
+     * **A one-way marker saying this phone HAS minted its pepper key.**
+     *
+     * Without it, an alias that existed and is now gone — credential-storage
+     * cleared, keystore corrupted across an OS upgrade — is indistinguishable
+     * from one that never existed, because `getKey` returns null for both. The
+     * app would quietly mint a *fresh* key, derive a different pepper, and the
+     * vault would refuse with `WrongPassphraseOrCorrupt`: the user is told their
+     * PIN is wrong, the attempt is counted, and the escalation walks them into
+     * hour-long lockouts while the honest copy written for exactly this state
+     * never fires (`wallet-security-auditor`, D-312).
+     *
+     * With it, a missing key on a phone that has one is reported as *cannot
+     * bind* — which routes to the `DeviceBinding` lane and the sentence that
+     * tells the truth: this wallet is locked to a phone that can no longer open
+     * it, restore from the recovery words. It lives in the same app-private
+     * directory as the blobs (INV-3, never SharedPreferences) and dies with
+     * them, so it can never outlive the vault it describes.
+     */
+    private const val PEPPER_MARK_FILE = "vault.pepper.mark"
+    private const val PEPPER_LEN = 32
+    private const val PEPPER_MAC = "HmacSHA256"
     private const val BLOB_A_FILE = "vault.keystore.blob"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val TRANSFORM = "AES/GCM/NoPadding"
@@ -387,6 +446,109 @@ object KeystoreVault {
             KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(KEY_ALIAS)
         }
         blobFile(ctx).delete()
+    }
+
+    /**
+     * Produce this device's vault pepper and hand it to Rust for the ONE vault
+     * operation about to run (D-312).
+     *
+     * Returns true if the binding is available. **False is not an error** — it
+     * means this phone could not produce the key, and the caller decides what
+     * that costs: a passphrase vault seals without it, a PIN vault is refused
+     * (Rust `binding_for` owns that rule, so it holds for every caller rather
+     * than for the ones that remember).
+     *
+     * The bytes are wiped in `finally` (L9) and never become a Dart object — the
+     * whole point of routing this over [VaultBridge] rather than the ceremony
+     * channel (INV-1/3).
+     */
+    fun installPepper(ctx: Context): Boolean = producePepper(ctx, push = true)
+
+    /**
+     * **Can this phone bind, WITHOUT leaving a pepper resident?**
+     *
+     * The create and restore screens ask this the moment the user taps *Use a
+     * 6-digit PIN*, so they can refuse there rather than at the seal with the
+     * recovery words already written down. Asking must not cost what using
+     * costs: `installPepper` would have left 32 bytes of device pepper in the
+     * Rust store for the rest of the ceremony, which is exactly the residency
+     * `PEPPER`'s own doc bounds to one operation (`ffi-leak-auditor`, D-312).
+     *
+     * Same work, same failure modes, and the answer is thrown away.
+     */
+    fun canBind(ctx: Context): Boolean = producePepper(ctx, push = false)
+
+    private fun producePepper(ctx: Context, push: Boolean): Boolean {
+        var pepper: ByteArray? = null
+        return try {
+            val key = loadOrCreatePepperKey(ctx) ?: return false
+            pepper = Mac.getInstance(PEPPER_MAC).run {
+                init(key)
+                doFinal(PEPPER_LABEL.toByteArray(Charsets.UTF_8))
+            }
+            if (pepper.size != PEPPER_LEN) return false
+            if (push) VaultBridge.nativeInstallVaultPepper(pepper)
+            true
+        } catch (e: Throwable) {
+            // A phone that cannot bind is a phone that cannot bind; it is not a
+            // crash, and it is not a reason to refuse a passphrase wallet.
+            android.util.Log.w("KeystoreVault", "device pepper unavailable: ${e.javaClass.simpleName}")
+            false
+        } finally {
+            pepper?.fill(0)
+        }
+    }
+
+    /**
+     * The pepper key, or **null when this phone once had one and no longer
+     * does** — see [PEPPER_MARK_FILE]. Null is not an error; it is the honest
+     * answer, and it routes to the copy that tells the user what actually
+     * happened instead of blaming their PIN.
+     */
+    private fun loadOrCreatePepperKey(ctx: Context): SecretKey? {
+        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        (ks.getKey(PEPPER_ALIAS, null) as? SecretKey)?.let { return it }
+        val mark = File(ctx.filesDir, PEPPER_MARK_FILE)
+        if (mark.exists()) {
+            android.util.Log.w("KeystoreVault", "pepper key is GONE but this phone minted one")
+            return null
+        }
+        val key = createPepperKey(strongBox = true)
+        // Marked only after the key exists, so a failed mint leaves a phone
+        // that can still try again rather than one permanently refused.
+        runCatching { mark.writeBytes(byteArrayOf(1)) }
+        return key
+    }
+
+    private fun createPepperKey(strongBox: Boolean): SecretKey {
+        // Same API-28 guard as [createKey]: naming StrongBox below 28 raises a
+        // java.lang.Error no `catch (e: Exception)` on the path would stop.
+        val strongBoxRequested = strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        val builder = KeyGenParameterSpec.Builder(PEPPER_ALIAS, KeyProperties.PURPOSE_SIGN)
+            .setDigests(KeyProperties.DIGEST_SHA256)
+        // NO setUserAuthenticationRequired and NO
+        // setInvalidatedByBiometricEnrollment — see [PEPPER_ALIAS]. Their
+        // ABSENCE is the design, so it is stated here rather than left to be
+        // inferred from a builder that does not mention them.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setIsStrongBoxBacked(strongBoxRequested)
+        }
+        val generator = KeyGenerator.getInstance(PEPPER_MAC, ANDROID_KEYSTORE)
+        return try {
+            generator.init(builder.build())
+            generator.generateKey().also {
+                android.util.Log.i(
+                    "KeystoreVault",
+                    "pepper key created (requested strongbox=$strongBoxRequested, " +
+                        "observed tier=${observedTier(it)})"
+                )
+            }
+        } catch (e: Exception) {
+            if (strongBoxRequested && isStrongBoxUnavailable(e)) {
+                android.util.Log.i("KeystoreVault", "StrongBox unavailable for pepper — TEE fallback")
+                createPepperKey(strongBox = false)
+            } else throw e
+        }
     }
 
     private fun createKey(strongBox: Boolean): SecretKey {
