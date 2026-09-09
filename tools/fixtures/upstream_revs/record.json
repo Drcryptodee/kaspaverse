@@ -1,0 +1,130 @@
+{
+ "not_polled": [
+  "kas-smiths.org \u2014 founder-curated (D-243 item 6; kas-smiths-intake \u00a70a rule 5)"
+ ],
+ "our_pin": {
+  "read_from": "rust/Cargo.toml",
+  "rusty_kaspa": "cfafeb4c093fa37a303f1b9f19c58f986b870ce3"
+ },
+ "recorded_at_utc": "2026-09-09T21:32:04Z",
+ "recorded_by": "tools/upstream_revs.sh --record",
+ "schema": 1,
+ "sources": {
+  "argent": {
+   "head": {
+    "branch": "master",
+    "date": "2026-09-08T14:43:20Z",
+    "sha": "94f249a75dd25a192ae2625d95f7a6f96974abcf"
+   },
+   "manifest": {
+    "at": "94f249a75dd25a192ae2625d95f7a6f96974abcf",
+    "path": "Cargo.toml",
+    "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
+    "silverscript": "c7d17a15ac88610d013ec9ffffa9520aeb69929b"
+   },
+   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "repo": "argent-lang/argent",
+   "top_release": null,
+   "top_tag": null
+  },
+  "argent-playground": {
+   "head": {
+    "branch": "master",
+    "date": "2026-09-02T11:00:44Z",
+    "sha": "566b76e21de39afd68fdf133329fbf19c5c0f334"
+   },
+   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "repo": "argent-lang/argent-playground"
+  },
+  "argent-template": {
+   "branches": {
+    "episode-01": {
+     "date": "2026-08-31T09:04:16Z",
+     "sha": "cf20e4397afdfcfaa8d02616bfc31b080d5a638a"
+    }
+   },
+   "head": {
+    "branch": "master",
+    "date": "2026-08-31T08:48:50Z",
+    "sha": "409122cd456f4fb77e6ada53972eff40431c9837"
+   },
+   "manifest": {
+    "at": "409122cd456f4fb77e6ada53972eff40431c9837",
+    "path": "Cargo.toml",
+    "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
+    "silverscript": null
+   },
+   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "repo": "argent-lang/argent-template"
+  },
+  "kccs": {
+   "blobs": {
+    "drift": false,
+    "last_line": "(fixture mode \u2014 probe not run)",
+    "probe": "tools/kcc_freshness.sh"
+   },
+   "head": {
+    "branch": "main",
+    "date": "2026-09-02T11:06:54Z",
+    "sha": "54f4f9c2730f77ec5b1ee8bc746d7f94d83b8ee6",
+    "tree": "cf0bc744d3a29b6b39144079a3d9fa51734b6743"
+   },
+   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "repo": "kaspanet/kccs"
+  },
+  "rusty-kaspa": {
+   "head": {
+    "branch": "master",
+    "date": "2026-08-24T02:24:54Z",
+    "sha": "c338d495bec29e4dc8b5149f99e8db6fa916ed4a"
+   },
+   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "repo": "kaspanet/rusty-kaspa",
+   "top_release": {
+    "prerelease": false,
+    "published_at": "2026-06-15T19:14:22Z",
+    "sha": "cfafeb4c093fa37a303f1b9f19c58f986b870ce3",
+    "tag": "v2.0.1"
+   },
+   "top_tag": {
+    "name": "v2.0.1",
+    "sha": "cfafeb4c093fa37a303f1b9f19c58f986b870ce3",
+    "stable": true,
+    "tags_page_full": false
+   }
+  },
+  "silverscript": {
+   "head": {
+    "branch": "master",
+    "date": "2026-09-09T16:47:25Z",
+    "sha": "3ed973335b59269293564805cc2c58a14595ec03"
+   },
+   "manifest": {
+    "at": "3ed973335b59269293564805cc2c58a14595ec03",
+    "path": "Cargo.toml",
+    "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
+    "silverscript": null
+   },
+   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "repo": "kaspanet/silverscript",
+   "top_release": {
+    "prerelease": false,
+    "published_at": "2026-09-09T16:48:31Z",
+    "sha": "3ed973335b59269293564805cc2c58a14595ec03",
+    "tag": "v1.0.0"
+   },
+   "top_tag": {
+    "name": "v1.0.0",
+    "sha": "3ed973335b59269293564805cc2c58a14595ec03",
+    "stable": true,
+    "tags_page_full": false
+   }
+  }
+ },
+ "triggers": {
+  "T-D": {
+   "condition": "v1.0.0:a41a333",
+   "fired_at": "2026-09-09T21:32:04Z"
+  }
+ }
+}

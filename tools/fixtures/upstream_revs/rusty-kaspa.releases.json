@@ -1,0 +1,27 @@
+[
+ {
+  "prerelease": false,
+  "published_at": "2026-06-15T19:14:22Z",
+  "tag_name": "v2.0.1"
+ },
+ {
+  "prerelease": false,
+  "published_at": "2026-06-05T12:09:13Z",
+  "tag_name": "v2.0.0"
+ },
+ {
+  "prerelease": true,
+  "published_at": "2026-06-03T13:34:34Z",
+  "tag_name": "v1.3.0-toc.5"
+ },
+ {
+  "prerelease": true,
+  "published_at": "2026-05-27T19:04:15Z",
+  "tag_name": "tn10-toc3"
+ },
+ {
+  "prerelease": true,
+  "published_at": "2026-05-16T19:09:09Z",
+  "tag_name": "tn10-toc2"
+ }
+]

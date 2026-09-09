@@ -1,0 +1,248 @@
+[
+ {
+  "commit": {
+   "sha": "cfafeb4c093fa37a303f1b9f19c58f986b870ce3"
+  },
+  "name": "v2.0.1"
+ },
+ {
+  "commit": {
+   "sha": "90dbf074275d60c1fe74a3491883196f110970c0"
+  },
+  "name": "v2.0.0"
+ },
+ {
+  "commit": {
+   "sha": "04b0d135f8c8023676ea74dcf496c99d5d0bc2a5"
+  },
+  "name": "v1.3.0-toc.5"
+ },
+ {
+  "commit": {
+   "sha": "e97070faa3826c590f477e327c82daaddd6178f4"
+  },
+  "name": "v1.1.0"
+ },
+ {
+  "commit": {
+   "sha": "a3113026239282a1833e6afbf6623ef2628f6aa1"
+  },
+  "name": "v1.1.0-rc.3"
+ },
+ {
+  "commit": {
+   "sha": "1a2f98adb39ff91a900170c01fe0beea39751fe2"
+  },
+  "name": "v1.1.0-rc.2"
+ },
+ {
+  "commit": {
+   "sha": "48f4d03279cef7c70e58fafe39a6ce959ac3b0c8"
+  },
+  "name": "v1.1.0-rc1"
+ },
+ {
+  "commit": {
+   "sha": "fcd9c28f9b211b9872a0c90a8c94f79466ffb063"
+  },
+  "name": "v1.0.1"
+ },
+ {
+  "commit": {
+   "sha": "eb71df4d284593fccd1342094c37edc8c000da85"
+  },
+  "name": "v1.0.0"
+ },
+ {
+  "commit": {
+   "sha": "47abc36b30d9c50e4e770a0712dcd1092f66b232"
+  },
+  "name": "v0.17.2"
+ },
+ {
+  "commit": {
+   "sha": "ac677a0f31a349b8cf77cb839c9d660fb2112508"
+  },
+  "name": "v0.17.1"
+ },
+ {
+  "commit": {
+   "sha": "430c8ad97d832b867d5918d6d4a3f4459aa876a4"
+  },
+  "name": "v0.17.0"
+ },
+ {
+  "commit": {
+   "sha": "cdd43795ac1c82e97058143d5cb607b07df324c9"
+  },
+  "name": "v0.16.1"
+ },
+ {
+  "commit": {
+   "sha": "178c0605f53b9e204bdfce8538fd9c7e67f3c443"
+  },
+  "name": "v0.16.0"
+ },
+ {
+  "commit": {
+   "sha": "14b1e10701b9f11c6f78306319a3b5780edfd153"
+  },
+  "name": "v0.15.4-tn11-only"
+ },
+ {
+  "commit": {
+   "sha": "8fe466311ba179e74fc8a52f13b36140bb6b9a4e"
+  },
+  "name": "v0.15.4-rc1"
+ },
+ {
+  "commit": {
+   "sha": "9fae376500c3b7bde4ac0d0f03f15d47a4d6f12c"
+  },
+  "name": "v0.15.2"
+ },
+ {
+  "commit": {
+   "sha": "b14537fac0c69505e64743dba8270c06fa1f11f5"
+  },
+  "name": "v0.15.2-rc1"
+ },
+ {
+  "commit": {
+   "sha": "f335376be8d720f709f04f3d12fe27a5dea5535f"
+  },
+  "name": "v0.15.1"
+ },
+ {
+  "commit": {
+   "sha": "d1dc5dd34426d7ce5f92ed9408701c8dae6cfe57"
+  },
+  "name": "v0.15.1-rc4"
+ },
+ {
+  "commit": {
+   "sha": "afbcf9e473acfe238b43785cab52f09387307588"
+  },
+  "name": "v0.15.1-rc3"
+ },
+ {
+  "commit": {
+   "sha": "06a874f4ee174d056d0c5c3d11ba1c3be545b8f4"
+  },
+  "name": "v0.15.1-rc2"
+ },
+ {
+  "commit": {
+   "sha": "c839a9d3f7d3da333d9ea8688dd1246ca3294596"
+  },
+  "name": "v0.15.1-rc1"
+ },
+ {
+  "commit": {
+   "sha": "4364f37fac816ccc16848a81433c8effec7bb9de"
+  },
+  "name": "v0.14.1"
+ },
+ {
+  "commit": {
+   "sha": "1eebd4d20a251b39615a88ccaef5a6cb268fdef1"
+  },
+  "name": "v0.13.6"
+ },
+ {
+  "commit": {
+   "sha": "b7469509418db82c458c7e3b440580b740ae802a"
+  },
+  "name": "v0.13.4"
+ },
+ {
+  "commit": {
+   "sha": "8d522e20cf4f953cccff89acaae7329cafd81a73"
+  },
+  "name": "v0.13.3"
+ },
+ {
+  "commit": {
+   "sha": "e2c94bf39005e46aace098b40317798d59bf4100"
+  },
+  "name": "v0.13.2"
+ },
+ {
+  "commit": {
+   "sha": "50d52330acf62ca52b42c584083a0ed7716a9575"
+  },
+  "name": "v0.13.0"
+ },
+ {
+  "commit": {
+   "sha": "1c2f7660ec73da2d69a88846d5c9d3495828d4a2"
+  },
+  "name": "v0.1.7"
+ },
+ {
+  "commit": {
+   "sha": "712c60e6fcda1e18f3882012afd6a7f62b25a2bd"
+  },
+  "name": "v0.1.7-deploy-fix"
+ },
+ {
+  "commit": {
+   "sha": "17c55bb6bca175ef7c969abcdee9e2b053eff7f1"
+  },
+  "name": "v0.1.2"
+ },
+ {
+  "commit": {
+   "sha": "d313489a6c2d6990c4a41e3a7ee5c9394bf686fe"
+  },
+  "name": "v0.1.1"
+ },
+ {
+  "commit": {
+   "sha": "3fff657a025d92f623aeeefcca1e523999958580"
+  },
+  "name": "v0.1.1-patch-2"
+ },
+ {
+  "commit": {
+   "sha": "4c44e5bc699f3f93dffbb397a1561d230425ce80"
+  },
+  "name": "v0.1.1-patch-1"
+ },
+ {
+  "commit": {
+   "sha": "f9878d7b90f66c32eeac93c279fee2df9f7faacb"
+  },
+  "name": "v0.1.0"
+ },
+ {
+  "commit": {
+   "sha": "1015a62359e0d06e0b3b3b7f7d06bc1bd4bf0c1b"
+  },
+  "name": "tn10-toc3"
+ },
+ {
+  "commit": {
+   "sha": "97415b689462bec8a1a36f1665302529ea8a3108"
+  },
+  "name": "tn10-toc2"
+ },
+ {
+  "commit": {
+   "sha": "2ba83227063d34143d6c070d0783ab4354e9b8c1"
+  },
+  "name": "musl-toolchain-v1"
+ },
+ {
+  "commit": {
+   "sha": "caedaa28385d4dfdd74f99f1d7e05bbb240189e9"
+  },
+  "name": "kos-20230708-084900"
+ },
+ {
+  "commit": {
+   "sha": "caedaa28385d4dfdd74f99f1d7e05bbb240189e9"
+  },
+  "name": "kos-20230708-083300"
+ }
+]

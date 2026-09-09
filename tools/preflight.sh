@@ -148,6 +148,18 @@ if command -v gh >/dev/null 2>&1 && timeout 10 gh auth status >/dev/null 2>&1; t
     fi
   fi
 fi
+# Upstream revs (D-243 item 6; built 2026-09-09, D-314). A READ-ONLY compare of the five
+# upstream repositories the covenant path depends on against the committed record: at most
+# fourteen API calls, hard-timeouted, SKIPs offline or rate-limited, never fatal. Default-ON,
+# opt out with KASPAVERSE_UPSTREAM=0 — the 2026-09-06 sweep addendum re-checked one source and
+# missed two moves, and Silverscript v1.0.0 shipped unnoticed on 2026-09-09; an instrument
+# nobody runs is the beacon lesson above, one level up. `--record` is the upstream-rediff
+# skill's closing act after a re-diff, never this ritual's. Silent in a public clone (no
+# docs/, no record — D-102); the record's path is named by the tool, not here.
+if [ "$HAVE_DOCS" = 1 ] && [ -x tools/upstream_revs.sh ] && [ "${KASPAVERSE_UPSTREAM:-1}" != 0 ]; then
+  UP_OUT="$(timeout 90 bash tools/upstream_revs.sh 2>/dev/null || true)"
+  [ -n "$UP_OUT" ] && printf '%s\n' "$UP_OUT" | sed '1s/^UPSTREAM /• upstream: /; 2,$s/^UPSTREAM /    /'
+fi
 # Disk headroom. Build caches here are pure REGENERABLE artifact — `rust/target` reached
 # 62 GB and `build/` 24 GB by 2026-08-29, and a full clean of both returned 86 GB in 11 s —
 # so running out of space is a self-inflicted wound, and it already cost one session
