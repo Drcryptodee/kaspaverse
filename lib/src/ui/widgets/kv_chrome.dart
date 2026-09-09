@@ -556,7 +556,6 @@ class KvAction extends StatefulWidget {
     this.destructive = false,
     this.disabledReason,
     this.disabledLabel,
-    this.disabledMark = true,
     this.labelWidget,
     this.mark,
     this.height = KvSpace.control,
@@ -598,7 +597,6 @@ class KvAction extends StatefulWidget {
     required String label,
     required VoidCallback onTap,
     String? disabledReason,
-    bool disabledMark = true,
     KvGlyph? mark,
     double height = KvSpace.control,
   }) : this(
@@ -607,7 +605,6 @@ class KvAction extends StatefulWidget {
          primary: false,
          onTap: onTap,
          disabledReason: disabledReason,
-         disabledMark: disabledMark,
          mark: mark,
          height: height,
        );
@@ -638,16 +635,6 @@ class KvAction extends StatefulWidget {
   /// screen reader is told why while the glass stays legible. Null keeps the
   /// reason on the glass, which remains the default everywhere else.
   final String? disabledLabel;
-
-  /// **Whether the disabled form carries its ring.**
-  ///
-  /// The mark is [KvRadio] and its documented meaning is *nothing new has been
-  /// picked* — it came from the selection sheet, where that is exactly the
-  /// refusal. It is wrong on a refusal about anything else: `M3`'s *Enter an
-  /// address to continue* is not an unmade choice, and neither is a network
-  /// check in flight (`ux-auditor`, UX-R5). Defaults on, so no shipped surface
-  /// moves; a caller whose refusal is not about a choice turns it off.
-  final bool disabledMark;
 
   /// The **enabled** label, composed — for the one case a plain string cannot
   /// carry: a label that mixes words with a figure, which BG-30 sets in two
@@ -757,13 +744,14 @@ class _KvActionState extends State<KvAction> {
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  if (disabled && widget.disabledMark) ...[
-                    // *Nothing new has been picked* — the sheet's own mark, in
-                    // miniature, rather than a second vocabulary. See
-                    // [disabledMark] for when it does not belong.
-                    const KvRadio(ring: KvRadio.markInPill),
-                    const SizedBox(width: KvSpace.s),
-                  ] else if (!disabled && widget.mark != null) ...[
+                  // **A disabled pill carries no mark.** It drew a [KvRadio]
+                  // — *nothing new has been picked*, borrowed from the
+                  // selection sheet — and the founder read it on glass as a
+                  // stray dot holding the label off centre. A radio doing
+                  // decorative duty breaks BG-21 twice: the ring already means
+                  // an unmade choice, and the reason text already says why the
+                  // pill refuses. The label centres instead (UX-R6 glass).
+                  if (!disabled && widget.mark != null) ...[
                     KvGlyphIcon(widget.mark!, size: KvAction.glyph, tone: ink),
                     const SizedBox(width: KvSpace.s),
                   ],
@@ -822,8 +810,14 @@ class _KvActionState extends State<KvAction> {
                                         ? 16
                                         : 15,
                                     height: 20 / 16,
-                                    fontWeight: FontWeight.w600,
-                                    fontVariations: KvWeight.w600,
+                                    // **700, not 600** — the founder read the
+                                    // verb as under-weighted against the pill
+                                    // it sits in (UX-R6 glass beat, "16% more
+                                    // bold"). 600 x 1.16 lands on the ramp's
+                                    // next whole rung, so the ask and the
+                                    // token agree without inventing a step.
+                                    fontWeight: FontWeight.w700,
+                                    fontVariations: KvWeight.w700,
                                     color: ink,
                                   ),
                                 ),

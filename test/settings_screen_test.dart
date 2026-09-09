@@ -761,9 +761,15 @@ void main() {
       // status (BG-2).
       await openSheet(tester, ValueNotifier(30));
       expect(find.byType(KvCheck), findsOneWidget);
-      // Five rings: four unchosen options, and the miniature on the disabled
-      // act that says *nothing new has been picked* in the same vocabulary.
-      expect(find.byType(KvRadio), findsNWidgets(5));
+      // **Four rings: the four unchosen options, and nothing else.** There
+      // used to be a fifth — a miniature on the disabled act, saying *nothing
+      // new has been picked* in the same vocabulary. The founder read that
+      // mark on glass at the UX-R6 beat as a stray dot holding the label off
+      // centre, and ruled it out of every disabled pill in the app. It was
+      // BG-21 twice over: a ring already means an unchosen option, so the same
+      // glyph meant two things on one sheet — which is exactly why this
+      // assertion could not tell them apart and had to count them together.
+      expect(find.byType(KvRadio), findsNWidgets(4));
       final rows = tester
           .widgetList<KvChoiceRow>(find.byType(KvChoiceRow))
           .where((r) => r.selected)

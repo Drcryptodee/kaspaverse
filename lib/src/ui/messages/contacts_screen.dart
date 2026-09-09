@@ -1706,8 +1706,6 @@ class _NewHandshakeScreenState extends State<NewHandshakeScreen> {
                   disabledReason: address.isEmpty
                       ? 'Enter an address to continue'
                       : null,
-                  // Not an unmade choice — see [KvAction.disabledMark].
-                  disabledMark: false,
                   onTap: () => Navigator.of(
                     context,
                   ).pop((address: address, name: _name.text.trim())),

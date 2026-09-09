@@ -189,10 +189,14 @@ class VaultService with WidgetsBindingObserver {
   /// (INV-1) — only the boolean verdict returns. The native Activity pauses
   /// Flutter, so this suppresses the §0.11 auto-lock for the handoff (the native
   /// surface is the ceremony's guardian meanwhile — it drops on background).
-  Future<bool> revealAndVerify() => runCeremony(() async {
+  /// [steps] is how many beats the create ceremony has on THIS phone, so the
+  /// two native screens draw the same indicator as the Flutter ones. It is a
+  /// count, not a secret, and it travels inward with the decoys.
+  Future<bool> revealAndVerify({int steps = 4}) => runCeremony(() async {
     final decoys = await _quizDecoys();
     return await ceremony.invokeMethod<bool>('revealAndVerify', {
           'decoys': decoys,
+          'steps': steps,
         }) ??
         false;
   });

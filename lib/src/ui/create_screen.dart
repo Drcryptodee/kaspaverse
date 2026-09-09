@@ -118,6 +118,16 @@ class _CreateScreenState extends State<CreateScreen> {
   bool _busy = false;
   String? _message;
 
+  /// **Where to scroll to when the extra word is switched on.**
+  ///
+  /// Raising the switch adds a caps label, two 56 dp fields and the notice
+  /// plate under a keypad that is already up, so the plate lands below the
+  /// fold — the founder had to scroll to find the one sentence on the screen
+  /// that says the word cannot be recovered. Scrolling the NOTICE to the
+  /// bottom of the viewport brings everything above it into view with it,
+  /// which is exactly what he asked for: "shows whats above it".
+  final GlobalKey _noticeKey = GlobalKey();
+
   /// Anchor for [_say], so a reason beat can prove it is on screen rather than
   /// merely in the tree.
   final GlobalKey _messageKey = GlobalKey();
@@ -153,8 +163,11 @@ class _CreateScreenState extends State<CreateScreen> {
         await VaultService.instance.abandonCreate();
         await VaultService.instance.beginCreate();
       };
+  // The seam keeps its no-argument shape so every injected test double still
+  // fits; the step count is closed over instead of being a parameter.
   Future<bool> Function() get _revealLane =>
-      widget.reveal ?? VaultService.instance.revealAndVerify;
+      widget.reveal ??
+      () => VaultService.instance.revealAndVerify(steps: _steps);
   Future<void> Function() get _abandonLane =>
       widget.abandon ?? VaultService.instance.abandonCreate;
   Future<void> Function(Uint8List, Uint8List) get _sealLane =>
@@ -207,7 +220,11 @@ class _CreateScreenState extends State<CreateScreen> {
 
   Future<void> _runReveal() async {
     try {
-      unawaited(_countSteps());
+      // **Awaited now, not fired and forgotten.** The native reveal draws the
+      // indicator too, and it is handed the total at launch — so a probe still
+      // in flight would put four dots on a five-beat phone for the two screens
+      // that cannot be corrected later. The probe is one cheap platform query.
+      await _countSteps();
       await _beginLane();
       final verified = await _revealLane();
       if (!mounted) return;
@@ -421,13 +438,40 @@ class _CreateScreenState extends State<CreateScreen> {
     messenger?.showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  /// Re-enter the native reveal WITHOUT re-beginning the ceremony.
+  ///
+  /// The words are still held Rust-side — nothing is sealed until the
+  /// passphrase step commits — so going back to look at them is a re-open, not
+  /// a restart. Calling [_runReveal] here would call `beginCreate` a second
+  /// time on a lane that is already open.
+  Future<void> _reopenReveal() async {
+    final verified = await _revealLane();
+    if (!mounted) return;
+    if (verified) {
+      setState(() => _step = _Step.passphrase);
+    } else {
+      // Backing out of the WORDS screen still means abandoning: that is the
+      // first beat, and there is nothing behind it but Welcome.
+      await _abandonLane();
+      if (mounted) _popWith('Backup not confirmed — no wallet was created.');
+    }
+  }
+
   void _handleBack() {
     switch (_step) {
       case _Step.preparing:
-      case _Step.passphrase:
         Navigator.of(
           context,
         ).pop(); // leave create (dispose abandons if !sealed)
+      case _Step.passphrase:
+        // **Back is one step, not the whole ceremony** (founder, UX-R6 glass
+        // beat — he raised it twice). This popped straight out to Welcome, so
+        // a user who had already written down twelve words and passed the
+        // quiz lost all of it by pressing the system back button once. The
+        // step before the passphrase is the words, so that is where it goes;
+        // the quiz is re-taken because the reveal screen always re-arms it,
+        // which is D-136's rule and not a cost worth breaking it for.
+        unawaited(_reopenReveal());
       case _Step.extraWord:
         // **The buffer does not survive the step it belongs to.** Backing out
         // kept it loaded and re-entering APPENDED, so a user who retyped had
@@ -517,6 +561,23 @@ class _CreateScreenState extends State<CreateScreen> {
     required int step,
     required List<Widget> children,
     Widget? foot,
+
+    /// **Rendered full-bleed, outside the content gutter.** [KvColumn] clamps to
+    /// 560 and inset by the window class's gutter, which is right for a pill and
+    /// wrong for a keyboard: the founder read the resulting strip of ground down
+    /// each side of the pad as unfinished (UX-R6 glass beat). A keypad is chrome
+    /// for the whole screen, not content inside the column — so it gets its own
+    /// slot rather than the column's air. Whatever sits above it in [foot] keeps
+    /// the gutter, because a pill IS content.
+    Widget? bleed,
+
+    /// **Centre the body in whatever room is left.** `O6` draws its mark and its
+    /// question in the middle of the screen; the build stacked them at the top,
+    /// which the founder read on glass as the content having fallen upward. A
+    /// [SliverFillRemaining] with no scroll body centres when there is room and
+    /// scrolls when there is not — the one idiom that does both without asking
+    /// the layout for its height (BG-33 forbids reading a breakpoint here).
+    bool centred = false,
     bool guarded = true,
     String? guardTitle,
   }) {
@@ -528,21 +589,31 @@ class _CreateScreenState extends State<CreateScreen> {
             _bar(step),
             Expanded(
               child: KvColumn(
-                child: SingleChildScrollView(
-                  // **No air at `short`.** 48 dp of top-and-bottom padding is
-                  // right on a phone and is more than the whole body at
-                  // 915 × 412, where a bar, a pinned pill and a 220 dp keypad
-                  // leave ~42: with it the heading scrolled out and the
-                  // passphrase step said nothing about what it was asking for
-                  // (`ux-auditor` BLOCK, UX-R6).
-                  padding: EdgeInsets.symmetric(
-                    vertical: _short ? 0 : KvSpace.l,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: children,
-                  ),
+                child: CustomScrollView(
+                  slivers: [
+                    SliverPadding(
+                      // **No air at `short`.** 48 dp of top-and-bottom padding
+                      // is right on a phone and is more than the whole body at
+                      // 915 × 412, where a bar, a pinned pill and a 220 dp
+                      // keypad leave ~42: with it the heading scrolled out and
+                      // the passphrase step said nothing about what it was
+                      // asking for (`ux-auditor` BLOCK, UX-R6).
+                      padding: EdgeInsets.symmetric(
+                        vertical: _short ? 0 : KvSpace.l,
+                      ),
+                      sliver: SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: centred
+                              ? MainAxisAlignment.center
+                              : MainAxisAlignment.start,
+                          children: children,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -552,6 +623,7 @@ class _CreateScreenState extends State<CreateScreen> {
             // inside a clamped column owns no horizontal air of its own
             // (L195).
             if (foot != null) KvColumn(child: foot),
+            ?bleed,
           ],
         ),
       ),
@@ -664,7 +736,20 @@ class _CreateScreenState extends State<CreateScreen> {
     body: SafeArea(
       child: Column(
         children: [
-          KvTopBar(title: 'Create wallet', onBack: null),
+          // **The indicator starts here, not three screens in.** The founder
+          // found the dots first appearing on the passphrase step, because
+          // everything before it was either this spinner or one of the two
+          // native screens — so the ceremony seemed to begin at step 3 of 5.
+          // The native pair now draw their own; this is the first beat.
+          //
+          // **Back stays off here, as it was.** `_bar` wires `_handleBack`,
+          // and this screen is the window where `beginCreate` is in flight —
+          // a back press across it would race the lane it is opening.
+          KvTopBar(
+            title: 'Create wallet',
+            centre: KvSteps(count: _steps, index: 0),
+            onBack: null,
+          ),
           Expanded(
             child: Center(
               child: Column(
@@ -746,6 +831,12 @@ class _CreateScreenState extends State<CreateScreen> {
             onTap: _submitPassphrase,
           ),
         ),
+      ],
+    ),
+    // **The keypad is full-bleed; its caption is not.** See [_page]'s `bleed`.
+    bleed: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
         SecretKeyboard(
           onChar: _busy ? (_) {} : _passphrase.appendChar,
           onBackspace: _busy ? () {} : _passphrase.backspace,
@@ -770,16 +861,18 @@ class _CreateScreenState extends State<CreateScreen> {
         // information-bearing string is a BG-14 refusal* (`ux-auditor` BLOCK,
         // UX-R6).
         if (!_short)
-          const Padding(
-            padding: EdgeInsets.only(bottom: KvSpace.s),
-            child: Text(
-              'In-app keypad — the system keyboard never sees this',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 12,
-                height: 16 / 12,
-                color: KvColor.inkMeta,
+          KvColumn(
+            child: const Padding(
+              padding: EdgeInsets.only(bottom: KvSpace.s),
+              child: Text(
+                'In-app keypad — the system keyboard never sees this',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 12,
+                  height: 16 / 12,
+                  color: KvColor.inkMeta,
+                ),
               ),
             ),
           ),
@@ -811,6 +904,12 @@ class _CreateScreenState extends State<CreateScreen> {
     return _page(
       step: _beatExtraWord,
       guardTitle: 'your recovery words',
+      // **Centred.** With the switch off this screen is a heading, a toggle and
+      // a lot of ground; the founder asked for the toggle, the fields and the
+      // notice to sit in the middle of it rather than pinned under the
+      // heading. With the switch on the block outgrows the room and the same
+      // slot simply scrolls (see [_noticeKey]).
+      centred: true,
       children: [
         _heading(extraWordHeading(createWordCount)),
         _sub(extraWordExplainer(createWordCount)),
@@ -863,9 +962,18 @@ class _CreateScreenState extends State<CreateScreen> {
                   placeholder: 'Type it again',
                 ),
                 const SizedBox(height: KvSpace.m),
-                const KvNotice(
-                  lead: 'Write it on the same paper, apart from the words.',
-                  text: 'KaspaVerse cannot recover it. Case and spaces matter.',
+                // His wording, on glass. "Separately" is the load-bearing
+                // change: the old line said *the same paper*, which is exactly
+                // the mistake — an extra word written beside the twelve it is
+                // supposed to protect defeats the decoy property entirely
+                // (vault_architecture §4).
+                KvNotice(
+                  key: _noticeKey,
+                  lead:
+                      'Write it down separately apart from the words. '
+                      'Do not forget it!',
+                  text: 'KaspaVerse cannot recover it.',
+                  tail: 'Case and spaces matter!',
                 ),
               ],
             ],
@@ -903,19 +1011,14 @@ class _CreateScreenState extends State<CreateScreen> {
             )
           else
             const SizedBox(height: KvSpace.sm),
-          // **Inert while the seal is in flight.** `_doSeal` wipes all three
-          // buffers the instant the seal returns and then `await`s the
-          // biometric probe with this step still mounted; an ungated key press
-          // writes extra-word bytes back in AFTER the wipe, across the
-          // unbounded, background-spanning enrol window the early wipe exists
-          // to close (`ffi-leak-auditor`, UX-R6).
-          if (_use25th)
-            SecretKeyboard(
-              onChar: _busy ? (_) {} : buffer.appendChar,
-              onBackspace: _busy ? () {} : buffer.backspace,
-            ),
         ],
       ),
+      bleed: _use25th
+          ? SecretKeyboard(
+              onChar: _busy ? (_) {} : buffer.appendChar,
+              onBackspace: _busy ? () {} : buffer.backspace,
+            )
+          : null,
     );
   }
 
@@ -936,6 +1039,28 @@ class _CreateScreenState extends State<CreateScreen> {
       _use25th = on;
       _step = _Step.extraWord;
       _message = null;
+    });
+    if (!on) return;
+    // After the frame that builds the fields, and after `AnimatedSize` has
+    // settled — asking to scroll to a box that is still growing lands short.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      // Read the accessibility flag BEFORE the gap — the context is not ours
+      // to use on the far side of an await.
+      final instant = MediaQuery.disableAnimationsOf(context);
+      await Future<void>.delayed(instant ? Duration.zero : KvMotion.calm);
+      // `box.mounted`, not this State's — the context being scrolled to is
+      // the one that has to still be in the tree.
+      final box = _noticeKey.currentContext;
+      if (box == null || !box.mounted) return;
+      await Scrollable.ensureVisible(
+        box,
+        // 1.0 = seat it at the BOTTOM of the viewport, so the fields and the
+        // switch above it come into view with it rather than scrolling away.
+        alignment: 1,
+        duration: instant ? Duration.zero : KvMotion.calm,
+        curve: KvMotion.curve,
+      );
     });
   }
 
@@ -968,6 +1093,7 @@ class _CreateScreenState extends State<CreateScreen> {
     return _page(
       step: _beatEnrol,
       guarded: false,
+      centred: true,
       children: [
         // §3a's own words for this class: *onboarding illustration discs
         // drop*. They are 104 dp of picture on a 412 dp screen whose question
@@ -984,17 +1110,22 @@ class _CreateScreenState extends State<CreateScreen> {
             align: TextAlign.center,
           ),
         ),
-        SizedBox(
-          width: double.infinity,
-          child: _sub(
-            ready
-                ? 'Face, fingerprint — whatever this phone offers. Your keys '
-                      'stay sealed in its hardware either way; this only opens '
-                      'the app faster.'
-                : biometricUnavailableCopy(_biometricStatus),
-            align: TextAlign.center,
+        // **Nothing under the question when the answer is a yes/no.**
+        // *Open with biometrics?* is the whole ask, and the founder said so on
+        // glass. The paragraph that used to sit here explained that keys stay
+        // in hardware either way — true, and already the promise the whole app
+        // makes, so restating it under a two-button choice only slowed the
+        // choice down. The `not ready` copy STAYS: that one is actionable
+        // (*enrol a fingerprint in Android Settings*) and is the only thing on
+        // the screen that says why there is no offer.
+        if (!ready)
+          SizedBox(
+            width: double.infinity,
+            child: _sub(
+              biometricUnavailableCopy(_biometricStatus),
+              align: TextAlign.center,
+            ),
           ),
-        ),
         _reason(),
       ],
       // The two ways on live in the thumb arc, which is where `O6` draws them

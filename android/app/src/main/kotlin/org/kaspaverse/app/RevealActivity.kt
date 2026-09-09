@@ -1,9 +1,15 @@
 package org.kaspaverse.app
 
 import android.app.Activity
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.os.Build
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.util.Log
@@ -12,7 +18,9 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.window.OnBackInvokedDispatcher
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -67,6 +75,9 @@ class RevealActivity : Activity() {
     private val cPrimaryMuted = Color.parseColor("#70C7BA")  // KvColor.primaryMuted
     private val cEtch = Color.parseColor("#4B5553")          // KvColor.etch
     private val cInkMeta = Color.parseColor("#7A8583")       // KvColor.inkMeta
+    // The amber notice plate and its ink — `KvNotice`'s warn tone (§1.6).
+    private val cWarnTint = Color.parseColor("#2E2510")      // KvColor.warnTint
+    private val cWarnInk = Color.parseColor("#F3D9A0")       // KvColor.warnInk
     // Ink on a `primary` fill has its own token in Deep V6 (§1.3) rather than
     // borrowing the ground. Not a contrast fix — `abyss` on `primary` still
     // measures 12.93:1 and `onPrimary` measures 11.31:1, both far above AA —
@@ -134,6 +145,22 @@ class RevealActivity : Activity() {
          * still never leave the JNI lane.
          */
         const val EXTRA_DECOYS = "kv.reveal.decoys"
+
+        /**
+         * How many beats the create ceremony has, and which one the words are.
+         * Only Dart can answer the first — the enrol beat exists solely on a
+         * phone with a sensor, and `create_screen` probes for it before it
+         * draws a dot. Absent, the screen assumes the four-beat phone.
+         */
+        const val EXTRA_STEPS = "kv.reveal.steps"
+
+        /**
+         * The two native beats' seats in the create indicator. They are 0 and 1
+         * because `create_screen` numbers the passphrase 2 — the words come
+         * first in this build, whatever order the render drew.
+         */
+        private const val STEP_WORDS = 0
+        private const val STEP_QUIZ = 1
     }
 
     /**
@@ -162,6 +189,15 @@ class RevealActivity : Activity() {
      * screen, so EVERY quiz attempt is preceded by the words being on the glass.
      */
     private var revealedOnce = false
+
+    /**
+     * **Which of the two native screens is showing.** Back used to finish the
+     * Activity from either, so `create_screen` saw an unverified ceremony,
+     * abandoned it and popped the user all the way to Welcome — from the quiz,
+     * with their words already written down. The founder hit it and asked for
+     * it twice. Back from the quiz is a step, not an exit.
+     */
+    private var onQuiz = false
 
     private val wordViews = arrayOfNulls<TextView>(12)
 
@@ -198,6 +234,20 @@ class RevealActivity : Activity() {
     private var quizChips: MutableList<Button> = ArrayList()
     private var quizPrompt: TextView? = null
 
+    /**
+     * **`O4`'s answer tray.** The quiz used one teal line — *Tap your word #7* —
+     * and on a wrong tap that line was OVERWRITTEN by the correction, so the
+     * one thing the user needed (which position?) vanished exactly when they
+     * had got it wrong. The founder hit that: "it just tells me i got it wrong".
+     *
+     * The render answers it structurally instead of with better wording: the
+     * positions answered so far sit in a card, and the one being asked is a
+     * dashed slot carrying its own number. It cannot be overwritten, because it
+     * is not a message.
+     */
+    private var trayCount: TextView? = null
+    private var trayRows: LinearLayout? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // FLAG_SECURE before any content and before a single word is read.
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -221,6 +271,14 @@ class RevealActivity : Activity() {
         }
         words = loaded
         Log.i(TAG, "reveal surface shown") // no secret — just that the surface is up
+        // **The 33+ half of the back contract.** Registered once, for the life
+        // of the Activity; [handleBack] reads `onQuiz` at call time, so one
+        // callback covers both screens without register/unregister churn.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT
+            ) { handleBack() }
+        }
         showReveal()
     }
 
@@ -292,6 +350,41 @@ class RevealActivity : Activity() {
         quizChips = ArrayList()
     }
 
+    /**
+     * **Back is a step inside the ceremony, not an exit from it.**
+     *
+     * From the quiz it means *show me the words again* — which is what `O4`
+     * draws as its own footer action, and the same route: positions and board
+     * redrawn, the hold re-armed. From the words there is nothing behind but
+     * the Dart screen that launched this, so it cancels.
+     */
+    private fun handleBack() {
+        if (onQuiz) {
+            showReveal()
+            return
+        }
+        finishWith(false)
+    }
+
+    /**
+     * The pre-33 half of the back contract.
+     *
+     * **On API 36+ predictive back is on by default and this is never called** —
+     * a back gesture dispatches neither `onBackPressed` nor `KEYCODE_BACK`
+     * (lint `GestureBackNavigation`). So the modern callback is registered in
+     * [onCreate] and this remains only for the phones below 33, where the
+     * dispatcher does not exist. Exactly one of the two fires on any device.
+     *
+     * The lint is suppressed rather than answered by moving to AndroidX's
+     * `OnBackPressedDispatcher`, because that means making this a
+     * `ComponentActivity`: lifecycle, saved-state and view-model machinery
+     * inside the one Activity that holds twelve recovery words in memory. The
+     * per-activity migration the lint's own text allows costs one branch;
+     * widening this Activity's surface costs an audit.
+     */
+    @Suppress("DEPRECATION", "MissingSuperCall", "GestureBackNavigation")
+    override fun onBackPressed() = handleBack()
+
     private fun finishWith(ok: Boolean) {
         if (done) return
         done = true
@@ -307,6 +400,9 @@ class RevealActivity : Activity() {
         revealed = false
         revealedOnce = false
         quizPrompt = null
+        trayCount = null
+        trayRows = null
+        onQuiz = false
         releaseQuizChips() // the bounce detaches a live chip set — drop it now
         // …and the previous grid's TextViews, which hold the SAME String objects
         // as `words`. Usually they show bullets, but Android splits multi-touch
@@ -320,26 +416,36 @@ class RevealActivity : Activity() {
             setBackgroundColor(cAbyss)
             setPadding(dp(24), dp(24), dp(24), dp(24))
         }
+        val steps = intent.getIntExtra(EXTRA_STEPS, 4)
+        root.addView(stepDots(steps, STEP_WORDS))
+        root.addView(spacer(dp(20)))
         root.addView(heading("Your recovery words"))
         root.addView(
-            body(
-                "Write these 12 words on paper, in order, and keep them somewhere " +
-                    "only you can reach. Anyone who has them controls your funds."
-            )
+            body("Anyone holding these words holds your money. Write them down in order.")
         )
-        root.addView(spacer(dp(12)))
+        root.addView(spacer(dp(14)))
+        // **The amber plate, not bold body copy.** It was `strong()` — same
+        // size as the paragraph above it, so the one irreversible fact on the
+        // screen had no more weight than the instructions. `O3` gives it a
+        // container; the founder asked for the same object the rest of the app
+        // uses for "this cannot be undone" (UX-R6 glass beat).
         root.addView(
-            strong(
-                "This is the only time they are ever shown. The app can never show " +
-                    "them to you again — not with your passphrase, not with your " +
-                    "fingerprint. Screenshots are blocked, so paper is your only copy."
+            noticePlate(
+                "This is the only time they are ever shown. " +
+                    "The app may never show them to you again."
             )
         )
         if (notice != null) {
             root.addView(spacer(dp(12)))
             root.addView(warning(notice))
         }
-        root.addView(spacer(dp(16)))
+        root.addView(spacer(dp(14)))
+        // `O3` draws this beside the 12/24 control. The founder hit exactly the
+        // confusion it exists to prevent — he tried to screenshot the words and
+        // got a black frame with nothing saying why (BG-8: a blocked thing says
+        // it is blocked). The 12/24 control itself is UX-R6b.
+        root.addView(meta("Screenshots blocked"))
+        root.addView(spacer(dp(10)))
         root.addView(buildGrid())
         root.addView(spacer(dp(16)))
 
@@ -351,14 +457,20 @@ class RevealActivity : Activity() {
         val cont = styledButton("I've written them down", cChip, cTextPrimary)
         val hint = body("")
 
-        // `O3`'s own pill, sampled at 4x: `chip` under `primaryMuted`. It
-        // carries no mark — the render draws an eye, and `KvGlyph` lives in
-        // Dart. A second hand-mirrored copy of a Lucide path in a file with no
-        // lane comparing it to the original is precisely the drift this file's
-        // own header warns about for the palette, and the palette at least has
-        // a lane now. The words carry the meaning (§1.2a: a control is
-        // identified by its text, never by its mark).
-        val hold = styledButton("Hold to reveal", cChip, cPrimaryMuted)
+        // `O3`'s own pill, sampled at 4x: `chip` under `primaryMuted`, sized to
+        // its own content rather than the column. It stretched full width and
+        // the founder read that as wrong on glass — a hold gesture wants a
+        // target you aim at, not a bar you land anywhere on.
+        val hold = styledButton("Hold to reveal", cChip, cPrimaryMuted).apply {
+            layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+            }
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            compoundDrawablePadding = dp(10)
+            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                eyeDrawable(cPrimaryMuted, 18), null, null, null
+            )
+        }
         hold.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -383,7 +495,6 @@ class RevealActivity : Activity() {
         root.addView(hold)
         root.addView(spacer(dp(12)))
         root.addView(hint)
-        root.addView(spacer(dp(4)))
 
         cont.setOnClickListener {
             if (revealedOnce) {
@@ -396,9 +507,25 @@ class RevealActivity : Activity() {
                 hint.setTextColor(cWarning)
             }
         }
-        root.addView(cont)
 
-        setContentView(scroll(root))
+        // **The CTA is pinned, not scrolled** (`O3`, and the founder's note).
+        // A 12-cell grid plus an amber plate overruns a short phone, and the one
+        // control that leaves this screen was ending up below the fold — on the
+        // screen where a user who scrolls past it loses their wallet.
+        setContentView(
+            column().apply {
+                setBackgroundColor(cAbyss)
+                layoutParams = LinearLayout.LayoutParams(MATCH, MATCH)
+                addView(scroll(root), LinearLayout.LayoutParams(MATCH, 0, 1f))
+                addView(
+                    LinearLayout(this@RevealActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(24), dp(8), dp(24), dp(24))
+                        addView(cont)
+                    }
+                )
+            }
+        )
         refreshGrid()
     }
 
@@ -458,7 +585,7 @@ class RevealActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(52)
-            setPadding(dp(12), dp(6), dp(8), dp(6))
+            setPadding(dp(10), dp(6), dp(6), dp(6))
             background = GradientDrawable().apply {
                 cornerRadius = dp(16).toFloat()
                 setColor(cSurfaceAlt) // KvColor.plate
@@ -468,8 +595,8 @@ class RevealActivity : Activity() {
             text = "${i + 1}"
             setTextColor(cInkMeta)
             typeface = faceMono
-            textSize = 13f
-            minWidth = dp(20)
+            textSize = 12f
+            minWidth = dp(16)
         }
         val dots = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -479,10 +606,15 @@ class RevealActivity : Activity() {
         dotRows[i] = dots
         val word = TextView(this).apply {
             typeface = faceMono
-            // 16, not §2's 13. A recovery word is copied onto paper once and
-            // never again; legibility beats the type ramp here, and the ramp
-            // was written for screens you read, not screens you transcribe.
-            textSize = 16f
+            // **A word must never wrap.** 16 was chosen for transcription
+            // legibility, and on a three-column grid it put "dentist" and
+            // "portion" onto two lines each — the founder's words on glass. A
+            // wrapped recovery word is worse than a smaller one: it reads as a
+            // different word. 15 fits the 7-character common case; the 8-letter
+            // tail (BIP39 English goes no longer) drops to 13, applied per cell
+            // in [refreshGrid] because only then is the word known.
+            textSize = 15f
+            maxLines = 1
             setTextColor(cTextPrimary)
             visibility = View.GONE
             setPadding(dp(6), 0, 0, 0)
@@ -507,6 +639,8 @@ class RevealActivity : Activity() {
         val w = words ?: return
         for (i in 0 until 12) {
             wordViews[i]?.text = if (revealed) w[i] else ""
+            // The long tail shrinks rather than wraps — see [wordCell].
+            wordViews[i]?.textSize = if (w[i].length > 7) 13f else 15f
             wordViews[i]?.visibility = if (revealed) View.VISIBLE else View.GONE
             dotRows[i]?.visibility = if (revealed) View.GONE else View.VISIBLE
         }
@@ -536,24 +670,28 @@ class RevealActivity : Activity() {
             setBackgroundColor(cAbyss)
             setPadding(dp(24), dp(24), dp(24), dp(24))
         }
-        root.addView(heading("Confirm your backup"))
+        onQuiz = true
+        root.addView(stepDots(intent.getIntExtra(EXTRA_STEPS, 4), STEP_QUIZ))
+        root.addView(spacer(dp(20)))
+        root.addView(heading("Tap them back in order"))
         root.addView(
             body(
-                "Tap the matching word for each position, in order. All 12 of your " +
-                    "words are here, mixed in with words that are not yours, so only " +
-                    "your own copy tells you which one belongs where. Three wrong " +
-                    "taps and you go back to the words."
+                "Some of the words below are decoys. Your paper is the only " +
+                    "source of truth. Three wrong taps and you go back to the words."
             )
         )
         root.addView(spacer(dp(16)))
+        root.addView(buildTray())
+        root.addView(spacer(dp(12)))
         val prompt = TextView(this).apply {
-            setTextColor(cPrimary)
-            textSize = 15f
-            typeface = uiWeight(600)
-            setPadding(0, 0, 0, dp(12))
+            setTextColor(cWarning)
+            textSize = 14f
+            typeface = uiWeight(500)
+            setPadding(0, 0, 0, dp(8))
+            visibility = View.GONE
         }
         quizPrompt = prompt
-        root.addView(prompt) // fixed header — never scrolls away from its chips
+        root.addView(prompt) // corrections only — the POSITION lives in the tray
 
         // The board is ALL TWELVE of the user's words, plus decoys on top —
         // never a subset of them. D-136 item 1 and `vault_architecture.md` "Verify step" both
@@ -584,7 +722,109 @@ class RevealActivity : Activity() {
             }
         )
         updateQuizPrompt()
+        // `O4`'s footer. It was reachable only by getting three taps wrong,
+        // which made the sole route back to your own words a punishment.
+        val again = Button(this).apply {
+            text = "Show me the words again"
+            setTextColor(cPrimary)
+            setBackgroundColor(Color.TRANSPARENT)
+            isAllCaps = false
+            typeface = uiWeight(600)
+            textSize = 16f
+            minHeight = dp(52)
+            stateListAnimator = null
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+            setOnClickListener { showReveal() }
+        }
+        root.addView(again)
         setContentView(root)
+    }
+
+    /**
+     * The tray card: what has been answered, and what is being asked.
+     *
+     * The dashed slot is the ask. It carries the position number itself, so a
+     * wrong tap can redraw the whole card without ever taking the question off
+     * the screen — which is the defect this replaces.
+     */
+    private fun buildTray(): View {
+        val card = column().apply {
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(cChip)
+            }
+        }
+        trayCount = meta("").apply { setPadding(0, 0, 0, dp(10)) }
+        card.addView(trayCount)
+        trayRows = column()
+        card.addView(trayRows)
+        return card
+    }
+
+    /** One answered position, or the dashed slot for the one being asked. */
+    private fun trayChip(position: Int, word: String?): View {
+        val chip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(40)
+            setPadding(dp(12), dp(6), dp(14), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(100).toFloat()
+                if (word == null) {
+                    setColor(Color.TRANSPARENT)
+                    // Dashed: the slot is a place for something, not a thing.
+                    setStroke(dp(1), cEtch, dp(4).toFloat(), dp(3).toFloat())
+                } else {
+                    setColor(cControl)
+                }
+            }
+        }
+        chip.addView(TextView(this).apply {
+            text = "${position + 1}"
+            setTextColor(if (word == null) cPrimary else cInkMeta)
+            typeface = faceMono
+            textSize = 12f
+        })
+        if (word != null) {
+            chip.addView(TextView(this).apply {
+                text = word
+                setTextColor(cTextPrimary)
+                typeface = uiWeight(600)
+                textSize = 15f
+                maxLines = 1
+                setPadding(dp(8), 0, 0, 0)
+            })
+        }
+        return chip
+    }
+
+    /** Repaint the tray from [quizProgress]. Cheap — at most five chips. */
+    private fun refreshTray() {
+        val rows = trayRows ?: return
+        rows.removeAllViews()
+        trayCount?.text = "$quizProgress OF ${quizExpected.size}"
+        var row: LinearLayout? = null
+        val slots = quizExpected.size.coerceAtMost(quizProgress + 1)
+        for (i in 0 until slots) {
+            if (i % 3 == 0) {
+                row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply {
+                        if (i > 0) topMargin = dp(8)
+                    }
+                }
+                rows.addView(row)
+            }
+            val answered = i < quizProgress
+            row?.addView(
+                trayChip(quizPositions[i], if (answered) quizExpected[i] else null).apply {
+                    layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply {
+                        if (i % 3 > 0) marginStart = dp(8)
+                    }
+                }
+            )
+        }
     }
 
     /**
@@ -657,9 +897,8 @@ class RevealActivity : Activity() {
     }
 
     private fun updateQuizPrompt() {
-        val pos = quizPositions[quizProgress] + 1
-        quizPrompt?.text = "Tap your word #$pos   (${quizProgress + 1} of ${quizExpected.size})"
-        quizPrompt?.setTextColor(cPrimary)
+        refreshTray()
+        quizPrompt?.visibility = View.GONE
     }
 
     private fun onChipTap(chip: Button, word: String) {
@@ -705,10 +944,13 @@ class RevealActivity : Activity() {
                 }
             }
             val left = QUIZ_MAX_WRONG - quizWrong
+            // The tray resets with it, so the dashed slot goes back to the
+            // first position and the ask is still on screen beside the reason.
+            refreshTray()
             quizPrompt?.text = "Not quite — check your paper, then start again from " +
                 "the top. $left more wrong ${if (left == 1) "tap" else "taps"} and " +
                 "you'll go back to your words."
-            quizPrompt?.setTextColor(cWarning)
+            quizPrompt?.visibility = View.VISIBLE
         }
     }
 
@@ -795,6 +1037,157 @@ class RevealActivity : Activity() {
     /** Why you are back on this screen. Not an error — a redirection. */
     private fun warning(t: String) = body(t).apply {
         setTextColor(cWarning)
+    }
+
+    /** The `inkMeta` register — a label about the screen, not content on it. */
+    private fun meta(t: String) = TextView(this).apply {
+        text = t
+        setTextColor(cInkMeta)
+        typeface = uiWeight(500)
+        textSize = 13f
+    }
+
+    /**
+     * **`KvNotice`, warn tone — the native twin.** §4 names the part and the
+     * Dart side got it at UX-R6; this screen had the same sentence set as bare
+     * `strong()` body copy, which the founder read on glass as "too big" and
+     * unmistakably not the same object as the amber plates elsewhere in the app.
+     *
+     * `warnTint` ground, `warnInk` body at 13/19, the `notice` radius. Kept in
+     * step with `KvColor.warnTint` / `KvColor.warnInk` by §9.1's mirror list.
+     */
+    private fun noticePlate(t: String): View {
+        val plate = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(cWarnTint)
+            }
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+        }
+        // **The mark, which the Dart twin has had all along.** `KvNotice` draws
+        // `KvGlyph.info` at 16 in `warn`; this plate shipped bare and the
+        // founder asked for it back. Top-aligned on the first line's optical
+        // centre, not centred in the box, so it reads as a mark ON the sentence.
+        plate.addView(ImageView(this).apply {
+            setImageDrawable(infoDrawable(cWarning, 16))
+            layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+                topMargin = dp(2)
+                marginEnd = dp(12)
+            }
+        })
+        plate.addView(TextView(this).apply {
+            text = t
+            setTextColor(cWarnInk)
+            typeface = uiWeight(500)
+            textSize = 13f
+            setLineSpacing(0f, 19f / 13f)
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        })
+        return plate
+    }
+
+    /**
+     * `KvGlyph.info`, drawn: a ring at r=10 on a 24 viewport, the stem
+     * `M12 16v-4` and the dot `M12 8h.01`. **Moves when `KvGlyph.info` moves**
+     * (§9.1's mirror list), the same contract as [eyeDrawable].
+     */
+    private fun infoDrawable(tint: Int, sizeDp: Int): Drawable {
+        val px = dp(sizeDp)
+        return object : Drawable() {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = px / 12f
+                strokeCap = Paint.Cap.ROUND
+                color = tint
+            }
+            override fun draw(canvas: Canvas) {
+                val w = px.toFloat()
+                val c = w / 2f
+                canvas.drawCircle(c, c, w * 10f / 24f, paint)
+                canvas.drawLine(c, w * 12f / 24f, c, w * 16f / 24f, paint)
+                canvas.drawPoint(c, w * 8f / 24f, paint)
+            }
+            override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+            override fun setColorFilter(cf: ColorFilter?) { paint.colorFilter = cf }
+            @Suppress("DEPRECATION")
+            override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+            override fun getIntrinsicWidth(): Int = px
+            override fun getIntrinsicHeight(): Int = px
+        }.apply { setBounds(0, 0, px, px) }
+    }
+
+    /**
+     * **`KvSteps`, native.** The founder found the ceremony's progress dots
+     * appeared only once he reached the passphrase screen — the two native
+     * beats drew none, so the indicator began at step 3 of 5 with no
+     * explanation (UX-R6 glass beat).
+     *
+     * The count arrives from Dart because only Dart can know it: the enrol beat
+     * is conditional on this phone having a sensor, and `create_screen`
+     * probes for it before the first dot is drawn. Words are beat 0 and the
+     * quiz is beat 1, which is the order `create_screen`'s own constants use
+     * (`_beatPassphrase = 2`).
+     */
+    private fun stepDots(count: Int, index: Int): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+        for (i in 0 until count) {
+            addView(View(this@RevealActivity).apply {
+                // The current beat is a 22 dp lozenge; the rest are 6 dp discs.
+                // Everything up to and including it is lit, so the row reads as
+                // distance travelled rather than as a set of unrelated lamps.
+                layoutParams = LinearLayout.LayoutParams(
+                    if (i == index) dp(22) else dp(6), dp(6)
+                ).apply { if (i > 0) marginStart = dp(6) }
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(3).toFloat()
+                    setColor(if (i <= index) cPrimary else cEdgeHi)
+                }
+            })
+        }
+    }
+
+    /**
+     * The reveal control's eye, drawn rather than imported.
+     *
+     * `KvGlyph.eye` lives in Dart and this file cannot reach it, which is why
+     * the pill shipped bare — but the founder asked for the render's eye and a
+     * control that says *hold to reveal* earns one. Two strokes, matching
+     * Lucide's `eye` on a 24 viewport: the almond, and the pupil at r=3.
+     * **If `KvGlyph.eye`'s path changes, change this with it** (§9.1).
+     */
+    private fun eyeDrawable(tint: Int, sizeDp: Int): Drawable {
+        val px = dp(sizeDp)
+        return object : Drawable() {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = px / 12f
+                strokeCap = Paint.Cap.ROUND
+                color = tint
+            }
+            override fun draw(canvas: Canvas) {
+                val w = px.toFloat()
+                val cx = w / 2f
+                val cy = w / 2f
+                val path = Path().apply {
+                    moveTo(w * 0.085f, cy)
+                    quadTo(cx, w * 0.10f, w * 0.915f, cy)
+                    quadTo(cx, w * 0.90f, w * 0.085f, cy)
+                    close()
+                }
+                canvas.drawPath(path, paint)
+                canvas.drawCircle(cx, cy, w * 0.125f, paint)
+            }
+            override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+            override fun setColorFilter(cf: ColorFilter?) { paint.colorFilter = cf }
+            @Suppress("DEPRECATION")
+            override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+            override fun getIntrinsicWidth(): Int = px
+            override fun getIntrinsicHeight(): Int = px
+        }.apply { setBounds(0, 0, px, px) }
     }
 
     /**

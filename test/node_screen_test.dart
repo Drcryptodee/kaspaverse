@@ -1519,9 +1519,12 @@ void main() {
       expect(_inSheet(find.text('kaspa.stream')), findsOneWidget);
       expect(_inSheet(find.text('Custom')), findsOneWidget);
       expect(_inSheet(find.byType(KvCheck)), findsOneWidget);
-      // Three: the two unchosen options, and the miniature on the disabled
-      // act that says *nothing new has been picked*.
-      expect(_inSheet(find.byType(KvRadio)), findsNWidgets(3));
+      // **Two: the two unchosen options.** The disabled act used to carry a
+      // third ring in miniature — *nothing new has been picked* — and the
+      // founder ruled that mark off every disabled pill at the UX-R6 glass
+      // beat. Its label ("This is already your explorer.", asserted below)
+      // was always the thing that said why.
+      expect(_inSheet(find.byType(KvRadio)), findsNWidgets(2));
       // The inputs `Custom` stands for are not drawn until it is chosen.
       expect(_inSheet(find.byType(TextField)), findsNothing);
       // Nothing changed: the act is disabled and says why (BG-12).

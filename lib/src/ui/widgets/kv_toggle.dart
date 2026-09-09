@@ -144,10 +144,16 @@ class KvToggle extends StatelessWidget {
                         children: [
                           Text(
                             title,
+                            // **16/17, up from 15/12** — the founder read the
+                            // pair as undersized beside the switch they label
+                            // (UX-R6 glass beat). The title is the control's
+                            // name and the sub is the only place *BIP39
+                            // passphrase* is ever explained; neither is
+                            // incidental text.
                             style: const TextStyle(
                               fontFamily: KvFont.ui,
-                              fontSize: 15,
-                              height: 20 / 15,
+                              fontSize: 16,
+                              height: 21 / 16,
                               fontWeight: FontWeight.w600,
                               // A variable face needs the axis set too, or the
                               // weight is a synthesis rather than the cut
@@ -161,8 +167,8 @@ class KvToggle extends StatelessWidget {
                             sub,
                             style: TextStyle(
                               fontFamily: KvFont.ui,
-                              fontSize: 12,
-                              height: 17 / 12,
+                              fontSize: 13,
+                              height: 18 / 13,
                               fontWeight: FontWeight.w400,
                               fontVariations: KvWeight.w400,
                               // BG-14 on the ground it is drawn on: 4.30 for

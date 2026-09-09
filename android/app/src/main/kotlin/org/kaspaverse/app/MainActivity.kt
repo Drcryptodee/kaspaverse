@@ -315,12 +315,19 @@ class MainActivity : FlutterFragmentActivity() {
                             // leaving the JNI lane. INV-1 governs secrets going
                             // out; this is public data coming in.
                             val decoys = call.argument<List<String>>("decoys")
+                            // How many beats the ceremony has, so the native
+                            // screens can draw the same progress dots as the
+                            // Flutter ones. Public, non-secret, inward — and
+                            // only Dart knows it, because the enrol beat
+                            // depends on this phone having a sensor.
+                            val steps = call.argument<Int>("steps") ?: 4
                             revealLauncher.launch(
                                 Intent(this, RevealActivity::class.java).apply {
                                     putStringArrayListExtra(
                                         RevealActivity.EXTRA_DECOYS,
                                         ArrayList(decoys ?: emptyList())
                                     )
+                                    putExtra(RevealActivity.EXTRA_STEPS, steps)
                                 }
                             )
                         }

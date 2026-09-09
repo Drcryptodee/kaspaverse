@@ -379,6 +379,50 @@ class _RestoreScreenState extends State<RestoreScreen>
     if (mounted) Navigator.of(context).pop();
   }
 
+  /// **Back walks the ceremony; it does not leave it.**
+  ///
+  /// Every step already had a correct back ARROW — and none of them was wired
+  /// to the phone's back button, which fell through to the route and popped
+  /// the whole restore. The founder hit it while typing the 13th word: the
+  /// system button threw away a phrase he had just entered word by word, and
+  /// landed him on Welcome. `create_screen` had a [PopScope] for exactly this
+  /// and this screen never got one.
+  ///
+  /// The arrows now call this too, so there is one description of what "back"
+  /// means per step rather than two that can drift apart.
+  void _handleBack() {
+    switch (_step) {
+      case _Step.words:
+        // The first beat. Behind it there is only Welcome, and leaving here
+        // has taken nothing but the picking — nothing is sealed.
+        Navigator.of(context).pop();
+      case _Step.extraWord:
+        // **The buffer does not survive the step it belongs to.** Same rule as
+        // `create_screen`'s: a half-typed extra word left loaded is a secret
+        // held on a screen that is not asking for it, and re-entry would
+        // append to it (`wallet-security-auditor`, UX-R6).
+        _extra.wipe();
+        setState(() {
+          _step = _Step.words;
+          _message = null;
+        });
+      case _Step.preview:
+        setState(() {
+          _wordsRevealed = false; // re-entering masked, never latched on
+          _previewAddress = null;
+        });
+        if (_use25th) {
+          _enterExtraWord();
+        } else {
+          setState(() => _step = _Step.words);
+        }
+      case _Step.passphrase:
+        setState(() => _step = _Step.preview);
+      case _Step.enrolling:
+        _finish(); // the vault exists — back here just means "go home"
+    }
+  }
+
   // ── views (`O7`, and the group's shared `O2` / `O6` legs) ────────────────
 
   /// §2 `display`, the onboarding rung.
@@ -501,31 +545,52 @@ class _RestoreScreenState extends State<RestoreScreen>
     // restore is still under way, and it suppresses the back arrow that one
     // step earlier meant *abandon the restore*.
     if (_step == _Step.enrolling) {
-      return _page(
-        title: 'Almost done',
-        onBack: null,
-        children: _enrollBody(),
-        foot: _enrollFoot(),
+      return _guardBack(
+        _page(
+          title: 'Almost done',
+          onBack: null,
+          centred: true,
+          children: _enrollBody(),
+          foot: _enrollFoot(),
+        ),
       );
     }
-    return SecretScreenGuard(
-      title: 'your recovery words',
-      setSecure: widget.setSecure,
-      checkAccessibility: widget.checkAccessibility,
-      child: _wordlist == null
-          ? Scaffold(
-              backgroundColor: KvColor.abyss,
-              body: const SafeArea(child: Center(child: KvLoader())),
-            )
-          : switch (_step) {
-              _Step.words => _wordsStep(),
-              _Step.extraWord => _extraWordStep(),
-              _Step.preview => _previewStep(),
-              _Step.passphrase => _passphraseStep(),
-              _Step.enrolling => const SizedBox.shrink(), // handled above
-            },
+    return _guardBack(
+      SecretScreenGuard(
+        title: 'your recovery words',
+        setSecure: widget.setSecure,
+        checkAccessibility: widget.checkAccessibility,
+        child: _wordlist == null
+            ? Scaffold(
+                backgroundColor: KvColor.abyss,
+                body: const SafeArea(child: Center(child: KvLoader())),
+              )
+            : switch (_step) {
+                _Step.words => _wordsStep(),
+                _Step.extraWord => _extraWordStep(),
+                _Step.preview => _previewStep(),
+                _Step.passphrase => _passphraseStep(),
+                _Step.enrolling => const SizedBox.shrink(), // handled above
+              },
+      ),
     );
   }
+
+  /// **The system back button is a step, not an exit** (founder, UX-R6 glass).
+  ///
+  /// `create_screen` has had this since it was built; this screen never did, so
+  /// its five correct back ARROWS were shadowed by a phone button that popped
+  /// the route. `canPop: false` routes the gesture, the hardware key and the
+  /// predictive-back swipe through [_handleBack], which is the same code the
+  /// arrows call — so there is exactly one answer to *what is behind this
+  /// screen*, and `_Step.words` is the only step that answers it with the pop.
+  Widget _guardBack(Widget child) => PopScope(
+    canPop: false,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop) _handleBack();
+    },
+    child: child,
+  );
 
   /// The group's page: ground, bar, clamped column, optional pinned foot.
   Widget _page({
@@ -533,39 +598,63 @@ class _RestoreScreenState extends State<RestoreScreen>
     required List<Widget> children,
     Widget? centre,
     Widget? foot,
+
+    /// **Rendered full-bleed, outside the content gutter.** [KvColumn] clamps to
+    /// 560 and insets by the window class's gutter, which is right for a pill and
+    /// wrong for a keyboard: the founder read the strip of ground down each side
+    /// of the pad as unfinished (UX-R6 glass beat). A keypad is chrome for the
+    /// whole screen, not content inside the column — so it gets its own slot.
+    /// Whatever sits above it in [foot] keeps the gutter, because a pill IS
+    /// content.
+    Widget? bleed,
+
+    /// **Centre the body in whatever room is left.** `O6` draws its mark and its
+    /// question in the middle of the screen; the build stacked them at the top,
+    /// which the founder read on glass as the content having fallen upward. A
+    /// [SliverFillRemaining] with no scroll body centres when there is room and
+    /// scrolls when there is not — the one idiom that does both without asking
+    /// the layout for its height (BG-33 forbids reading a breakpoint here).
+    bool centred = false,
     VoidCallback? onBack,
-    bool defaultBack = false,
   }) => Scaffold(
     backgroundColor: KvColor.abyss,
     body: SafeArea(
       child: Column(
         children: [
-          KvTopBar(
-            title: title,
-            centre: centre,
-            onBack: defaultBack
-                ? () => Navigator.of(context).maybePop()
-                : onBack,
-          ),
+          KvTopBar(title: title, centre: centre, onBack: onBack),
           Expanded(
             child: KvColumn(
-              child: SingleChildScrollView(
-                // **No air at `short`.** 48 dp of top-and-bottom padding is
-                // right on a phone and is more than the whole body at
-                // 915 × 412, where a bar and a pinned foot leave ~42
-                // (`ux-auditor` BLOCK, UX-R6).
-                padding: EdgeInsets.symmetric(vertical: _short ? 0 : KvSpace.l),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: children,
-                ),
+              child: CustomScrollView(
+                slivers: [
+                  SliverPadding(
+                    // **No air at `short`.** 48 dp of top-and-bottom padding is
+                    // right on a phone and is more than the whole body at
+                    // 915 × 412, where a bar and a pinned foot leave ~42
+                    // (`ux-auditor` BLOCK, UX-R6).
+                    padding: EdgeInsets.symmetric(
+                      vertical: _short ? 0 : KvSpace.l,
+                    ),
+                    sliver: SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: centred
+                            ? MainAxisAlignment.center
+                            : MainAxisAlignment.start,
+                        children: children,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
           // Inside the column's gutter — a part in a clamped column owns no
-          // horizontal air of its own (L195).
+          // horizontal air of its own (L195). The keypad is the exception and
+          // travels in [bleed].
           if (foot != null) KvColumn(child: foot),
+          ?bleed,
         ],
       ),
     ),
@@ -585,14 +674,16 @@ class _RestoreScreenState extends State<RestoreScreen>
         ready ? 'Open with biometrics?' : 'Biometrics, when you want them',
         align: TextAlign.center,
       ),
-      _sub(
-        ready
-            ? 'Face, fingerprint — whatever this phone offers. Your keys stay '
-                  'sealed in its hardware either way; this only opens the app '
-                  'faster.'
-            : biometricUnavailableCopy(_biometricStatus),
-        align: TextAlign.center,
-      ),
+      // **Nothing under the question when the answer is a yes/no** — the
+      // founder's call on glass, and `create_screen`'s twin does the same
+      // (BG-21: the identical step in two ceremonies is one composition). The
+      // `not ready` copy stays because it is actionable and is the only thing
+      // that says why no offer appeared.
+      if (!ready)
+        _sub(
+          biometricUnavailableCopy(_biometricStatus),
+          align: TextAlign.center,
+        ),
       _reason(),
     ];
   }
@@ -639,20 +730,22 @@ class _RestoreScreenState extends State<RestoreScreen>
   Widget _wordsStep() {
     final suggestions = _wordlist!.startingWith(_filter);
     final complete = _indices.length == _target;
-    final left = _target - _indices.length;
     return _page(
       title: 'Restore wallet',
       centre: _counter(),
-      defaultBack: true,
+      onBack: _handleBack,
       children: [
         _heading('Enter your recovery words'),
         _sub(
           'Type a few letters and tap the word — nobody should ever spell one '
           'wrong.',
         ),
-        const SizedBox(height: KvSpace.l),
-        _lengthRow(),
         const SizedBox(height: KvSpace.m),
+        _lengthRow(),
+        // Tight to the row above it: the length choice and the extra-word
+        // switch are settings ABOUT this grid, and the founder read the old
+        // `m` gap as the grid floating away from its own controls.
+        const SizedBox(height: KvSpace.s),
         _tray(),
         const SizedBox(height: KvSpace.m),
         if (_indices.isNotEmpty)
@@ -707,53 +800,20 @@ class _RestoreScreenState extends State<RestoreScreen>
           // rendered there, so a keystroke would silently fill `_filter` and
           // then have to be drained by ⌫ before it reached a word — a stretch
           // where nothing the user does responds.
-          SecretKeyboard(
-            mode: SecretKeyboardMode.lowercaseLetters,
-            onChar: complete ? (_) {} : (c) => setState(() => _filter += c),
-            onBackspace: _wordsBackspace,
-          ),
-          // `O7`'s foot: the undo on the left, what is left to do on the
-          // right. **`Remove last` is rendered whenever there is anything to
-          // undo**, not only while there is something left to add — its
-          // twin on the keyboard is the only other caller of
-          // `_wordsBackspace`, and unmounting it at exactly `complete` once
-          // took away the sole way to un-pick a word, leaving the preview
-          // trap's own "Go back and fix a word" remedy pointing at a step
-          // that could not fix one (product-audit run 1, F5).
-          // **At `short` the foot's counter goes and the bar's stays.** The
-          // two say one thing — `8 of 12` and `5 to go` are the same fact —
-          // and 412 dp of landscape leaves the body 17 dp once the keyboard,
-          // the suggestion strip and this row have taken theirs. Dropping the
-          // duplicate is what puts the first row of the tray back on the
-          // glass. Both are kept everywhere else: the render draws both, and
-          // whether one of them is redundant at every geometry is his call on
-          // glass, not one to take here (register §20).
-          if (!_short)
-            Padding(
-              padding: const EdgeInsets.only(bottom: KvSpace.s),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  if (_indices.isNotEmpty || _filter.isNotEmpty)
-                    KvTextAction(
-                      label: 'Remove last',
-                      tone: KvColor.ink,
-                      onTap: _wordsBackspace,
-                    )
-                  else
-                    const SizedBox.shrink(),
-                  Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(text: '$left', style: _figure),
-                        const TextSpan(text: ' to go', style: _word),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          // **`O7`'s foot row is gone** (founder, UX-R6 glass beat). It held
+          // `Remove last` and an `N to go` counter, and both were duplicates:
+          // backspace on the keyboard directly below already removes the last
+          // word, and the bar's `8 of 12` already says what is left. He called
+          // the pair noise, and on a screen whose whole job is careful
+          // transcription, a second way to say the same number is a second
+          // thing to read. The `_short` special-case that dropped only the
+          // counter goes with it — there is nothing left to drop.
         ],
+      ),
+      bleed: SecretKeyboard(
+        mode: SecretKeyboardMode.lowercaseLetters,
+        onChar: complete ? (_) {} : (c) => setState(() => _filter += c),
+        onBackspace: _wordsBackspace,
       ),
     );
   }
@@ -816,27 +876,63 @@ class _RestoreScreenState extends State<RestoreScreen>
   );
 
   /// The picked words, and the one being typed. `O7`'s `plate` card.
-  Widget _tray() => Container(
-    width: double.infinity,
-    padding: const EdgeInsets.all(KvSpace.sm),
-    decoration: BoxDecoration(
-      color: KvColor.plate,
-      borderRadius: BorderRadius.circular(KvRadius.plate),
-    ),
-    child: Wrap(
-      spacing: KvSpace.s,
-      runSpacing: KvSpace.s,
-      children: [
-        for (var k = 0; k < _indices.length; k++)
-          KvWordChip(
-            index: k + 1,
-            word: _wordsRevealed ? _wordlist!.words[_indices[k]] : null,
-          ),
-        if (_indices.length < _target)
-          KvWordChip.typing(index: _indices.length + 1, prefix: _filter),
-      ],
-    ),
-  );
+  ///
+  /// **A fixed grid, not a `Wrap`** (founder, UX-R6 glass beat). Chips are
+  /// sized by their content, so a `Wrap` re-flowed the entire tray the instant
+  /// hold-to-reveal swapped four mask dots for a word: rows re-broke and a word
+  /// appeared in a different place than its mask had been, on the one screen
+  /// whose whole job is checking that each word is in the right position. He
+  /// asked for "the same row and column they are arranged when not revealed",
+  /// which a fixed three-column grid gives by construction.
+  ///
+  /// Three columns is also what `O3` draws natively, so the phrase a user
+  /// writes down and the phrase they type back now occupy the same shape
+  /// across the process seam.
+  Widget _tray() {
+    const cols = 3;
+    final rows = (_target / cols).ceil();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(KvSpace.s),
+      decoration: BoxDecoration(
+        color: KvColor.plate,
+        borderRadius: BorderRadius.circular(KvRadius.plate),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var r = 0; r < rows; r++)
+            Padding(
+              padding: EdgeInsets.only(top: r == 0 ? 0 : KvSpace.s),
+              child: Row(
+                children: [
+                  for (var c = 0; c < cols; c++) ...[
+                    if (c > 0) const SizedBox(width: KvSpace.s),
+                    Expanded(child: _slot(r * cols + c)),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// One seat in the grid: a picked word, the word being typed, or an empty
+  /// slot still waiting. The seat exists either way — that is the point.
+  Widget _slot(int k) {
+    if (k >= _target) return const SizedBox.shrink();
+    if (k < _indices.length) {
+      return KvWordChip(
+        index: k + 1,
+        word: _wordsRevealed ? _wordlist!.words[_indices[k]] : null,
+      );
+    }
+    if (k == _indices.length) {
+      return KvWordChip.typing(index: k + 1, prefix: _filter);
+    }
+    return SizedBox(height: KvWordChip.height);
+  }
 
   Widget _suggestions(List<String> words) => SizedBox(
     height: KvSuggestion.height,
@@ -855,7 +951,7 @@ class _RestoreScreenState extends State<RestoreScreen>
   // ── step: the optional extra word ────────────────────────────────────────
   Widget _extraWordStep() => _page(
     title: 'Restore wallet',
-    onBack: () => setState(() => _step = _Step.words),
+    onBack: _handleBack,
     children: [
       _heading(extraWordHeading(_target)),
       _sub(
@@ -892,28 +988,18 @@ class _RestoreScreenState extends State<RestoreScreen>
         // in AFTER the wipe, and nothing wipes them again until dispose. The
         // words step already uses this idiom for `complete`
         // (`ffi-leak-auditor`, UX-R6).
-        SecretKeyboard(
-          onChar: _busy ? (_) {} : _extra.appendChar,
-          onBackspace: _busy ? () {} : _extra.backspace,
-        ),
       ],
+    ),
+    bleed: SecretKeyboard(
+      onChar: _busy ? (_) {} : _extra.appendChar,
+      onBackspace: _busy ? () {} : _extra.backspace,
     ),
   );
 
   // ── step: address preview (the decoy/typo trap) ──────────────────────────
   Widget _previewStep() => _page(
     title: 'Restore wallet',
-    onBack: () {
-      setState(() {
-        _wordsRevealed = false; // re-entering masked, never latched on
-        _previewAddress = null;
-      });
-      if (_use25th) {
-        _enterExtraWord();
-      } else {
-        setState(() => _step = _Step.words);
-      }
-    },
+    onBack: _handleBack,
     children: [
       _heading('Is this your wallet?'),
       _sub(
@@ -959,7 +1045,7 @@ class _RestoreScreenState extends State<RestoreScreen>
   // ── step: set passphrase, then commit (`O2`'s form) ──────────────────────
   Widget _passphraseStep() => _page(
     title: 'Restore wallet',
-    onBack: () => setState(() => _step = _Step.preview),
+    onBack: _handleBack,
     children: [
       _heading('Choose an unlock passphrase'),
       _sub(
@@ -985,10 +1071,6 @@ class _RestoreScreenState extends State<RestoreScreen>
     foot: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SecretKeyboard(
-          onChar: _busy ? (_) {} : _passphrase.appendChar,
-          onBackspace: _busy ? () {} : _passphrase.backspace,
-        ),
         // **It drops at `short`, and the heading is why.** 412 dp of
         // landscape less a bar, a pill and a 220 dp keypad leaves ~76: with
         // this line the screen's own heading scrolled out entirely and the
@@ -1006,17 +1088,28 @@ class _RestoreScreenState extends State<RestoreScreen>
         // already settled the identical case in the same words — *`etch` on an
         // information-bearing string is a BG-14 refusal* (`ux-auditor` BLOCK,
         // UX-R6).
+      ],
+    ),
+    bleed: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SecretKeyboard(
+          onChar: _busy ? (_) {} : _passphrase.appendChar,
+          onBackspace: _busy ? () {} : _passphrase.backspace,
+        ),
         if (!_short)
-          const Padding(
-            padding: EdgeInsets.only(bottom: KvSpace.s),
-            child: Text(
-              'In-app keypad — the system keyboard never sees this',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 12,
-                height: 16 / 12,
-                color: KvColor.inkMeta,
+          KvColumn(
+            child: const Padding(
+              padding: EdgeInsets.only(bottom: KvSpace.s),
+              child: Text(
+                'In-app keypad — the system keyboard never sees this',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 12,
+                  height: 16 / 12,
+                  color: KvColor.inkMeta,
+                ),
               ),
             ),
           ),

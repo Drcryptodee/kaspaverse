@@ -62,15 +62,17 @@ class KvWordChip extends StatelessWidget {
   final String? prefix;
   final bool typing;
 
-  /// `O7` measured.
-  static const double height = 32;
+  /// `O7` measured 32; the founder took it down on glass — the tray and its
+  /// words "feel kinda big" against a three-column grid, and the chip is a
+  /// record of a word, not a control you aim at, so it owes no touch target.
+  static const double height = 30;
 
   @override
   Widget build(BuildContext context) {
     final revealed = word;
     return Container(
       height: height,
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+      padding: const EdgeInsets.symmetric(horizontal: KvSpace.s),
       decoration: BoxDecoration(
         color: typing ? Colors.transparent : KvColor.chip,
         borderRadius: BorderRadius.circular(KvRadius.control),
@@ -96,7 +98,19 @@ class KvWordChip extends StatelessWidget {
               ),
             )
           else if (revealed != null)
-            Text(revealed, style: _word)
+            // **Flexible, because the cell is now a fixed grid column.** The
+            // tray used to be a `Wrap`, so revealing re-flowed every chip and
+            // the words landed in different places than the mask had — the
+            // founder asked for the same rows and columns either way.
+            Flexible(
+              child: Text(
+                revealed,
+                style: _word,
+                maxLines: 1,
+                softWrap: false,
+                overflow: TextOverflow.fade,
+              ),
+            )
           else
             const KvMaskDots.fixed(),
         ],
@@ -106,8 +120,8 @@ class KvWordChip extends StatelessWidget {
 
   static const TextStyle _index = TextStyle(
     fontFamily: KvFont.mono,
-    fontSize: 13,
-    height: 18 / 13,
+    fontSize: 12,
+    height: 16 / 12,
     fontWeight: FontWeight.w500,
     fontVariations: KvWeight.w500,
     color: KvColor.inkMeta,
@@ -115,8 +129,8 @@ class KvWordChip extends StatelessWidget {
 
   static const TextStyle _word = TextStyle(
     fontFamily: KvFont.ui,
-    fontSize: 15,
-    height: 20 / 15,
+    fontSize: 14,
+    height: 18 / 14,
     fontWeight: FontWeight.w600,
     fontVariations: KvWeight.w600,
     color: KvColor.ink,
@@ -209,12 +223,20 @@ class KvRevealHold extends StatelessWidget {
       // Opaque, so the whole pill — including the air between the mark and its
       // label — takes the press rather than only the ink.
       behavior: HitTestBehavior.opaque,
-      onLongPressStart: (_) {
+      // **Down, not long-press.** `onLongPressStart` does not fire until
+      // Flutter's 500 ms threshold, and the founder read that on glass as the
+      // control being slow rather than as a deliberate hold. The native reveal
+      // screen has always used raw ACTION_DOWN/UP, so the two halves of the
+      // same ceremony did not even feel alike across the process seam.
+      //
+      // `onTapCancel` is what keeps this honest: a press that turns into a
+      // scroll hides the words again instead of latching them open.
+      onTapDown: (_) {
         KvHaptic.selection();
         onChanged(true);
       },
-      onLongPressEnd: (_) => onChanged(false),
-      onLongPressCancel: () => onChanged(false),
+      onTapUp: (_) => onChanged(false),
+      onTapCancel: () => onChanged(false),
       child: Container(
         height: KvSpace.control,
         padding: const EdgeInsets.symmetric(horizontal: KvSpace.l),
@@ -286,12 +308,20 @@ class KvSecretField extends StatelessWidget {
     alignment: Alignment.centerLeft,
     // `O5` measured: the dots start 22 dp inside the field.
     padding: const EdgeInsets.symmetric(horizontal: KvSpace.s22),
+    // **Focus is the fill, not a teal ring.** The active field carried a
+    // 1.5 dp `primary` outline and the founder read it on glass as
+    // "not-quite-it" — full-strength teal is the app's commit colour (BG-7,
+    // BG-27: lit means committable), and spending it on *which box has the
+    // caret* devalues it on the pill directly below that actually commits.
+    // The active field lifts to `chip` and takes a hairline `edgeHi`; the
+    // inactive one stays `plate` and unstroked. Same signal, quieter register,
+    // and the teal is left to mean one thing.
     decoration: BoxDecoration(
-      color: KvColor.plate,
+      color: active ? KvColor.chip : KvColor.plate,
       borderRadius: BorderRadius.circular(KvRadius.control),
       border: Border.all(
-        color: active ? KvColor.primary : Colors.transparent,
-        width: 1.5,
+        color: active ? KvColor.edgeHi : Colors.transparent,
+        width: 1,
       ),
     ),
     child: ValueListenableBuilder<int>(

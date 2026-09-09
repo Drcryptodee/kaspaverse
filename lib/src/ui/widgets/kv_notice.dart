@@ -27,6 +27,7 @@ class KvNotice extends StatelessWidget {
     super.key,
     required this.text,
     this.lead,
+    this.tail,
     this.tone = KvNoticeTone.warn,
     this.mark = KvGlyph.info,
   });
@@ -39,6 +40,13 @@ class KvNotice extends StatelessWidget {
   /// words.* Same ink, more weight: hierarchy is weight and scale, never
   /// colour (§2).
   final String? lead;
+
+  /// An optional LAST clause, also set at 700 — for a notice whose closing
+  /// sentence is a second thing that must not be skimmed past. `O5` has two:
+  /// *write it down separately* opens and *case and spaces matter* closes, and
+  /// the founder asked for the second in the first's weight because the middle
+  /// sentence is the one you can afford to skim (UX-R6 glass beat).
+  final String? tail;
 
   final KvNoticeTone tone;
   final KvGlyph mark;
@@ -97,6 +105,14 @@ class KvNotice extends StatelessWidget {
                       ),
                     ),
                   TextSpan(text: text),
+                  if (tail != null)
+                    TextSpan(
+                      text: ' $tail',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontVariations: KvWeight.w700,
+                      ),
+                    ),
                 ],
               ),
               style: body,

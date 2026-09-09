@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/restore_screen.dart';
@@ -154,6 +155,104 @@ void main() {
     await tester.pumpAndSettle();
     await reach(find.widgetWithText(KvAction, 'Restore wallet'));
   }
+
+  // ── the system back button ───────────────────────────────────────────────
+  //
+  // **Five correct back arrows, and none of them wired to the phone's button.**
+  // `restore_screen` had no [PopScope], so the hardware key and the
+  // predictive-back gesture fell through to the route and popped the whole
+  // ceremony. The founder hit it while typing the 13th word — the button threw
+  // away a phrase he had entered word by word and landed him on Welcome
+  // (UX-R6 glass beat, D-311). Nothing in this suite could see it, because a
+  // widget test taps arrows and never presses the phone's button.
+
+  /// Press the system back button, the way Android delivers it.
+  Future<void> systemBack(WidgetTester tester) async {
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      SystemChannels.navigation.name,
+      SystemChannels.navigation.codec.encodeMethodCall(
+        const MethodCall('popRoute'),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('the system back button is a STEP, never an exit', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 851);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, page) => KvWindow(child: page!),
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(ctx).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => RestoreScreen(
+                      wordlist: wordlist,
+                      setSecure: ({required bool enable}) async {},
+                      checkAccessibility: () async => false,
+                      preview: (phrase, extra) async => 'kaspa:qtestaddress',
+                      commit: (phrase, extra, pass) async {},
+                    ),
+                  ),
+                ),
+                child: const Text('home'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('home'));
+    await tester.pumpAndSettle();
+
+    // Turn the extra word on, then fill the phrase so `Continue` lands on the
+    // 13th-word step — the exact place he was standing.
+    await tester.tap(find.byType(KvSwitch));
+    await tester.pumpAndSettle();
+    for (var i = 0; i < 12; i++) {
+      await tester.tap(find.text('a'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(KvSuggestion, 'abandon'));
+      await tester.pumpAndSettle();
+    }
+    final cont = find.widgetWithText(KvAction, 'Continue');
+    await tester.ensureVisible(cont);
+    await tester.pumpAndSettle();
+    await tester.tap(cont);
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('word', findRichText: true),
+      findsWidgets,
+      reason: 'we should be on the extra-word step',
+    );
+
+    // THE REGRESSION. This used to pop the whole restore.
+    await systemBack(tester);
+    expect(
+      find.text('home'),
+      findsNothing,
+      reason: 'back from the 13th word must not abandon the ceremony',
+    );
+    expect(
+      find.byType(SecretKeyboard),
+      findsOneWidget,
+      reason: 'back lands on the word picker, the step before it',
+    );
+
+    // And from the FIRST step it does leave — there is only Welcome behind it.
+    await systemBack(tester);
+    expect(find.text('home'), findsOneWidget);
+  });
 
   testWidgets('a restored wallet is OFFERED biometric enrolment', (
     tester,

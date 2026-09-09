@@ -20,8 +20,8 @@ import 'widgets/kv_two_pane.dart';
 ///
 /// **The orb replaces the shield, and it is not a swap of one picture for
 /// another.** A shield is a claim about safety made by the app about itself;
-/// the mark is the app's identity, which is the honest thing to open with when
-/// the sentence underneath is *answers to no one else — including us*. `KvMark`
+/// the mark is the app's identity, which is the honest thing to open with
+/// over *Your money. Your keys.* `KvMark`
 /// at the canon 120 rung (`O1` measured a 115 dp disc inside a 148 dp halo).
 ///
 /// Both paths are fully wired: create runs the ceremony (native FLAG_SECURE
@@ -96,13 +96,22 @@ class OnboardingSurface extends StatelessWidget {
               ),
             ),
             const SizedBox(height: KvSpace.s20),
+            // **The founder wrote this line himself on glass** (UX-R6 glass
+            // beat), under the heading he kept. The old sentence argued the
+            // custody model — *answers to no one else, including us* — which
+            // is the same ground the heading above already holds. This one
+            // says what the custody model BUYS and then greets, so the two
+            // lines stop repeating each other.
+            //
+            // **20, not 15**: he measured it by eye at "about 37% more
+            // bigger", and 15 x 1.37 = 20.55, which the ramp rounds to its 20
+            // rung. It is a greeting, so it can be read at arm's length.
             Text(
-              'This wallet lives on this phone and answers to no one else '
-              '— including us.',
+              'Unstoppable. Instant. Yours.\nWelcome to KaspaVerse.',
               style: const TextStyle(
                 fontFamily: KvFont.ui,
-                fontSize: 15,
-                height: 22 / 15,
+                fontSize: 20,
+                height: 28 / 20,
                 color: KvColor.inkDim,
               ),
             ),

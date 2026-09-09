@@ -288,7 +288,6 @@ class _BackupBlock extends StatelessWidget {
                   (state == null || state.total == 0 || onBackUp == null)
                   ? 'Nothing to back up yet'
                   : null,
-              disabledMark: false,
               // **Never an enabled pill with an empty callback.** `?? () {}`
               // made a lit control that swallows a tap the moment a caller
               // passes no handler — BG-12's own refusal (`ux-auditor`, UX-R5).
@@ -586,7 +585,6 @@ class _HistoryFillSheetState extends State<HistoryFillSheet> {
                 disabledReason: _busy ? 'Checking…' : null,
                 // A network check in flight is not "nothing has been picked",
                 // which is what the disabled ring means (`ux-auditor`, UX-R5).
-                disabledMark: false,
                 onTap: _checkNow,
               ),
             ],
