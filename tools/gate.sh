@@ -103,6 +103,8 @@ else
   expect_lane "flutter app"
 fi
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "kotlin compile (custody platform layer)"
+[ -f "$ROOT/android/app/src/main/kotlin/org/kaspaverse/app/RevealActivity.kt" ] \
+  && expect_lane "cross-language part mirror (L207)"
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "android lint (NewApi — custody platform layer)"
 [ -f "$ROOT/android/gradle/wrapper/gradle-wrapper.properties" ] && expect_lane "gradle wrapper (INV-7)"
 # Guarded on build.gradle.kts, NOT on verification-metadata.xml: guarding a lane on
@@ -440,6 +442,76 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   fi
 else
   skip_check "flutter app" "pubspec.yaml absent (pre-P0-D1 scaffold state)"
+fi
+
+# ── Cross-language part mirror (L207) ───────────────────────────
+#
+# **A control that exists in Dart and is drawn again in Kotlin must take the
+# Dart part's CONSTANTS, not a number somebody re-derived from the render.**
+#
+# `O3`'s `12 | 24` segmented control was built from the founder's picture by eye
+# — 40 dp track, 32 dp thumb, radius 20 — while `KvSegmented` had been sitting in
+# `kv_tabs.dart` since UX-R3 with every value measured off `T4`. He saw it in one
+# look: *"the rounded corners are not pill enough."* The second attempt got
+# closer and was still wrong, because `KvRadius.control` is **999** — Flutter
+# clamps an oversized radius to half the box, which is a stadium at ANY height —
+# and it had been "translated" into half of the height it happened to have.
+#
+# So this lane reads the numbers out of `tokens.dart` and `kv_tabs.dart` and
+# asserts the Kotlin control still carries them. Change a token and this reddens,
+# which is the difference between a lesson and a mechanism.
+part_mirror() {
+  local rc=0
+  local kt="$ROOT/android/app/src/main/kotlin/org/kaspaverse/app/RevealActivity.kt"
+  local tokens="$ROOT/lib/src/ui/theme/tokens.dart"
+  local tabs="$ROOT/lib/src/ui/widgets/kv_tabs.dart"
+  for f in "$kt" "$tokens" "$tabs"; do
+    [ -f "$f" ] || { echo "   missing $f"; return 1; }
+  done
+
+  # The Dart side's own values, read rather than restated (a guard that carries
+  # its own expectation cannot fail).
+  local radius inset size weight
+  # Scoped to the OWNING class, because `control` is a name in both KvSpace
+  # (56, a height) and KvRadius (999, a radius) — the lane's first draft read
+  # the wrong one and said so, which is the lane working before it shipped.
+  radius="$(sed -n '/^abstract final class KvRadius/,/^}/p' "$tokens" \
+    | grep -oP 'static const double control = \K[0-9]+' | head -1)"
+  inset="$(sed -n '/^abstract final class KvSpace/,/^}/p' "$tokens" \
+    | grep -oP 'static const double xs = \K[0-9]+' | head -1)"
+  size="$(sed -n '/class _Segment/,/^}/p' "$tabs" | grep -oP 'fontSize: \K[0-9]+' | head -1)"
+  weight="$(sed -n '/class _Segment/,/^}/p' "$tabs" | grep -oP 'FontWeight\.w\K[0-9]+' | head -1)"
+  [ -n "$radius" ] && [ -n "$inset" ] && [ -n "$size" ] && [ -n "$weight" ] || {
+    echo "   could not read KvSegmented's constants from the Dart side —"
+    echo "   the lane cannot assert what it cannot find (fail closed)"
+    return 1
+  }
+
+  local block
+  block="$(sed -n '/private fun wordCountControl/,/^    }$/p' "$kt")"
+  [ -n "$block" ] || { echo "   RevealActivity.kt has no wordCountControl()"; return 1; }
+
+  grep -q "dp($radius)" <<<"$block" || {
+    echo "   the O3 segmented control does not use KvRadius.control ($radius)."
+    echo "   A radius re-derived from a height is a pill only at that height —"
+    echo "   999 clamps to a stadium at any of them (L207)."
+    rc=1; }
+  grep -q "setPadding(dp($inset), dp($inset), dp($inset), dp($inset))" <<<"$block" || {
+    echo "   the O3 segmented control's track inset is not KvSpace.xs ($inset),"
+    echo "   which is KvSegmented.inset"
+    rc=1; }
+  grep -q "textSize = ${size}f" <<<"$block" || {
+    echo "   the O3 segmented control's label is not KvSegmented's $size"
+    rc=1; }
+  grep -q "uiWeight($weight)" <<<"$block" || {
+    echo "   the O3 segmented control's label is not KvSegmented's w$weight —"
+    echo "   and it must be that weight in BOTH states: the selection is carried"
+    echo "   by the COLOUR, never by thickening"
+    rc=1; }
+  return $rc
+}
+if [ -f "$ROOT/android/app/src/main/kotlin/org/kaspaverse/app/RevealActivity.kt" ]; then
+  run_check "cross-language part mirror (L207)" part_mirror
 fi
 
 # ── The wrapper jar itself (INV-7) ──────────────────────────────

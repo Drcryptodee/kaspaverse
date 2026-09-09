@@ -525,9 +525,16 @@ class RevealActivity : Activity() {
             }
             true
         }
-        root.addView(hold)
-        root.addView(spacer(dp(12)))
-        root.addView(hint)
+        // **The hold pill is PINNED, with the CTA.** It used to sit at the
+        // bottom of the scrolling body, which was fine at twelve words and a
+        // defect at twenty-four: the founder had to scroll past six rows to
+        // reach the control that reveals them. *"i have to scroll down to be
+        // able to tap on the 'Hold to Reveal' which is a bad UX."*
+        //
+        // Making the grid shorter (four columns, a tighter cell) helps and does
+        // not settle it — a phone with a large font, or a future length, puts
+        // it back below the fold. The control that operates the screen belongs
+        // where the thumb is, and the words are the part that may scroll.
 
         cont.setOnClickListener {
             if (revealedOnce) {
@@ -553,7 +560,11 @@ class RevealActivity : Activity() {
                 addView(
                     LinearLayout(this@RevealActivity).apply {
                         orientation = LinearLayout.VERTICAL
-                        setPadding(dp(24), dp(8), dp(24), dp(24))
+                        setPadding(dp(24), dp(12), dp(24), dp(24))
+                        addView(hold)
+                        addView(spacer(dp(10)))
+                        addView(hint)
+                        addView(spacer(dp(10)))
                         addView(cont)
                     }
                 )
@@ -581,27 +592,46 @@ class RevealActivity : Activity() {
      * the Dart side has no call site for that part (this screen is the only
      * place recovery words are ever shown), so the specification lands here.
      */
+    /**
+     * **How many columns the grid takes, and it is not the same at both
+     * lengths.**
+     *
+     * `O3` draws **three** for twelve words and that is the render. Twenty-four
+     * in three columns is EIGHT rows, and the founder measured the consequence
+     * rather than the layout: *"i see from 19 - 24 are hidden, and i have to
+     * scroll down to be able to tap on the 'Hold to Reveal' which is a bad
+     * UX."* Four columns is six rows, which is his own suggested range and the
+     * widest the cell can go before an eight-character word stops fitting.
+     *
+     * The cell shrinks with it — see [wordCell] — so the whole grid costs about
+     * a third less height than the naive eight rows. **And the hold pill is
+     * pinned regardless**, because the real defect was a control below the
+     * fold, and a control that can be scrolled away from is a control that will
+     * be.
+     */
+    private fun gridColumns(n: Int) = if (n > WORDS_12) 4 else 3
+
     private fun buildGrid(): View {
         val grid = column()
         val n = words?.size ?: WORDS_12
-        // Three columns, and as many rows as the phrase needs — four for 12,
-        // eight for 24. The screen already scrolls, which is what makes the
-        // taller grid a layout rather than a redesign.
-        val rows = (n + 2) / 3
+        val cols = gridColumns(n)
+        val gap = if (cols == 4) dp(6) else dp(8)
+        val rows = (n + cols - 1) / cols
         for (r in 0 until rows) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply {
-                    if (r > 0) topMargin = dp(8)
+                    if (r > 0) topMargin = gap
                 }
             }
-            for (c in 0 until 3) {
-                val i = r * 3 + c
-                // A phrase whose length is not a multiple of three would leave
-                // a hole; neither 12 nor 24 does, and the guard costs nothing.
-                val cell = if (i < n) wordCell(i) else View(this)
+            for (c in 0 until cols) {
+                val i = r * cols + c
+                // A phrase whose length is not a multiple of the column count
+                // would leave a hole; neither 12/3 nor 24/4 does, and the guard
+                // costs nothing.
+                val cell = if (i < n) wordCell(i, cols) else View(this)
                 cell.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply {
-                    if (c > 0) marginStart = dp(8)
+                    if (c > 0) marginStart = gap
                 }
                 row.addView(cell)
             }
@@ -621,46 +651,40 @@ class RevealActivity : Activity() {
      *
      * **No copy on this control, or anywhere near it, says or implies that 24 is
      * more secure — because it is not.** 12 words is 128 bits of entropy, which
-     * already saturates secp256k1's ~128-bit effective security; the extra 128
-     * bits of a 24-word phrase compress back through BIP32 to a key of exactly
-     * the same strength. What the choice buys is parity with the wallets people
-     * arrive from. If a future hand adds a *recommended* or a *stronger* to
-     * either segment, that hand is adding a claim the cryptography does not
-     * support (D-312).
+     * already saturates secp256k1's ~128-bit effective security. If a future
+     * hand adds a *recommended* or a *stronger* to either segment, that hand is
+     * adding a claim the cryptography does not support (D-312).
      */
     private fun wordCountControl(): View {
         val n = words?.size ?: WORDS_12
-        // **`KvSegmented`, transcribed** — the founder's own instruction:
-        // *"look at the wallet settings screen. it has the 'With funds and All'
-        // toggle, well that is how i wanted it to be."* So this is not drawn
-        // from the render by eye any more; it is that Dart part's numbers,
-        // copied, because two controls doing one job in two languages is
-        // exactly where the app starts disagreeing with itself (BG-21).
+        // **`KvSegmented`, transcribed — including its RADIUS, which is the part
+        // the first two attempts got wrong.**
         //
-        // From `kv_tabs.dart`: track **36** on `plate`, inset **4** (thumb
-        // **28**) on `chip`, radius **`KvRadius.control` = 999** — a true
-        // stadium, which is what "not pill enough" meant: this drew 40/32 at
-        // radius 20 and read as a rounded card. Label ui **14 / w600 at both
-        // states**, `ink` when chosen and `inkMeta` when not, with **14** of
-        // horizontal padding. The target is `KvSpace.touchTarget` (**52**) and
-        // does not scale with the track (BG-12).
+        // `KvRadius.control` is **999**, and Flutter clamps an oversized radius
+        // to half the box: a guaranteed stadium at whatever height the box turns
+        // out to be. I translated that into "half of 36, so 18", which is a pill
+        // only while the box really is 36 — and a rounded card the moment a font
+        // scale or a measurement makes it anything else. That is L207's own
+        // lesson one level deeper: transcribing a part means taking its
+        // CONSTANT, not re-deriving the number it happens to produce. 999 here
+        // too; `GradientDrawable` clamps the same way.
         //
-        // The two heights are reconciled with an `InsetDrawable` rather than by
-        // choosing between them: each view is 52 tall and its BACKGROUND is
-        // inset, so what is drawn is 36/28 and what a thumb hits is 52.
-        val trackInset = dp((52 - 36) / 2)
-        val thumbInset = dp((52 - 28) / 2)
+        // The heights follow the TEXT rather than being pinned, for the same
+        // reason the founder could see them being wrong: *"it is small and
+        // barely circling the words."* A 28 dp thumb around a label that grew
+        // with the user's font scale is a pill with no room in it. Padding, not
+        // a fixed box — so the air around the words is constant and the pill
+        // grows with them.
+        val pill = dp(999).toFloat()
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(4), 0, dp(4), 0)
-            background = InsetDrawable(
-                GradientDrawable().apply {
-                    // Half the drawn height — a stadium, never a rounded card.
-                    cornerRadius = dp(18).toFloat()
-                    setColor(cSurfaceAlt) // KvColor.plate
-                },
-                0, trackInset, 0, trackInset
-            )
+            // `KvSegmented`'s own inset (4) on every side, so the thumb sits
+            // inside the track by the same air the Dart part gives it.
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = GradientDrawable().apply {
+                cornerRadius = pill
+                setColor(cSurfaceAlt) // KvColor.plate
+            }
             for (count in intArrayOf(WORDS_12, WORDS_24)) {
                 val on = count == n
                 addView(
@@ -673,16 +697,15 @@ class RevealActivity : Activity() {
                         typeface = uiWeight(600)
                         setTextColor(if (on) cTextPrimary else cInkMeta)
                         gravity = Gravity.CENTER
-                        minHeight = dp(52)
-                        setPadding(dp(14), 0, dp(14), 0)
+                        // 14 across and 7 down: the vertical is what "circling
+                        // the words" is made of, and it is air rather than a
+                        // height so it holds at any text size.
+                        setPadding(dp(14), dp(7), dp(14), dp(7))
                         if (on) {
-                            background = InsetDrawable(
-                                GradientDrawable().apply {
-                                    cornerRadius = dp(14).toFloat()
-                                    setColor(cChip) // KvColor.chip
-                                },
-                                0, thumbInset, 0, thumbInset
-                            )
+                            background = GradientDrawable().apply {
+                                cornerRadius = pill
+                                setColor(cChip) // KvColor.chip
+                            }
                         }
                         contentDescription = "Use a $count word recovery phrase"
                         // The live segment is the one you are NOT on; tapping
@@ -746,14 +769,29 @@ class RevealActivity : Activity() {
         }
     }
 
-    private fun wordCell(i: Int): View {
+    /**
+     * One cell. **`cols` is the compaction knob**, and it exists because
+     * twenty-four cells at twelve's metrics do not stand in a phone.
+     *
+     * At three columns this is `O3` exactly: a 52 dp `plate` card at radius 16,
+     * a mono index and the mask beside it. At four it is the same object with
+     * the air taken out — 44 dp, a tighter index, and one rung less type —
+     * which is what buys six rows instead of eight without a word ever wrapping
+     * (the thing that made 16 wrong in the first place).
+     */
+    private fun wordCell(i: Int, cols: Int): View {
+        val tight = cols > 3
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(52)
-            setPadding(dp(10), dp(6), dp(6), dp(6))
+            minimumHeight = if (tight) dp(44) else dp(52)
+            if (tight) {
+                setPadding(dp(7), dp(4), dp(4), dp(4))
+            } else {
+                setPadding(dp(10), dp(6), dp(6), dp(6))
+            }
             background = GradientDrawable().apply {
-                cornerRadius = dp(16).toFloat()
+                cornerRadius = dp(if (tight) 13 else 16).toFloat()
                 setColor(cSurfaceAlt) // KvColor.plate
             }
         }
@@ -761,8 +799,10 @@ class RevealActivity : Activity() {
             text = "${i + 1}"
             setTextColor(cInkMeta)
             typeface = faceMono
-            textSize = 12f
-            minWidth = dp(16)
+            textSize = if (tight) 11f else 12f
+            // Two digits at 24, one at 12 — the index column has to hold the
+            // wider case or the words start at different x down the grid.
+            minWidth = if (tight) dp(15) else dp(16)
         }
         val dots = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -776,14 +816,13 @@ class RevealActivity : Activity() {
             // legibility, and on a three-column grid it put "dentist" and
             // "portion" onto two lines each — the founder's words on glass. A
             // wrapped recovery word is worse than a smaller one: it reads as a
-            // different word. 15 fits the 7-character common case; the 8-letter
-            // tail (BIP39 English goes no longer) drops to 13, applied per cell
-            // in [refreshGrid] because only then is the word known.
-            textSize = 15f
+            // different word. The per-word sizing lives in [refreshGrid],
+            // because only there is the word known.
+            textSize = if (tight) 13f else 15f
             maxLines = 1
             setTextColor(cTextPrimary)
+            setPadding(dp(if (tight) 4 else 6), 0, 0, 0)
             visibility = View.GONE
-            setPadding(dp(6), 0, 0, 0)
         }
         wordViews[i] = word
         card.addView(num)
@@ -803,10 +842,16 @@ class RevealActivity : Activity() {
      */
     private fun refreshGrid() {
         val w = words ?: return
+        val tight = gridColumns(w.size) > 3
         for (i in w.indices) {
             wordViews[i]?.text = if (revealed) w[i] else ""
-            // The long tail shrinks rather than wraps — see [wordCell].
-            wordViews[i]?.textSize = if (w[i].length > 7) 13f else 15f
+            // The long tail shrinks rather than wraps — see [wordCell]. One
+            // rung lower again in the four-column grid, where the cell is
+            // narrower to begin with.
+            wordViews[i]?.textSize = when {
+                w[i].length > 7 -> if (tight) 11f else 13f
+                else -> if (tight) 13f else 15f
+            }
             wordViews[i]?.visibility = if (revealed) View.VISIBLE else View.GONE
             dotRows[i]?.visibility = if (revealed) View.GONE else View.VISIBLE
         }
@@ -1158,8 +1203,27 @@ class RevealActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
     }
 
+    /**
+     * The scrolling body — **with no scrollbar and no overscroll glow.**
+     *
+     * Both are Android's chrome, not this app's. The bar only ever appeared
+     * once a phrase was long enough to overflow, so picking `24 words` made a
+     * grey rail slide in down the right edge of the one screen that is meant to
+     * be nothing but twelve or twenty-four words on the void — the founder saw
+     * it the moment he tapped it (D-312). Nothing else in this app draws a
+     * scrollbar; a Flutter `CustomScrollView` shows none by default, so the
+     * native surface was the only place in the ceremony where the platform's
+     * furniture reached the glass.
+     *
+     * `overScrollMode = never` goes with it for the same reason: the stretch
+     * glow is the same borrowed chrome arriving at the other end of the
+     * gesture.
+     */
     private fun scroll(child: View) = ScrollView(this).apply {
         setBackgroundColor(cAbyss)
+        isVerticalScrollBarEnabled = false
+        isHorizontalScrollBarEnabled = false
+        overScrollMode = View.OVER_SCROLL_NEVER
         addView(child)
     }
 

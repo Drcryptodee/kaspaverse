@@ -1113,11 +1113,12 @@ fn binding_for(
 /// 1. **It never runs eagerly.** Not on install, not on launch — only after a
 ///    correct secret has already unsealed the old blob, so a failure here can
 ///    never be the thing that stops a user opening their wallet.
-/// 2. **The new blob is unsealed again BEFORE the old one is replaced.** A seal
-///    that cannot be re-opened is discarded with the original untouched. It
-///    costs one extra KDF on one unlock in the app's lifetime, which is the
-///    cheapest insurance available against a bug in the derivation path this
-///    very commit introduces.
+/// 2. **The new blob is re-opened before the old one is replaced** — inside
+///    `seal_seed`, with the key it has already derived, so a seal that cannot be
+///    re-opened never leaves that function and never replaces a working vault.
+///    It used to be a second `unseal_seed` here, which paid a second full
+///    Argon2id: three KDFs on the migrating unlock instead of two, and the
+///    founder felt it on a phone whose Argon2id was ALSO unoptimised (L208).
 /// 3. **Every failure is non-fatal.** The unlock already succeeded; a migration
 ///    that cannot complete logs and leaves v1 on disk, and the next unlock tries
 ///    again. The user is never blocked and never told anything went wrong,
@@ -1138,11 +1139,11 @@ fn migrate_blob(seed: &SecretSeed, passphrase: &[u8], pepper: Option<&[u8]>) {
             return;
         }
     };
-    // Property 2. A re-seal that does not re-open is not written.
-    if let Err(e) = unseal_seed(&fresh, passphrase, pepper) {
-        log::warn!("vault migration: verify failed ({e}); v1 blob left in place");
-        return;
-    }
+    // Property 2 is now `seal_seed`'s own: it re-opens what it produced, with
+    // the key it already derived, before handing it back. That used to be a
+    // second `unseal_seed` here — a second full Argon2id, which turned a
+    // one-KDF unlock into a three-KDF one on the migrating pass and was
+    // measurable on the founder's phone. Same guarantee, one KDF less.
     match atomic_write(&path, &fresh) {
         Ok(()) => log::info!(
             "vault migrated v1 -> v2 (device_bound={})",

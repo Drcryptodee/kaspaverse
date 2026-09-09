@@ -401,6 +401,42 @@ pub fn seal_seed(
     let mut blob = Vec::with_capacity(BLOB_LEN);
     blob.extend_from_slice(&header);
     blob.extend_from_slice(&ciphertext);
+
+    // **Every seal re-opens its own output before returning it, with the key it
+    // has already derived.**
+    //
+    // The migration needed this — a re-seal that cannot be re-opened must never
+    // replace a working vault — and the obvious way to get it was to call
+    // `unseal_seed` afterwards, which derives the key a SECOND time: another
+    // full Argon2id at 192 MiB. On the founder's phone that turned a one-KDF
+    // unlock into a three-KDF one, and he felt it (D-312's glass beat).
+    //
+    // Verifying here costs one XChaCha20 pass over 80 bytes — microseconds —
+    // because the key is already in hand. It catches exactly what could go
+    // wrong in this function: a header that is not the AAD it claims, an
+    // off-by-one in the layout, a nonce written to the wrong offset. It does
+    // NOT re-check the key derivation, and it is not claimed to: Argon2id over
+    // fixed inputs is deterministic, and a "verification" that repeats a
+    // deterministic function is a cost with no finding behind it.
+    //
+    // Unconditional, so it is the property of a SEAL rather than of the one
+    // caller that remembered to ask. A vault this function returns is a vault
+    // that has been opened once.
+    let reopened = cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &blob[HEADER_LEN_V2..],
+                aad: &header,
+            },
+        )
+        .map_err(|_| CoreError::Seal)?;
+    let mut reopened = Zeroizing::new(reopened);
+    if reopened.as_slice() != seed.as_bytes() {
+        reopened.zeroize();
+        return Err(CoreError::Seal);
+    }
+
     Ok(blob)
 }
 
