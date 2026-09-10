@@ -34,6 +34,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart';
 
+import 'package:kaspaverse/src/ui/messages/blocked_addresses_screen.dart';
 import 'package:kaspaverse/src/ui/messages/contacts_screen.dart';
 import 'package:kaspaverse/src/ui/messages/thread_screen.dart';
 import 'package:kaspaverse/src/services/messaging_service.dart';
@@ -130,10 +131,18 @@ ConversationDto _conv(
   String address = _addr,
   String? preview,
   int unread = 0,
+  // A request carries no address until the node names its sender; `resolved`
+  // is the card after that lookup — the one `M2` draws, and the one that can
+  // be blocked.
+  bool resolved = false,
+  bool blocked = false,
+  bool replyNeedsHandshake = false,
 }) => ConversationDto(
   conversationId: id,
-  contactAddress: status == 'pending_in' ? '' : address,
-  myAlias: 'fa6d1afa79e1',
+  contactAddress: status == 'pending_in' && !resolved ? '' : address,
+  // A revived row (D-307) holds no alias of ours — the flag derives from that
+  // in Rust, and the fixture keeps the two consistent.
+  myAlias: replyNeedsHandshake ? '' : 'fa6d1afa79e1',
   theirAlias: 'a1e1b60b5fca',
   status: status,
   initiatedByMe: status != 'pending_in',
@@ -147,7 +156,26 @@ ConversationDto _conv(
   contactName: name,
   preview: preview,
   unread: unread,
+  blocked: blocked,
+  replyNeedsHandshake: replyNeedsHandshake,
 );
+
+/// One blocked address, for `M5`'s count and the list behind it (D-308).
+List<BlockedContactDto> _blockedRows() => [
+  BlockedContactDto(
+    address: _addr,
+    contactName: 'Mara',
+    sinceUnixMs: BigInt.from(
+      DateTime.now().millisecondsSinceEpoch - 86400000 * 3,
+    ),
+  ),
+];
+
+Widget _blocked({bool empty = false}) {
+  MessagingService.blockedContactsFn = () async =>
+      empty ? const [] : _blockedRows();
+  return BlockedAddressesScreen(messaging: MessagingService.instance);
+}
 
 Widget _chats({bool requests = false, bool empty = false, int? gapMinutes}) {
   MessagingService.conversationsFn = () async => empty
@@ -198,9 +226,31 @@ Widget _chats({bool requests = false, bool empty = false, int? gapMinutes}) {
           // (`wallet-security-auditor`, UX-R5). A frame that only shows the
           // easy case is the comfortable half.
           _conv('c5', agoMinutes: 60 * 24 * 26),
-          _conv('r1', status: 'pending_in', agoMinutes: 120),
+          // **`M2`'s three words on the first request** (D-308): the node
+          // has named its sender, so `Block` is buildable and drawn. The
+          // second is still unresolved — the card that cannot carry it.
+          _conv('r1', status: 'pending_in', resolved: true, agoMinutes: 120),
           _conv('r2', status: 'pending_in', agoMinutes: 60 * 30),
+          // **A blocked address knocking again**: the state line says so,
+          // Accept stays (it lifts the block), Block is gone.
+          _conv(
+            'r3',
+            status: 'pending_in',
+            resolved: true,
+            blocked: true,
+            agoMinutes: 60 * 4,
+          ),
         ];
+  // `M5`'s count under `Blocked addresses`, and the wipe sheet's own numbers
+  // — the bonds clause included, so the frame draws every paragraph.
+  MessagingService.blockedContactsFn = () async => _blockedRows();
+  MessagingService.wipePreviewFn = () async => WipeReportDto(
+    conversations: 6,
+    messages: 41,
+    pendingBonds: 2,
+    sideFilesCleared: 0,
+    floorPersisted: false,
+  );
   // **A gap, when a case asks for one.** The history notice renders only when
   // history may be incomplete, so the resting fixture cannot draw it and the
   // one surface built for it would have no frame at all (D-309).
@@ -220,7 +270,13 @@ Widget _chats({bool requests = false, bool empty = false, int? gapMinutes}) {
   return ContactsScreen(messaging: MessagingService.instance);
 }
 
-Widget _thread() {
+Widget _thread({bool revived = false}) {
+  // **A revived thread** (D-307): the row holds no alias of ours, so the
+  // composer's seat carries the state, the cost and the handshake door.
+  MessagingService.conversationsFn = () async => [
+    _conv('c2', name: 'Jonas', replyNeedsHandshake: revived),
+  ];
+  MessagingService.instance.refresh();
   final now = DateTime.now().millisecondsSinceEpoch;
   final rows = [
     _msg(
@@ -1026,6 +1082,54 @@ Future<void> _openHideConfirm(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// Long-press a row, then take its Block confirm (D-308).
+Future<void> _openBlockConfirm(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.longPress(find.byType(KvRow).first);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Block contact'));
+  await tester.pumpAndSettle();
+}
+
+/// The Requests lane, then the first card's `Block` — the invitation variant
+/// of the confirm.
+Future<void> _openRequestBlockConfirm(WidgetTester tester) async {
+  await _openRequestsTab(tester);
+  await tester.tap(find.text('Block').first);
+  await tester.pumpAndSettle();
+}
+
+/// The thread's overflow, with its Block row.
+Future<void> _openThreadActions(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.bySemanticsLabel('Thread actions'));
+  await tester.pumpAndSettle();
+}
+
+/// The blocked list's one row, then its Unblock confirm.
+Future<void> _openUnblockConfirm(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Mara'));
+  await tester.pumpAndSettle();
+}
+
+/// Message settings, then the erase — the one sheet with two acts.
+Future<void> _openWipeSheet(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.tap(find.bySemanticsLabel('Message settings'));
+  await tester.pumpAndSettle();
+  // The row sits under the fold at the short geometry now that `Contacts`
+  // is above it, and a `ListView` child under the fold is not built.
+  await tester.scrollUntilVisible(
+    find.text('Delete all messages'),
+    120,
+    scrollable: find.byType(Scrollable).last,
+  );
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Delete all messages').last);
+  await tester.pumpAndSettle();
+}
+
 /// It is reached through message settings now — the bar no longer carries it
 /// (founder, 2026-09-08).
 Future<void> _openHistorySheet(WidgetTester tester) async {
@@ -1259,6 +1363,25 @@ void main() {
     framedSurface('messages__chats_alert', () => _chats(gapMinutes: 235));
     // The confirm ceremony, which had no frame at all.
     framedSurface('messages__confirm', _chats, act: _openHideConfirm);
+    // **Block, and the list behind it** (D-308): the confirm off a row's
+    // long-press, the wipe sheet with its backup door and the D-307 copy, and
+    // the Blocked addresses screen no render covers.
+    framedSurface('messages__block', _chats, act: _openBlockConfirm);
+    // The request's own variant of the sheet, the thread's overflow with its
+    // new row, the unblock confirm, and the list with nobody in it.
+    framedSurface(
+      'messages__block_request',
+      () => _chats(requests: true),
+      act: _openRequestBlockConfirm,
+    );
+    framedSurface('messages__thread_actions', _thread, act: _openThreadActions);
+    framedSurface('messages__unblock', _blocked, act: _openUnblockConfirm);
+    framedSurface('messages__blocked_empty', () => _blocked(empty: true));
+    framedSurface('messages__wipe', _chats, act: _openWipeSheet);
+    framedSurface('messages__blocked', _blocked);
+    // **The revived thread** (D-307): readable, and the composer's seat holds
+    // the handshake door instead of a field.
+    framedSurface('messages__thread_revived', () => _thread(revived: true));
 
     framedSurface('send__recipient', _sendScreen);
     framedSurface('send__checked', _sendScreen, act: _checkedDestination);

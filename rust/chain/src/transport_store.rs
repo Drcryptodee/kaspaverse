@@ -340,8 +340,20 @@ impl TransportStore {
     pub fn conversation_by_alias(&self, alias: &str) -> Option<&ConversationRecord> {
         /// Higher wins. A conversation we can actually talk in outranks one
         /// still awaiting our accept.
+        ///
+        /// **An Active row with no alias of ours ranks BELOW an announced
+        /// one** (`consensus-auditor`, MSG-BLOCK). A revived row (D-307) is
+        /// minted on its sender's own evidence — a comm under the alias,
+        /// sealed to our published key, which anyone can post — so on a wiped
+        /// device the first writer under an alias owns it, and "older
+        /// establishment wins" then hands a squatter every later message the
+        /// real contact sends under that alias. A row the user accepted or
+        /// opened, or one a backup restored, holds an alias of ours and
+        /// outranks it; the revived row has no standing to capture routing,
+        /// which is the same rule `stash_row_is_free` applies to it.
         fn rank(c: &ConversationRecord) -> u8 {
             match c.status {
+                ConversationStatus::Active if !c.my_alias.is_empty() => 3,
                 ConversationStatus::Active => 2,
                 ConversationStatus::PendingOutbound if c.initiated_by_me => 1,
                 _ => 0,
@@ -546,21 +558,6 @@ impl TransportStore {
                 .filter(|c| !self.conversations.is_tombstoned(&c.conversation_id))
                 .count(),
         }
-    }
-
-    /// Whether any conversation knows WHO it is talking to but not what alias
-    /// they write under — the precondition for learning an alias back from an
-    /// inbound message.
-    ///
-    /// It gates a full key-window decrypt attempt on every otherwise-unroutable
-    /// comm, and on a public chain that is every stranger's traffic. So the
-    /// expensive path runs only while we are genuinely missing something, and
-    /// costs nothing once every conversation knows its contact's alias.
-    pub fn has_conversation_awaiting_alias(&self) -> bool {
-        self.conversations
-            .records
-            .values()
-            .any(|c| c.their_alias.is_none() && !c.contact_address.is_empty())
     }
 
     /// Whether ANY conversation knows its counterparty's address — the free
@@ -1101,6 +1098,48 @@ fn merge_rank(c: &ConversationRecord, hidden: bool) -> (bool, bool, bool, bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A revived row (D-307: Active, no alias of ours) must not capture an
+    /// alias an announced row also answers to, whichever came first — the
+    /// squatter arrives FIRST on a wiped device (`consensus-auditor`).
+    #[test]
+    fn an_announced_row_outranks_a_revived_one_that_shares_its_alias() {
+        let dir = test_dir("revived-rank");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let mut revived = conversation("revived", 50);
+        revived.my_alias = String::new();
+        revived.their_alias = Some("822deb62da52".to_string());
+        revived.contact_address = "kaspa:squatter".to_string();
+        revived.initiated_by_me = false;
+        revived.created_unix_ms = 1; // the squatter wrote first
+        store.upsert_conversation(revived).unwrap();
+        let mut real = conversation("real", 40);
+        real.their_alias = Some("822deb62da52".to_string());
+        real.created_unix_ms = 100; // the user accepted them later
+        store.upsert_conversation(real).unwrap();
+        assert_eq!(
+            store
+                .conversation_by_alias("822deb62da52")
+                .unwrap()
+                .conversation_id,
+            "real",
+            "an alias of ours is standing; a revived row is not"
+        );
+        // And between two revived rows the existing rule still applies.
+        let mut other = conversation("other", 60);
+        other.my_alias = String::new();
+        other.their_alias = Some("1111aaaa2222".to_string());
+        other.created_unix_ms = 10;
+        store.upsert_conversation(other).unwrap();
+        assert_eq!(
+            store
+                .conversation_by_alias("1111aaaa2222")
+                .unwrap()
+                .conversation_id,
+            "other"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// HIDING MUST NOT DESTROY IDENTITY.
     ///

@@ -233,6 +233,10 @@ enum KvGlyph {
   /// Go back to the letters. Lucide `keyboard` — the pair `smile` toggles to,
   /// so the composer's one trailing control says which way it goes.
   keyboard,
+
+  /// Refuse this person. Lucide `ban` — the ring with the stroke through it;
+  /// the Block rows and the Blocked addresses list (D-308).
+  ban,
 }
 
 /// One glyph, painted.
@@ -683,6 +687,9 @@ class KvGlyphPainter extends CustomPainter {
           'M8 14s1.5 2 4 2 4-2 4-2',
         ]);
         path(const ['M9 9h.01', 'M15 9h.01']);
+      case KvGlyph.ban:
+        circle(12, 12, 10);
+        path(const ['M4.929 4.929 19.07 19.071']);
       case KvGlyph.keyboard:
         path(const [
           'M10 8h.01',

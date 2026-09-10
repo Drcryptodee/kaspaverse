@@ -28,10 +28,17 @@ ConversationDto conversation(
   int unread = 0,
   String address =
       'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf',
+  // A request carries no address until the node names its sender; `resolved`
+  // is the card after that lookup — the one that can be blocked.
+  bool resolved = false,
+  bool blocked = false,
+  bool replyNeedsHandshake = false,
 }) => ConversationDto(
   conversationId: id,
-  contactAddress: status == 'pending_in' ? '' : address,
-  myAlias: 'fa6d1afa79e1',
+  contactAddress: status == 'pending_in' && !resolved ? '' : address,
+  // A revived row (D-307) holds no alias of ours — that is what the flag
+  // derives from in Rust, and the fixture keeps the two consistent.
+  myAlias: replyNeedsHandshake ? '' : 'fa6d1afa79e1',
   theirAlias: 'a1e1b60b5fca',
   status: status,
   initiatedByMe: status != 'pending_in',
@@ -41,6 +48,8 @@ ConversationDto conversation(
   contactName: contactName,
   preview: preview,
   unread: unread,
+  blocked: blocked,
+  replyNeedsHandshake: replyNeedsHandshake,
 );
 
 ThreadMessageDto message(
@@ -205,6 +214,10 @@ void main() {
     );
     MessagingService.abandonFn = () async {};
     MessagingService.hideFn = (_) async {};
+    // D-308 seams: nobody blocked, and a block that simply succeeds.
+    MessagingService.blockFn = (_) async {};
+    MessagingService.unblockFn = (_) async => true;
+    MessagingService.blockedContactsFn = () async => const [];
     // The composer's live fee and the founder's signing toggle. The DEFAULTS
     // are the shipped posture: a real quote, and the confirm ceremony ON — so
     // every test that does not say otherwise exercises the path the app ships
@@ -1159,8 +1172,18 @@ void main() {
       );
       expect(find.textContaining('stay on Kaspa permanently'), findsOneWidget);
       expect(find.textContaining('wallet and coins are not'), findsOneWidget);
-      // The repair instruction — the useful half.
-      expect(find.textContaining('Asking them to start it'), findsOneWidget);
+      // What a wipe does to the people who still write to you (D-307): the
+      // thread comes back on their next message, the reply costs a handshake
+      // unless there is a backup — and the repair is offered on the sheet.
+      expect(find.textContaining('reopens the thread'), findsOneWidget);
+      expect(find.textContaining('needs no new handshake'), findsOneWidget);
+      expect(find.text('Back up first…'), findsOneWidget);
+      // And the one thing a wipe deliberately leaves standing (D-308).
+      expect(find.text('Blocked addresses stay blocked.'), findsNothing);
+      expect(
+        find.textContaining('Blocked addresses stay blocked'),
+        findsOneWidget,
+      );
       expect(wiped, isFalse, reason: 'opening the sheet must delete nothing');
 
       // The address book's cache is mirrored state: the wipe clears
@@ -1600,6 +1623,296 @@ void main() {
     });
   });
 
+  group('ContactsScreen — Block (D-308)', () {
+    testWidgets('a request whose sender is known offers Block, and Block '
+        'confirms then runs the bridge', (tester) async {
+      String? blocked;
+      MessagingService.blockFn = (id) async => blocked = id;
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in', resolved: true),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+      await openRequests(tester);
+
+      // `M2`'s three words, now all three.
+      expect(find.text('Accept…'), findsOneWidget);
+      expect(find.text('Ignore'), findsOneWidget);
+      expect(find.text('Block'), findsOneWidget);
+
+      await tester.tap(find.text('Block'));
+      await tester.pumpAndSettle();
+      // The sheet says what a block does, in the request's own words.
+      expect(find.text('Block contact'), findsOneWidget);
+      expect(find.textContaining('Turns down this request'), findsOneWidget);
+      expect(find.textContaining('tells them nothing'), findsOneWidget);
+      expect(find.textContaining('Accepting it unblocks them'), findsOneWidget);
+      expect(blocked, isNull, reason: 'opening the sheet blocks nobody');
+
+      await tester.tap(find.text('Block').last);
+      await tester.pumpAndSettle();
+      expect(blocked, 'c1');
+      expect(
+        find.text('Blocked. Only a new request from them reaches you.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a request whose sender is not yet known cannot be blocked', (
+      tester,
+    ) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+      await openRequests(tester);
+
+      // A block is keyed on the address, and there is none to key it on —
+      // the word is absent rather than dead (BG-12). Ignore still answers.
+      expect(find.text('Sender not yet known'), findsOneWidget);
+      expect(find.text('Block'), findsNothing);
+      expect(find.text('Ignore'), findsOneWidget);
+    });
+
+    testWidgets("a blocked address's request says so, keeps Accept and "
+        'loses Block', (tester) async {
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', status: 'pending_in', resolved: true, blocked: true),
+      ];
+      var prepared = '';
+      MessagingService.prepareAcceptFn = (id) async {
+        prepared = id;
+        return summary();
+      };
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+      await openRequests(tester);
+
+      // The consequence is on the state line, never behind a mark (BG-34):
+      // accepting lifts the block, and a card that looked like any
+      // stranger's would invite exactly that without saying so.
+      expect(find.text('Blocked · asks to connect again'), findsOneWidget);
+      expect(find.text('Wants to connect'), findsNothing);
+      expect(find.text('Block'), findsNothing);
+      expect(find.text('Accept…'), findsOneWidget);
+
+      await tester.tap(find.text('Accept…'));
+      await tester.pumpAndSettle();
+      expect(prepared, 'c1');
+      expect(find.textContaining('This also unblocks them.'), findsOneWidget);
+    });
+
+    testWidgets('long-press offers Block contact on a thread, and confirming '
+        'blocks it', (tester) async {
+      String? blocked;
+      MessagingService.blockFn = (id) async => blocked = id;
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(_row());
+      await tester.pumpAndSettle();
+      expect(find.text('Hide conversation'), findsOneWidget);
+      expect(find.text('Block contact'), findsOneWidget);
+      await tester.tap(find.text('Block contact'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Clears this conversation from your device'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Block').last);
+      await tester.pumpAndSettle();
+      expect(blocked, 'c1');
+    });
+
+    testWidgets('cancelling the block sheet blocks nobody', (tester) async {
+      var blocks = 0;
+      MessagingService.blockFn = (_) async => blocks++;
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(_row());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Block contact'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(blocks, 0);
+    });
+
+    testWidgets('a failed block is said, never swallowed', (tester) async {
+      MessagingService.blockFn = (_) async =>
+          throw const AppError(message: 'store is locked');
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(_row());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Block contact'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Block').last);
+      await tester.pumpAndSettle();
+      // A refusal that silently failed would leave the user believing
+      // someone cannot reach them.
+      expect(find.textContaining('store is locked'), findsOneWidget);
+      expect(find.textContaining('Blocked.'), findsNothing);
+    });
+
+    testWidgets('message settings counts the blocked addresses, and the list '
+        'unblocks through the bridge', (tester) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      var listed = [
+        BlockedContactDto(
+          address: addr,
+          contactName: 'Mara',
+          sinceUnixMs: BigInt.from(
+            DateTime.now().millisecondsSinceEpoch - 86400000 * 3,
+          ),
+        ),
+      ];
+      MessagingService.blockedContactsFn = () async => listed;
+      String? unblocked;
+      MessagingService.unblockFn = (address) async {
+        unblocked = address;
+        listed = const [];
+        return true;
+      };
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapMessageSettings(tester);
+      expect(find.text('Blocked addresses'), findsOneWidget);
+      // `M5`'s bare count, mono.
+      expect(find.text('1'), findsOneWidget);
+
+      await tester.tap(find.text('Blocked addresses'));
+      await tester.pumpAndSettle();
+      // The list reads as people: the name the user gave, and since when.
+      expect(find.text('Mara'), findsOneWidget);
+      expect(find.textContaining('Since '), findsOneWidget);
+      expect(find.textContaining('accepting it unblocks them'), findsOneWidget);
+
+      await tester.tap(find.text('Mara'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('can reach you again'), findsOneWidget);
+      expect(unblocked, isNull, reason: 'opening the sheet lifts nothing');
+      await tester.tap(find.text('Unblock').last);
+      await tester.pumpAndSettle();
+      expect(unblocked, addr);
+      expect(find.text('Unblocked.'), findsOneWidget);
+      // The list re-reads and says its empty state honestly.
+      expect(find.text('Mara'), findsNothing);
+      expect(find.textContaining('Nobody is blocked'), findsOneWidget);
+    });
+
+    testWidgets('message settings fits the phone with nothing to scroll', (
+      tester,
+    ) async {
+      // **Playbook §19, the same guard `T1` carries** (item 43, D-278): a
+      // setting you must scroll to hunt is a setting you will not change.
+      // The V60 is 393 × 894 logical with ~50 in system bars; the guard is
+      // 800, and every seam is present — the signing card, the history
+      // card, the new Contacts card and the erase.
+      tester.view.physicalSize = const Size(393 * 3, 800 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+      await _tapMessageSettings(tester);
+      expect(find.text('Delete all messages'), findsOneWidget);
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(
+        position.maxScrollExtent,
+        0,
+        reason:
+            'Message settings overflows its own phone by '
+            '${position.maxScrollExtent.toStringAsFixed(1)} dp — the erase '
+            'is below the fold',
+      );
+    });
+
+    testWidgets('the wipe sheet offers the backup first, and taking it runs '
+        'the stash ceremony instead of the erase', (tester) async {
+      var wiped = false;
+      MessagingService.wipeAllFn = () async {
+        wiped = true;
+        return WipeReportDto(
+          conversations: 1,
+          messages: 2,
+          pendingBonds: 0,
+          sideFilesCleared: 2,
+          floorPersisted: true,
+        );
+      };
+      MessagingService.wipePreviewFn = () async => WipeReportDto(
+        conversations: 1,
+        messages: 2,
+        pendingBonds: 0,
+        sideFilesCleared: 0,
+        floorPersisted: false,
+      );
+      var stashed = false;
+      MessagingService.prepareStashFn = () async {
+        stashed = true;
+        return summary(payloadKind: 'self_stash');
+      };
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapMessageSettings(tester);
+      await tester.tap(find.text('Delete all messages').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Back up first…'));
+      await tester.pumpAndSettle();
+      expect(stashed, isTrue, reason: 'the backup ceremony was prepared');
+      expect(find.text('Confirm backup'), findsOneWidget);
+      expect(wiped, isFalse, reason: 'the backup door never deletes');
+    });
+  });
+
   group('ThreadScreen', () {
     Widget screen() => MaterialApp(
       builder: _kvWindow,
@@ -1608,6 +1921,112 @@ void main() {
         contactLabel: 'kaspa:qz7u…j43pf',
       ),
     );
+
+    testWidgets('the overflow offers Block contact, and blocking closes the '
+        'thread', (tester) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      String? blocked;
+      MessagingService.blockFn = (id) async => blocked = id;
+      // A route under the thread, so closing it has somewhere to go.
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ThreadScreen(
+                      conversationId: 'c1',
+                      contactLabel: 'Mara',
+                      contactAddress: addr,
+                    ),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadScreen), findsOneWidget);
+
+      await tester.tap(_iconButton('Thread actions'));
+      await tester.pumpAndSettle();
+      expect(find.text('Block contact'), findsOneWidget);
+      await tester.tap(find.text('Block contact'));
+      await tester.pumpAndSettle();
+      expect(find.text('Mara'), findsWidgets);
+      await tester.tap(find.text('Block').last);
+      await tester.pumpAndSettle();
+      expect(blocked, 'c1');
+      expect(find.byType(ThreadScreen), findsNothing);
+      expect(find.text('open'), findsOneWidget);
+      expect(
+        find.text('Blocked. Only a new request from them reaches you.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a thread whose counterparty is not yet named has no Block', (
+      tester,
+    ) async {
+      await tester.pumpWidget(screen());
+      await tester.pumpAndSettle();
+      await tester.tap(_iconButton('Thread actions'));
+      await tester.pumpAndSettle();
+      expect(find.text('Challenge or taunt'), findsOneWidget);
+      expect(find.text('Block contact'), findsNothing);
+    });
+
+    testWidgets('a revived thread swaps the composer for the handshake door, '
+        'and the door runs the handshake ceremony (D-307)', (tester) async {
+      const addr =
+          'kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xjellj43pf';
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', replyNeedsHandshake: true),
+      ];
+      String? invited;
+      MessagingService.prepareHandshakeFn = (destination) async {
+        invited = destination;
+        return summary();
+      };
+      MessagingService.threadSinceFn = (_, _) async =>
+          delta([message('t1', text: 'still here?')]);
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: ThreadScreen(
+            conversationId: 'c1',
+            contactLabel: 'Mara',
+            contactAddress: addr,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Their message is readable — that is the whole point of D-307.
+      expect(find.text('still here?'), findsOneWidget);
+      // And the composer is not there: a reply under a fresh alias would be
+      // read by nobody. The state, its cost and the door are all on the
+      // glass, none behind a mark (BG-34).
+      expect(find.byType(TextField), findsNothing);
+      expect(
+        find.textContaining("can't read your replies yet"),
+        findsOneWidget,
+      );
+      expect(find.textContaining('0.20 KAS'), findsOneWidget);
+      expect(find.text('Send handshake…'), findsOneWidget);
+
+      await tester.tap(find.text('Send handshake…'));
+      await tester.pumpAndSettle();
+      expect(invited, addr);
+      expect(find.text('Confirm handshake'), findsOneWidget);
+    });
 
     /// A thread with no dates and no clock is a wall of text you cannot place
     /// in time — `unixMs` rode the DTO all along and the screen threw it away.

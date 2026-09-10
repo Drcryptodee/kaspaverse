@@ -382,3 +382,26 @@ String formatStamp(DateTime at) {
 /// wrong (founder, on glass 2026-08-30). Leading and trailing space is trimmed
 /// long before here; this is the one in the middle.
 bool hasInnerWhitespace(String s) => RegExp(r'\s').hasMatch(s.trim());
+
+/// **A calendar day, the way the conversation list writes one past its first
+/// week** (founder, 2026-09-08): `1 Sept` this year, `29 Dec 2025` for
+/// another. One home for the month table, so the chats list and the blocked
+/// list cannot spell a month two ways (BG-21).
+String dayLabel(DateTime at, DateTime now) {
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final day = '${at.day} ${months[at.month - 1]}';
+  return at.year == now.year ? day : '$day ${at.year}';
+}

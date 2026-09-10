@@ -18,6 +18,8 @@ import '../widgets/kv_rows.dart';
 import '../widgets/kv_sheet.dart';
 import '../widgets/kv_toggle.dart';
 import '../widgets/kv_two_pane.dart';
+import '../theme/kv_page_route.dart';
+import 'blocked_addresses_screen.dart';
 import 'contacts_screen.dart' show signingToggleSub, signingToggleTitle;
 import 'history_fill_sheet.dart';
 
@@ -60,10 +62,54 @@ class _MessageSettingsScreenState extends State<MessageSettingsScreen> {
   /// toast (§4: this language has no toasts).
   String? _signingError;
 
+  /// How many addresses are blocked — `M5`'s figure under the row. Null
+  /// until Rust has answered, so the line is absent rather than a guess.
+  int? _blockedCount;
+
   @override
   void initState() {
     super.initState();
     unawaited(_loadSigning());
+    unawaited(_loadBlocked());
+  }
+
+  Future<void> _loadBlocked() async {
+    try {
+      final rows = await _messaging.blockedContacts();
+      if (mounted) setState(() => _blockedCount = rows.length);
+    } catch (_) {
+      // Unreadable stays unsaid; the screen behind the row says its own truth.
+    }
+  }
+
+  /// The sub-line under `Blocked addresses`: `M5`'s bare count, in mono
+  /// (BG-30, D-259 — the render draws `1` and the render wins). Absent until
+  /// Rust has answered, so the line is never a guess.
+  Widget? get _blockedSub {
+    final n = _blockedCount;
+    if (n == null) return null;
+    return Text(
+      '$n',
+      style: const TextStyle(
+        fontFamily: KvFont.mono,
+        fontSize: 13,
+        height: 17 / 13,
+        fontWeight: FontWeight.w400,
+        fontVariations: KvWeight.w400,
+        fontFeatures: [FontFeature.tabularFigures()],
+        color: KvColor.inkMeta,
+      ),
+    );
+  }
+
+  Future<void> _openBlocked() async {
+    KvHaptic.selection();
+    await Navigator.of(context).push(
+      KvPageRoute<void>(
+        builder: (_) => BlockedAddressesScreen(messaging: _messaging),
+      ),
+    );
+    if (mounted) await _loadBlocked();
   }
 
   Future<void> _loadSigning() async {
@@ -200,6 +246,26 @@ class _MessageSettingsScreenState extends State<MessageSettingsScreen> {
                             );
                           },
                         ),
+                      ),
+                      // **`M5`'s `Blocked addresses` row** (D-308) — the
+                      // render draws it with its count; the screen behind it
+                      // is where a block is lifted deliberately.
+                      const KvSectionHeader('Contacts'),
+                      KvRowContainer(
+                        children: [
+                          KvRow(
+                            titleLines: 2,
+                            leading: const KvRowDisc.neutral(mark: KvGlyph.ban),
+                            title: 'Blocked addresses',
+                            subWidget: _blockedSub,
+                            trailing: const KvGlyphIcon(
+                              KvGlyph.chevron,
+                              size: 20,
+                              tone: KvColor.etch,
+                            ),
+                            onTap: _openBlocked,
+                          ),
+                        ],
                       ),
                       const KvSectionHeader('Danger'),
                       KvRowContainer(
@@ -340,12 +406,22 @@ Future<void> runMessageWipe(
   // (`consensus-auditor` BLOCK, UX-R5).
   final bond = messaging.handshakeBondSompi;
   if (!context.mounted) return;
-  final confirmed = await Navigator.of(context).push<bool>(
-    KvSheetRoute<bool>(
+  final choice = await Navigator.of(context).push<String>(
+    KvSheetRoute<String>(
       builder: (_) => _WipeConfirmSheet(preview: preview, bond: bond),
     ),
   );
-  if (confirmed != true || !context.mounted) return;
+  if (!context.mounted) return;
+  // **The stash, offered before the erase** (D-307 (b)): the backup is what
+  // keeps replies working afterwards, and the founder's own wipe is what
+  // taught us that. The delete is not re-opened behind it — a fresh backup is
+  // unproven until a walk reads it back, and putting the erase under the same
+  // thumb a second later would invite deleting before it is findable.
+  if (choice == 'backup') {
+    await runMessageBackUp(context, messaging);
+    return;
+  }
+  if (choice != 'delete') return;
   try {
     final report = await messaging.wipeAll();
     // **The address book's cache goes with the store it mirrors.** The wipe
@@ -395,6 +471,16 @@ Future<void> runMessageWipe(
 /// else's money that this makes unreturnable — its figure comes from Rust
 /// because a remembered constant here was a `consensus-auditor` BLOCK — and
 /// the last paragraph is the repair instruction, which is the useful half.
+/// A figure inside the sheet's prose: mono, tabular, the body's own ink
+/// (BG-30 — *speak and count in different faces*).
+TextSpan _figure(String text) => TextSpan(
+  text: text,
+  style: const TextStyle(
+    fontFamily: KvFont.mono,
+    fontFeatures: [FontFeature.tabularFigures()],
+  ),
+);
+
 class _WipeConfirmSheet extends StatelessWidget {
   const _WipeConfirmSheet({required this.preview, required this.bond});
 
@@ -411,39 +497,97 @@ class _WipeConfirmSheet extends StatelessWidget {
     final plural = conversationCount == 1 ? '' : 's';
     return KvSheet(
       title: 'Delete all messages',
-      onCancel: () => Navigator.of(context).pop(false),
-      foot: KvAction.destructive(
-        label: 'Delete $conversationCount conversation$plural',
-        onTap: () => Navigator.of(context).pop(true),
+      onCancel: () => Navigator.of(context).pop(),
+      // **Two acts, the repair above the erase.** The backup is offered here
+      // because this sheet is where the founder learned what a wipe costs
+      // (D-307): it is raised, never teal — it spends a fee and it is not the
+      // sheet's subject — and the erase keeps §3's red below it, nearest the
+      // thumb, as every destructive act on a sheet does.
+      foot: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          KvAction.raised(
+            label: 'Back up first…',
+            onTap: () => Navigator.of(context).pop('backup'),
+          ),
+          const SizedBox(height: KvSpace.s),
+          KvAction.destructive(
+            label: 'Delete $conversationCount conversation$plural',
+            onTap: () => Navigator.of(context).pop('delete'),
+          ),
+        ],
       ),
       // `KvSheet` flexes its body and leaves the scrolling to the caller,
-      // which is what keeps the act out of the scroll (D-221 §1).
-      child: SingleChildScrollView(
-        child: Text(
-          'This deletes $conversationCount conversation$plural and '
-          '$messageCount message${messageCount == 1 ? '' : 's'} from this '
-          'device, including any you have hidden. It cannot be undone.\n\n'
-          'Messages already sent stay on Kaspa permanently — this clears your '
-          'copy, not the chain, and this app will not fetch them back, '
-          'including from your backup. Your wallet and coins are not '
-          'touched.\n\n'
-          'A contact can appear again as a new request — their messages do not '
-          'come back.\n\n'
-          '${preview.pendingBonds > 0 ? 'This also deletes '
-                    '${preview.pendingBonds} unanswered contact '
-                    'request${preview.pendingBonds == 1 ? '' : 's'} — the '
-                    '${kasCanonical(bond)} KAS bond each sender paid can no '
-                    'longer be returned to them.\n\n' : ''}'
-          'To talk to someone again afterwards, one of you has to send a new '
-          'contact request. Asking them to start it is the reliable way round: '
-          'an app that still remembers you may not answer a repeat request.',
-          style: const TextStyle(
-            fontFamily: KvFont.ui,
-            fontSize: 14,
-            height: 20 / 14,
-            fontWeight: FontWeight.w400,
-            fontVariations: KvWeight.w400,
-            color: KvColor.inkDim,
+      // which is what keeps the act out of the scroll (D-221 §1). The body
+      // is long enough to sit under the fold at 320 dp / 1.3×, so the edge
+      // says so rather than clipping the sentence that justifies the backup
+      // act (`ux-auditor`, MSG-BLOCK).
+      child: KvScrollEdge(
+        ground: KvColor.plate,
+        child: SingleChildScrollView(
+          // **Every figure in mono** (BG-30): the counts, the bond, and the
+          // handshake's price — the same span `M2`'s gloss sets the bond in.
+          child: Text.rich(
+            TextSpan(
+              children: [
+                const TextSpan(text: 'This deletes '),
+                _figure('$conversationCount'),
+                TextSpan(text: ' conversation$plural and '),
+                _figure('$messageCount'),
+                TextSpan(
+                  text:
+                      ' message${messageCount == 1 ? '' : 's'} from this '
+                      'device, including any you have hidden. KaspaVerse '
+                      'cannot undo it.\n\n'
+                      'Messages already sent stay on Kaspa permanently. This '
+                      'clears your copy, not the chain, and this app will not '
+                      'fetch them back, even with History & backup on. Your '
+                      'wallet and coins are not touched.\n\n',
+                ),
+                if (preview.pendingBonds > 0) ...[
+                  const TextSpan(text: 'This also deletes '),
+                  _figure('${preview.pendingBonds}'),
+                  TextSpan(
+                    text:
+                        ' unanswered contact '
+                        'request${preview.pendingBonds == 1 ? '' : 's'}. The ',
+                  ),
+                  _figure(kasCanonical(bond)),
+                  const TextSpan(
+                    text:
+                        ' KAS bond each sender paid can no longer be returned '
+                        'to them.\n\n',
+                  ),
+                ],
+                // D-307: what a wipe does to the people who still write to
+                // you. Their message reopens the thread; the reply is the
+                // part that costs, and the backup is what makes it not cost.
+                const TextSpan(
+                  text:
+                      'Contacts who still have you can write to you '
+                      'afterwards; their next message reopens the thread. '
+                      'Replying costs a new handshake (',
+                ),
+                _figure(kasCanonical(bond)),
+                const TextSpan(
+                  text:
+                      ' KAS). A backup keeps your side of every handshake, so '
+                      'a reply needs no new handshake.\n\n'
+                      // D-308: the one thing a wipe deliberately leaves
+                      // standing.
+                      'Blocked addresses stay blocked.',
+                ),
+              ],
+            ),
+            style: const TextStyle(
+              fontFamily: KvFont.ui,
+              fontSize: 14,
+              height: 20 / 14,
+              fontWeight: FontWeight.w400,
+              fontVariations: KvWeight.w400,
+              color: KvColor.inkDim,
+            ),
           ),
         ),
       ),

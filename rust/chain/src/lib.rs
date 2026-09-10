@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod acceptance;
+pub mod block_list;
 pub mod contact_names;
 mod dag_monitor;
 pub mod discovery;
@@ -31,6 +32,7 @@ mod wallet_sync;
 pub use acceptance::{
     pruning_horizon_ms, AcceptanceEvent, AcceptanceTracker, TxStatus, VccBatch, WatchSource,
 };
+pub use block_list::{BlockList, BlockedContact};
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
 pub use dag_monitor::{DagEvent, DagMonitor, LinkProbe, PROBE_TIMEOUT};
 pub use error::{ChainError, Result};

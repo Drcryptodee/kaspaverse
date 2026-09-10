@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `alias_already_parked`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `bound_preview`, `branch_token`, `build`, `chain_stamp`, `clamp_display`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_alias`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `read_marks`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `resweep_invitation_senders`, `row_source_label`, `row_source`, `run_fill`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_intent`, `take_parked_acceptance`, `take_parked_alias`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `ParkedAcceptance`, `PinPolicy`, `ReplayGap`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `bound_preview`, `branch_token`, `build`, `bytes`, `chain_stamp`, `clamp_display`, `clear_side_files`, `clear`, `comm_already_parked`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `contains`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `forget_alias`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_reuses`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `lift_block_on_contact`, `locate_and_adopt`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_comm`, `park`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `purge_comms_keeping_handshake`, `purge_contact_rows`, `quarantine_unreadable_block_list`, `read_marks`, `refuse_blocked_knock_comms`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `resweep_invitation_senders`, `revival_refusal`, `revive_or_drop`, `revived_conversation`, `row_source_label`, `row_source`, `run_fill`, `schedule_sender_locate`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_by_alias`, `take_intent`, `take_parked_acceptance`, `take_parked_comm`, `take_parked_siblings`, `take`, `take`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `try_take`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `LocatingGuard`, `ParkedAcceptance`, `ParkedComm`, `ParkedComms`, `PinPolicy`, `RateWindow`, `ReplayGap`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -63,10 +63,6 @@ Future<SignableSummaryDto> transportPrepareBcast({
   message: message,
 );
 
-/// Phase 1 (initiate a conversation): fresh alias + the live-shape handshake
-/// JSON, sealed to the recipient's address key; 0.2 KAS bond (§0.6 — THE one
-/// provenance-cited constant, refunded in their acceptance). The plaintext is
-/// re-sealed to self HERE so the stash holds ciphertext only (§0.4).
 Future<SignableSummaryDto> transportPrepareHandshake({
   required String destination,
 }) => RustLib.instance.api.crateApiTransportTransportPrepareHandshake(
@@ -497,6 +493,58 @@ Future<WipeReportDto> transportWipePreview() =>
 Future<WipeReportDto> transportWipeAll() =>
     RustLib.instance.api.crateApiTransportTransportWipeAll();
 
+/// **Block a contact — a reset to strangers** (D-308, the founder's design).
+///
+/// Three things, in an order that never leaves a purged thread with no
+/// refusal behind it:
+///
+/// 1. **The refusal is written first, durably** (`block.list`, keyed on the
+///    address and nothing else). If anything
+///    below fails, the block stands and the rows die on the next attempt; the
+///    reverse order would purge the thread and then lose the reason.
+/// 2. **Every row for the address is destroyed, with its messages** — the
+///    conversation, their alias, our alias, all of it. This is the one caller
+///    `TransportStore::remove_conversation` warns it must never have as a
+///    "cleanup", and the warning is right: the alias goes, and their messages
+///    become unroutable. That is the point. Hide keeps the row so a mute can
+///    end when they write; a block is *no*, and what ends it is a handshake.
+/// 3. **The in-memory claims that could resurrect them go too** — a parked
+///    comm under their alias, a parked acceptance for their row.
+///
+/// It sits in FRONT of the revival path (D-307): their next comm is refused
+/// on the alias before any decrypt, and on the address after any resolution,
+/// so it never mints anything. Their next HANDSHAKE still surfaces — marked —
+/// because that is the one door a stranger has, it costs them the bond, and
+/// the choice is the user's; accepting it lifts the block.
+///
+/// **Touches no money.** Nothing is refunded, nothing is stranded: a request
+/// they have already paid for is dismissed like any other (the bond stays
+/// where it was paid, exactly as Ignore leaves it), and a request they send
+/// later is Accept-able or Dismiss-able like any other.
+///
+/// Never on the wire — telling someone they are blocked is a feature nobody
+/// asked for, and on a public ledger it would be permanent.
+///
+/// Refuses a row whose sender is not known yet: there is no address to key
+/// the refusal on, so nothing it promised would hold. The request card's
+/// Ignore is the right gesture for that row.
+Future<void> transportBlockConversation({required String conversationId}) =>
+    RustLib.instance.api.crateApiTransportTransportBlockConversation(
+      conversationId: conversationId,
+    );
+
+/// Lift a block on an address, when the user does it deliberately. Nothing
+/// else happens: their next message can revive the thread (D-307) and their
+/// next handshake is a plain request. Returns whether there was one to lift.
+Future<bool> transportUnblockContact({required String address}) => RustLib
+    .instance
+    .api
+    .crateApiTransportTransportUnblockContact(address: address);
+
+/// Every blocked address, newest first, with the name the user gave it.
+Future<List<BlockedContactDto>> transportBlockedContacts() =>
+    RustLib.instance.api.crateApiTransportTransportBlockedContacts();
+
 /// A conversation's thread, oldest first — DECRYPT-ON-VIEW (§0.4): sealed
 /// rows open here, per call, while the vault is unlocked; the plaintext
 /// crosses once as the display DTO and Dart drops it with the widget. Vault
@@ -634,6 +682,35 @@ class AttachmentDto {
           viewMime == other.viewMime;
 }
 
+/// One blocked address, for the Blocked addresses list (`M5`, D-308).
+class BlockedContactDto {
+  final String address;
+
+  /// The local name the user gave this address, when they gave one — so
+  /// the list reads as people, not keys. Device only, like the name itself.
+  final String? contactName;
+  final BigInt sinceUnixMs;
+
+  const BlockedContactDto({
+    required this.address,
+    this.contactName,
+    required this.sinceUnixMs,
+  });
+
+  @override
+  int get hashCode =>
+      address.hashCode ^ contactName.hashCode ^ sinceUnixMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BlockedContactDto &&
+          runtimeType == other.runtimeType &&
+          address == other.address &&
+          contactName == other.contactName &&
+          sinceUnixMs == other.sinceUnixMs;
+}
+
 /// One saved contact: the address, and the name the user gave it.
 ///
 /// The pair travels together because a name without its address is not a
@@ -751,6 +828,20 @@ class ConversationDto {
   /// disagree with the thread it counts.
   final int unread;
 
+  /// The counterparty's address is on the user's block list (D-308). True
+  /// only on a request from someone the user refused — the request still
+  /// surfaces, because a handshake is the one door a blocked person may
+  /// still knock on, and accepting it lifts the block. A blocked address
+  /// never holds an Active row: blocking destroyed it.
+  final bool blocked;
+
+  /// **This thread can be read but not answered until a new handshake goes
+  /// out** (D-307). The row was minted by THEIR message after a wipe took
+  /// the alias they know us by, and no client re-announces one: the thread
+  /// says so and offers the handshake. Derived from the row (`Active` with
+  /// no alias of ours), never stored.
+  final bool replyNeedsHandshake;
+
   const ConversationDto({
     required this.conversationId,
     required this.contactAddress,
@@ -764,6 +855,8 @@ class ConversationDto {
     this.contactName,
     this.preview,
     required this.unread,
+    required this.blocked,
+    required this.replyNeedsHandshake,
   });
 
   @override
@@ -779,7 +872,9 @@ class ConversationDto {
       inviteExpired.hashCode ^
       contactName.hashCode ^
       preview.hashCode ^
-      unread.hashCode;
+      unread.hashCode ^
+      blocked.hashCode ^
+      replyNeedsHandshake.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -797,7 +892,9 @@ class ConversationDto {
           inviteExpired == other.inviteExpired &&
           contactName == other.contactName &&
           preview == other.preview &&
-          unread == other.unread;
+          unread == other.unread &&
+          blocked == other.blocked &&
+          replyNeedsHandshake == other.replyNeedsHandshake;
 }
 
 /// The user's fill posture, for the settings surface. `default_endpoint`

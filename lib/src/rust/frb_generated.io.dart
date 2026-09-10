@@ -68,6 +68,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AttachmentDto dco_decode_attachment_dto(dynamic raw);
 
   @protected
+  BlockedContactDto dco_decode_blocked_contact_dto(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
@@ -162,6 +165,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ActivityRecord> dco_decode_list_activity_record(dynamic raw);
+
+  @protected
+  List<BlockedContactDto> dco_decode_list_blocked_contact_dto(dynamic raw);
 
   @protected
   List<ContactDto> dco_decode_list_contact_dto(dynamic raw);
@@ -355,6 +361,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AttachmentDto sse_decode_attachment_dto(SseDeserializer deserializer);
 
   @protected
+  BlockedContactDto sse_decode_blocked_contact_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -469,6 +480,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ActivityRecord> sse_decode_list_activity_record(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<BlockedContactDto> sse_decode_list_blocked_contact_dto(
     SseDeserializer deserializer,
   );
 
@@ -712,6 +728,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_attachment_dto(AttachmentDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_blocked_contact_dto(
+    BlockedContactDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
@@ -855,6 +877,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_activity_record(
     List<ActivityRecord> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_blocked_contact_dto(
+    List<BlockedContactDto> self,
     SseSerializer serializer,
   );
 

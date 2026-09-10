@@ -515,6 +515,16 @@ impl ActivityStore {
         Ok(Self { path, records })
     }
 
+    /// **Has this wallet ever paid `address`?** — some spend of our own whose
+    /// single counterparty it is, by the same rule the ledger names a
+    /// recipient ([`counterparty_of`]). Chain-witnessed by our own signature
+    /// and held outside the transport store, so it survives a message wipe.
+    fn has_paid(&self, address: &str, ours: &HashSet<Address>) -> bool {
+        self.records
+            .values()
+            .any(|record| counterparty_of(record, ours).as_deref() == Some(address))
+    }
+
     fn append(&self, frame: &StoreFrame) -> Result<()> {
         use std::io::Write;
         if let Some(parent) = self.path.parent() {
@@ -675,6 +685,23 @@ impl WalletEngine {
 
     /// A snapshot of the current watched window. Taken by value (an `Arc` bump)
     /// so no lock is ever held across an await — `clippy::await_holding_lock`.
+    /// **Whether this wallet has ever paid `address`** — a handshake bond, an
+    /// acceptance refund or a payment: every way a contact was ever
+    /// established costs us one spend to them, and that spend is witnessed
+    /// here by our own signature, outside the transport store a wipe erases.
+    /// The revival path (D-307) mints a conversation only for such an
+    /// address: *as long as there is already a handshake* is the founder's
+    /// condition, and this is the record that can say so after the rows are
+    /// gone (`consensus-auditor`, MSG-BLOCK).
+    pub fn has_paid(&self, address: &str) -> bool {
+        let ours: HashSet<Address> = self.watched().iter().cloned().collect();
+        self.inner
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .has_paid(address, &ours)
+    }
+
     fn watched(&self) -> Arc<Vec<Address>> {
         self.inner
             .watch
@@ -1273,6 +1300,34 @@ mod tests {
         // suffix — which is what `NetworkParams::from` panics on.
         assert!(maturity_params(NetworkId::with_suffix(NetworkType::Testnet, 99)).is_err());
         assert!(maturity_params(NetworkId::with_suffix(NetworkType::Testnet, 10)).is_ok());
+    }
+
+    /// The revival fence (D-307): a spend of ours to the address is the one
+    /// fact a message wipe cannot erase, and only such an address may mint a
+    /// conversation from a message alone.
+    #[test]
+    fn has_paid_answers_from_our_own_spends_only() {
+        let payee = mainnet_address(1);
+        let change = mainnet_address(2);
+        let stranger = mainnet_address(3);
+        let ours: HashSet<Address> = [change.clone()].into_iter().collect();
+        let mut store = ActivityStore {
+            path: std::env::temp_dir().join("kv-has-paid-never-written"),
+            records: HashMap::new(),
+        };
+        assert!(
+            !store.has_paid(&payee.to_string(), &ours),
+            "nothing paid yet"
+        );
+        let rec = outgoing_paying(9, &[(&payee, 1_000), (&change, 8_000)]);
+        store.records.insert(*rec.id(), rec);
+        assert!(store.has_paid(&payee.to_string(), &ours));
+        assert!(!store.has_paid(&stranger.to_string(), &ours));
+        assert!(
+            !store.has_paid(&change.to_string(), &ours),
+            "our own change is not a payee"
+        );
+        assert!(!store.has_paid("", &ours));
     }
 
     #[test]

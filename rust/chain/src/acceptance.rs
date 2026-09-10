@@ -635,6 +635,14 @@ pub struct AcceptanceTracker {
 /// conversation rate, not a chain-wide one; the oldest is dropped first.
 pub const SENDER_INTEREST_CAPACITY: usize = 256;
 
+/// Which chain block in a page accepted `txid`, if any. Pure over the page.
+fn accepting_block_of(accepted: &[(Hash, Vec<Hash>)], txid: Hash) -> Option<Hash> {
+    accepted
+        .iter()
+        .find(|(_, ids)| ids.contains(&txid))
+        .map(|(block, _)| *block)
+}
+
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -733,6 +741,58 @@ impl AcceptanceTracker {
             }
         }
         out
+    }
+
+    /// **Name the chain block that accepted `txid`, given the block that
+    /// CARRIED it** — for a message folded out of an old block, whose VCC
+    /// batch this tracker walked before anyone was interested in it.
+    ///
+    /// [`Self::note_sender_interest`] is resolved inside [`Self::fold_batch`],
+    /// so it can only ever answer for a batch that arrives AFTER the interest
+    /// is noted. A comm folded by the transport lane's own catch-up sits in a
+    /// block this tracker's cold-open walk has usually already passed, and
+    /// its interest would wait forever — which is exactly the message a user
+    /// who reopens the app after a day expects to see (D-307).
+    ///
+    /// One virtual-chain page from the carrying block, **read and never
+    /// folded**: the cursor does not move, no watch changes, no event is
+    /// broadcast. The pin's `calculate_chain_path` accepts a non-chain start
+    /// (its off-chain ancestors are the `removed` half), so the carrying block
+    /// itself is the right cursor; the accepting block sits within the first
+    /// page for anything but a deep side chain. Then one `get_block` for the
+    /// DAA score the return-address lookup demands exactly
+    /// (`find_accepting_chain_block_hash_at_daa_score` is a binary search for
+    /// an EQUAL score — an approximate one is `NoTxAtScore`).
+    ///
+    /// Bounded by the caller: a page is up to `mergeset_size_limit × 10`
+    /// chain blocks with their accepted txids, and every unroutable comm on a
+    /// public chain can ask for one, so the bridge rate-limits calls and
+    /// runs at most one per alias.
+    pub async fn locate_accepting_daa_score(
+        &self,
+        rpc: &Rpc,
+        txid: &str,
+        carrying_block: Hash,
+    ) -> Option<u64> {
+        let target = txid.parse::<Hash>().ok()?;
+        let resp = self.catch_up_page(rpc, carrying_block).await?;
+        let accepted: Vec<(Hash, Vec<Hash>)> = resp
+            .accepted_transaction_ids
+            .into_iter()
+            .map(|a| (a.accepting_block_hash, a.accepted_transaction_ids))
+            .collect();
+        let accepting = accepting_block_of(&accepted, target)?;
+        match rpc.rpc_api().get_block(accepting, false).await {
+            Ok(block) => Some(block.header.daa_score),
+            Err(e) => {
+                // Node-controlled text, sanitized before it reaches the log (L167).
+                log::info!(
+                    "acceptance: get_block({accepting}) for a sender locate failed ({})",
+                    crate::link::sanitize_node_text(&e.to_string())
+                );
+                None
+            }
+        }
     }
 
     /// Current status of a watched txid (None = not watched / already
@@ -1098,6 +1158,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kv-accept-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// The page reader behind the sender locate: the accepting block is the
+    /// one whose accepted list names the txid, and a txid in no list is
+    /// `None` rather than the page's last block.
+    #[test]
+    fn the_accepting_block_is_the_one_whose_list_names_the_txid() {
+        let block = |n: u8| Hash::from_bytes([n; 32]);
+        let page = vec![
+            (block(1), vec![block(10), block(11)]),
+            (block(2), vec![block(12)]),
+        ];
+        assert_eq!(accepting_block_of(&page, block(12)), Some(block(2)));
+        assert_eq!(accepting_block_of(&page, block(10)), Some(block(1)));
+        assert_eq!(accepting_block_of(&page, block(99)), None);
+        assert_eq!(accepting_block_of(&[], block(10)), None);
     }
 
     fn txid(n: u8) -> String {

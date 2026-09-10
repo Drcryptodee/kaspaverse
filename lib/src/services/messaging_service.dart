@@ -184,6 +184,20 @@ class MessagingService {
   @visibleForTesting
   static Future<WipeReportDto> Function() wipePreviewFn = transportWipePreview;
 
+  // D-308 block seams.
+  @visibleForTesting
+  static Future<void> Function(String conversationId) blockFn =
+      (conversationId) =>
+          transportBlockConversation(conversationId: conversationId);
+
+  @visibleForTesting
+  static Future<bool> Function(String address) unblockFn = (address) =>
+      transportUnblockContact(address: address);
+
+  @visibleForTesting
+  static Future<List<BlockedContactDto>> Function() blockedContactsFn =
+      transportBlockedContacts;
+
   /// All conversations, most recently active first.
   ///
   /// **Not public-wire-class since D-303.** `ConversationDto.preview` is one
@@ -508,6 +522,37 @@ class MessagingService {
       rethrow;
     }
   }
+
+  /// **Block a contact** (D-308): a reset to strangers. Rust writes the
+  /// refusal durably, destroys every row for the address and forgets the
+  /// claims that could resurrect them; from then on their messages are refused
+  /// before they mint anything, and only a new request of theirs — which the
+  /// user may accept — lifts it. Nothing on-chain, nothing on the wire.
+  ///
+  /// Rethrows, like [clearMessages]: a refusal that silently failed is the
+  /// worst outcome this lane has, so the caller must be able to say so.
+  Future<void> block(String conversationId) async {
+    try {
+      await blockFn(conversationId);
+      await refresh();
+    } on AppError catch (e) {
+      error.value = e.message;
+      await refresh();
+      rethrow;
+    }
+  }
+
+  /// Lift a block deliberately. Their next message can reopen the thread
+  /// (D-307) and their next request is a plain request. Returns whether there
+  /// was one to lift.
+  Future<bool> unblock(String address) async {
+    final lifted = await unblockFn(address);
+    await refresh();
+    return lifted;
+  }
+
+  /// Every blocked address, newest first, with the name the user gave it.
+  Future<List<BlockedContactDto>> blockedContacts() => blockedContactsFn();
 
   /// What a [wipeAll] would destroy — the number the confirm sheet must show.
   ///

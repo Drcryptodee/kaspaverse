@@ -123,6 +123,14 @@ pub struct TransportEvent {
     /// it off the indexer row. `None` only for sources with no block context —
     /// consumers fall back to the local clock (the pre-V2b behavior).
     pub block_time_ms: Option<u64>,
+    /// The carrying block's hash, when the source is the node (live scan and
+    /// catch-up walk). It is what lets a message folded out of an OLD block
+    /// still name its sender: the return-address lookup needs the accepting
+    /// chain block's exact DAA score, and one bounded virtual-chain page from
+    /// the carrying block finds it after the acceptance tracker's own walk has
+    /// already gone past (D-307). `None` on the fill lane — an indexer row is
+    /// a claim, and identity never comes from one (D-139).
+    pub block_hash: Option<String>,
 }
 
 /// Parse a raw tx payload into `(kind, body)` — pure, version-neutral, shared
@@ -167,7 +175,14 @@ pub fn scan_block(block: &RpcBlock, prefix: Prefix) -> Vec<TransportEvent> {
     block
         .transactions
         .iter()
-        .filter_map(|tx| scan_transaction(tx, prefix, Some(block.header.timestamp)))
+        .filter_map(|tx| {
+            scan_transaction(
+                tx,
+                prefix,
+                Some(block.header.timestamp),
+                Some(block.header.hash.to_string()),
+            )
+        })
         .collect()
 }
 
@@ -176,6 +191,7 @@ fn scan_transaction(
     tx: &RpcTransaction,
     prefix: Prefix,
     block_time_ms: Option<u64>,
+    block_hash: Option<String>,
 ) -> Option<TransportEvent> {
     let (namespace, kind, body) = parse_payload_in(&tx.payload)?;
     Some(TransportEvent {
@@ -185,6 +201,7 @@ fn scan_transaction(
         body: body.to_vec(),
         addresses: output_addresses(tx, prefix),
         block_time_ms,
+        block_hash,
     })
 }
 

@@ -7,7 +7,8 @@ import '../../rust/api/error.dart';
 import '../../rust/api/send.dart';
 import '../../rust/api/transport.dart';
 import '../../services/messaging_service.dart';
-import 'contacts_screen.dart' show signingToggleSub, signingToggleTitle;
+import 'contacts_screen.dart'
+    show confirmBlockContact, signingToggleSub, signingToggleTitle;
 import '../send/confirm_send_flow.dart';
 import '../error_text.dart';
 import '../format.dart';
@@ -908,112 +909,183 @@ class _ThreadScreenState extends State<ThreadScreen> {
                       ),
                     ),
             ),
-            KvColumn(
-              child: Padding(
-                padding: const EdgeInsets.only(
-                  top: KvSpace.s,
-                  bottom: KvSpace.sm,
-                ),
-                // **ONE container: the words above, the controls in its
-                // bottom-right corner** (founder, 2026-09-08: *"the send
-                // button, the input, the emoji and all is in one container and
-                // the send button and emoji always stay at the bottom right
-                // corner of the chat input container, while the texts are
-                // above and clearly seen and aligned even if the texts are
-                // much"*).
-                //
-                // The shape before this was a pill with the controls INSIDE it
-                // on one line, which is WhatsApp's for a single line and comes
-                // apart the moment a message is long: the marks ride the last
-                // line, so they drift down the box as it grows and the text
-                // has to flow around them. Claude's and Gemini's composers
-                // solve it the same way this now does — the text owns its own
-                // full width at the top, and the controls own a fixed row
-                // under it. Nothing reflows as the message grows; the box just
-                // gets taller.
-                child: Container(
-                  padding: const EdgeInsets.fromLTRB(14, 10, 8, 6),
-                  decoration: BoxDecoration(
-                    color: KvColor.plate,
-                    borderRadius: BorderRadius.circular(KvRadius.bubble),
+            // **A revived thread has no composer until a handshake goes
+            // out** (D-307): their message minted this row after a wipe took
+            // the alias they know us by, and a reply sent under a fresh one
+            // would be built, signed, paid for and read by nobody — the
+            // D-162 sink. Rust refuses that send; this is the honest face of
+            // the refusal, with the one repair the protocol has. It watches
+            // the list, so the composer returns on the pull that records our
+            // new alias.
+            ValueListenableBuilder<List<ConversationDto>>(
+              valueListenable: _messaging.conversations,
+              builder: (context, rows, _) {
+                final row = rows
+                    .where((c) => c.conversationId == widget.conversationId)
+                    .firstOrNull;
+                final revived = row != null && row.replyNeedsHandshake;
+                // **The swap eases** (BG-24): the composer returns on the
+                // pull after the handshake commits, on a settled screen, and
+                // a field appearing between two frames where a plate stood
+                // is a cut. Zero under reduced motion, like every ease here.
+                // And the SEAT eases with it: a switcher alone crossfades
+                // the faces while the height steps in one frame, shoving the
+                // thread above it by the difference between a one-line field
+                // and the plate (`ux-auditor`, MSG-BLOCK — the `KvSearchField`
+                // class). The old face is pinned to the new bounds so it
+                // never floats mid-plate during the fade.
+                return AnimatedSize(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : KvMotion.calm,
+                  curve: KvMotion.curve,
+                  alignment: Alignment.bottomCenter,
+                  child: AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : KvMotion.calm,
+                    switchInCurve: KvMotion.curve,
+                    switchOutCurve: KvMotion.curve,
+                    layoutBuilder: (current, previous) => Stack(
+                      alignment: Alignment.bottomCenter,
+                      children: [
+                        for (final old in previous) Positioned.fill(child: old),
+                        ?current,
+                      ],
+                    ),
+                    child: revived
+                        ? _ReplyNeedsHandshake(
+                            key: const ValueKey('reply-needs-handshake'),
+                            bond: _messaging.handshakeBondSompi,
+                            onSend: _sendHandshake,
+                          )
+                        : KeyedSubtree(
+                            key: const ValueKey('composer'),
+                            child: KvColumn(
+                              child: Padding(
+                                padding: const EdgeInsets.only(
+                                  top: KvSpace.s,
+                                  bottom: KvSpace.sm,
+                                ),
+                                // **ONE container: the words above, the controls in its
+                                // bottom-right corner** (founder, 2026-09-08: *"the send
+                                // button, the input, the emoji and all is in one container and
+                                // the send button and emoji always stay at the bottom right
+                                // corner of the chat input container, while the texts are
+                                // above and clearly seen and aligned even if the texts are
+                                // much"*).
+                                //
+                                // The shape before this was a pill with the controls INSIDE it
+                                // on one line, which is WhatsApp's for a single line and comes
+                                // apart the moment a message is long: the marks ride the last
+                                // line, so they drift down the box as it grows and the text
+                                // has to flow around them. Claude's and Gemini's composers
+                                // solve it the same way this now does — the text owns its own
+                                // full width at the top, and the controls own a fixed row
+                                // under it. Nothing reflows as the message grows; the box just
+                                // gets taller.
+                                child: Container(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    14,
+                                    10,
+                                    8,
+                                    6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: KvColor.plate,
+                                    borderRadius: BorderRadius.circular(
+                                      KvRadius.bubble,
+                                    ),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      TextField(
+                                        controller: _compose,
+                                        focusNode: _composeFocus,
+                                        minLines: 1,
+                                        // Taller than the old four: the container no longer
+                                        // has to share its line with anything, so a long
+                                        // message can actually be read before it is sent.
+                                        maxLines: 6,
+                                        keyboardType: TextInputType.multiline,
+                                        textInputAction:
+                                            TextInputAction.newline,
+                                        cursorColor: KvColor.primary,
+                                        style: const TextStyle(
+                                          fontFamily: KvFont.ui,
+                                          fontSize: 15,
+                                          height: 20 / 15,
+                                          fontWeight: FontWeight.w400,
+                                          fontVariations: KvWeight.w400,
+                                          color: KvColor.ink,
+                                        ),
+                                        decoration: const InputDecoration(
+                                          isDense: true,
+                                          border: InputBorder.none,
+                                          enabledBorder: InputBorder.none,
+                                          focusedBorder: InputBorder.none,
+                                          contentPadding: EdgeInsets.zero,
+                                          hintText: 'Message',
+                                          hintStyle: TextStyle(
+                                            fontFamily: KvFont.ui,
+                                            fontSize: 15,
+                                            height: 20 / 15,
+                                            fontWeight: FontWeight.w400,
+                                            fontVariations: KvWeight.w400,
+                                            color: KvColor.inkMeta,
+                                          ),
+                                        ),
+                                      ),
+                                      // **A tiny gap, not a breath** (founder, 2026-09-08:
+                                      // *"reduce the padding between the message input and the
+                                      // emoji/send icon … just a tiny gap"*). The row below
+                                      // belongs to the box the words are in; separating them
+                                      // made it read as a second object.
+                                      const SizedBox(height: 2),
+                                      // **The controls' own row, pinned to the bottom.** The
+                                      // fee sits at its left because that is the one piece of
+                                      // empty space in the box and it puts the price
+                                      // immediately beside the control that spends it — still
+                                      // tiny, still by the send mark, and no longer a floating
+                                      // line above a container it does not belong to.
+                                      Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.center,
+                                        children: [
+                                          Expanded(
+                                            child: _ComposerFee(sompi: _fee),
+                                          ),
+                                          _EmojiKey(
+                                            showingEmoji: _emojiUp,
+                                            onTap: _toggleEmoji,
+                                          ),
+                                          // The two marks are one control group, so they sit
+                                          // together rather than evenly spread across the row.
+                                          _SendMark(
+                                            armed:
+                                                _draft.trim().isNotEmpty &&
+                                                !_sending,
+                                            // A disabled control says WHY, and the two reasons
+                                            // it can be disabled are different facts (BG-12).
+                                            reason: _sending
+                                                ? 'Sending…'
+                                                : 'Write a message first',
+                                            onTap: _send,
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      TextField(
-                        controller: _compose,
-                        focusNode: _composeFocus,
-                        minLines: 1,
-                        // Taller than the old four: the container no longer
-                        // has to share its line with anything, so a long
-                        // message can actually be read before it is sent.
-                        maxLines: 6,
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.newline,
-                        cursorColor: KvColor.primary,
-                        style: const TextStyle(
-                          fontFamily: KvFont.ui,
-                          fontSize: 15,
-                          height: 20 / 15,
-                          fontWeight: FontWeight.w400,
-                          fontVariations: KvWeight.w400,
-                          color: KvColor.ink,
-                        ),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          contentPadding: EdgeInsets.zero,
-                          hintText: 'Message',
-                          hintStyle: TextStyle(
-                            fontFamily: KvFont.ui,
-                            fontSize: 15,
-                            height: 20 / 15,
-                            fontWeight: FontWeight.w400,
-                            fontVariations: KvWeight.w400,
-                            color: KvColor.inkMeta,
-                          ),
-                        ),
-                      ),
-                      // **A tiny gap, not a breath** (founder, 2026-09-08:
-                      // *"reduce the padding between the message input and the
-                      // emoji/send icon … just a tiny gap"*). The row below
-                      // belongs to the box the words are in; separating them
-                      // made it read as a second object.
-                      const SizedBox(height: 2),
-                      // **The controls' own row, pinned to the bottom.** The
-                      // fee sits at its left because that is the one piece of
-                      // empty space in the box and it puts the price
-                      // immediately beside the control that spends it — still
-                      // tiny, still by the send mark, and no longer a floating
-                      // line above a container it does not belong to.
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Expanded(child: _ComposerFee(sompi: _fee)),
-                          _EmojiKey(
-                            showingEmoji: _emojiUp,
-                            onTap: _toggleEmoji,
-                          ),
-                          // The two marks are one control group, so they sit
-                          // together rather than evenly spread across the row.
-                          _SendMark(
-                            armed: _draft.trim().isNotEmpty && !_sending,
-                            // A disabled control says WHY, and the two reasons
-                            // it can be disabled are different facts (BG-12).
-                            reason: _sending
-                                ? 'Sending…'
-                                : 'Write a message first',
-                            onTap: _send,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+                );
+              },
             ),
             // **Our emoji panel takes the keyboard's place, never the
             // thread's.** It opens where the system keyboard was, so the
@@ -1050,10 +1122,76 @@ class _ThreadScreenState extends State<ThreadScreen> {
   Future<void> _threadActions() async {
     KvHaptic.selection();
     final action = await Navigator.of(context).push<String>(
-      KvSheetRoute<String>(builder: (_) => const _ThreadActionsSheet()),
+      KvSheetRoute<String>(
+        builder: (_) => _ThreadActionsSheet(
+          // A block is keyed on the address (D-308); a thread whose
+          // counterparty the node has not named yet cannot carry it.
+          canBlock: widget.contactAddress.isNotEmpty,
+        ),
+      ),
     );
     if (!mounted || action == null) return;
     if (action == 'arcade') await _openArcadeComposer();
+    if (action == 'block') await _blockContact();
+  }
+
+  /// **Block, from inside the thread** (D-308) — the same question the list
+  /// asks, in the same words. The thread closes on success: the row it drew
+  /// no longer exists, and a screen over a conversation that has been reset
+  /// to strangers would be a view of nothing.
+  Future<void> _blockContact() async {
+    final confirmed = await confirmBlockContact(
+      context,
+      label: widget.contactLabel,
+      address: widget.contactAddress,
+      isInvitation: false,
+    );
+    if (!confirmed || !mounted) return;
+    try {
+      await _messaging.block(widget.conversationId);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+      return;
+    }
+    if (!mounted) return;
+    // The messenger is the app's, so the line survives the pop below.
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Blocked. Only a new request from them reaches you.'),
+      ),
+    );
+    Navigator.of(context).pop();
+  }
+
+  /// **The one repair a revived thread has** (D-307): a fresh handshake to an
+  /// address we already know, announcing the alias this phone no longer had.
+  /// Rust reuses the revived row for it (`transport_prepare_handshake`), so
+  /// the thread keeps its id and its messages; the commit records our alias
+  /// and the composer comes back on the next pull.
+  Future<void> _sendHandshake() async {
+    try {
+      await runConfirmSend(
+        context,
+        prepare: () => _messaging.prepareHandshake(widget.contactAddress),
+        commit: _messaging.commit,
+        abandon: _messaging.abandon,
+        title: 'Confirm handshake',
+        preparingObject: 'handshake',
+        contextNote:
+            'Carries a ${kasCanonical(_messaging.handshakeBondSompi)} KAS '
+            'bond, the network norm. Their app already has you, so it takes '
+            'the new alias silently and keeps the bond.',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    }
+    await _messaging.refresh();
   }
 
   Widget _body(ThemeData theme) {
@@ -3337,7 +3475,10 @@ String? _nameOf(String label) {
 /// as a permanent icon: `M4` draws two controls in that row and this is where
 /// the third went.
 class _ThreadActionsSheet extends StatelessWidget {
-  const _ThreadActionsSheet();
+  const _ThreadActionsSheet({required this.canBlock});
+
+  /// A block is keyed on the address (D-308).
+  final bool canBlock;
 
   @override
   Widget build(BuildContext context) {
@@ -3362,7 +3503,125 @@ class _ThreadActionsSheet extends StatelessWidget {
             ),
             onTap: () => Navigator.of(context).pop('arcade'),
           ),
+          if (canBlock)
+            KvRow(
+              dense: true,
+              ground: KvColor.chip,
+              titleLines: 2,
+              leading: const KvRowDisc.neutral(mark: KvGlyph.ban),
+              title: 'Block contact',
+              // The same line the list's long-press draws (BG-21): *no*,
+              // until they knock again (D-308).
+              sub: 'Ends the thread; only a new request reaches you',
+              subLines: 2,
+              trailing: const KvGlyphIcon(
+                KvGlyph.chevron,
+                size: 20,
+                tone: KvColor.etch,
+              ),
+              onTap: () => Navigator.of(context).pop('block'),
+            ),
         ],
+      ),
+    );
+  }
+}
+
+/// **The composer's seat on a revived thread** (D-307): the state, its cost,
+/// and the door — never behind a mark, because a figure about to be spent and
+/// a consequence are the surface's subject (BG-34).
+///
+/// The plate is the composer's own (`plate` at the bubble radius, in the same
+/// column), so the thread's bottom edge keeps its shape while the thing in it
+/// changes from a field to a sentence. The act is `raised`, never `primary`:
+/// it spends a bond, and §3 rations teal to the signing control that follows.
+class _ReplyNeedsHandshake extends StatelessWidget {
+  const _ReplyNeedsHandshake({
+    super.key,
+    required this.bond,
+    required this.onSend,
+  });
+
+  /// The handshake bond, from Rust — never a Dart literal.
+  final BigInt bond;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    return KvColumn(
+      child: Padding(
+        padding: const EdgeInsets.only(top: KvSpace.s, bottom: KvSpace.sm),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(
+            KvSpace.m,
+            KvSpace.s14,
+            KvSpace.m,
+            KvSpace.s14,
+          ),
+          decoration: BoxDecoration(
+            color: KvColor.plate,
+            borderRadius: BorderRadius.circular(KvRadius.bubble),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "You can read them, but they can't read your replies yet.",
+                style: TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 14,
+                  height: 20 / 14,
+                  fontWeight: FontWeight.w600,
+                  fontVariations: KvWeight.w600,
+                  color: KvColor.ink,
+                ),
+              ),
+              const SizedBox(height: KvSpace.xs),
+              // **The figure is mono** (BG-30) — the same span `M2`'s gloss
+              // sets the bond in — and the last two sentences are the
+              // `consensus-auditor`'s: this row was minted on its sender's
+              // own message, which the user never accepted, so the address
+              // in the bar is theirs to check before a bond goes to it.
+              Text.rich(
+                TextSpan(
+                  children: [
+                    const TextSpan(
+                      text:
+                          'Their app knows you by an alias this phone no '
+                          'longer has. A new handshake tells it your new one: ',
+                    ),
+                    TextSpan(
+                      text: kasCanonical(bond),
+                      style: const TextStyle(
+                        fontFamily: KvFont.mono,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    // The unit beside a figure is Jakarta (BG-30).
+                    const TextSpan(
+                      text:
+                          ' KAS, which their app keeps. You never accepted '
+                          'this address yourself. Check it in the bar first.',
+                    ),
+                  ],
+                ),
+                style: const TextStyle(
+                  fontFamily: KvFont.ui,
+                  fontSize: 13,
+                  height: 18 / 13,
+                  fontWeight: FontWeight.w400,
+                  fontVariations: KvWeight.w400,
+                  color: KvColor.inkDim,
+                ),
+              ),
+              const SizedBox(height: KvSpace.s),
+              // The ellipsis is BG-11's: the tap opens the ceremony, and the
+              // ceremony is where the bond is committed.
+              KvAction.raised(label: 'Send handshake…', onTap: onSend),
+            ],
+          ),
+        ),
       ),
     );
   }

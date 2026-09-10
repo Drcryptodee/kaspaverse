@@ -156,7 +156,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
       preparingObject: 'acceptance',
       contextNote:
           'Returns the ${kasCanonical(_bond)} KAS bond to the sender and opens '
-          'the conversation.',
+          'the conversation.'
+          // A consequence, said where the money is confirmed (BG-34): the
+          // founder's own way back in for a blocked contact is their new
+          // request, and taking it up lifts the block (D-308).
+          '${conversation.blocked ? ' This also unblocks them.' : ''}',
     );
   }
 
@@ -229,6 +233,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
           label: contactLabel(conversation),
           bond: _bond,
           canName: conversation.contactAddress.isNotEmpty,
+          // A block is keyed on the address (D-308); a request whose sender
+          // the node has not named yet has nothing to key it on, and an
+          // already-blocked one has nothing left to block.
+          canBlock:
+              conversation.contactAddress.isNotEmpty && !conversation.blocked,
           // Nothing to clear on an invitation but the handshake row, which is
           // deliberately kept (a bond gate reads it) — so it would report "0
           // messages cleared" over a card that visibly still has a row on it.
@@ -243,6 +252,38 @@ class _ContactsScreenState extends State<ContactsScreen> {
       await _clearMessages(conversation);
     } else if (action == 'hide') {
       await _hide(conversation);
+    } else if (action == 'block') {
+      await _block(conversation);
+    }
+  }
+
+  /// **Block** (D-308): a reset to strangers. Confirm → Rust writes the
+  /// refusal, destroys the thread and refuses their messages from then on;
+  /// only a new request of theirs — accepted — lifts it. Local, silent to
+  /// them, and irreversible from their side, which is why it confirms.
+  Future<void> _block(ConversationDto conversation) async {
+    final confirmed = await confirmBlockContact(
+      context,
+      label: contactLabel(conversation),
+      address: conversation.contactAddress,
+      isInvitation: conversation.status == 'pending_in',
+    );
+    if (!confirmed || !mounted) return;
+    try {
+      await _messaging.block(conversation.conversationId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Blocked. Only a new request from them reaches you.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      // A refusal that silently failed is the worst outcome this lane has:
+      // the user walks away believing someone cannot reach them.
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
     }
   }
 
@@ -384,6 +425,14 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 onActions: () => _rowActions(conversation),
                 onIgnore: () => _hide(conversation),
                 onDismissExpired: () => _dismissExpired(conversation),
+                // `M2`'s third word. Keyed on the address, so a request whose
+                // sender is not yet named cannot carry it; a request from an
+                // address already blocked has nothing left to block.
+                onBlock:
+                    conversation.contactAddress.isNotEmpty &&
+                        !conversation.blocked
+                    ? () => _block(conversation)
+                    : null,
               ),
             ),
       ],
@@ -686,6 +735,7 @@ class _RowActionsSheet extends StatelessWidget {
     required this.canName,
     required this.bond,
     this.canClear = true,
+    this.canBlock = false,
   });
 
   final String label;
@@ -693,6 +743,9 @@ class _RowActionsSheet extends StatelessWidget {
   /// An invitation carries no address until its sender is recorded, and a
   /// name is keyed on the address — so there is nothing to name yet.
   final bool canName;
+
+  /// Same key, same reason (D-308): a block is on the address.
+  final bool canBlock;
 
   /// Active conversations only, and never a replaced one. Starting over hides
   /// the thread, and hiding an invitation is permanent — it would bury the only
@@ -781,6 +834,26 @@ class _RowActionsSheet extends StatelessWidget {
             ),
             onTap: () => Navigator.of(context).pop('hide'),
           ),
+          if (canBlock)
+            KvRow(
+              dense: true,
+              ground: KvColor.chip,
+              titleLines: 2,
+              leading: const KvRowDisc.neutral(mark: KvGlyph.ban),
+              title: 'Block contact',
+              // The distinction from Hide, in one line: hide is *mute until
+              // they write*; this is *no*, and only a new request of theirs
+              // ends it (D-308). Neither is a delete, and neither reaches
+              // the chain.
+              sub: 'Ends the thread; only a new request reaches you',
+              subLines: 2,
+              trailing: const KvGlyphIcon(
+                KvGlyph.chevron,
+                size: 20,
+                tone: KvColor.etch,
+              ),
+              onTap: () => Navigator.of(context).pop('block'),
+            ),
         ],
       ),
     );
@@ -853,6 +926,7 @@ class _ConversationRow extends StatelessWidget {
     required this.onActions,
     required this.onIgnore,
     required this.onDismissExpired,
+    this.onBlock,
   });
 
   final ConversationDto conversation;
@@ -861,6 +935,9 @@ class _ConversationRow extends StatelessWidget {
   final VoidCallback onActions;
   final VoidCallback onIgnore;
   final VoidCallback onDismissExpired;
+
+  /// `M2`'s `Block`, when the request carries an address to key it on.
+  final VoidCallback? onBlock;
 
   @override
   Widget build(BuildContext context) {
@@ -887,10 +964,14 @@ class _ConversationRow extends StatelessWidget {
     // there is no preview to show, and a row whose only news is a 12 dp badge
     // states nothing in words (BG-20, `ux-auditor`) — so the sentence is the
     // fallback rather than the deletion.
+    // **A blocked address's request says so on its state line** (D-308): the
+    // block is a consequence the user chose, and a card that looked like any
+    // stranger's would invite them to accept — which lifts the block — without
+    // knowing it. Never behind a mark (BG-34).
     final String? state = expired
         ? 'Invitation expired'
         : pendingIn
-        ? 'Wants to connect'
+        ? (c.blocked ? 'Blocked · asks to connect again' : 'Wants to connect')
         : pendingOut
         ? 'Awaiting their accept'
         : null;
@@ -1055,7 +1136,11 @@ class _ConversationRow extends StatelessWidget {
             ignoreLabel: 'Dismiss',
           )
         else if (pendingIn)
-          _RequestActions(accept: onAccept, onIgnore: onIgnore),
+          _RequestActions(
+            accept: onAccept,
+            onIgnore: onIgnore,
+            onBlock: onBlock,
+          ),
       ],
     );
   }
@@ -1146,9 +1231,7 @@ class _When extends StatelessWidget {
         ? 'Yesterday'
         : days < 7
         ? _weekdays[at.weekday - 1]
-        : at.year == now.year
-        ? '${at.day} ${_months[at.month - 1]}'
-        : '${at.day} ${_months[at.month - 1]} ${at.year}';
+        : dayLabel(at, now);
     return Text(
       text,
       maxLines: 1,
@@ -1170,42 +1253,32 @@ class _When extends StatelessWidget {
 }
 
 const _weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const _months = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-];
 
-/// `M2`'s action row under a request: one raised **Accept…** and one quiet
-/// **Ignore**.
+/// `M2`'s action row under a request: one raised **Accept…**, and the two
+/// quiet words beside it, **Ignore** and **Block**.
 ///
-/// **The render draws a third, `Block`, and this build does not.** There is no
-/// blocklist anywhere in the stack — not in `TransportStore`, not on the
-/// inbound scan — so the word would name a promise nothing keeps: a blocked
-/// stranger's next handshake would arrive exactly as before. It needs a
-/// persisted set the scan consults before it mints a row, which is Rust work
-/// and a T3 change, not a button. Said in the sitting.
+/// **`Block` is built now** (D-308). D-302 left it off because no blocklist
+/// existed and the word would have named a promise nothing kept; the list
+/// exists — `block.list` beside `contact.names`, consulted by the inbound
+/// scan before it decrypts and again before it mints — and the render's
+/// third word is buildable. It is absent on exactly two cards: one whose
+/// sender the node has not named yet (a block is keyed on the address), and
+/// one from an address already blocked (nothing left to block).
 ///
 /// **Ignore is real and already built**: it is the D-068 hide — local, silent
 /// to the counterparty, and reversible, because their next message reopens the
 /// thread. That is what "ignore" means, and it is why the word is not
-/// "Delete".
+/// "Delete". Block is the other thing: *no*, until they knock again.
 ///
 /// The ellipsis on Accept is load-bearing (BG-11): accepting posts a bond, so
-/// it opens the confirm ceremony rather than spending on the tap.
+/// it opens the confirm ceremony rather than spending on the tap. Block has
+/// none, because it spends nothing — it confirms on its own sheet for a
+/// different reason (it ends a thread), and that sheet says so.
 class _RequestActions extends StatelessWidget {
   const _RequestActions({
     required this.accept,
     required this.onIgnore,
+    this.onBlock,
     this.acceptReason,
     this.ignoreLabel = 'Ignore',
   });
@@ -1213,6 +1286,7 @@ class _RequestActions extends StatelessWidget {
   final VoidCallback? accept;
   final String? acceptReason;
   final VoidCallback onIgnore;
+  final VoidCallback? onBlock;
   final String ignoreLabel;
 
   @override
@@ -1234,9 +1308,16 @@ class _RequestActions extends StatelessWidget {
       // by 25 dp in the floor frame. A `Wrap` needs no threshold and no
       // measurement — side by side while they fit, stacked the moment they do
       // not, and neither word ever ellipsises.
+      // **`M2` measured at 4×** (`ux-auditor`, MSG-BLOCK): the pill's edge to
+      // `Ignore`'s ink is 14 dp and the two quiet words sit 23 dp apart.
+      // Each quiet word already carries 12 dp of its own air on both sides
+      // (`_TextAction`), so the row needs NO spacing of its own: 12 and 24
+      // against the render's 14 and 23. `KvSpace.s` here put the words 8 dp
+      // further apart than the picture, invisible with two words and plain
+      // with three.
       child: Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
-        spacing: KvSpace.s,
+        spacing: 0,
         children: [
           if (accept != null)
             // `KvAction` stretches to the width it is given, and a `Wrap`
@@ -1274,6 +1355,7 @@ class _RequestActions extends StatelessWidget {
               ),
             ),
           _TextAction(label: ignoreLabel, onTap: onIgnore),
+          if (onBlock != null) _TextAction(label: 'Block', onTap: onBlock!),
         ],
       ),
     );
@@ -1414,12 +1496,62 @@ class _RequestsGloss extends StatelessWidget {
 /// the four destroy something, and §3 rations teal to the signing control —
 /// dressing an erase in it would say the opposite of what it does (D-262's
 /// own reasoning for refusing the glow on this screen's wipe).
+/// The shared confirm, as a question: the blocked list asks it to lift a
+/// block, and asking through the same sheet is what keeps the two gestures
+/// one shape (BG-21, `ux-auditor`, MSG-BLOCK).
+Future<bool> confirmAct(
+  BuildContext context, {
+  required String title,
+  required String act,
+  required String body,
+  String? subject,
+  String? subjectAddress,
+}) async {
+  final confirmed = await Navigator.of(context).push<bool>(
+    KvSheetRoute<bool>(
+      builder: (_) => _ConfirmSheet(
+        title: title,
+        act: act,
+        subject: subject,
+        subjectAddress: subjectAddress,
+        body: Text(body),
+      ),
+    ),
+  );
+  return confirmed == true;
+}
+
+/// The sheet's subject line: the name the user gave a person, or — when the
+/// person IS a key — the key drawn as one. An address set as words in Jakarta
+/// is the poisoning surface `KvAddress` exists for (BG-15; `ux-auditor`,
+/// MSG-BLOCK), and on a sheet about refusing or readmitting someone the
+/// address is the decision.
+Widget _subjectLine(String subject, String? address) {
+  if (address != null &&
+      address.isNotEmpty &&
+      subject == truncateAddressPayload(address)) {
+    return KvAddress(address, form: KvAddressForm.compact, fontSize: 16);
+  }
+  return Text(
+    subject,
+    style: const TextStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 16,
+      height: 20 / 16,
+      fontWeight: FontWeight.w600,
+      fontVariations: KvWeight.w600,
+      color: KvColor.ink,
+    ),
+  );
+}
+
 class _ConfirmSheet extends StatelessWidget {
   const _ConfirmSheet({
     required this.title,
     required this.act,
     required this.body,
     this.subject,
+    this.subjectAddress,
   });
 
   final String title;
@@ -1432,6 +1564,10 @@ class _ConfirmSheet extends StatelessWidget {
 
   /// The thing being acted on — a contact's label, on its own line.
   final String? subject;
+
+  /// The contact's address, when known — so a subject that IS the address is
+  /// drawn as one rather than as words (see [_subjectLine]).
+  final String? subjectAddress;
 
   @override
   Widget build(BuildContext context) {
@@ -1458,17 +1594,7 @@ class _ConfirmSheet extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (subject != null) ...[
-              Text(
-                subject,
-                style: const TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 16,
-                  height: 20 / 16,
-                  fontWeight: FontWeight.w600,
-                  fontVariations: KvWeight.w600,
-                  color: KvColor.ink,
-                ),
-              ),
+              _subjectLine(subject, subjectAddress),
               const SizedBox(height: KvSpace.sm),
             ],
             DefaultTextStyle(
@@ -1484,6 +1610,64 @@ class _ConfirmSheet extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// **Confirm a block** (D-308) — the same shared sheet as Hide, because the
+/// two gestures must look alike and read differently: the copy is the
+/// difference. Exported so the thread's own overflow can ask the same question
+/// in the same words (BG-21).
+///
+/// What it says, and why each clause is there: *ends / turns down* is the
+/// destructive half first, like Hide's; *their messages won't reach you* is
+/// the promise the block list keeps; *aren't notified* and *nothing is deleted
+/// on-chain* are the two things every local gesture in this lane must say;
+/// and the last sentence is the founder's own design — the way back in is a
+/// new request, and taking it up lifts the block.
+Future<bool> confirmBlockContact(
+  BuildContext context, {
+  required String label,
+  required String address,
+  required bool isInvitation,
+}) async {
+  final confirmed = await Navigator.of(context).push<bool>(
+    KvSheetRoute<bool>(
+      builder: (_) => _BlockSheet(
+        label: label,
+        address: address,
+        isInvitation: isInvitation,
+      ),
+    ),
+  );
+  return confirmed == true;
+}
+
+class _BlockSheet extends StatelessWidget {
+  const _BlockSheet({
+    required this.label,
+    required this.address,
+    required this.isInvitation,
+  });
+
+  final String label;
+  final String address;
+  final bool isInvitation;
+
+  @override
+  Widget build(BuildContext context) {
+    return _ConfirmSheet(
+      title: 'Block contact',
+      act: 'Block',
+      subject: label,
+      subjectAddress: address,
+      body: Text(
+        '${isInvitation ? 'Turns down this request' : 'Clears this conversation from your device'} '
+        'and blocks the address. Their messages will not reach you. '
+        'KaspaVerse tells them nothing, and nothing is deleted on-chain.\n\n'
+        'They can reach you again only with a new request. Accepting it '
+        'unblocks them; ignoring it does not.',
       ),
     );
   }
