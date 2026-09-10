@@ -2,7 +2,7 @@
 
 ## Our standard
 
-KaspaVerse is built on a simple design law — **stag hunt, not prisoner's dilemma**: every
+KaspaVerse is built on one design law, **stag hunt, not prisoner's dilemma**: every
 mechanism in the product is meant to make honest cooperation the winning move. We hold the
 community to the same law. Contributors, maintainers, and participants are expected to make
 this a welcoming, harassment-free space for everyone, regardless of background or identity,
@@ -20,7 +20,7 @@ reported behavior fairly and, where appropriate, confidentially.
 
 To report a concern, contact the maintainer privately through either channel:
 
-> - **Email:** `kaspaverse@gmail.com` — read only by the maintainer.
+> - **Email:** `kaspaverse@gmail.com`, read only by the maintainer.
 > - **GitHub:** open a private report via the repository's **Security → "Report a vulnerability"**
 >   tab, which routes privately to the maintainer.
 
@@ -32,8 +32,8 @@ safety of anyone who reports in good faith.
 Consequences are scaled to the severity and the pattern of the behavior, and a maintainer
 will say which one is being applied and why:
 
-1. **A private word** — the behavior is named, with what is expected instead.
-2. **A warning** — a stated period of no interaction with the people involved, in project
+1. **A private word.** The behavior is named, with what is expected instead.
+2. **A warning.** A stated period of no interaction with the people involved, in project
    spaces or outside them.
 3. **A temporary ban** from project spaces.
 4. **A permanent ban**, for a sustained pattern, for harassment of an individual, or for

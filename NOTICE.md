@@ -5,7 +5,7 @@ binding terms are the licence files it names.
 
 ## The original KaspaVerse work
 
-Copyright (c) 2026 Drcryptodee. Licensed under the **ISC License** — see `LICENSE`.
+Copyright (c) 2026 Drcryptodee. Licensed under the **ISC License**; see `LICENSE`.
 
 That covers the code, tests, tooling and configuration written for this project: the
 Flutter app under `lib/`, the Rust crates under `rust/core`, `rust/chain`, `rust/bridge`
@@ -17,18 +17,18 @@ proof gate and scripts under `tools/`, the test suites, and the covenant artifac
 `flutter_rust_bridge_codegen` and is committed for reviewability. It is derived from the
 original work above and carries the same copyright and licence.
 
-## Third-party material — not covered by the ISC License above
+## Third-party material not covered by the ISC License above
 
 The following is **not** original KaspaVerse work. It is redistributed under its own
 terms, its own copyright statements are unchanged, and nothing here relicenses any of it.
 
 | Material | Where | Copyright | Terms |
 |:--|:--|:--|:--|
-| `tokio-tungstenite` 0.23.1, vendored | `rust/vendor/tokio-tungstenite/` | Daniel Abramov; Alexey Galakhov | MIT — `rust/vendor/tokio-tungstenite/LICENSE` |
-| Cargokit (build tooling) | `rust_builder/cargokit/` | Matej Knopp | MIT and Apache-2.0 — `rust_builder/cargokit/LICENSE` |
-| Plus Jakarta Sans (variable) | `assets/fonts/PlusJakartaSans-Variable.ttf` | The Plus Jakarta Sans Project Authors | SIL OFL 1.1 — `assets/fonts/OFL-PlusJakartaSans.txt` |
-| JetBrains Mono (variable) | `assets/fonts/JetBrainsMono-Variable.ttf` | The JetBrains Mono Project Authors | SIL OFL 1.1 — `assets/fonts/OFL-JetBrainsMono.txt` |
-| Gradle wrapper | `android/gradlew`, `android/gradlew.bat`, `android/gradle/wrapper/gradle-wrapper.jar` | the original authors, 2015-2021 | Apache-2.0 — headers in the scripts |
+| `tokio-tungstenite` 0.23.1, vendored | `rust/vendor/tokio-tungstenite/` | Daniel Abramov; Alexey Galakhov | MIT, `rust/vendor/tokio-tungstenite/LICENSE` |
+| Cargokit (build tooling) | `rust_builder/cargokit/` | Matej Knopp | MIT and Apache-2.0, `rust_builder/cargokit/LICENSE` |
+| Plus Jakarta Sans (variable) | `assets/fonts/PlusJakartaSans-Variable.ttf` | The Plus Jakarta Sans Project Authors | SIL OFL 1.1, `assets/fonts/OFL-PlusJakartaSans.txt` |
+| JetBrains Mono (variable) | `assets/fonts/JetBrainsMono-Variable.ttf` | The JetBrains Mono Project Authors | SIL OFL 1.1, `assets/fonts/OFL-JetBrainsMono.txt` |
+| Gradle wrapper | `android/gradlew`, `android/gradlew.bat`, `android/gradle/wrapper/gradle-wrapper.jar` | the original authors, 2015-2021 | Apache-2.0, headers in the scripts |
 | BIP-39 English wordlist | `assets/bip39/english.txt` | the BIP-39 authors | see **Wordlist** below |
 | Icon geometry transcribed from Lucide | `lib/src/ui/widgets/kv_glyph.dart` | Lucide Icons and Contributors; Feather icons, Cole Bemis | ISC (Lucide); MIT for the Feather-derived subset |
 
@@ -81,13 +81,13 @@ configuration, contain no application logic, and are noted for completeness.
 it.** The app's About screen names the app's own ISC licence and opens Flutter's licence
 page, which enumerates the **Dart package graph**. That list does not include the bundled OFL
 faces, and it cannot include the Rust crates compiled into the native library, because those
-are `cargo` dependencies rather than `pubspec` ones. Several of those terms — MIT's "included
-in all copies", Apache-2.0 §4, OFL §2, LGPL-3.0 §4(a)/(b) — attach to a binary distribution.
+are `cargo` dependencies rather than `pubspec` ones. Several of those terms (MIT's "included
+in all copies", Apache-2.0 §4, OFL §2, LGPL-3.0 §4(a)/(b)) attach to a binary distribution.
 This file is complete for the repository; the in-app surface is owed, and is tracked against
 the first signed public release.
 
 ## Trademarks
 
 Software licensing and trademark rights are separate. The ISC License covers the code and
-grants no rights in the KaspaVerse name, logo or other project branding — see
+grants no rights in the KaspaVerse name, logo or other project branding; see
 `TRADEMARK.md`.

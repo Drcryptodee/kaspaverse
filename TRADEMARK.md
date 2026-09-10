@@ -21,13 +21,13 @@ symbol is used anywhere in this project.
 ## What the project treats as its marks
 
 - The name **KaspaVerse**, and confusingly similar variants.
-- The **KaspaVerse mark** — the orb-and-inverted-K logo, its glow treatment, and the app
+- The **KaspaVerse mark**: the orb-and-inverted-K logo, its glow treatment, and the app
   icon built from them.
 - Product and surface names used as identifiers of the official project.
 
 The *files* that draw the mark are source code and are covered by the ISC License like
 everything else. Copying that code is permitted. Using the resulting mark **as a badge of
-origin** — to identify a product as being KaspaVerse — is what this policy is about.
+origin**, to identify a product as being KaspaVerse, is what this policy is about.
 
 ## What you may do
 

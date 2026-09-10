@@ -1,139 +1,92 @@
-# Contributing to KaspaVerse
+# Contributing
 
-Thanks for looking. KaspaVerse custodies strangers' money on an unpatchable ledger, so the
-bar is unusual: **nothing is "done" until it is proven** (a green gate cited as evidence),
-and a change that touches keys, the language boundary, or on-chain logic gets adversarial
-review before it merges. This guide is how to clear that bar.
+KaspaVerse holds other people's keys and money on a ledger that cannot be patched. Two things
+follow. Nothing is done until the proof gate is green, and any change that touches keys, the
+Rust/Dart boundary, transactions or contracts gets a review before it merges.
 
-Development runs on an internal AI-assisted process. This repo carries the product — the
-code, the CI, the tooling, and a proof gate you can run from a clean clone. The
-engineering record behind it (constitution, decision ledger, research corpus, phase plans,
-session journal) is private. If you're working on the code or auditing it, ask and you'll
-get the whole thing.
-
-## The one rule
-
-> **Done = proven.** A claim without a green [`tools/gate.sh`](tools/gate.sh) is drift
-> (INV-10). Run the gate; paste the result in your PR.
-
-## Build from a clean clone
-
-KaspaVerse is **Android-first** and currently **arm64-only** — upstream `kaspa-hashes` has no
-x86_64-android assembly path, so x86_64 emulators won't run it. **Use a physical device.**
+## Build
 
 You need:
 
-| Tool | Version | Why |
-|:--|:--|:--|
-| Flutter | 3.41.5 | the app + the `flutter`/`dart` toolchain |
-| Rust | 1.94.0 (pinned in `rust/rust-toolchain.toml`) | the core/chain/bridge crates |
-| `cargo-ndk` | for `aarch64-linux-android` | Android cross-compile |
-| `cargo-deny` | latest | the supply-chain gate (INV-7) |
-| JDK | 17 | the Android/Gradle build + `apksigner` |
+| Tool | Version |
+|:--|:--|
+| Flutter | 3.41.5 |
+| Rust | 1.94.0 (pinned in `rust/rust-toolchain.toml`) |
+| cargo-ndk | with the `aarch64-linux-android` target |
+| cargo-deny | current |
+| JDK | 17 |
 
-Then:
+Android only, arm64 only, on a physical device. x86_64 emulators cannot run the upstream
+hashing crate at the pinned revision.
 
 ```bash
-flutter pub get                 # Dart deps
-tools/preflight.sh              # orient: branch, toolchain, active phase
-# build + run on a connected arm64 device:
+flutter pub get
+tools/preflight.sh
 flutter build apk --debug --target-platform android-arm64
 flutter install
 ```
 
-After editing any `rust/bridge` API types, regenerate the bindings (never hand-edit
-`lib/src/rust/`):
+If you change a type in `rust/bridge`, regenerate the bindings and never edit them by hand:
 
 ```bash
 flutter_rust_bridge_codegen generate
 ```
 
-## The proof gate
+## The gate
 
-[`tools/gate.sh`](tools/gate.sh) is the only arbiter of "done". It runs, in strict mode
-(the same checks locally and in CI):
+`tools/gate.sh` is the arbiter. It runs the same checks locally and in CI: cargo fmt, clippy
+with warnings denied, cargo test, cargo-deny, the arm64 cross-compile, dart format, flutter
+analyze, flutter test, the Kotlin build and lint, generated-binding drift, and repository
+hygiene. Run it before you open a pull request and paste the summary.
 
-`cargo fmt` · `cargo clippy -D warnings` · `cargo test` · `cargo deny` (INV-7) · android
-arm64 cross-compile · `dart format` · `flutter analyze` · `flutter test` · codegen-drift
-(generated bindings match the Rust API) · public-repo hygiene (no tracked secrets) ·
-internal-record boundary (the private engineering record can't drift into this repo).
+Do not weaken a check to get green. Fix the cause. If your machine cannot run a check, say so
+in the pull request.
 
-**Never weaken a check to go green.** A failing gate is fixed at the cause; a check is removed
-only via a decision-ledger entry. If your environment can't run a check, say so in the
-PR — an honest partial beats a fake pass.
+## Review tiers
 
-## Risk tiers + the auditor ritual
+Every change carries a tier in its commit subject. The tier is the highest tier of anything
+the change touches, and it decides who reviews it.
 
-Every change is tagged **T0–T3** (in the commit message), and the tier selects mandatory
-reviewers. The tier of a change is the highest tier of anything it touches.
-
-| Tier | Touches | Mandatory review before merge |
+| Tier | Touches | Review before merge |
 |:--|:--|:--|
-| T0 | UI, copy, theme | UX review |
-| T1 | chain reads, indexer calls | consensus review |
-| T2 | tx construction, fees, mass, broadcast | consensus + wallet-security |
-| T3 | keys, vault, FFI surface, contracts, deps | FFI-leak + wallet-security + consensus + dependency-steward |
+| T0 | UI, copy, theme | UX |
+| T1 | chain reads, indexer calls, contract specs | consensus |
+| T2 | transaction construction, fees, mass, broadcast | consensus, wallet security |
+| T3 | keys, vault, FFI surface, compiled contracts, dependencies | FFI boundary, wallet security, consensus, dependencies |
 
-Reviews issue **PASS / CONCERNS / BLOCK** verdicts citing invariant (`INV-`) and
-design-law (`BG-`) numbers — run against five internal domain-audit checklists
-(consensus, wallet-security, FFI-leak, dependency-steward, UX). An absent mandated verdict
-blocks the merge.
+Reviews end in PASS, CONCERNS or BLOCK, each citing the invariant it rests on. A missing
+mandatory review blocks the merge. The invariants that matter for security are summarised in
+[SECURITY.md](SECURITY.md).
 
-## How decisions are made (the epistemic order)
+## Ground rules
 
-When sources conflict, the higher one wins: **working code + gate output → the pinned
-`rusty-kaspa` crate source → the project's source-of-truth register → its research
-corpus → a live network/web check → training data** (presumed stale — the network has hardforked, so never
-the sole basis for protocol logic). In particular, **consensus logic is consumed from the
-pinned crates, never re-implemented from memory** (INV-9). Reality wins: docs converge to the
-build, never the reverse. Found drift? Fix it if it's in scope, else log it — never silently
-ignore it.
-
-## Read before you build (the spine)
-
-The record is a "spine" of load-bearing documents. Ask for it before you start — it saves
-you re-deriving settled ground:
-
-- **The constitution** — the numbered laws (INV-1…12). Read first.
-- **The source-of-truth register** — what is true right now: every subsystem's state,
-  built or planned.
-- **The decision ledger** — the *why* behind established choices (a thing may be
-  deliberate before you "fix" it).
-- **The research corpus** — the verified research behind every protocol and design claim.
-
-The invariants that bind *your* change are summarised in [SECURITY.md](SECURITY.md), so a
-small PR doesn't have to wait on the full record.
+- Consensus logic is consumed from the pinned rusty-kaspa crates. It is never re-implemented
+  or written from memory.
+- When code and documentation disagree, the code and the gate win, then the pinned crate
+  source, then a live check of the network. Fix the drift or say where it is.
+- Keep the diff the smallest one that proves the change.
+- No secret may cross the FFI, exist as a Dart string, or enter a state manager. User-entered
+  secrets enter once, as bytes, and are zeroed.
 
 ## Pull requests
 
-- Branch from `main`; keep the diff the smallest that proves the bar (INV-12 — gold-plating
-  is scope drift).
-- Commit messages: `type(scope): summary` with the tier tag, e.g.
-  `feat(receive): QR + payload-aware address [T1]`.
-- Paste your gate result. For T2/T3, note the device proof and which auditor verdicts apply.
-- If your change adds or updates third-party material, say where it came from and under
-  what terms, and add it to [NOTICE.md](NOTICE.md) in the same PR.
+- Branch from `main`.
+- Commit subjects are one plain line: `type(scope): what changed [T0-T3]`, for example
+  `fix(receive): reject addresses with the wrong prefix [T1]`. Add a short body only when the
+  subject cannot carry it. No em dashes, no prose.
+- Paste the gate summary. For T2 and T3, say what was proven on a device and which reviews apply.
+- Third-party material comes with its origin and terms, and an entry in [NOTICE.md](NOTICE.md)
+  in the same pull request.
 
-## Licensing your contribution
+## Licence
 
-The project is licensed under the **ISC License** ([LICENSE](LICENSE)). By opening a pull
-request you confirm that you wrote the contribution or otherwise have the right to submit
-it, and that you licence it to the project under the ISC License. That is the whole of it —
-there is no CLA to sign today and none is planned as a hurdle for small changes.
+The project is licensed under the ISC License ([LICENSE](LICENSE)). By opening a pull request
+you confirm that you wrote the contribution or have the right to submit it, and that you
+license it under the same terms. You keep the copyright in what you wrote. There is no CLA.
 
-Two honest caveats, so nothing here surprises a future contributor:
+The project currently has a single maintainer. If contribution terms change when the project
+moves to an organisation, the change will be stated here and will apply going forward, not to
+contributions already accepted.
 
-- **The project is at a single-maintainer stage.** The original KaspaVerse work is currently
-  the copyright of one author (see [NOTICE.md](NOTICE.md)); contributors keep the copyright
-  in their own contributions and licence them in under ISC as above.
-- **This policy may evolve before broad external contributions are accepted** — most likely
-  when the project moves to the official KaspaVerse organization, where a formal contributor
-  licensing or IP policy may be adopted. Any such change will be stated here, will apply
-  going forward, and will not retroactively alter the terms your contribution was accepted
-  under.
-
-Contributing code does not grant rights in the KaspaVerse name or mark, and does not receive
-any — branding is handled separately from the software licence in
+Contributing code grants no rights in the KaspaVerse name or mark; see
 [TRADEMARK.md](TRADEMARK.md).
-
-Welcome aboard — and thank you for holding the line on proof.

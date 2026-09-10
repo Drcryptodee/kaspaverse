@@ -1,8 +1,8 @@
 # Security Policy
 
 KaspaVerse is a **non-custodial** wallet: it holds the keys to real funds on the Kaspa
-BlockDAG, an **unpatchable public ledger**. A key leak is total and silent — discovered by
-the victim, not us — and a covenant bug is fund loss, not a hotfix. We treat security as the
+BlockDAG, an **unpatchable public ledger**. A key leak is total and silent, discovered by
+the victim rather than by us, and a covenant bug is fund loss, not a hotfix. We treat security as the
 product, not a feature of it.
 
 If you are deciding whether something is worth reporting: **if it could move, freeze, or
@@ -26,15 +26,14 @@ This opens a private advisory only the maintainers can see. Include:
 
 We aim to acknowledge a report within a few days and to keep you updated as we confirm,
 fix, and prepare a disclosure. We will credit you in the advisory unless you ask us not to.
-Please give us a reasonable window to ship a fix before any public disclosure — on a ledger
+Please give us a reasonable window to ship a fix before any public disclosure: on a ledger
 that cannot be rolled back, a coordinated release protects users who cannot patch retroactively.
 
 There is **no bug-bounty program** at this alpha stage; reports are handled on good faith.
 
 ## The security model (what we guarantee, by design)
 
-These are enforced invariants, not aspirations. They are numbered clauses of a written
-constitution, kept private ([CONTRIBUTING.md](CONTRIBUTING.md)); the security-critical ones:
+These are enforced invariants, numbered so a review can cite them. The security-critical ones:
 
 - **No secret ever crosses the language boundary or lives on the GC heap (INV-1/2/3).**
   Private keys, seeds, mnemonics, and raw signatures are created, used, and destroyed in
@@ -46,11 +45,11 @@ constitution, kept private ([CONTRIBUTING.md](CONTRIBUTING.md)); the security-cr
   Android Keystore (StrongBox/TEE when present), gated by `BiometricPrompt`, with an
   Argon2id passphrase fallback. The seed-backup screen blocks screenshots (`FLAG_SECURE`).
 - **Every covenant state has a unilateral timeout exit (INV-6).** No contract state can be
-  frozen forever by an adversary — a game an opponent can stall is a fund-loss bug.
+  frozen forever by an adversary; a game an opponent can stall is a fund-loss bug.
 - **No phoning home (INV-8).** No telemetry, no analytics, no mandatory servers. Indexers
   are untrusted, optional accelerators; the app degrades gracefully without them.
 - **Consensus parity (INV-9).** Protocol logic is consumed from pinned `rusty-kaspa` crates,
-  never re-implemented or "remembered" — so we inherit upstream's audited correctness.
+  never re-implemented or written from memory, so we inherit upstream's audited correctness.
 - **Verifiable releases (INV-11).** Every released APK is signed, built from a tagged commit,
   and published with checksums; the build verifies the artifact's *actual* signer against a
   pinned certificate. Each release publishes the checksums and the signer fingerprint needed
@@ -77,13 +76,13 @@ constitution, kept private ([CONTRIBUTING.md](CONTRIBUTING.md)); the security-cr
 - a rooted, malware-infected, or otherwise compromised OS, or a hostile custom ROM;
 - physical attacks: device theft with a known PIN/passphrase, coercion, shoulder-surfing,
   a malicious screen overlay;
-- the user's own backup hygiene — a seed written down insecurely, phished, or shared;
+- the user's own backup hygiene: a seed written down insecurely, phished, or shared;
 - bugs in Kaspa consensus itself, or in the upstream `rusty-kaspa` crates (report those
   upstream; we will track the pin);
 - the inherent variability of public node infrastructure (see the README's known-limitations
-  note on send propagation) — a reliability matter, not a custody one.
+  note on send propagation); a reliability matter, not a custody one.
 
 ## Supported versions
 
-KaspaVerse is **alpha**. Security fixes target `main` and the most recent tagged release
-(currently the `v0.2.0-alpha` line). There are no long-term support branches yet.
+KaspaVerse is alpha and has no published release yet. Security fixes target `main`, and the
+most recent release once one exists. There are no long-term support branches.

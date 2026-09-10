@@ -2,198 +2,84 @@
 
 [![gate](https://github.com/Drcryptodee/kaspaverse/actions/workflows/gate.yml/badge.svg)](https://github.com/Drcryptodee/kaspaverse/actions/workflows/gate.yml)
 
-**A sovereign wallet kernel + covenant arcade for the Kaspa BlockDAG.**
+A non-custodial Kaspa wallet and covenant app for Android. Flutter on top, Rust underneath,
+and the keys never leave Rust.
 
-Android-first. Non-custodial. Built on [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa)
-v2.0.1 (the Toccata-hardfork line, pinned by immutable revision) — a Flutter UI over a Rust
-core, with **keys that never leave Rust memory and never cross the language boundary**
-(enforced by an executable proof gate, not aspirational — see [SECURITY.md](SECURITY.md)).
+KaspaVerse starts as a small wallet that does the basics well and grows from there into
+covenant applications on Kaspa's L1: games with on-chain escrow, self-custody tooling, and
+peer-to-peer swaps. Pure L1. No servers, no telemetry, no house, no custody.
 
-## What this becomes
+## The stack
 
-**A minimal, excellent Kaspa wallet that grows one proven surface at a time.** There is no
-destination noun here: the app is what it has proven, and the list below is a sequence, not
-a claim. Two are shipped.
+- **Kaspa after Toccata.** Covenants and covenant ids (KIP-20) are the primitive everything
+  above the wallet is built on. No L2.
+- **rusty-kaspa v2.0.1**, pinned by revision. Consensus logic, fees and mass come from the
+  pinned crates. Nothing consensus-shaped is re-implemented here.
+- **Silverscript v1** is the contract compiler ([kaspanet/silverscript](https://github.com/kaspanet/silverscript)),
+  pinned by tag per contract. **Argent** ([argent-lang/argent](https://github.com/argent-lang/argent))
+  is the actor language and runtime the contracts are written in. A contract is authored in
+  Argent, compiled to Silverscript, and executed against the same pinned engine the wallet uses,
+  with the compiled artifact committed and checked for drift.
+- **The Kaspa Calls for Conventions** (KCC-1 covenant ABI, KCC-2 authority schemes, KCC-20
+  tokens) are followed as drafts at a named revision. They change; we re-read them when they do.
+- **Flutter 3.41 and Rust 1.94** over flutter_rust_bridge 2.12. The vault is the Android
+  Keystore (StrongBox or TEE where present) behind BiometricPrompt, with an Argon2id passphrase
+  path. The wallet talks wRPC to whichever Kaspa node you choose.
+- **The proof gate**, `tools/gate.sh`: fmt, clippy, tests, cargo-deny, arm64 cross-compile,
+  Dart analysis and tests, Kotlin, generated-binding drift, repo hygiene. If the gate is not
+  green, it is not done.
 
-- **Money** — Keystore/biometric vault, send/receive at 10 bps speed, fees priced by the
-  pinned consensus crates rather than by us. **Shipped and device-proven** (status below).
-- **Communication** — encrypted-payload messaging as a first-class L1 primitive: the
-  negotiation and social rail beside the games — challenges, taunts, results — never the
-  match's own state, which lives in the contract. Wire-compatible with the ecosystem's
-  established Kasia payload format. **Shipped and interop-proven** against live
-  third-party clients.
-- **Contracts** — a covenant engine on Toccata (KIP-17/20): state machines whose rules live
-  in the script. **The contracts KaspaVerse itself ships carry no admin path, no upgrade
-  proxy and no pause guardian**, and every state has a timeout exit one party can take
-  alone. That is a claim about *our* contracts, not about every asset the app can display —
-  see **Assets** below for what we promise about someone else's. **In progress.**
-- **Games** — **the arcade is designed as a public room you can walk into.** An offer stands
-  on chain with its terms in the open — stake, windows, expiry — and any player who meets them
-  can take it, without the two of you having met or exchanged a message. Finding an opponent is
-  reading one covenant lineage off the chain, so **discovery needs no server and no indexer** —
-  nothing sits between you and the offer but a node. Playing a friend from a message thread is a second door into
-  the same room, not a different product. On-chain wager escrow, no house and no server holding
-  funds. The design bar, which no contract ships without meeting: **every state has a timeout
-  exit one player can take alone**, so an opponent who walks away cannot strand your money.
-  First duel is **Attack & Defend**; then tic-tac-toe → ZK battleship (KIP-16, settlement-time
-  proving) → tournaments. **Not started.**
-- **Finance** — the contract engine turned inward: time-locked recovery, spending limits,
-  dead-man's-switch inheritance — funds owned by a rule you can read rather than a party you
-  must trust — **and peer-to-peer swaps of native covenant assets, with no house and no
-  escrow.** A swap here is one ordinary transaction that either happens or doesn't: both
-  sides sign the whole thing, so deleting the other party's payout invalidates their own
-  signature. Counterparties are found and terms are agreed over the encrypted messaging rail
-  above, which means no server and no order-book operator. Market structures that need
-  shared state (order books, AMMs) remain **out of scope, not queued** — a single pooled
-  UTXO that every trader must spend serialises trades and manufactures exactly the
-  extractable-value surface "no house" exists to avoid. **Not started.**
+## Surfaces
 
-- **Assets** — what we promise about tokens *other people* issue, which is different from
-  what we promise about our own contracts: **we add no authority and hold no key over
-  anything, and we compute what an asset's owners can do to it and show you before you
-  accept it.** Kaspa covenants make that answerable from the bytes, locally — consensus
-  guarantees a lineage name is unforgeable and nothing else, so supply, ownership and
-  freezability all live in the script where they can be read. We do not refuse assets whose
-  issuer can freeze them; that would hand the entire dollar surface to custodial apps and
-  your money is your business. We show you which kind you are holding. **Not started.**
-- **Identity** — your keypair already is your identity; there is no login layer to import.
-  Human-readable naming arrives natively or not at all.
+| Surface | What it is | Status |
+|:--|:--|:--|
+| Money | Vault, send, receive, live balance and activity, fees priced by the pinned crates | Shipped, device-proven on mainnet |
+| Messaging | Encrypted payloads on L1, wire-compatible with Kasia and KaChat | Shipped, proven against live third-party clients |
+| Contracts | The covenant engine: Argent contracts on Silverscript, executed at the pin | Designed; the toolchain is the next build |
+| Games | An on-chain arcade. Offers stand on chain with their terms; anyone who meets them can take one. First game: Attack & Defend | Not started |
+| Finance | The engine turned inward: time-locked recovery, spending limits, and peer-to-peer swaps of covenant assets with no escrow | Not started |
+| Assets | What the app tells you about tokens other people issue, read from the script, before you accept one | Not started |
 
-Pure L1 — no L2, no house. No servers. No telemetry. Indexers are optional, untrusted
-accelerators, always verifiable against the chain.
+Three rules hold across all of them. Every contract state has a timeout exit one party can take
+alone. Our own contracts carry no admin key, no pause and no upgrade path. The app takes no cut
+of anything you do with your money: no send fee, no swap spread.
 
-**One exception, stated rather than buried: the fiat price.** A market rate is the only
-thing this app can show you that nothing can verify — no node, no chain, no proof. It is
-fetched from a named endpoint you can replace or switch off, it never prices a fee or sizes
-a spend, it appears on **no signing surface** (what you sign is denominated in KAS), and it
-renders `—` rather than a number nobody vouched for. The wallet is fully functional, and
-fully correct, with it off.
-
-## How this gets paid for
-
-**KaspaVerse takes no cut of your transactions. Not a swap spread, not a send fee, not a
-percentage of anything you do with your own money.** That is a standing constraint, not a
-launch promise — it is written into the project's decision ledger and it rules out the
-revenue model most wallets use.
-
-The reason is alignment rather than generosity. A wallet earning a slice of your
-transactions earns more when you transact more, which quietly points the product at making
-you trade rather than at making trading rare and cheap. We would rather not carry that
-gradient, because the entire claim of this app is that its interests and yours are the same
-one.
-
-So the app is a **public good**, and anything sold sits beside it as a **separate business
-with separate money** — paid for by someone other than the sovereign user. Tooling for
-people building on the covenant engine. Sponsorship. Optional services you can decline
-without the app getting worse.
-
-The test we hold ourselves to is not the licence. In the famous cases where an open project
-quietly closed — Red Hat, Android — **the licence never changed**; what moved behind the wall
-was everything needed to actually build the thing. So ISC is not the promise. **The app
-building and running for a third party, with every optional service switched off, is the
-promise** — and it is a thing you can check rather than a thing you have to believe.
+One exception is stated rather than hidden: the fiat price. It is the only thing on screen no
+node can verify. It comes from an endpoint you can change or switch off, it never prices a fee or
+a spend, and it never appears on a signing screen.
 
 ## Status
 
-**Alpha — the sovereign loop is live and device-proven on mainnet.** On a physical Android
-device you can create or restore a vault (biometric ceremony, `FLAG_SECURE` seed backup),
-**receive** real KAS (with a scannable QR), watch balance and activity update live, and
-**send** it back out — with the exact fee shown and an anti-blind-signing, hold-to-sign
-confirm — then kill and relaunch and find everything still true. Keys stay in Rust at every
-step (auditor-verified, not vibed).
+Alpha, unreleased. On a physical Android device you can create or restore a vault, receive and
+send KAS on mainnet with the exact fee shown and a hold-to-sign confirm, message other Kaspa
+wallets, and pick your own node. The UI is being rebuilt screen by screen; after that comes the
+contract toolchain, then the covenant engine, then the arcade.
 
-What's done: the custody core, the platform vault, onboarding & backup, wallet sync, and
-**send & receive** (Phase 1.1–1.7) — then **re-proven twice** in 2026-07: a five-pass
-adversarial re-audit of the shipped wallet, and a full docs↔code grounding audit that
-found **zero code defects**. **Native transport shipped 2026-07-08** (Phase 2): encrypted
-payloads on L1, byte-parity proven against the ecosystem's cipher and interop-proven
-against live third-party clients on mainnet.
+Known limitations:
 
-**Connection reliability closed 2026-07-31.** The wallet reaches the network through public
-community nodes over a phone radio, and holding that link through weak signal and network
-changes turned out to be the hard part — it took five iterations, and the root cause was
-ours, not the nodes'. Verified across two multi-hour soaks of ordinary use on a real device:
-zero healthy nodes wrongly blamed, and reconnects that used to hang now land in seconds
-(residual limitation below).
+- Confirmation time depends on the public node that accepts the transaction. The mechanics are
+  correct; node quality varies.
+- A cold start on a weak connection can take a while before the first balance appears. Warm
+  reconnects take seconds.
+- arm64 only, on a physical device. x86_64 emulators cannot run the upstream hashing crate at
+  the pinned revision.
 
-**The grounding pass landed 2026-08-25.** The covenant standards the ecosystem is converging
-on (the Kaspa Calls for Conventions, `KCC-0000/0001/0002/0020`) were read against the engine's
-design, and they are re-read whenever they move — they are drafts, they change weekly, and none
-of them is final. The engine's wire format and authority model are settled against them.
-
-Next: the **contract toolchain** — pinning the authoring language and compiler, and committing
-the first compiled artifact with the checks that prove it did not drift. Then the **covenant
-engine** itself (Phase 3), then the arcade.
-
-The state of every subsystem, and the reasoning behind every established choice, live in
-the project's engineering record — which is private (see [CONTRIBUTING.md](CONTRIBUTING.md)).
-
-### Known limitations (honest roadmap)
-
-- **Send propagation can be variable.** The wallet reaches the network through public
-  community nodes, so the time from broadcast to first confirmation depends on the node that
-  accepts it — sometimes slower than mature wallets like Kaspium/Kasware. The transaction
-  mechanics are correct and fully on-chain; the gap is node-infrastructure quality, not
-  cryptography. Node-quality selection, fee-bump/replacement, and Send-Max are a planned
-  dedicated performance pass.
-- **A cold start on a weak, lossy link can take 14–28 seconds** before the first balance
-  appears. This is known, measured, and deliberately not yet fixed: the reliability pass
-  chose to fix *correctness* of the link first, and the remaining cost is latency on bad
-  radio, not lost funds or wrong balances. Warm reconnects are seconds.
-- **Restore discovers the address window from the chain** (balance-driven, 256 automatic /
-  2048 via a manual deep scan). The fixed 30-address window is only the fallback when
-  discovery cannot complete — a restored wallet that used more addresses elsewhere is
-  found, not truncated.
-- **Arm64-only, physical device.** x86_64 Android emulators can't run upstream `kaspa-hashes`
-  (no x86_64-android assembly path at the pinned revision) — use a real device.
-- **Receive uses a single static address** for the alpha; next-unused address rotation is
-  deferred to a later phase.
-
-## Build & run
-
-Android-first, **arm64-only**, physical device:
+## Build
 
 ```bash
 flutter pub get
-tools/preflight.sh                                        # orientation
-flutter build apk --debug --target-platform android-arm64 # then `flutter install`
-tools/gate.sh   # the proof gate, all twenty-three lanes: cargo fmt · clippy · test (bounded) ·
-                # cargo-deny · vendored-dialer tests · arm64 cross-compile · dart format ·
-                # flutter analyze · flutter test · gradle wrapper · gradle dependency
-                # verification · kotlin compile · android lint (NewApi) · codegen-drift ·
-                # contract spine · race fan-out exponent · toolchain pins · repo hygiene ·
-                # record boundary · record pointers · repo-path resolution ·
-                # section-anchor resolution
-                #
-                # The roster is asserted, not implied: a lane that fails to report at all
-                # is a failure, so GREEN means the lanes this tree declares actually ran.
+tools/preflight.sh
+flutter build apk --debug --target-platform android-arm64
+flutter install
+tools/gate.sh
 ```
 
-Full toolchain + the contributor workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Toolchain versions and the contributor workflow are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Contributing & security
+## Security, conduct, licence
 
-This repo carries the product: the code, the CI, the tooling, and a proof gate anyone can
-run. The engineering record behind it — constitution, decision ledger, research corpus,
-phase plans — is private. Contributors and auditors get it in full.
-
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — build from a clean clone, the proof gate, and the
-  risk-tier auditor ritual.
-- **[SECURITY.md](SECURITY.md)** — the security model, the threat-model boundary, and how to
-  report a vulnerability privately.
-- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — stag hunt, not prisoner's dilemma.
-
-## Licence and branding
-
-**KaspaVerse is open source.** The source code is licensed under the **ISC License** — see
-[LICENSE](LICENSE). Use it, fork it, modify it, ship it, commercially or not.
-
-Third-party material in this tree (vendored code, the bundled fonts, the Gradle wrapper, the
-BIP-39 wordlist, the transcribed icon geometry) keeps its own licences and its own copyright
-statements. [NOTICE.md](NOTICE.md) says what is original work and what is not.
-
-**The name and the mark are maintained separately from the licence.** The ISC grant is a
-copyright grant; it conveys no rights in the KaspaVerse name, logo or branding. A fork or
-derivative must not be represented as an official KaspaVerse release merely because it uses
-this code — rename it and ship it as your own. The full policy, including what you *may*
-freely do, is [TRADEMARK.md](TRADEMARK.md).
+- [SECURITY.md](SECURITY.md): the security model, what is in scope, and how to report privately.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- The code is licensed under the ISC License ([LICENSE](LICENSE)). Third-party material keeps
+  its own terms; [NOTICE.md](NOTICE.md) lists it. The name and the mark are not part of the
+  licence grant; see [TRADEMARK.md](TRADEMARK.md).
