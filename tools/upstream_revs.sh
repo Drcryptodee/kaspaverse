@@ -113,6 +113,30 @@ PY
   then echo "  ok   --record round-trip: previous kept the planted value"
   else echo "  FAIL --record round-trip: previous.head.sha missing or wrong"; fails=$((fails+1)); fi
   run "--sweep-table renders the §0a rows"          '^\| `kaspanet/silverscript` \| master' 0 "$R" "$work/fx" --sweep-table
+  # consensus-auditor 2026-09-10: T-A is a STABLE tagged release we are not on; T-D reads the TAG's manifest.
+  cp -R "$work/fx" "$work/fx-rc"
+  python3 - "$work/fx-rc/rusty-kaspa.releases.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d[0] = {"tag_name": "v1.3.0-toc.5", "prerelease": True, "published_at": "2026-06-03T13:34:34Z"}; json.dump(d, open(p, "w"))
+PY
+  PIN_OVERRIDE=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+  run "T-A ignores a pre-release release"           'T-A not fired: rusty-kaspa newest release v1\.3\.0-toc\.5 is a pre-release' 1 "$R" "$work/fx-rc" --sweep-table
+  cp -R "$work/fx" "$work/fx-rel"
+  python3 - "$work/fx-rel/rusty-kaspa.releases.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d[0] = {"tag_name": "v2.0.0", "prerelease": False, "published_at": "2026-06-05T12:09:13Z"}; json.dump(d, open(p, "w"))
+PY
+  PIN_OVERRIDE=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+  run "T-A resolves a stable release below the top tag" 'T-A FIRED: rusty-kaspa newest release v2\.0\.0 @ 90dbf07 ≠ pin deadbee' 1 "$R" "$work/fx-rel" --sweep-table
+  unset PIN_OVERRIDE
+  cp -R "$work/fx" "$work/fx-tag"
+  cp "$work/fx-tag/silverscript.manifest.toml" "$work/fx-tag/silverscript.tag.manifest.toml"
+  sed -i 's/a41a333b08848f41bf737b72592e463a6011b8ac/1111111111111111111111111111111111111111/g' "$work/fx-tag/silverscript.manifest.toml"
+  python3 - "$work/fx-tag/silverscript.head.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["sha"] = "0" * 40; json.dump(d, open(p, "w"))
+PY
+  run "T-D reads the tag's manifest when master moved past the tag" 'T-D FIRED: silverscript v1\.0\.0 \(stable\) pins rusty-kaspa a41a333 ≠ pin cfafeb4' 1 "$R" "$work/fx-tag"
   rm -rf "$work"
   if [ "$fails" = 0 ]; then echo "upstream revs selftest: PASS ($rows rows)"; return 0; fi
   echo "upstream revs selftest: $fails of $rows FAILED"; return 1
@@ -173,7 +197,13 @@ while read -r name repo branch feats; do
   case ",$feats," in *,manifest,*)
     sha=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sha"])' "$TMP/$name.head.json" 2>/dev/null || true)
     # Raw content at the sha just observed: no race with a push, and not an API call.
-    [ -n "$sha" ] && fetch "$name.manifest.toml" "https://raw.githubusercontent.com/$repo/$sha/Cargo.toml" ;;
+    [ -n "$sha" ] && fetch "$name.manifest.toml" "https://raw.githubusercontent.com/$repo/$sha/Cargo.toml"
+    # T-D reads what the RELEASE pins: when master has moved past the top tag, fetch the tag's
+    # manifest too (consensus-auditor, 2026-09-10). The natural-sort top tag is the .py's call.
+    if [ -f "$TMP/$name.tags.json" ]; then
+      tsha=$(PYTHONDONTWRITEBYTECODE=1 python3 -c 'import json,sys; sys.path.insert(0, sys.argv[2]); import upstream_revs as u; t = u.top_tag(json.load(open(sys.argv[1]))); print(t["sha"] if t and t.get("sha") else "")' "$TMP/$name.tags.json" "$ROOT/tools" 2>/dev/null || true)
+      [ -n "$tsha" ] && [ "$tsha" != "$sha" ] && fetch "$name.tag.manifest.toml" "https://raw.githubusercontent.com/$repo/$tsha/Cargo.toml"
+    fi ;;
   esac
   case ",$feats," in *,branch=*) b=${feats##*branch=}; b=${b%%,*}; fetch "$name.$b.json" "$API/repos/$repo/commits/$b" ;; esac
 done <<< "$SOURCES"

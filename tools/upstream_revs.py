@@ -105,16 +105,23 @@ def observe():
         src["head"] = {"branch": branch, "sha": head["sha"], "date": commit.get("committer", {}).get("date")}
         if opts.get("tree"):
             src["head"]["tree"] = commit.get("tree", {}).get("sha")
+        tags = load(f"{name}.tags.json") if (opts.get("tags") or opts.get("releases")) else None
         if opts.get("tags"):
-            tags = load(f"{name}.tags.json")
             src["top_tag"] = top_tag(tags) if isinstance(tags, list) else None
         if opts.get("releases"):
             rel = load(f"{name}.releases.json")
             r0 = rel[0] if isinstance(rel, list) and rel else None
-            src["top_release"] = ({"tag": r0.get("tag_name"), "sha": None, "prerelease": bool(r0.get("prerelease")),
-                                   "published_at": r0.get("published_at")} if r0 else None)
-            if src["top_release"] and src.get("top_tag") and src["top_tag"]["name"] == src["top_release"]["tag"]:
-                src["top_release"]["sha"] = src["top_tag"]["sha"]
+            if r0:
+                # The release's sha is looked up by tag NAME across the tags page, not only when it
+                # happens to be the natural-sort top tag: a stable v2.0.2 beneath a v2.1.0-rc1 tag
+                # must still resolve (consensus-auditor, 2026-09-10). `stable` = no suffix.
+                tag_name = r0.get("tag_name")
+                by_name = {t.get("name"): (t.get("commit") or {}).get("sha") for t in (tags if isinstance(tags, list) else [])}
+                k = tag_key(tag_name)
+                src["top_release"] = {"tag": tag_name, "sha": by_name.get(tag_name), "prerelease": bool(r0.get("prerelease")),
+                                      "stable": bool(k and k[3] == 1), "published_at": r0.get("published_at")}
+            else:
+                src["top_release"] = None
         if opts.get("branches"):
             src["branches"] = {}
             for b in opts["branches"]:
@@ -125,6 +132,17 @@ def observe():
             p = os.path.join(REPLY_DIR, f"{name}.manifest.toml")
             text = open(p, encoding="utf-8").read() if os.path.isfile(p) else ""
             src["manifest"] = {"path": "Cargo.toml", "at": head["sha"], **manifest_revs(text)}
+            # T-D is about what the RELEASE pins (D-183: "the toolchain releases pinned to a rev"), so
+            # when master has moved past the top tag the tag's own manifest is read, not master's
+            # (consensus-auditor, 2026-09-10). The shell half fetches it as <name>.tag.manifest.toml.
+            tt = src.get("top_tag")
+            if tt and tt.get("sha"):
+                if tt["sha"] == head["sha"]:
+                    tt["manifest"] = {"at": head["sha"], "same_as_head": True, **manifest_revs(text)}
+                else:
+                    tp = os.path.join(REPLY_DIR, f"{name}.tag.manifest.toml")
+                    ttext = open(tp, encoding="utf-8").read() if os.path.isfile(tp) else ""
+                    tt["manifest"] = ({"at": tt["sha"], "same_as_head": False, **manifest_revs(ttext)} if ttext else None)
         if name == "kccs":
             src["blobs"] = {"probe": "tools/kcc_freshness.sh", "last_line": KCC_LINE or "(probe not run)",
                             "drift": KCC_EXIT not in ("", "0")}
@@ -168,22 +186,39 @@ def compare(record, obs):
 def triggers(obs, record):
     """D-183 T-A / T-D, evaluated mechanically. Returns [(name, fired, line)]."""
     out = []
+    # T-A (D-183): a TAGGED STABLE release we are not on — pre-releases (rusty-kaspa publishes rcs
+    # as GitHub releases) never fire it; an unresolvable release tag is said, not skipped.
     rk = obs.get("rusty-kaspa", {})
     rel = rk.get("top_release") or {}
-    if rel.get("sha") and OUR_PIN:
-        fired = rel["sha"] != OUR_PIN
-        cond = f"{rel.get('tag')}:{short(rel.get('sha'))}"
-        out.append(("T-A", fired, cond,
-                    f"rusty-kaspa newest release {rel.get('tag')} @ {short(rel.get('sha'))} ≠ pin {short(OUR_PIN)} — D-183: steward + consensus packet; the bump is the founder's"
-                    if fired else f"rusty-kaspa newest release {rel.get('tag')} = pin"))
+    if rel.get("tag") and OUR_PIN:
+        if rel.get("prerelease") or not rel.get("stable"):
+            out.append(("T-A", False, f"{rel['tag']}:pre",
+                        f"rusty-kaspa newest release {rel['tag']} is a pre-release — D-183 T-A waits for a stable tag"))
+        elif not rel.get("sha"):
+            out.append(("T-A", False, f"{rel['tag']}:unresolved",
+                        f"rusty-kaspa newest release {rel['tag']} has no matching tag in the first 100 tags — T-A unevaluated"))
+        else:
+            fired = rel["sha"] != OUR_PIN
+            cond = f"{rel['tag']}:{short(rel['sha'])}"
+            out.append(("T-A", fired, cond,
+                        f"rusty-kaspa newest release {rel['tag']} @ {short(rel['sha'])} ≠ pin {short(OUR_PIN)} — D-183: steward + consensus packet; the bump is the founder's"
+                        if fired else f"rusty-kaspa newest release {rel['tag']} = pin"))
+    # T-D (D-183): the canonical toolchain RELEASES pinned to a rev — read at the tag, never at master.
     ss = obs.get("silverscript", {})
-    tag, man = ss.get("top_tag") or {}, ss.get("manifest") or {}
-    if tag.get("name") and man.get("rusty_kaspa") and OUR_PIN:
-        fired = bool(tag.get("stable")) and man["rusty_kaspa"] != OUR_PIN
-        cond = f"{tag.get('name')}:{short(man.get('rusty_kaspa'))}"
-        out.append(("T-D", fired, cond,
-                    f"silverscript {tag['name']} (stable) pins rusty-kaspa {short(man['rusty_kaspa'])} ≠ pin {short(OUR_PIN)} — D-183 T-D packet; the bump is the founder's"
-                    if fired else f"silverscript {tag['name']} ({'stable' if tag.get('stable') else 'pre-release'}) pins rusty-kaspa {short(man['rusty_kaspa'])}"))
+    tag = ss.get("top_tag") or {}
+    tm = tag.get("manifest")
+    if tag.get("name") and OUR_PIN:
+        if tm is None and tag.get("sha") and (ss.get("head") or {}).get("sha") != tag.get("sha"):
+            out.append(("T-D", False, f"{tag['name']}:unresolved",
+                        f"silverscript {tag['name']}'s manifest at the tag was not fetched — T-D unevaluated"))
+        else:
+            man = tm or ss.get("manifest") or {}
+            if man.get("rusty_kaspa"):
+                fired = bool(tag.get("stable")) and man["rusty_kaspa"] != OUR_PIN
+                cond = f"{tag['name']}:{short(man['rusty_kaspa'])}"
+                out.append(("T-D", fired, cond,
+                            f"silverscript {tag['name']} (stable) pins rusty-kaspa {short(man['rusty_kaspa'])} ≠ pin {short(OUR_PIN)} — D-183 T-D packet; the bump is the founder's"
+                            if fired else f"silverscript {tag['name']} ({'stable' if tag.get('stable') else 'pre-release'}) pins rusty-kaspa {short(man['rusty_kaspa'])}"))
     ack = ((record or {}).get("triggers") or {})
     lines = []
     for name, fired, cond, text in out:
