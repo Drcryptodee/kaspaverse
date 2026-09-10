@@ -4,7 +4,8 @@
 # The record is written for readers and stays discursive; what rots first is the handful
 # of facts restated where a session reads them at open: ledger ids, the gate count in the
 # baton, the playbook count in the router, the freshness register's coverage, the active
-# phase, a lesson's declared destination, the upstream record's idea of our own pin. Each
+# phase, a lesson's declared destination, the upstream record's idea of our own pin, the
+# session index's row numbers. Each
 # check is exact, offline and cheap (tools/drift_census.py holds them, one function each).
 #
 #   tools/drift_census.sh            advisory: the strict checks plus what has merely aged
@@ -75,6 +76,19 @@ open(p, "w").write(re.sub(r"(## Paste this next\s+`)[^`]+`", r"\g<1>docs/session
 PY
   run "C8 the baton points at a missing prompt"       'C8 NEXT_SESSION.md points at docs/sessions/nope_PROMPT.md' 1 "$work/c8"  # gate-allow:internal-path — gate-allow:dangling-path — the planted missing prompt the row expects, meant not to resolve
   rm -rf "$work"
+  scaffold "$work/c9";     python3 - "$work/c9/docs/sessions/INDEX.md" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+rows = "| 9999 | 2026-01-01 | **ZZ-A** — first claim | a |\n| 9999 | 2026-01-02 | **ZZ-B** — second claim | b |\n\n"
+open(p, "w").write(re.sub(r"^## §2 ", lambda m: rows + m.group(0), s, count=1, flags=re.M))
+PY
+  run "C9 two sittings claim the same index row"      'C9 sessions/INDEX.md claims row 9999 twice \(ZZ-A and ZZ-B\)' 1 "$work/c9"
+  scaffold "$work/c9b";    python3 - "$work/c9b/docs/sessions/INDEX.md" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+open(p, "w").write(re.sub(r"^## §2 ", lambda m: "| 5 | 2026-01-01 | **ZZ-C** — late and low | c |\n\n" + m.group(0), s, count=1, flags=re.M))
+PY
+  run "C9 an index row numbered below its predecessor" 'C9 sessions/INDEX.md rows are out of order at row 5' 1 "$work/c9b"
   if [ "$fails" = 0 ]; then echo "drift census selftest: PASS ($rows rows)"; return 0; fi
   echo "drift census selftest: $fails of $rows FAILED"; return 1
 }

@@ -35,6 +35,7 @@ FALLBACK_LANES = {"rust workspace", "flutter app"}
 STALE_DAYS = 21
 RECORD_STALE_DAYS = 7
 LESSON_DESTINATION_FROM = 206  # rows from this id on carry a destination that must cite the id
+TOTAL_CHECKS = 9  # C1…C9; the clean line reports this minus the checks a public clone skips
 
 fails, notes = [], []
 
@@ -199,6 +200,33 @@ def c8_baton():
         fail("C8 NEXT_SESSION.md carries no `Suggested model & effort` line (update-context §10a)")
 
 
+# ── C9 session index: a chronology row number is claimed once, and the rows rise ─────────
+def c9_session_index_rows():
+    idx = read("docs", "sessions", "INDEX.md")
+    if idx is None:
+        return note("C9 skipped: docs/sessions/INDEX.md absent (public clone)")  # gate-allow:internal-path — the census reads the record; naming its files is its job
+    # §1 is the chronology table and the only numbered one; §2 is the file map. Two sittings
+    # that wrap in one tree read the same last row and both write N+1 (L214, one register
+    # over from the ledger C1 counts).
+    m = re.search(r"^## §1 .*?(?=^## §2 |\Z)", idx, flags=re.M | re.S)
+    body = m.group(0) if m else idx
+    rows = []
+    for r in re.finditer(r"^\| (\d+) \| ([^|]*) \|(.*)$", body, flags=re.M):
+        nm = re.search(r"\*\*([^*]+)\*\*", r.group(3))
+        rows.append((int(r.group(1)), nm.group(1).strip() if nm else r.group(2).strip()))
+    seen = {}
+    for n, name in rows:
+        if n in seen:
+            fail(f"C9 sessions/INDEX.md claims row {n} twice ({seen[n]} and {name}) — two sittings read the same tail; the later writer renumbers")
+        else:
+            seen[n] = name
+    nums = [n for n, _ in rows]
+    for i in range(1, len(nums)):
+        if nums[i] < nums[i - 1]:
+            fail(f"C9 sessions/INDEX.md rows are out of order at row {nums[i]} (after {nums[i - 1]})")
+            break
+
+
 # ── Advisory: what has merely aged ───────────────────────────────────────────────────────
 def a1_freshness_age():
     fr = read("docs", "research", "FRESHNESS.md")
@@ -267,7 +295,7 @@ def a5_recent_supersessions():
 
 def main():
     c1_ledger_ids(); c2_freshness_coverage(); c3_next_session_gate_count(); c4_playbook_count()
-    c5_active_phase(); c6_lesson_destinations(); rec = c7_record_pin(); c8_baton()
+    c5_active_phase(); c6_lesson_destinations(); rec = c7_record_pin(); c8_baton(); c9_session_index_rows()
     if not GATE:
         a1_freshness_age(); a2_pending_prompts(); a3_record_age(rec); a5_recent_supersessions()
     if fails:
@@ -275,7 +303,7 @@ def main():
         for f in fails:
             print(f"  FAIL {f}")
     else:
-        print(f"DRIFT clean: the living pointers agree ({8 - sum(1 for n in notes if n.startswith('C') and 'skipped' in n)} checks)")
+        print(f"DRIFT clean: the living pointers agree ({TOTAL_CHECKS - sum(1 for n in notes if n.startswith('C') and 'skipped' in n)} checks)")
     for n in notes:
         print(f"  {'skip' if 'skipped' in n else 'note'} {n}")
     return 1 if fails else 0
