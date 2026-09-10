@@ -2651,6 +2651,12 @@ fn dropped(kind: &str, txid: &str, reason: DropReason, origin: EventOrigin) -> F
                     // would be the eviction weapon this list exists to deny.
                     | DropReason::BlockedContact
                     | DropReason::RevivalBudgetSpent
+                    // The DAG delivers one transaction in several blocks:
+                    // on glass (2026-09-10) the reviving message was seen
+                    // six times in 1.3 s, and five of those were the
+                    // already-parked refusal. The park itself says so once,
+                    // at info, in `revive_or_drop`.
+                    | DropReason::SenderPending
             ))
         || reason == DropReason::DismissedInvitation;
     if routine {
@@ -3007,6 +3013,9 @@ fn revive_or_drop(
         tracker.note_sender_interest(txid);
     }
     schedule_sender_locate(txid.to_string(), alias, block_hash.map(str::to_string));
+    // Once, here — the re-deliveries the DAG will send next are refused
+    // before the decrypt and stay quiet.
+    log::info!("transport-intake: unroutable comm tx={txid} sealed to us — parked, awaiting sender (D-307)");
     dropped(COMM, txid, DropReason::SenderPending, origin)
 }
 
