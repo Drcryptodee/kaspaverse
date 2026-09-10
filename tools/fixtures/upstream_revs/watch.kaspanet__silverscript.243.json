@@ -1,0 +1,7 @@
+{
+ "html_url": "https://github.com/kaspanet/silverscript/issues/243",
+ "merged_at": null,
+ "number": 243,
+ "state": "open",
+ "title": "Compiled artifact carries no compute-budget estimate; required commitment is discoverable only by node rejection"
+}

@@ -160,6 +160,16 @@ if [ "$HAVE_DOCS" = 1 ] && [ -x tools/upstream_revs.sh ] && [ "${KASPAVERSE_UPST
   UP_OUT="$(timeout 90 bash tools/upstream_revs.sh 2>/dev/null || true)"
   [ -n "$UP_OUT" ] && printf '%s\n' "$UP_OUT" | sed '1s/^UPSTREAM /• upstream: /; 2,$s/^UPSTREAM /    /'
 fi
+# Drift census (D-317): do the living pointers still agree with what they restate — ledger
+# ids claimed once, one freshness row per research doc, the baton's gate count, the router's
+# playbook count, one active phase, lesson destinations that cite their lesson, the upstream
+# record's idea of our pin — plus what has merely AGED (freshness rows, pending prompts,
+# unpropagated decisions). Offline, exact, a second or two. The strict subset is also a gate
+# lane; here it is advisory so a session opens knowing what rotted while nobody was looking.
+if [ "$HAVE_DOCS" = 1 ] && [ -x tools/drift_census.sh ]; then
+  DC_OUT="$(bash tools/drift_census.sh 2>/dev/null || true)"
+  [ -n "$DC_OUT" ] && printf '%s\n' "$DC_OUT" | sed '1s/^DRIFT /• drift:    /; 2,$s/^/  /'
+fi
 # Disk headroom. Build caches here are pure REGENERABLE artifact — `rust/target` reached
 # 62 GB and `build/` 24 GB by 2026-08-29, and a full clean of both returned 86 GB in 11 s —
 # so running out of space is a self-inflicted wound, and it already cost one session

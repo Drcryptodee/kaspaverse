@@ -125,6 +125,7 @@ expect_lane "section-anchor resolution (Group U-2)"
 expect_lane "internal-record boundary (D-102)"
 expect_lane "internal-record pointers (D-102 / L88)"
 expect_lane "repo-path resolution (L88 / F48)"
+expect_lane "drift census (living pointers)"
 
 # ── Rust workspace ──────────────────────────────────────────────
 if [ -f "$ROOT/rust/Cargo.toml" ]; then
@@ -1552,6 +1553,28 @@ repo_path_targets() {
   return $bad
 }
 run_check "repo-path resolution (L88 / F48)" repo_path_targets
+
+# ── Drift census (D-317, 2026-09-10): do the LIVING pointers still agree with what they restate? ──
+#
+# The record is discursive on purpose and stays that way; what rots first is the handful of
+# facts restated where a session reads them at open. tools/drift_census.py holds one exact,
+# offline check per fact: a D-/L-number claimed once (two sittings took D-282 and D-283 on
+# the same day), one FRESHNESS row per research doc (a moved-in doc went four days without
+# one), the gate count the baton tells the next session to expect, the router's playbook
+# count, exactly one active phase named by the index, a lesson's declared destination
+# actually citing the lesson (three declared destinations were unbuilt on 2026-09-10), the
+# upstream record's idea of our pin, and the baton's target existing. In a public clone every
+# record-dependent check reports `skip` and the lane stays green: the record is absent there
+# by design (D-102), not stale. Advisory ageing (freshness rows, pending prompts) lives in
+# the same tool but only prints from preflight — age is a nudge, never a red.
+drift_census_lane() {
+  [ -x "$ROOT/tools/drift_census.sh" ] || { echo "   tools/drift_census.sh missing or not executable — failing closed"; return 1; }
+  local out rc
+  out="$(bash "$ROOT/tools/drift_census.sh" --gate 2>&1)"; rc=$?
+  printf '%s\n' "$out" | sed 's/^/   /'
+  return "$rc"
+}
+run_check "drift census (living pointers)" drift_census_lane
 
 # ── §-anchor resolution (Group U-2; the L78 prescription, built) ──────────────
 # The repo-path lane above proves a named FILE exists. This one proves the SECTION

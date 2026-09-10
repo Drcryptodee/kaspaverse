@@ -24,6 +24,7 @@
 #   tools/upstream_revs.sh --sweep-table     the kas-smiths-intake §0a markdown table + trigger footer
 #   tools/upstream_revs.sh --print           the live observation as JSON
 #   tools/upstream_revs.sh --manifest-revs F rusty-kaspa / silverscript `rev =` pins from a Cargo.toml
+#   tools/upstream_revs.sh --watch-add owner/repo N [pull|issue]   watch an upstream PR/issue our triggers name
 #   tools/upstream_revs.sh --selftest        the mutation table, offline, from tools/fixtures/upstream_revs/
 #   tools/upstream_revs.sh --from-fixture D  read API replies from D instead of the network
 #   tools/upstream_revs.sh --capture-fixture D  observe live and write trimmed replies to D
@@ -96,7 +97,13 @@ PY
   PIN_OVERRIDE=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
   run "T-A evaluator (pin ≠ newest release)"        'UPSTREAM T-A FIRED: rusty-kaspa newest release .* ≠ pin deadbee' 0 "$R" "$work/fx"
   unset PIN_OVERRIDE
-  run "T-D evaluator (live negative control)"       'UPSTREAM T-D FIRED: silverscript v[0-9.]+ \(stable\) pins rusty-kaspa [0-9a-f]{7} ≠ pin' 0 "$R" "$work/fx"
+  # the fixture record may carry the live acknowledgement of T-D; these two rows test the LOUD form
+  python3 - "$R" "$work/r-noack.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["triggers"] = {}; json.dump(d, open(sys.argv[2], "w"), indent=1, sort_keys=True)
+PY
+  run "T-D evaluator (live negative control)"       'UPSTREAM T-D FIRED: silverscript v[0-9.]+ \(stable\) pins rusty-kaspa [0-9a-f]{7} ≠ pin' 0 "$work/r-noack.json" "$work/fx"
+  run "T-D acknowledged in the record prints muted" 'UPSTREAM clean' 0 "$R" "$work/fx"
   run "offline"                                     'UPSTREAM SKIP \(network unreachable\)' 0 "$R" "/nonexistent/upstream-fixture"
   cp -R "$work/fx" "$work/fx-rl"; printf '{"resources":{"core":{"remaining":3,"limit":60,"reset":0}}}' > "$work/fx-rl/rate_limit.json"
   run "rate-limited"                                'UPSTREAM SKIP \(rate-limited: 3 remaining' 0 "$R" "$work/fx-rl"
@@ -136,7 +143,20 @@ PY
 import json, sys
 p = sys.argv[1]; d = json.load(open(p)); d["sha"] = "0" * 40; json.dump(d, open(p, "w"))
 PY
-  run "T-D reads the tag's manifest when master moved past the tag" 'T-D FIRED: silverscript v1\.0\.0 \(stable\) pins rusty-kaspa a41a333 ≠ pin cfafeb4' 1 "$R" "$work/fx-tag"
+  run "T-D reads the tag's manifest when master moved past the tag" 'T-D FIRED: silverscript v1\.0\.0 \(stable\) pins rusty-kaspa a41a333 ≠ pin cfafeb4' 1 "$work/r-noack.json" "$work/fx-tag"
+  # the watch list: a watched PR whose state changed is a MOVED (2026-09-10, D-317)
+  python3 - "$R" "$work/rw.json" <<'PY'
+import json, sys
+src, dst = sys.argv[1:3]; d = json.load(open(src))
+w = d.get("watch") or {}
+repo, num = next(((r, n) for r, items in w.items() for n in items), (None, None))
+if repo is None:
+    sys.exit("fixture record carries no watch list — re-capture")
+d["watch"][repo][num]["state"] = "planted-old-state"
+json.dump(d, open(dst, "w"), indent=1, sort_keys=True)
+print(f"{repo}#{num}")
+PY
+  run "a watched PR's state change is a MOVED"       'UPSTREAM WATCH  [a-z-]+/[a-z-]+#[0-9]+ planted-old-state→' 1 "$work/rw.json" "$work/fx"
   rm -rf "$work"
   if [ "$fails" = 0 ]; then echo "upstream revs selftest: PASS ($rows rows)"; return 0; fi
   echo "upstream revs selftest: $fails of $rows FAILED"; return 1
@@ -148,6 +168,7 @@ while [ $# -gt 0 ]; do
     --sweep-table) MODE=sweep ;;
     --print) MODE=print ;;
     --manifest-revs) shift; manifest_revs "$1"; exit $? ;;
+    --watch-add) shift; PYTHONDONTWRITEBYTECODE=1 exec python3 "$PY" --watch-add "$RECORD" "${1:-}" "${2:-}" "${3:-pull}" ;;
     --from-fixture) shift; FIXTURE="$1" ;;
     --capture-fixture) shift; CAPTURE="$1" ;;
     --selftest) selftest; exit $? ;;
@@ -183,13 +204,8 @@ if [ "$REMAIN" -lt 15 ]; then
   echo "UPSTREAM SKIP (rate-limited: $REMAIN remaining, resets $RESET) — record $(rec_stamp) stands"; exit 0
 fi
 
-# ── the sources (the parse side of this list is SOURCES in upstream_revs.py — keep them aligned) ──
-SOURCES='rusty-kaspa kaspanet/rusty-kaspa master tags,releases
-silverscript kaspanet/silverscript master tags,releases,manifest
-argent argent-lang/argent master tags,releases,manifest
-argent-template argent-lang/argent-template master manifest,branch=episode-01
-argent-playground argent-lang/argent-playground master -
-kccs kaspanet/kccs main -'
+# ── the sources: ONE list, SOURCES in upstream_revs.py; the shell asks for the fetch plan ──
+SOURCES="$(PYTHONDONTWRITEBYTECODE=1 python3 "$PY" --plan)" || { echo "UPSTREAM SKIP (tools/upstream_revs.py --plan failed)"; exit 0; }
 while read -r name repo branch feats; do
   fetch "$name.head.json" "$API/repos/$repo/commits/$branch" || continue
   case ",$feats," in *,tags,*)     fetch "$name.tags.json"     "$API/repos/$repo/tags?per_page=100" ;; esac
@@ -207,6 +223,12 @@ while read -r name repo branch feats; do
   esac
   case ",$feats," in *,branch=*) b=${feats##*branch=}; b=${b%%,*}; fetch "$name.$b.json" "$API/repos/$repo/commits/$b" ;; esac
 done <<< "$SOURCES"
+
+# ── the watch list: the upstream PRs and issues our own triggers name (record.watch) ──
+while read -r wrepo wkind wnum; do
+  [ -n "${wrepo:-}" ] || continue
+  fetch "watch.${wrepo//\//__}.$wnum.json" "$API/repos/$wrepo/$wkind/$wnum" || true
+done <<< "$(PYTHONDONTWRITEBYTECODE=1 python3 "$PY" --watch-plan "$RECORD" 2>/dev/null || true)"
 
 # kccs blobs are compared in exactly one place — the pinned table in tools/kcc_freshness.sh.
 KCC_LINE="(fixture mode — probe not run)"; KCC_EXIT=0

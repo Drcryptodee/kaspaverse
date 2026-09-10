@@ -18,6 +18,7 @@ import sys
 
 MODE, REPLY_DIR, RECORD_PATH, OUR_PIN, CAPTURE_DIR, KCC_LINE, KCC_EXIT = (sys.argv + [""] * 8)[1:8]
 NOW = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+WATCH_KINDS = {"pull": "pulls", "issue": "issues"}
 
 # One row per tracked source. `branches` are extra heads recorded beside master; `tags` and
 # `releases` are the top-of-list facts; `manifest` means "parse rusty-kaspa/silverscript rev ="
@@ -150,6 +151,48 @@ def observe():
     return obs
 
 
+def slug(repo):
+    return repo.replace("/", "__")
+
+
+def watch_items(record):
+    """[(repo, number, kind, entry)] from the record's `watch` map — the upstream PRs and
+    issues our own triggers name. Extended by `--watch-add`, never by editing JSON by hand."""
+    out = []
+    for repo, items in ((record or {}).get("watch") or {}).items():
+        for num, entry in (items or {}).items():
+            out.append((repo, str(num), (entry or {}).get("kind", "pull"), entry or {}))
+    return sorted(out)
+
+
+def observe_watch(record):
+    obs = {}
+    for repo, num, kind, entry in watch_items(record):
+        reply = load(f"watch.{slug(repo)}.{num}.json")
+        cur = {"kind": kind, "title": entry.get("title"), "url": entry.get("url")}
+        if isinstance(reply, dict) and "state" in reply:
+            cur["state"] = "merged" if reply.get("merged_at") else reply.get("state")
+            cur["title"] = reply.get("title") or cur["title"]
+            cur["url"] = reply.get("html_url") or cur["url"]
+            cur["observed_at_utc"] = NOW
+        else:
+            cur["state"] = None  # unobserved this run (unreachable / unparseable)
+        obs.setdefault(repo, {})[num] = cur
+    return obs
+
+
+def compare_watch(record, wobs):
+    moved = []
+    for repo, num, kind, entry in watch_items(record):
+        cur = wobs.get(repo, {}).get(num) or {}
+        if cur.get("state") is None:
+            continue
+        old = entry.get("state")
+        if old is not None and old != cur["state"]:
+            moved.append((repo, num, old, cur["state"], cur.get("title") or ""))
+    return moved
+
+
 def get(d, path):
     for part in path.split("."):
         if not isinstance(d, dict):
@@ -254,7 +297,43 @@ def describe(src):
     return " · ".join(parts)
 
 
+def special_modes():
+    """`--plan`, `--watch-plan RECORD`, `--watch-add RECORD REPO N KIND` — the shell half's
+    single source for what to fetch, so the source list lives in exactly one file."""
+    if MODE == "--plan":
+        for name, repo, branch, opts in SOURCES:
+            feats = [k for k in ("tags", "releases", "manifest", "tree") if opts.get(k)]
+            feats += [f"branch={b}" for b in opts.get("branches", [])]
+            print(name, repo, branch, ",".join(feats) or "-")
+        return 0
+    if MODE == "--watch-plan":
+        path = sys.argv[2] if len(sys.argv) > 2 else ""
+        try:
+            rec = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        for repo, num, kind, _e in watch_items(rec):
+            print(repo, WATCH_KINDS.get(kind, "pulls"), num)
+        return 0
+    if MODE == "--watch-add":
+        path, repo, num, kind = (sys.argv + [""] * 6)[2:6]
+        if kind not in WATCH_KINDS or not num.isdigit() or "/" not in repo:
+            print("usage: --watch-add RECORD owner/repo NUMBER pull|issue", file=sys.stderr)
+            return 2
+        rec = json.load(open(path, encoding="utf-8"))
+        rec.setdefault("watch", {}).setdefault(repo, {})[num] = {"kind": kind, "state": None, "added_at_utc": NOW}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, indent=1, sort_keys=True)
+            fh.write("\n")
+        print(f"UPSTREAM watch added {repo}#{num} ({kind}); state is read at the next run")
+        return 0
+    return None
+
+
 def main():
+    rc = special_modes()
+    if rc is not None:
+        return rc
     obs = observe()
     if CAPTURE_DIR:
         os.makedirs(CAPTURE_DIR, exist_ok=True)
@@ -292,6 +371,8 @@ def main():
         return 0
     record = record or {"sources": {}}
     moved = {} if fresh else compare(record, obs)
+    wobs = observe_watch(record)
+    wmoved = [] if fresh else compare_watch(record, wobs)
     rec_at = record.get("recorded_at_utc", "none")
 
     if MODE == "sweep":
@@ -315,15 +396,22 @@ def main():
         print("| kas-smiths.org | not polled — founder-curated (D-243 item 6, `kas-smiths-intake` §0a rule 5) | — | — | — |")
         print()
         print(" · ".join(l.replace("UPSTREAM ", "") for _n, _f, l in trig_lines) or "no trigger evaluated")
-        return 1 if moved else 0
+        wl = [f"{repo}#{num} {cur.get('state') or 'unobserved'}" + (" **(moved)**" if any(m[0] == repo and m[1] == num for m in wmoved) else "")
+              for repo, items in sorted(wobs.items()) for num, cur in sorted(items.items(), key=lambda kv: int(kv[0]))]
+        if wl:
+            print("Watched: " + " · ".join(wl))
+        return 1 if (moved or wmoved) else 0
 
     # compare / record
     exit_code = 0
-    if moved:
+    if moved or wmoved:
         exit_code = 1
-        print(f"UPSTREAM {len(moved)} MOVED ({', '.join(moved)}) at {NOW} vs record {rec_at} → run the upstream-rediff skill")
+        what = list(moved) + [f"{r}#{n}" for r, n, _o, _s, _t in wmoved]
+        print(f"UPSTREAM {len(what)} MOVED ({', '.join(what)}) at {NOW} vs record {rec_at} → run the upstream-rediff skill")
         for name, rows in moved.items():
             print(f"UPSTREAM MOVED  {name}  " + " · ".join(f"{f} {short(o)}→{short(n)}" + (" (stable)" if f == "top_tag.name" and get(obs[name], 'top_tag.stable') else "") for f, o, n in rows))
+        for repo, num, old, new, title in wmoved:
+            print(f"UPSTREAM WATCH  {repo}#{num} {old}→{new}  {title}".rstrip())
     for name in skipped:
         print(f"UPSTREAM SKIP {name} ({obs[name]['skip']})")
     for _n, _f, line in trig_lines:
@@ -355,6 +443,15 @@ def main():
             if name in moved:
                 entry["previous"] = {"recorded_at_utc": rec_at, **{f: o for f, o, _n in moved[name]}}
             new["sources"][name] = entry
+        new["watch"] = {}
+        for repo, num, kind, entry in watch_items(record):
+            cur = wobs.get(repo, {}).get(num) or {}
+            keep = dict(entry)
+            if cur.get("state") is not None:
+                keep.update({"kind": kind, "state": cur["state"], "title": cur.get("title"), "url": cur.get("url"), "observed_at_utc": NOW})
+                if entry.get("state") not in (None, cur["state"]):
+                    keep["previous"] = {"state": entry.get("state"), "recorded_at_utc": rec_at}
+            new["watch"].setdefault(repo, {})[num] = keep
         os.makedirs(os.path.dirname(RECORD_PATH) or ".", exist_ok=True)
         with open(RECORD_PATH, "w", encoding="utf-8") as fh:
             json.dump(new, fh, indent=1, sort_keys=True)
@@ -373,6 +470,8 @@ def trim(fn, data):
         return [{"name": t.get("name"), "commit": {"sha": (t.get("commit") or {}).get("sha")}} for t in data]
     if fn.endswith(".releases.json") and isinstance(data, list):
         return [{"tag_name": r.get("tag_name"), "prerelease": r.get("prerelease"), "published_at": r.get("published_at")} for r in data]
+    if fn.startswith("watch.") and isinstance(data, dict):
+        return {k: data.get(k) for k in ("number", "state", "merged_at", "title", "html_url")}
     if isinstance(data, dict) and "sha" in data:
         c = data.get("commit") or {}
         return {"sha": data["sha"], "commit": {"committer": {"date": (c.get("committer") or {}).get("date")},

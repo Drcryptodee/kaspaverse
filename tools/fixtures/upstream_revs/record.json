@@ -6,7 +6,7 @@
   "read_from": "rust/Cargo.toml",
   "rusty_kaspa": "cfafeb4c093fa37a303f1b9f19c58f986b870ce3"
  },
- "recorded_at_utc": "2026-09-09T21:32:04Z",
+ "recorded_at_utc": "2026-09-10T03:32:58Z",
  "recorded_by": "tools/upstream_revs.sh --record",
  "schema": 1,
  "sources": {
@@ -22,7 +22,7 @@
     "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
     "silverscript": "c7d17a15ac88610d013ec9ffffa9520aeb69929b"
    },
-   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "observed_at_utc": "2026-09-10T03:32:58Z",
    "repo": "argent-lang/argent",
    "top_release": null,
    "top_tag": null
@@ -33,7 +33,7 @@
     "date": "2026-09-02T11:00:44Z",
     "sha": "566b76e21de39afd68fdf133329fbf19c5c0f334"
    },
-   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "observed_at_utc": "2026-09-10T03:32:58Z",
    "repo": "argent-lang/argent-playground"
   },
   "argent-template": {
@@ -54,7 +54,7 @@
     "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
     "silverscript": null
    },
-   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "observed_at_utc": "2026-09-10T03:32:58Z",
    "repo": "argent-lang/argent-template"
   },
   "kccs": {
@@ -69,7 +69,7 @@
     "sha": "54f4f9c2730f77ec5b1ee8bc746d7f94d83b8ee6",
     "tree": "cf0bc744d3a29b6b39144079a3d9fa51734b6743"
    },
-   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "observed_at_utc": "2026-09-10T03:32:58Z",
    "repo": "kaspanet/kccs"
   },
   "rusty-kaspa": {
@@ -78,12 +78,13 @@
     "date": "2026-08-24T02:24:54Z",
     "sha": "c338d495bec29e4dc8b5149f99e8db6fa916ed4a"
    },
-   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "observed_at_utc": "2026-09-10T03:32:58Z",
    "repo": "kaspanet/rusty-kaspa",
    "top_release": {
     "prerelease": false,
     "published_at": "2026-06-15T19:14:22Z",
     "sha": "cfafeb4c093fa37a303f1b9f19c58f986b870ce3",
+    "stable": true,
     "tag": "v2.0.1"
    },
    "top_tag": {
@@ -105,15 +106,22 @@
     "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
     "silverscript": null
    },
-   "observed_at_utc": "2026-09-09T21:32:04Z",
+   "observed_at_utc": "2026-09-10T03:32:58Z",
    "repo": "kaspanet/silverscript",
    "top_release": {
     "prerelease": false,
     "published_at": "2026-09-09T16:48:31Z",
     "sha": "3ed973335b59269293564805cc2c58a14595ec03",
+    "stable": true,
     "tag": "v1.0.0"
    },
    "top_tag": {
+    "manifest": {
+     "at": "3ed973335b59269293564805cc2c58a14595ec03",
+     "rusty_kaspa": "a41a333b08848f41bf737b72592e463a6011b8ac",
+     "same_as_head": true,
+     "silverscript": null
+    },
     "name": "v1.0.0",
     "sha": "3ed973335b59269293564805cc2c58a14595ec03",
     "stable": true,
@@ -123,8 +131,83 @@
  },
  "triggers": {
   "T-D": {
+   "acknowledged": "D-314 (HELD \u2014 packet filed 2026-09-09; the bump is the founder's on a tagged release)",
    "condition": "v1.0.0:a41a333",
-   "fired_at": "2026-09-09T21:32:04Z"
+   "fired_at": "2026-09-09T21:31:02Z"
+  }
+ },
+ "watch": {
+  "argent-lang/argent": {
+   "57": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "issue",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "Launch proofs: four verification rules from a downstream implementation",
+    "url": "https://github.com/argent-lang/argent/issues/57"
+   },
+   "60": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "pull",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "Formalize leader and delegate group security",
+    "url": "https://github.com/argent-lang/argent/pull/60"
+   }
+  },
+  "kaspanet/kccs": {
+   "20": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "pull",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "KCC-0020: first-cut conformance vectors",
+    "url": "https://github.com/kaspanet/kccs/pull/20"
+   },
+   "23": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "pull",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "KCC-2: add p2pk-ecdsa schemes (0x05/0x06)",
+    "url": "https://github.com/kaspanet/kccs/pull/23"
+   },
+   "4": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "pull",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "KCC-0402: Covenant Payment Channels",
+    "url": "https://github.com/kaspanet/kccs/pull/4"
+   },
+   "6": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "pull",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "KCC-0021: Covenant Token Metadata Specification",
+    "url": "https://github.com/kaspanet/kccs/pull/6"
+   }
+  },
+  "kaspanet/rusty-kaspa": {
+   "1074": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "pull",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "compute commit, mass calculation and generator fixes",
+    "url": "https://github.com/kaspanet/rusty-kaspa/pull/1074"
+   }
+  },
+  "kaspanet/silverscript": {
+   "243": {
+    "added_at_utc": "2026-09-10T03:32:32Z",
+    "kind": "issue",
+    "observed_at_utc": "2026-09-10T03:32:58Z",
+    "state": "open",
+    "title": "Compiled artifact carries no compute-budget estimate; required commitment is discoverable only by node rejection",
+    "url": "https://github.com/kaspanet/silverscript/issues/243"
+   }
   }
  }
 }
