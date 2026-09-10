@@ -1077,6 +1077,25 @@ void main() {
       expect(written, startsWith('kaspa:'));
     });
 
+    testWidgets('a named contact is edited, an unnamed address is saved', (
+      tester,
+    ) async {
+      // Founder, 2026-09-10: a stored contact read *Save this contact* as if
+      // it had no name. The verb names what the tap does.
+      MessagingService.conversationsFn = () async => [
+        conversation('c1', contactName: 'Mara'),
+      ];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+      await tester.longPress(_row('Mara'));
+      await tester.pumpAndSettle();
+      expect(find.text('Edit this contact'), findsOneWidget);
+      expect(find.text('Save this contact'), findsNothing);
+    });
+
     testWidgets('an invitation has no address, so it cannot be named yet', (
       tester,
     ) async {

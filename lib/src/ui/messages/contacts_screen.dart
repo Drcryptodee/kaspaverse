@@ -233,6 +233,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           label: contactLabel(conversation),
           bond: _bond,
           canName: conversation.contactAddress.isNotEmpty,
+          named: conversation.contactName?.isNotEmpty ?? false,
           // A block is keyed on the address (D-308); a request whose sender
           // the node has not named yet has nothing to key it on, and an
           // already-blocked one has nothing left to block.
@@ -736,6 +737,7 @@ class _RowActionsSheet extends StatelessWidget {
     required this.bond,
     this.canClear = true,
     this.canBlock = false,
+    this.named = false,
   });
 
   final String label;
@@ -743,6 +745,11 @@ class _RowActionsSheet extends StatelessWidget {
   /// An invitation carries no address until its sender is recorded, and a
   /// name is keyed on the address — so there is nothing to name yet.
   final bool canName;
+
+  /// Whether the address already carries a name — the row then offers to
+  /// EDIT it, not to save it (founder, 2026-09-10: a stored contact read
+  /// *Save this contact* as if it were not).
+  final bool named;
 
   /// Same key, same reason (D-308): a block is on the address.
   final bool canBlock;
@@ -778,8 +785,12 @@ class _RowActionsSheet extends StatelessWidget {
               ground: KvColor.chip,
               titleLines: 2,
               leading: const KvRowDisc.neutral(mark: KvGlyph.identity),
-              title: 'Save this contact',
-              sub: 'Shown only on this device',
+              // The verb says what the tap does: a named contact is edited,
+              // an unnamed address is saved (founder, 2026-09-10).
+              title: named ? 'Edit this contact' : 'Save this contact',
+              sub: named
+                  ? 'Rename, or clear the name'
+                  : 'Shown only on this device',
               trailing: const KvGlyphIcon(
                 KvGlyph.chevron,
                 size: 20,
