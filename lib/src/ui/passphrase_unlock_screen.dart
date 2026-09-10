@@ -8,7 +8,9 @@ import 'secret/secret_byte_buffer.dart';
 import 'secret/secret_keyboard.dart';
 import 'secret/secret_screen_guard.dart';
 import 'error_text.dart';
+import 'theme/kv_window.dart';
 import 'theme/tokens.dart';
+import 'widgets/kv_ceremony_page.dart';
 import 'widgets/kv_chrome.dart';
 import 'widgets/kv_keypad.dart';
 
@@ -178,95 +180,104 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
         : 'That passphrase did not unlock the vault. Your funds are safe — try again.';
   }
 
+  bool get _short => KvWindow.of(context).heightClass == KvHeightClass.short;
+
+  Widget _commitPill() => KvAction(
+    label: 'Unlock',
+    primary: true,
+    onTap: _submit,
+    disabledReason: _busy ? 'Unlocking\u2026' : null,
+  );
+
+  Widget _switchAction() =>
+      KvTextAction(label: _padSwitchLabel, onTap: _busy ? null : _switchPad);
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return SecretScreenGuard(
       title: _isPin ? 'your PIN' : 'your passphrase',
       setSecure: widget.setSecure,
       checkAccessibility: widget.checkAccessibility,
-      child: Scaffold(
-        appBar: AppBar(title: const Text('Unlock vault')),
-        body: SafeArea(
-          child: Column(
-            children: [
-              Expanded(
-                // **A scroll escape, because the inner column had none.**
-                // Framed for the first time at UX-R6 — this screen was
-                // re-toned by two changes that sitting made under it
-                // (`CeremonyMark`'s ground and the secret keypad's bed), and a
-                // re-tone with no picture is a re-tone nobody looked at. The
-                // 915 × 412 frame overflowed by 50 dp, pre-existing and
-                // invisible until somebody rendered it. `mainAxisSize.min`
-                // keeps the centring the `Expanded` gives it at every
-                // geometry that fits. **The screen itself is R7's** — this is
-                // the overflow only, not its rebuild.
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(KvSpace.gutter),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        _isPin ? 'Enter your PIN' : 'Enter your passphrase',
-                        style: theme.textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: KvSpace.l),
-                      MaskedDots(
-                        length: _buffer.length,
-                        slots: _isPin ? _pinLength : null,
-                      ),
-                      const SizedBox(height: KvSpace.l),
-                      // The PIN path unlocks itself on the sixth digit, so it
-                      // needs no commit; the keyboard path's secret has no
-                      // length the app can infer, so it does.
-                      if (!_isPin)
-                        SizedBox(
-                          width: double.infinity,
-                          child: FilledButton(
-                            onPressed: _busy ? null : _submit,
-                            child: Text(_busy ? 'Unlocking…' : 'Unlock'),
-                          ),
-                        ),
-                      const SizedBox(height: KvSpace.s),
-                      KvTextAction(
-                        label: _padSwitchLabel,
-                        onTap: _busy ? null : _switchPad,
-                      ),
-                      if (_message != null) ...[
-                        const SizedBox(height: KvSpace.m),
-                        Text(
-                          _message!,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: KvColor.textSecondary,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-              if (_isPin)
-                // `O2`'s number pad is drawn inset — see
-                // `create_screen._keypad` for why this one and not the other.
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: KvSpace.gutter,
-                  ),
-                  child: KvKeypad.pin(
-                    onChar: _onPinChar,
-                    onBackspace: _buffer.backspace,
-                  ),
-                )
-              else
-                SecretKeyboard(
-                  onChar: (c) => _buffer.appendChar(c),
+      // **The shared ceremony shape** (UX-R7). This screen used to own an
+      // `AppBar`, a `FilledButton` and `theme.textTheme` — the last corner of
+      // the group still speaking Material — while its two siblings kept the
+      // house page. Three ceremonies with two scaffolds is the drift BG-21
+      // exists to stop, so the scaffold was extracted rather than copied a
+      // third time.
+      child: KvCeremonyPage(
+        bar: KvTopBar(
+          title: 'Unlock',
+          onBack: () => Navigator.of(context).pop(),
+        ),
+        centred: true,
+        // The PIN path unlocks itself on the sixth digit, so it needs no
+        // commit; the keyboard path's secret has no length the app can infer,
+        // so it does.
+        //
+        // **At `short` the pad switch joins the foot.** 412 dp of landscape
+        // less a bar and a pinned keyboard leaves the body ~77 dp, and the
+        // switch — the control that gets a PIN-vault owner onto a keyboard and
+        // back — sat below that fold with nothing saying to scroll. That is
+        // the shape of UX-R6's `O5` BLOCK one screen over. The foot is not
+        // scrolled, so it is the seat that survives the geometry.
+        foot: _short
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (!_isPin) _commitPill(),
+                  Center(child: _switchAction()),
+                ],
+              )
+            : (_isPin ? null : _commitPill()),
+        bleed: _isPin
+            // `O2`'s number pad is drawn inset — see `create_screen._keypad`
+            // for why this one and not the other.
+            ? Padding(
+                padding: const EdgeInsets.symmetric(horizontal: KvSpace.gutter),
+                child: KvKeypad.pin(
+                  onChar: _onPinChar,
                   onBackspace: _buffer.backspace,
                 ),
-            ],
+              )
+            : SecretKeyboard(
+                onChar: (c) => _buffer.appendChar(c),
+                onBackspace: _buffer.backspace,
+              ),
+        children: [
+          Text(
+            _isPin ? 'Enter your PIN' : 'Enter your passphrase',
+            style: KvCeremonyPage.headingStyle(context),
           ),
-        ),
+          const SizedBox(height: KvSpace.l),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: MaskedDots(
+              length: _buffer.length,
+              slots: _isPin ? _pinLength : null,
+            ),
+          ),
+          if (_message != null) ...[
+            const SizedBox(height: KvSpace.m),
+            Text(
+              _message!,
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 15,
+                height: 22 / 15,
+                color: KvColor.inkDim,
+              ),
+            ),
+          ],
+          const SizedBox(height: KvSpace.s),
+          // **Centred, as its two siblings centre it** (BG-21: the identical
+          // control in three ceremonies is one composition). It is also what
+          // keeps `KvTextAction`'s own 8 dp of horizontal padding invisible —
+          // the part sits inside `KvColumn`, which has already applied the
+          // gutter, so left-aligned it drew its label 8 dp inside every other
+          // line on the screen (`ux-auditor`, UX-R7; L195).
+          if (!_short) Center(child: _switchAction()),
+        ],
       ),
     );
   }

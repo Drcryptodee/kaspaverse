@@ -724,6 +724,23 @@ class _Version extends StatelessWidget {
 class KvWalletIdentity extends StatelessWidget {
   const KvWalletIdentity({super.key, required this.name, this.address});
 
+  /// **What this app calls the one wallet it holds** — owned here, in the seat
+  /// that has been painting it since D-260, and read by the locked surface's
+  /// chip rather than typed a second time.
+  ///
+  /// `Unlock-selection.png` draws *Main wallet* on the locked screen and the
+  /// drawer header has drawn the same two words on the unlocked one since
+  /// D-260, so this is **not** the render inventing a name the app lacks: it
+  /// is one name the app already owns, reaching its second seat. Hard-coded on
+  /// purpose — there is exactly one vault and it has never been asked to be
+  /// called anything, so a *stored* name would be a feature, not a constant.
+  /// The multi-account session (D-313 §2) is where it becomes per-wallet, and
+  /// on that day this constant is the thing it replaces.
+  ///
+  /// Two seats reading one string is BG-21's whole point: the chip and the
+  /// header cannot drift, because there is nothing to drift from.
+  static const String soleWalletName = 'Main wallet';
+
   final String name;
 
   /// Null while the vault has not answered yet. The row renders the name

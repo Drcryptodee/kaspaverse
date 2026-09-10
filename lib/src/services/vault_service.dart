@@ -32,6 +32,29 @@ class VaultService with WidgetsBindingObserver {
   /// Last vault-lane error message, null while healthy.
   final ValueNotifier<String?> error = ValueNotifier(null);
 
+  /// **When this process WATCHED the vault lock — never when it guessed.**
+  ///
+  /// `Unlock-selection.png` prints *Locked at 09:41* under the wallet chip,
+  /// and there is exactly one honest way to supply it: observe the status
+  /// stream cross from `unlocked` to locked and stamp the clock then. It is
+  /// set in [_onStatus], the one place every lock path is visible — the
+  /// drawer's Lock now, the §0.11 background grace, the presence watchdog and
+  /// any future one — because a fact is safer taken where it HAPPENS than at
+  /// each of the places that cause it (L203: a guard one layer above the
+  /// artefact it protects is a guard with a gap).
+  ///
+  /// **Null is the common case and it is the truthful one.** A cold start
+  /// onto a sealed vault has no transition to see: the app was not running
+  /// when the lock happened, so it does not know the time and the line is not
+  /// drawn. Formatting `DateTime.now()` there would read correctly at every
+  /// moment except the only one a user would check it — BG-8's exact
+  /// prohibition, and undetectable by eye.
+  ///
+  /// **Deliberately not persisted.** A file recording when its owner last had
+  /// their wallet open is a surveillance artefact on a stolen phone, and it
+  /// would buy one cosmetic line (INV-12).
+  final ValueNotifier<DateTime?> lockedAt = ValueNotifier(null);
+
   StreamSubscription<vault_api.VaultStatus>? _subscription;
 
   /// How many native ceremony surfaces currently own the foreground (D-039).
@@ -120,7 +143,7 @@ class VaultService with WidgetsBindingObserver {
     }
     _subscription = vault_api.vaultStatusStream().listen(
       (s) {
-        status.value = s;
+        _onStatus(s);
         error.value = null;
       },
       onError: (Object e) {
@@ -129,6 +152,21 @@ class VaultService with WidgetsBindingObserver {
     );
     await _loadLockGrace();
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// Every status emit, and the one edge [lockedAt] is taken on.
+  ///
+  /// The crossing is `unlocked -> !unlocked` and nothing else: a repeat emit
+  /// of a locked vault must not restamp it, or the line would creep forward
+  /// while the phone sat on a table, and the first emit after launch is not a
+  /// crossing at all (there is no previous state to have left).
+  void _onStatus(vault_api.VaultStatus s) {
+    final was = status.value;
+    if (was != null && was.unlocked && !s.unlocked) lockedAt.value = clock();
+    // An unlock retires the stamp: the next lock supplies its own, and a stale
+    // one outliving the session it belongs to is the same lie one hour later.
+    if (s.unlocked) lockedAt.value = null;
+    status.value = s;
   }
 
   Future<void> _loadLockGrace() async {

@@ -16,6 +16,7 @@ import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
 import 'widgets/haptics.dart';
 import 'widgets/kv_address.dart';
+import 'widgets/kv_ceremony_page.dart';
 import 'widgets/kv_chrome.dart';
 import 'widgets/kv_keypad.dart';
 import 'widgets/kv_loader.dart';
@@ -455,17 +456,6 @@ class _RestoreScreenState extends State<RestoreScreen>
 
   // ── views (`O7`, and the group's shared `O2` / `O6` legs) ────────────────
 
-  /// §2 `display`, the onboarding rung.
-  static const TextStyle _display = TextStyle(
-    fontFamily: KvFont.ui,
-    fontSize: 30,
-    height: 34 / 30,
-    fontWeight: FontWeight.w800,
-    fontVariations: KvWeight.w800,
-    letterSpacing: -0.75,
-    color: KvColor.ink,
-  );
-
   static const TextStyle _body = TextStyle(
     fontFamily: KvFont.ui,
     fontSize: 15,
@@ -478,17 +468,8 @@ class _RestoreScreenState extends State<RestoreScreen>
   /// the fold — type clipped through its glyphs, which is the thing BG-14
   /// refuses. §3a's `short` class is the chrome giving way, and this is the
   /// chrome: the heading keeps its job at `barTitle`'s size.
-  TextStyle get _headingStyle => _short
-      ? const TextStyle(
-          fontFamily: KvFont.ui,
-          fontSize: 18,
-          height: 22 / 18,
-          fontWeight: FontWeight.w700,
-          fontVariations: KvWeight.w700,
-          letterSpacing: -0.18,
-          color: KvColor.ink,
-        )
-      : _display;
+  /// One copy, on [KvCeremonyPage] (UX-R7).
+  TextStyle get _headingStyle => KvCeremonyPage.headingStyle(context);
 
   Widget _heading(String text, {TextAlign align = TextAlign.start}) => SizedBox(
     width: double.infinity,
@@ -623,71 +604,21 @@ class _RestoreScreenState extends State<RestoreScreen>
   );
 
   /// The group's page: ground, bar, clamped column, optional pinned foot.
+  /// The ceremony's page, on the shared [KvCeremonyPage] shape (UX-R7).
   Widget _page({
     required String title,
     required List<Widget> children,
     Widget? centre,
     Widget? foot,
-
-    /// **Rendered full-bleed, outside the content gutter.** [KvColumn] clamps to
-    /// 560 and insets by the window class's gutter, which is right for a pill and
-    /// wrong for a keyboard: the founder read the strip of ground down each side
-    /// of the pad as unfinished (UX-R6 glass beat). A keypad is chrome for the
-    /// whole screen, not content inside the column — so it gets its own slot.
-    /// Whatever sits above it in [foot] keeps the gutter, because a pill IS
-    /// content.
     Widget? bleed,
-
-    /// **Centre the body in whatever room is left.** `O6` draws its mark and its
-    /// question in the middle of the screen; the build stacked them at the top,
-    /// which the founder read on glass as the content having fallen upward. A
-    /// [SliverFillRemaining] with no scroll body centres when there is room and
-    /// scrolls when there is not — the one idiom that does both without asking
-    /// the layout for its height (BG-33 forbids reading a breakpoint here).
     bool centred = false,
     VoidCallback? onBack,
-  }) => Scaffold(
-    backgroundColor: KvColor.abyss,
-    body: SafeArea(
-      child: Column(
-        children: [
-          KvTopBar(title: title, centre: centre, onBack: onBack),
-          Expanded(
-            child: KvColumn(
-              child: CustomScrollView(
-                slivers: [
-                  SliverPadding(
-                    // **No air at `short`.** 48 dp of top-and-bottom padding is
-                    // right on a phone and is more than the whole body at
-                    // 915 × 412, where a bar and a pinned foot leave ~42
-                    // (`ux-auditor` BLOCK, UX-R6).
-                    padding: EdgeInsets.symmetric(
-                      vertical: _short ? 0 : KvSpace.l,
-                    ),
-                    sliver: SliverFillRemaining(
-                      hasScrollBody: false,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        mainAxisAlignment: centred
-                            ? MainAxisAlignment.center
-                            : MainAxisAlignment.start,
-                        children: children,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          // Inside the column's gutter — a part in a clamped column owns no
-          // horizontal air of its own (L195). The keypad is the exception and
-          // travels in [bleed].
-          if (foot != null) KvColumn(child: foot),
-          ?bleed,
-        ],
-      ),
-    ),
+  }) => KvCeremonyPage(
+    bar: KvTopBar(title: title, centre: centre, onBack: onBack),
+    foot: foot,
+    bleed: bleed,
+    centred: centred,
+    children: children,
   );
 
   // ── `O6 · Biometrics` — the same step the create ceremony ends on ────────

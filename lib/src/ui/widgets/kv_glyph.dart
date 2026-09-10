@@ -517,8 +517,31 @@ class KvGlyphPainter extends CustomPainter {
         circle(12, 12, 10);
         path(const ['M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01']);
       case KvGlyph.lock:
-        rect(3, 11, 18, 11, 2);
-        path(const ['M7 11V7a5 5 0 0 1 10 0v4']);
+        // **The render's padlock, measured — not Lucide's** (UX-R7, founder on
+        // glass 2026-09-10: *"use the actual padlock icon in the screenshot
+        // example (make sure its sleek drawn and nice as the image)"*).
+        //
+        // Lucide's `lock` is `rect(3,11,18,11,2)` + a 5-unit shackle and **has
+        // no keyhole**. `Unlock-selection.png` draws a narrower, taller body
+        // with a keyhole in it. Scanned row by row at 4x and converted at
+        // 3.8 px per grid unit (x 12 at px 393.5, y 2 at px 559):
+        //
+        // - body centreline **x 4.4 .. 19.6** (15.2 wide, where Lucide's is
+        //   18) and **y 10.0 .. 20.8** (10.8 tall); corner radius 2, which is
+        //   the one number Lucide already had right.
+        // - shackle legs at **7.8** and **16.2** (Lucide: 7 and 17), arc
+        //   radius **4.2**, arc centre y **7.1**, so the arch's ink tops out
+        //   at y 2 exactly as the grid intends.
+        // - the keyhole at the body's own centre, **(12, 15.5)**.
+        //
+        // The dot is a **stroked circle of radius 0.4**, never a fill: at any
+        // stroke wider than 0.8 the ink closes over the centre and reads
+        // solid, which is §2a rule 4's whole trick (`palette` draws its four
+        // wells the same way). It therefore thickens and thins WITH the mark
+        // instead of being a second, fixed object inside it.
+        rect(4.4, 10, 15.2, 10.8, 2);
+        path(const ['M7.8 10V7.1a4.2 4.2 0 0 1 8.4 0V10']);
+        circle(12, 15.5, 0.4);
       case KvGlyph.paste:
         rect(8, 2, 8, 4, 1);
         path(const [

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/passphrase_unlock_screen.dart';
 import 'package:kaspaverse/src/rust/api/vault.dart' as vault_api;
 import 'package:kaspaverse/src/ui/secret/masked_dots.dart';
@@ -30,7 +31,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Enter your passphrase'), findsOneWidget);
     expect(find.byType(SecretKeyboard), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Unlock'), findsOneWidget);
+    // The house pill since UX-R7 — the screen no longer speaks Material.
+    expect(find.widgetWithText(KvAction, 'Unlock'), findsOneWidget);
+    // The recovery escape is NOT here: it lives on the unguarded door, so it
+    // survives the accessibility refusal this screen sits behind (F6,
+    // `ffi-leak-auditor` UX-R7). One act, one seat (BG-21).
+    expect(find.text('Lost your passphrase?'), findsNothing);
   });
 
   testWidgets('refuses to render under an active accessibility service', (

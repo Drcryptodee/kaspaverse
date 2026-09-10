@@ -779,6 +779,12 @@ class KvChoiceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Semantics(
     button: true,
+    // **A null tap is announced as disabled, not as a live button** (§8's
+    // dead destination, in the semantics tree rather than on the glass). The
+    // wallets sheet's one chosen row passes null precisely so it cannot
+    // answer a tap with nothing, and a screen reader was still being told it
+    // was a button (`ux-auditor`, UX-R7).
+    enabled: onTap != null,
     selected: selected,
     label: sub == null ? title : '$title. $sub',
     child: ExcludeSemantics(

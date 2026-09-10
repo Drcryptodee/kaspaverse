@@ -463,8 +463,10 @@ class _MoneyShellState extends State<_MoneyShell> {
       // on a phone; it takes no tap until it does (§8).
       header: FutureBuilder<String>(
         future: _address,
-        builder: (context, snap) =>
-            KvWalletIdentity(name: 'Main wallet', address: snap.data),
+        builder: (context, snap) => KvWalletIdentity(
+          name: KvWalletIdentity.soleWalletName,
+          address: snap.data,
+        ),
       ),
       // The render's nine, in the render's two groups (`S2 · Drawer`, D-261).
       // Every row is live: an unbuilt destination opens its own seat, honestly

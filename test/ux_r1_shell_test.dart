@@ -123,6 +123,19 @@ void main() {
             'and give the scroll an `Expanded`, which needs no measurement at '
             'all (UX-R6; the first version of this reason claimed those two '
             'carried the same pattern, and they do not — item 0 / L130)',
+        'lib/src/ui/unlock_surface.dart':
+            'the locked surface reads the viewport HEIGHT — never a width, '
+            'and never to choose a layout — so the render\'s rhythm can be '
+            'built from flex (which needs a bounded height) while the same '
+            'composition still scrolls rather than overflows where it does '
+            'not fit. `Unlock-selection.png` seats the emblem 239 dp down and '
+            'pins the pill at the foot; at 915 × 412 with the '
+            'key-invalidated notice on it the fixed content alone is 53 dp '
+            'taller than the window. `IntrinsicHeight` under a `minHeight` of '
+            'the viewport does both, and the door is the one screen in this '
+            'group with no bar to push against — its two ceremony siblings '
+            'share `KvCeremonyPage`, whose `Expanded` needs no measurement '
+            '(UX-R7)',
         'lib/src/ui/messages/contacts_screen.dart':
             'keyboard inset (`viewInsets`), not width',
         'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',

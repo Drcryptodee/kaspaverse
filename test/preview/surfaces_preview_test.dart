@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/error.dart';
@@ -39,9 +41,11 @@ import 'package:kaspaverse/src/ui/onboarding_surface.dart';
 import 'package:kaspaverse/src/ui/create_screen.dart';
 import 'package:kaspaverse/src/ui/restore_screen.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
+import 'package:kaspaverse/src/rust/api/vault.dart' as vault_api;
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/passphrase_unlock_screen.dart';
 import 'package:kaspaverse/src/ui/secret/bip39_wordlist.dart';
+import 'package:kaspaverse/src/ui/secret/secret_screen_guard.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_toggle.dart' show KvToggle;
 import '../support/preview_harness.dart';
 import '../support/maturity.dart';
@@ -1096,6 +1100,18 @@ void main() {
   /// the two-geometry form for surfaces still wearing Black Glass, which have
   /// no four-frame answer yet and would only produce four identical stretched
   /// columns — a picture that says "responsive" while proving nothing.
+  /// Tap Unlock and let the lane throw `key_invalidated`, which is the only
+  /// way to reach the notice state — it is a consequence, never a flag.
+  Future<void> failBiometricUnlock(WidgetTester tester) async {
+    await tester.tap(find.text('Unlock'));
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> openWalletsSheet(WidgetTester tester) async {
+    await tester.tap(find.text(KvWalletIdentity.soleWalletName));
+    await tester.pumpAndSettle();
+  }
+
   void framedSurface(
     String name,
     Widget Function() build, {
@@ -1115,6 +1131,8 @@ void main() {
   }
 
   group('surface previews (tier 2 — no device)', () {
+    // `find.bySemanticsLabel` needs the semantics tree built.
+    setUp(() => SemanticsBinding.instance.ensureSemantics());
     // **The money screen, in all four window classes** (BG-33, UX-R1): the
     // pushed drawer at `compact`, the 80 dp rail at `medium`, ledger + detail
     // beside a standing drawer at `expanded`, and the `KvMoneyBar` collapse at
@@ -1332,12 +1350,101 @@ void main() {
       _restoreScreen,
       act: _toRestoreBiometrics,
     );
-    // The locked vault — R7's screen, framed here because this sitting moved
-    // two things under it: `CeremonyMark`'s ground, and the secret keypad's
-    // bed. A re-tone with no picture is a re-tone nobody looked at.
+    // **The locked vault, in every state it has** (UX-R7, render
+    // `Unlock-selection.png`). This is the only screen a sealed wallet ever
+    // shows, so each of its states gets a picture rather than the resting one
+    // standing in for all of them (L205: three states shipped with no frames
+    // is how a 34 dp overflow and a truncated secret reached an auditor).
     framedSurface(
-      'unlock__surface',
-      () => UnlockSurface(probe: () async => true, unlock: () async => true),
+      'unlock__locked',
+      () => UnlockSurface(
+        probe: () async => true,
+        unlock: () async => true,
+        inputKind: () async => vault_api.VaultInputKind.passphrase,
+        lockedAt: ValueNotifier<DateTime?>(DateTime(2026, 9, 9, 9, 41)),
+      ),
+    );
+    // A cold start onto a sealed vault: no transition was witnessed, so the
+    // `Locked at` seat is empty and holds its height (BG-24).
+    framedSurface(
+      'unlock__locked_cold',
+      () => UnlockSurface(
+        probe: () async => true,
+        unlock: () async => true,
+        inputKind: () async => vault_api.VaultInputKind.passphrase,
+        lockedAt: ValueNotifier<DateTime?>(null),
+      ),
+    );
+    // No biometric on offer — Path B takes the primary pill.
+    framedSurface(
+      'unlock__no_biometric',
+      () => UnlockSurface(
+        probe: () async => false,
+        unlock: () async => true,
+        inputKind: () async => vault_api.VaultInputKind.digits,
+        lockedAt: ValueNotifier<DateTime?>(DateTime(2026, 9, 9, 9, 41)),
+      ),
+    );
+    // `Unlock-selection (1).png` — the fingerprints changed and the Keystore
+    // key is gone until it is set up again.
+    framedSurface(
+      'unlock__key_invalidated',
+      () => UnlockSurface(
+        probe: () async => true,
+        unlock: () async =>
+            throw PlatformException(code: biometricKeyInvalidated),
+        inputKind: () async => vault_api.VaultInputKind.passphrase,
+        lockedAt: ValueNotifier<DateTime?>(DateTime(2026, 9, 9, 9, 41)),
+      ),
+      act: failBiometricUnlock,
+    );
+    // `Unlock-selection (2).png` — the switcher, shown before it is built
+    // (D-313 §1).
+    framedSurface(
+      'unlock__wallets_sheet',
+      () => UnlockSurface(
+        probe: () async => true,
+        unlock: () async => true,
+        inputKind: () async => vault_api.VaultInputKind.passphrase,
+        lockedAt: ValueNotifier<DateTime?>(DateTime(2026, 9, 9, 9, 41)),
+      ),
+      act: openWalletsSheet,
+    );
+    // The two states this group adds that would otherwise ship with no
+    // picture (L205: a builder's obligation, not a reviewer's catch). The
+    // lost-secret sheet was a third until the founder removed it (D-316 §6).
+    framedSurface(
+      'unlock__failed_attempt',
+      () => UnlockSurface(
+        probe: () async => true,
+        unlock: () async => false,
+        inputKind: () async => vault_api.VaultInputKind.passphrase,
+        lockedAt: ValueNotifier<DateTime?>(DateTime(2026, 9, 9, 9, 41)),
+      ),
+      act: failBiometricUnlock,
+    );
+    framedSurface(
+      'unlock__unlocking',
+      () => UnlockSurface(
+        probe: () async => true,
+        // Never completes, so the pill stays in its busy form for the shot.
+        unlock: () => Completer<bool>().future,
+        inputKind: () async => vault_api.VaultInputKind.passphrase,
+        lockedAt: ValueNotifier<DateTime?>(DateTime(2026, 9, 9, 9, 41)),
+      ),
+      act: failBiometricUnlock,
+    );
+    // **The refusal surface** — the one state in this group that cannot be
+    // faked on a device without actually switching a service on, and the one
+    // that appears in front of a user who is probably relying on it.
+    framedSurface(
+      'guard__accessibility_refusal',
+      () => SecretScreenGuard(
+        title: 'your passphrase',
+        checkAccessibility: () async => true,
+        setSecure: ({required bool enable}) async {},
+        child: const SizedBox.shrink(),
+      ),
     );
     framedSurface(
       'unlock__passphrase',

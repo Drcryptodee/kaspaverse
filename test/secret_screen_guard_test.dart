@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/secret/secret_screen_guard.dart';
 
 // Deliverable-5 mechanism (§0.6 a11y refusal). The platform PROOF is on-glass
 // (FLAG_SECURE / TalkBack, device pass); these pin the gating logic via seams.
 void main() {
-  Widget host(Widget child) => MaterialApp(home: child);
+  // The refusal sits on the house column since UX-R7, and `KvColumn` asserts
+  // on a missing window rather than guessing a class (UX-R1).
+  Widget host(Widget child) => MaterialApp(
+    builder: (context, page) => KvWindow(child: page!),
+    home: child,
+  );
 
   testWidgets('renders the child when no accessibility service is active', (
     tester,

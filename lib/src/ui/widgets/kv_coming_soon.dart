@@ -78,15 +78,38 @@ class KvComingSoon extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      name,
-                      style: const TextStyle(
-                        fontFamily: KvFont.ui,
-                        fontSize: 15,
-                        height: 20 / 15,
-                        fontVariations: [FontVariation('wght', 600)],
-                        color: KvColor.ink,
-                      ),
+                    // **The tag WRAPS with the name, it does not sit beside
+                    // the column** (`ux-auditor` BLOCK, UX-R7).
+                    //
+                    // `_Tag` was an intrinsic-width sibling of the whole text
+                    // column, so at 320 dp / 1.3x inside a sheet it took ~105
+                    // of a 232 dp row and left the words ~63 — and a 19.5 dp
+                    // `wallet` broke mid-word: *More / than / one / walle / t*,
+                    // "Ad ding", "sw itching". BG-14 forbids that outright.
+                    // Every earlier caller was a full-width page or used the
+                    // short default sentence, so the narrow column is this
+                    // sitting's first, and the fix belongs in the part.
+                    //
+                    // In a `Wrap` the tag rides the name's line when there is
+                    // room and drops to its own when there is not; the name
+                    // keeps the whole width either way.
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: KvSpace.s,
+                      runSpacing: KvSpace.xs,
+                      children: [
+                        Text(
+                          name,
+                          style: const TextStyle(
+                            fontFamily: KvFont.ui,
+                            fontSize: 15,
+                            height: 20 / 15,
+                            fontVariations: [FontVariation('wght', 600)],
+                            color: KvColor.ink,
+                          ),
+                        ),
+                        _Tag(tag),
+                      ],
                     ),
                     const SizedBox(height: KvSpace.xs),
                     Text(
@@ -101,8 +124,6 @@ class KvComingSoon extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(width: KvSpace.sm),
-              _Tag(tag),
             ],
           ),
         ),

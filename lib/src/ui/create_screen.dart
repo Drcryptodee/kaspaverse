@@ -16,6 +16,7 @@ import 'secret/word_parts.dart';
 import 'theme/kv_window.dart';
 import 'theme/tokens.dart';
 import 'widgets/ceremony_mark.dart';
+import 'widgets/kv_ceremony_page.dart';
 import 'widgets/kv_chrome.dart';
 import 'widgets/kv_keypad.dart';
 import 'widgets/kv_loader.dart';
@@ -700,106 +701,26 @@ class _CreateScreenState extends State<CreateScreen>
   );
 
   /// The screen's own scaffold: ground, bar, clamped column, pinned foot.
+  /// The ceremony's page, on the shared [KvCeremonyPage] shape (UX-R7) —
+  /// this method now supplies only the two things that are this screen's: the
+  /// step bar, and the secret guard around it.
   Widget _page({
     required int step,
     required List<Widget> children,
     Widget? foot,
-
-    /// **Rendered full-bleed, outside the content gutter.** [KvColumn] clamps to
-    /// 560 and inset by the window class's gutter, which is right for a pill and
-    /// wrong for a keyboard: the founder read the resulting strip of ground down
-    /// each side of the pad as unfinished (UX-R6 glass beat). A keypad is chrome
-    /// for the whole screen, not content inside the column — so it gets its own
-    /// slot rather than the column's air. Whatever sits above it in [foot] keeps
-    /// the gutter, because a pill IS content.
     Widget? bleed,
-
-    /// **Centre the body in whatever room is left.** `O6` draws its mark and its
-    /// question in the middle of the screen; the build stacked them at the top,
-    /// which the founder read on glass as the content having fallen upward. A
-    /// [SliverFillRemaining] with no scroll body centres when there is room and
-    /// scrolls when there is not — the one idiom that does both without asking
-    /// the layout for its height (BG-33 forbids reading a breakpoint here).
     bool centred = false,
-
-    /// **Tapping the body gives the keyboard back** (`O5`'s F18).
-    ///
-    /// A pad this app raises is a pad this app has to be able to lower, and
-    /// the only gesture a user will try is tapping somewhere else. Null on
-    /// every screen with no focus model, so the body stays inert rather than
-    /// swallowing taps for a state that does not exist.
     VoidCallback? onTapOutside,
     bool guarded = true,
     String? guardTitle,
   }) {
-    final page = Scaffold(
-      backgroundColor: KvColor.abyss,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _bar(step),
-            Expanded(
-              child: KvColumn(
-                child: CustomScrollView(
-                  slivers: [
-                    SliverPadding(
-                      // **No air at `short`.** 48 dp of top-and-bottom padding
-                      // is right on a phone and is more than the whole body at
-                      // 915 × 412, where a bar, a pinned pill and a 220 dp
-                      // keypad leave ~42: with it the heading scrolled out and
-                      // the passphrase step said nothing about what it was
-                      // asking for (`ux-auditor` BLOCK, UX-R6).
-                      padding: EdgeInsets.symmetric(
-                        vertical: _short ? 0 : KvSpace.l,
-                      ),
-                      sliver: SliverFillRemaining(
-                        hasScrollBody: false,
-                        child: GestureDetector(
-                          // `deferToChild`, not `opaque`: the fields and the
-                          // switch inside must keep their own taps, and only
-                          // the ground between them drops the keyboard.
-                          behavior: HitTestBehavior.deferToChild,
-                          onTap: onTapOutside,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            mainAxisAlignment: centred
-                                ? MainAxisAlignment.center
-                                : MainAxisAlignment.start,
-                            children: children,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // The keyboard is inside the column's gutter, not full-bleed:
-            // `O7` seats its caps at x 29 against content at 25, which is
-            // `KvKeypad`'s own 4 dp of side air and nothing more. A part
-            // inside a clamped column owns no horizontal air of its own
-            // (L195).
-            if (foot != null) KvColumn(child: foot),
-            // **The pad arrives and leaves with motion** (BG-24). Three sites
-            // changed it in one frame after D-312: F18 raising and dropping the
-            // keyboard (236 dp), the `Next` pill vanishing on the pad switch,
-            // and the number pad swapping for the alphanumeric one (236 → 248).
-            // A 236 dp block appearing between two frames is exactly the
-            // "section appears with no motion that accounts for it" this law
-            // was written for (`ux-auditor`, D-312). Zero under
-            // `disableAnimations`, like every other easing in this file.
-            AnimatedSize(
-              duration: MediaQuery.disableAnimationsOf(context)
-                  ? Duration.zero
-                  : KvMotion.calm,
-              curve: KvMotion.curve,
-              alignment: Alignment.topCenter,
-              child: bleed ?? const SizedBox(width: double.infinity),
-            ),
-          ],
-        ),
-      ),
+    final page = KvCeremonyPage(
+      bar: _bar(step),
+      foot: foot,
+      bleed: bleed,
+      centred: centred,
+      onTapOutside: onTapOutside,
+      children: children,
     );
     if (!guarded) return page;
     return SecretScreenGuard(
@@ -809,17 +730,6 @@ class _CreateScreenState extends State<CreateScreen>
       child: page,
     );
   }
-
-  /// §2 `display`, the onboarding rung: Jakarta 30 / 34, 800, −0.025em.
-  static const TextStyle _display = TextStyle(
-    fontFamily: KvFont.ui,
-    fontSize: 30,
-    height: 34 / 30,
-    fontWeight: FontWeight.w800,
-    fontVariations: KvWeight.w800,
-    letterSpacing: -0.75,
-    color: KvColor.ink,
-  );
 
   static const TextStyle _body = TextStyle(
     fontFamily: KvFont.ui,
@@ -833,17 +743,9 @@ class _CreateScreenState extends State<CreateScreen>
   /// the fold — type clipped through its glyphs, which is the thing BG-14
   /// refuses. §3a's `short` class is the chrome giving way, and this is the
   /// chrome: the heading keeps its job at `barTitle`'s size.
-  TextStyle get _headingStyle => _short
-      ? const TextStyle(
-          fontFamily: KvFont.ui,
-          fontSize: 18,
-          height: 22 / 18,
-          fontWeight: FontWeight.w700,
-          fontVariations: KvWeight.w700,
-          letterSpacing: -0.18,
-          color: KvColor.ink,
-        )
-      : _display;
+  /// One copy, on [KvCeremonyPage] (UX-R7). It was identical here, in
+  /// `restore_screen` and in `passphrase_unlock_screen`.
+  TextStyle get _headingStyle => KvCeremonyPage.headingStyle(context);
 
   Widget _heading(String text, {TextAlign align = TextAlign.start}) =>
       Text(text, style: _headingStyle, textAlign: align);

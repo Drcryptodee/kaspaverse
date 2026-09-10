@@ -34,15 +34,31 @@ const String pathANone = 'none';
 const String pathAReady = 'ready';
 const String pathAInvalidated = 'invalidated';
 
+/// **The name this vault's own secret goes by** — `passphrase` or `PIN`
+/// (D-312's `input_kind`, as a word).
+///
+/// Every sentence below that tells somebody to *use their secret* has to use
+/// the right noun for the vault in front of them. The locked surface reads the
+/// kind for its pill and would otherwise have painted *"Unlock with your
+/// passphrase"* directly above a pill reading **Enter PIN**
+/// (`wallet-security-auditor`, UX-R7). `PassphraseUnlockScreen._calmError`
+/// already branched correctly; this is that rule, lifted to where the strings
+/// live so a third caller cannot get it wrong.
+///
+/// **The default is `passphrase`, and that is the safe direction** — the same
+/// one D-312 gives the pad: the byte is read unauthenticated and may not be
+/// readable at all, and the word that fits either secret is this one.
+const String secretNounDefault = 'passphrase';
+
 /// What to say when the fingerprint lane has been invalidated by a new
 /// enrolment, on the locked surface and in Settings.
 ///
 /// Ends where every custody message must: what is still true about the money.
 /// Nothing is lost — Path B is the vault's real key and was never touched.
-const String biometricInvalidatedCopy =
+String biometricInvalidatedCopy([String secret = secretNounDefault]) =>
     'Your fingerprints changed, so this phone locked the wallet out of the '
     'fingerprint key — that is the wallet protecting you, not a fault. Unlock '
-    'with your passphrase, then turn fingerprint unlock on again in Settings. '
+    'with your $secret, then turn fingerprint unlock on again in Settings. '
     'Your funds are safe.';
 
 /// Why Path A is unavailable, in the user's terms, with the action where there
@@ -79,7 +95,7 @@ String enrollFailureCopy(String code) => switch (code) {
   // Should no longer reach here — enrolment now deletes and rebuilds an
   // invalidated key rather than reusing it — but a code with no consumer is a
   // silent failure by construction, so it keeps a sentence of its own.
-  biometricKeyInvalidated => biometricInvalidatedCopy,
+  biometricKeyInvalidated => biometricInvalidatedCopy(),
   // The lifecycle race, said plainly: the vault re-locked while the system
   // prompt held the foreground, so there was no seed to seal. Swallowed, this
   // was the "I tapped it and nothing happened" report.
@@ -103,23 +119,26 @@ const String biometricKeyInvalidated = 'key_invalidated';
 /// Separate from [enrollFailureCopy] because the stakes read differently: the
 /// user is standing in front of a locked wallet, so every arm has to end with
 /// the way in that still works.
-String unlockFailureCopy(String code) => switch (code) {
-  biometricKeyInvalidated => biometricInvalidatedCopy,
+String unlockFailureCopy(
+  String code, [
+  String secret = secretNounDefault,
+]) => switch (code) {
+  biometricKeyInvalidated => biometricInvalidatedCopy(secret),
   'lockout' =>
     'Too many fingerprint attempts. Wait a moment, or unlock with your '
-        'passphrase. Your funds are safe.',
+        '$secret. Your funds are safe.',
   'no_enrollment' =>
     'Fingerprint unlock is not set up on this phone any more. Unlock with your '
-        'passphrase, then turn it on again in Settings.',
+        '$secret, then turn it on again in Settings.',
   // `vault` is the code EVERY unseal/JNI failure on this lane carries, and
   // `keystore` every hardware refusal. Both fell through to the generic arm,
   // which is checklist 15 applied to one code and not carried across — the
   // commonest real failure came out as the most content-free sentence.
   'vault' =>
     "The wallet couldn't open with your fingerprint. Unlock with your "
-        'passphrase — that always works, and your funds are safe.',
+        '$secret — that always works, and your funds are safe.',
   'keystore' =>
-    "This phone's secure hardware refused the key. Unlock with your passphrase "
+    "This phone's secure hardware refused the key. Unlock with your $secret "
         'and turn fingerprint unlock on again in Settings.',
   _ => 'Unlock is unavailable right now. Your funds are safe.',
 };

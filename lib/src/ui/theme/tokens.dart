@@ -759,6 +759,17 @@ abstract final class KvGlyphSpec {
   /// Fingerprint and face at 46–56 dp, where the mark is illustrative.
   static const double strokeIllustrative = 2.25;
 
+  /// **The lock screen's padlock, and nothing else so far** — the weight
+  /// `Unlock-selection.png` draws it at, measured: a 3.5 dp stroke on 38 dp of
+  /// ink is **1.84 grid units**, against the 2.5 default and the 2.25 an
+  /// illustrative mark takes.
+  ///
+  /// A mark drawn at 46 dp is being *looked at*, not scanned, and the founder's
+  /// word for the difference was **sleek** (on glass, 2026-09-10). Below about
+  /// 40 dp this is too fine to hold its own — [strokeIllustrative] is the floor
+  /// for anything smaller, and a row-sized lock keeps the 2.5 default.
+  static const double strokeFine = 1.84;
+
   static const StrokeCap cap = StrokeCap.round;
   static const StrokeJoin join = StrokeJoin.round;
 }

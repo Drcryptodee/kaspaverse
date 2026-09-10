@@ -75,6 +75,8 @@ class RevealActivity : Activity() {
     private val cChip = Color.parseColor("#1A2120")          // KvColor.chip
     private val cPrimaryMuted = Color.parseColor("#70C7BA")  // KvColor.primaryMuted
     private val cEtch = Color.parseColor("#4B5553")          // KvColor.etch
+    // Added at UX-R7 for the answered quiz chip — see [onChipTap].
+    private val cTealTint = Color.parseColor("#0F2E28")      // KvColor.tealTint
     private val cInkMeta = Color.parseColor("#7A8583")       // KvColor.inkMeta
     // The amber notice plate and its ink — `KvNotice`'s warn tone (§1.6).
     private val cWarnTint = Color.parseColor("#2E2510")      // KvColor.warnTint
@@ -84,7 +86,10 @@ class RevealActivity : Activity() {
     // measures 12.93:1 and `onPrimary` measures 11.31:1, both far above AA —
     // but the ground moved, and a fill's ink that tracks whatever the canvas
     // happens to be is a coincidence the next palette change would break.
-    // Used by the reveal-screen chips, the only `primary` fills here.
+    // Used by the reveal screen's continue pill, which at UX-R7 became the
+    // ONLY `primary` fill on this activity — the answered quiz chip gave its
+    // emission back (see [onChipTap]). `primaryMuted` on `tealTint` measures
+    // **7.34:1**, AAA for body text, so the quieter pair costs no legibility.
     private val cOnPrimary = Color.parseColor("#06201B")  // KvColor.onPrimary
 
     // The two bundled faces, loaded from the Flutter asset bundle. Until now
@@ -1117,10 +1122,22 @@ class RevealActivity : Activity() {
         if (word == quizExpected[quizProgress]) {
             chip.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
             chip.isEnabled = false
-            chip.setTextColor(cOnPrimary)
+            // **An answered chip is OURS, not ALIVE** (UX-R7; BG-2 caps a
+            // screen at three `primary` emissions with one fill, and this quiz
+            // confirms up to four positions — so at the end it was lighting
+            // four chips plus the step row's lit dots, all in the emitting
+            // teal, on the most security-critical screen in the app).
+            //
+            // `tealTint` + `primaryMuted` is §1.5's uncounted pair: it still
+            // reads unmistakably as *answered* — it is the only tinted thing
+            // on a board of `chip` greys — without spending an emission on a
+            // state that is merely done. The step row keeps `primary`, because
+            // that is the one thing on the screen saying how far there is left
+            // to go.
+            chip.setTextColor(cPrimaryMuted)
             chip.background = GradientDrawable().apply {
                 cornerRadius = dp(100).toFloat()
-                setColor(cPrimary)
+                setColor(cTealTint)
             }
             quizProgress++
             if (quizProgress >= quizExpected.size) {

@@ -212,7 +212,33 @@ Future<T> withShadows<T>(Future<T> Function() body) async {
   }
 }
 
+/// **Shadows PAINT for every frame** (`ux-auditor` BLOCK, UX-R7).
+///
+/// `flutter_test` sets `debugDisableShadows = true` globally, which makes
+/// `BoxShadow` draw its shape with the blur ignored — a hard-edged solid. This
+/// function had [withShadows] written for exactly that problem (D-294) and
+/// never called it, so every `framedSurface` golden in the catalogue was a
+/// picture with the light missing. On `KvLockMark`, whose entire subject IS
+/// the light coming off it, the four frames drew a flat filled disc with a
+/// hard cut to `abyss` — a different object, on the one part whose BG-32
+/// argument turns on the glow being there. L139 again, and the same
+/// instrument that told the lie last time.
+///
+/// **It wraps the whole body, not just the capture.** Toggling the global
+/// around `expectLater` alone changes nothing: the tree has already painted by
+/// then and the layer is cached, so the frame is captured exactly as it was
+/// drawn. The global has to be on for the pumps.
 Future<void> renderSurface(
+  WidgetTester tester, {
+  required String name,
+  required Widget child,
+  PreviewSize size = PreviewSize.reference,
+  Future<void> Function(WidgetTester tester)? act,
+}) => withShadows(
+  () => _renderSurface(tester, name: name, child: child, size: size, act: act),
+);
+
+Future<void> _renderSurface(
   WidgetTester tester, {
   required String name,
   required Widget child,
@@ -270,6 +296,19 @@ Future<void> renderSurface(
     await tester.pump(KvMotion.enter);
     await tester.pump(KvMotion.enter);
   }
+  // **Shadows PAINT for the shot** (`ux-auditor` BLOCK, UX-R7).
+  //
+  // `flutter_test` sets `debugDisableShadows = true` globally, and this
+  // function had the helper written for exactly this problem (D-294) and never
+  // called it — so every `framedSurface` golden in the catalogue was drawn
+  // with no shadow and no glow. That is not a cosmetic loss: `KvLockMark`'s
+  // whole subject is the light coming off it, and its four frames rendered a
+  // flat filled disc with a hard cut to `abyss` — a picture of a different
+  // object, on the one part whose BG-32 argument turns on the light being
+  // there. L139's shape again, and the same instrument.
+  //
+  // The global goes back INSIDE the body, never in a `tearDown`: the framework
+  // verifies its painting globals at the end of the body itself.
   await expectLater(
     find.byType(MaterialApp),
     matchesGoldenFile('$previewOut/${name}__${size.slug}.png'),
