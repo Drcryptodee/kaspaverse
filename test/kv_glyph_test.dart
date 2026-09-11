@@ -10,6 +10,10 @@ import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 class _RecordingCanvas implements Canvas {
   final List<Paint> paints = <Paint>[];
 
+  /// The paints of zero-length lines — dots, the one stroke that may carry a
+  /// second weight (§2a rule 6).
+  final List<Paint> dots = <Paint>[];
+
   @override
   void drawPath(Path path, Paint paint) => paints.add(paint);
 
@@ -17,7 +21,10 @@ class _RecordingCanvas implements Canvas {
   void drawCircle(Offset c, double radius, Paint paint) => paints.add(paint);
 
   @override
-  void drawLine(Offset p1, Offset p2, Paint paint) => paints.add(paint);
+  void drawLine(Offset p1, Offset p2, Paint paint) {
+    paints.add(paint);
+    if ((p2 - p1).distance < 0.05 * KvGlyphSpec.grid) dots.add(paint);
+  }
 
   @override
   void drawRRect(RRect rrect, Paint paint) => paints.add(paint);
@@ -111,21 +118,44 @@ void main() {
     // tinted dark, so the set is redrawn at 2.5 with ROUND caps and joins.
     // v3.1's 1.75 square-capped machined stroke is retired. The cap and join
     // are read from KvGlyphSpec rather than restated, so the law has one home.
-    test('strokes are 2.5dp round-capped on the 24dp grid (BG-25, v4.2)', () {
-      expect(KvGlyphSpec.stroke, 2.5);
-      expect(KvGlyphSpec.cap, StrokeCap.round);
-      expect(KvGlyphSpec.join, StrokeJoin.round);
-      for (final mark in KvGlyph.values) {
-        final stroked = _paintsFor(
-          mark,
-        ).where((p) => p.style == PaintingStyle.stroke);
-        for (final paint in stroked) {
-          expect(paint.strokeWidth, KvGlyphSpec.stroke, reason: '$mark');
-          expect(paint.strokeCap, KvGlyphSpec.cap, reason: '$mark');
-          expect(paint.strokeJoin, KvGlyphSpec.join, reason: '$mark');
+    test(
+      'strokes are 2.5dp round-capped on the 24dp grid (BG-25, v4.2) — '
+      'and a dot is the one stroke that may be heavier, bounded (§2a rule 6)',
+      () {
+        expect(KvGlyphSpec.stroke, 2.5);
+        expect(KvGlyphSpec.cap, StrokeCap.round);
+        expect(KvGlyphSpec.join, StrokeJoin.round);
+        expect(KvGlyphSpec.dotWeightMax, 1.5);
+        for (final mark in KvGlyph.values) {
+          final canvas = _RecordingCanvas();
+          KvGlyphPainter(
+            mark,
+          ).paint(canvas, const Size.square(KvGlyphSpec.grid));
+          final stroked = canvas.paints.where(
+            (p) => p.style == PaintingStyle.stroke,
+          );
+          for (final paint in stroked) {
+            if (canvas.dots.contains(paint)) {
+              // A zero-length stroke — a dot. The founder ruled the render's
+              // keyhole over the one-weight law (2026-09-11); the fence is that
+              // only a dot may take a second weight, and no more than this.
+              expect(
+                paint.strokeWidth,
+                inInclusiveRange(
+                  KvGlyphSpec.stroke,
+                  KvGlyphSpec.stroke * KvGlyphSpec.dotWeightMax,
+                ),
+                reason: '$mark: a dot heavier than rule 6 allows',
+              );
+            } else {
+              expect(paint.strokeWidth, KvGlyphSpec.stroke, reason: '$mark');
+            }
+            expect(paint.strokeCap, KvGlyphSpec.cap, reason: '$mark');
+            expect(paint.strokeJoin, KvGlyphSpec.join, reason: '$mark');
+          }
         }
-      }
-    });
+      },
+    );
 
     test('the stroke scales with the glyph, and is computed not asserted', () {
       // A glyph rendered smaller is a scaled 24dp glyph, not a thinner one.

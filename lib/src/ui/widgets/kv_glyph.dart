@@ -20,7 +20,8 @@ import '../theme/tokens.dart';
 /// `lib/` reds the gate, which is BG-25 as a mechanism rather than a review
 /// item. The last fifteen retired at UX-R8 (twelve in the thread, three on
 /// the debug launchers), seven of them by drawing a mark that had no house
-/// shape yet.
+/// shape yet — three of those (`duel`, `flag`, `circle`) went again the same
+/// day with the chat's game surface (D-322).
 ///
 /// Adding a glyph is one enum case plus one `case` arm in [KvGlyphPainter] —
 /// the Lucide outline, pasted — which is deliberately the whole cost: this file
@@ -241,20 +242,6 @@ enum KvGlyph {
   /// the Block rows and the Blocked addresses list (D-308).
   ban,
 
-  /// A challenge — the game card's mark. Lucide `swords`: two blades crossed,
-  /// which is a duel and not Material's wrestlers (`sports_kabaddi`, retired
-  /// at UX-R8).
-  duel,
-
-  /// A reported result — a claim, not a verified outcome. Lucide `flag`.
-  flag,
-
-  /// An event of no named kind — the safe generic mark `_FrameLightSurface`
-  /// draws for a frame kind it does not recognise, the same rule the card's
-  /// `_gameTitle` keeps for an unknown game (a hostile sender never gets its
-  /// own string on the glass). Lucide `circle`.
-  circle,
-
   /// An attached picture. Lucide `image`.
   image,
 
@@ -383,6 +370,30 @@ class KvGlyphPainter extends CustomPainter {
     // A Lucide `<line>`.
     void line(double x1, double y1, double x2, double y2) =>
         canvas.drawLine(Offset(x1 * s, y1 * s), Offset(x2 * s, y2 * s), p);
+
+    // A dot: a zero-length round-capped stroke (how Lucide draws every dot —
+    // §2a rule 4, never a fill), at [weight] times the mark's own stroke so a
+    // keyhole can be the size the render draws it and still thicken and thin
+    // with the mark. **The one place a mark carries a second weight**, by the
+    // founder's ruling (2026-09-11: *"if something is better, we better do
+    // it"*) — §2a rule 6 bounds it at [KvGlyphSpec.dotWeightMax], and only a
+    // zero-length stroke may take it; every contour keeps the one weight. The
+    // stroked circle it replaced went hollow the moment the stroke passed its
+    // diameter (the lock, UX-R7 → 2026-09-11).
+    void dot(double cx, double cy, double weight) {
+      assert(weight >= 1 && weight <= KvGlyphSpec.dotWeightMax);
+      final c = Offset(cx * s, cy * s);
+      canvas.drawLine(
+        c,
+        c.translate(0.01 * s, 0),
+        Paint()
+          ..color = tone
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = p.strokeWidth * weight
+          ..strokeCap = KvGlyphSpec.cap
+          ..strokeJoin = KvGlyphSpec.join,
+      );
+    }
 
     switch (mark) {
       case KvGlyph.arrowIn:
@@ -563,22 +574,33 @@ class KvGlyphPainter extends CustomPainter {
         // with a keyhole in it. Scanned row by row at 4x and converted at
         // 3.8 px per grid unit (x 12 at px 393.5, y 2 at px 559):
         //
-        // - body centreline **x 4.4 .. 19.6** (15.2 wide, where Lucide's is
-        //   18) and **y 10.0 .. 20.8** (10.8 tall); corner radius 2, which is
-        //   the one number Lucide already had right.
+        // - body centreline **x 4.15 .. 19.85** (15.7 wide, where Lucide's
+        //   is 18) and **y 10.15 .. 21.05** (10.9 tall); **corner radius
+        //   3.6**. UX-R7 had measured 15.2 × 10.8 at Lucide's radius 2, which
+        //   at the fine stroke left an inner corner of 1.1 — nearly square
+        //   beside the picture — and the founder said so on glass
+        //   (2026-09-11: *"the padlock needs more rounded corners, like the
+        //   screenshot"*). Re-fitted by **overlay**, not by eye: the mark
+        //   rendered at the render's own 3.8 px per unit and XOR'd against the
+        //   render's ink, then the numbers moved until the mismatch fell from
+        //   412 px to 122 px of ~1 970 — what is left is the render's soft
+        //   1 px rim and Figma's corner smoothing, which a true arc cannot
+        //   draw (D-321's glass record).
         // - shackle legs at **7.8** and **16.2** (Lucide: 7 and 17), arc
-        //   radius **4.2**, arc centre y **7.1**, so the arch's ink tops out
-        //   at y 2 exactly as the grid intends.
-        // - the keyhole at the body's own centre, **(12, 15.5)**.
-        //
-        // The dot is a **stroked circle of radius 0.4**, never a fill: at any
-        // stroke wider than 0.8 the ink closes over the centre and reads
-        // solid, which is §2a rule 4's whole trick (`palette` draws its four
-        // wells the same way). It therefore thickens and thins WITH the mark
-        // instead of being a second, fixed object inside it.
-        rect(4.4, 10, 15.2, 10.8, 2);
-        path(const ['M7.8 10V7.1a4.2 4.2 0 0 1 8.4 0V10']);
-        circle(12, 15.5, 0.4);
+        //   radius **4.2**, arc centre y **7.0**, so the arch's ink tops out
+        //   at y 2 as the grid intends.
+        // - the keyhole at the body's centre, **(12, 15.6)**: a **dot**, a
+        //   zero-length round-capped stroke at **1.5×** the mark's stroke —
+        //   the render's dot is 10 px across on a 6 px stroke, and a dot at
+        //   the stroke's own width came out at 0.7 of it. Solid, and it
+        //   thickens and thins WITH the mark. UX-R7 drew a stroked circle of
+        //   radius 0.4 expecting the ink to close over the centre; the frames
+        //   showed a ring with a hole, and the render's dot is solid. The
+        //   founder ruled the picture over the one-weight law on glass
+        //   (2026-09-11), and §2a rule 6 fences what he opened.
+        rect(4.15, 10.15, 15.7, 10.9, 3.6);
+        path(const ['M7.8 10.15V7.0a4.2 4.2 0 0 1 8.4 0V10.15']);
+        dot(12, 15.6, 1.5);
       case KvGlyph.paste:
         rect(8, 2, 8, 4, 1);
         path(const [
@@ -735,27 +757,6 @@ class KvGlyphPainter extends CustomPainter {
               'l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z',
           'm21.854 2.147-10.94 10.939',
         ]);
-      case KvGlyph.duel:
-        path(const [
-          'm13 19 6-6',
-          'M14.5 17.5 3.586 6.586A2 2 0 013 5.172V3h2.172a2 2 0 011.414.586'
-              'L17.5 14.5',
-          'm14.828 6.172 2.586-2.586A2 2 0 0118.828 3H21v2.172a2 2 0 01-.586 '
-              '1.414l-2.586 2.586',
-          'm16 16 4 4',
-          'm19 21 2-2',
-          'm5 14 4 4',
-          'm5 21-2-2',
-          'M7.5 16.5 4 20',
-        ]);
-      case KvGlyph.flag:
-        path(const [
-          'M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8'
-              'A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2'
-              'a6 6 0 0 0-4 1.528',
-        ]);
-      case KvGlyph.circle:
-        circle(12, 12, 10);
       case KvGlyph.image:
         rect(3, 3, 18, 18, 2);
         circle(9, 9, 2);

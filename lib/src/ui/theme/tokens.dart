@@ -600,6 +600,15 @@ abstract final class KvGlyphSpec {
   /// for anything smaller, and a row-sized lock keeps the 2.5 default.
   static const double strokeFine = 1.84;
 
+  /// **The one second weight a mark may carry: a dot's.** A keyhole drawn as
+  /// a zero-length round-capped stroke at the mark's own weight is 0.7 of the
+  /// render's; the founder ruled the picture over the one-weight law
+  /// (2026-09-11, *"if something is better, we better do it"*), and this is
+  /// the fence that keeps it a rule — a dot may be up to this many times the
+  /// stroke, only a zero-length stroke may take it, and `kv_glyph_test`
+  /// reads it back on every mark (§2a rule 6).
+  static const double dotWeightMax = 1.5;
+
   static const StrokeCap cap = StrokeCap.round;
   static const StrokeJoin join = StrokeJoin.round;
 }

@@ -388,10 +388,49 @@ void main() {
         closeTo(before, 0.5),
         reason: 'a swipe left on the drawer panel closes it',
       );
-      // The fling crossed half on its way out: one click, and the tap-open
-      // before it added none — the drawer was opened by a button, and a
-      // drag that starts from open must not click on its first pixel.
+      // The fling committed the close: one click, and the tap-open before
+      // it added none — the drawer was opened by a button, and a drag that
+      // starts from open must not click on its first pixel.
       expect(haptics, hasLength(3));
+
+      // A FAST flick from closed: a few dp under the finger, then release
+      // with velocity. The finger never reached half, so the crossing click
+      // cannot fire — the commit at release clicks instead, once (the
+      // founder felt nothing on a fast pull, 2026-09-11).
+      final flick = await tester.createGesture();
+      await flick.down(const Offset(200, 260), timeStamp: Duration.zero);
+      await flick.moveBy(
+        const Offset(kDragSlopDefault + 1, 0),
+        timeStamp: const Duration(milliseconds: 8),
+      );
+      await tester.pump();
+      await flick.moveBy(
+        const Offset(14, 0),
+        timeStamp: const Duration(milliseconds: 16),
+      );
+      await tester.pump();
+      await flick.moveBy(
+        const Offset(14, 0),
+        timeStamp: const Duration(milliseconds: 24),
+      );
+      await tester.pump();
+      expect(haptics, hasLength(3), reason: 'nothing crossed under the finger');
+      await flick.up(timeStamp: const Duration(milliseconds: 28));
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      expect(
+        tester.getTopLeft(find.byType(HomeScreen)).dx - before,
+        closeTo(KvMotion.drawerPush, 0.5),
+        reason: 'a flick opens',
+      );
+      expect(haptics, hasLength(4), reason: 'the flick committed: one click');
+      // And the tap that closes it says nothing — no drag, no commit.
+      await tester.tapAt(const Offset(350, 500));
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      expect(haptics, hasLength(4));
 
       // The other door: opened by a tap, then a 2 dp pull on the panel that
       // crosses nothing. Silent (the seed is taken where the finger lands).
@@ -406,7 +445,7 @@ void main() {
       await tester.pump();
       await nudge.moveBy(const Offset(-2, 0));
       await tester.pump();
-      expect(haptics, hasLength(3), reason: 'nothing crossed, nothing clicks');
+      expect(haptics, hasLength(4), reason: 'nothing crossed, nothing clicks');
       await nudge.up();
       await tester.pump();
       await tester.pump(KvMotion.enter);

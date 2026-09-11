@@ -22,7 +22,6 @@ import '../widgets/kv_glyph.dart';
 import '../widgets/kv_icon_button.dart';
 import '../widgets/kv_loader.dart';
 import '../widgets/kv_rows.dart';
-import '../widgets/kv_tabs.dart';
 import '../widgets/kv_toggle.dart';
 import '../widgets/kv_sheet.dart';
 import '../widgets/kv_two_pane.dart';
@@ -44,11 +43,12 @@ import '../widgets/tx_status_chip.dart';
 /// txid-keyed in an [AnimatedList]; arrivals glide in and never yank a reader
 /// who has scrolled up.
 ///
-/// P2.4: a recognized `kv:1:` frame renders as a tappable card (challenge) or a
-/// light surface (accept/result/taunt); the card is built from the frame's JSON
-/// FIELDS, never the readable line, so a tampered line can't misrepresent it.
-/// Frames are hints — nothing here moves value; Accept opens the normal confirm
-/// ceremony and never auto-broadcasts (§0.3/§0.5).
+/// **No game surface in a chat** (founder ruling 2026-09-11, D-322): a
+/// recognised `kv:1:` frame that arrives renders as its readable line, a plain
+/// bubble — no card, no accept, no stake, no taunt. The P2.4 challenge card and
+/// its composer were removed outright; the wire parser in `core::frames` is
+/// untouched and the frames are still decoded, they are just not a surface.
+/// How PvP works is decided globally first, and not through chats.
 ///
 /// FLAG_SECURE (§17) decided consciously: message content is user
 /// conversation, NOT seed material — screenshots stay the user's choice
@@ -95,11 +95,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
   /// Live per-txid status (tombstone + acceptance) — refreshed WHOLE on every
   /// pull, so rows behind the cursor keep telling the truth.
   Map<String, MessageStatusDto> _statuses = const {};
-
-  /// Challenge ids the user has locally declined this view. Decline sends no
-  /// frame (no `decline` kind exists, §0.5) — it just retires the card's
-  /// actions. View-scoped, like the decrypted rows.
-  final Set<String> _declined = {};
 
   /// Where each saved attachment landed, by txid — the destination the user
   /// chose, kept so "Open" can point at it without a second copy existing.
@@ -562,8 +557,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         // The founder's toggle, on the one sheet it governs — supplied by the
         // plain-message caller, never by this shared funnel.
         footer: footer,
-        // Every send this funnel makes lands in the thread as a message —
-        // the comm frame, the challenge, the taunt and the accept alike.
+        // Every send this funnel makes lands in the thread as a message.
         preparingObject: 'message',
       );
       await _pull();
@@ -670,20 +664,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
     final sent = await _confirmSend(
       prepare: () => _messaging.prepareComm(widget.conversationId, text),
       title: 'Confirm message',
-      // **The toggle rides the PLAIN MESSAGE ceremony only.** This funnel is
-      // shared with the challenge, the taunt and the challenge-accept, and the
-      // preference governs none of them — a switch on a sheet it does not
-      // change is a control that lies (`wallet-security-auditor`, this
-      // sitting). Challenge-accept especially: P3 turns that into a staked
-      // commitment.
+      // **The toggle rides the PLAIN MESSAGE ceremony only** — a switch on a
+      // sheet it does not change is a control that lies
+      // (`wallet-security-auditor`, MSG-M1). The funnel is shared with the
+      // attachment send, which the preference governs no more than it did the
+      // arcade frames it used to share it with.
       footer: _SigningToggle(messaging: _messaging),
     );
     if (sent) _compose.clear();
   }
 
-  /// Accept a received challenge — routes through the confirm ceremony and
-  /// sends only a social `accept` frame (a self-send fee). NEVER binds a stake
-  /// or auto-spends (§0.5 law a); the real wager binds at the P3 covenant.
   /// Save a file attachment to the device.
   ///
   /// The bytes are fetched only now, never with the thread pull: rendering a
@@ -742,38 +732,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     txid,
     () => _messaging.attachmentBytes(widget.conversationId, txid),
   );
-
-  Future<void> _acceptChallenge(String refId) => _confirmSend(
-    prepare: () =>
-        _messaging.prepareChallengeAccept(widget.conversationId, refId),
-    title: 'Confirm accept',
-  );
-
-  void _declineChallenge(String refId) {
-    KvHaptic.selection();
-    setState(() => _declined.add(refId));
-  }
-
-  Future<void> _openArcadeComposer() async {
-    KvHaptic.selection();
-    final result = await Navigator.of(context).push<_ArcadeCompose>(
-      KvSheetRoute<_ArcadeCompose>(builder: (_) => const _ArcadeComposeSheet()),
-    );
-    if (result == null || !mounted) return;
-    switch (result) {
-      case _ChallengeCompose(:final stake):
-        await _confirmSend(
-          prepare: () =>
-              _messaging.prepareChallenge(widget.conversationId, stake),
-          title: 'Confirm challenge',
-        );
-      case _TauntCompose(:final text):
-        await _confirmSend(
-          prepare: () => _messaging.prepareTaunt(widget.conversationId, text),
-          title: 'Confirm taunt',
-        );
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1115,11 +1073,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
     );
   }
 
-  /// The thread's own overflow. The arcade composer used to be a permanent
-  /// icon in the composer row, where it competed with the two controls the
-  /// screen is actually for; `M4` draws neither it nor a seat for it, and an
-  /// action used once a session does not earn a seat beside the one used
-  /// every time.
+  /// The thread's own overflow — Block, and whatever a thread grows next.
+  /// (The arcade composer that once lived here went with the challenge
+  /// surface, D-322.)
   Future<void> _threadActions() async {
     KvHaptic.selection();
     final action = await Navigator.of(context).push<String>(
@@ -1132,7 +1088,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       ),
     );
     if (!mounted || action == null) return;
-    if (action == 'arcade') await _openArcadeComposer();
     if (action == 'block') await _blockContact();
   }
 
@@ -1297,13 +1252,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
           delivered: _deliveredFor(m),
           acceptedUnixMs: _statuses[m.txid]?.acceptance?.acceptedUnixMs,
           ghost: _ghostFor(m),
-          declined: m.frame != null && _declined.contains(m.frame!.id),
-          onAccept: _acceptChallenge,
           onSaveFile: _saveAttachment,
           onOpenFile: _openSaved,
           savedFile: _saved[m.txid] != null,
           imageBytes: _imageBytes,
-          onDecline: _declineChallenge,
         );
         // The day separator belongs to the item, not between items: an
         // AnimatedList indexes its own children, so a separator inserted as a
@@ -1805,16 +1757,6 @@ BorderRadius _bubbleRadius({required bool outbound, required bool tail}) {
     bottomRight: tail && outbound ? small : big,
   );
 }
-
-/// Native card identity (house mark + name) for a game slug. Rendered with a
-/// tinted `KvGlyph`, not an emoji (design_system §13 — emoji personality rides
-/// the Kasia-facing wire line only, generated in `core::frames`). An unknown
-/// slug (a future/hostile sender) renders a SAFE generic label, never the raw
-/// counterparty string (a display-spoof surface otherwise).
-(KvGlyph, String) _gameTitle(String game) => switch (game) {
-  'attack_defend' => (KvGlyph.duel, 'Attack & Defend'),
-  _ => (KvGlyph.duel, 'Challenge'),
-};
 
 /// **A bubble caps off the COLUMN it is in, never off the window** (U2-1 /
 /// U2-2, the defect this sub-phase exists to close).
@@ -2325,7 +2267,6 @@ class _MessageRow extends StatelessWidget {
   const _MessageRow({
     super.key,
     required this.message,
-    required this.declined,
     this.showTime = false,
     this.tail = true,
     this.continuesRun = false,
@@ -2335,8 +2276,6 @@ class _MessageRow extends StatelessWidget {
     this.delivered = false,
     this.acceptedUnixMs,
     this.ghost = false,
-    this.onAccept,
-    this.onDecline,
     this.onSaveFile,
     this.onOpenFile,
     this.savedFile = false,
@@ -2344,7 +2283,6 @@ class _MessageRow extends StatelessWidget {
   });
 
   final ThreadMessageDto message;
-  final bool declined;
 
   /// This message closes a run, so it carries the clock time. Suppressed on
   /// system rows, which are not something anyone said.
@@ -2389,9 +2327,6 @@ class _MessageRow extends StatelessWidget {
   /// the row dims to the BG-8 stale opacity with an honest line, and lifts
   /// again if the network re-accepts it (reversible by construction).
   final bool ghost;
-
-  final void Function(String refId)? onAccept;
-  final void Function(String refId)? onDecline;
 
   /// Save this message's file attachment to the device (by txid).
   final void Function(String txid)? onSaveFile;
@@ -2510,25 +2445,9 @@ class _MessageRow extends StatelessWidget {
       );
     }
 
-    final frame = m.frame;
-    if (frame != null) {
-      if (frame.kind == 'challenge') {
-        return _ChallengeCard(
-          frame: frame,
-          outbound: m.outbound,
-          declined: declined,
-          onAccept: onAccept,
-          onDecline: onDecline,
-        );
-      }
-      // accept / result / taunt — light surfaces (a forged one is inert: no
-      // action, display-only, a CLAIM not a settled outcome).
-      return _FrameLightSurface(
-        kind: frame.kind,
-        text: m.text,
-        outbound: m.outbound,
-      );
-    }
+    // A recognised `kv:1:` frame is not a surface (D-322): it falls through
+    // to the plain bubble below and shows its readable line, exactly what a
+    // Kasia user sees.
 
     final attachment = m.attachment;
     if (attachment != null) {
@@ -2673,421 +2592,6 @@ class _MessageRow extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// The tappable challenge card — game · stake · Accept/Decline. Rendered from
-/// the frame's JSON fields (spoof-proof), never the readable line.
-class _ChallengeCard extends StatelessWidget {
-  const _ChallengeCard({
-    required this.frame,
-    required this.outbound,
-    required this.declined,
-    this.onAccept,
-    this.onDecline,
-  });
-
-  final FrameDto frame;
-  final bool outbound;
-  final bool declined;
-  final void Function(String refId)? onAccept;
-  final void Function(String refId)? onDecline;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (icon, name) = _gameTitle(frame.game);
-    final staked = frame.stake.isNotEmpty;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
-      child: Align(
-        alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
-        child: _BubbleWidth(
-          child: Container(
-            padding: const EdgeInsets.all(KvSpace.m),
-            decoration: BoxDecoration(
-              color: KvColor.plate,
-              borderRadius: BorderRadius.circular(KvRadius.plate),
-              // **A plate on the ground has no edge** (BG-4). Both of these
-              // cards drew one, which is the boundary said twice — the tone
-              // step is the whole boundary (`ux-auditor` BLOCK, UX-R5).
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        // A socket carries the brand, it never emits (§1.5,
-                        // BG-2): `tealTint` under `primaryMuted`, not a
-                        // 12 % `primary` wash under `primary` — the sweep
-                        // had kept the old tone through the glyph swap
-                        // (`ux-auditor`, UX-R8 BLOCK).
-                        color: KvColor.tealTint,
-                        borderRadius: BorderRadius.circular(KvRadius.inner),
-                      ),
-                      child: KvGlyphIcon(
-                        icon,
-                        size: KvSpace.l,
-                        tone: KvColor.primaryMuted,
-                      ),
-                    ),
-                    const SizedBox(width: KvSpace.sm),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(name, style: theme.textTheme.titleMedium),
-                          const SizedBox(height: KvSpace.xs),
-                          Text.rich(
-                            TextSpan(
-                              children: [
-                                const TextSpan(text: 'Stake · '),
-                                TextSpan(
-                                  text: staked
-                                      ? '${frame.stake} KAS'
-                                      : 'Friendly',
-                                  // NOT brand-primary. `frame.stake` is a
-                                  // counterparty-supplied wire string validated
-                                  // only for shape, and the accent is how this
-                                  // app says "our money, our number" — dressing
-                                  // an unbacked claim in it is the styling half
-                                  // of the same defect the disclosure line
-                                  // below fixes (ux-auditor, this wave).
-                                  style: TextStyle(
-                                    color: staked
-                                        ? KvColor.ink
-                                        : KvColor.inkDim,
-                                    fontWeight: FontWeight.w600,
-                                    fontVariations: KvWeight.w600,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: KvColor.inkDim,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                // The disclosure the RECIPIENT never got. A stake renders in
-                // brand-primary bold with Accept directly beneath it, which
-                // reads as money about to be committed — and on chain it is
-                // not: a frame binds nothing (§0.3, chain-proven by run 1).
-                // The sender's compose sheet said so; the person being asked
-                // to accept was told nothing at all (run 1, F9).
-                if (staked && !outbound) ...[
-                  const SizedBox(height: KvSpace.xs),
-                  Text(
-                    'Accepting binds no money — this is a claim in a message, '
-                    'not an on-chain wager.',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: KvColor.inkMeta,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: KvSpace.m),
-                _actions(context, theme),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _actions(BuildContext context, ThemeData theme) {
-    final caption = theme.textTheme.labelSmall?.copyWith(
-      color: KvColor.inkMeta,
-    );
-    if (outbound) {
-      return Align(
-        alignment: Alignment.centerRight,
-        child: Text('Challenge sent', style: caption),
-      );
-    }
-    if (declined) {
-      return Align(
-        alignment: Alignment.centerRight,
-        child: Text('Declined', style: caption),
-      );
-    }
-    // A `Wrap`, not a `Row`: at 320 dp / 1.3× the two pills overran the card
-    // by 10 dp (the first frame this card ever had, UX-R8). They stack at the
-    // floor and sit side by side everywhere else; the card itself is P4's to
-    // recompose in house parts.
-    return Wrap(
-      alignment: WrapAlignment.end,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: KvSpace.s,
-      runSpacing: KvSpace.xs,
-      children: [
-        TextButton(
-          onPressed: onDecline == null ? null : () => onDecline!(frame.id),
-          child: const Text('Decline'),
-        ),
-        FilledButton(
-          onPressed: onAccept == null
-              ? null
-              : () {
-                  KvHaptic.selection();
-                  onAccept!(frame.id);
-                },
-          child: const Text('Accept'),
-        ),
-      ],
-    );
-  }
-}
-
-/// A light surface for `accept` / `result` / `taunt` — a leading glyph + the
-/// frame's readable line. `result` is framed as a CLAIM (display-only in P2.4;
-/// truth binds at the P3 covenant), never a settled outcome.
-class _FrameLightSurface extends StatelessWidget {
-  const _FrameLightSurface({
-    required this.kind,
-    required this.text,
-    required this.outbound,
-  });
-
-  final String kind;
-  final String text;
-  final bool outbound;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    // House marks tinted by tokens (not emoji — design_system §13). Colors
-    // are DS-rationed: `ok` (chain-confirmed) and `warn` (degraded) are NOT
-    // for social acknowledgements — accept/taunt ride `primaryMuted`, and a
-    // result stays `inkDim` to reinforce it's an unverified claim.
-    final (glyph, tint) = switch (kind) {
-      'accept' => (KvGlyph.check, KvColor.primaryMuted),
-      'result' => (KvGlyph.flag, KvColor.inkDim),
-      'taunt' => (KvGlyph.chat, KvColor.primaryMuted),
-      _ => (KvGlyph.circle, KvColor.inkDim),
-    };
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: KvSpace.xs),
-      child: Align(
-        alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 300),
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: KvSpace.sm,
-              vertical: KvSpace.s,
-            ),
-            decoration: BoxDecoration(
-              color: KvColor.chip,
-              borderRadius: BorderRadius.circular(KvRadius.plate),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (kind == 'result')
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: KvSpace.xs),
-                    child: Text(
-                      'Reported result — unverified until played',
-                      // `inkDim`: on `chip`, `inkMeta` is 4.30 and this is
-                      // the chip's whole caveat (§1.4, BG-14).
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: KvColor.inkDim,
-                      ),
-                    ),
-                  ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    KvGlyphIcon(glyph, size: KvSpace.m, tone: tint),
-                    const SizedBox(width: KvSpace.s),
-                    Flexible(
-                      child: Text(text, style: theme.textTheme.bodyMedium),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Arcade composer sheet ────────────────────────────────────────────────────
-
-/// What the composer sheet returns — a challenge (optional stake) or a taunt.
-sealed class _ArcadeCompose {
-  const _ArcadeCompose();
-}
-
-class _ChallengeCompose extends _ArcadeCompose {
-  const _ChallengeCompose(this.stake);
-
-  /// Display stake in KAS; null ⇒ a friendly, no-stake duel.
-  final String? stake;
-}
-
-class _TauntCompose extends _ArcadeCompose {
-  const _TauntCompose(this.text);
-
-  final String text;
-}
-
-enum _ArcadeMode { challenge, taunt }
-
-class _ArcadeComposeSheet extends StatefulWidget {
-  const _ArcadeComposeSheet();
-
-  @override
-  State<_ArcadeComposeSheet> createState() => _ArcadeComposeSheetState();
-}
-
-class _ArcadeComposeSheetState extends State<_ArcadeComposeSheet> {
-  _ArcadeMode _mode = _ArcadeMode.challenge;
-  final _stake = TextEditingController();
-  final _taunt = TextEditingController();
-  String? _error;
-
-  @override
-  void dispose() {
-    _stake.dispose();
-    _taunt.dispose();
-    super.dispose();
-  }
-
-  /// Mirrors `core::frames::validate_stake`: a plain decimal (digits + at most
-  /// one `.`), so the UI and the wire agree on what a stake may be.
-  bool _validStake(String s) {
-    if (s.isEmpty || s == '.' || s.length > 64) return false;
-    if ('.'.allMatches(s).length > 1) return false;
-    return s.runes.every((r) => (r >= 0x30 && r <= 0x39) || r == 0x2e);
-  }
-
-  void _submit() {
-    KvHaptic.selection();
-    if (_mode == _ArcadeMode.challenge) {
-      final raw = _stake.text.trim();
-      if (raw.isNotEmpty && !_validStake(raw)) {
-        setState(
-          () => _error = 'Enter an amount like 10 or 2.5, or leave empty',
-        );
-        return;
-      }
-      Navigator.of(context).pop(_ChallengeCompose(raw.isEmpty ? null : raw));
-    } else {
-      final t = _taunt.text.trim();
-      if (t.isEmpty) {
-        setState(() => _error = 'Enter a taunt');
-        return;
-      }
-      Navigator.of(context).pop(_TauntCompose(t));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final challenge = _mode == _ArcadeMode.challenge;
-    // **The sixth sheet** (`ux-auditor` BLOCK, UX-R5). It was the last raw
-    // `showModalBottomSheet` on the messages surface: a `titleMedium` heading,
-    // a `SegmentedButton`, three `Icons.*` — one of them painted `primary`,
-    // which is a Material glyph carrying a teal emission (BG-2/BG-25) — and a
-    // `FilledButton`. No render covers the arcade composer, so the house parts
-    // ARE the design here: `KvSheet`, `KvSegmented`, `KvGlyph`, `KvAction`.
-    return KvSheet(
-      title: 'Attack & Defend',
-      onCancel: () => Navigator.of(context).pop(),
-      foot: KvAction(
-        label: challenge ? 'Review challenge' : 'Review taunt',
-        primary: true,
-        onTap: _submit,
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            KvSegmented(
-              options: const [
-                KvSegmentedOption('Challenge'),
-                KvSegmentedOption('Taunt'),
-              ],
-              index: challenge ? 0 : 1,
-              onSelect: (i) => setState(() {
-                _mode = i == 0 ? _ArcadeMode.challenge : _ArcadeMode.taunt;
-                _error = null;
-              }),
-            ),
-            const SizedBox(height: KvSpace.l),
-            if (challenge) ...[
-              const KvSectionHeader('Stake', gloss: 'optional'),
-              _ArcadeField(
-                controller: _stake,
-                hint: 'e.g. 10',
-                suffix: 'KAS',
-                mono: true,
-              ),
-              const SizedBox(height: KvSpace.sm),
-              const Text(
-                'Leave empty for a friendly duel. The stake is shown to your '
-                'opponent now; it binds when you play, not here.',
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 13,
-                  height: 18 / 13,
-                  fontWeight: FontWeight.w400,
-                  fontVariations: KvWeight.w400,
-                  color: KvColor.inkDim,
-                ),
-              ),
-            ] else ...[
-              const KvSectionHeader('Taunt'),
-              _ArcadeField(controller: _taunt, hint: 'trash talk…'),
-              const SizedBox(height: KvSpace.sm),
-              const Text(
-                'A jab, sent as a message. It costs the network fee like any '
-                'other.',
-                style: TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 13,
-                  height: 18 / 13,
-                  fontWeight: FontWeight.w400,
-                  fontVariations: KvWeight.w400,
-                  color: KvColor.inkDim,
-                ),
-              ),
-            ],
-            if (_error case final error?) ...[
-              const SizedBox(height: KvSpace.sm),
-              Text(
-                error,
-                style: const TextStyle(
-                  fontFamily: KvFont.ui,
-                  fontSize: 13,
-                  height: 18 / 13,
-                  fontWeight: FontWeight.w400,
-                  fontVariations: KvWeight.w400,
-                  color: KvColor.warn,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
     );
   }
 }
@@ -3532,19 +3036,6 @@ class _ThreadActionsSheet extends StatelessWidget {
       child: KvRowContainer(
         ground: KvColor.chip,
         children: [
-          KvRow(
-            dense: true,
-            ground: KvColor.chip,
-            leading: const KvRowDisc.neutral(mark: KvGlyph.games),
-            title: 'Challenge or taunt',
-            sub: 'Send a duel invitation or a jab',
-            trailing: const KvGlyphIcon(
-              KvGlyph.chevron,
-              size: 20,
-              tone: KvColor.etch,
-            ),
-            onTap: () => Navigator.of(context).pop('arcade'),
-          ),
           if (canBlock)
             KvRow(
               dense: true,
@@ -3664,84 +3155,6 @@ class _ReplyNeedsHandshake extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// One field on the arcade composer — the same pill the handshake screen
-/// draws, with an optional unit after it.
-class _ArcadeField extends StatelessWidget {
-  const _ArcadeField({
-    required this.controller,
-    required this.hint,
-    this.suffix,
-    this.mono = false,
-  });
-
-  final TextEditingController controller;
-  final String hint;
-  final String? suffix;
-  final bool mono;
-
-  @override
-  Widget build(BuildContext context) {
-    final suffix = this.suffix;
-    return Container(
-      constraints: const BoxConstraints(minHeight: KvSpace.control),
-      padding: const EdgeInsets.symmetric(horizontal: KvSpace.s20),
-      decoration: BoxDecoration(
-        color: KvColor.chip,
-        borderRadius: BorderRadius.circular(KvRadius.control),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: controller,
-              cursorColor: KvColor.primary,
-              keyboardType: mono
-                  ? const TextInputType.numberWithOptions(decimal: true)
-                  : null,
-              style: TextStyle(
-                fontFamily: mono ? KvFont.mono : KvFont.ui,
-                fontSize: 15,
-                height: 20 / 15,
-                fontWeight: FontWeight.w400,
-                fontVariations: KvWeight.w400,
-                color: KvColor.ink,
-              ),
-              decoration: InputDecoration(
-                isDense: true,
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(vertical: KvSpace.m),
-                hintText: hint,
-                hintStyle: TextStyle(
-                  fontFamily: mono ? KvFont.mono : KvFont.ui,
-                  fontSize: 15,
-                  height: 20 / 15,
-                  fontWeight: FontWeight.w400,
-                  fontVariations: KvWeight.w400,
-                  color: KvColor.inkMeta,
-                ),
-              ),
-            ),
-          ),
-          if (suffix != null)
-            Text(
-              suffix,
-              style: const TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 15,
-                height: 20 / 15,
-                fontWeight: FontWeight.w500,
-                fontVariations: KvWeight.w500,
-                color: KvColor.inkDim,
-              ),
-            ),
-        ],
       ),
     );
   }

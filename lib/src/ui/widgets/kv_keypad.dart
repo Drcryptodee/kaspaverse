@@ -374,11 +374,17 @@ class _KeyCap extends StatelessWidget {
     final style = switch (skin) {
       // Mono, because every cap on the amount pad is a figure and the figure
       // it types is rendered in mono two inches above it.
+      // **600**, the Bible's own number for a key cap (§4 *Secure keypad*:
+      // mono 22 / 600). It shipped declared 500 and painted 400 (the L150
+      // bug), UX-R8 paired it so 500 rendered, and the founder chose the
+      // Bible's weight on glass (2026-09-11: *"should we make em 600?"* —
+      // yes). Size stays 20; the row's 22 is a separate question nobody has
+      // asked.
       KvKeypadSkin.plain => const TextStyle(
         fontFamily: KvFont.mono,
         fontSize: 20,
-        fontWeight: FontWeight.w500,
-        fontVariations: KvWeight.w500,
+        fontWeight: FontWeight.w600,
+        fontVariations: KvWeight.w600,
       ),
       KvKeypadSkin.secret => theme.textTheme.titleMedium,
     };

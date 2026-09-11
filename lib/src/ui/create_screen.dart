@@ -966,7 +966,7 @@ class _CreateScreenState extends State<CreateScreen>
     step: _beatPassphrase,
     guardTitle: _isPin ? 'your PIN' : 'your passphrase',
     children: [
-      _heading('Choose an unlock passphrase'),
+      _heading(_isPin ? 'Choose an unlock PIN' : 'Choose an unlock passphrase'),
       _sub(
         _isPin
             // `O2`'s own lead sentence, with our tail: the render says "that

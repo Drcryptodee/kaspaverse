@@ -182,11 +182,20 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
     _dragging = false;
     // A flick decides on its own; a slow drag decides on where it stopped.
     final v = d.primaryVelocity ?? 0;
-    if (v.abs() > 300) {
-      v > 0 ? _open() : _close();
-    } else {
-      _push.value > 0.5 ? _open() : _close();
+    final open = v.abs() > 300 ? v > 0 : _push.value > 0.5;
+    // **A flick commits at release, not under the finger.** A fast pull
+    // travels a few dp, lets go, and the animation crosses half on its own —
+    // so the crossing click above never fired and the founder felt nothing
+    // on a fast pull either way (on glass, 2026-09-11). The click belongs to
+    // the commit: if the release decides the side the finger had not yet
+    // reached, that is the moment, once. A slow drag that already crossed
+    // half clicked there and `_pastCommit` agrees with the decision, so this
+    // adds nothing to it.
+    if (open != _pastCommit) {
+      _pastCommit = open;
+      KvHaptic.detent();
     }
+    open ? _open() : _close();
   }
 
   @override

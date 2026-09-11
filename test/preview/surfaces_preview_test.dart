@@ -349,13 +349,13 @@ ThreadMessageDto _msg(
   provenance: provenance,
 );
 
-/// **Every seat a house mark took over from `Icons.*` at UX-R8, in one
-/// thread** — a frame for the seven glyphs drawn that sitting, because a
-/// glyph on the sheet is a shape and a glyph in its seat is a design
-/// (L205: frame before you claim). Top to bottom: an archive-restored row and
-/// the `archive` marker it earns; the challenge card (`duel`); the three
-/// event chips (`check` · `flag` · `chat`); a text file (`file`), a picture
-/// (`image`) and a body that claimed to be a file and was not (`alert`).
+/// **The seats the house marks took over from `Icons.*` at UX-R8, in a
+/// thread** — because a glyph on the sheet is a shape and a glyph in its seat
+/// is a design (L205). `files: false` is an archive-restored row and the
+/// `archive` marker it earns; `files: true` is a text file (`file`), a picture
+/// (`image`) and a body that claimed to be a file and was not (`alert`). The
+/// challenge card and the three game events this fixture also seated were
+/// removed with the chat's game surface (D-322, founder 2026-09-11).
 Widget _threadFrames({bool files = false}) {
   MessagingService.conversationsFn = () async => [_conv('c2', name: 'Jonas')];
   MessagingService.instance.refresh();
@@ -363,13 +363,6 @@ Widget _threadFrames({bool files = false}) {
   // times it shows are the fixture's, not the machine's (the catalogue diff
   // at UX-R8 was half wall-clock noise).
   final now = DateTime(2026, 9, 10, 12).millisecondsSinceEpoch;
-  FrameDto frame(
-    String kind, {
-    String game = '',
-    String stake = '',
-    String detail = '',
-  }) =>
-      FrameDto(kind: kind, game: game, stake: stake, id: 'ch1', detail: detail);
   AttachmentDto file(
     String name,
     String kind, {
@@ -384,7 +377,7 @@ Widget _threadFrames({bool files = false}) {
     viewMime: 'application/octet-stream',
   );
   // Two pictures, because the thread sits at its latest row and a frame is
-  // one screen tall: the game half and the file half.
+  // one screen tall: the archive half and the file half.
   final rows = files
       ? [
           _msg(
@@ -412,31 +405,7 @@ Widget _threadFrames({bool files = false}) {
             'Found the old thread — restoring it here.',
             provenance: 'archive',
           ),
-          _msg(
-            'f1',
-            now - 3600000,
-            'Attack & Defend, 5 KAS?',
-            frame: frame('challenge', game: 'attack_defend', stake: '5'),
-          ),
-          _msg(
-            'f2',
-            now - 3500000,
-            'Accepted.',
-            outbound: true,
-            frame: frame('accept'),
-          ),
-          _msg(
-            'f3',
-            now - 3400000,
-            'gg ez',
-            frame: frame('taunt', detail: 'gg ez'),
-          ),
-          _msg(
-            'f4',
-            now - 3300000,
-            'I won 2–1',
-            frame: frame('result', detail: 'I won 2–1'),
-          ),
+          _msg('f1', now - 3600000, 'Thanks — got it.', outbound: true),
         ];
   MessagingService.commFeePreviewFn = (_, _) async => BigInt.from(14300);
   MessagingService.messageSigningFn = () async => true;

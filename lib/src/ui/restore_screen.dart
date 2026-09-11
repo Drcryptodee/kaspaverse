@@ -1044,7 +1044,7 @@ class _RestoreScreenState extends State<RestoreScreen>
     title: 'Restore wallet',
     onBack: _handleBack,
     children: [
-      _heading('Choose an unlock passphrase'),
+      _heading(_isPin ? 'Choose an unlock PIN' : 'Choose an unlock passphrase'),
       _sub(
         _isPin
             ? 'Six digits. It opens this app on this phone only — it is not '

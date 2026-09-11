@@ -65,30 +65,6 @@ class MessagingService {
       transportPrepareComm(conversationId: conversationId, text: text);
 
   @visibleForTesting
-  static Future<SignableSummaryDto> Function(
-    String conversationId,
-    String? stake,
-  )
-  prepareChallengeFn = (conversationId, stake) =>
-      transportPrepareChallenge(conversationId: conversationId, stake: stake);
-
-  @visibleForTesting
-  static Future<SignableSummaryDto> Function(
-    String conversationId,
-    String refId,
-  )
-  prepareChallengeAcceptFn = (conversationId, refId) =>
-      transportPrepareChallengeAccept(
-        conversationId: conversationId,
-        refId: refId,
-      );
-
-  @visibleForTesting
-  static Future<SignableSummaryDto> Function(String conversationId, String text)
-  prepareTauntFn = (conversationId, text) =>
-      transportPrepareTaunt(conversationId: conversationId, text: text);
-
-  @visibleForTesting
   static Future<SendOutcomeDto> Function(BigInt nonce) commitFn = (nonce) =>
       transportCommit(nonce: nonce);
 
@@ -435,24 +411,10 @@ class MessagingService {
   Future<SignableSummaryDto> prepareComm(String conversationId, String text) =>
       prepareCommFn(conversationId, text);
 
-  /// Compose a `kv:1:` Attack & Defend challenge (self-send comm). [stake] is a
-  /// DISPLAY value in KAS (null ⇒ a friendly duel); it binds no value — the
-  /// wager binds at the P3 covenant. Confirmed through the shared ceremony.
-  Future<SignableSummaryDto> prepareChallenge(
-    String conversationId,
-    String? stake,
-  ) => prepareChallengeFn(conversationId, stake);
-
-  /// Compose a social `kv:1:accept` for challenge [refId] — a self-send comm,
-  /// NOT a wager: confirmed through the normal ceremony, never auto-broadcast.
-  Future<SignableSummaryDto> prepareChallengeAccept(
-    String conversationId,
-    String refId,
-  ) => prepareChallengeAcceptFn(conversationId, refId);
-
-  /// Compose a `kv:1:taunt` (personality) as a self-send comm.
-  Future<SignableSummaryDto> prepareTaunt(String conversationId, String text) =>
-      prepareTauntFn(conversationId, text);
+  // The `kv:1:` challenge / accept / taunt composers that sat here (P2.4) were
+  // removed with the chat's game surface (D-322, founder 2026-09-11): a chat
+  // is not where PvP starts. The bridge fns still exist (Rust is untouched);
+  // nothing in Dart calls them until the global PvP model says how.
 
   Future<SendOutcomeDto> commit(BigInt nonce) => commitFn(nonce);
 

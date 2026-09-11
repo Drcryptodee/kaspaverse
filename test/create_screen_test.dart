@@ -603,7 +603,7 @@ void main() {
       await reach(tester, find.text(d));
     }
     // Five is not six: still on `O2`, nothing committed.
-    expect(find.text('Choose an unlock passphrase'), findsOneWidget);
+    expect(find.text('Choose an unlock PIN'), findsOneWidget);
 
     await reach(tester, find.text('6'));
     expect(find.text('Add a 13th word?'), findsOneWidget);
@@ -651,7 +651,7 @@ void main() {
     expect(find.text('Add a 13th word?'), findsOneWidget);
 
     await reach(tester, find.bySemanticsLabel('Back'));
-    expect(find.text('Choose an unlock passphrase'), findsOneWidget);
+    expect(find.text('Choose an unlock PIN'), findsOneWidget);
     expect(
       tester.widget<MaskedDots>(find.byType(MaskedDots)).length.value,
       0,
@@ -695,7 +695,7 @@ void main() {
       find.widgetWithText(KvAction, 'Continue — 12 words only'),
     );
 
-    expect(find.text('Choose an unlock passphrase'), findsOneWidget);
+    expect(find.text('Choose an unlock PIN'), findsOneWidget);
     expect(find.textContaining('anyone would try'), findsOneWidget);
     expect(
       tester.widget<MaskedDots>(find.byType(MaskedDots)).length.value,
