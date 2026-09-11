@@ -1,5 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/painting.dart';
 import 'package:kaspaverse/src/ui/format.dart';
+import 'package:kaspaverse/src/ui/send/signing_ceremony.dart'
+    show ceremonyNoteSpans;
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_address.dart';
 
 void main() {
@@ -124,6 +128,39 @@ void main() {
         'kaspa:${addressPayloadGroups(addr).join(' ')}',
       );
       expect(KvAddress.tailGroup, addressTailGroup);
+    });
+  });
+
+  group('ceremonyNoteSpans (BG-30 — speak and count in different faces)', () {
+    String? face(TextSpan s) => s.style?.fontFamily;
+
+    test('every figure in a note is mono, and the words are not', () {
+      final spans = ceremonyNoteSpans(
+        'Merges 38 coins into one — a typical send today costs 0.0001 KAS, '
+        'after this 0.00002 KAS. Sent as 2 transactions.',
+      );
+      final figures = spans.where((s) => face(s) == KvFont.mono).toList();
+      expect(figures.map((s) => s.text), ['38', '0.0001', '0.00002', '2']);
+      for (final s in spans.where((s) => face(s) != KvFont.mono)) {
+        expect(s.style, isNull, reason: 'prose inherits the note\'s face');
+      }
+      // Nothing is dropped: the spans re-join to the sentence.
+      expect(spans.map((s) => s.text).join(), startsWith('Merges 38 coins'));
+      expect(spans.map((s) => s.text).join(), endsWith('2 transactions.'));
+    });
+
+    test('a digit inside a word is a word (L1), a thousands figure is one', () {
+      final spans = ceremonyNoteSpans(
+        'Your message rides the Kaspa L1; the bond is 1,000 sompi.',
+      );
+      final figures = spans.where((s) => face(s) == KvFont.mono).toList();
+      expect(figures.map((s) => s.text), ['1,000']);
+    });
+
+    test('a note with no figure is one plain span', () {
+      final spans = ceremonyNoteSpans('This cannot be undone.');
+      expect(spans, hasLength(1));
+      expect(spans.single.style, isNull);
     });
   });
 }

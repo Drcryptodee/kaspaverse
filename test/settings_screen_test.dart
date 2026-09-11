@@ -9,6 +9,7 @@ import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/settings/about_screen.dart';
+import 'package:kaspaverse/src/rust/api/vault.dart' show VaultInputKind;
 import 'package:kaspaverse/src/ui/settings/security_screen.dart';
 import 'package:kaspaverse/src/ui/settings/settings_scopes.dart';
 import 'package:kaspaverse/src/ui/settings/settings_screen.dart';
@@ -542,6 +543,7 @@ void main() {
       Future<void> Function()? clear,
       ValueNotifier<int>? grace,
       Future<void> Function(int)? setGrace,
+      Future<VaultInputKind> Function()? inputKind,
       double height = 2400,
     }) async {
       tester.view.physicalSize = Size(393 * 3, height * 3);
@@ -558,6 +560,7 @@ void main() {
               clear: clear,
               grace: grace,
               setGrace: setGrace,
+              inputKind: inputKind,
             ),
           ),
         ),
@@ -589,6 +592,34 @@ void main() {
         find.textContaining('no fingerprint set up yet'),
         findsOneWidget,
         reason: 'a disabled control always says why',
+      );
+    });
+
+    testWidgets('the refusal names the secret the vault actually keeps '
+        '(BG-21; the R7 debt UX-R8 closed)', (tester) async {
+      // A PIN wallet with no sensor: the sentence that ends "…is the unlock"
+      // must say PIN, as the door does — R7 threaded the noun through the
+      // unlock copy and left this helper and the enrolment one hard-coded.
+      await pumpSecurity(
+        tester,
+        biometricStatus: () async => 'no_hardware',
+        inputKind: () async => VaultInputKind.digits,
+      );
+      expect(find.textContaining('Your PIN is the unlock'), findsOneWidget);
+      expect(find.textContaining('passphrase'), findsNothing);
+    });
+
+    testWidgets('a failed read of the kind keeps the word that fits either', (
+      tester,
+    ) async {
+      await pumpSecurity(
+        tester,
+        biometricStatus: () async => 'no_hardware',
+        inputKind: () async => throw StateError('no vault'),
+      );
+      expect(
+        find.textContaining('Your passphrase is the unlock'),
+        findsOneWidget,
       );
     });
 
@@ -1656,6 +1687,7 @@ SecurityScope securityScope({
   ValueNotifier<int>? grace,
   Future<void> Function(int)? setGrace,
   Future<void> Function()? lockNow,
+  Future<VaultInputKind> Function()? inputKind,
 }) => SecurityScope(
   biometricStatus: biometricStatus ?? () async => 'ready',
   pathAState: pathAState ?? () async => pathANone,
@@ -1664,6 +1696,9 @@ SecurityScope securityScope({
   lockGraceSecs: grace ?? ValueNotifier(0),
   setLockGraceSecs: setGrace ?? (_) async {},
   lockNow: lockNow,
+  // A throwing default rather than a silent one: the screen keeps the word
+  // that fits either secret, and no test leans on the real vault by accident.
+  inputKind: inputKind ?? () async => throw StateError('no vault in test'),
 );
 
 SignableSummaryDto _summary() => SignableSummaryDto(

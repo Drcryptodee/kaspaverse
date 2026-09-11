@@ -201,4 +201,44 @@ void main() {
       expect(a.shouldRepaint(const KvGlyphPainter(KvGlyph.money)), isFalse);
     });
   });
+
+  group('kvSvgPath — the transcription is a copy (§2a rule 5)', () {
+    // Both forms exist so a mark can be carried as lucide.dev publishes it.
+    // The compact one is how `swords` writes its arcs; a tokeniser that read
+    // `013` as thirteen would desync every number after it and draw a
+    // different blade, silently.
+    test('arc flags may run into the next number (SVG 1.1 §8.3.8)', () {
+      final spaced = kvSvgPath('M3 5A2 2 0 0 1 3 5.172V3', 1);
+      final compact = kvSvgPath('M3 5A2 2 0 013 5.172V3', 1);
+      expect(compact.getBounds(), spaced.getBounds());
+      expect(
+        compact.computeMetrics().fold<double>(0, (a, m) => a + m.length),
+        closeTo(
+          spaced.computeMetrics().fold<double>(0, (a, m) => a + m.length),
+          1e-9,
+        ),
+      );
+    });
+
+    test('a quadratic segment draws, absolute and relative', () {
+      // Lucide's `flag` is the first mark in the set to use `q`; the parser
+      // used to refuse it with "unsupported path command".
+      final q = kvSvgPath('M4 4Q8 0 12 4q4 4 8 0', 1);
+      expect(q.getBounds().width, closeTo(16, 1e-9));
+      expect(q.computeMetrics().isNotEmpty, isTrue);
+    });
+
+    test('an unsupported command still refuses, by name', () {
+      expect(
+        () => kvSvgPath('M0 0T4 4', 1),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message,
+            'message',
+            contains('unsupported path command T'),
+          ),
+        ),
+      );
+    });
+  });
 }

@@ -2291,7 +2291,13 @@ void main() {
       await tester.pumpWidget(screen());
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+      // The house lock, drawn — `Icons.lock_outline` retired at UX-R8 (BG-25).
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is KvGlyphIcon && w.mark == KvGlyph.lock,
+        ),
+        findsOneWidget,
+      );
       expect(find.textContaining('unlock to read'), findsOneWidget);
       expect(find.textContaining('gm'), findsNothing);
     });

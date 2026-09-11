@@ -510,7 +510,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       return KvIconButton(
                         mark: KvGlyph.kebab,
                         label: 'Message settings',
-                        tone: KvColor.inkNav,
+                        tone: KvColor.inkDim,
                         alert: alert != null,
                         hint: alert,
                         onTap: _messageSettings,

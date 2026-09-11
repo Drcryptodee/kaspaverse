@@ -282,7 +282,7 @@ class _Segment extends StatelessWidget {
             duration: MediaQuery.disableAnimationsOf(context)
                 ? Duration.zero
                 : KvMotion.fast,
-            curve: KvMotion.out,
+            curve: KvMotion.curve,
             alignment: Alignment.center,
             padding: const EdgeInsets.symmetric(horizontal: KvSpace.s14),
             decoration: BoxDecoration(

@@ -4,7 +4,7 @@ import 'format.dart';
 import 'theme/tokens.dart';
 
 /// Renders a Kaspa address in the BG-15 **compact** form: the `kaspa:` scheme in
-/// [KvColor.textTertiary], the payload in mono [KvColor.textPrimary], truncated
+/// [KvColor.inkMeta], the payload in mono [KvColor.ink], truncated
 /// payload-aware ([truncateAddressPayload] — never the scheme). For the full
 /// reviewable form, use [chunkAddress] inside a `SelectableText`; a compact
 /// address should reveal that form on tap (BG-15).
@@ -49,11 +49,11 @@ class AddressText extends StatelessWidget {
           if (scheme.isNotEmpty)
             TextSpan(
               text: scheme,
-              style: base.copyWith(color: KvColor.textTertiary),
+              style: base.copyWith(color: KvColor.inkMeta),
             ),
           TextSpan(
             text: payload,
-            style: base.copyWith(color: KvColor.textPrimary),
+            style: base.copyWith(color: KvColor.ink),
           ),
         ],
       ),

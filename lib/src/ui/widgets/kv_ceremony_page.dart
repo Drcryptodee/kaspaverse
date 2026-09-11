@@ -104,6 +104,22 @@ class KvCeremonyPage extends StatelessWidget {
           color: KvColor.ink,
         );
 
+  /// The heading itself — [headingStyle] on a line that takes the column's
+  /// full width, so a centred one centres in the column and not in its own
+  /// shrink-wrapped box (the column is `start`-aligned). One copy: UX-R7 left
+  /// `create_screen` wrapping its centred heading at the call site and
+  /// `restore_screen` wrapping every heading in its helper — the same
+  /// composition two ways, which is the drift BG-21 names. UX-R8 seated it
+  /// here, where the style already lived.
+  static Widget heading(
+    BuildContext context,
+    String text, {
+    TextAlign align = TextAlign.start,
+  }) => SizedBox(
+    width: double.infinity,
+    child: Text(text, style: headingStyle(context), textAlign: align),
+  );
+
   @override
   Widget build(BuildContext context) {
     final short = KvWindow.of(context).heightClass == KvHeightClass.short;

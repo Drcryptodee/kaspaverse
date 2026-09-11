@@ -184,7 +184,7 @@ class _TxDetailScreenState extends State<TxDetailScreen> {
               trailing: onShare == null
                   ? null
                   : KvIconButton(
-                      mark: KvGlyph.shareUp,
+                      mark: KvGlyph.share,
                       label: 'Share this transaction',
                       onTap: () => onShare(widget.txid),
                     ),
@@ -346,7 +346,7 @@ Future<void> _copy(BuildContext context, String value, String said) async {
   if (context.mounted) {
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text(said), duration: KvMotion.toast));
+    ).showSnackBar(SnackBar(content: Text(said), duration: KvMotion.pulse));
   }
 }
 
@@ -519,7 +519,7 @@ class _LifecycleChipState extends State<_LifecycleChip> {
     return Center(
       child: AnimatedContainer(
         duration: crossing,
-        curve: KvMotion.out,
+        curve: KvMotion.curve,
         // **30 dp at every rung, measured** — and no vertical padding, which
         // is what keeps it so: the check's disc and ring are 28 and sat
         // inside 4 + 4 of padding, so the pill stepped 30 → 36 in one frame at
@@ -547,8 +547,8 @@ class _LifecycleChipState extends State<_LifecycleChip> {
         child: AnimatedSwitcher(
           key: ValueKey(_epoch),
           duration: crossing,
-          switchInCurve: KvMotion.out,
-          switchOutCurve: KvMotion.out,
+          switchInCurve: KvMotion.curve,
+          switchOutCurve: KvMotion.curve,
           child: KeyedSubtree(
             key: ValueKey(rung),
             child: Row(
@@ -663,7 +663,7 @@ class _DepthPlate extends StatelessWidget {
               // slim, and a flap eases the line in rather than cutting it.
               AnimatedSize(
                 duration: KvMotion.fast,
-                curve: KvMotion.out,
+                curve: KvMotion.curve,
                 alignment: Alignment.topCenter,
                 child: stale
                     ? const Padding(
@@ -1008,7 +1008,7 @@ class _CopyRow extends StatelessWidget {
     child: ExcludeSemantics(
       child: InkWell(
         onTap: onTap,
-        highlightColor: KvColor.keyPressed,
+        highlightColor: KvColor.chip,
         splashFactory: NoSplash.splashFactory,
         borderRadius: BorderRadius.circular(KvRadius.row),
         child: child,

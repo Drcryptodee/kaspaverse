@@ -9,21 +9,30 @@ import '../support/preview_harness.dart';
 /// be judged, on the drawer's ground. Looked at against the intake renders'
 /// glyph crops (D-261) — the sheet is what "transcribed from Lucide" is proven
 /// by, not the path strings.
+///
+/// The sheet is as tall as the set needs: eight marks to a row, 90 dp a row.
+/// It was fixed at 360 and had been clipping the last eighteen marks since the
+/// set passed thirty-two — a sheet that shows the marks it was built to prove
+/// only up to a fold is L211's instrument again (found at UX-R8, drawing the
+/// seven marks the thread needed).
 void main() {
   setUpAll(loadBundledFonts);
   testWidgets('glyph sheet', (tester) async {
+    const perRow = 8;
+    const cell = 90.0;
+    final rows = (KvGlyph.values.length + perRow - 1) ~/ perRow;
     await renderSurface(
       tester,
       name: 'glyphs',
-      size: const PreviewSize('sheet', Size(720, 360), 1.0),
+      size: PreviewSize('sheet', Size(perRow * cell, rows * cell), 1.0),
       child: ColoredBox(
         color: KvColor.shelf,
         child: Wrap(
           children: [
             for (final mark in KvGlyph.values)
               SizedBox(
-                width: 90,
-                height: 90,
+                width: cell,
+                height: cell,
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -31,6 +40,7 @@ void main() {
                     Text(
                       mark.name,
                       style: const TextStyle(
+                        fontFamily: KvFont.ui,
                         fontSize: 9,
                         color: KvColor.inkMeta,
                         decoration: TextDecoration.none,

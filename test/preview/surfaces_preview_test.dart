@@ -333,6 +333,9 @@ ThreadMessageDto _msg(
   int unixMs,
   String text, {
   bool outbound = false,
+  FrameDto? frame,
+  AttachmentDto? attachment,
+  String provenance = 'node',
 }) => ThreadMessageDto(
   txid: txid,
   kind: 'comm',
@@ -340,9 +343,125 @@ ThreadMessageDto _msg(
   unixMs: BigInt.from(unixMs),
   text: text,
   readable: true,
+  frame: frame,
+  attachment: attachment,
   tombstoned: false,
-  provenance: 'node',
+  provenance: provenance,
 );
+
+/// **Every seat a house mark took over from `Icons.*` at UX-R8, in one
+/// thread** — a frame for the seven glyphs drawn that sitting, because a
+/// glyph on the sheet is a shape and a glyph in its seat is a design
+/// (L205: frame before you claim). Top to bottom: an archive-restored row and
+/// the `archive` marker it earns; the challenge card (`duel`); the three
+/// event chips (`check` · `flag` · `chat`); a text file (`file`), a picture
+/// (`image`) and a body that claimed to be a file and was not (`alert`).
+Widget _threadFrames({bool files = false}) {
+  MessagingService.conversationsFn = () async => [_conv('c2', name: 'Jonas')];
+  MessagingService.instance.refresh();
+  // A fixed clock, so the frame is the same picture at every render: the
+  // times it shows are the fixture's, not the machine's (the catalogue diff
+  // at UX-R8 was half wall-clock noise).
+  final now = DateTime(2026, 9, 10, 12).millisecondsSinceEpoch;
+  FrameDto frame(
+    String kind, {
+    String game = '',
+    String stake = '',
+    String detail = '',
+  }) =>
+      FrameDto(kind: kind, game: game, stake: stake, id: 'ch1', detail: detail);
+  AttachmentDto file(
+    String name,
+    String kind, {
+    String? text,
+    bool broken = false,
+  }) => AttachmentDto(
+    name: name,
+    sizeBytes: BigInt.from(18432),
+    kind: kind,
+    text: text,
+    broken: broken,
+    viewMime: 'application/octet-stream',
+  );
+  // Two pictures, because the thread sits at its latest row and a frame is
+  // one screen tall: the game half and the file half.
+  final rows = files
+      ? [
+          _msg(
+            'f5',
+            now - 1800000,
+            '',
+            attachment: file(
+              'notes.txt',
+              'text',
+              text: 'Meet at the print shop.',
+            ),
+          ),
+          _msg('f6', now - 1700000, '', attachment: file('proof.png', 'image')),
+          _msg(
+            'f7',
+            now - 1600000,
+            '',
+            attachment: file('invoice.pdf', 'other', broken: true),
+          ),
+        ]
+      : [
+          _msg(
+            'f0',
+            now - 86400000 * 2,
+            'Found the old thread — restoring it here.',
+            provenance: 'archive',
+          ),
+          _msg(
+            'f1',
+            now - 3600000,
+            'Attack & Defend, 5 KAS?',
+            frame: frame('challenge', game: 'attack_defend', stake: '5'),
+          ),
+          _msg(
+            'f2',
+            now - 3500000,
+            'Accepted.',
+            outbound: true,
+            frame: frame('accept'),
+          ),
+          _msg(
+            'f3',
+            now - 3400000,
+            'gg ez',
+            frame: frame('taunt', detail: 'gg ez'),
+          ),
+          _msg(
+            'f4',
+            now - 3300000,
+            'I won 2–1',
+            frame: frame('result', detail: 'I won 2–1'),
+          ),
+        ];
+  MessagingService.commFeePreviewFn = (_, _) async => BigInt.from(14300);
+  MessagingService.messageSigningFn = () async => true;
+  MessagingService.threadSinceFn = (_, _) async => ThreadDeltaDto(
+    messages: rows,
+    statuses: [
+      for (final m in rows)
+        MessageStatusDto(
+          txid: m.txid,
+          tombstoned: false,
+          acceptance: TxStatusDto(
+            kind: TxStatusKind.accepted,
+            blueDepth: BigInt.from(12),
+            acceptedUnixMs: BigInt.from(m.unixMs.toInt() + 900),
+          ),
+        ),
+    ],
+  );
+  return ThreadScreen(
+    conversationId: 'c2',
+    contactLabel: 'Jonas',
+    contactAddress: 'kaspa:qpz3${'x' * 52}41k8t',
+    messaging: MessagingService.instance,
+  );
+}
 
 Widget _sendScreen({bool book = true, BigInt? mature}) => SendScreen(
   mature: ValueNotifier<BigInt?>(mature ?? BigInt.from(2597792200)),
@@ -795,6 +914,10 @@ SecurityScope _securityScope({int grace = 30, String state = pathAReady}) =>
       lockGraceSecs: ValueNotifier(grace),
       setLockGraceSecs: (_) async {},
       lockNow: () async {},
+      // A resolved kind, so the frame shows the row a user reads and not the
+      // one-frame "unknown" state the harness would otherwise leave it in
+      // (`ux-auditor`, UX-R8 re-review).
+      inputKind: () async => vault_api.VaultInputKind.passphrase,
     );
 
 /// `T4`'s own numbers, so the preview is a picture of the render and not of a
@@ -1340,6 +1463,8 @@ void main() {
     );
     surface('messages__empty', () => _chats(empty: true));
     framedSurface('messages__thread', _thread);
+    framedSurface('messages__thread_frames', _threadFrames);
+    framedSurface('messages__thread_files', () => _threadFrames(files: true));
     // The composer mid-draft: the live fee above the mark, and the mark lit
     // (BG-27) — neither of which the resting frame above can show.
     framedSurface('messages__composing', _thread, act: _typeADraft);

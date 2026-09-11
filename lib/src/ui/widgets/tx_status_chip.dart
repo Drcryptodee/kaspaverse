@@ -174,9 +174,9 @@ class _TxStatusChipState extends State<TxStatusChip> {
     final state = _shown;
     final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     return AnimatedSwitcher(
-      duration: state == TxChipState.none ? KvMotion.normal : KvMotion.fast,
-      switchInCurve: KvMotion.out,
-      switchOutCurve: KvMotion.out,
+      duration: state == TxChipState.none ? KvMotion.calm : KvMotion.fast,
+      switchInCurve: KvMotion.curve,
+      switchOutCurve: KvMotion.curve,
       // The dissolve releases its space smoothly (no end-of-fade layout
       // snap); reduced motion degrades to opacity-only (§6).
       transitionBuilder: (child, animation) {
@@ -194,8 +194,8 @@ class _TxStatusChipState extends State<TxStatusChip> {
 
   Widget _body(BuildContext context, TxChipState state) {
     var (color, label) = switch (state) {
-      TxChipState.accepted => (KvColor.success, 'Accepted'),
-      TxChipState.stalled => (KvColor.warning, 'Not accepted yet'),
+      TxChipState.accepted => (KvColor.ok, 'Accepted'),
+      TxChipState.stalled => (KvColor.warn, 'Not accepted yet'),
       TxChipState.none => (null, null),
     };
     if (color == null || label == null) return const SizedBox.shrink();

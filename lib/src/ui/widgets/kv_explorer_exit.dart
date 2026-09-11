@@ -149,7 +149,7 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
               ? 'The link could not be opened.'
               : 'This phone has no browser to open the link with.',
         ),
-        duration: KvMotion.toast,
+        duration: KvMotion.pulse,
       ),
     );
   }
@@ -205,6 +205,7 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
                     fontSize: 13,
                     height: 19 / 13,
                     fontWeight: FontWeight.w500,
+                    fontVariations: KvWeight.w500,
                     color: live ? KvColor.ink : KvColor.inkMeta,
                   ),
                 ),
@@ -229,7 +230,7 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
           // dead affordance must not look live — the words carry the reason.
           KvGlyphIcon(
             KvGlyph.chevron,
-            tone: live ? KvColor.inkNav : KvColor.etch,
+            tone: live ? KvColor.inkDim : KvColor.etch,
             size: 20,
           ),
         ],
@@ -244,11 +245,11 @@ class _KvExplorerExitState extends State<KvExplorerExit> {
       child: live
           ? InkWell(
               onTap: _go,
-              borderRadius: BorderRadius.circular(KvRadius.chip),
+              borderRadius: BorderRadius.circular(KvRadius.control),
               // Grey press, no ripple — the house gesture language (BG-21).
               // The theme's default splash is `glow`, which is teal, and teal
               // is light rather than paint (BG-2).
-              highlightColor: KvColor.keyPressed,
+              highlightColor: KvColor.chip,
               splashFactory: NoSplash.splashFactory,
               child: card,
             )

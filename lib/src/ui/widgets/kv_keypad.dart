@@ -378,6 +378,7 @@ class _KeyCap extends StatelessWidget {
         fontFamily: KvFont.mono,
         fontSize: 20,
         fontWeight: FontWeight.w500,
+        fontVariations: KvWeight.w500,
       ),
       KvKeypadSkin.secret => theme.textTheme.titleMedium,
     };
@@ -393,7 +394,7 @@ class _KeyCap extends StatelessWidget {
         // the same (BG-12).
         color: cap.bare
             ? Colors.transparent
-            : (cap.active ? KvColor.keyPressed : KvColor.key),
+            : (cap.active ? KvColor.chip : KvColor.plate),
         borderRadius: BorderRadius.circular(KvRadius.key),
         child: InkWell(
           borderRadius: BorderRadius.circular(KvRadius.key),
@@ -406,7 +407,7 @@ class _KeyCap extends StatelessWidget {
               border: cap.bare
                   ? null
                   : Border.all(
-                      color: cap.active ? KvColor.ok : KvColor.keyEdge,
+                      color: cap.active ? KvColor.ok : KvColor.plateEdge,
                     ),
             ),
             // The cap is excluded from semantics: the `Semantics` above

@@ -261,9 +261,7 @@ class _PreparingCardState extends State<_PreparingCard> {
                     'on its own either way.'
               : 'This can take a few seconds.',
           textAlign: TextAlign.center,
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: KvColor.textSecondary,
-          ),
+          style: theme.textTheme.bodyMedium?.copyWith(color: KvColor.inkDim),
         ),
       ),
     );
@@ -273,10 +271,14 @@ class _PreparingCardState extends State<_PreparingCard> {
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: KvSpace.xl),
           padding: const EdgeInsets.all(KvSpace.l),
+          // No edge: `plateEdge` is the icon tile's rim and a spec frame,
+          // nothing else (§1.2). This plate floats over a scrim, which is what
+          // says it is nearer; the border had come in under the `border` alias
+          // and the sweep only renamed it. That it is a `DialogRoute` at all is
+          // §9.35's entry — the ceremony's own sheet is where it belongs.
           decoration: BoxDecoration(
-            color: KvColor.surface,
-            borderRadius: BorderRadius.circular(KvRadius.card),
-            border: Border.all(color: KvColor.border),
+            color: KvColor.plate,
+            borderRadius: BorderRadius.circular(KvRadius.plate),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -299,11 +301,11 @@ class _PreparingCardState extends State<_PreparingCard> {
               else
                 AnimatedSize(
                   duration: KvMotion.fast,
-                  curve: KvMotion.out,
+                  curve: KvMotion.curve,
                   child: AnimatedOpacity(
                     opacity: _explain ? 1 : 0,
                     duration: KvMotion.fast,
-                    curve: KvMotion.out,
+                    curve: KvMotion.curve,
                     child: _explain
                         ? reason
                         : const SizedBox(width: double.infinity),

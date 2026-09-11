@@ -967,11 +967,7 @@ class _NodeScreenState extends State<NodeScreen> {
                     spacing: KvSpace.s,
                     runSpacing: KvSpace.xs,
                     children: [
-                      const KvRuledLabel(
-                        'Connection',
-                        tight: true,
-                        rule: false,
-                      ),
+                      const KvRuledLabel('Connection', tight: true),
                       KvLatencyWord(
                         milliseconds: reading.milliseconds,
                         tier: reading.tier,
@@ -1867,7 +1863,7 @@ class _SourceRow extends StatelessWidget {
     child: ExcludeSemantics(
       child: InkWell(
         onTap: onTap,
-        highlightColor: KvColor.keyPressed,
+        highlightColor: KvColor.chip,
         splashFactory: NoSplash.splashFactory,
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: KvSpace.touchTarget),
@@ -2453,7 +2449,7 @@ class _EndpointTextState extends State<_EndpointText> {
               onTap: () => setState(() => _open = !_open),
               child: AnimatedSize(
                 duration: KvMotion.fast,
-                curve: KvMotion.out,
+                curve: KvMotion.curve,
                 alignment: Alignment.topLeft,
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(
@@ -2515,6 +2511,18 @@ class _NodeDisc extends StatelessWidget {
 /// returns early while a dispatch is in flight. (This shipped correctly on the
 /// network sheet, UX-2 dropped it when the action moved here, and it was found
 /// on glass; the test that "proved" the swallow had codified the regression.)
+/// The node screen's compact raised pill — `Search`, `Test`, and the `Use`
+/// verb on a peer row.
+///
+/// **Not `KvAction.raised`, by ruling (UX-R8), after two deferrals.** It reads
+/// as that part's compact register and is not one: `T5` measured it at 600
+/// where `KvAction` sets its verb at 700, at 12 dp of side air where `KvAction`
+/// takes 20 (`M2`), and its in-flight state — `Searching…` in `inkDim` on a
+/// pill that stays filled and pressable — has no form in `KvAction`, whose
+/// only dimmed state is the outlined *disabled* one. Folding it in either
+/// re-tones a founder-signed screen in three measured ways or grows `KvAction`
+/// a fourth form for one screen. It stays here, deliberately, and the register
+/// (§27) carries the same sentence so the next sweep does not re-defer it.
 class _ChipPill extends StatefulWidget {
   const _ChipPill({
     required this.label,

@@ -50,7 +50,7 @@ void main() {
       await tester.pumpWidget(_host(const KvCadence(running: true)));
       final first = _barAlphas(tester);
       expect(first, hasLength(5));
-      await tester.pump(KvMotion.breath * 0.3);
+      await tester.pump(KvMotion.cadence * 0.3);
       expect(_barAlphas(tester), isNot(equals(first)));
       await tester.pumpWidget(const SizedBox());
     });
@@ -95,7 +95,7 @@ void main() {
 
     testWidgets('it stops the instant running goes false', (tester) async {
       await tester.pumpWidget(_host(const KvCadence(running: true)));
-      await tester.pump(KvMotion.breath * 0.4);
+      await tester.pump(KvMotion.cadence * 0.4);
       await tester.pumpWidget(_host(const KvCadence(running: false)));
       await tester.pumpAndSettle();
       expect(
@@ -120,32 +120,16 @@ void main() {
       () {
         const expected = <KvSurfaceTone, (Color, Color?, double)>{
           KvSurfaceTone.abyss: (KvColor.abyss, null, 0),
-          KvSurfaceTone.well: (KvColor.well, KvColor.hairline, KvRadius.plate),
-          KvSurfaceTone.notice: (
-            KvColor.notice,
-            KvColor.noticeEdge,
-            KvRadius.plate,
-          ),
+          KvSurfaceTone.well: (KvColor.plate, KvColor.hairline, KvRadius.plate),
           KvSurfaceTone.chip: (
             KvColor.chip,
-            KvColor.plateDivider,
-            KvRadius.chip,
+            KvColor.hairline,
+            KvRadius.control,
           ),
           KvSurfaceTone.plate: (
             KvColor.plate,
             KvColor.plateEdge,
-            KvRadius.panel,
-          ),
-          KvSurfaceTone.key: (KvColor.key, KvColor.keyEdge, KvRadius.key),
-          KvSurfaceTone.keyPressed: (
-            KvColor.keyPressed,
-            KvColor.keyEdge,
-            KvRadius.key,
-          ),
-          KvSurfaceTone.summoned: (
-            KvColor.summoned,
-            KvColor.summonedEdge,
-            KvRadius.panel,
+            KvRadius.plate,
           ),
         };
         expect(expected.keys, containsAll(KvSurfaceTone.values));
@@ -180,26 +164,6 @@ void main() {
         expect(decoration.color, tone.fill);
       }
     });
-
-    testWidgets(
-      'controls are pills at `control`; surfaces are milled (D-194)',
-      (tester) async {
-        await tester.pumpWidget(
-          _host(const KvSurface.control(width: 80, height: 48)),
-        );
-        final surface = tester.widget<KvSurface>(find.byType(KvSurface));
-        expect(surface.resolvedRadius, KvRadius.control);
-        expect(surface.resolvedRadius, KvRadius.pill);
-        expect(surface.tone.fill, KvColor.control);
-        expect(surface.resolvedEdge, KvColor.edgeHi);
-        // `control` and `notice` are ONE tone, not two — v3.1 defined
-        // `control = notice` and `KvSurfaceTone.notice` is the tone every
-        // control wears. v4.2's ramp is five deep, not eight (§1.1), and the
-        // legacy aliases must map onto it without splitting a pair the widgets
-        // treat as interchangeable.
-        expect(KvColor.control, KvColor.notice);
-      },
-    );
 
     testWidgets('a transparent edge is no edge at all', (tester) async {
       await tester.pumpWidget(
@@ -301,7 +265,7 @@ void main() {
           ),
         ),
       );
-      expect(plateFor(tester).color, KvColor.noticeWarnFill);
+      expect(plateFor(tester).color, KvColor.warnTint);
 
       for (final tone in [KvLampTone.ok, KvLampTone.risk]) {
         await tester.pumpWidget(

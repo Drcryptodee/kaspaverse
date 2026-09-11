@@ -8,6 +8,12 @@ abstract final class KvHaptic {
   /// Picker / toggle / word-select (both registers).
   static void selection() => HapticFeedback.selectionClick();
 
+  /// A dragged thing crossing the point where it will commit on release —
+  /// the drawer passing half-open under the finger, in either direction. One
+  /// click per crossing, never a buzz that follows the drag: the pull is
+  /// silent until it has decided something (founder, 2026-09-06; UX-R8).
+  static void detent() => HapticFeedback.selectionClick();
+
   /// Hold-to-sign threshold reached (vault register).
   static void holdThreshold() => HapticFeedback.mediumImpact();
 

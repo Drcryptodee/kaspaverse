@@ -187,12 +187,10 @@ class KvStatusChip extends StatelessWidget {
         vertical: KvSpace.s10,
       ),
       decoration: BoxDecoration(
-        color: warm ? KvColor.noticeWarnFill : KvColor.chip,
+        color: warm ? KvColor.warnTint : KvColor.chip,
         // §4's notice radius, not the plate's — the shape follows the box.
         borderRadius: BorderRadius.circular(KvRadius.notice),
-        border: Border.all(
-          color: warm ? KvColor.noticeWarnEdge : KvColor.plateDivider,
-        ),
+        border: Border.all(color: warm ? KvColor.warnTint : KvColor.hairline),
       ),
       child: row,
     );

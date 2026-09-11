@@ -130,6 +130,11 @@ class _RestoreScreenState extends State<RestoreScreen>
   vault_api.VaultInputKind _pad = vault_api.VaultInputKind.passphrase;
   bool get _isPin => _pad == vault_api.VaultInputKind.digits;
 
+  /// **One act, one pair of names** (BG-21) — the door (`UnlockSurface`) and
+  /// the room call the secret the same thing, and so does every sentence the
+  /// fingerprint lane says about it.
+  String get _secretNoun => _isPin ? 'PIN' : 'passphrase';
+
   /// `O2` draws six wells.
   static const int _pinLength = 6;
 
@@ -394,13 +399,15 @@ class _RestoreScreenState extends State<RestoreScreen>
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _message = e.code == 'cancelled' ? null : enrollFailureCopy(e.code);
+        _message = e.code == 'cancelled'
+            ? null
+            : enrollFailureCopy(e.code, _secretNoun);
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _message = enrollFailureCopy('failed');
+        _message = enrollFailureCopy('failed', _secretNoun);
       });
     }
   }
@@ -463,18 +470,8 @@ class _RestoreScreenState extends State<RestoreScreen>
     color: KvColor.inkDim,
   );
 
-  /// **A smaller register at `short`.** `display` is a phone-portrait rung; at
-  /// 915 × 412 the body is ~42 dp and a 34 dp line with a descender is cut at
-  /// the fold — type clipped through its glyphs, which is the thing BG-14
-  /// refuses. §3a's `short` class is the chrome giving way, and this is the
-  /// chrome: the heading keeps its job at `barTitle`'s size.
-  /// One copy, on [KvCeremonyPage] (UX-R7).
-  TextStyle get _headingStyle => KvCeremonyPage.headingStyle(context);
-
-  Widget _heading(String text, {TextAlign align = TextAlign.start}) => SizedBox(
-    width: double.infinity,
-    child: Text(text, style: _headingStyle, textAlign: align),
-  );
+  Widget _heading(String text, {TextAlign align = TextAlign.start}) =>
+      KvCeremonyPage.heading(context, text, align: align);
 
   /// **§3a's `short` class: phone landscape, where the chrome gives way.**
   ///
@@ -642,7 +639,7 @@ class _RestoreScreenState extends State<RestoreScreen>
       // that says why no offer appeared.
       if (!ready)
         _sub(
-          biometricUnavailableCopy(_biometricStatus),
+          biometricUnavailableCopy(_biometricStatus, _secretNoun),
           align: TextAlign.center,
         ),
       _reason(),

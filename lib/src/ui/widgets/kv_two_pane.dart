@@ -13,13 +13,14 @@ import '../theme/tokens.dart';
 /// "back" from a pane, because the list beside it never left.
 ///
 /// **The list pane's width is derived, not chosen.** §3a.1 puts it at 400–480,
-/// and the same section pins the V60 in landscape at 340 — which is not a
-/// contradiction: with a rail or a standing drawer already taking 80 or 296 dp,
-/// 400 would leave the detail column too narrow to be a column. So the pane
-/// takes 40% of what is actually left, held between 340 and
-/// [KvLayout.listPaneMax], and yields further only if the detail would fall
-/// under [minDetail]. On a roomy window the formula lands inside the band on
-/// its own.
+/// and the same section pins the V60 in landscape at 340. Those are two floors
+/// for two height classes, not one formula: the pane takes 40% of what is
+/// actually left, held between the class's floor — [minList] when `tall`,
+/// [minListShort] when `short` — and [KvLayout.listPaneMax], and yields further
+/// only if the detail would fall under [minDetail]. The single 340 floor this
+/// widget shipped with handed a tall `expanded` window (1180 with the standing
+/// drawer: 40% of 780 is 312) a 340 list where the law says 400 — the
+/// unimplemented law `KvLayout` recorded on 2026-09-06 and UX-R8 closed.
 class KvTwoPane extends StatelessWidget {
   const KvTwoPane({super.key, required this.list, required this.detail});
 
@@ -29,15 +30,20 @@ class KvTwoPane extends StatelessWidget {
   /// The narrowest a detail column may be and still be one.
   static const double minDetail = 320;
 
-  /// The narrowest the list pane may be squeezed to (§3a.1, the V60).
-  static const double minList = 340;
+  /// The list pane's floor in a `tall` window (§3a.1: *list 400–480*).
+  static const double minList = 400;
+
+  /// The floor in a `short` window — the V60 in landscape (§3a.1), where a
+  /// rail and a 320 detail column leave no room for 400.
+  static const double minListShort = 340;
 
   /// The list pane's width for a given available [width] and outer [gutter].
   /// Exposed so a test can assert the geometry rather than eyeball a render.
-  static double listWidth(double width, double gutter) {
+  static double listWidth(double width, double gutter, {bool short = false}) {
     final content = width - gutter * 2 - KvLayout.columnGap;
     if (content <= 0) return 0;
-    var pane = (content * 0.4).clamp(minList, KvLayout.listPaneMax);
+    final floor = short ? minListShort : minList;
+    var pane = (content * 0.4).clamp(floor, KvLayout.listPaneMax);
     if (content - pane < minDetail) {
       pane = math.max(0, content - minDetail);
     }
@@ -57,7 +63,11 @@ class KvTwoPane extends StatelessWidget {
           // permits and requires — what it forbids is *choosing a layout* from
           // a raw width, and the layout here was already chosen by the class.
           builder: (context, box) {
-            final pane = listWidth(box.maxWidth, gutter);
+            final pane = listWidth(
+              box.maxWidth,
+              gutter,
+              short: metrics.heightClass == KvHeightClass.short,
+            );
             return Padding(
               padding: EdgeInsets.symmetric(horizontal: gutter),
               child: Row(

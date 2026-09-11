@@ -145,7 +145,7 @@ class KvPageTransitionsBuilder extends PageTransitionsBuilder {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    final curved = CurvedAnimation(parent: animation, curve: KvMotion.out);
+    final curved = CurvedAnimation(parent: animation, curve: KvMotion.curve);
     final fade = FadeTransition(opacity: curved, child: child);
     if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) return fade;
     return SlideTransition(
@@ -188,7 +188,7 @@ ThemeData kvDarkTheme() {
     primaryContainer: KvColor.chip,
     onPrimaryContainer: KvColor.ink,
     primaryFixed: KvColor.chip,
-    primaryFixedDim: KvColor.key,
+    primaryFixedDim: KvColor.plate,
     onPrimaryFixed: KvColor.ink,
     onPrimaryFixedVariant: KvColor.inkDim,
 
@@ -197,7 +197,7 @@ ThemeData kvDarkTheme() {
     secondaryContainer: KvColor.chip,
     onSecondaryContainer: KvColor.ink,
     secondaryFixed: KvColor.chip,
-    secondaryFixedDim: KvColor.key,
+    secondaryFixedDim: KvColor.plate,
     onSecondaryFixed: KvColor.ink,
     onSecondaryFixedVariant: KvColor.inkDim,
 
@@ -208,29 +208,29 @@ ThemeData kvDarkTheme() {
     tertiaryContainer: KvColor.chip,
     onTertiaryContainer: KvColor.ink,
     tertiaryFixed: KvColor.chip,
-    tertiaryFixedDim: KvColor.key,
+    tertiaryFixedDim: KvColor.plate,
     onTertiaryFixed: KvColor.ink,
     onTertiaryFixedVariant: KvColor.inkDim,
 
     // The plate stays plain; the hue rides the words (BG-7/§1.5).
     error: KvColor.risk,
     onError: KvColor.onPrimary,
-    errorContainer: KvColor.notice,
+    errorContainer: KvColor.plate,
     onErrorContainer: KvColor.risk,
 
     // The surface ramp, in the order M3 expects: lowest is deepest.
     surface: KvColor.plate,
     onSurface: KvColor.ink,
     surfaceDim: KvColor.abyss,
-    surfaceBright: KvColor.summoned,
-    surfaceContainerLowest: KvColor.well,
+    surfaceBright: KvColor.plate,
+    surfaceContainerLowest: KvColor.plate,
     surfaceContainerLow: KvColor.chip,
     surfaceContainer: KvColor.plate,
-    surfaceContainerHigh: KvColor.key,
-    surfaceContainerHighest: KvColor.summoned,
+    surfaceContainerHigh: KvColor.plate,
+    surfaceContainerHighest: KvColor.plate,
     onSurfaceVariant: KvColor.inkDim,
 
-    outline: KvColor.keyEdge,
+    outline: KvColor.plateEdge,
     outlineVariant: KvColor.hairline,
 
     // Depth is tone plus one edge — never a shadow (BG-4). A scrim is the
@@ -248,7 +248,7 @@ ThemeData kvDarkTheme() {
 
   final text = kvTextTheme();
   final buttonShape = RoundedRectangleBorder(
-    borderRadius: BorderRadius.circular(KvRadius.button),
+    borderRadius: BorderRadius.circular(KvRadius.control),
   );
 
   return ThemeData(
@@ -273,8 +273,8 @@ ThemeData kvDarkTheme() {
     canvasColor: KvColor.abyss,
     fontFamily: KvFont.ui,
     textTheme: text,
-    splashColor: KvColor.glow,
-    highlightColor: KvColor.glow,
+    splashColor: KvColor.armedGlowRing,
+    highlightColor: KvColor.armedGlowRing,
     iconTheme: const IconThemeData(color: KvColor.inkDim),
     // **No `switchTheme`, and its absence is the decision** (D-206, retired
     // here at UX-3). It pinned a Material `Switch` in exactly `KvToggle`'s
@@ -355,7 +355,7 @@ ThemeData kvDarkTheme() {
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: KvColor.well,
+      fillColor: KvColor.plate,
       hintStyle: const TextStyle(color: KvColor.inkMeta),
       suffixIconColor: KvColor.inkDim,
       suffixStyle: text.bodyLarge?.copyWith(color: KvColor.inkDim),
@@ -429,7 +429,7 @@ ThemeData kvDarkTheme() {
       hoverElevation: 0,
       highlightElevation: 0,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(KvRadius.panel),
+        borderRadius: BorderRadius.circular(KvRadius.plate),
         side: const BorderSide(color: KvColor.edgeHi),
       ),
     ),
@@ -440,23 +440,23 @@ ThemeData kvDarkTheme() {
       space: 1,
     ),
     snackBarTheme: SnackBarThemeData(
-      backgroundColor: KvColor.summoned,
+      backgroundColor: KvColor.plate,
       contentTextStyle: text.bodyMedium?.copyWith(color: KvColor.ink),
       behavior: SnackBarBehavior.floating,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(KvRadius.button),
+        borderRadius: BorderRadius.circular(KvRadius.control),
       ),
       actionTextColor: KvColor.primary,
     ),
     bottomSheetTheme: const BottomSheetThemeData(
-      backgroundColor: KvColor.summoned,
-      modalBackgroundColor: KvColor.summoned,
+      backgroundColor: KvColor.plate,
+      modalBackgroundColor: KvColor.plate,
       surfaceTintColor: Colors.transparent,
       dragHandleColor: KvColor.edgeHi,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(
-          top: Radius.circular(KvRadius.panel),
+          top: Radius.circular(KvRadius.plate),
         ),
       ),
     ),
@@ -475,24 +475,24 @@ ThemeData kvDarkTheme() {
     ),
     progressIndicatorTheme: const ProgressIndicatorThemeData(
       color: KvColor.primaryMuted,
-      linearTrackColor: KvColor.key,
+      linearTrackColor: KvColor.plate,
     ),
     chipTheme: ChipThemeData(
       backgroundColor: KvColor.chip,
       side: const BorderSide(color: KvColor.edgeHi),
       labelStyle: text.labelSmall?.copyWith(color: KvColor.ink),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(KvRadius.chip),
+        borderRadius: BorderRadius.circular(KvRadius.control),
       ),
     ),
     segmentedButtonTheme: SegmentedButtonThemeData(
       style: SegmentedButton.styleFrom(
         // Same M3 `labelLarge` default as TextButton — pinned for the same reason.
         textStyle: text.titleMedium,
-        selectedBackgroundColor: KvColor.keyPressed,
+        selectedBackgroundColor: KvColor.chip,
         selectedForegroundColor: KvColor.ink,
         foregroundColor: KvColor.inkDim,
-        side: const BorderSide(color: KvColor.keyEdge),
+        side: const BorderSide(color: KvColor.plateEdge),
       ),
     ),
   );

@@ -2,11 +2,14 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// The eight surface tones of §1.1, each with the job it exists for and the
-/// edge the table pairs it with.
+/// The surface tones of §1.1 a `KvSurface` can wear, each with the job it
+/// exists for and the edge the table pairs it with.
 ///
 /// One tone, one job: the enum is what makes "is this the right surface?"
-/// answerable at a call site instead of by comparing hexes.
+/// answerable at a call site instead of by comparing hexes. The v3.1 tones
+/// that only carried a legacy alias (`notice`, `key`, `keyPressed`, `summoned`)
+/// went with the aliases at UX-R8; `well` stays because `KvAddress` plates an
+/// address in it and its `hairline` edge is the one a sunken entry keeps.
 enum KvSurfaceTone {
   /// The ground. An absence, not a surface — it takes no edge and no radius
   /// (BG-1). Painting it deliberately is how a screen states that it is void.
@@ -15,37 +18,20 @@ enum KvSurfaceTone {
   /// Sunken entry: fields, masked dots, word cells.
   well,
 
-  /// A recessed alert or notice plate. Also the tone every **control** wears,
-  /// under the name [KvColor.control] — see [KvSurface.control].
-  notice,
-
   /// Chips, pills, activity rows, secondary controls.
   chip,
 
   /// A bounded, earned panel.
   plate,
-
-  /// Keypad keys, grid cells, word cells.
-  key,
-
-  /// A pressed key, an inline mono badge, a gauge track.
-  keyPressed,
-
-  /// Sheets and summoned blocks.
-  summoned,
 }
 
 extension KvSurfaceToneTokens on KvSurfaceTone {
   /// The fill from §1.1.
   Color get fill => switch (this) {
     KvSurfaceTone.abyss => KvColor.abyss,
-    KvSurfaceTone.well => KvColor.well,
-    KvSurfaceTone.notice => KvColor.notice,
+    KvSurfaceTone.well => KvColor.plate,
     KvSurfaceTone.chip => KvColor.chip,
     KvSurfaceTone.plate => KvColor.plate,
-    KvSurfaceTone.key => KvColor.key,
-    KvSurfaceTone.keyPressed => KvColor.keyPressed,
-    KvSurfaceTone.summoned => KvColor.summoned,
   };
 
   /// The edge §1.1 pairs with the tone. Null on [abyss], which is not a
@@ -57,12 +43,8 @@ extension KvSurfaceToneTokens on KvSurfaceTone {
   Color? get edge => switch (this) {
     KvSurfaceTone.abyss => null,
     KvSurfaceTone.well => KvColor.hairline,
-    KvSurfaceTone.notice => KvColor.noticeEdge,
-    KvSurfaceTone.chip => KvColor.plateDivider,
+    KvSurfaceTone.chip => KvColor.hairline,
     KvSurfaceTone.plate => KvColor.plateEdge,
-    KvSurfaceTone.key => KvColor.keyEdge,
-    KvSurfaceTone.keyPressed => KvColor.keyEdge,
-    KvSurfaceTone.summoned => KvColor.summonedEdge,
   };
 
   /// The machined radius each tone rests at (§3). Small and deliberate —
@@ -71,12 +53,8 @@ extension KvSurfaceToneTokens on KvSurfaceTone {
   double get radius => switch (this) {
     KvSurfaceTone.abyss => 0,
     KvSurfaceTone.well => KvRadius.plate,
-    KvSurfaceTone.notice => KvRadius.plate,
-    KvSurfaceTone.chip => KvRadius.chip,
-    KvSurfaceTone.plate => KvRadius.panel,
-    KvSurfaceTone.key => KvRadius.key,
-    KvSurfaceTone.keyPressed => KvRadius.key,
-    KvSurfaceTone.summoned => KvRadius.panel,
+    KvSurfaceTone.chip => KvRadius.control,
+    KvSurfaceTone.plate => KvRadius.plate,
   };
 }
 
@@ -103,32 +81,11 @@ class KvSurface extends StatelessWidget {
     this.height,
     this.alignment,
     this.child,
-  }) : _pill = false;
-
-  /// A **control** surface: [KvColor.control] at a pill radius (D-194).
-  ///
-  /// `control` is [KvColor.notice] under its control-surface name — the same
-  /// `#060606`, so the ramp keeps eight tones and not nine. The default edge
-  /// is [KvColor.edgeHi]: a control is a nearer layer than the plate it sits
-  /// on. Per §1.2a that edge is **decoration** — a control is identified by
-  /// its text, which clears AA against `control` by a wide margin — so it
-  /// carries no contrast obligation of its own.
-  const KvSurface.control({
-    super.key,
-    this.edge = KvColor.edgeHi,
-    this.edgeWidth = 1,
-    this.padding,
-    this.width,
-    this.height,
-    this.alignment,
-    this.child,
-  }) : tone = KvSurfaceTone.notice,
-       radius = KvRadius.control,
-       _pill = true;
+  });
 
   final KvSurfaceTone tone;
 
-  /// Null takes the tone's machined radius, or the pill on `.control`.
+  /// Null takes the tone's machined radius.
   final double? radius;
 
   /// Null takes the tone's paired edge; pass [Colors.transparent] for a
@@ -142,14 +99,12 @@ class KvSurface extends StatelessWidget {
   final AlignmentGeometry? alignment;
   final Widget? child;
 
-  final bool _pill;
-
   /// The radius this surface will actually paint at.
   double get resolvedRadius => radius ?? tone.radius;
 
   /// The edge this surface will actually paint, or null for none.
   Color? get resolvedEdge {
-    final e = edge ?? (_pill ? KvColor.edgeHi : tone.edge);
+    final e = edge ?? tone.edge;
     return e == null || e.a == 0 ? null : e;
   }
 

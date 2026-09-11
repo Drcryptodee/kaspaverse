@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -462,7 +463,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
           // Null until the list first builds — initialItemCount covers it.
           _listKey.currentState?.insertItem(
             _messages.length - 1,
-            duration: KvMotion.normal,
+            duration: KvMotion.calm,
           );
         }
       }
@@ -522,8 +523,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
           } else {
             _scroll.animateTo(
               bottom,
-              duration: KvMotion.normal,
-              curve: KvMotion.out,
+              duration: KvMotion.calm,
+              curve: KvMotion.curve,
             );
           }
         }
@@ -853,7 +854,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
               trailing: KvIconButton(
                 mark: KvGlyph.kebab,
                 label: 'Thread actions',
-                tone: KvColor.inkNav,
+                tone: KvColor.inkDim,
                 onTap: _threadActions,
               ),
             ),
@@ -1205,9 +1206,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.lock_outline,
-                color: KvColor.inkDim,
+              const KvGlyphIcon(
+                KvGlyph.lock,
+                tone: KvColor.inkDim,
                 size: KvSpace.xl,
               ),
               const SizedBox(height: KvSpace.m),
@@ -1279,7 +1280,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
         // exactly as far as a one-liner), decelerate-only; reduced motion
         // degrades to the fade alone; initial rows build with a completed
         // animation (no replay).
-        final curved = CurvedAnimation(parent: animation, curve: KvMotion.out);
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: KvMotion.curve,
+        );
         final reduced = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
         Widget row = _MessageRow(
           key: ValueKey(m.txid),
@@ -1716,7 +1720,7 @@ class _DaySeparator extends StatelessWidget {
           // something anyone said* — which is exactly what a boundary is for.
           decoration: BoxDecoration(
             color: KvColor.chip,
-            borderRadius: BorderRadius.circular(KvRadius.pill),
+            borderRadius: BorderRadius.circular(KvRadius.control),
           ),
           padding: const EdgeInsets.symmetric(
             horizontal: KvSpace.sm,
@@ -1762,7 +1766,7 @@ Future<void> _copyMessage(BuildContext context, String text) async {
   await Clipboard.setData(ClipboardData(text: text));
   if (!context.mounted) return;
   ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text('Message copied'), duration: KvMotion.slow),
+    const SnackBar(content: Text('Message copied'), duration: KvMotion.pulse),
   );
 }
 
@@ -1802,14 +1806,14 @@ BorderRadius _bubbleRadius({required bool outbound, required bool tail}) {
   );
 }
 
-/// Native card identity (Material icon + name) for a game slug. Rendered with a
-/// tinted `Icon`, not an emoji (design_system §13 — emoji personality rides the
-/// Kasia-facing wire line only, generated in `core::frames`). An unknown slug
-/// (a future/hostile sender) renders a SAFE generic label, never the raw
+/// Native card identity (house mark + name) for a game slug. Rendered with a
+/// tinted `KvGlyph`, not an emoji (design_system §13 — emoji personality rides
+/// the Kasia-facing wire line only, generated in `core::frames`). An unknown
+/// slug (a future/hostile sender) renders a SAFE generic label, never the raw
 /// counterparty string (a display-spoof surface otherwise).
-(IconData, String) _gameTitle(String game) => switch (game) {
-  'attack_defend' => (Icons.sports_kabaddi, 'Attack & Defend'),
-  _ => (Icons.sports_kabaddi, 'Challenge'),
+(KvGlyph, String) _gameTitle(String game) => switch (game) {
+  'attack_defend' => (KvGlyph.duel, 'Attack & Defend'),
+  _ => (KvGlyph.duel, 'Challenge'),
 };
 
 /// **A bubble caps off the COLUMN it is in, never off the window** (U2-1 /
@@ -2410,8 +2414,8 @@ class _MessageRow extends StatelessWidget {
 
     final ghosted = AnimatedOpacity(
       opacity: ghost ? KvFreshness.opacityStale : 1.0,
-      duration: KvMotion.normal,
-      curve: KvMotion.out,
+      duration: KvMotion.calm,
+      curve: KvMotion.curve,
       child: body,
     );
     // ONE meta line under the bubble, never two stacked ones: the clock, the
@@ -2447,29 +2451,38 @@ class _MessageRow extends StatelessWidget {
           ),
         ),
     ];
-    if (meta.isEmpty) return ghosted;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ghosted,
-        Padding(
-          padding: const EdgeInsets.only(top: KvSpace.xs, bottom: KvSpace.xs),
-          child: Align(
-            alignment: m.outbound
-                ? Alignment.centerRight
-                : Alignment.centerLeft,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final (i, w) in meta.indexed) ...[
-                  if (i > 0) const SizedBox(width: KvSpace.s),
-                  w,
+    // **The archive marker goes under the whole row — bubble AND clock.** It
+    // wrapped the bubble alone, so the row's clock landed below "Everything
+    // above was restored from an archive", outside the caveat, and for an
+    // unconfirmed archive row that clock IS the archive-supplied value the
+    // marker exists to qualify (F3; `ux-auditor`, UX-R8).
+    if (meta.isEmpty) return _withProvenance(theme, m, ghosted);
+    return _withProvenance(
+      theme,
+      m,
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ghosted,
+          Padding(
+            padding: const EdgeInsets.only(top: KvSpace.xs, bottom: KvSpace.xs),
+            child: Align(
+              alignment: m.outbound
+                  ? Alignment.centerRight
+                  : Alignment.centerLeft,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final (i, w) in meta.indexed) ...[
+                    if (i > 0) const SizedBox(width: KvSpace.s),
+                    w,
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -2486,121 +2499,98 @@ class _MessageRow extends StatelessWidget {
       // can manufacture a whole fake CONTACT, not merely append to a thread —
       // and an unmarked "Handshake received" is how that would look
       // (consensus-auditor, this wave).
-      return _withProvenance(
-        theme,
-        m,
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
-          child: Center(
-            child: Text(
-              m.outbound ? 'Handshake sent' : 'Handshake received',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: KvColor.inkMeta,
-              ),
-            ),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: KvSpace.s),
+        child: Center(
+          child: Text(
+            m.outbound ? 'Handshake sent' : 'Handshake received',
+            style: theme.textTheme.labelSmall?.copyWith(color: KvColor.inkMeta),
           ),
         ),
-        align: CrossAxisAlignment.center,
       );
     }
 
     final frame = m.frame;
     if (frame != null) {
       if (frame.kind == 'challenge') {
-        return _withProvenance(
-          theme,
-          m,
-          _ChallengeCard(
-            frame: frame,
-            outbound: m.outbound,
-            declined: declined,
-            onAccept: onAccept,
-            onDecline: onDecline,
-          ),
+        return _ChallengeCard(
+          frame: frame,
+          outbound: m.outbound,
+          declined: declined,
+          onAccept: onAccept,
+          onDecline: onDecline,
         );
       }
       // accept / result / taunt — light surfaces (a forged one is inert: no
       // action, display-only, a CLAIM not a settled outcome).
-      return _withProvenance(
-        theme,
-        m,
-        _FrameLightSurface(
-          kind: frame.kind,
-          text: m.text,
-          outbound: m.outbound,
-        ),
+      return _FrameLightSurface(
+        kind: frame.kind,
+        text: m.text,
+        outbound: m.outbound,
       );
     }
 
     final attachment = m.attachment;
     if (attachment != null) {
-      return _withProvenance(
-        theme,
-        m,
-        _AttachmentCard(
-          file: attachment,
-          outbound: m.outbound,
-          heroTag: m.txid,
-          tail: tail,
-          onSave: onSaveFile == null ? null : () => onSaveFile!(m.txid),
-          onOpen: (!savedFile || onOpenFile == null)
-              ? null
-              : () => onOpenFile!(m.txid, attachment.viewMime),
-          imageBytes: attachment.kind == 'image' && imageBytes != null
-              ? imageBytes!(m.txid)
-              : null,
-        ),
+      return _AttachmentCard(
+        file: attachment,
+        outbound: m.outbound,
+        heroTag: m.txid,
+        tail: tail,
+        onSave: onSaveFile == null ? null : () => onSaveFile!(m.txid),
+        onOpen: (!savedFile || onOpenFile == null)
+            ? null
+            : () => onOpenFile!(m.txid, attachment.viewMime),
+        imageBytes: attachment.kind == 'image' && imageBytes != null
+            ? imageBytes!(m.txid)
+            : null,
       );
     }
 
-    return _withProvenance(
-      theme,
-      m,
-      Padding(
-        // A run reads as one utterance: tight above when it continues the run,
-        // a normal breath when it starts one.
-        padding: EdgeInsets.only(
-          top: continuesRun ? 1 : KvSpace.xs,
-          bottom: KvSpace.xs,
-        ),
-        child: Align(
-          alignment: m.outbound ? Alignment.centerRight : Alignment.centerLeft,
-          child: _BubbleWidth(
-            child: GestureDetector(
-              // Offered only where there are words to copy.
-              onLongPress: m.readable && m.text.isNotEmpty
-                  ? () => _copyMessage(context, m.text)
-                  : null,
-              child: Container(
-                // **Tighter, and tighter at the top than the bottom**
-                // (founder, 2026-09-08: *"reduce the padding top of the bubble
-                // that houses the text, adds unnecessary height to the
-                // message"*). 12 all round put a band of empty plate above
-                // every line of every message; 10 horizontal buys text width
-                // back for the wrap, and 6 over 8 sits the words optically
-                // centred, because a line box already carries leading above
-                // the cap that it does not carry below the baseline.
-                padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
-                decoration: _bubbleDecoration(outbound: m.outbound, tail: tail),
-                child: m.readable
-                    ? _BubbleText(
-                        text: m.text,
-                        delivered: delivered,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          // Leading, not size: §4 owns the ramp, but a
-                          // paragraph inside a bubble needs more air between
-                          // lines than a label in a row does.
-                          height: 1.35,
-                        ),
-                      )
-                    : Text(
-                        'Unreadable message',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: KvColor.inkMeta,
-                          fontStyle: FontStyle.italic,
-                        ),
+    return Padding(
+      // A run reads as one utterance: tight above when it continues the run,
+      // a normal breath when it starts one.
+      padding: EdgeInsets.only(
+        top: continuesRun ? 1 : KvSpace.xs,
+        bottom: KvSpace.xs,
+      ),
+      child: Align(
+        alignment: m.outbound ? Alignment.centerRight : Alignment.centerLeft,
+        child: _BubbleWidth(
+          child: GestureDetector(
+            // Offered only where there are words to copy.
+            onLongPress: m.readable && m.text.isNotEmpty
+                ? () => _copyMessage(context, m.text)
+                : null,
+            child: Container(
+              // **Tighter, and tighter at the top than the bottom**
+              // (founder, 2026-09-08: *"reduce the padding top of the bubble
+              // that houses the text, adds unnecessary height to the
+              // message"*). 12 all round put a band of empty plate above
+              // every line of every message; 10 horizontal buys text width
+              // back for the wrap, and 6 over 8 sits the words optically
+              // centred, because a line box already carries leading above
+              // the cap that it does not carry below the baseline.
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+              decoration: _bubbleDecoration(outbound: m.outbound, tail: tail),
+              child: m.readable
+                  ? _BubbleText(
+                      text: m.text,
+                      delivered: delivered,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        // Leading, not size: §4 owns the ramp, but a
+                        // paragraph inside a bubble needs more air between
+                        // lines than a label in a row does.
+                        height: 1.35,
                       ),
-              ),
+                    )
+                  : Text(
+                      'Unreadable message',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: KvColor.inkMeta,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
             ),
           ),
         ),
@@ -2621,12 +2611,7 @@ class _MessageRow extends StatelessWidget {
   /// `unknown` (pre-V5 rows) is deliberately NOT marked: those predate
   /// provenance entirely, so the badge would say "archive" about rows that were
   /// almost certainly node-scanned. They are claimed by the next node scan.
-  Widget _withProvenance(
-    ThemeData theme,
-    ThreadMessageDto m,
-    Widget child, {
-    CrossAxisAlignment? align,
-  }) {
+  Widget _withProvenance(ThemeData theme, ThreadMessageDto m, Widget child) {
     if (!archiveBoundary) return child;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2634,49 +2619,57 @@ class _MessageRow extends StatelessWidget {
         child,
         Padding(
           padding: const EdgeInsets.symmetric(vertical: KvSpace.m),
-          child: Row(
-            children: [
-              const Expanded(child: Divider(color: KvColor.warn, height: 1)),
-              // **`Flexible`, not a bare child.** The label is a whole
-              // sentence and it took its intrinsic width off a `Row` that had
-              // already given the rest away to the rule — so the row
-              // overflowed by 76 dp the moment the thread sat in a clamped
-              // column rather than the full window. Exactly U2-1's defect one
-              // widget over: content sized against the window instead of
-              // against the column it is in.
-              Flexible(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // `warning`, not tertiary chrome: this says our view of
-                      // the thread above the line may be wrong, and an
-                      // authenticity marker must not be quieter than the content
-                      // it qualifies (BG-8).
-                      const Icon(
-                        Icons.inventory_2_outlined,
-                        size: 12,
-                        color: KvColor.warn,
-                      ),
-                      const SizedBox(width: KvSpace.xs),
-                      Flexible(
-                        child: Text(
-                          allAboveRestored
-                              ? 'Everything above was restored from an archive'
-                              : 'Some messages above were restored from an '
-                                    'archive',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: KvColor.warn,
+          // **The sentence takes the width it needs; the rules split what is
+          // left.** It sat in a `Flexible` between two `Expanded` rules, which
+          // is a third of the row by construction — flex shares are not
+          // handed back when a loose child uses less — so at 393 dp it wrapped
+          // into four lines between two long rules (the first frame this seat
+          // had, UX-R8). Bounded rather than bare, because a bare child took
+          // its intrinsic width off a row that had already given the rest to
+          // the rule and overflowed by 76 dp in a clamped column (U2-1's
+          // defect one widget over). Each rule keeps at least a gutter.
+          child: LayoutBuilder(
+            builder: (context, box) => Row(
+              children: [
+                const Expanded(child: Divider(color: KvColor.warn, height: 1)),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: math.max(0, box.maxWidth - 2 * KvSpace.xl),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: KvSpace.sm),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // `warning`, not tertiary chrome: this says our view
+                        // of the thread above the line may be wrong, and an
+                        // authenticity marker must not be quieter than the
+                        // content it qualifies (BG-8).
+                        const KvGlyphIcon(
+                          KvGlyph.archive,
+                          size: 12,
+                          tone: KvColor.warn,
+                        ),
+                        const SizedBox(width: KvSpace.xs),
+                        Flexible(
+                          child: Text(
+                            allAboveRestored
+                                ? 'Everything above was restored from an '
+                                      'archive'
+                                : 'Some messages above were restored from an '
+                                      'archive',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: KvColor.warn,
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              const Expanded(child: Divider(color: KvColor.warn, height: 1)),
-            ],
+                const Expanded(child: Divider(color: KvColor.warn, height: 1)),
+              ],
+            ),
           ),
         ),
       ],
@@ -2716,7 +2709,7 @@ class _ChallengeCard extends StatelessWidget {
             padding: const EdgeInsets.all(KvSpace.m),
             decoration: BoxDecoration(
               color: KvColor.plate,
-              borderRadius: BorderRadius.circular(KvRadius.card),
+              borderRadius: BorderRadius.circular(KvRadius.plate),
               // **A plate on the ground has no edge** (BG-4). Both of these
               // cards drew one, which is the boundary said twice — the tone
               // step is the whole boundary (`ux-auditor` BLOCK, UX-R5).
@@ -2732,13 +2725,18 @@ class _ChallengeCard extends StatelessWidget {
                       height: 48,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: KvColor.primary.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(KvRadius.data),
+                        // A socket carries the brand, it never emits (§1.5,
+                        // BG-2): `tealTint` under `primaryMuted`, not a
+                        // 12 % `primary` wash under `primary` — the sweep
+                        // had kept the old tone through the glyph swap
+                        // (`ux-auditor`, UX-R8 BLOCK).
+                        color: KvColor.tealTint,
+                        borderRadius: BorderRadius.circular(KvRadius.inner),
                       ),
-                      child: Icon(
+                      child: KvGlyphIcon(
                         icon,
                         size: KvSpace.l,
-                        color: KvColor.primary,
+                        tone: KvColor.primaryMuted,
                       ),
                     ),
                     const SizedBox(width: KvSpace.sm),
@@ -2768,6 +2766,7 @@ class _ChallengeCard extends StatelessWidget {
                                         ? KvColor.ink
                                         : KvColor.inkDim,
                                     fontWeight: FontWeight.w600,
+                                    fontVariations: KvWeight.w600,
                                   ),
                                 ),
                               ],
@@ -2823,14 +2822,20 @@ class _ChallengeCard extends StatelessWidget {
         child: Text('Declined', style: caption),
       );
     }
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.end,
+    // A `Wrap`, not a `Row`: at 320 dp / 1.3× the two pills overran the card
+    // by 10 dp (the first frame this card ever had, UX-R8). They stack at the
+    // floor and sit side by side everywhere else; the card itself is P4's to
+    // recompose in house parts.
+    return Wrap(
+      alignment: WrapAlignment.end,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: KvSpace.s,
+      runSpacing: KvSpace.xs,
       children: [
         TextButton(
           onPressed: onDecline == null ? null : () => onDecline!(frame.id),
           child: const Text('Decline'),
         ),
-        const SizedBox(width: KvSpace.s),
         FilledButton(
           onPressed: onAccept == null
               ? null
@@ -2862,15 +2867,15 @@ class _FrameLightSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // Material icons tinted by tokens (not emoji — design_system §13). Colors
-    // are DS-rationed: `success` (chain-confirmed) and `warning` (degraded) are
-    // NOT for social acknowledgements — accept/taunt ride `primaryMuted`, and a
-    // result stays muted-`textSecondary` to reinforce it's an unverified claim.
+    // House marks tinted by tokens (not emoji — design_system §13). Colors
+    // are DS-rationed: `ok` (chain-confirmed) and `warn` (degraded) are NOT
+    // for social acknowledgements — accept/taunt ride `primaryMuted`, and a
+    // result stays `inkDim` to reinforce it's an unverified claim.
     final (glyph, tint) = switch (kind) {
-      'accept' => (Icons.check, KvColor.primaryMuted),
-      'result' => (Icons.flag_outlined, KvColor.inkDim),
-      'taunt' => (Icons.chat_bubble_outline, KvColor.primaryMuted),
-      _ => (Icons.circle, KvColor.inkDim),
+      'accept' => (KvGlyph.check, KvColor.primaryMuted),
+      'result' => (KvGlyph.flag, KvColor.inkDim),
+      'taunt' => (KvGlyph.chat, KvColor.primaryMuted),
+      _ => (KvGlyph.circle, KvColor.inkDim),
     };
 
     return Padding(
@@ -2886,7 +2891,7 @@ class _FrameLightSurface extends StatelessWidget {
             ),
             decoration: BoxDecoration(
               color: KvColor.chip,
-              borderRadius: BorderRadius.circular(KvRadius.card),
+              borderRadius: BorderRadius.circular(KvRadius.plate),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2897,15 +2902,17 @@ class _FrameLightSurface extends StatelessWidget {
                     padding: const EdgeInsets.only(bottom: KvSpace.xs),
                     child: Text(
                       'Reported result — unverified until played',
+                      // `inkDim`: on `chip`, `inkMeta` is 4.30 and this is
+                      // the chip's whole caveat (§1.4, BG-14).
                       style: theme.textTheme.labelSmall?.copyWith(
-                        color: KvColor.inkMeta,
+                        color: KvColor.inkDim,
                       ),
                     ),
                   ),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(glyph, size: KvSpace.m, color: tint),
+                    KvGlyphIcon(glyph, size: KvSpace.m, tone: tint),
                     const SizedBox(width: KvSpace.s),
                     Flexible(
                       child: Text(text, style: theme.textTheme.bodyMedium),
@@ -3123,6 +3130,29 @@ class _AttachmentCard extends StatelessWidget {
   /// will not interpret never reach a decoder.
   final Future<Uint8List>? imageBytes;
 
+  /// The card's secondary ink, by ground: `inkMeta` on the `plate` bubble a
+  /// contact sent (4.75), `inkDim` on the `tealTint` bubble I sent (6.55) —
+  /// `inkMeta` there is 3.82 and under BG-14 (`ux-auditor`, UX-R8 re-review).
+  Color get _meta => outbound ? KvColor.inkDim : KvColor.inkMeta;
+
+  /// `18.0 KB` as two faces: the figure mono, the unit Jakarta (BG-30).
+  static TextSpan _sizeSpan(String pretty) {
+    final cut = pretty.lastIndexOf(' ');
+    if (cut < 0) return TextSpan(text: pretty);
+    return TextSpan(
+      children: [
+        TextSpan(
+          text: pretty.substring(0, cut),
+          style: const TextStyle(
+            fontFamily: KvFont.mono,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
+        ),
+        TextSpan(text: pretty.substring(cut)),
+      ],
+    );
+  }
+
   static String prettySize(BigInt bytes) {
     final n = bytes.toInt();
     if (n < 1024) return '$n B';
@@ -3130,10 +3160,12 @@ class _AttachmentCard extends StatelessWidget {
     return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
-  IconData get _icon => switch (file.kind) {
-    'text' => Icons.description_outlined,
-    'image' => Icons.image_outlined,
-    _ => Icons.insert_drive_file_outlined,
+  // A picture, or a file: two marks, not three. `file-text` already means
+  // the Contracts destination (BG-21, one meaning per glyph), and the card
+  // names the kind in words beside the mark.
+  KvGlyph get _mark => switch (file.kind) {
+    'image' => KvGlyph.image,
+    _ => KvGlyph.file,
   };
 
   @override
@@ -3155,10 +3187,10 @@ class _AttachmentCard extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Icon(
-                      file.broken ? Icons.error_outline : _icon,
+                    KvGlyphIcon(
+                      file.broken ? KvGlyph.alert : _mark,
                       size: 20,
-                      color: file.broken ? KvColor.inkMeta : KvColor.inkDim,
+                      tone: file.broken ? KvColor.inkMeta : KvColor.inkDim,
                     ),
                     const SizedBox(width: KvSpace.s),
                     Expanded(
@@ -3173,10 +3205,14 @@ class _AttachmentCard extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                           if (!file.broken)
-                            Text(
-                              prettySize(file.sizeBytes),
+                            // The figure in mono, its unit in Jakarta (BG-30),
+                            // on ink that clears the card's own ground: a file
+                            // I sent sits on `tealTint`, where `inkMeta` is
+                            // 3.82 (`ux-auditor`, UX-R8 re-review).
+                            Text.rich(
+                              _sizeSpan(prettySize(file.sizeBytes)),
                               style: theme.textTheme.bodySmall?.copyWith(
-                                color: KvColor.inkMeta,
+                                color: _meta,
                                 fontFamily: KvFont.ui,
                               ),
                             ),
@@ -3208,15 +3244,15 @@ class _AttachmentCard extends StatelessWidget {
                 if (imageBytes != null) ...[
                   const SizedBox(height: KvSpace.s),
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(KvRadius.data),
+                    borderRadius: BorderRadius.circular(KvRadius.inner),
                     child: FutureBuilder<Uint8List>(
                       future: imageBytes,
                       builder: (context, snap) {
                         if (snap.hasError) {
                           return Text(
                             "This image didn't decode",
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: KvColor.inkMeta,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: _meta,
                             ),
                           );
                         }
@@ -3248,8 +3284,8 @@ class _AttachmentCard extends StatelessWidget {
                               // error box.
                               errorBuilder: (_, _, _) => Text(
                                 "This image didn't decode",
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: KvColor.inkMeta,
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: _meta,
                                 ),
                               ),
                             ),
@@ -3268,12 +3304,18 @@ class _AttachmentCard extends StatelessWidget {
                     padding: const EdgeInsets.all(KvSpace.s),
                     decoration: BoxDecoration(
                       color: KvColor.abyss,
-                      borderRadius: BorderRadius.circular(KvRadius.data),
+                      borderRadius: BorderRadius.circular(KvRadius.inner),
                     ),
                     // Plain text, never markup — the sender chose these bytes,
                     // so nothing here may be interpreted as formatting.
                     child: SelectableText(
                       text,
+                      // `maxLines` alone LOCKS the box at twenty lines (the
+                      // editable's preferred height is maxLines when minLines
+                      // is null): a one-line file drew a 456 dp plate with
+                      // its header off the top of every frame (first frame of
+                      // this card, UX-R8). One line grows to twenty.
+                      minLines: 1,
                       maxLines: 20,
                       style: theme.textTheme.bodySmall?.copyWith(
                         fontFamily: KvFont.mono,
@@ -3367,7 +3409,7 @@ class _ImageViewer extends StatelessWidget {
                   fit: BoxFit.contain,
                   errorBuilder: (_, _, _) => Text(
                     "This image didn't decode",
-                    style: theme.textTheme.bodySmall?.copyWith(
+                    style: theme.textTheme.labelSmall?.copyWith(
                       color: KvColor.inkMeta,
                     ),
                   ),

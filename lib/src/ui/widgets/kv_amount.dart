@@ -474,8 +474,8 @@ class KvAmount extends StatelessWidget {
     final dim = stale && base >= KvFreshness.staleDimFloor;
     return AnimatedOpacity(
       opacity: dim ? KvFreshness.opacityStale : 1,
-      duration: KvMotion.instant,
-      curve: KvMotion.out,
+      duration: KvMotion.fast,
+      curve: KvMotion.curve,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.end,

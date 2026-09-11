@@ -14,11 +14,13 @@ import '../theme/tokens.dart';
 /// 2.5 instead of 2, round caps and joins, and no fill — a dot is a zero-length
 /// round-capped stroke (`h.01`), exactly as Lucide draws it.
 ///
-/// **`Icons.*` has not been swept out of `lib/` yet, and this file does not
-/// claim otherwise.** Fifty-two Material icons are still live across sixteen
-/// screens; each retires in its own sub-phase, because a glyph swap is a
-/// composition change and every one of those screens is having its
-/// composition rebuilt anyway (`design_system.md` §9.3, divergence 3).
+/// **`Icons.*` is swept out of `lib/`** (UX-R8, closing `design_system.md`
+/// §9.3 divergence 3): every mark the app draws is a case below, and
+/// `test/no_material_icons_test.dart` keeps it that way — a new `Icons.` in
+/// `lib/` reds the gate, which is BG-25 as a mechanism rather than a review
+/// item. The last fifteen retired at UX-R8 (twelve in the thread, three on
+/// the debug launchers), seven of them by drawing a mark that had no house
+/// shape yet.
 ///
 /// Adding a glyph is one enum case plus one `case` arm in [KvGlyphPainter] —
 /// the Lucide outline, pasted — which is deliberately the whole cost: this file
@@ -149,12 +151,13 @@ enum KvGlyph {
   /// This leaves the app. Lucide `external-link`.
   external,
 
-  /// Hand this to another app. Lucide `share-2`.
+  /// Hand this out of the app — one mark, app-wide. Lucide `share`: a tray
+  /// with the arrow leaving it. `S9`'s own mark at the top right (founder, on
+  /// glass 2026-09-05), and the mark `S5 · Receive` draws on its Share pill;
+  /// Lucide's `share-2` (the three-node graph) lived beside it as `share` until
+  /// UX-R8 read the Receive render and found it was never drawn there (BG-21:
+  /// one glyph per meaning).
   share,
-
-  /// Hand this out of the app — `S9`'s own mark at the top right (founder, on
-  /// glass 2026-09-05). Lucide `share`: a tray with the arrow leaving it.
-  shareUp,
 
   /// The hold's badge, and biometrics. Lucide `fingerprint` (shipped in this
   /// Lucide build under the name `fingerprint-pattern`). **Illustrative**, so
@@ -185,7 +188,7 @@ enum KvGlyph {
   search,
 
   /// Save this to the device. Lucide `download` — the tray with the arrow
-  /// coming INTO it, the mirror of [shareUp], which is what an attachment
+  /// coming INTO it, the mirror of [share], which is what an attachment
   /// save is against an attachment share.
   download,
 
@@ -237,6 +240,36 @@ enum KvGlyph {
   /// Refuse this person. Lucide `ban` — the ring with the stroke through it;
   /// the Block rows and the Blocked addresses list (D-308).
   ban,
+
+  /// A challenge — the game card's mark. Lucide `swords`: two blades crossed,
+  /// which is a duel and not Material's wrestlers (`sports_kabaddi`, retired
+  /// at UX-R8).
+  duel,
+
+  /// A reported result — a claim, not a verified outcome. Lucide `flag`.
+  flag,
+
+  /// An event of no named kind — the safe generic mark `_FrameLightSurface`
+  /// draws for a frame kind it does not recognise, the same rule the card's
+  /// `_gameTitle` keeps for an unknown game (a hostile sender never gets its
+  /// own string on the glass). Lucide `circle`.
+  circle,
+
+  /// An attached picture. Lucide `image`.
+  image,
+
+  /// An attached file of any other kind. Lucide `file`. Not `contracts`'s
+  /// `file-text`, which already means a destination (BG-21: one meaning per
+  /// glyph).
+  file,
+
+  /// This did not decode. Lucide `circle-alert` — the attachment card's broken
+  /// state.
+  alert,
+
+  /// Restored from an archive — the thread's authenticity marker above a
+  /// history fill (BG-8). Lucide `archive`: the box with its lid.
+  archive,
 }
 
 /// One glyph, painted.
@@ -608,18 +641,12 @@ class KvGlyphPainter extends CustomPainter {
           'M10 14 21 3',
           'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
         ]);
-      case KvGlyph.shareUp:
+      case KvGlyph.share:
         path(const [
           'M12 2V15',
           'M16 6L12 2L8 6',
           'M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8',
         ]);
-      case KvGlyph.share:
-        circle(18, 5, 3);
-        circle(6, 12, 3);
-        circle(18, 19, 3);
-        line(8.59, 13.51, 15.42, 17.49);
-        line(15.41, 6.51, 8.59, 10.49);
       case KvGlyph.fingerprint:
         path(const [
           'M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4',
@@ -708,6 +735,44 @@ class KvGlyphPainter extends CustomPainter {
               'l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z',
           'm21.854 2.147-10.94 10.939',
         ]);
+      case KvGlyph.duel:
+        path(const [
+          'm13 19 6-6',
+          'M14.5 17.5 3.586 6.586A2 2 0 013 5.172V3h2.172a2 2 0 011.414.586'
+              'L17.5 14.5',
+          'm14.828 6.172 2.586-2.586A2 2 0 0118.828 3H21v2.172a2 2 0 01-.586 '
+              '1.414l-2.586 2.586',
+          'm16 16 4 4',
+          'm19 21 2-2',
+          'm5 14 4 4',
+          'm5 21-2-2',
+          'M7.5 16.5 4 20',
+        ]);
+      case KvGlyph.flag:
+        path(const [
+          'M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8'
+              'A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2'
+              'a6 6 0 0 0-4 1.528',
+        ]);
+      case KvGlyph.circle:
+        circle(12, 12, 10);
+      case KvGlyph.image:
+        rect(3, 3, 18, 18, 2);
+        circle(9, 9, 2);
+        path(const ['m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21']);
+      case KvGlyph.file:
+        path(const [
+          'M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 '
+              '3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z',
+          'M14 2v5a1 1 0 0 0 1 1h5',
+        ]);
+      case KvGlyph.alert:
+        circle(12, 12, 10);
+        line(12, 8, 12, 12);
+        line(12, 16, 12.01, 16);
+      case KvGlyph.archive:
+        rect(2, 3, 20, 5, 1);
+        path(const ['M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8', 'M10 12h4']);
     }
   }
 
@@ -717,14 +782,17 @@ class KvGlyphPainter extends CustomPainter {
 }
 
 /// **SVG path data → [Path]**, scaled by [scale], for the subset Lucide uses:
-/// `M L H V C S A Z` in absolute and relative forms. It exists so a mark can
+/// `M L H V C S Q A Z` in absolute and relative forms. It exists so a mark can
 /// be carried as the string lucide.dev publishes rather than as a hand
 /// re-typed polyline — the transcription is then a copy, not an interpretation
 /// (§2a rule 5), and a wrong glyph is a diff against one public string.
 ///
 /// Arcs map onto [Path.arcToPoint] one-to-one (SVG's sweep flag is Flutter's
-/// `clockwise`). Not supported, because Lucide never emits them: `Q T`
-/// quadratics.
+/// `clockwise`), and the two arc flags may run into each other and into the
+/// coordinate after them (`A2 2 0 013 5.172` — SVG 1.1 §8.3.8), which Lucide's
+/// `swords` does. `Q` quadratics arrived with Lucide's `flag` (UX-R8); `T` is
+/// still unsupported because nothing in the set uses it, and the parser says
+/// so rather than guessing.
 @visibleForTesting
 Path kvSvgPath(String d, double scale) {
   final path = Path();
@@ -736,6 +804,17 @@ Path kvSvgPath(String d, double scale) {
   double? cx, cy;
   double num() => double.parse(tokens[i++]);
   bool more() => i < tokens.length && !_isCommand(tokens[i]);
+  // An arc flag is one digit, and SVG lets it abut the next flag or number:
+  // `013` is large-arc 0, sweep 1, then 3. Peel one digit and leave the rest.
+  bool flag() {
+    final t = tokens[i];
+    if (t.length > 1 && (t[0] == '0' || t[0] == '1') && t[1] != '.') {
+      tokens[i] = t.substring(1);
+      return t[0] == '1';
+    }
+    i++;
+    return t != '0';
+  }
 
   while (i < tokens.length) {
     if (_isCommand(tokens[i])) cmd = tokens[i++];
@@ -815,12 +894,26 @@ Path kvSvgPath(String d, double scale) {
           x = ex;
           y = ey;
         } while (more());
+      case 'Q':
+        do {
+          final x1 = ax(num()), y1 = ay(num());
+          final ex = ax(num()), ey = ay(num());
+          path.quadraticBezierTo(
+            x1 * scale,
+            y1 * scale,
+            ex * scale,
+            ey * scale,
+          );
+          x = ex;
+          y = ey;
+        } while (more());
+        cx = cy = null;
       case 'A':
         do {
           final rx = num(), ry = num();
           final rotation = num();
-          final large = num() != 0;
-          final sweep = num() != 0;
+          final large = flag();
+          final sweep = flag();
           final ex = ax(num()), ey = ay(num());
           path.arcToPoint(
             Offset(ex * scale, ey * scale),
@@ -845,6 +938,9 @@ Path kvSvgPath(String d, double scale) {
   return path;
 }
 
-final RegExp _svgTokens = RegExp(r'[MmLlHhVvCcSsAaZz]|-?(?:\d+\.?\d*|\.\d+)');
+// Any letter is a command token, so one the switch does not know reaches its
+// `default:` and refuses by name. A tokeniser that only matched the known
+// letters dropped the rest on the floor, and `M0 0T4 4` drew a line.
+final RegExp _svgTokens = RegExp(r'[A-Za-z]|-?(?:\d+\.?\d*|\.\d+)');
 
 bool _isCommand(String t) => t.length == 1 && RegExp('[A-Za-z]').hasMatch(t);

@@ -9,8 +9,8 @@ void main() {
   group('KvPageRoute — the §6 v2.2 duration law', () {
     test('slow in, normal back (leaving is lighter than arriving)', () {
       final route = KvPageRoute<void>(builder: (_) => const SizedBox());
-      expect(route.transitionDuration, KvMotion.slow);
-      expect(route.reverseTransitionDuration, KvMotion.normal);
+      expect(route.transitionDuration, KvMotion.enter);
+      expect(route.reverseTransitionDuration, KvMotion.calm);
     });
   });
 

@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import 'theme/tokens.dart';
+
 import '../rust/api/send.dart' as send_api;
 import '../rust/api/transport.dart' as transport_api;
 import '../rust/api/vault.dart' show vaultReceiveAddress;
@@ -183,7 +185,10 @@ class _DevTransportPanelState extends State<DevTransportPanel> {
               children: [
                 Text(
                   'live ciph_msg matches: ${events.length}',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontVariations: KvWeight.w700,
+                  ),
                 ),
                 for (final e in events)
                   Padding(

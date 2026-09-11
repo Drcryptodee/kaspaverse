@@ -276,12 +276,12 @@ class _BackupBlock extends StatelessWidget {
             const SizedBox(height: KvSpace.m),
             KvAction.raised(
               label: 'Back up now',
-              // `shareUp` is the tray with the arrow leaving it — parking the
+              // `share` is the tray with the arrow leaving it — parking the
               // conversation list on chain is exactly that, and it is a mark
               // the app owns (BG-25). `Icons.backup_outlined` rendered as an
               // empty box in the preview frame, which is what a Material icon
               // does on a surface whose font the house never bundles.
-              mark: KvGlyph.shareUp,
+              mark: KvGlyph.share,
               // Nothing to back up is a disabled action with its reason ON it,
               // never a button that spends a fee on an empty payload.
               disabledReason:

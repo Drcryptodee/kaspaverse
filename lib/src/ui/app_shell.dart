@@ -109,9 +109,9 @@ class _AppShellState extends State<AppShell> {
         final key = AppShell.routeKey(s);
         // Vault-calm cross-fade between states — decelerate, no slide (BG-9/§6).
         return AnimatedSwitcher(
-          duration: KvMotion.normal,
-          switchInCurve: KvMotion.out,
-          switchOutCurve: KvMotion.out,
+          duration: KvMotion.calm,
+          switchInCurve: KvMotion.curve,
+          switchOutCurve: KvMotion.curve,
           child: KeyedSubtree(key: ValueKey(key), child: _childFor(key)),
         );
       },

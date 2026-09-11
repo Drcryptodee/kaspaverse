@@ -12,8 +12,8 @@ import 'kv_glyph.dart';
 /// information" — and what the user types is `ink`, because that IS
 /// information.
 ///
-/// It is deliberately **not** a [KvSurface.control]: a control is something you
-/// commit, and BG-27 lights those. A search field commits nothing; it filters
+/// It is deliberately **not** a control (`KvAction`, `KvGlowPill`): a control
+/// is something you commit, and BG-27 lights those. A search field commits nothing; it filters
 /// what is already on the screen, and it never takes the teal.
 class KvSearchField extends StatefulWidget {
   const KvSearchField({

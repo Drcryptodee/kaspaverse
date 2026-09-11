@@ -97,14 +97,14 @@ class RoadmapScreen extends StatelessWidget {
                   Container(
                     decoration: BoxDecoration(
                       color: KvColor.plate,
-                      borderRadius: BorderRadius.circular(KvRadius.panel),
+                      borderRadius: BorderRadius.circular(KvRadius.plate),
                       border: Border.all(color: KvColor.plateEdge),
                     ),
                     child: Column(
                       children: [
                         for (var i = 0; i < destinations.length; i++) ...[
                           if (i > 0)
-                            Container(height: 1, color: KvColor.plateDivider),
+                            Container(height: 1, color: KvColor.hairline),
                           _Destination(destinations[i]),
                         ],
                       ],
@@ -144,7 +144,8 @@ class _Destination extends StatelessWidget {
                     fontSize: 15,
                     height: 20 / 15,
                     fontWeight: FontWeight.w600,
-                    color: KvColor.inkNav,
+                    fontVariations: KvWeight.w600,
+                    color: KvColor.inkDim,
                   ),
                 ),
               ),
@@ -159,6 +160,7 @@ class _Destination extends StatelessWidget {
                   fontSize: 11,
                   height: 16 / 11,
                   fontWeight: FontWeight.w600,
+                  fontVariations: KvWeight.w600,
                   letterSpacing: 1.6,
                   color: KvColor.inkMeta,
                 ),

@@ -1881,7 +1881,7 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Mainnet'));
       await tester.pump();
-      await tester.pump(KvMotion.slow);
+      await tester.pump(KvMotion.enter);
       expect(find.byType(NodeScreen), findsOneWidget);
       expect(find.text('Network'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
@@ -1903,7 +1903,7 @@ void main() {
       expect(find.text('Mainnet'), findsOneWidget);
       await tester.tap(find.text('Mainnet'));
       await tester.pump();
-      await tester.pump(KvMotion.slow);
+      await tester.pump(KvMotion.enter);
       expect(find.byType(NodeScreen), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });

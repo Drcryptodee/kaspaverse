@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import 'theme/tokens.dart';
+
 import '../rust/api/vault.dart' as vault_api;
 import '../services/vault_service.dart';
 
@@ -53,7 +55,10 @@ class _DevVaultPanelState extends State<DevVaultPanel> {
                   : 'status: exists=${s.exists} unlocked=${s.unlocked} '
                         'failed=${s.failedAttempts} '
                         'lockedOutUntil=${s.lockedOutUntilUnix ?? "-"}',
-              style: const TextStyle(fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontVariations: KvWeight.w700,
+              ),
             ),
           ),
           ValueListenableBuilder(

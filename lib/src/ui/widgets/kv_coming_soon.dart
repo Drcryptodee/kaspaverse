@@ -104,7 +104,7 @@ class KvComingSoon extends StatelessWidget {
                             fontFamily: KvFont.ui,
                             fontSize: 15,
                             height: 20 / 15,
-                            fontVariations: [FontVariation('wght', 600)],
+                            fontVariations: KvWeight.w600,
                             color: KvColor.ink,
                           ),
                         ),
@@ -155,7 +155,7 @@ class _Tag extends StatelessWidget {
             fontFamily: KvFont.ui,
             fontSize: 11,
             height: 16 / 11,
-            fontVariations: [FontVariation('wght', 600)],
+            fontVariations: KvWeight.w600,
             // inkDim, not inkMeta: this sits on `chip`, where inkMeta measures
             // 4.30 and fails AA (§1.4, BG-14).
             color: KvColor.inkDim,

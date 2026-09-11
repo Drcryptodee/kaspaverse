@@ -38,6 +38,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart' show KvMaturity;
 import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_contact.dart' show ContactsScope;
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
+import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/tx/tx_detail_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
@@ -224,6 +225,7 @@ SecurityScope _securityScope() => SecurityScope(
   clearEnrollment: VaultService.instance.clearBiometric,
   lockGraceSecs: VaultService.instance.lockGraceSecs,
   setLockGraceSecs: VaultService.instance.setLockGraceSecs,
+  inputKind: VaultService.instance.vaultInputKind,
   // `T1`'s raised pill and the drawer's Lock foot are the same act. BG-13:
   // a lock is a discard, and the shell routes on the vault's own status
   // stream, so nothing here navigates.
@@ -579,7 +581,7 @@ class _DevPanelLink extends StatelessWidget {
           onPressed: () => Navigator.of(
             context,
           ).push(KvPageRoute<void>(builder: (_) => const DevVaultPanel())),
-          icon: const Icon(Icons.build_outlined),
+          icon: const KvGlyphIcon(KvGlyph.lock, size: 18),
           label: const Text('Dev vault panel'),
         ),
       ],
@@ -605,7 +607,7 @@ class _DevFabs extends StatelessWidget {
           onPressed: () => Navigator.of(
             context,
           ).push(KvPageRoute<void>(builder: (_) => const DevTransportPanel())),
-          child: const Icon(Icons.satellite_alt_outlined),
+          child: const KvGlyphIcon(KvGlyph.network, tone: KvColor.ink),
         ),
         const SizedBox(height: 8),
         FloatingActionButton.small(
@@ -614,7 +616,7 @@ class _DevFabs extends StatelessWidget {
           onPressed: () => Navigator.of(
             context,
           ).push(KvPageRoute<void>(builder: (_) => const DevVaultPanel())),
-          child: const Icon(Icons.build_outlined),
+          child: const KvGlyphIcon(KvGlyph.lock, tone: KvColor.ink),
         ),
       ],
     );

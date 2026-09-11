@@ -177,7 +177,7 @@ class _CreateScreenState extends State<CreateScreen>
   /// The two read differently and should look different: "Enter the extra word,
   /// or tap Skip" is guidance, while "those didn't match" is the app telling you
   /// something went wrong on the screen that decides whether your backup works.
-  /// `KvColor.error` is reserved for fund risk and destruction, so this is
+  /// `KvColor.risk` is reserved for fund risk and destruction, so this is
   /// `warning` — the degraded tier, not the destructive one.
   bool _messageIsWarning = false;
   bool _sealed = false; // ceremony consumed — don't abandon on dispose
@@ -225,6 +225,11 @@ class _CreateScreenState extends State<CreateScreen>
   /// their recovery words already written down.
   vault_api.VaultInputKind _pad = vault_api.VaultInputKind.passphrase;
   bool get _isPin => _pad == vault_api.VaultInputKind.digits;
+
+  /// **One act, one pair of names** (BG-21) — the door (`UnlockSurface`) and
+  /// the room call the secret the same thing, and so does every sentence the
+  /// fingerprint lane says about it.
+  String get _secretNoun => _isPin ? 'PIN' : 'passphrase';
 
   /// **The live phrase length**, read back from the ceremony once the native
   /// reveal has verified it (D-312). It starts at the default and only ever
@@ -386,7 +391,7 @@ class _CreateScreenState extends State<CreateScreen>
       Scrollable.ensureVisible(
         ctx,
         duration: KvMotion.fast,
-        curve: KvMotion.out,
+        curve: KvMotion.curve,
         alignment: 0.5,
       );
     });
@@ -558,14 +563,14 @@ class _CreateScreenState extends State<CreateScreen>
         _busy = false;
         _message = null;
       });
-      if (e.code != 'cancelled') _say(enrollFailureCopy(e.code));
+      if (e.code != 'cancelled') _say(enrollFailureCopy(e.code, _secretNoun));
     } catch (_) {
       // Never swallowed to a silent pop again: that is what made enrolment
       // present as "I tapped it and nothing happened". The user stays on the
       // step, is told what happened, and can retry or skip.
       if (!mounted) return;
       setState(() => _busy = false);
-      _say(enrollFailureCopy('failed'));
+      _say(enrollFailureCopy('failed', _secretNoun));
     }
   }
 
@@ -738,17 +743,8 @@ class _CreateScreenState extends State<CreateScreen>
     color: KvColor.inkDim,
   );
 
-  /// **A smaller register at `short`.** `display` is a phone-portrait rung; at
-  /// 915 × 412 the body is ~42 dp and a 34 dp line with a descender is cut at
-  /// the fold — type clipped through its glyphs, which is the thing BG-14
-  /// refuses. §3a's `short` class is the chrome giving way, and this is the
-  /// chrome: the heading keeps its job at `barTitle`'s size.
-  /// One copy, on [KvCeremonyPage] (UX-R7). It was identical here, in
-  /// `restore_screen` and in `passphrase_unlock_screen`.
-  TextStyle get _headingStyle => KvCeremonyPage.headingStyle(context);
-
   Widget _heading(String text, {TextAlign align = TextAlign.start}) =>
-      Text(text, style: _headingStyle, textAlign: align);
+      KvCeremonyPage.heading(context, text, align: align);
 
   /// **§3a's `short` class: phone landscape, where the chrome gives way.**
   ///
@@ -1374,12 +1370,9 @@ class _CreateScreenState extends State<CreateScreen>
           const Center(child: CeremonyMarkPair()),
           const SizedBox(height: KvSpace.xl),
         ],
-        SizedBox(
-          width: double.infinity,
-          child: _heading(
-            ready ? 'Open with biometrics?' : 'Biometrics, when you want them',
-            align: TextAlign.center,
-          ),
+        _heading(
+          ready ? 'Open with biometrics?' : 'Biometrics, when you want them',
+          align: TextAlign.center,
         ),
         // **Nothing under the question when the answer is a yes/no.**
         // *Open with biometrics?* is the whole ask, and the founder said so on
@@ -1393,7 +1386,7 @@ class _CreateScreenState extends State<CreateScreen>
           SizedBox(
             width: double.infinity,
             child: _sub(
-              biometricUnavailableCopy(_biometricStatus),
+              biometricUnavailableCopy(_biometricStatus, _secretNoun),
               align: TextAlign.center,
             ),
           ),

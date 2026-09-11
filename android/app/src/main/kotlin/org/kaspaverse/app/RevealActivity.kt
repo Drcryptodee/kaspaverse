@@ -68,7 +68,7 @@ class RevealActivity : Activity() {
     // answer, and the bounce notice is a redirection. Amber is exactly the
     // "not yet certain / needs checking" meaning the law assigns it (BG-7).
     private val cWarning = Color.parseColor("#E0B15C")    // KvColor.warn
-    private val cControl = Color.parseColor("#121717")    // KvColor.control -> plate
+    private val cControl = Color.parseColor("#121717")    // KvColor.plate (the `control` alias it mirrored was deleted at UX-R8)
     private val cEdgeHi = Color.parseColor("#2A3433")     // KvColor.edgeHi
     // Added at UX-R6, sampled off `O3` and `O4` at 4x: the raised pill's
     // ground, the reveal control's ink, the mask's dots and a word's index.

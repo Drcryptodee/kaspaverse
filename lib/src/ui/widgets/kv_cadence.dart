@@ -90,7 +90,7 @@ class _KvCadenceState extends State<KvCadence>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
-    duration: KvMotion.breath,
+    duration: KvMotion.cadence,
   );
 
   bool _reduced = false;
@@ -133,7 +133,8 @@ class _KvCadenceState extends State<KvCadence>
     if (!widget.running) return KvFreshness.opacityStale;
     if (_reduced) return 1;
     final stagger =
-        KvMotion.cadenceStagger.inMilliseconds / KvMotion.breath.inMilliseconds;
+        KvMotion.cadenceStagger.inMilliseconds /
+        KvMotion.cadence.inMilliseconds;
     final phase = (_c.value - i * stagger) % 1.0;
     final wave = (0.5 - 0.5 * math.cos(2 * math.pi * phase)).clamp(0.0, 1.0);
     return KvCadence.troughOpacity + (1 - KvCadence.troughOpacity) * wave;

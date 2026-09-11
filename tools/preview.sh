@@ -11,6 +11,9 @@
 #   tools/preview.sh              # render "after" and build the sheet
 #   tools/preview.sh --open       # ... and open it
 #
+# One surface, without wiping the rest (the filtered-run trap, MSG-BLOCK):
+#   KV_PREVIEW=1 KV_PREVIEW_KEEP=1 flutter test test/preview --update-goldens --name '<surface>'
+#
 # What it CANNOT do, stated here so the sheet is never mistaken for proof:
 #   - it cannot judge motion (still frames; use the frame strips, then glass)
 #   - it cannot judge the panel (true black, refresh, brightness)

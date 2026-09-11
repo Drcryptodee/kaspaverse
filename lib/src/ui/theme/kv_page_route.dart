@@ -15,8 +15,8 @@ class KvPageRoute<T> extends MaterialPageRoute<T> {
   KvPageRoute({required super.builder, super.settings, super.fullscreenDialog});
 
   @override
-  Duration get transitionDuration => KvMotion.slow;
+  Duration get transitionDuration => KvMotion.enter;
 
   @override
-  Duration get reverseTransitionDuration => KvMotion.normal;
+  Duration get reverseTransitionDuration => KvMotion.calm;
 }

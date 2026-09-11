@@ -704,7 +704,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('The contact could not be saved. ${displayError(e)}'),
-            duration: KvMotion.toast,
+            duration: KvMotion.pulse,
           ),
         );
       }
@@ -1175,21 +1175,64 @@ class _SigningCeremonyState extends State<SigningCeremony>
 
 /// A quiet explanatory line. Sentences WRAP; only numbers refuse to (L131),
 /// and every string on this screen is a sentence.
+///
+/// **Every figure in it is mono** (BG-30: *speak and count in different
+/// faces*) — the coin counts, the fee, the bond a handshake note carries, the
+/// transaction count. Taught here once rather than at seven call sites, each
+/// of which would otherwise wrap its own span (`ux-auditor`, MSG-BLOCK →
+/// UX-R8). A figure is a run of digits on a word boundary, with its decimals
+/// and thousands; `L1` is a word and stays in Jakarta.
 class _Note extends StatelessWidget {
   const _Note(this.text);
 
   final String text;
 
   @override
-  Widget build(BuildContext context) => Text(
-    text,
+  Widget build(BuildContext context) => Text.rich(
+    TextSpan(children: ceremonyNoteSpans(text)),
     style: const TextStyle(
       fontFamily: KvFont.ui,
       fontSize: 13,
       height: 19 / 13,
       color: KvColor.inkDim,
     ),
+    // **The line is 19 dp whichever face sits in it.** A mono figure's ascent
+    // is not Jakarta's, and a line box that unions two faces grew by 2 dp per
+    // figure-bearing line — which moved a content-sized ceremony sheet up the
+    // glass (seen in the frame diff at UX-R8). The strut makes the rhythm the
+    // note's own.
+    strutStyle: const StrutStyle(
+      fontFamily: KvFont.ui,
+      fontSize: 13,
+      height: 19 / 13,
+      forceStrutHeight: true,
+    ),
   );
+}
+
+final RegExp _noteFigure = RegExp(r'\b\d[\d,]*(?:\.\d+)?\b');
+
+/// A ceremony note, split into prose and figures — the figures in mono with
+/// tabular digits, the prose inheriting the note's own face (BG-30).
+@visibleForTesting
+List<TextSpan> ceremonyNoteSpans(String text) {
+  final out = <TextSpan>[];
+  var at = 0;
+  for (final m in _noteFigure.allMatches(text)) {
+    if (m.start > at) out.add(TextSpan(text: text.substring(at, m.start)));
+    out.add(
+      TextSpan(
+        text: m.group(0),
+        style: const TextStyle(
+          fontFamily: KvFont.mono,
+          fontFeatures: [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
+    at = m.end;
+  }
+  if (at < text.length) out.add(TextSpan(text: text.substring(at)));
+  return out;
 }
 
 /// The hairline between two facts. A ruled row is what turns a pair of numbers
@@ -1420,6 +1463,9 @@ class _StagedWait extends StatelessWidget {
                         fontWeight: i == stage
                             ? FontWeight.w600
                             : FontWeight.w400,
+                        fontVariations: i == stage
+                            ? KvWeight.w600
+                            : KvWeight.w400,
                         color: i == stage ? KvColor.ink : KvColor.inkMeta,
                       ),
                     ),
@@ -2045,7 +2091,7 @@ class _ReceiptActions extends StatelessWidget {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
                       content: Text('Transaction id copied'),
-                      duration: KvMotion.toast,
+                      duration: KvMotion.pulse,
                     ),
                   );
                 }

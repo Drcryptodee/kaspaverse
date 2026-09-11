@@ -787,13 +787,13 @@ void main() {
 
     connected.value = false;
     await tester.pump();
-    await tester.pump(KvMotion.normal);
+    await tester.pump(KvMotion.calm);
     expect(region().opacity, KvFreshness.opacityStaleRegion);
     expect(row().muted, isTrue, reason: 'a hued figure under the dim');
 
     connected.value = true;
     await tester.pump();
-    await tester.pump(KvMotion.normal);
+    await tester.pump(KvMotion.calm);
     expect(region().opacity, 1);
     expect(row().muted, isFalse);
     await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker

@@ -205,7 +205,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     await KvAddress.copyFull(address);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Address copied'), duration: KvMotion.toast),
+      const SnackBar(content: Text('Address copied'), duration: KvMotion.pulse),
     );
   }
 
@@ -223,7 +223,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       // nothing. `displayError`, never `e.toString()`.
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(displayError(e)), duration: KvMotion.toast),
+        SnackBar(content: Text(displayError(e)), duration: KvMotion.pulse),
       );
       return;
     }
@@ -233,7 +233,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Nothing on this phone takes text. Copy it instead.'),
-        duration: KvMotion.toast,
+        duration: KvMotion.pulse,
       ),
     );
   }
@@ -384,8 +384,8 @@ class _Body extends StatelessWidget {
                       // into the layout.
                       AnimatedSwitcher(
                         duration: KvMotion.fast,
-                        switchInCurve: KvMotion.out,
-                        switchOutCurve: KvMotion.out,
+                        switchInCurve: KvMotion.curve,
+                        switchOutCurve: KvMotion.curve,
                         layoutBuilder: (current, previous) => Stack(
                           alignment: Alignment.topCenter,
                           clipBehavior: Clip.none,
@@ -755,8 +755,8 @@ class _AddressPillState extends State<_AddressPill> {
           // without being touched.
           child: AnimatedSwitcher(
             duration: KvMotion.fast,
-            switchInCurve: KvMotion.out,
-            switchOutCurve: KvMotion.out,
+            switchInCurve: KvMotion.curve,
+            switchOutCurve: KvMotion.curve,
             child: caption == null
                 ? const SizedBox.shrink()
                 : ExcludeSemantics(

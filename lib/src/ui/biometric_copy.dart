@@ -63,13 +63,21 @@ String biometricInvalidatedCopy([String secret = secretNounDefault]) =>
 
 /// Why Path A is unavailable, in the user's terms, with the action where there
 /// is one.
-String biometricUnavailableCopy(String status) => switch (status) {
+///
+/// [secret] is what the vault calls the other way in — `PIN` or `passphrase`
+/// — threaded the way [unlockFailureCopy] threads it (UX-R7), so a PIN user
+/// is not told their *passphrase* is the unlock (UX-R8 closed the two helpers
+/// R7 left hard-coded). The default is the word that fits either secret.
+String biometricUnavailableCopy(
+  String status, [
+  String secret = secretNounDefault,
+]) => switch (status) {
   biometricNoneEnrolled =>
     'This phone has no fingerprint set up yet. Add one in Android Settings → '
         'Security, then turn this on in Settings → Security.',
   'no_hardware' =>
     'This phone has no fingerprint sensor the wallet can trust. Your '
-        'passphrase is the unlock.',
+        '$secret is the unlock.',
   'unavailable' =>
     'The fingerprint sensor is not available right now. Try again in a moment.',
   'security_update_required' =>
@@ -77,7 +85,7 @@ String biometricUnavailableCopy(String status) => switch (status) {
         'sensor here.',
   _ =>
     "The wallet can't tell whether this phone supports fingerprint unlock. Your "
-        'passphrase is the unlock.',
+        '$secret is the unlock.',
 };
 
 /// What to say when an enrolment ceremony did not complete.
@@ -89,13 +97,16 @@ String biometricUnavailableCopy(String status) => switch (status) {
 /// Every line ends where a custody message has to end: what is still true about
 /// the user's money. Losing an enrolment attempt costs nothing — Path B is the
 /// vault's real key and is untouched throughout.
-String enrollFailureCopy(String code) => switch (code) {
+String enrollFailureCopy(
+  String code, [
+  String secret = secretNounDefault,
+]) => switch (code) {
   'lockout' =>
     'Too many attempts. Wait a moment and try again — your funds are safe.',
   // Should no longer reach here — enrolment now deletes and rebuilds an
   // invalidated key rather than reusing it — but a code with no consumer is a
   // silent failure by construction, so it keeps a sentence of its own.
-  biometricKeyInvalidated => biometricInvalidatedCopy(),
+  biometricKeyInvalidated => biometricInvalidatedCopy(secret),
   // The lifecycle race, said plainly: the vault re-locked while the system
   // prompt held the foreground, so there was no seed to seal. Swallowed, this
   // was the "I tapped it and nothing happened" report.
@@ -103,7 +114,7 @@ String enrollFailureCopy(String code) => switch (code) {
     'The wallet locked while the prompt was open. Unlock and try again from '
         'Settings.',
   'keystore' =>
-    "This phone's secure hardware refused the key. Your passphrase still "
+    "This phone's secure hardware refused the key. Your $secret still "
         'unlocks the wallet.',
   _ =>
     "Fingerprint setup didn't complete. Your funds are safe — you can turn it "

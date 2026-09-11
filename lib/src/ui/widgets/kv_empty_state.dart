@@ -59,7 +59,7 @@ class KvEmptyState extends StatelessWidget {
               fontFamily: KvFont.ui,
               fontSize: 13,
               height: 19 / 13,
-              color: KvColor.inkMetaLow,
+              color: KvColor.inkMeta,
             ),
           ),
         ],

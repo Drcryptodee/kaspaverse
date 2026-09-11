@@ -267,7 +267,7 @@ class KvYields extends StatelessWidget {
       duration: MediaQuery.disableAnimationsOf(context)
           ? Duration.zero
           : KvMotion.calm,
-      curve: KvMotion.out,
+      curve: KvMotion.curve,
       // From the top, so the collapse runs upward and whatever sits ABOVE this
       // never moves — only what is below rises.
       alignment: Alignment.topCenter,
@@ -319,7 +319,7 @@ class KvExpands extends StatelessWidget {
       duration: MediaQuery.disableAnimationsOf(context)
           ? Duration.zero
           : KvMotion.calm,
-      curve: KvMotion.out,
+      curve: KvMotion.curve,
       constraints: BoxConstraints(maxHeight: cap),
       child: child,
     );

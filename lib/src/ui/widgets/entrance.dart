@@ -35,12 +35,12 @@ class _EntranceState extends State<Entrance>
   void initState() {
     super.initState();
     final delay = KvMotion.stagger * widget.index;
-    final total = KvMotion.normal + delay;
+    final total = KvMotion.calm + delay;
     final start = delay.inMilliseconds / total.inMilliseconds;
     _controller = AnimationController(vsync: this, duration: total)..forward();
     _t = CurvedAnimation(
       parent: _controller,
-      curve: Interval(start, 1, curve: KvMotion.out),
+      curve: Interval(start, 1, curve: KvMotion.curve),
     );
   }
 

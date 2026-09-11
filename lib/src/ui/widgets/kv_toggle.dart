@@ -105,7 +105,7 @@ class KvToggle extends StatelessWidget {
           excludeSemantics: true,
           child: InkWell(
             onTap: enabled ? () => onChanged!(!on) : null,
-            borderRadius: BorderRadius.circular(KvRadius.panel),
+            borderRadius: BorderRadius.circular(KvRadius.plate),
             // The card is the home's: `plate`, the panel radius, **no
             // border** (founder on glass 2026-09-05 — every card shares the
             // home's topography).
@@ -124,7 +124,7 @@ class KvToggle extends StatelessWidget {
                   ? null
                   : BoxDecoration(
                       color: KvColor.plate,
-                      borderRadius: BorderRadius.circular(KvRadius.panel),
+                      borderRadius: BorderRadius.circular(KvRadius.plate),
                     ),
               child: Opacity(
                 // The whole row dims, so "you cannot press this right now" is
@@ -229,7 +229,7 @@ class KvSwitch extends StatelessWidget {
     final reduced = MediaQuery.disableAnimationsOf(context);
     return AnimatedContainer(
       duration: reduced ? Duration.zero : KvMotion.fast,
-      curve: KvMotion.out,
+      curve: KvMotion.curve,
       width: KvToggle.trackWidth,
       height: KvToggle.trackHeight,
       padding: const EdgeInsets.all(KvToggle.trackInset),

@@ -446,8 +446,8 @@ class _KvBurialMarkState extends State<KvBurialMark> {
     return AnimatedSwitcher(
       key: ValueKey(_epoch),
       duration: KvMotion.fast,
-      switchInCurve: KvMotion.out,
-      switchOutCurve: KvMotion.out,
+      switchInCurve: KvMotion.curve,
+      switchOutCurve: KvMotion.curve,
       layoutBuilder: (current, previous) => Stack(
         alignment: Alignment.centerLeft,
         clipBehavior: Clip.none,

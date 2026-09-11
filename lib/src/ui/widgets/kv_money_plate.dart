@@ -115,7 +115,7 @@ class KvMoneyPlate extends StatelessWidget {
               duration: MediaQuery.disableAnimationsOf(context)
                   ? Duration.zero
                   : KvMotion.calm,
-              curve: KvMotion.out,
+              curve: KvMotion.curve,
               alignment: Alignment.topCenter,
               child: chainClock == null
                   ? const SizedBox(width: double.infinity)

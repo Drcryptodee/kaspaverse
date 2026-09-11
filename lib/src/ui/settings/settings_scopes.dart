@@ -1,4 +1,6 @@
 import 'package:flutter/foundation.dart';
+
+import '../../rust/api/vault.dart' as vault_api;
 import 'package:flutter/widgets.dart';
 
 import '../../rust/api/send.dart'
@@ -26,7 +28,14 @@ class SecurityScope {
     required this.lockGraceSecs,
     required this.setLockGraceSecs,
     this.lockNow,
+    this.inputKind,
   });
+
+  /// What the vault's own secret is — a PIN or a passphrase — so every
+  /// sentence the fingerprint lane says about "the other way in" names it as
+  /// the door does (`UnlockSurface.inputKind`, BG-21). Null reads the
+  /// service; a failed read keeps *passphrase*, the word that fits either.
+  final Future<vault_api.VaultInputKind> Function()? inputKind;
 
   /// `ready` · `none_enrolled` · `no_hardware` · `unavailable` ·
   /// `security_update_required` · `unknown`. A reason, never a bool — see

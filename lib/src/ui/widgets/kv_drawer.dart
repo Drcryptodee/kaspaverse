@@ -7,6 +7,7 @@ import '../../app_version.dart';
 
 import '../theme/kv_window.dart';
 import '../theme/tokens.dart';
+import 'haptics.dart';
 import 'kv_glyph.dart';
 import 'kv_address.dart';
 import 'kv_mark.dart';
@@ -150,10 +151,31 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
 
   void _close() => _push.animateBack(0, curve: KvMotion.curve);
 
-  void _dragStart(DragStartDetails _) => _dragging = true;
+  /// The side of the commit point the drag was last on, so the detent fires
+  /// once per crossing and not once per pixel past it. **Seeded where the
+  /// finger lands**, not where the last drag let go: a menu-button open, a
+  /// row tap, the scrim and Back all move the drawer without a drag, and a
+  /// seed left over from before them clicked on the first pixel of the next
+  /// pull with nothing crossed (`ux-auditor`, UX-R8 BLOCK).
+  bool _pastCommit = false;
+
+  void _dragStart(DragStartDetails _) {
+    _dragging = true;
+    _pastCommit = _push.value > 0.5;
+  }
 
   void _dragUpdate(DragUpdateDetails d) {
     _push.value = (_push.value + d.primaryDelta! / KvNav.width).clamp(0.0, 1.0);
+    // **The pull speaks once, at the point it will commit** (retrofit, founder
+    // 2026-09-06). `_dragEnd` opens past half and closes under it, so half is
+    // where a release changes its mind; the click lands there in either
+    // direction and nowhere else — a drag that hummed under the finger would
+    // report nothing but its own length.
+    final past = _push.value > 0.5;
+    if (past != _pastCommit) {
+      _pastCommit = past;
+      KvHaptic.detent();
+    }
   }
 
   void _dragEnd(DragEndDetails d) {
@@ -246,14 +268,31 @@ class _KvNavState extends State<KvNav> with SingleTickerProviderStateMixin {
                 animation: _push,
                 builder: (context, panel) =>
                     TickerMode(enabled: _push.value > 0, child: panel!),
-                child: KvDrawer(
-                  destinations: widget.destinations,
-                  secondary: widget.secondary,
-                  footer: widget.footer,
-                  selected: widget.selected,
-                  header: widget.header,
-                  standing: false,
-                  onNavigate: _close,
+                // **The panel takes the same drag as the page** (retrofit,
+                // founder 2026-09-06: the drawer opened on a swipe and closed
+                // only by tap or back). A swipe left on the panel itself now
+                // closes it with the page's own velocity and cancel rules —
+                // one gesture, symmetrical. Translucent, and horizontal only,
+                // so every row keeps its tap and the panel its scroll; out of
+                // the semantics tree, because a detector with drag callbacks
+                // seats its own gesture node over the rows and their labels
+                // vanished from `bySemanticsLabel` — a screen reader closes
+                // the drawer by its rows, tap and Back, never by a swipe.
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  excludeFromSemantics: true,
+                  onHorizontalDragStart: _dragStart,
+                  onHorizontalDragUpdate: _dragUpdate,
+                  onHorizontalDragEnd: _dragEnd,
+                  child: KvDrawer(
+                    destinations: widget.destinations,
+                    secondary: widget.secondary,
+                    footer: widget.footer,
+                    selected: widget.selected,
+                    header: widget.header,
+                    standing: false,
+                    onNavigate: _close,
+                  ),
                 ),
               ),
             ),

@@ -72,8 +72,16 @@ Future<void> loadBundledFonts() async {
 /// stopped writing, showing a design two rebuilds out of date, and was read as
 /// current in the sitting that had just replaced it. A render is a claim about
 /// **now**, so the directory starts empty.
+///
+/// **Except on a filtered run.** `flutter test test/preview --name X` still
+/// runs this `setUpAll`, so it wiped the whole catalogue to write one frame,
+/// and the next `ls` read 400 missing surfaces as 400 retired ones (MSG-BLOCK,
+/// 2026-09-10). A test cannot see its own `--name`, so the caller says it:
+/// `KV_PREVIEW_KEEP=1` keeps what is on disk and lets the rendered frames
+/// overwrite their own names only. `tools/preview.sh` never sets it, so the
+/// full catalogue still starts empty.
 void clearPreviousFrames() {
-  if (!previewRequested) return;
+  if (!previewRequested || previewKeepRequested) return;
   final dir = Directory(previewDirFromRoot);
   if (!dir.existsSync()) return;
   for (final f in dir.listSync()) {
@@ -180,6 +188,10 @@ const String previewDirFromRoot = 'build/preview';
 /// there would write files and burn time on every gate for nobody. Preview
 /// tests skip unless `KV_PREVIEW=1`, so the gate sees a no-op.
 bool get previewRequested => Platform.environment['KV_PREVIEW'] == '1';
+
+/// True when a filtered preview run asked to keep the frames it is not
+/// rendering — see [clearPreviousFrames].
+bool get previewKeepRequested => Platform.environment['KV_PREVIEW_KEEP'] == '1';
 
 /// Render [child] at [size] and write it to `<previewDir>/<name>__<size>.png`.
 ///

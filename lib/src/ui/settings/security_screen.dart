@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../rust/api/vault.dart' as vault_api;
+import '../../services/vault_service.dart';
 import '../biometric_copy.dart';
 import '../theme/kv_page_route.dart';
 import '../theme/kv_window.dart';
@@ -64,6 +66,14 @@ class _SecurityScreenState extends State<SecurityScreen>
   String _pathA = pathANone;
   bool _busy = false;
 
+  /// The vault's secret, by name, for the fingerprint lane's sentences. Null
+  /// until the probe has read it — the row's sub-line says nothing about the
+  /// secret while it is unknown, the way `_status` starts as `unknown`, rather
+  /// than paint *passphrase* to a PIN user for a frame (`ux-auditor`, UX-R8).
+  /// A failed read keeps the null; the refusal copy then takes
+  /// [secretNounDefault], the word that fits either.
+  String? _secretNoun;
+
   /// The last enrolment refusal, in our words. Rendered under the toggle,
   /// where the refusal happened — never as a toast that leaves the screen
   /// (§9.30's open question does not get a ninth `showSnackBar`).
@@ -115,10 +125,20 @@ class _SecurityScreenState extends State<SecurityScreen>
       // Keep what we last knew; a failed read is not a state change.
       state = null;
     }
+    String? noun;
+    try {
+      final kind =
+          await (widget.scope.inputKind ?? VaultService.instance.vaultInputKind)
+              .call();
+      noun = kind == vault_api.VaultInputKind.digits ? 'PIN' : 'passphrase';
+    } catch (_) {
+      noun = null; // unknown stays unknown
+    }
     if (!mounted) return;
     setState(() {
       _status = status;
       if (state != null) _pathA = state;
+      if (noun != null) _secretNoun = noun;
     });
   }
 
@@ -133,7 +153,12 @@ class _SecurityScreenState extends State<SecurityScreen>
     if (biometricStateIsUnknown(_status)) {
       return 'This build cannot see the fingerprint sensor.';
     }
-    if (!_hardware) return biometricUnavailableCopy(_status);
+    if (!_hardware) {
+      return biometricUnavailableCopy(
+        _status,
+        _secretNoun ?? secretNounDefault,
+      );
+    }
     return null;
   }
 
@@ -153,10 +178,22 @@ class _SecurityScreenState extends State<SecurityScreen>
     } on PlatformException catch (e) {
       // A cancel is a CHOICE, not a failure — nothing to apologise for.
       if (mounted && e.code != 'cancelled') {
-        setState(() => _fault = enrollFailureCopy(e.code));
+        setState(
+          () => _fault = enrollFailureCopy(
+            e.code,
+            _secretNoun ?? secretNounDefault,
+          ),
+        );
       }
     } catch (_) {
-      if (mounted) setState(() => _fault = enrollFailureCopy('failed'));
+      if (mounted) {
+        setState(
+          () => _fault = enrollFailureCopy(
+            'failed',
+            _secretNoun ?? secretNounDefault,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -229,7 +266,9 @@ class _SecurityScreenState extends State<SecurityScreen>
                           sub: _invalidated
                               ? 'Set up again — a new fingerprint on this '
                                     'phone retired the old key'
-                              : 'Your passphrase is always available as a '
+                              : _secretNoun == null
+                              ? 'The other way in is always available'
+                              : 'Your $_secretNoun is always available as a '
                                     'fallback',
                           disabledReason: refusal,
                           onChanged: refusal == null ? _setBiometric : null,

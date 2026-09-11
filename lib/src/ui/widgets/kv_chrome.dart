@@ -111,7 +111,7 @@ class KvTopBar extends StatelessWidget {
             // `etch` is the disabled tone: decorative by design, and it never
             // carries information alone — what the exit is waiting for is on
             // the screen in words beneath it.
-            tone: onBack == null ? KvColor.etch : KvColor.inkNav,
+            tone: onBack == null ? KvColor.etch : KvColor.inkDim,
             label: 'Back',
             onTap: onBack,
           ),
@@ -240,20 +240,16 @@ class KvTopBar extends StatelessWidget {
   }
 }
 
-/// A tick, then a sentence-case label — where an instrument silk-screens the
-/// name of a section.
+/// A caps label — where an instrument silk-screens the name of a section.
+///
+/// **Bare: no tick before the words.** It was born ruled (a dash, then the
+/// label) and every render drew it bare — `T5` and `S9`'s `CONNECTION`,
+/// `DEPTH`, `MY OWN NODE`, `SOURCES`, and all five `T` renders — so seat by
+/// seat the callers passed `rule: false` until, at UX-R8, none was left that
+/// did not. The parameter and the tick went with the last one; the name stays,
+/// because a rename is a diff across every screen for a word nobody reads.
 class KvRuledLabel extends StatelessWidget {
-  const KvRuledLabel(
-    this.text, {
-    super.key,
-    this.tight = false,
-    this.rule = true,
-  });
-
-  /// The tick before the words. `T5` and `S9` draw their caps labels bare —
-  /// `CONNECTION`, `DEPTH`, `MY OWN NODE`, `SOURCES` — and the founder asked
-  /// for the picture (2026-09-05), so those seats pass `false`.
-  final bool rule;
+  const KvRuledLabel(this.text, {super.key, this.tight = false});
 
   final String text;
 
@@ -276,10 +272,6 @@ class KvRuledLabel extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisSize: tight ? MainAxisSize.min : MainAxisSize.max,
     children: [
-      if (rule) ...[
-        Container(width: KvSpace.s, height: 1, color: KvColor.inkMeta),
-        const SizedBox(width: KvSpace.s),
-      ],
       // Flexible for the same reason as the rail's title: at 1.3x this label
       // can be wider than a 320dp gutter leaves it.
       Flexible(
@@ -387,7 +379,7 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
   Widget build(BuildContext context) {
     final info = widget.info;
     final label = widget.label;
-    final title = KvRuledLabel(label, tight: true, rule: false);
+    final title = KvRuledLabel(label, tight: true);
     final trailing = widget.trailing;
     if (info == null && trailing != null) {
       // The words sit on the control's own centre line — `T4` measured them
@@ -481,8 +473,8 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
                 onTap: () => info.value = !open,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: _down ? KvColor.keyPressed : Colors.transparent,
-                    borderRadius: BorderRadius.circular(KvRadius.pill),
+                    color: _down ? KvColor.chip : Colors.transparent,
+                    borderRadius: BorderRadius.circular(KvRadius.control),
                   ),
                   child: SizedBox(
                     height: KvSectionHeader.height,

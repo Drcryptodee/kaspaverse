@@ -308,7 +308,7 @@ class _KvBurialGaugeState extends State<KvBurialGauge> {
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(end: KvBurial.hueFor(rung)),
       duration: crossing,
-      curve: KvMotion.out,
+      curve: KvMotion.curve,
       builder: (context, hue, _) {
         final fill = hue ?? KvBurial.hueFor(rung);
         return Column(
@@ -456,7 +456,7 @@ class _ReadingLine extends StatelessWidget {
         if (fits) {
           return Row(
             children: [
-              KvRuledLabel(label, tight: true, rule: false),
+              KvRuledLabel(label, tight: true),
               const Spacer(),
               reading,
             ],
@@ -465,7 +465,7 @@ class _ReadingLine extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            KvRuledLabel(label, tight: true, rule: false),
+            KvRuledLabel(label, tight: true),
             const SizedBox(height: KvSpace.xs),
             Align(alignment: Alignment.centerRight, child: reading),
           ],

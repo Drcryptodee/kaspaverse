@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
@@ -46,102 +47,132 @@ void main() {
     /// which is the only way a rule like this survives contact with the next
     /// six groups.
     test('every width-reading site in lib/ is one of the classified ones', () {
-      const allowed = <String, String>{
-        'lib/src/ui/theme/kv_window.dart':
-            'THE decision point — the one place a width becomes a class',
-        'lib/src/ui/widgets/kv_two_pane.dart':
-            'measures the space it was GIVEN to split it; the arrangement was '
-            'already chosen by the class',
-        'lib/src/ui/home_screen.dart':
-            'bounds the pinned plate by the viewport HEIGHT — never a width',
-        'lib/src/ui/restore_screen.dart':
-            'min-height centring with an overflow escape (an auditor fix)',
-        'lib/src/ui/create_screen.dart': 'same pattern, same origin',
-        'lib/src/ui/widgets/kv_burial_gauge.dart':
-            'a gauge must measure its own track to place ticks — BG-22 ink '
-            '(L145). Removing it would CREATE a Lie Factor defect',
-        'lib/src/ui/widgets/kv_address.dart':
-            'compares the width it was GIVEN against the 11 dp floor, to '
-            'decide whether the compact run may keep scaling or must reflow '
-            'to two lines — a legibility floor, never a layout chosen from a '
-            'width (UX-R2B)',
-        'lib/src/ui/widgets/kv_rows.dart':
-            'intrinsic sizing inside a row; no width is read',
-        'lib/src/ui/widgets/kv_drawer.dart':
-            'rounds the rail\'s scroll viewport DOWN to a whole number of '
-            'sockets so a clip never falls through a glyph — a HEIGHT it was '
-            'given, never a width',
-        'lib/src/ui/widgets/kv_fact_line.dart':
-            'the fact grid measures the row it was GIVEN, to bound the value '
-            'so a whole-supply figure fits instead of starving the label — a '
-            'share of the space, never a layout chosen from a width (UX-R2B). '
-            '**Promoted out of `signing_ceremony.dart` at UX-R3**, because `S9` '
-            'measures the transaction detail\'s values ending on the receipt\'s '
-            'own right edge and a second copy of this layout is how two funds '
-            'surfaces start disagreeing (L143)',
-        'lib/src/ui/send/signing_ceremony.dart':
-            'the receipt head bounds its own address run against the width it '
-            'was given — a legibility floor, never a layout chosen from a '
-            'width',
-        'lib/src/ui/node/node_screen.dart':
-            'the node row measures the space it was GIVEN to decide whether '
-            'the `Switch node` pill can stand beside the title without breaking '
-            'a word, and stacks it under the sentence when it cannot — '
-            '`KvFactLine`\'s stack-when-tight, a legibility floor found in the '
-            '320 dp / 1.3× frame, never a layout chosen from a width (UX-R3, '
-            'second beat). It reads the width TWICE since D-277: the second is '
-            '`_EndpointText`, which measures the box it was handed to decide '
-            'where the endpoint\'s middle ellipsis falls — a text measurement, '
-            'not a window class, and the allowance is file-granular so the '
-            'reason has to name both',
-        'lib/src/ui/settings/wallet_screen.dart':
-            'the address card reads the frame HEIGHT — never a width, and '
-            'never to choose a layout — to bound how far it may grow while '
-            'someone is scrolling it. The founder\'s constraint is stated in '
-            'screens ("not entirely past the bottom of the screen"), so the '
-            'cap has to be a share of the screen; `_tallCap` derives 0.62 from '
-            'the card\'s own offset and the chrome above and below it, and '
-            'the same composition renders in all four window classes '
-            'unchanged (D-285, his glass ask 2026-09-06)',
-        'lib/src/ui/receive/receive_picker.dart':
-            'the fresh card reads the sheet HEIGHT — never a width, and never '
-            'to choose a layout — to bound how far it may grow while someone '
-            'is scrolling it. `T4`\'s address card, one file over, does the '
-            'same for the same reason and carries the same allowance; the '
-            'founder asked for exactly that behaviour here (2026-09-07: '
-            '"clicking on show literally does what All does in wallet '
-            'settings")',
-        'lib/src/ui/onboarding_surface.dart':
-            'the welcome screen reads the viewport HEIGHT — never a width, '
-            'and never to choose a layout — so its two blocks can sit at the '
-            'two ends of the frame with a scroll escape under them. `O1` '
-            'draws the mark and the statement 197 dp down and the pair of '
-            'verbs in the thumb arc, and at 320 dp / 1.3× the `display` '
-            'heading alone is three 52 dp lines. It is the ONE screen in the '
-            'group with no pinned foot to push against — `create_screen` and '
-            '`restore_screen` both hold their bar and their acts in a Column '
-            'and give the scroll an `Expanded`, which needs no measurement at '
-            'all (UX-R6; the first version of this reason claimed those two '
-            'carried the same pattern, and they do not — item 0 / L130)',
-        'lib/src/ui/unlock_surface.dart':
-            'the locked surface reads the viewport HEIGHT — never a width, '
-            'and never to choose a layout — so the render\'s rhythm can be '
-            'built from flex (which needs a bounded height) while the same '
-            'composition still scrolls rather than overflows where it does '
-            'not fit. `Unlock-selection.png` seats the emblem 239 dp down and '
-            'pins the pill at the foot; at 915 × 412 with the '
-            'key-invalidated notice on it the fixed content alone is 53 dp '
-            'taller than the window. `IntrinsicHeight` under a `minHeight` of '
-            'the viewport does both, and the door is the one screen in this '
-            'group with no bar to push against — its two ceremony siblings '
-            'share `KvCeremonyPage`, whose `Expanded` needs no measurement '
-            '(UX-R7)',
-        'lib/src/ui/messages/contacts_screen.dart':
-            'keyboard inset (`viewInsets`), not width',
-        'lib/src/ui/messages/history_fill_sheet.dart': 'keyboard inset',
-        'lib/src/ui/messages/thread_screen.dart':
-            'keyboard inset, plus a decode budget in PHYSICAL pixels and two '
-            'bubble caps R5 owns (U2-1 / U2-2, register §2)',
+      // `path: (sites, reason)` — the COUNT is the pin (item 24a as amended):
+      // a file already allowed for one reason could grow a second site under
+      // it unseen, which is what the archive marker's bound did at UX-R8. A
+      // new site reddens, and so does a stale allowance: five files were
+      // allowed here with zero sites left (create/restore's pattern moved into
+      // `KvCeremonyPage`, which reads nothing; three "keyboard inset" entries
+      // never matched a pattern this test looks for).
+      const allowed = <String, (int, String)>{
+        'lib/src/ui/theme/kv_window.dart': (
+          1,
+          'THE decision point — the one place a width becomes a class',
+        ),
+        'lib/src/ui/widgets/kv_two_pane.dart': (
+          1,
+          'measures the space it was GIVEN to split it; the arrangement was '
+              'already chosen by the class',
+        ),
+        'lib/src/ui/home_screen.dart': (
+          1,
+          'bounds the pinned plate by the viewport HEIGHT — never a width',
+        ),
+        'lib/src/ui/widgets/kv_burial_gauge.dart': (
+          4,
+          'a gauge must measure its own track to place ticks — BG-22 ink '
+              '(L145). Removing it would CREATE a Lie Factor defect',
+        ),
+        'lib/src/ui/widgets/kv_address.dart': (
+          2,
+          'compares the width it was GIVEN against the 11 dp floor, to '
+              'decide whether the compact run may keep scaling or must reflow '
+              'to two lines — a legibility floor, never a layout chosen from a '
+              'width (UX-R2B)',
+        ),
+        'lib/src/ui/widgets/kv_drawer.dart': (
+          1,
+          'rounds the rail\'s scroll viewport DOWN to a whole number of '
+              'sockets so a clip never falls through a glyph — a HEIGHT it was '
+              'given, never a width',
+        ),
+        'lib/src/ui/widgets/kv_fact_line.dart': (
+          2,
+          'the fact grid measures the row it was GIVEN, to bound the value '
+              'so a whole-supply figure fits instead of starving the label — a '
+              'share of the space, never a layout chosen from a width (UX-R2B). '
+              '**Promoted out of `signing_ceremony.dart` at UX-R3**, because `S9` '
+              'measures the transaction detail\'s values ending on the receipt\'s '
+              'own right edge and a second copy of this layout is how two funds '
+              'surfaces start disagreeing (L143)',
+        ),
+        'lib/src/ui/send/signing_ceremony.dart': (
+          2,
+          'the receipt head bounds its own address run against the width it '
+              'was given — a legibility floor, never a layout chosen from a '
+              'width',
+        ),
+        'lib/src/ui/node/node_screen.dart': (
+          6,
+          'the node row measures the space it was GIVEN to decide whether '
+              'the `Switch node` pill can stand beside the title without breaking '
+              'a word, and stacks it under the sentence when it cannot — '
+              '`KvFactLine`\'s stack-when-tight, a legibility floor found in the '
+              '320 dp / 1.3× frame, never a layout chosen from a width (UX-R3, '
+              'second beat). It reads the width TWICE since D-277: the second is '
+              '`_EndpointText`, which measures the box it was handed to decide '
+              'where the endpoint\'s middle ellipsis falls — a text measurement, '
+              'not a window class, and the allowance is file-granular so the '
+              'reason has to name both',
+        ),
+        'lib/src/ui/settings/wallet_screen.dart': (
+          1,
+          'the address card reads the frame HEIGHT — never a width, and '
+              'never to choose a layout — to bound how far it may grow while '
+              'someone is scrolling it. The founder\'s constraint is stated in '
+              'screens ("not entirely past the bottom of the screen"), so the '
+              'cap has to be a share of the screen; `_tallCap` derives 0.62 from '
+              'the card\'s own offset and the chrome above and below it, and '
+              'the same composition renders in all four window classes '
+              'unchanged (D-285, his glass ask 2026-09-06)',
+        ),
+        'lib/src/ui/receive/receive_picker.dart': (
+          1,
+          'the fresh card reads the sheet HEIGHT — never a width, and never '
+              'to choose a layout — to bound how far it may grow while someone '
+              'is scrolling it. `T4`\'s address card, one file over, does the '
+              'same for the same reason and carries the same allowance; the '
+              'founder asked for exactly that behaviour here (2026-09-07: '
+              '"clicking on show literally does what All does in wallet '
+              'settings")',
+        ),
+        'lib/src/ui/onboarding_surface.dart': (
+          1,
+          'the welcome screen reads the viewport HEIGHT — never a width, '
+              'and never to choose a layout — so its two blocks can sit at the '
+              'two ends of the frame with a scroll escape under them. `O1` '
+              'draws the mark and the statement 197 dp down and the pair of '
+              'verbs in the thumb arc, and at 320 dp / 1.3× the `display` '
+              'heading alone is three 52 dp lines. It is the ONE screen in the '
+              'group with no pinned foot to push against — `create_screen` and '
+              '`restore_screen` both hold their bar and their acts in a Column '
+              'and give the scroll an `Expanded`, which needs no measurement at '
+              'all (UX-R6; the first version of this reason claimed those two '
+              'carried the same pattern, and they do not — item 0 / L130)',
+        ),
+        'lib/src/ui/unlock_surface.dart': (
+          1,
+          'the locked surface reads the viewport HEIGHT — never a width, '
+              'and never to choose a layout — so the render\'s rhythm can be '
+              'built from flex (which needs a bounded height) while the same '
+              'composition still scrolls rather than overflows where it does '
+              'not fit. `Unlock-selection.png` seats the emblem 239 dp down and '
+              'pins the pill at the foot; at 915 × 412 with the '
+              'key-invalidated notice on it the fixed content alone is 53 dp '
+              'taller than the window. `IntrinsicHeight` under a `minHeight` of '
+              'the viewport does both, and the door is the one screen in this '
+              'group with no bar to push against — its two ceremony siblings '
+              'share `KvCeremonyPage`, whose `Expanded` needs no measurement '
+              '(UX-R7)',
+        ),
+        'lib/src/ui/messages/thread_screen.dart': (
+          7,
+          'keyboard inset, plus a decode budget in PHYSICAL pixels, two '
+              'bubble caps R5 owns (U2-1 / U2-2, register §2), and the archive '
+              'marker\'s bound — it fits the sentence to the box it was handed '
+              'so the two rules split the rest, never a layout chosen from a '
+              'width (UX-R8)',
+        ),
       };
       final offenders = <String>[];
       for (final file
@@ -152,13 +183,15 @@ void main() {
         // Generated bindings are never edited by hand and carry no layout.
         if (file.path.startsWith('lib/src/rust/')) continue;
         final source = file.readAsStringSync();
-        final reads =
-            source.contains('MediaQuery.sizeOf') ||
-            source.contains('MediaQuery.of(context).size') ||
-            source.contains('LayoutBuilder') ||
-            source.contains('constraints.maxWidth');
-        if (reads && !allowed.containsKey(file.path)) {
-          offenders.add(file.path);
+        final reads = [
+          'MediaQuery.sizeOf',
+          'MediaQuery.of(context).size',
+          'LayoutBuilder',
+          'constraints.maxWidth',
+        ].fold<int>(0, (n, needle) => n + needle.allMatches(source).length);
+        final pinned = allowed[file.path]?.$1 ?? 0;
+        if (reads != pinned) {
+          offenders.add('${file.path}: $reads site(s), $pinned pinned');
         }
       }
       expect(
@@ -273,6 +306,111 @@ void main() {
         closeTo(KvMotion.drawerPush, 0.5),
         reason: 'the page translates 296 dp right (§3)',
       );
+    });
+
+    testWidgets('the pull clicks once where it will commit, and a swipe on the '
+        'panel closes it (retrofits, founder 2026-09-06; UX-R8)', (
+      tester,
+    ) async {
+      final haptics = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            haptics.add(call.arguments as String);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await pumpShell(tester, const Size(393, 851));
+      final before = tester.getTopLeft(find.byType(HomeScreen)).dx;
+      // A slow pull to a third of the way: the drag follows, and says
+      // nothing — it has not decided anything yet. From the money plate: the
+      // ledger card beneath is a `PageView` (Activity ↔ Tokens) and takes a
+      // horizontal drag inside its own region, which is its right.
+      final gesture = await tester.startGesture(const Offset(200, 260));
+      // The first event clears the touch slop and wins the arena; updates
+      // arrive from the second on — the same two-step `WidgetTester.drag`
+      // takes.
+      await gesture.moveBy(const Offset(kDragSlopDefault + 1, 0));
+      await tester.pump();
+      await gesture.moveBy(const Offset(80, 0));
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.byType(HomeScreen)).dx - before,
+        greaterThan(0),
+        reason: 'the page follows the finger',
+      );
+      expect(haptics, isEmpty, reason: 'under half, the pull is silent');
+      // Past half (148 of 296): one click, and only one however far it goes.
+      await gesture.moveBy(const Offset(100, 0));
+      await tester.pump();
+      await gesture.moveBy(const Offset(60, 0));
+      await tester.pump();
+      expect(haptics, ['HapticFeedbackType.selectionClick']);
+      // Back under half: the drag changed its mind, and says so once.
+      await gesture.moveBy(const Offset(-150, 0));
+      await tester.pump();
+      expect(haptics, hasLength(2));
+      // Released under half ⇒ closed, and the settle adds no click of its own.
+      await gesture.up();
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      expect(
+        tester.getTopLeft(find.byType(HomeScreen)).dx,
+        closeTo(before, 0.5),
+      );
+      expect(haptics, hasLength(2));
+
+      // Open it, then swipe left ON THE PANEL: it closes with the page's own
+      // rules (a flick decides on its own).
+      await tester.tap(find.bySemanticsLabel('Open navigation'));
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      expect(
+        tester.getTopLeft(find.byType(HomeScreen)).dx - before,
+        closeTo(KvMotion.drawerPush, 0.5),
+      );
+      await tester.fling(find.byType(KvDrawer), const Offset(-200, 0), 1200);
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      expect(
+        tester.getTopLeft(find.byType(HomeScreen)).dx,
+        closeTo(before, 0.5),
+        reason: 'a swipe left on the drawer panel closes it',
+      );
+      // The fling crossed half on its way out: one click, and the tap-open
+      // before it added none — the drawer was opened by a button, and a
+      // drag that starts from open must not click on its first pixel.
+      expect(haptics, hasLength(3));
+
+      // The other door: opened by a tap, then a 2 dp pull on the panel that
+      // crosses nothing. Silent (the seed is taken where the finger lands).
+      await tester.tap(find.bySemanticsLabel('Open navigation'));
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
+      final nudge = await tester.startGesture(
+        tester.getCenter(find.byType(KvDrawer)),
+      );
+      await nudge.moveBy(const Offset(-(kDragSlopDefault + 1), 0));
+      await tester.pump();
+      await nudge.moveBy(const Offset(-2, 0));
+      await tester.pump();
+      expect(haptics, hasLength(3), reason: 'nothing crossed, nothing clicks');
+      await nudge.up();
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      await tester.pump(KvMotion.enter);
     });
 
     testWidgets('a destination without a tap is a record, not a dead button '
@@ -474,10 +612,18 @@ void main() {
     });
 
     test('the list pane is derived, and yields to the detail column', () {
-      // §3a.1 puts the pane at 400–480 and pins the V60 in landscape at 340;
-      // both fall out of the same formula rather than being special-cased.
+      // §3a.1 puts the pane at 400–480 in a tall window and pins the V60 in
+      // landscape — `expanded short` — at 340: one formula, two floors.
       expect(KvTwoPane.listWidth(1440 - 296, 48), inInclusiveRange(400, 480));
-      expect(KvTwoPane.listWidth(915 - 80, 40), KvTwoPane.minList);
+      // The 1180 spec frame with the standing drawer: 40% of 780 is 312, and
+      // the tall floor lifts it to 400 (it shipped at 340 until UX-R8).
+      expect(KvTwoPane.listWidth(1180 - 296, 40), KvTwoPane.minList);
+      expect(KvTwoPane.listWidth(1180 - 296, 40), 400);
+      expect(
+        KvTwoPane.listWidth(915 - 80, 40, short: true),
+        KvTwoPane.minListShort,
+      );
+      expect(KvTwoPane.listWidth(915 - 80, 40, short: true), 340);
       // A detail column never falls under 320.
       for (final width in const [700.0, 840.0, 915.0, 1180.0, 1440.0]) {
         final pane = KvTwoPane.listWidth(width, 40);

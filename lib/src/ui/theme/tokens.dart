@@ -19,12 +19,11 @@
 /// silently keeps the previous design system. `ux-auditor` item 16 is the only
 /// check that exists.
 ///
-/// **Names are owned here; values are owned by the design.** Legacy names that
-/// widgets still reference are kept as aliases onto their new role rather than
-/// renamed, so a palette change is never also a refactor. The alias block at
-/// the foot of each class is **deleted by the sitting after the last screen
-/// migrates** (Bible §9.8) — until then a screen still wearing Black Glass
-/// compiles and renders Deep V6's nearest tone.
+/// **Names are owned here; values are owned by the design.** A widget names a
+/// role, never a value, so a palette change is never also a refactor. The
+/// legacy Black Glass aliases that held the UX-R line's intermediate state
+/// (Bible §9.8, D-185) were **deleted at UX-R8** once the last screen migrated
+/// — every name below is a Deep V6 role, and there is no second spelling.
 library;
 
 import 'package:flutter/material.dart';
@@ -225,136 +224,6 @@ abstract final class KvColor {
 
   /// Slice 3. `rgba(0,0,0,.55)` — floating layers only.
   static const Color layerShadow = Color(0x8C000000);
-
-  // ── Legacy aliases (Bible §9.8) — deleted after the last screen migrates ──
-  //
-  // Every name a Black Glass screen still references, mapped to its Deep V6
-  // successor. A screen that has not had its UX-R group sitting compiles and
-  // renders the nearest correct tone rather than failing to build.
-
-  /// @Deprecated — v3.1 sunken entry. Deep V6 sets a figure in a plate.
-  static const Color well = plate;
-
-  /// @Deprecated — v3.1 notice ground.
-  static const Color notice = plate;
-
-  /// @Deprecated — v3.1 keypad key.
-  static const Color key = plate;
-
-  /// @Deprecated — v3.1 pressed key.
-  static const Color keyPressed = chip;
-
-  /// @Deprecated — v3.1 summoned panel; the panel itself is retired (§4).
-  static const Color summoned = plate;
-
-  /// @Deprecated — v3.1 control ground. **Held identical to [notice]**, which
-  /// is what it was in v3.1 (`control = notice`) and what `KvSurfaceTone.notice`
-  /// still assumes: it is the tone every unmigrated control wears. Splitting the
-  /// two here silently re-tones every legacy control — caught by
-  /// `kv_widgets_test.dart`'s KvSurface law test, which is why that test exists.
-  static const Color control = notice;
-
-  /// @Deprecated — v3.1 generic surface.
-  static const Color surface = plate;
-
-  /// @Deprecated — v3.1 alternate surface.
-  static const Color surfaceAlt = chip;
-
-  /// @Deprecated — v3.1 row divider. Deep V6 has one line inside a container.
-  static const Color rowDivider = hairline;
-
-  /// @Deprecated — v3.1 plate divider.
-  static const Color plateDivider = hairline;
-
-  /// @Deprecated — v3.1 notice edge.
-  static const Color noticeEdge = plateEdge;
-
-  /// @Deprecated — v3.1 engraved datum line. The `datum` rule is gone (§1.2).
-  static const Color datum = hairline;
-
-  /// @Deprecated — v3.1 key edge.
-  static const Color keyEdge = plateEdge;
-
-  /// @Deprecated — v3.1 summoned edge.
-  static const Color summonedEdge = edgeHi;
-
-  /// @Deprecated — v3.1 gauge tick.
-  static const Color tick = edgeHi;
-
-  /// @Deprecated — v3.1 generic border.
-  static const Color border = plateEdge;
-
-  /// @Deprecated — v3.1 brightest ink step; Deep V6 has four.
-  static const Color inkBright = ink;
-
-  /// @Deprecated — v3.1 nav ink.
-  static const Color inkNav = inkDim;
-
-  /// @Deprecated — v3.1 fifth ink step.
-  static const Color inkMetaLow = inkMeta;
-
-  /// @Deprecated — v3.1 Material-ish alias.
-  static const Color textPrimary = ink;
-
-  /// @Deprecated — v3.1 Material-ish alias.
-  static const Color textSecondary = inkDim;
-
-  /// @Deprecated — v3.1 Material-ish alias.
-  static const Color textTertiary = inkMeta;
-
-  /// @Deprecated — v3.1 Material-ish alias.
-  static const Color textDisabled = etch;
-
-  /// @Deprecated — v3.1 semantic alias.
-  static const Color success = ok;
-
-  /// @Deprecated — v3.1 semantic alias.
-  static const Color warning = warn;
-
-  /// @Deprecated — v3.1 semantic alias.
-  static const Color error = risk;
-
-  /// @Deprecated — blooms are retired (§1.6); exactly two things glow (BG-32).
-  static const Color okBloom = okTint;
-
-  /// @Deprecated — see [okBloom].
-  static const Color warnBloom = warnTint;
-
-  /// @Deprecated — see [okBloom].
-  static const Color riskBloom = riskTint;
-
-  /// @Deprecated — see [okBloom].
-  static const Color successGlow = okTint;
-
-  /// @Deprecated — v3.1 teal glow; replaced by [armedGlowRing] and the halo.
-  static const Color glow = armedGlowRing;
-
-  /// @Deprecated — absorbed by [tealTint] (§10.2).
-  static const Color messageMine = tealTint;
-
-  /// @Deprecated — bubbles carry no edge in Deep V6 (§4).
-  static const Color messageMineEdge = tealTintEdge;
-
-  /// @Deprecated — their-bubbles are [plate] (§1.7).
-  static const Color messageTheirs = plate;
-
-  /// @Deprecated — bubbles carry no edge in Deep V6 (§4).
-  static const Color messageTheirsEdge = plateEdge;
-
-  /// @Deprecated — v3.1 message inset.
-  static const Color messageInset = abyss;
-
-  /// @Deprecated — the notice plate is [warnTint] itself (§1.6).
-  static const Color noticeWarnFill = warnTint;
-
-  /// @Deprecated — the notice plate carries no edge (§1.6).
-  static const Color noticeWarnEdge = warnTint;
-
-  /// @Deprecated — alias of [onPrimary] (§10.2).
-  static const Color onPrimaryDim = onPrimary;
-
-  /// @Deprecated — v3.1 frost fill. Glass floats, never sits (BG-31).
-  static const Color glassFill = Color(0x08FFFFFF);
 }
 
 /// §3 — Spacing. 4 dp grid; the only permitted steps. Screen gutter **16 dp**
@@ -453,26 +322,6 @@ abstract final class KvRadius {
 
   /// The tail corner of the last bubble in a run.
   static const double bubbleTail = 6;
-
-  // ── Legacy aliases (Bible §9.8) ───────────────────────────────────────────
-
-  /// @Deprecated — v3.1 pill; [control] is the name now.
-  static const double pill = control;
-
-  /// @Deprecated — v3.1 chip radius 4. Deep V6 chips are stadiums.
-  static const double chip = control;
-
-  /// @Deprecated — v3.1 panel radius 8.
-  static const double panel = plate;
-
-  /// @Deprecated — v3.1 card radius.
-  static const double card = plate;
-
-  /// @Deprecated — v3.1 button radius.
-  static const double button = control;
-
-  /// @Deprecated — v3.1 data radius.
-  static const double data = inner;
 }
 
 /// §3 — Motion. **One curve, deceleration only, no overshoot.**
@@ -516,27 +365,15 @@ abstract final class KvMotion {
   /// Streaming cadence for a chain counter (BG-18).
   static const Duration stream = Duration(seconds: 1);
 
-  // ── Legacy aliases (Bible §9.8) ───────────────────────────────────────────
+  /// One breath of the loading cadence — `KvCadence`'s five bars rise and fall
+  /// once in this time (§4 *Cadence*; the app's one loading indicator). Not
+  /// [breathe], which is the orb's halo at 3200: two loops, two names, one
+  /// letter apart was the trap the `breath` alias set, and this is its
+  /// replacement (UX-R8).
+  static const Duration cadence = Duration(milliseconds: 1100);
 
-  /// @Deprecated — v3.1 name for [curve].
-  static const Curve out = curve;
-
-  /// @Deprecated — the 80 ms step is **retired** (BG-9); nearest is [fast].
-  static const Duration instant = fast;
-
-  /// @Deprecated — there are no toasts (§4).
-  static const Duration toast = pulse;
-
-  /// @Deprecated — v3.1 alias.
-  static const Duration normal = calm;
-
-  /// @Deprecated — v3.1 alias.
-  static const Duration slow = enter;
-
-  /// @Deprecated — retired with the five-bar loading cadence (§10.2).
-  static const Duration breath = Duration(milliseconds: 1100);
-
-  /// @Deprecated — retired with the five-bar loading cadence (§10.2).
+  /// The phase offset between neighbouring cadence bars, so the hill rolls
+  /// rather than pumps.
   static const Duration cadenceStagger = Duration(milliseconds: 120);
 }
 
@@ -582,17 +419,10 @@ abstract final class KvLayout {
   /// A page never exceeds this; wider windows centre it.
   static const double pageMax = 1200;
 
-  /// The list pane's lower bound in `expanded` (§3a: *list 400–480*).
-  ///
-  /// **Unread, and that is a finding rather than dead code** (cleanup,
-  /// 2026-09-06). `KvTwoPane` clamps every class at its own `minList = 340`,
-  /// which is §3a's number for `expanded short` — so a tall `expanded` window
-  /// can hand the list 340 where the law says 400. Two numbers for one
-  /// quantity, and the wrong one shipping: routed to UX-R8 with the rest of
-  /// the shell sweep rather than changed in a cleanup pass, because it moves
-  /// a layout.
-
-  /// The list pane's upper bound.
+  /// The list pane's upper bound. Its lower bound lives beside the formula
+  /// that applies it — `KvTwoPane.minList` 400 in a `tall` window and
+  /// `minListShort` 340 in a `short` one (§3a.1) — since UX-R8 closed the
+  /// two-numbers-for-one-quantity drift the 2026-09-06 cleanup recorded here.
   static const double listPaneMax = 480;
 
   /// The standing rail in `medium`.
