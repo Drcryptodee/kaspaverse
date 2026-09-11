@@ -29,6 +29,7 @@ import 'package:kaspaverse/src/rust/api/prefs.dart'
     show prefsExplorerConfig, prefsExplorerTxUrl, prefsSetExplorerConfig;
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
+import 'package:kaspaverse/src/ui/settings/rekey_screen.dart';
 import 'package:kaspaverse/src/ui/settings/security_screen.dart';
 import 'package:kaspaverse/src/ui/settings/settings_scopes.dart';
 import 'package:kaspaverse/src/ui/settings/settings_screen.dart';
@@ -226,6 +227,8 @@ SecurityScope _securityScope() => SecurityScope(
   lockGraceSecs: VaultService.instance.lockGraceSecs,
   setLockGraceSecs: VaultService.instance.setLockGraceSecs,
   inputKind: VaultService.instance.vaultInputKind,
+  // The re-key ceremony (REKEY-1); its seams default to the service.
+  rekeyRoute: () => const RekeyScreen(),
   // `T1`'s raised pill and the drawer's Lock foot are the same act. BG-13:
   // a lock is a discard, and the shell routes on the vault's own status
   // stream, so nothing here navigates.

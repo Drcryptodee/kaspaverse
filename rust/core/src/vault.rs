@@ -337,6 +337,54 @@ pub fn read_facts(blob: &[u8]) -> Result<BlobFacts> {
     parse_header(blob).map(|(_, _, facts)| facts)
 }
 
+/// **Every refusal a seal can make without a KDF, made before one runs.**
+///
+/// Shared by [`seal_seed`] and [`reseal_seed`] so the two cannot disagree
+/// about what a sealable secret is — and so a re-key never spends Argon2id
+/// on the CURRENT secret only to refuse the NEXT one for a reason that was
+/// knowable up front. Returns the checked pepper, `None` staying `None`.
+/// Public so the bridge can ask the same question before its lockout
+/// bookkeeping begins: a refusal of the NEXT secret is not a guess at the
+/// current one and must not be counted as one (`wallet-security-auditor`).
+///
+/// **A PIN vault cannot exist unbound, and the refusal lives HERE.**
+///
+/// The bridge refuses it too, at the seam where the Keystore answer arrives.
+/// But this is the layer that writes the file, and a rule enforced only one
+/// layer up is a rule the next caller of this layer does not have: an unbound
+/// six-digit vault is 10^6 offline candidates at ~679 ms each, which is
+/// precisely the attack the binding exists to close. The founder's condition
+/// — the PIN and the hardware key ship together or neither ships — is a
+/// property of the blob, so it is checked where the blob is made
+/// (`consensus-auditor`, D-312).
+///
+/// The LENGTH is checked here for the same reason. Both screens enforce six,
+/// so a one-digit PIN is unreachable today; "unreachable today" is how a rule
+/// that lives in a screen becomes a rule that lives nowhere.
+pub fn check_seal_inputs<'p>(
+    passphrase: &[u8],
+    params: SealParams,
+    input_kind: InputKind,
+    pepper: Option<&'p [u8]>,
+) -> Result<Option<&'p [u8]>> {
+    if passphrase.is_empty() {
+        return Err(CoreError::EmptyPassphrase);
+    }
+    params.check_bounds()?;
+    let pepper = check_pepper(pepper)?;
+    if input_kind == InputKind::Digits {
+        if pepper.is_none() {
+            return Err(CoreError::DeviceBinding(
+                "a PIN vault needs a device binding",
+            ));
+        }
+        if passphrase.len() != PIN_LEN || !passphrase.iter().all(u8::is_ascii_digit) {
+            return Err(CoreError::MalformedBlob("pin shape"));
+        }
+    }
+    Ok(pepper)
+}
+
 /// Seal the seed under a passphrase. Fresh random salt and nonce every call —
 /// re-sealing the same seed never reuses either. Always writes **v2**.
 ///
@@ -350,35 +398,7 @@ pub fn seal_seed(
     input_kind: InputKind,
     pepper: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    if passphrase.is_empty() {
-        return Err(CoreError::EmptyPassphrase);
-    }
-    params.check_bounds()?;
-    let pepper = check_pepper(pepper)?;
-    // **A PIN vault cannot exist unbound, and the refusal lives HERE.**
-    //
-    // The bridge refuses it too, at the seam where the Keystore answer arrives.
-    // But this is the function that writes the file, and a rule enforced only
-    // one layer up is a rule the next caller of this layer does not have: an
-    // unbound six-digit vault is 10^6 offline candidates at ~679 ms each, which
-    // is precisely the attack the binding exists to close. The founder's
-    // condition — the PIN and the hardware key ship together or neither ships —
-    // is a property of the blob, so it is checked where the blob is made
-    // (`consensus-auditor`, D-312).
-    //
-    // The LENGTH is checked here for the same reason. Both screens enforce six,
-    // so a one-digit PIN is unreachable today; "unreachable today" is how a
-    // rule that lives in a screen becomes a rule that lives nowhere.
-    if input_kind == InputKind::Digits {
-        if pepper.is_none() {
-            return Err(CoreError::DeviceBinding(
-                "a PIN vault needs a device binding",
-            ));
-        }
-        if passphrase.len() != PIN_LEN || !passphrase.iter().all(u8::is_ascii_digit) {
-            return Err(CoreError::MalformedBlob("pin shape"));
-        }
-    }
+    let pepper = check_seal_inputs(passphrase, params, input_kind, pepper)?;
 
     let mut salt = [0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
@@ -486,6 +506,41 @@ pub fn unseal_seed(blob: &[u8], passphrase: &[u8], pepper: Option<&[u8]>) -> Res
     bytes.copy_from_slice(&plaintext);
     plaintext.zeroize();
     Ok(SecretSeed::new(bytes))
+}
+
+/// **Change the secret a blob is sealed under, keeping the seed it holds**
+/// (REKEY-1 — the re-key D-312 left to Settings).
+///
+/// One function, so the property that matters is a fact about its body rather
+/// than about two callers agreeing: **the seed sealed under `next` is the seed
+/// that `current` just opened**, and nothing else — not a resident vault's
+/// copy, not a ceremony's, not a caller's argument. A wrong `current` refuses
+/// with `WrongPassphraseOrCorrupt` and produces no blob at all; a `next` the
+/// seal would refuse is refused **before** the KDF on `current` is spent
+/// ([`check_seal_inputs`]); the seed lives in one `SecretSeed` that zeroizes
+/// on the way out of this frame, on every path (INV-2).
+///
+/// `pepper` serves both halves. The unseal ignores it for a blob that is not
+/// device-bound (the D-312 rule that keeps pre-binding vaults opening); the
+/// seal takes it when present and demands it for `Digits` — so a passphrase
+/// vault that was sealed unbound because the Keystore was away that day comes
+/// out of a re-key bound, which is the same promotion the migrating unlock
+/// makes. Fresh salt and nonce, as every seal.
+///
+/// The caller owns the write. This returns bytes and touches no file, so the
+/// atomic-replace contract — the old blob survives a crash at any instant up
+/// to the rename — is the bridge's `atomic_write` and is tested there.
+pub fn reseal_seed(
+    blob: &[u8],
+    current: &[u8],
+    next: &[u8],
+    params: SealParams,
+    next_kind: InputKind,
+    pepper: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    check_seal_inputs(next, params, next_kind, pepper)?;
+    let seed = unseal_seed(blob, current, pepper)?;
+    seal_seed(&seed, next, params, next_kind, pepper)
 }
 
 #[cfg(test)]
@@ -1101,5 +1156,219 @@ mod tests {
             let seed = unseal_seed(&blob, b"pw", None).unwrap();
             assert_eq!(seed.as_bytes(), &[0x42u8; 64], "corner t={t} p={p}");
         }
+    }
+
+    // ── REKEY-1: the re-key ───────────────────────────────────────────────
+
+    /// **PIN → passphrase → PIN, the seed never moving.** Each stage's output
+    /// opens with the secret it was sealed under and refuses the one it
+    /// replaced; the seed that comes out at the end is the seed that went in.
+    #[test]
+    fn reseal_round_trips_both_directions_and_keeps_the_seed() {
+        let seed = test_seed();
+        let pin_a = seal_seed(
+            &seed,
+            b"481902",
+            TEST_PARAMS,
+            InputKind::Digits,
+            Some(&TEST_PEPPER),
+        )
+        .unwrap();
+
+        // PIN → passphrase.
+        let pass = reseal_seed(
+            &pin_a,
+            b"481902",
+            b"correct horse battery",
+            TEST_PARAMS,
+            InputKind::Passphrase,
+            Some(&TEST_PEPPER),
+        )
+        .unwrap();
+        assert_eq!(pass.len(), BLOB_LEN);
+        let facts = read_facts(&pass).unwrap();
+        assert_eq!(facts.input_kind, InputKind::Passphrase);
+        assert!(facts.device_bound, "the binding travels with the re-key");
+        assert_eq!(
+            unseal_seed(&pass, b"correct horse battery", Some(&TEST_PEPPER))
+                .unwrap()
+                .as_bytes(),
+            seed.as_bytes()
+        );
+        assert!(
+            matches!(
+                unseal_seed(&pass, b"481902", Some(&TEST_PEPPER)),
+                Err(CoreError::WrongPassphraseOrCorrupt)
+            ),
+            "the old PIN must not open the re-keyed blob"
+        );
+        assert_ne!(pass[18..34], pin_a[18..34], "salt reused across a re-key");
+        assert_ne!(pass[34..58], pin_a[34..58], "nonce reused across a re-key");
+
+        // passphrase → PIN.
+        let pin_b = reseal_seed(
+            &pass,
+            b"correct horse battery",
+            b"902481",
+            TEST_PARAMS,
+            InputKind::Digits,
+            Some(&TEST_PEPPER),
+        )
+        .unwrap();
+        assert_eq!(read_facts(&pin_b).unwrap().input_kind, InputKind::Digits);
+        assert_eq!(
+            unseal_seed(&pin_b, b"902481", Some(&TEST_PEPPER))
+                .unwrap()
+                .as_bytes(),
+            seed.as_bytes()
+        );
+        assert!(unseal_seed(&pin_b, b"correct horse battery", Some(&TEST_PEPPER)).is_err());
+        assert!(unseal_seed(&pin_b, b"481902", Some(&TEST_PEPPER)).is_err());
+    }
+
+    /// A wrong current secret produces nothing — not a blob, not a different
+    /// error, and (the bridge's half) no write.
+    #[test]
+    fn reseal_with_the_wrong_current_secret_refuses() {
+        let blob = seal_seed(
+            &test_seed(),
+            b"right",
+            TEST_PARAMS,
+            InputKind::Passphrase,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            reseal_seed(
+                &blob,
+                b"wrong",
+                b"whatever comes next",
+                TEST_PARAMS,
+                InputKind::Passphrase,
+                None,
+            ),
+            Err(CoreError::WrongPassphraseOrCorrupt)
+        ));
+        // The blob it was handed still opens as it did.
+        assert!(unseal_seed(&blob, b"right", None).is_ok());
+    }
+
+    /// **A next secret the seal would refuse is refused BEFORE the current one
+    /// is checked** — proven by the error kind under a wrong current: if the
+    /// KDF on `current` ran first, every one of these would read as
+    /// `WrongPassphraseOrCorrupt`.
+    #[test]
+    fn reseal_refuses_a_bad_next_before_spending_the_kdf() {
+        let blob = seal_seed(
+            &test_seed(),
+            b"right",
+            TEST_PARAMS,
+            InputKind::Passphrase,
+            None,
+        )
+        .unwrap();
+        // Empty next.
+        assert!(matches!(
+            reseal_seed(
+                &blob,
+                b"wrong",
+                b"",
+                TEST_PARAMS,
+                InputKind::Passphrase,
+                None
+            ),
+            Err(CoreError::EmptyPassphrase)
+        ));
+        // A PIN with no binding to make it safe.
+        assert!(matches!(
+            reseal_seed(
+                &blob,
+                b"wrong",
+                b"481902",
+                TEST_PARAMS,
+                InputKind::Digits,
+                None
+            ),
+            Err(CoreError::DeviceBinding(_))
+        ));
+        // A PIN of the wrong shape.
+        assert!(matches!(
+            reseal_seed(
+                &blob,
+                b"wrong",
+                b"4819",
+                TEST_PARAMS,
+                InputKind::Digits,
+                Some(&TEST_PEPPER)
+            ),
+            Err(CoreError::MalformedBlob("pin shape"))
+        ));
+        // Hostile parameters.
+        let hostile = SealParams {
+            m_cost_kib: MAX_M_COST_KIB + 1,
+            ..TEST_PARAMS
+        };
+        assert!(matches!(
+            reseal_seed(
+                &blob,
+                b"wrong",
+                b"next",
+                hostile,
+                InputKind::Passphrase,
+                None
+            ),
+            Err(CoreError::BlobParamBounds)
+        ));
+    }
+
+    /// The binding rules hold across a re-key exactly as they hold at a seal:
+    /// a bound blob needs its pepper to be opened at all; an unbound one is
+    /// promoted when the pepper is in the room, as the migrating unlock does.
+    #[test]
+    fn reseal_keeps_the_binding_rules_and_promotes_an_unbound_vault() {
+        let unbound = seal_seed(
+            &test_seed(),
+            b"old",
+            TEST_PARAMS,
+            InputKind::Passphrase,
+            None,
+        )
+        .unwrap();
+        assert!(!read_facts(&unbound).unwrap().device_bound);
+
+        // Pepper offered to an unbound blob: ignored on the way in, taken on
+        // the way out.
+        let promoted = reseal_seed(
+            &unbound,
+            b"old",
+            b"new",
+            TEST_PARAMS,
+            InputKind::Passphrase,
+            Some(&TEST_PEPPER),
+        )
+        .unwrap();
+        assert!(read_facts(&promoted).unwrap().device_bound);
+        assert!(unseal_seed(&promoted, b"new", Some(&TEST_PEPPER)).is_ok());
+        assert!(
+            matches!(
+                unseal_seed(&promoted, b"new", None),
+                Err(CoreError::DeviceBinding(_))
+            ),
+            "the promoted blob must be bound to this phone"
+        );
+
+        // A bound blob will not be re-keyed without its pepper — and the error
+        // is the binding's, not the secret's, so nothing counts it as a guess.
+        assert!(matches!(
+            reseal_seed(
+                &promoted,
+                b"new",
+                b"newer",
+                TEST_PARAMS,
+                InputKind::Passphrase,
+                None
+            ),
+            Err(CoreError::DeviceBinding(_))
+        ));
     }
 }

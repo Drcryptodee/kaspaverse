@@ -32,9 +32,11 @@ import 'settings_screen.dart' show graceFragment;
 ///    seam in the vault. A number on this row that nothing enforces is the
 ///    worst kind of lie a custody screen can tell, so the row is absent rather
 ///    than decorative.
-///  * *Change passphrase* — the passphrase is set once inside the create
-///    ceremony and there is no re-key path in `vault.rs`. It reaches this
-///    screen as the Coming soon door, which states that in words.
+///  * *Change passphrase* — **built (REKEY-1)**, as `Change PIN or
+///    passphrase`: the render assumed a six-digit code; since D-312 the vault
+///    keeps either, so the row names both and its sub-line says which one
+///    this vault keeps. It opens the re-key ceremony (`RekeyScreen`) through
+///    `SecurityScope.rekeyRoute`; absent the seam, the row is absent.
 ///  * *Block screenshots* is drawn with a switch. **BG-10 does not let it be
 ///    one**: secret screens set `FLAG_SECURE` and refuse accessibility
 ///    unconditionally, and a switch that turns that off is a switch that
@@ -78,6 +80,12 @@ class _SecurityScreenState extends State<SecurityScreen>
   /// where the refusal happened — never as a toast that leaves the screen
   /// (§9.30's open question does not get a ninth `showSnackBar`).
   String? _fault;
+
+  /// What the re-key ceremony reported when it came back, under the row it
+  /// came back to — the row's own sub-line already says the new kind; this
+  /// says the change happened, on the one visit that made it (BG-8: drawn
+  /// from the ceremony's return, never assumed).
+  String? _rekeyed;
 
   @override
   void initState() {
@@ -219,6 +227,33 @@ class _SecurityScreenState extends State<SecurityScreen>
     }
   }
 
+  /// **`T2`'s `Change passphrase` row** — the re-key ceremony, then a re-read
+  /// of what the vault keeps so the row and the fingerprint lane's sentences
+  /// name the new secret without waiting for a resume.
+  /// **The ceremony hands back the kind it sealed**, and that is what names
+  /// the new secret — the re-probe refreshes the fingerprint lane's readings
+  /// and re-reads the header, but a header read that fails keeps its last
+  /// noun (BG-8 for a lamp), which here would have been the OLD noun over the
+  /// NEW vault (`ux-auditor`, L216). Null ⇒ nothing changed, nothing said.
+  Future<void> _openRekey() async {
+    final route = widget.scope.rekeyRoute;
+    if (route == null) return;
+    KvHaptic.selection();
+    setState(() => _rekeyed = null);
+    final sealed = await Navigator.of(context).push<vault_api.VaultInputKind>(
+      KvPageRoute<vault_api.VaultInputKind>(builder: (_) => route()),
+    );
+    if (!mounted || sealed == null) return;
+    final noun = sealed == vault_api.VaultInputKind.digits
+        ? 'PIN'
+        : 'passphrase';
+    setState(() {
+      _secretNoun = noun;
+      _rekeyed = 'Your $noun is set. Your recovery words are unchanged.';
+    });
+    await _probe();
+  }
+
   void _comingSoon(String name, String sentence) {
     KvHaptic.selection();
     Navigator.of(context).push(
@@ -291,7 +326,7 @@ class _SecurityScreenState extends State<SecurityScreen>
                         ),
                       ],
                     ),
-                    if (_fault case final fault?) _Fault(fault),
+                    if (_fault case final fault?) _Note(fault),
                     const KvSectionHeader('Recovery'),
                     KvRowContainer(
                       children: [
@@ -314,6 +349,34 @@ class _SecurityScreenState extends State<SecurityScreen>
                                 'wrote down at setup are the wallet.',
                           ),
                         ),
+                        // **The render's seat: between the words and the
+                        // screenshot rule.** Absent without its seam (§8).
+                        if (widget.scope.rekeyRoute != null)
+                          KvRow(
+                            title: 'Change PIN or passphrase',
+                            sub: switch (_secretNoun) {
+                              // A PIN vault is always phone-bound (the seal
+                              // refuses otherwise), so the render's *this
+                              // phone only* is true here and not claimed on
+                              // the passphrase line (D-312).
+                              'PIN' => 'A 6-digit PIN, this phone only',
+                              'passphrase' => 'A keyboard passphrase',
+                              _ => 'The secret that opens this app',
+                            },
+                            subLines: 2,
+                            // At 320 dp / 1.3× the title came out
+                            // `Change PIN or passph…` — the same floor
+                            // scar `Lock when I leave` carries (§19.6;
+                            // `ux-auditor` BLOCK, REKEY-1).
+                            titleLines: 2,
+                            dense: true,
+                            trailing: const KvGlyphIcon(
+                              KvGlyph.chevron,
+                              size: 16,
+                              tone: KvColor.etch,
+                            ),
+                            onTap: _openRekey,
+                          ),
                         // **BG-10 is not a preference**, so this is not a
                         // control. `T2` draws a switch; a switch that cannot
                         // move renders dim and reads as broken, and the honest
@@ -331,6 +394,8 @@ class _SecurityScreenState extends State<SecurityScreen>
                         ),
                       ],
                     ),
+                    if (_rekeyed case final line?)
+                      _Note(line, tone: KvColor.inkDim),
                   ],
                 ),
               ),
@@ -415,22 +480,25 @@ class _Value extends StatelessWidget {
   }
 }
 
-/// A refusal, where the refusal happened.
-class _Fault extends StatelessWidget {
-  const _Fault(this.text);
+/// A sentence under the container it is about — a refusal in `warn` where
+/// the refusal happened, or a change's confirmation in `inkDim` (BG-7 rations
+/// the colour: the re-key's line is a fact, not a degraded state).
+class _Note extends StatelessWidget {
+  const _Note(this.text, {this.tone = KvColor.warn});
 
   final String text;
+  final Color tone;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(top: KvSpace.s),
     child: Text(
       text,
-      style: const TextStyle(
+      style: TextStyle(
         fontFamily: KvFont.ui,
         fontSize: 12,
         height: 17 / 12,
-        color: KvColor.warn,
+        color: tone,
       ),
     ),
   );

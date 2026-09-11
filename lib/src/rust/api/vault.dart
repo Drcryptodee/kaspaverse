@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `binding_for`, `blob_path`, `broadcast_status`, `build_wallet_signer`, `chain_store_dir`, `change_cursor_path`, `change_cursor`, `current_status`, `derive_wallet_addresses`, `derive_wallet_branches`, `endpoint_cache_path`, `export_seed_for_keystore`, `from_bytes`, `install_pepper`, `is_trivially_guessable_pin`, `is_unlocked`, `load_vault_from_seed_bytes`, `lock_epoch`, `lock_grace_path`, `lock_grace_secs`, `lockout_delay_secs`, `lockout_path`, `migrate_blob`, `node_config_dir`, `now_unix`, `persisted_count`, `prefs_dir`, `read_blob`, `read_lockout`, `regenerate_ceremony`, `reveal_ceremony_words`, `scan_high_water`, `scan_window_path`, `set_change_cursor`, `set_lock_grace_secs`, `set_scan_high_water`, `set_vault_if_current`, `status_tx`, `take_pepper`, `to_bytes`, `transport_decryptor`, `transport_store_dir`, `vault_dir`, `wallet_address_at`, `wallet_store_path`, `write_lockout`
+// These functions are ignored because they are not marked as `pub`: `active_until`, `atomic_write`, `binding_for`, `blob_path`, `broadcast_status`, `build_wallet_signer`, `chain_store_dir`, `change_cursor_path`, `change_cursor`, `current_status`, `derive_wallet_addresses`, `derive_wallet_branches`, `endpoint_cache_path`, `export_seed_for_keystore`, `from_bytes`, `install_pepper`, `is_trivially_guessable_pin`, `is_unlocked`, `load_vault_from_seed_bytes`, `lock_epoch`, `lock_grace_path`, `lock_grace_secs`, `lockout_delay_secs`, `lockout_gate`, `lockout_path`, `migrate_blob`, `node_config_dir`, `now_unix`, `persisted_count`, `prefs_dir`, `read_blob`, `read_lockout`, `refuse_unsafe_pin`, `regenerate_ceremony`, `reveal_ceremony_words`, `scan_high_water`, `scan_window_path`, `set_change_cursor`, `set_lock_grace_secs`, `set_scan_high_water`, `set_vault_if_current`, `settle_attempt`, `status_tx`, `take_pepper`, `to_bytes`, `transport_decryptor`, `transport_store_dir`, `vault_dir`, `wallet_address_at`, `wallet_store_path`, `write_lockout`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Lockout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -126,6 +126,69 @@ Future<void> unlockWithPassphrase({required List<int> passphrase}) => RustLib
     .instance
     .api
     .crateApiVaultUnlockWithPassphrase(passphrase: passphrase);
+
+/// **Prove the current unlock secret without changing anything** — the first
+/// beat of REKEY-1's ceremony, and the reason the third can be self-contained.
+///
+/// It unseals the blob under `secret` and drops the seed on the spot: no
+/// install, no migration, no replacement of the resident vault. It exists so a
+/// mistyped current secret is reported where it was typed rather than after
+/// the user has chosen a new one — and it is **not a cheaper oracle than the
+/// unlock**: same gate, same KDF, same lockout, same `DeviceBinding`
+/// exemption, so a guess costs exactly what it costs at the door.
+///
+/// **Refused while the vault is locked.** The re-key is a Settings ceremony
+/// and Settings is behind the unlock; a lane that would prove the secret for
+/// a locked app is a second door, and the vault has one. The check is cheap
+/// and runs before the budget is read, because a locked call is not an
+/// attempt.
+Future<void> vaultConfirmSecret({required List<int> secret}) =>
+    RustLib.instance.api.crateApiVaultVaultConfirmSecret(secret: secret);
+
+/// **Change the unlock secret on an existing vault** (REKEY-1): open the blob
+/// with `current`, seal the same seed under `next` as `next_kind`, and replace
+/// the file atomically.
+///
+/// Self-contained on purpose. It proves `current` itself rather than trusting
+/// that [`vault_confirm_secret`] ran a moment ago, so the invariant *you must
+/// know the secret to change it* is a property of this function and not of
+/// the screen that calls it — a rule that lives only in a screen lives
+/// nowhere. That costs one Argon2id over what a ticket scheme would, once per
+/// re-key, and buys a property worth more than 700 ms: **the seed sealed
+/// under the new secret is the seed the old one just opened**, byte for byte,
+/// with no resident copy consulted (`core::reseal_seed`).
+///
+/// Order, and why:
+/// 1. Gate, unlocked check, lockout — the cheap refusals, none of them an
+///    attempt.
+/// 2. The pepper is taken once, first, and serves both halves — first, so a
+///    refusal drops it; the NEW kind's rules (`refuse_unsafe_pin`: no
+///    repeat/run PIN, a PIN needs the binding) are checked **before** any
+///    KDF, so the user learns a choice is refused without having paid to
+///    prove the current secret first.
+/// 3. `reseal_seed` — two KDFs. A wrong `current` counts against the lockout
+///    exactly as at the door; a binding refusal does not.
+/// 4. `atomic_write` — write-beside, fsync, rename. **The old blob is on disk
+///    and readable at every instant until the rename**, so a crash anywhere
+///    in here leaves a wallet that opens with the secret the user still
+///    knows. A write failure after a correct `current` is reported, but the
+///    budget has already been reset: the secret was right.
+///
+/// **The resident vault is untouched, and so is Path A.** The seed did not
+/// change, so the unlocked keychain is still the wallet, and the biometric
+/// lane — which wraps the seed itself, never this file — still opens it. A
+/// re-key changes what the user types, and only that.
+Future<void> vaultReseal({
+  required List<int> current,
+  required List<int> next,
+  required VaultKdfParams params,
+  required VaultInputKind nextKind,
+}) => RustLib.instance.api.crateApiVaultVaultReseal(
+  current: current,
+  next: next,
+  params: params,
+  nextKind: nextKind,
+);
 
 /// Lock the vault. **Contract (D-031.4): "no new operation can start", not
 /// "instant erasure".** A sign already in flight holds an upgraded strong ref

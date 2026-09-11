@@ -15,6 +15,7 @@ import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
 import 'package:kaspaverse/src/ui/settings/about_screen.dart';
+import 'package:kaspaverse/src/ui/settings/rekey_screen.dart';
 import 'package:kaspaverse/src/ui/settings/security_screen.dart';
 import 'package:kaspaverse/src/ui/settings/settings_scopes.dart';
 import 'package:kaspaverse/src/ui/settings/settings_screen.dart';
@@ -887,7 +888,128 @@ SecurityScope _securityScope({int grace = 30, String state = pathAReady}) =>
       // one-frame "unknown" state the harness would otherwise leave it in
       // (`ux-auditor`, UX-R8 re-review).
       inputKind: () async => vault_api.VaultInputKind.passphrase,
+      // The render's `Change passphrase` row (REKEY-1), so the frame shows
+      // the screen the founder opens and the fit is measured with it.
+      rekeyRoute: () => _rekey(),
     );
+
+/// **The re-key ceremony** (REKEY-1), with every lane a fake: a PIN vault
+/// whose fingerprint is not yet on, so the fourth beat is offered.
+Widget _rekey({
+  vault_api.VaultInputKind kind = vault_api.VaultInputKind.digits,
+  String pathA = pathANone,
+  // A reseal that never completes holds the sealing beat for its frame.
+  Future<void> Function(Uint8List, Uint8List, vault_api.VaultInputKind)? reseal,
+}) => RekeyScreen(
+  inputKind: () async => kind,
+  confirm: (_) async {},
+  reseal: reseal ?? (_, _, _) async {},
+  deviceBinding: () async => true,
+  biometricStatus: () async => biometricReady,
+  pathAState: () async => pathA,
+  enroll: () async => true,
+  checkAccessibility: () async => false,
+  setSecure: ({required bool enable}) async {},
+);
+
+/// Security as the ceremony RETURNS to it: the row re-named and the one
+/// `inkDim` line under the container (`ux-auditor`, REKEY-1 — the state the
+/// fit guard is proven at, framed).
+Widget _securityRekeyed() => SecurityScreen(
+  scope: SecurityScope(
+    biometricStatus: () async => 'ready',
+    pathAState: () async => pathAReady,
+    enroll: () async => true,
+    clearEnrollment: () async {},
+    lockGraceSecs: ValueNotifier(30),
+    setLockGraceSecs: (_) async {},
+    lockNow: () async {},
+    inputKind: () async => vault_api.VaultInputKind.digits,
+    rekeyRoute: () => const _PopsWithDigits(),
+  ),
+);
+
+/// A stand-in ceremony that hands `digits` back on its first frame.
+class _PopsWithDigits extends StatefulWidget {
+  const _PopsWithDigits();
+
+  @override
+  State<_PopsWithDigits> createState() => _PopsWithDigitsState();
+}
+
+class _PopsWithDigitsState extends State<_PopsWithDigits> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => Navigator.of(context).pop(vault_api.VaultInputKind.digits),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+Future<void> _openRekeyRow(WidgetTester tester) async {
+  await tester.tap(find.text('Change PIN or passphrase'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+  await tester.pump(KvMotion.enter);
+}
+
+/// Six digits on the ceremony's pad, then the settle the sixth-well beat
+/// waits for (`KvMotion.fast`).
+Future<void> _rekeyType(WidgetTester tester, String digits) async {
+  for (final d in digits.split('')) {
+    await tester.tap(find.text(d).first);
+    await tester.pump();
+  }
+  await tester.pump(KvMotion.fast);
+  await tester.pump(KvMotion.enter);
+}
+
+Future<void> _rekeyToChoose(WidgetTester tester) =>
+    _rekeyType(tester, '481902');
+
+Future<void> _rekeyToRepeat(WidgetTester tester) async {
+  await _rekeyToChoose(tester);
+  await _rekeyType(tester, '902481');
+}
+
+Future<void> _rekeyToBiometrics(WidgetTester tester) async {
+  await _rekeyToRepeat(tester);
+  await _rekeyType(tester, '902481');
+}
+
+/// The repeat that does not match: both wiped, back on the chooser with the
+/// amber sentence.
+Future<void> _rekeyToMismatch(WidgetTester tester) async {
+  await _rekeyToRepeat(tester);
+  await _rekeyType(tester, '902482');
+}
+
+/// A passphrase vault, walked to the repeat beat on the keyboard: `Set
+/// passphrase` is the pill, and there is no pad switch on this beat.
+Future<void> _rekeyToPassphraseRepeat(WidgetTester tester) async {
+  for (final beat in ['old', 'new']) {
+    for (final ch in beat.split('')) {
+      await tester.tap(find.text(ch).first);
+      await tester.pump();
+    }
+    await tester.tap(find.widgetWithText(KvAction, 'Next'));
+    await tester.pump();
+    await tester.pump(KvMotion.enter);
+  }
+}
+
+/// Past the confirm, then onto the keyboard for the new secret — the tallest
+/// typing composition, with the sub-copy this sitting wrote.
+Future<void> _rekeyToKeyboardChooser(WidgetTester tester) async {
+  await _rekeyToChoose(tester);
+  await tester.tap(find.text('Use a keyboard passphrase'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
+}
 
 /// `T4`'s own numbers, so the preview is a picture of the render and not of a
 /// convenient wallet: 31 receive addresses, **3** of them funded — 27.72 ·
@@ -1670,6 +1792,40 @@ void main() {
         checkAccessibility: () async => false,
         setSecure: ({required bool enable}) async {},
       ),
+    );
+
+    // **REKEY-1 — the re-key ceremony, beat by beat.** The confirm beat is
+    // the unlock pad; the chooser is `O2`; the closing beat is `O6`. No new
+    // archetype, so the frames are the proof that the composition survived
+    // the transplant at every geometry.
+    framedSurface('rekey__confirm_pin', () => _rekey());
+    framedSurface(
+      'rekey__confirm_passphrase',
+      () => _rekey(kind: vault_api.VaultInputKind.passphrase),
+    );
+    framedSurface('rekey__choose', () => _rekey(), act: _rekeyToChoose);
+    framedSurface(
+      'rekey__choose_keyboard',
+      () => _rekey(),
+      act: _rekeyToKeyboardChooser,
+    );
+    framedSurface('rekey__repeat', () => _rekey(), act: _rekeyToRepeat);
+    framedSurface(
+      'rekey__repeat_passphrase',
+      () => _rekey(kind: vault_api.VaultInputKind.passphrase),
+      act: _rekeyToPassphraseRepeat,
+    );
+    framedSurface('rekey__mismatch', () => _rekey(), act: _rekeyToMismatch);
+    framedSurface(
+      'rekey__sealing',
+      () => _rekey(reseal: (_, _, _) => Completer<void>().future),
+      act: _rekeyToBiometrics,
+    );
+    framedSurface('rekey__biometrics', () => _rekey(), act: _rekeyToBiometrics);
+    framedSurface(
+      'settings__security_rekeyed',
+      _securityRekeyed,
+      act: _openRekeyRow,
     );
 
     surface(

@@ -162,19 +162,11 @@ class _PassphraseUnlockScreenState extends State<PassphraseUnlockScreen> {
     // `e.toString()` is the literal "Instance of 'AppError'", so this branch
     // never fired and a rate-limited user was told their passphrase was wrong
     // instead of that they were locked out (run 1, F8).
-    if (isLockedOut(e)) {
-      return 'Too many attempts. Wait a moment, then try again — your funds are safe.';
-    }
-    // **Not "wrong passphrase" — the secret may be perfectly correct.** A
-    // device-bound vault (D-312) is unopenable on any phone but the one that
-    // sealed it, and telling somebody to try again would be telling them to
-    // keep retyping the right answer. The way out is the recovery words, and
-    // the copy says so instead of hiding it behind a retry.
-    if (isDeviceBinding(e)) {
-      return 'This wallet is locked to the phone that made it, and this phone '
-          'cannot open it. Restore from your recovery words instead — your '
-          'funds are safe.';
-    }
+    if (isLockedOut(e)) return lockedOutCopy;
+    // **Not "wrong passphrase" — the secret may be perfectly correct**; the
+    // string and its reasoning live in `error_text.dart`, shared with the
+    // re-key ceremony (REKEY-1).
+    if (isDeviceBinding(e)) return deviceBindingCopy;
     return _isPin
         ? 'That PIN did not unlock the vault. Your funds are safe — try again.'
         : 'That passphrase did not unlock the vault. Your funds are safe — try again.';

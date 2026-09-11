@@ -41,8 +41,8 @@ pub use seed::SecretSeed;
 pub use signer::{UnlockedVault, VaultSigner};
 pub use transport_keys::{KeySlot, TransportDecryptor};
 pub use vault::{
-    read_facts, seal_seed, unseal_seed, BlobFacts, InputKind, SealParams, BLOB_LEN, BLOB_LEN_V1,
-    PEPPER_LEN,
+    check_seal_inputs, read_facts, reseal_seed, seal_seed, unseal_seed, BlobFacts, InputKind,
+    SealParams, BLOB_LEN, BLOB_LEN_V1, PEPPER_LEN,
 };
 
 // Re-exported so callers name the network without depending on the kaspa

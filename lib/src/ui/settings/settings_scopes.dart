@@ -29,7 +29,14 @@ class SecurityScope {
     required this.setLockGraceSecs,
     this.lockNow,
     this.inputKind,
+    this.rekeyRoute,
   });
+
+  /// **`T2`'s `Change passphrase` row, opened as the re-key ceremony**
+  /// (REKEY-1). Null ⇒ the row is absent rather than a dead destination —
+  /// the one thing a settings screen must not teach (§8). The screen it
+  /// builds owns its own seams (`RekeyScreen`), the way `receiveRoute` does.
+  final Widget Function()? rekeyRoute;
 
   /// What the vault's own secret is — a PIN or a passphrase — so every
   /// sentence the fingerprint lane says about "the other way in" names it as

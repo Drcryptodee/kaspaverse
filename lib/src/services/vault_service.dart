@@ -206,6 +206,45 @@ class VaultService with WidgetsBindingObserver {
     }
   }
 
+  /// **Prove the current unlock secret without changing anything** — the
+  /// first beat of the re-key ceremony (REKEY-1). Same pepper install, same
+  /// lockout budget and same finally-wipe as [unlockWithPassphrase]; Rust
+  /// installs nothing and drops the seed on the spot.
+  Future<void> confirmSecret(Uint8List secret) async {
+    try {
+      await installVaultPepper();
+      await vault_api.vaultConfirmSecret(secret: secret);
+    } finally {
+      secret.fillRange(0, secret.length, 0);
+    }
+  }
+
+  /// **Change the unlock secret on the existing vault** (REKEY-1): Rust opens
+  /// the blob with [current], seals the same seed under [next] as [inputKind]
+  /// and replaces the file atomically. Both throwaway buffers are wiped in
+  /// `finally` (INV-1 sentence two). One pepper install serves both halves —
+  /// the unseal of a bound blob and the seal of a bound one.
+  Future<void> resealVault(
+    Uint8List current,
+    Uint8List next, {
+    vault_api.VaultKdfParams? params,
+    vault_api.VaultInputKind inputKind = vault_api.VaultInputKind.passphrase,
+  }) async {
+    try {
+      final p = params ?? await vault_api.VaultKdfParams.tuned();
+      await installVaultPepper();
+      await vault_api.vaultReseal(
+        current: current,
+        next: next,
+        params: p,
+        nextKind: inputKind,
+      );
+    } finally {
+      current.fillRange(0, current.length, 0);
+      next.fillRange(0, next.length, 0);
+    }
+  }
+
   /// **Ask the platform to hand Rust this phone's vault pepper** (D-312), for
   /// the one operation about to run.
   ///

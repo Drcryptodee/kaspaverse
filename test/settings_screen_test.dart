@@ -606,7 +606,10 @@ void main() {
         inputKind: () async => VaultInputKind.digits,
       );
       expect(find.textContaining('Your PIN is the unlock'), findsOneWidget);
-      expect(find.textContaining('passphrase'), findsNothing);
+      // The re-key row's title names both secrets by design (REKEY-1); the
+      // sentences ABOUT the secret must not call it the other one.
+      expect(find.textContaining('Your passphrase'), findsNothing);
+      expect(find.textContaining('your passphrase'), findsNothing);
     });
 
     testWidgets('a failed read of the kind keeps the word that fits either', (
@@ -675,6 +678,125 @@ void main() {
       expect(findRuledLabel('Signing'), findsNothing);
       expect(find.text('Hold to sign'), findsNothing);
       expect(find.textContaining('cannot be turned off'), findsOneWidget);
+    });
+
+    testWidgets('the re-key row names what a PIN vault keeps, in the render\'s '
+        'seat (REKEY-1)', (tester) async {
+      await pumpSecurity(tester, inputKind: () async => VaultInputKind.digits);
+      expect(find.text('Change PIN or passphrase'), findsOneWidget);
+      // A PIN vault is always phone-bound, so the render's claim is true here.
+      expect(find.text('A 6-digit PIN, this phone only'), findsOneWidget);
+      // The render's seat: under `Recovery words`, above `Block screenshots`.
+      final words = tester.getTopLeft(find.text('Recovery words')).dy;
+      final change = tester
+          .getTopLeft(find.text('Change PIN or passphrase'))
+          .dy;
+      final block = tester.getTopLeft(find.text('Block screenshots')).dy;
+      expect(change, greaterThan(words));
+      expect(block, greaterThan(change));
+    });
+
+    testWidgets('…and a passphrase vault\'s line does NOT claim the phone '
+        '(D-312)', (tester) async {
+      await pumpSecurity(
+        tester,
+        inputKind: () async => VaultInputKind.passphrase,
+      );
+      expect(find.text('A keyboard passphrase'), findsOneWidget);
+      expect(find.textContaining('this phone only'), findsNothing);
+    });
+
+    testWidgets('no seam, no row — never a dead destination (§8)', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(393 * 3, 2400 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: _kvWindow,
+          home: SecurityScreen(scope: securityScope(rekeyRoute: null)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Change PIN or passphrase'), findsNothing);
+      expect(find.text('Recovery words'), findsOneWidget);
+    });
+
+    testWidgets('coming back from the ceremony names the kind IT sealed, '
+        'even when the re-read fails (L216)', (tester) async {
+      // The vault answers `passphrase` until the ceremony has run; the
+      // ceremony hands back `digits`; the header re-read then THROWS. The row
+      // must still show the new kind — a failed read keeps its last noun for a
+      // lamp, and here the last noun would have been the old secret over the
+      // new vault (`ux-auditor`, BG-8).
+      var reads = 0;
+      await pumpSecurity(
+        tester,
+        inputKind: () async {
+          if (reads++ == 0) return VaultInputKind.passphrase;
+          throw StateError('header unreadable');
+        },
+      );
+      expect(find.text('A keyboard passphrase'), findsOneWidget);
+
+      await tester.tap(find.text('Change PIN or passphrase'));
+      await tester.pumpAndSettle();
+      expect(find.text('stub: changed'), findsOneWidget);
+      await tester.tap(find.text('stub: changed'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('A 6-digit PIN, this phone only'), findsOneWidget);
+      expect(find.text('A keyboard passphrase'), findsNothing);
+      // The confirmation names the new secret and ends with the words.
+      expect(
+        find.text('Your PIN is set. Your recovery words are unchanged.'),
+        findsOneWidget,
+        reason: 'the return of the ceremony is said, once, where it returned',
+      );
+      // …and the fingerprint lane's sentence names it too.
+      expect(
+        find.textContaining('Your PIN is always available'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('…and the screen still fits the phone with that line on it', (
+      tester,
+    ) async {
+      // The fixture ends in a state no real vault reaches — the header still
+      // answers `passphrase` while the stub hands back `digits`, so the row
+      // reads *A keyboard passphrase* under *Your PIN is set*. That is TALLER
+      // than any real return, so the guard is conservative (`ux-auditor`).
+      await pumpSecurity(
+        tester,
+        height: 800,
+        grace: ValueNotifier(30),
+        inputKind: () async => VaultInputKind.passphrase,
+      );
+      await tester.tap(find.text('Change PIN or passphrase'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('stub: changed'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Your PIN is set'), findsOneWidget);
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(
+        position.maxScrollExtent,
+        0,
+        reason:
+            'Security overflows its own phone by '
+            '${position.maxScrollExtent.toStringAsFixed(1)} dp with the '
+            're-key line on it',
+      );
     });
 
     testWidgets('the whole screen fits the phone, with nothing to scroll', (
@@ -1688,6 +1810,7 @@ SecurityScope securityScope({
   Future<void> Function(int)? setGrace,
   Future<void> Function()? lockNow,
   Future<VaultInputKind> Function()? inputKind,
+  Widget Function()? rekeyRoute = _rekeyStub,
 }) => SecurityScope(
   biometricStatus: biometricStatus ?? () async => 'ready',
   pathAState: pathAState ?? () async => pathANone,
@@ -1699,6 +1822,23 @@ SecurityScope securityScope({
   // A throwing default rather than a silent one: the screen keeps the word
   // that fits either secret, and no test leans on the real vault by accident.
   inputKind: inputKind ?? () async => throw StateError('no vault in test'),
+  // Present by default, so the fit guard measures the screen the app draws
+  // (REKEY-1 added a row). Pass null to test the seam-less shape.
+  rekeyRoute: rekeyRoute,
+);
+
+/// A stand-in for the re-key ceremony that hands back the kind it "sealed"
+/// the moment it is popped — the Security tests are about the row and its
+/// return, and the ceremony has its own file.
+Widget _rekeyStub() => Builder(
+  builder: (context) => Scaffold(
+    body: Center(
+      child: TextButton(
+        onPressed: () => Navigator.of(context).pop(VaultInputKind.digits),
+        child: const Text('stub: changed'),
+      ),
+    ),
+  ),
 );
 
 SignableSummaryDto _summary() => SignableSummaryDto(

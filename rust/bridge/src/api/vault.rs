@@ -23,8 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaspaverse_chain::Address;
 use kaspaverse_core::{
-    read_facts, seal_seed, unseal_seed, Branch, CoreError, InputKind, KeyChain, MnemonicCeremony,
-    Prefix, SealParams, SecretSeed, UnlockedVault, VaultSigner, PEPPER_LEN,
+    check_seal_inputs, read_facts, reseal_seed, seal_seed, unseal_seed, Branch, CoreError,
+    InputKind, KeyChain, MnemonicCeremony, Prefix, SealParams, SecretSeed, UnlockedVault,
+    VaultSigner, PEPPER_LEN,
 };
 use tokio::sync::broadcast::{self, error::RecvError};
 use zeroize::Zeroizing;
@@ -709,6 +710,20 @@ fn now_unix() -> u64 {
 
 // ── Atomic storage (temp + fsync + rename; power-cut-safe) ────────────────
 
+// Test-only fault point inside `atomic_write`: when set, the write stages and
+// syncs its bytes and then fails as if the process had died before the rename.
+// See the REKEY-1 tests.
+//
+// **Thread-local, not a process-wide atomic.** Cargo runs tests on parallel
+// threads and one `atomic_write` test runs outside `TEST_LOCK`; a global flag
+// would let the crash test's window fail it nondeterministically. The lane
+// under test runs the write on the injecting test's own thread, so a
+// thread-local fires exactly there and nowhere else (`consensus-auditor`).
+#[cfg(test)]
+thread_local! {
+    static FAULT_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Write `bytes` to `path` atomically: a power cut mid-write leaves the old
 /// file intact, never a half-written one (P1.1-audit corruption vector). Temp
 /// file in the SAME directory → fsync data → rename (atomic on POSIX) → fsync
@@ -732,6 +747,15 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?; // data on disk before the rename
+    }
+    // **The crash the re-key contract is written against, made injectable.**
+    // From the file system's point of view an error returned here is the
+    // process dying between the fsync and the rename: the staged file is
+    // durable beside an untouched original. Test builds only; the release
+    // binary has no such switch.
+    #[cfg(test)]
+    if FAULT_BEFORE_RENAME.with(|f| f.get()) {
+        return Err(io::Error::other("injected: died before the rename"));
     }
     fs::rename(&tmp, path)?; // atomic replace within the directory
                              // Best-effort directory fsync: makes the rename survive a power cut.
@@ -1088,20 +1112,37 @@ fn binding_for(
     input_kind: VaultInputKind,
     passphrase: &[u8],
 ) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
-    if input_kind == VaultInputKind::Digits && is_trivially_guessable_pin(passphrase) {
+    // **Taken before the rules are read, so a refusal drops it.** The weak-PIN
+    // check used to run first, which left the hardware factor resident across
+    // its own refusal — the caller re-installs on the next attempt anyway
+    // (`ffi-leak-auditor`, REKEY-1).
+    let pepper = take_pepper();
+    refuse_unsafe_pin(input_kind, passphrase, pepper.is_some())?;
+    Ok(pepper)
+}
+
+/// The two refusals a NEW secret can meet before any KDF, for every lane that
+/// seals: the PIN shapes a thief tries first, and a PIN on a phone that cannot
+/// bind it. `pepper_present` is the answer the caller already holds — the
+/// pepper itself stays wherever it was taken.
+fn refuse_unsafe_pin(
+    input_kind: VaultInputKind,
+    secret: &[u8],
+    pepper_present: bool,
+) -> Result<(), AppError> {
+    if input_kind == VaultInputKind::Digits && is_trivially_guessable_pin(secret) {
         return Err(AppError::msg(
             "that PIN is one of the first anyone would try — pick digits that are not all the \
              same and not in a row",
         ));
     }
-    let pepper = take_pepper();
-    if pepper.is_none() && input_kind == VaultInputKind::Digits {
+    if input_kind == VaultInputKind::Digits && !pepper_present {
         return Err(AppError::msg(
             "this phone cannot hardware-bind the vault, so a 6-digit PIN cannot be used here — \
              choose a passphrase instead",
         ));
     }
-    Ok(pepper)
+    Ok(())
 }
 
 /// **Re-wrap a pre-D-312 vault, once, on the unlock that proved the secret.**
@@ -1221,6 +1262,57 @@ pub fn restore_and_persist(
     Ok(())
 }
 
+/// **The lockout, read and enforced before any KDF runs** — the one budget
+/// every lane that proves the unlock secret shares (wallet-security 11).
+///
+/// Three lanes prove it now: the unlock, and REKEY-1's confirm and re-seal.
+/// One reader here rather than three, because a budget with three readers is
+/// three budgets the moment one of them drifts — and the whole point of the
+/// budget is that a guess costs the same whichever door it comes through.
+/// Called with [`UNLOCK_GATE`] held.
+fn lockout_gate(now: u64) -> Result<Lockout, AppError> {
+    let lockout = read_lockout();
+    if let Some(until) = lockout.active_until(now) {
+        let remaining = until.saturating_sub(now);
+        log::warn!("vault secret refused: locked out {remaining}s");
+        return Err(AppError::msg(format!(
+            "too many attempts — locked out for {remaining} more seconds"
+        )));
+    }
+    Ok(lockout)
+}
+
+/// **What an attempt to prove the secret found, recorded in the budget.**
+///
+/// `None` is a correct secret and resets the counter, whatever the caller
+/// then does with the vault — refusing an install is a lifecycle decision,
+/// never a failed attempt, and counting it would let backgrounding the app
+/// walk the user into a lockout. **A `DeviceBinding` refusal is not a failed
+/// attempt either** (D-312): the secret may be perfectly correct and this
+/// phone simply unable to produce its own key, which no amount of correct
+/// typing resolves — the lockout prices GUESSES, and this is not one. Every
+/// other failure advances the counter and persists it. Called with
+/// [`UNLOCK_GATE`] held, on the same `lockout` [`lockout_gate`] returned.
+fn settle_attempt(mut lockout: Lockout, now: u64, lane: &str, failure: Option<&CoreError>) {
+    match failure {
+        None => {
+            let _ = write_lockout(Lockout::default());
+        }
+        Some(CoreError::DeviceBinding(_)) => {
+            log::warn!("vault {lane} refused: device binding unavailable");
+        }
+        Some(_) => {
+            lockout.failed_attempts = lockout.failed_attempts.saturating_add(1);
+            let delay = lockout_delay_secs(lockout.failed_attempts);
+            if delay > 0 {
+                lockout.locked_until_unix = now.saturating_add(delay);
+            }
+            let _ = write_lockout(lockout);
+            log::warn!("vault {lane} failed (attempt={})", lockout.failed_attempts);
+        }
+    }
+}
+
 /// Serializes passphrase-unlock attempts end-to-end. The lockout counter is a
 /// read-modify-write spanning a seconds-long KDF — unserialized, concurrent
 /// failures lose updates (caught LIVE on-device 2026-06-13: two overlapping
@@ -1236,27 +1328,24 @@ static UNLOCK_GATE: Mutex<()> = Mutex::new(());
 pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
     let _gate = UNLOCK_GATE.lock().unwrap_or_else(PoisonError::into_inner);
     let passphrase = Zeroizing::new(passphrase);
+    // **Taken first, not borrowed, and before any refusal**: the hardware
+    // factor is resident for this call and no longer (see [`PEPPER`]). Taking
+    // it above the lockout gate means a refused attempt drops it on the way
+    // out rather than leaving it in the slot for a locked app to hold
+    // (`ffi-leak-auditor`, REKEY-1). A blob that is not device-bound ignores
+    // it — the core refuses to mix a pepper into a vault sealed without one,
+    // which is what lets every pre-D-312 vault keep opening on the update that
+    // adds it.
+    let pepper = take_pepper();
+    let pepper = pepper.as_ref().map(|p| p.as_slice());
     let now = now_unix();
-    let mut lockout = read_lockout();
-    if let Some(until) = lockout.active_until(now) {
-        let remaining = until.saturating_sub(now);
-        log::warn!("vault unlock refused: locked out {remaining}s");
-        return Err(AppError::msg(format!(
-            "too many attempts — locked out for {remaining} more seconds"
-        )));
-    }
+    let lockout = lockout_gate(now)?;
     log::info!("vault unlock attempt (path=passphrase)");
     // Sampled before the KDF. THIS is the reported repro: press Home inside the
     // ~1 s Argon2id window and the lock used to be overwritten by the unlock it
     // was racing (F3).
     let epoch = lock_epoch();
     let blob = read_blob()?;
-    // Taken, not borrowed: the hardware factor is resident for this call and no
-    // longer (see [`PEPPER`]). A blob that is not device-bound ignores it — the
-    // core refuses to mix a pepper into a vault sealed without one, which is
-    // what lets every pre-D-312 vault keep opening on the update that adds it.
-    let pepper = take_pepper();
-    let pepper = pepper.as_ref().map(|p| p.as_slice());
     // **A vault that is not device-bound is still owed one**, however it got
     // that way — a v1 blob, or a v2 one migrated on an unlock where the
     // Keystore happened to be unavailable. Keying this on the VERSION alone
@@ -1277,10 +1366,8 @@ pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
             let keychain = KeyChain::from_seed(seed, Prefix::Mainnet).map_err(AppError::core)?;
             let installed = set_vault_if_current(UnlockedVault::new(keychain), epoch);
             // The passphrase was right, so the lockout resets either way —
-            // refusing the install is a lifecycle decision, never a failed
-            // attempt, and counting it as one would let backgrounding the app
-            // during an unlock walk the user into a lockout.
-            let _ = write_lockout(Lockout::default());
+            // see `settle_attempt` for why a refused install is not a failure.
+            settle_attempt(lockout, now, "unlock", None);
             if installed {
                 log::info!("vault unlock ok (path=passphrase)");
             } else {
@@ -1289,35 +1376,125 @@ pub fn unlock_with_passphrase(passphrase: Vec<u8>) -> Result<(), AppError> {
             broadcast_status();
             Ok(())
         }
-        // **A device-binding refusal is not a failed attempt** (D-312), and
-        // counting it as one would be a real defect rather than a strict
-        // reading. The secret may be perfectly correct: what failed is that
-        // this phone could not produce the pepper — a Keystore that was
-        // transiently unavailable, or a file that came from another device. The
-        // user cannot fix it by typing anything, so every retry would burn an
-        // attempt and walk them into an hour-long lockout for a condition no
-        // amount of correct typing resolves. The lockout exists to price
-        // GUESSES; this is not one.
-        Err(e @ CoreError::DeviceBinding(_)) => {
-            log::warn!("vault unlock refused: device binding unavailable");
-            broadcast_status();
-            Err(AppError::core(e))
-        }
+        // A `DeviceBinding` refusal does not count; everything else does —
+        // the budget's law lives in `settle_attempt`, once, for every lane.
         Err(e) => {
-            lockout.failed_attempts = lockout.failed_attempts.saturating_add(1);
-            let delay = lockout_delay_secs(lockout.failed_attempts);
-            if delay > 0 {
-                lockout.locked_until_unix = now.saturating_add(delay);
-            }
-            let _ = write_lockout(lockout);
-            log::warn!(
-                "vault unlock failed (path=passphrase, attempt={})",
-                lockout.failed_attempts
-            );
+            settle_attempt(lockout, now, "unlock", Some(&e));
             broadcast_status();
             Err(AppError::core(e))
         }
     }
+}
+
+/// **Prove the current unlock secret without changing anything** — the first
+/// beat of REKEY-1's ceremony, and the reason the third can be self-contained.
+///
+/// It unseals the blob under `secret` and drops the seed on the spot: no
+/// install, no migration, no replacement of the resident vault. It exists so a
+/// mistyped current secret is reported where it was typed rather than after
+/// the user has chosen a new one — and it is **not a cheaper oracle than the
+/// unlock**: same gate, same KDF, same lockout, same `DeviceBinding`
+/// exemption, so a guess costs exactly what it costs at the door.
+///
+/// **Refused while the vault is locked.** The re-key is a Settings ceremony
+/// and Settings is behind the unlock; a lane that would prove the secret for
+/// a locked app is a second door, and the vault has one. The check is cheap
+/// and runs before the budget is read, because a locked call is not an
+/// attempt.
+pub fn vault_confirm_secret(secret: Vec<u8>) -> Result<(), AppError> {
+    let _gate = UNLOCK_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    let secret = Zeroizing::new(secret);
+    // First, so every refusal below drops it (see `unlock_with_passphrase`).
+    let pepper = take_pepper();
+    let pepper = pepper.as_ref().map(|p| p.as_slice());
+    if !is_unlocked() {
+        return Err(AppError::msg("wallet is locked"));
+    }
+    let now = now_unix();
+    let lockout = lockout_gate(now)?;
+    log::info!("vault secret confirm attempt");
+    let blob = read_blob()?;
+    let outcome = unseal_seed(&blob, &secret, pepper).map(drop);
+    settle_attempt(lockout, now, "confirm", outcome.as_ref().err());
+    broadcast_status();
+    outcome.map_err(AppError::core)
+}
+
+/// **Change the unlock secret on an existing vault** (REKEY-1): open the blob
+/// with `current`, seal the same seed under `next` as `next_kind`, and replace
+/// the file atomically.
+///
+/// Self-contained on purpose. It proves `current` itself rather than trusting
+/// that [`vault_confirm_secret`] ran a moment ago, so the invariant *you must
+/// know the secret to change it* is a property of this function and not of
+/// the screen that calls it — a rule that lives only in a screen lives
+/// nowhere. That costs one Argon2id over what a ticket scheme would, once per
+/// re-key, and buys a property worth more than 700 ms: **the seed sealed
+/// under the new secret is the seed the old one just opened**, byte for byte,
+/// with no resident copy consulted (`core::reseal_seed`).
+///
+/// Order, and why:
+/// 1. Gate, unlocked check, lockout — the cheap refusals, none of them an
+///    attempt.
+/// 2. The pepper is taken once, first, and serves both halves — first, so a
+///    refusal drops it; the NEW kind's rules (`refuse_unsafe_pin`: no
+///    repeat/run PIN, a PIN needs the binding) are checked **before** any
+///    KDF, so the user learns a choice is refused without having paid to
+///    prove the current secret first.
+/// 3. `reseal_seed` — two KDFs. A wrong `current` counts against the lockout
+///    exactly as at the door; a binding refusal does not.
+/// 4. `atomic_write` — write-beside, fsync, rename. **The old blob is on disk
+///    and readable at every instant until the rename**, so a crash anywhere
+///    in here leaves a wallet that opens with the secret the user still
+///    knows. A write failure after a correct `current` is reported, but the
+///    budget has already been reset: the secret was right.
+///
+/// **The resident vault is untouched, and so is Path A.** The seed did not
+/// change, so the unlocked keychain is still the wallet, and the biometric
+/// lane — which wraps the seed itself, never this file — still opens it. A
+/// re-key changes what the user types, and only that.
+pub fn vault_reseal(
+    current: Vec<u8>,
+    next: Vec<u8>,
+    params: VaultKdfParams,
+    next_kind: VaultInputKind,
+) -> Result<(), AppError> {
+    let _gate = UNLOCK_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    let current = Zeroizing::new(current);
+    let next = Zeroizing::new(next);
+    // The one pepper both halves will use — taken first, so every refusal
+    // below drops it (see `unlock_with_passphrase`).
+    let pepper = take_pepper();
+    let pepper = pepper.as_ref().map(|p| p.as_slice());
+    if !is_unlocked() {
+        return Err(AppError::msg("wallet is locked"));
+    }
+    let now = now_unix();
+    let lockout = lockout_gate(now)?;
+    // **Every refusal of the NEXT secret, before any KDF and before the budget
+    // is touched.** The bridge's own rules first (the guessable shapes, the
+    // binding); then the core's (empty, the PIN's length and alphabet, the
+    // parameters' bounds), asked here as a question rather than met inside
+    // `reseal_seed`, where they would come back as an error `settle_attempt`
+    // counts — and a refused NEXT secret is not a guess at the current one
+    // (`wallet-security-auditor`, REKEY-1). `reseal_seed` asks again; it is
+    // cheap and idempotent.
+    refuse_unsafe_pin(next_kind, &next, pepper.is_some())?;
+    let params: SealParams = params.into();
+    check_seal_inputs(&next, params, next_kind.into(), pepper).map_err(AppError::core)?;
+    log::info!("vault re-key attempt (next={next_kind:?})");
+    let path = blob_path()?;
+    let blob = read_blob()?;
+    let fresh = reseal_seed(&blob, &current, &next, params, next_kind.into(), pepper);
+    settle_attempt(lockout, now, "re-key", fresh.as_ref().err());
+    broadcast_status();
+    let fresh = fresh.map_err(AppError::core)?;
+    atomic_write(&path, &fresh).map_err(|e| AppError::io("write re-keyed blob", e))?;
+    log::info!(
+        "vault re-keyed (kind={next_kind:?} device_bound={})",
+        pepper.is_some()
+    );
+    Ok(())
 }
 
 /// Lock the vault. **Contract (D-031.4): "no new operation can start", not
@@ -2450,6 +2627,335 @@ pub(crate) mod tests {
         // The restored vault unlocks with the same passphrase.
         unlock_with_passphrase(b"pw".to_vec()).unwrap();
         assert!(current_status().unlocked);
+        lock_vault();
+    }
+
+    // ── REKEY-1: change the unlock secret on an existing vault ────────────
+
+    /// **Passphrase → PIN → passphrase on one vault, and after every step the
+    /// old secret is dead, the new one opens it, the header says which pad,
+    /// the resident vault is the same wallet, and the seed Path A would wrap
+    /// is byte-identical.**
+    #[test]
+    fn a_re_key_walks_both_directions_and_the_old_secret_dies() {
+        let (_g, dir) = enter();
+        seal_test_vault(b"old passphrase".to_vec(), cheap_params());
+        let path = dir.join("vault.kvsb");
+        let seed_before = export_seed_for_keystore().unwrap();
+        assert_eq!(vault_input_kind().unwrap(), VaultInputKind::Passphrase);
+
+        // passphrase → PIN. The pepper is installed once and serves both halves.
+        install_test_pepper();
+        vault_reseal(
+            b"old passphrase".to_vec(),
+            b"481902".to_vec(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap().len(), kaspaverse_core::BLOB_LEN);
+        assert_eq!(vault_input_kind().unwrap(), VaultInputKind::Digits);
+        assert!(read_facts(&fs::read(&path).unwrap()).unwrap().device_bound);
+        // Untouched: still unlocked, same wallet, same seed for the Keystore.
+        assert!(current_status().unlocked);
+        assert_eq!(*export_seed_for_keystore().unwrap(), *seed_before);
+        assert_eq!(current_status().failed_attempts, 0);
+        assert!(take_pepper().is_none(), "the pepper outlived the re-key");
+
+        // The old secret is gone; the new one opens the vault at the door.
+        lock_vault();
+        install_test_pepper();
+        assert!(unlock_with_passphrase(b"old passphrase".to_vec()).is_err());
+        install_test_pepper();
+        unlock_with_passphrase(b"481902".to_vec()).unwrap();
+        assert_eq!(*export_seed_for_keystore().unwrap(), *seed_before);
+
+        // PIN → passphrase. A passphrase vault keeps the binding it can have.
+        install_test_pepper();
+        vault_reseal(
+            b"481902".to_vec(),
+            b"new passphrase".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap();
+        assert_eq!(vault_input_kind().unwrap(), VaultInputKind::Passphrase);
+        assert!(read_facts(&fs::read(&path).unwrap()).unwrap().device_bound);
+        lock_vault();
+        install_test_pepper();
+        assert!(unlock_with_passphrase(b"481902".to_vec()).is_err());
+        install_test_pepper();
+        unlock_with_passphrase(b"new passphrase".to_vec()).unwrap();
+        assert_eq!(*export_seed_for_keystore().unwrap(), *seed_before);
+        // Wrong attempts above were counted and the right one reset them.
+        assert_eq!(current_status().failed_attempts, 0);
+        lock_vault();
+        write_lockout(Lockout::default()).unwrap();
+    }
+
+    /// **A wrong current secret refuses, writes nothing, and costs what a
+    /// wrong secret costs at the door** — the confirm lane too.
+    #[test]
+    fn a_wrong_current_secret_refuses_the_re_key_without_touching_the_blob() {
+        let (_g, dir) = enter();
+        seal_test_vault(b"right".to_vec(), cheap_params());
+        let path = dir.join("vault.kvsb");
+        let before = fs::read(&path).unwrap();
+
+        let refused = vault_reseal(
+            b"wrong".to_vec(),
+            b"whatever".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap_err();
+        assert!(
+            refused.message.contains("wrong passphrase"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "a refused re-key wrote");
+        assert_eq!(current_status().failed_attempts, 1);
+
+        // The confirm lane shares the budget: same counter, same reset.
+        assert!(vault_confirm_secret(b"wrong".to_vec()).is_err());
+        assert_eq!(current_status().failed_attempts, 2);
+        vault_confirm_secret(b"right".to_vec()).unwrap();
+        assert_eq!(current_status().failed_attempts, 0);
+        // …and a correct confirm changed nothing on disk or in memory.
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(current_status().unlocked);
+        // No stray staged file either way.
+        assert!(!dir.join(".vault.kvsb.tmp").exists());
+        lock_vault();
+    }
+
+    /// **The crash between the write and the rename leaves the OLD blob
+    /// readable** — injected at the one point where the new bytes are durable
+    /// and the file has not moved. The retry then completes over the stale
+    /// staged file.
+    #[test]
+    fn a_re_key_that_dies_before_the_rename_leaves_the_old_vault_openable() {
+        let (_g, dir) = enter();
+        seal_test_vault(b"old".to_vec(), cheap_params());
+        let path = dir.join("vault.kvsb");
+        let before = fs::read(&path).unwrap();
+
+        FAULT_BEFORE_RENAME.with(|f| f.set(true));
+        let died = vault_reseal(
+            b"old".to_vec(),
+            b"new".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        );
+        FAULT_BEFORE_RENAME.with(|f| f.set(false));
+        assert!(died.is_err(), "the injected crash was not observed");
+        // The staged bytes are there and the original is untouched — exactly
+        // the picture the next launch would find.
+        assert!(dir.join(".vault.kvsb.tmp").exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        // The secret WAS right, so the budget is clean.
+        assert_eq!(current_status().failed_attempts, 0);
+        // The wallet still opens with the secret the user knows.
+        lock_vault();
+        unlock_with_passphrase(b"old".to_vec()).unwrap();
+        assert!(unlock_with_passphrase(b"new".to_vec()).is_err());
+        write_lockout(Lockout::default()).unwrap();
+
+        // The retry completes over the leftover.
+        vault_reseal(
+            b"old".to_vec(),
+            b"new".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap();
+        assert!(!dir.join(".vault.kvsb.tmp").exists());
+        lock_vault();
+        assert!(unlock_with_passphrase(b"old".to_vec()).is_err());
+        unlock_with_passphrase(b"new".to_vec()).unwrap();
+        lock_vault();
+        write_lockout(Lockout::default()).unwrap();
+    }
+
+    /// The two lanes are closed while locked (not an attempt), and refuse
+    /// before the KDF while locked out — the same gate as the door. **And a
+    /// refusal of any kind drops the pepper**: a tap that races the auto-lock
+    /// installs one and is then refused, and the hardware factor must not sit
+    /// in the slot while the app is locked (`ffi-leak-auditor`, REKEY-1).
+    #[test]
+    fn the_re_key_lanes_are_closed_while_locked_and_share_the_lockout_gate() {
+        let (_g, dir) = enter();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
+        let before = fs::read(dir.join("vault.kvsb")).unwrap();
+        lock_vault();
+
+        install_test_pepper();
+        let locked = vault_confirm_secret(b"pw".to_vec()).unwrap_err();
+        assert!(locked.message.contains("locked"), "{}", locked.message);
+        assert!(
+            take_pepper().is_none(),
+            "the pepper outlived a locked confirm"
+        );
+        install_test_pepper();
+        let locked = vault_reseal(
+            b"pw".to_vec(),
+            b"next".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap_err();
+        assert!(locked.message.contains("locked"), "{}", locked.message);
+        assert!(
+            take_pepper().is_none(),
+            "the pepper outlived a locked re-key"
+        );
+        assert_eq!(current_status().failed_attempts, 0);
+        assert_eq!(fs::read(dir.join("vault.kvsb")).unwrap(), before);
+
+        // Unlocked but locked out: refused without paying the KDF — and the
+        // pepper dropped, on all three lanes.
+        unlock_with_passphrase(b"pw".to_vec()).unwrap();
+        write_lockout(Lockout {
+            failed_attempts: 9,
+            locked_until_unix: now_unix() + 600,
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+        install_test_pepper();
+        assert!(vault_confirm_secret(b"pw".to_vec()).is_err());
+        assert!(
+            take_pepper().is_none(),
+            "the pepper outlived a locked-out confirm"
+        );
+        install_test_pepper();
+        assert!(vault_reseal(
+            b"pw".to_vec(),
+            b"next".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .is_err());
+        assert!(
+            take_pepper().is_none(),
+            "the pepper outlived a locked-out re-key"
+        );
+        install_test_pepper();
+        assert!(unlock_with_passphrase(b"pw".to_vec()).is_err());
+        assert!(
+            take_pepper().is_none(),
+            "the pepper outlived a locked-out unlock"
+        );
+        assert!(
+            started.elapsed().as_millis() < 100,
+            "a locked-out re-key ran the KDF instead of short-circuiting"
+        );
+        assert_eq!(fs::read(dir.join("vault.kvsb")).unwrap(), before);
+        write_lockout(Lockout::default()).unwrap();
+        lock_vault();
+    }
+
+    /// **The new kind's rules are checked before the current secret is
+    /// proven, and neither refusal is a guess.** A PIN on a phone that cannot
+    /// bind, a PIN anyone would try first — refused with the budget untouched
+    /// and the blob untouched. And a bound vault with no pepper in the room
+    /// refuses with the binding's error, uncounted, as at the door.
+    #[test]
+    fn a_re_key_refuses_an_unsafe_next_before_the_kdf_and_counts_no_binding_failure() {
+        let (_g, dir) = enter();
+        seal_test_vault(b"pw".to_vec(), cheap_params());
+        let path = dir.join("vault.kvsb");
+        let before = fs::read(&path).unwrap();
+
+        // No pepper installed: a PIN cannot be offered.
+        let started = std::time::Instant::now();
+        let refused = vault_reseal(
+            b"pw".to_vec(),
+            b"481902".to_vec(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .unwrap_err();
+        assert!(
+            refused.message.contains("cannot hardware-bind"),
+            "{}",
+            refused.message
+        );
+        assert!(started.elapsed().as_millis() < 100, "the refusal ran a KDF");
+        // A weak PIN, with the pepper present.
+        install_test_pepper();
+        let refused = vault_reseal(
+            b"pw".to_vec(),
+            b"123456".to_vec(),
+            cheap_params(),
+            VaultInputKind::Digits,
+        )
+        .unwrap_err();
+        assert!(
+            refused.message.contains("anyone would try"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(current_status().failed_attempts, 0);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        // The core's own refusals of the NEXT secret — empty, the wrong shape,
+        // hostile parameters — are not guesses at the current one either, and
+        // reach the caller without the budget moving (`wallet-security-auditor`).
+        for (next, kind, params) in [
+            (b"".to_vec(), VaultInputKind::Passphrase, cheap_params()),
+            (b"48190".to_vec(), VaultInputKind::Digits, cheap_params()),
+            (b"abcdef".to_vec(), VaultInputKind::Digits, cheap_params()),
+            (
+                b"fine".to_vec(),
+                VaultInputKind::Passphrase,
+                VaultKdfParams {
+                    m_cost_kib: 1024 * 1024,
+                    t_cost: 1,
+                    p_cost: 1,
+                },
+            ),
+        ] {
+            install_test_pepper();
+            assert!(vault_reseal(b"pw".to_vec(), next, params, kind).is_err());
+            assert_eq!(
+                current_status().failed_attempts,
+                0,
+                "a refused NEXT was counted"
+            );
+            assert!(take_pepper().is_none());
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        // Bind it, then try to re-key with no pepper: the binding's refusal,
+        // not the secret's, and not counted.
+        install_test_pepper();
+        vault_reseal(
+            b"pw".to_vec(),
+            b"bound now".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap();
+        let bound = fs::read(&path).unwrap();
+        assert!(read_facts(&bound).unwrap().device_bound);
+        let refused = vault_reseal(
+            b"bound now".to_vec(),
+            b"newer".to_vec(),
+            cheap_params(),
+            VaultInputKind::Passphrase,
+        )
+        .unwrap_err();
+        assert!(
+            refused.message.contains("bound to its phone"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(current_status().failed_attempts, 0);
+        assert_eq!(fs::read(&path).unwrap(), bound);
+        // The confirm lane, same rule.
+        let refused = vault_confirm_secret(b"bound now".to_vec()).unwrap_err();
+        assert!(refused.message.contains("bound to its phone"));
+        assert_eq!(current_status().failed_attempts, 0);
         lock_vault();
     }
 }
