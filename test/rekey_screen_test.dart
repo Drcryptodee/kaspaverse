@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -102,8 +104,8 @@ Future<void> type(WidgetTester tester, String s) async {
 Object refusal(String message) => AppError(message: message);
 
 void main() {
-  testWidgets('the confirm beat opens on the pad the vault keeps, and offers '
-      'the other (D-312)', (tester) async {
+  testWidgets('the confirm beat draws the pad the vault keeps — and ONLY that '
+      'pad (founder, on glass)', (tester) async {
     await pump(tester);
     expect(find.text('Enter your current PIN'), findsOneWidget);
     expect(find.byType(KvKeypad), findsOneWidget);
@@ -111,16 +113,89 @@ void main() {
     expect(tester.widget<MaskedDots>(find.byType(MaskedDots)).slots, 6);
     // No commit on the PIN path — the sixth digit is the commit (`O2`).
     expect(find.widgetWithText(KvAction, 'Next'), findsNothing);
-    expect(find.text('Use a keyboard passphrase'), findsOneWidget);
+    // The door's switch is not here: a PIN vault has no current passphrase
+    // to enter, and the wallet is open with its header authenticated.
+    expect(find.text('Use a keyboard passphrase'), findsNothing);
+    expect(find.text('Use a 6-digit PIN'), findsNothing);
     // Three beats on a phone whose fingerprint is already on.
     expect(tester.widget<KvSteps>(find.byType(KvSteps)).count, 3);
+  });
 
-    await tester.tap(find.text('Use a keyboard passphrase'));
-    await tester.pumpAndSettle();
+  testWidgets('…a passphrase vault gets the keyboard, and no switch', (
+    tester,
+  ) async {
+    await pump(tester, kind: vault_api.VaultInputKind.passphrase);
     expect(find.text('Enter your current passphrase'), findsOneWidget);
+    // (`SecretKeyboard` is itself a `KvKeypad`, D-189 — the number pad is
+    // told apart by the six slots, which the keyboard path has none of.)
     expect(find.byType(SecretKeyboard), findsOneWidget);
+    expect(tester.widget<MaskedDots>(find.byType(MaskedDots)).slots, isNull);
     expect(find.widgetWithText(KvAction, 'Next'), findsOneWidget);
-    expect(find.text('Use a 6-digit PIN'), findsOneWidget);
+    expect(find.text('Use a 6-digit PIN'), findsNothing);
+  });
+
+  testWidgets('no pad is drawn until the vault has said which one', (
+    tester,
+  ) async {
+    // The read is a local header read and answers in a millisecond; while it
+    // has not, the beat draws no pad — a keyboard flashed at a PIN user for
+    // a frame would look like exactly the bug the missing switch guards.
+    final kind = Completer<vault_api.VaultInputKind>();
+    tester.view.physicalSize = const Size(393 * 3, 852 * 3);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, page) => KvWindow(child: page!),
+        home: RekeyScreen(
+          inputKind: () => kind.future,
+          confirm: (_) async {},
+          biometricStatus: () async => biometricReady,
+          pathAState: () async => pathAReady,
+          checkAccessibility: () async => false,
+          setSecure: ({required bool enable}) async {},
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(KvKeypad), findsNothing);
+    expect(find.byType(SecretKeyboard), findsNothing);
+    expect(find.textContaining('Enter your current'), findsNothing);
+    kind.complete(vault_api.VaultInputKind.digits);
+    await tester.pumpAndSettle();
+    expect(find.byType(KvKeypad), findsOneWidget);
+    expect(find.text('Enter your current PIN'), findsOneWidget);
+  });
+
+  testWidgets('a PIN user whose kind read FAILED is not stranded: the keyboard '
+      'takes six digits and Next', (tester) async {
+    final seen = <String>[];
+    tester.view.physicalSize = const Size(393 * 3, 852 * 3);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, page) => KvWindow(child: page!),
+        home: RekeyScreen(
+          inputKind: () async => throw StateError('header unreadable'),
+          confirm: (s) async => seen.add(String.fromCharCodes(s)),
+          biometricStatus: () async => biometricReady,
+          pathAState: () async => pathAReady,
+          checkAccessibility: () async => false,
+          setSecure: ({required bool enable}) async {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(SecretKeyboard), findsOneWidget);
+    // The digits live on the keyboard's symbols page.
+    await tester.tap(find.text('123'));
+    await tester.pumpAndSettle();
+    await type(tester, '481902');
+    await tester.tap(find.widgetWithText(KvAction, 'Next'));
+    await tester.pumpAndSettle();
+    expect(seen, ['481902'], reason: 'the bytes reach the lane as typed');
   });
 
   testWidgets('a kind that cannot be read keeps the KEYBOARD on both beats', (

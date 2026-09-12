@@ -25,11 +25,12 @@ import '../widgets/kv_two_pane.dart';
 ///
 /// One ceremony, four beats, on the shared [KvCeremonyPage]:
 ///
-///  1. **Confirm** the current secret on the unlock surface's own pad — the
-///     pad the vault keeps drawn first, the other always offered (D-312's
-///     rule that outranks the byte). Rust proves it (`vault_confirm_secret`)
-///     and drops the seed; a wrong one costs what it costs at the door — the
-///     same lockout, no separate budget.
+///  1. **Confirm** the current secret on the pad the vault keeps — and only
+///     that pad, on the founder's ruling; the door's *other pad* exists for a
+///     kind read before anything is proven, and this beat is behind the
+///     unlock. Rust proves it (`vault_confirm_secret`) and drops the seed; a
+///     wrong one costs what it costs at the door — the same lockout, no
+///     separate budget.
 ///  2. **Choose** the new one — `O2`'s composition exactly as `create_screen`
 ///     draws it: the same pad switch, the same heading, the same refusals (a
 ///     PIN vault is phone-bound and the seal refuses otherwise).
@@ -121,12 +122,16 @@ class _RekeyScreenState extends State<RekeyScreen> {
   bool _messageIsWarning = false;
   final GlobalKey _messageKey = GlobalKey();
 
-  /// The pad each beat draws. The confirm beat starts on the pad the vault
-  /// keeps, because that is what the user types every day; so does the
-  /// chooser, because most people changing a PIN want another PIN — the switch
-  /// is one tap away on both, in both directions.
+  /// The pad each beat draws. The confirm beat draws the pad the vault keeps
+  /// and only that (see [_confirmStep]); the chooser starts there too, because
+  /// most people changing a PIN want another PIN, and its switch is one tap
+  /// away in both directions.
   vault_api.VaultInputKind _confirmPad = vault_api.VaultInputKind.passphrase;
   vault_api.VaultInputKind _nextPad = vault_api.VaultInputKind.passphrase;
+
+  /// Whether the header read has answered — with a kind, or with a failure
+  /// that keeps the keyboard. Until it has, the confirm beat draws no pad.
+  bool _padResolved = false;
 
   /// **What the vault keeps right now**, as read once at open — the noun for
   /// every sentence about the secret that has NOT changed. `_nextNoun` names
@@ -180,13 +185,17 @@ class _RekeyScreenState extends State<RekeyScreen> {
     try {
       kind = await _kindLane();
     } catch (_) {
-      return; // keep the keyboard — the pad that can enter either secret
+      // Keep the keyboard — the pad that can enter either secret — and say
+      // the read is over, so the beat draws it.
+      if (mounted) setState(() => _padResolved = true);
+      return;
     }
     if (!mounted) return;
     setState(() {
       _vaultKind = kind;
       _confirmPad = kind;
       _nextPad = kind;
+      _padResolved = true;
     });
   }
 
@@ -261,17 +270,6 @@ class _RekeyScreenState extends State<RekeyScreen> {
     await Future<void>.delayed(instant ? Duration.zero : KvMotion.fast);
     if (!mounted || _busy) return;
     commit();
-  }
-
-  void _switchConfirmPad() {
-    // A half-typed secret does not survive the pad that was typing it.
-    _current.wipe();
-    setState(() {
-      _confirmPad = _confirmIsPin
-          ? vault_api.VaultInputKind.passphrase
-          : vault_api.VaultInputKind.digits;
-      _message = null;
-    });
   }
 
   Future<void> _submitConfirm() async {
@@ -731,18 +729,40 @@ class _RekeyScreenState extends State<RekeyScreen> {
     bleed: _bleed(pin: pin, onChar: onChar, onBackspace: buffer.backspace),
   );
 
-  Widget _confirmStep() => _typingBeat(
-    step: _beatConfirm,
-    pin: _confirmIsPin,
-    buffer: _current,
-    heading: _confirmIsPin
-        ? 'Enter your current PIN'
-        : 'Enter your current passphrase',
-    commitLabel: 'Next',
-    onCommit: _submitConfirm,
-    onChar: _confirmIsPin ? _onConfirmChar : _current.appendChar,
-    padSwitch: _padSwitch(pin: _confirmIsPin, onTap: _switchConfirmPad),
-  );
+  /// **No pad switch here, on the founder's word** (2026-09-11, on glass:
+  /// *"why should there be 'Use a 6 digit pin' when i want to enter current
+  /// passphrase … there will never be a current pin if the user set a
+  /// passphrase"*). The door offers the other pad because it reads the kind
+  /// before anything is proven (D-312). This beat sits behind the unlock: the
+  /// vault is open, its header authenticated, and a corrupted kind byte would
+  /// open with neither pad. The pad is decided by the vault's own header byte
+  /// — the one thing that can say *digits* is a file that was sealed as a
+  /// PIN, so a passphrase vault is never shown the number pad. The one case a
+  /// switch would have covered — the kind READ failing — is covered by the
+  /// fallback: the keyboard, which can type a PIN (its symbols page carries
+  /// the digits), so a PIN user is never stranded. **And no pad is drawn
+  /// until the read has answered** ([_padResolved]): a keyboard flashed at a
+  /// PIN user for a frame would look like exactly the bug this guards.
+  Widget _confirmStep() {
+    if (!_padResolved) {
+      return _page(
+        step: _beatConfirm,
+        guardTitle: 'your secret',
+        children: const [],
+      );
+    }
+    return _typingBeat(
+      step: _beatConfirm,
+      pin: _confirmIsPin,
+      buffer: _current,
+      heading: _confirmIsPin
+          ? 'Enter your current PIN'
+          : 'Enter your current passphrase',
+      commitLabel: 'Next',
+      onCommit: _submitConfirm,
+      onChar: _confirmIsPin ? _onConfirmChar : _current.appendChar,
+    );
+  }
 
   Widget _chooseStep() => _typingBeat(
     step: _beatChoose,
