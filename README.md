@@ -13,7 +13,7 @@ peer-to-peer swaps. Pure L1. No servers, no telemetry, no house, no custody.
 
 - **Kaspa after Toccata.** Covenants and covenant ids (KIP-20) are the primitive everything
   above the wallet is built on. No L2.
-- **rusty-kaspa v2.0.1**, pinned by revision. Consensus logic, fees and mass come from the
+- **rusty-kaspa v2.1.0**, pinned by revision. Consensus logic, fees and mass come from the
   pinned crates. Nothing consensus-shaped is re-implemented here.
 - **Silverscript v1** is the contract compiler ([kaspanet/silverscript](https://github.com/kaspanet/silverscript)),
   pinned by tag per contract. **Argent** ([argent-lang/argent](https://github.com/argent-lang/argent))

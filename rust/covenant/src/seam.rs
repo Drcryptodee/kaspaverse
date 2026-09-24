@@ -6,7 +6,7 @@
 //! sighash commits to — version, all outpoints, all sequences, the spent
 //! SPK/amount, outputs *including covenant bindings*, `lock_time`, payload
 //! (`consensus/core/src/hashing/sighash.rs`, `calc_schnorr_signature_hash`, at
-//! `cfafeb4c`) — must be final before any signature exists, so an
+//! `01b532e`) — must be final before any signature exists, so an
 //! implementation must own whole-transaction assembly to be able to promise
 //! anything. Second, the nearest real implementation model,
 //! `argent-template/src/bin/counter.rs` at `0eae1fd`, builds transactions
@@ -24,7 +24,7 @@
 //! The pinned wallet-core Generator is **excluded from this path** by three
 //! independent pin facts: it hardcodes `version = 0`
 //! (`generator.rs:1093,1158`), a v0 transaction cannot carry a covenant
-//! binding (`tx_validation_in_isolation.rs:209-212`), and it hardcodes every
+//! binding (`tx_validation_in_isolation.rs:207-210` @ `01b532e`), and it hardcodes every
 //! input's `sequence = 0` with no setter (`generator.rs:735`) — which would
 //! make any `OpCheckSequenceVerify` exit unsatisfiable. Implementations emit
 //! v1 transactions directly and control `sequence` (relative idiom) and
@@ -270,7 +270,7 @@ pub enum WitnessChunk {
 /// the rest of the type space (`sequences_hash` → `ZERO_HASH` under
 /// `NONE`/`SINGLE`/`ANYONECANPAY`; `outputs_hash` → `ZERO_HASH` under `NONE`;
 /// `previous_outputs_hash` → `ZERO_HASH` under `ANYONECANPAY` —
-/// `consensus/core/src/hashing/sighash.rs` at `cfafeb4c`). Core's slot-fill
+/// `consensus/core/src/hashing/sighash.rs` at `01b532e`). Core's slot-fill
 /// therefore REFUSES any slot whose type is not `SIG_HASH_ALL` unless a
 /// `D-` entry names the exception and the narrower commitment it accepts —
 /// an implementation cannot widen what the user's signature stops committing

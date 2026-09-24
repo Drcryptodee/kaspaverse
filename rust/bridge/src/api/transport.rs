@@ -8081,7 +8081,7 @@ fn thread_row(
 /// Sompi rendered exactly, to all 8 decimals.
 ///
 /// NOT the pinned crate's `sompi_to_kaspa_string`: that one goes through `f64`
-/// (`wallet/core/src/utils.rs:34,44` @ `cfafeb4`), and this project does not put
+/// (`wallet/core/src/utils.rs:34,44` @ `01b532e`), and this project does not put
 /// money through binary floating point — DS-2 wants the exact figure at the
 /// moment of commitment, and a refusal that names an amount is such a moment.
 /// Integer division and remainder are exact for every u64.

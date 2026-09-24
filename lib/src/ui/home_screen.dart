@@ -2055,7 +2055,7 @@ class _StatusStrip extends StatelessWidget {
             // **The in-flight memo carries NO sign, and that is the design.**
             // At the pin the hero is already NET of the send (`mature =
             // (mature_utxos + consumed).saturating_sub(fees + payment)`,
-            // `wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`), so a `−`
+            // `wallet/core/src/utxo/context.rs:506-547 @ 01b532e`), so a `−`
             // would invite a second subtraction — a partial send of 30 from
             // 100 would read `70.00 KAS` over `− 30.00000000`. It would also
             // be a lie outright on `SignableKind::SelfSendFrame`. So it is a

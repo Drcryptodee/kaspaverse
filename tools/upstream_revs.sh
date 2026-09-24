@@ -143,7 +143,11 @@ PY
 import json, sys
 p = sys.argv[1]; d = json.load(open(p)); d["sha"] = "0" * 40; json.dump(d, open(p, "w"))
 PY
-  run "T-D reads the tag's manifest when master moved past the tag" 'T-D FIRED: silverscript v1\.0\.0 \(stable\) pins rusty-kaspa a41a333 ≠ pin cfafeb4' 1 "$work/r-noack.json" "$work/fx-tag"
+  # PIN_OVERRIDE, like the T-A rows above: the row tests the tag-manifest read, not our
+  # live pin — spelled as a literal it went stale the day the pin moved (v2.1.0, D-324).
+  PIN_OVERRIDE=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+  run "T-D reads the tag's manifest when master moved past the tag" 'T-D FIRED: silverscript v1\.0\.0 \(stable\) pins rusty-kaspa a41a333 ≠ pin deadbee' 1 "$work/r-noack.json" "$work/fx-tag"
+  unset PIN_OVERRIDE
   # the watch list: a watched PR whose state changed is a MOVED (2026-09-10, D-317)
   python3 - "$R" "$work/rw.json" <<'PY'
 import json, sys

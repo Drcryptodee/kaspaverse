@@ -300,7 +300,7 @@ the condition that its own term binds — `β·stake/5 ≥ 10·FEE_MOVE_CAP` (SP
 §3.1; a numeric `β ≥ φ` floor would leave the sub-range `[φ, 2.17φ)` inert …)"*,
 which is the fix that sitting prescribed, verbatim in substance.
 
-**Re-pinned to (sha256, working tree at this sitting) — THIS IS THE LIVE TABLE:**
+**Re-pinned to (sha256, working tree at this sitting) — the live table until 2026-09-24; superseded by the D-324 section at the end of this file:**
 
 | File | sha256 | vs the C6 pin |
 |:--|:--|:--|
@@ -388,3 +388,40 @@ count them against the list. Not a fund-safety item; a record-integrity one.
 **Disposition: the covenant portion of this wave is unblocked.** The wave's
 non-covenant findings (F3's provenance surface and the F2 deferral) are reported
 in the session verdict, not here — they touch no contract artifact.
+
+## D-324 re-pin (2026-09-24) — rusty-kaspa v2.1.0 re-read. CONCERNS, both resolved in the sitting
+
+`consensus-auditor`, verify-only, scope `uncommitted working tree + index vs HEAD (1c62f3f)`,
+1,585 diff lines read in full. **VERDICT: CONCERNS — 0 BLOCK.** The contract's substance did not
+move: no rule, exit, value, witness, bound or state line changed (checklist items 8–16 unmoved).
+
+- **The re-read.** Every `[pin]` cite re-read at `01b532e` by content and recorded as a new §12
+  provenance row (the older rows kept as read); the three `vectors/negative.json` enforcer strings
+  restamped with their byte-identical twins in `duel_ad_model.rs` (golden-enforced; 5/5 at the new
+  pin). The covenant opcodes lost their `covenants_enabled` gates at `01b532e`; at v2.0.1 the flag was
+  `toccata_activation.is_active(block_daa_score)` (`tx_validation_in_utxo_context.rs:171`) and mainnet
+  is ~74M DAA past activation, so nothing executes differently.
+- **`f5571b2` (2026-09-03)**, the D-246 scope banner, **voided this table's `SPEC.md` hash and nobody
+  re-recorded it: the audit was void on `SPEC.md` for 21 days.** Content PASS (the only difference from
+  the audited `f5be33f1` is the 11-line banner plus D-324's three lines); the process defect is L218,
+  and `consensus-auditor` item 30 now recomputes this table on every run that touches `contracts/`.
+  The banner's pointer `00_ARGENT_MODEL.md §9` names a section that has since moved (§5 and §10
+  rule 11 today); left unedited so this table's `SPEC.md` hash holds — the next `contracts/` edit
+  fixes it and re-pins.
+- **Two record CONCERNS, both fixed before the commit:** five upstream line citations outside the
+  restamp lane's window (`seam.rs`, `send.rs`, `acceptance.rs` ×2, `discovery.rs`) re-pointed at
+  `01b532e`; `KCC_TRACKING.md` §0's pin row corrected.
+
+**Re-pinned to (sha256, working tree on `1c62f3f`, recomputed by the main session at the wrap and
+equal to the auditor's) — THIS IS THE LIVE TABLE:**
+
+| File | sha256 | vs the prior pin (2026-08-13) |
+|:--|:--|:--|
+| `SPEC.md` | `6706c782a59b901370eb30c77d49c6af29145fa9d59d3cc9638bc231e217cfe1` | changed — `f5571b2`'s scope banner (never re-recorded until now) + D-324's evidence-tier clause and §12 "v2.1.0 re-read" row |
+| `STATES.md` | `639cac16e27d1375ad8519c63749a4f687bea0fa8445a74d0d48f4522a38d22b` | **unchanged** |
+| `vectors/positive.json` | `83ae497e53065874de8ac6c7c9ee2299c5981b4f6d4a76ca3bad65b4b975ff25` | **unchanged** |
+| `vectors/negative.json` | `0c1ccc92693f07b5b528fe75441828f26c3bf246608977b09e42434847498d45` | changed — three `enforcer` strings restamped `cfafeb4c` → `01b532e` (one line cite `1093-1094` → `953-954`) |
+| `vectors/README.md` | `ff34acde6ce2b056b8b90be211c2b1ddabfcc8c955b4800cef0c62cc97327fe0` | **unchanged** |
+| `rust/covenant/tests/duel_ad_model.rs` | `edd60dc1a349caeae2bd33a4500b2ea9303ddb1ffccfe045c5e3ec81c3eef62b` | changed — the three twin strings only |
+
+Any change to any pinned file voids this audit.

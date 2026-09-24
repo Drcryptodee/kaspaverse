@@ -20,7 +20,7 @@
 //! nothing to see. A depth-first balance probe finds index 77.
 //!
 //! INV-9: the probe is `get_balances_by_addresses` from the pinned crates
-//! (`rpc/core/src/api/rpc.rs:351` at rev `cfafeb4`), never a re-implementation.
+//! (`rpc/core/src/api/rpc.rs:351` at rev `01b532e`), never a re-implementation.
 
 use std::future::Future;
 use std::time::Duration;
@@ -101,7 +101,7 @@ where
 /// would misattribute a balance to the wrong index, which on this code path
 /// means deriving the wrong signing key. (At this rev the server does echo
 /// order, building one entry per requested address in sequence —
-/// `rpc/service/src/service.rs:840-847` — so this is stricter than the pin
+/// `rpc/service/src/service.rs:841-848` @ `01b532e` — so this is stricter than the pin
 /// requires. That is the correct direction to be wrong in.)
 fn highest_funded_in_chunk(
     base: u32,
@@ -112,7 +112,7 @@ fn highest_funded_in_chunk(
     for entry in entries {
         // `balance: Option<u64>` — at the pin the server builds one entry per
         // REQUESTED address with `balance = entry_map.get(&script).copied()`
-        // (`rpc/service/src/service.rs:840-847`), so `None` means the address
+        // (`rpc/service/src/service.rs:841-848` @ `01b532e`), so `None` means the address
         // has no indexed UTXOs: exactly zero, not "no answer". Either way the
         // treatment is the same — only a positive balance widens the window.
         if entry.balance.unwrap_or(0) == 0 {
@@ -267,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_none_balance_is_zero_at_the_pin_and_never_widens_the_window() {
-        // `None` = no indexed UTXOs for that address (service.rs:840-847).
+        // `None` = no indexed UTXOs for that address (service.rs:841-848).
         let all = addrs(4);
         let (found, _) = scan(&all, |chunk| {
             Ok(chunk.iter().map(|a| entry(a.clone(), None)).collect())

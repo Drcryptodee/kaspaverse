@@ -189,8 +189,8 @@ class SendScreen extends StatefulWidget {
 
 /// The mainnet address lengths, derived from the pinned crate rather than
 /// remembered: `Version::public_key_len` is 32 bytes for `PubKey` and
-/// `ScriptHash` and 33 for `PubKeyECDSA` (`crypto/addresses/src/lib.rs:164` at
-/// `cfafeb4`); a version byte joins the payload, the whole is base32 at 5 bits
+/// `ScriptHash` and 33 for `PubKeyECDSA` (`crypto/addresses/src/lib.rs:166` at
+/// `01b532e`); a version byte joins the payload, the whole is base32 at 5 bits
 /// a character, and an 8-character checksum follows — 53 + 8 and 55 + 8
 /// payload characters, plus `kaspa:`.
 ///

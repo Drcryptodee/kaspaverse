@@ -1,5 +1,5 @@
 #!/bin/bash
-# V0 resolver sampling — replicates Resolver::default() fetches at pin cfafeb4:
+# V0 resolver sampling — replicates Resolver::default() fetches at pin 01b532e:
 # GET {beacon}/v2/kaspa/mainnet/any/wrpc/borsh  (tls=false -> "any", Borsh encoding)
 BEACONS=""
 for n in eric maxim sean troy; do BEACONS="$BEACONS https://$n.kaspa.stream"; done

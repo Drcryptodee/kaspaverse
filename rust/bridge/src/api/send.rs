@@ -1180,6 +1180,41 @@ mod tests {
         assert!(validate_mainnet_address("kaspa:qqqqqqqq").is_err());
     }
 
+    /// Checksum-VALID mainnet strings the v2.0.1 parser could not survive. At
+    /// `cfafeb4` a pasted or QR-scanned string could PANIC this function at two
+    /// sites, a panic reaching the bridge, which INV-2 forbids: `Address::new`'s
+    /// `assert_eq!(payload.len(), …)` on a wrong-length payload
+    /// (`crypto/addresses/src/lib.rs:232`), and `payload_u8[0]` on a string with no
+    /// payload byte at all (`bech32.rs:143`). v2.1.0 decodes through
+    /// `split_first` and `Address::try_new` (`bech32.rs:144-145` @ `01b532e`), so
+    /// both are an `Err` like any other bad input. This is the tripwire: a pin
+    /// that brings either panic back reds here, not on a phone (D-324; each
+    /// case below was run against both pins in a scratch crate first).
+    #[test]
+    fn validate_refuses_a_wrong_length_payload_without_panicking() {
+        // No payload byte at all (0 and 1 base32 chars before the checksum):
+        // the `payload_u8[0]` site.
+        for s in ["kaspa:3xjng3c9", "kaspa:qkgdh0z5s"] {
+            let outcome = std::panic::catch_unwind(|| validate_mainnet_address(s).is_err());
+            assert_eq!(outcome.ok(), Some(true), "{s} must be refused, not panic");
+        }
+        // A version byte and a payload of the wrong length: the `assert_eq!` site.
+        let main = Address::try_from(MAINNET).unwrap();
+        for len in [0usize, 1, 31, 33, 64] {
+            let mut forged = main.clone();
+            forged.payload.clear();
+            forged.payload.extend_from_slice(&vec![7u8; len]);
+            let s = forged.to_string();
+            assert!(s.starts_with("kaspa:"), "forged a mainnet string ({len})");
+            let outcome = std::panic::catch_unwind(|| validate_mainnet_address(&s).is_err());
+            assert_eq!(
+                outcome.ok(),
+                Some(true),
+                "a {len}-byte payload must be refused, not panic"
+            );
+        }
+    }
+
     #[test]
     fn validate_rejects_a_wrong_network_address() {
         // Re-prefix the valid mainnet payload as testnet → a well-formed string

@@ -35,7 +35,7 @@ import '../widgets/kv_sheet.dart';
 /// It replaced a narrower claim that was true and awkward. The approved render
 /// says `FRESH · never seen on the chain` and gives every used row a
 /// `14 received · last 3 Sep` line; **neither can be answered offline**, because
-/// a Kaspa node is a UTXO-state machine (`RpcApi` @ `cfafeb4` has no
+/// a Kaspa node is a UTXO-state machine (`RpcApi` @ `01b532e` has no
 /// address-history call at all) and INV-8 forbids asking an indexer. The first
 /// build therefore said *"not handed out from this phone"*, over a record the
 /// app wrote whenever it displayed an address — true, but scoped to one handset

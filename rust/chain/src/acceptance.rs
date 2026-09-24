@@ -7,7 +7,7 @@
 //! send/wallet status honesty, transport reorg tombstones, and the V3 stall
 //! signal. Catch-up twin: `get_virtual_chain_from_block(cursor, …)` — the
 //! node itself pages the response (`batch_size = mergeset_size_limit × 10`,
-//! pin `rpc/service/src/service.rs:736-742`), so reopen catch-up is a
+//! pin `rpc/service/src/service.rs:737-743` @ `01b532e`), so reopen catch-up is a
 //! bounded page walk like the transport one.
 //!
 //! **INV-9 posture:** acceptance, displacement, and blue scores are READ
@@ -46,7 +46,7 @@ const TOMBSTONE_WINDOW_MS: u64 = 120_000;
 /// Stall signal: a SEND-sourced watch with no acceptance within this window
 /// is signalled stalled (consumer #3 — V3 acts on it; V1 only exposes it).
 /// PROVISIONAL 60 s (founder-nodded 2026-07-08): ≥2× the node's ~30 s
-/// High-priority rebroadcast cadence (pin `flow_context.rs:626-700`); V1's
+/// High-priority rebroadcast cadence (pin `flow_context.rs:597-671` @ `01b532e`); V1's
 /// own submit→accepted markers refine it.
 const STALL_AFTER_MS: u64 = 60_000;
 
@@ -103,8 +103,9 @@ const CURSOR_MIN_WRITE_SECS: u64 = 3;
 
 /// The pruning horizon in milliseconds, READ from the pinned mainnet params
 /// (INV-9; founder ruling 2026-07-08): `pruning_depth` blocks ×
-/// `target_time_per_block` ms — 1,080,000 × 100 ms = 30 h at the v2.0.1 pin
-/// (`consensus/core/src/config/{params.rs:496,bps.rs:96-107}`). Past this
+/// `target_time_per_block` ms — 1,080,000 × 100 ms = 30 h at the pin, unmoved
+/// v2.0.1 → v2.1.0 (`bps.rs` blob-identical; D-324)
+/// (`consensus/core/src/config/{params.rs:428,bps.rs:96-107}` @ `01b532e`). Past this
 /// age nothing about a txid is knowable from any normal node, so a watch
 /// older than the horizon is dropped (honest unknown, never a guess).
 pub fn pruning_horizon_ms() -> u64 {
@@ -1588,11 +1589,12 @@ mod tests {
         // MAINNET_PARAMS, and at pin v2.0.1 that is 1,080,000 blocks ×
         // 100 ms = exactly 30 h. If a pin bump changes this, this test
         // CHANGES VALUE with it (never hardcode the horizon elsewhere).
+        // Re-read at the v2.1.0 bump (D-324): unmoved, bps.rs blob-identical.
         assert_eq!(
             pruning_horizon_ms(),
             MAINNET_PARAMS.pruning_depth() * MAINNET_PARAMS.blockrate.target_time_per_block
         );
-        assert_eq!(pruning_horizon_ms(), 108_000_000, "30 h at the v2.0.1 pin");
+        assert_eq!(pruning_horizon_ms(), 108_000_000, "30 h at the v2.1.0 pin");
     }
 
     #[test]

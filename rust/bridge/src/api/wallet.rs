@@ -604,7 +604,7 @@ pub struct WalletAddressDto {
 /// addresses from the ONE derivation site (`vault::derive_wallet_branches`),
 /// and the balances from the engine's live `UtxoContext` —
 /// `mature_balances_by_address`, which is the same local read `prepare_send`
-/// builds from (`chain::send`, `context.rs:757` @ `cfafeb4`). So this list is a
+/// builds from (`chain::send`, `context.rs:757` @ `01b532e`). So this list is a
 /// re-projection of one set, not a second measurement of it — a
 /// `get_balances_by_addresses` probe would have been the second measurement.
 ///

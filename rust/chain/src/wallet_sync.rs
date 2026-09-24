@@ -5,7 +5,7 @@
 //! diverge).
 //!
 //! INV-9 — every byte of UTXO/balance/maturity logic is consumed from the
-//! pinned `kaspa-wallet-core` (rev `cfafeb4c` = v2.0.1, D-058), never re-implemented.
+//! pinned `kaspa-wallet-core` (rev `01b532e` = v2.1.0, D-324), never re-implemented.
 //! The wiring mirrors the worked example `wallet/core/src/utxo/test.rs:9`
 //! (processor → context → scan_and_register) and the subscription loop in
 //! `wallet/core/src/api/transport.rs:210` (`multiplexer().channel()` →
@@ -755,7 +755,7 @@ impl WalletEngine {
     /// For an incoming record the pinned crate sets `value` to
     /// `aggregate_input_value`, the sum of the UTXO amounts credited to our own
     /// `UtxoContext` (`wallet/core/src/storage/transaction/record.rs:488-518`
-    /// @ `cfafeb4`) — so this is node truth about value received, not a claim
+    /// @ `01b532e`) — so this is node truth about value received, not a claim
     /// from a payload. Deliberately `None` for anything [`is_incoming_data`]
     /// rejects: `value` means something different on a record we originated
     /// (change, or the aggregate we spent), and reading it as a receive is how

@@ -35,7 +35,8 @@
 > the gate re-proves it on every run.
 >
 > **Evidence tiers** (pass law, `COVENANT_PASS.md §1`): `[pin]` = rusty-kaspa
-> `cfafeb4c` (= v2.0.1) with `path:line`, **read this sitting** where marked;
+> `cfafeb4c` (= v2.0.1) with `path:line`, **read this sitting** where marked — every
+> `[pin]` cite **re-read at `01b532e` (= v2.1.0) on 2026-09-24 (D-324)**, §12's last row;
 > `[chess]` = `argent-playground` branch `chess` @ `115f29a`, carried from
 > D-116/D-117's ratified reads; `[ship]` = this repo; `[spine]` = our record.
 >
@@ -844,5 +845,6 @@ degenerate case at P4 — same rows, one round, no SD).
 | silverscript pin `[research]` | `d57e5df` (argent's rev; C5's DP-11 path) | `this.activeInputIndex` = `NullaryOp::ActiveInputIndex` (`silverscript-lang/src/ast/mod.rs:1220,2434`) lowering to `OpTxInputIndex` (`compiler/compile/expression.rs:504,507`) — D-129 is expressible on the chosen codegen path |
 | carried pin cites | from C1/C2 verified tables | covenant-id derivation (`hashing/covenant_id.rs:16-30`) · v1-necessity (A-4) · v1 txid excludes signature scripts |
 | chess `[chess]` | `115f29a` (D-116/D-117 ratified reads; paths `chess/`-relative) | signature discipline (`Mux.timeout` signed; workers/settle free) · compiled sizes · exclusively-relative timeout shape |
+| rusty-kaspa pin `[pin]` — **v2.1.0 re-read (2026-09-24, D-324)** | `01b532e` (= v2.1.0; the rows above are kept as read) | Every `[pin]` cite above re-read by content, not by line number. **Same content, new lines:** `constants.rs:47,52` → `:42,47` · the CSV `UnsatisfiedLockTime` arms `opcodes/mod.rs:1093-1094,1098-1099` → `:953-954,958-959` · `OpTxInputIndex` `1188-1195` → `1038-1045` · `TxOutZero` `tx_validation_in_isolation.rs:149-154` → `:147-152` · `tx_validation_in_utxo_context.rs:53,136-155` same lines · `covenants.rs::from_tx` and `calc_storage_mass` unchanged. **Changed, and it strengthens nothing we rely on:** `OpTxInputDaaScore` (`1282` → `1124`) and the covenant opcodes (`OpAuthOutputCount/Idx`, `OpCovInputCount/Idx`, `OpOutputAuthorizingInput`) lost their `if vm.flags.covenants_enabled` gates — v2.1.0 collapsed the Toccata activation branches and `EngineFlags` no longer has the field, so on the live network (Toccata active since DAA 474,165,565) nothing executes differently. The C6 row's "**not** gated on `covenants_enabled`" distinction for `OpTxInputIndex` no longer distinguishes it: at v2.1.0 **no** opcode is. The mass surface is unchanged (the bump's consensus lane, D-324). |
 | shipped `[ship]` | working tree at C3 | `rust/covenant/src/seam.rs` (Unlock/Taker/EntrypointClass/KeyRole/SuccessorExpectation) · `rust/covenant/tests/duel_ad_model.rs` (this spec's arbiter) |
 | spine `[spine]` | this pass | `pvp_game_theory.md` §0.5/§0.6/§1–§10 (as corrected D-110/D-116/D-117) · `covenant_custody.md` (D-118/D-119, whole) · `covenant_design_patterns.md §7` · `covenant_engine_lexicon.md` · `COVENANT_PASS.md` registers · D-029 (`DECISION_LOG.md:368`) · D-115 sighash law |

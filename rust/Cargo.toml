@@ -16,37 +16,40 @@ license = "ISC"
 
 # Profile note (P0 §0.5): TLS/crypto deps must be rustls-based — anything
 # OpenSSL-linked breaks the Android cross-compile (lesson L16). Verified at the
-# original pin and re-held at the v2.0.1 bump (D-058): rusty-kaspa pins
+# original pin, re-held at the v2.0.1 bump (D-058) and again at the v2.1.0 bump
+# (D-324: upstream Cargo.toml:329 @ `01b532e`; `cargo tree -i openssl-sys` and
+# `-i native-tls` for aarch64-linux-android match nothing): rusty-kaspa pins
 # workflow-rpc with default-features = false + rustls-tls-webpki-roots, so the
 # wRPC stack is OpenSSL-free.
 
 [workspace.dependencies]
-# rusty-kaspa pinned at tag v2.0.1 (INV-9: consensus logic only from these).
-# Pinned by rev — immutable, unlike tags; rev verified = tag v2.0.1 on 2026-07-03
-# (D-058 bump from v2.0.0/`90dbf07`, D-021 — zero consensus deltas proven).
+# rusty-kaspa pinned at tag v2.1.0 (INV-9: consensus logic only from these).
+# Pinned by rev — immutable, unlike tags; rev verified = tag v2.1.0 = tip of
+# `stable` = latest release on 2026-09-24 (`git ls-remote`). D-324 bump from
+# v2.0.1/`cfafeb4c` (itself D-058's bump from v2.0.0/`90dbf07`; D-021).
 # `version` alongside the rev: cargo asserts the pinned commit resolves to a
-# compatible 2.x (the immutable rev fixes which one), and cargo-deny's wildcard
-# ban stays at "deny" (a version-less dep reads as "*"). L23.
-kaspa-wrpc-client = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
-kaspa-consensus-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
-kaspa-addresses = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
+# compatible 2.x at or above 2.1.0 (the immutable rev fixes which one), and
+# cargo-deny's wildcard ban stays at "deny" (a version-less dep reads as "*"). L23.
+kaspa-wrpc-client = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-consensus-core = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-addresses = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
 # Wallet layer (P1 §0.1, executes D-005): processor/generator/keys ONLY — the
 # upstream `Wallet` account/storage framework is deliberately not used (its
 # file-wallet custody conflicts with our INV-4 platform vault).
-kaspa-wallet-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
-kaspa-wallet-keys = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
-kaspa-bip32 = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
+kaspa-wallet-core = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-wallet-keys = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
+kaspa-bip32 = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
 # Standard-script → address decoding for the P2.1 transport scan
 # (`extract_script_pub_key_address` — INV-9 authority, never re-implemented).
 # Same pin, already resolved in the lock via consensus/wallet-core — a direct
 # line on an existing transitive adds zero new code (the D-028 §0.2 pattern).
-kaspa-txscript = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
+kaspa-txscript = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
 # RPC model/API layer (V6, D-073 hardening close): `api::ops::RPC_API_VERSION`
 # for the probe's wrong-major refusal (the crate root does not re-export it)
 # and the `RpcApi` trait surface for the reconnect-survival test fake. Same
 # pin, already resolved in the lock via kaspa-wrpc-client — a direct line on
 # an existing transitive adds zero new code (the D-028 §0.2 pattern).
-kaspa-rpc-core = { version = "2.0.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "cfafeb4c093fa37a303f1b9f19c58f986b870ce3" }
+kaspa-rpc-core = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
 # Vault crypto (P1 §0.2 Path B). Same crates the pinned tree's own storage
 # AEAD uses; the wallet crates above bring them in regardless. Containment
 # caveat (P1.1 audit, D-031): "in the pinned tree" holds at crate-name level —
@@ -61,7 +64,7 @@ zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 # Transport cipher building blocks (P2.2 §0.8, pinned-crates-first): all three
 # were ALREADY resolved in the lock as transitives of the pinned tree —
 # secp256k1 via the kaspa signing stack (the pin's own feature set includes
-# `global-context`, rusty-kaspa Cargo.toml:244), hmac + sha2 via kaspa-bip32's
+# `global-context`, rusty-kaspa Cargo.toml:246 @ `01b532e`), hmac + sha2 via kaspa-bip32's
 # BIP32 HMAC. Direct lines at the locked versions add zero new packages (the
 # D-063 / D-028 §0.2 containment class). The wire KDF is RFC 5869 HKDF-SHA256
 # at its degenerate single-block point (zero salt, empty info, L=32) — two
@@ -105,7 +108,7 @@ workflow-log = "0.18.0"
 # kaspa-wrpc-client; serde everywhere) — direct lines at the locked versions
 # add zero new packages (the D-076/D-022a containment class).
 # Feature set mirrored VERBATIM from the pin's own declaration (rusty-kaspa
-# Cargo.toml:320) — default-features would enable reqwest's native-tls and
+# Cargo.toml:325 @ `01b532e`) — default-features would enable reqwest's native-tls and
 # break the Android cross-compile on OpenSSL (L16); the pin rides rustls.
 workflow-http = { version = "0.18.0", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
 serde = { version = "1", features = ["derive"] }

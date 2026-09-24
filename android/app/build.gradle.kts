@@ -69,7 +69,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         ndk {
-            // arm64 only in P0: kaspa-hashes (pin `cfafeb4c` v2.0.1 — D-058;
+            // arm64 only in P0: kaspa-hashes (pin `01b532e` v2.1.0 — D-324;
             // constraint verified durable on upstream master, D-023f) has no
             // x86_64-android asm path — its build script panics "Unsupported
             // OS" — and cargokit otherwise builds every ABI. Widening is a

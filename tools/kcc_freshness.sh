@@ -9,10 +9,10 @@
 # tool is the internal record's own freshness probe); the table is duplicated inline so the
 # script still works in the public clone, which carries code and tooling only.
 set -uo pipefail
-REV=54f4f9c2730f77ec5b1ee8bc746d7f94d83b8ee6   # kaspanet/kccs main @ 2026-09-02T11:06:54Z; re-pinned 2026-09-02 (trajectory audit; was ea5176a, read 2026-08-25)
+REV=c0bb8f3babbb6a93dbddac900121e5046c1ec388   # kaspanet/kccs main @ 2026-09-21T13:31:53Z; re-pinned 2026-09-24 (kcc-rediff; was 54f4f9c, re-pinned 2026-09-02; before that ea5176a)
 PINNED='b17b9b81d55ea51dce633c9b992287cabcd85edf LICENSE.md
 94d9965319f4bb2b26bdc7f5b8a91357f109e274 README.md
-2866e9f7ee513a736d9ee1920547899078608832 kcc-0000.md
+aeb1e37dce1efb2dd2588abe3e9551e8f0ee3e04 kcc-0000.md
 a1d3f1725d869f63b3b4304662dfe0b2c42e7dc0 kcc-0001.md
 e6b1b5362b7ee54791799c9db410ce7370799102 kcc-0002.md
 e6e96f39a15b0e8bf6a319152a8fa0e54b3c93ab kcc-0002/reference-code.md

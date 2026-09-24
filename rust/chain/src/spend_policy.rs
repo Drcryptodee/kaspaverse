@@ -4,7 +4,7 @@
 //! number still comes from the pinned Generator (INV-9, D-051). The only thing
 //! decided here is the order in which the wallet's own mature UTXOs are offered
 //! to it, expressed through the Generator's native priority-entry facility
-//! (`generator.rs:588-614` @ `cfafeb4`: priority entries are consumed in list
+//! (`generator.rs:588-614` @ `01b532e`: priority entries are consumed in list
 //! order BEFORE the context iterator, and are de-duplicated out of that
 //! iterator by outpoint identity — so a full ordering handed as priority is a
 //! complete selection policy with the live `UtxoContext` bookkeeping intact).
@@ -113,7 +113,7 @@ pub(crate) fn is_reserved(entry: &UtxoEntryReference, exclude: &[Address]) -> bo
 /// one-definition discipline. A covenant-bound output can pay one of the
 /// wallet's own derived addresses (`populate_genesis_covenants` binds outputs
 /// by INDEX with no script inspection — `consensus/core/src/tx.rs:335` @
-/// `cfafeb4`), so it registers as ordinary wallet funds and would sort
+/// `01b532e`), so it registers as ordinary wallet funds and would sort
 /// largest-first. A plain spend of it is consensus-VALID at the pin
 /// (enforcement is script-side; an input with no covenant outputs is a
 /// terminated lineage) — which is precisely the harm: a plain payment would
@@ -126,7 +126,7 @@ pub(crate) fn is_reserved(entry: &UtxoEntryReference, exclude: &[Address]) -> bo
 /// (this module) keeps these coins out of the offered order; the custody
 /// layer (`send.rs`'s `covenant_fence`) refuses any BUILT chain that drew one
 /// through the context iterator behind the priority list, which the order
-/// alone cannot prevent (generator.rs:588-614 @ `cfafeb4`).
+/// alone cannot prevent (generator.rs:588-614 @ `01b532e`).
 pub fn is_covenant_bound(entry: &UtxoEntryReference) -> bool {
     entry.utxo.covenant_id.is_some()
 }

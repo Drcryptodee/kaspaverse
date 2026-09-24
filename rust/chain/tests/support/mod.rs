@@ -8,7 +8,7 @@
 //! proved can go silently deaf (L59/PB-022).
 //!
 //! The method list is mirrored verbatim from the pin's own reference mock
-//! (`wallet/core/src/tests/rpc_core_mock.rs` at rev cfafeb4 — `#[cfg(test)]`-
+//! (`wallet/core/src/tests/rpc_core_mock.rs` at rev 01b532e — `#[cfg(test)]`-
 //! gated upstream, hence hand-written here): six calls answer meaningfully,
 //! everything else returns `Err(RpcError::NotImplemented)` — never
 //! `unimplemented!()`, so an unexpected hit surfaces as a recorded failure,

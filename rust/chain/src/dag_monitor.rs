@@ -1,8 +1,8 @@
 //! Connection lifecycle + notification subscription for the hello-DAG stream.
 //!
 //! Derived from the pinned rev's `rpc/wrpc/examples/subscriber` example
-//! (originally at `90dbf074`; pin since bumped to `cfafeb4c` v2.0.1 — D-058;
-//! INV-9). Key protocol fact from that source:
+//! (originally at `90dbf074`; pin since bumped to `cfafeb4c` v2.0.1 — D-058,
+//! then to `01b532e` v2.1.0 — D-324; INV-9). Key protocol fact from that source:
 //! notification scopes live on the node for the lifetime of one RPC
 //! connection — they are lost on disconnect, so every `RpcState::Connected`
 //! event must re-register the listener and its scopes.

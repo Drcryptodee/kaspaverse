@@ -10,7 +10,7 @@
 //! exactly as `transport::scan_block` does today, with its own events channel
 //! and its own cursor. The RPC surface already carries what the matcher
 //! needs at the pin: `RpcTransactionOutput.covenant: Option<RpcCovenantBinding>`
-//! (`rpc/core/src/model/tx.rs:244-248` at `cfafeb4c`) — no new subscription,
+//! (`rpc/core/src/model/tx.rs:244-248` at `01b532e`) — no new subscription,
 //! no protocol gap, no indexer (INV-8).
 //!
 //! What lives HERE is the pure half: sighting types and the family fold —

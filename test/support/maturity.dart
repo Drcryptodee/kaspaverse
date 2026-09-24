@@ -2,7 +2,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_burial_mark.dart';
 
 /// **The pin's mainnet thresholds, as a fixture** — `user_transaction_
 /// maturity_period_daa` 100 and `coinbase_transaction_maturity_period_daa`
-/// 1,000, read from `wallet/core/src/utxo/settings.rs` at rev `cfafeb4c`.
+/// 1,000, read from `wallet/core/src/utxo/settings.rs` at rev `01b532e`.
 ///
 /// It lives in `test/` on purpose. D-249's rule is that no such number is typed
 /// into **`lib/`** — production reads them across the FFI from `NetworkParams`

@@ -614,7 +614,7 @@ void main() {
     //
     // At the pin the hero is ALREADY net of the send —
     // `mature = (mature_utxos + consumed).saturating_sub(fees + payment)`
-    // (`wallet/core/src/utxo/context.rs:506-547 @ cfafeb4`) — so a signed
+    // (`wallet/core/src/utxo/context.rs:506-547 @ 01b532e`) — so a signed
     // `− 30.00000000` under `70.00000000 KAS` would invite 70 − 30, and on a
     // self-send frame the value is travelling back to this wallet anyway.
     await tester.pumpWidget(

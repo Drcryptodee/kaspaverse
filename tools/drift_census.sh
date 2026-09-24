@@ -67,7 +67,7 @@ PY
   run "C5 two active phases"                          'C5 expected exactly one \*_ACTIVE.md' 1 "$work/c5"
   scaffold "$work/c6";     printf '| L9998 | a lesson | **`update-context`** gains a step |\n' >> "$work/c6/docs/LESSONS.md"
   run "C6 a destination skill that never cites the lesson" 'C6 L9998 names `update-context` as a destination' 1 "$work/c6"
-  scaffold "$work/c7";     sed -i 's/"rusty_kaspa": "cfafeb4c/"rusty_kaspa": "0000000c/' "$work/c7/docs/research/UPSTREAM_REVS.json"
+  scaffold "$work/c7";     sed -i -E '/"our_pin"/,/\}/ s/"rusty_kaspa": "[0-9a-f]{7}/"rusty_kaspa": "0000000/' "$work/c7/docs/research/UPSTREAM_REVS.json"  # our_pin only, any rev: a literal went stale at the v2.1.0 re-pin (D-324)
   run "C7 the record disagrees with the manifest pin" 'C7 UPSTREAM_REVS.json records our pin as 0000000' 1 "$work/c7"
   scaffold "$work/c8";     python3 - "$work/c8/docs/sessions/NEXT_SESSION.md" <<'PY'
 import re, sys

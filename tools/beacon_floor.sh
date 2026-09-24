@@ -16,7 +16,7 @@
 #   ./tools/beacon_floor.sh --stamp    # print "DATE YIELDING HUNG TOTAL" (used by preflight)
 #
 # WHAT IS COUNTED, and why it is not "HTTP 200":
-# The pinned resolver's fetch() (rusty-kaspa cfafeb4c, rpc/wrpc/client/src/resolver.rs:155-167)
+# The pinned resolver's fetch() (rusty-kaspa 01b532e, rpc/wrpc/client/src/resolver.rs:155-167)
 # shuffles all 16 beacons and walks them SEQUENTIALLY, returning the first that yields a
 # NodeDescriptor. Its success test is workflow-http 0.18.0 (native.rs:66-79):
 # `status.is_success()` AND `serde_json::from_str`. So a 2xx with an empty or unparseable

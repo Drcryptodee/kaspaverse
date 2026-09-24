@@ -1017,7 +1017,7 @@ pub async fn bounded_get_node(
 /// permanently with nothing left to retry from.
 ///
 /// The pinned `Resolver::fetch` shuffles all 16 beacons and walks them
-/// SERIALLY with no per-URL timeout (`resolver.rs:155-167` @ cfafeb4;
+/// SERIALLY with no per-URL timeout (`resolver.rs:155-167` @ 01b532e;
 /// `reqwest::Client::new()` in `workflow-http` sets neither a request nor a
 /// read timeout). Measured 2026-08-29: five of the sixteen complete TCP *and*
 /// TLS in under 0.44 s and then never answer, and Cloudflare 522s them at

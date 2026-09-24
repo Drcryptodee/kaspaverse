@@ -1525,7 +1525,7 @@ mod vectors {
                 "premature_claim_sequence_lock",
                 "A commit-timeout claim broadcast before the window: the claim input carries sequence = W, and the state UTXO is younger than W.",
                 "consensus",
-                "check_sequence_lock rejects until the spent UTXO is `sequence` DAA old (tx_validation_in_utxo_context.rs:136-155 at cfafeb4c)",
+                "check_sequence_lock rejects until the spent UTXO is `sequence` DAA old (tx_validation_in_utxo_context.rs:136-155 at 01b532e)",
             ),
             (
                 "premature_claim_low_sequence",
@@ -1537,7 +1537,7 @@ mod vectors {
                 "premature_claim_disabled_bit",
                 "A claim built with sequence = W | SEQUENCE_LOCK_TIME_DISABLED (1<<63): consensus FILTERS disabled-bit inputs out of the sequence lock, so the script's CSV arm is the only wall standing.",
                 "script",
-                "OpCheckSequenceVerify refuses a spending input whose sequence carries the disabled bit (opcodes/mod.rs:1093-1094 at cfafeb4c) — the one premature shape with a single enforcement layer; the P4 harness must execute it",
+                "OpCheckSequenceVerify refuses a spending input whose sequence carries the disabled bit (opcodes/mod.rs:953-954 at 01b532e) — the one premature shape with a single enforcement layer; the P4 harness must execute it",
             ),
             (
                 "premature_dead_man",
@@ -1633,7 +1633,7 @@ mod vectors {
                 "covenant_not_at_input_zero",
                 "Any transition whose covenant input sits at a transaction index other than 0 (the shape a merge forces on its second victim).",
                 "script",
-                "require(this.activeInputIndex == 0) — lowering to OpTxInputIndex (0xb9) at the rusty-kaspa pin cfafeb4c. The Silverscript construct is NullaryOp::ActiveInputIndex at michaelsutton/silverscript rev d57e5df (argent's pin, branch argent-sil-integration); on canonical kaspanet/silverscript master the same type is IntrospectionKind::ActiveInputIndex after the 2026-08-02 renames — the capability survives, only the name moved",
+                "require(this.activeInputIndex == 0) — lowering to OpTxInputIndex (0xb9) at the rusty-kaspa pin 01b532e. The Silverscript construct is NullaryOp::ActiveInputIndex at michaelsutton/silverscript rev d57e5df (argent's pin, branch argent-sil-integration); on canonical kaspanet/silverscript master the same type is IntrospectionKind::ActiveInputIndex after the 2026-08-02 renames — the capability survives, only the name moved",
             ),
         ];
         let mut out = Vec::new();

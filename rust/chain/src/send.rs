@@ -1,7 +1,7 @@
 //! Send pipeline — build, sign, broadcast a payment, every byte of mass / fee /
 //! UTXO-selection / signing consumed from the pinned `kaspa-wallet-core`
-//! Generator (INV-9; never hand-rolled). Mirrored API (pin = rev `cfafeb4c`,
-//! v2.0.1 — D-058; every line cite below verified byte-identical at the bump):
+//! Generator (INV-9; never hand-rolled). Mirrored API (pin = rev `01b532e`,
+//! v2.1.0 — D-324; every line cite below verified byte-identical at the bump):
 //!
 //! - `GeneratorSettings::try_new_with_context` — settings.rs:97 (the spendable
 //!   source is our live [`WalletEngine`] `UtxoContext`, so a send spends only
@@ -241,7 +241,7 @@ impl PreparedSend {
                     submitted_txids.push(txid);
                     // Discharge the pin's outgoing record for a `ReceiverPays`
                     // EXIT drain, the moment `try_submit` has registered it
-                    // (pending.rs:214-219 @ `cfafeb4`).
+                    // (pending.rs:214-219 @ `01b532e`).
                     //
                     // WHY THIS ARM. `UtxoContext::calculate_balance`
                     // (context.rs:506-547) adjusts the mature balance by
@@ -347,7 +347,7 @@ impl WalletEngine {
     ///
     /// `payload`: raw bytes for the final transaction's payload field (P2.1
     /// transport spine) — priced by the pinned Generator's own mass accounting
-    /// upstream of us (settings.rs:38 / generator.rs:1093 at `cfafeb4`, INV-9);
+    /// upstream of us (settings.rs:38 / generator.rs:1093 at `01b532e`, INV-9);
     /// `None` = a plain payment. Size is bounded by the Generator's per-tx mass
     /// ceiling, surfaced as its own typed error — never a magic constant here
     /// (§4 watch-out).
@@ -385,7 +385,7 @@ impl WalletEngine {
     /// silently spend from a different address (which would fragment the
     /// counterpart's view of our identity — the L47 scar). Reads the SAME
     /// `UtxoContext` the balance reflects (no node round-trip): the pinned
-    /// `get_utxos` filters the mature set by address (context.rs:757 @ `cfafeb4`).
+    /// `get_utxos` filters the mature set by address (context.rs:757 @ `01b532e`).
     pub async fn mature_utxos_at(&self, address: &Address) -> Result<Vec<UtxoEntryReference>> {
         let entries = self
             .context()
@@ -398,7 +398,7 @@ impl WalletEngine {
     /// the whole source for the wallet's address list.
     ///
     /// **The same read as [`mature_utxos_at`], unfiltered.** `get_utxos(None,
-    /// None)` returns `context().mature` (context.rs:757 @ `cfafeb4`), which is
+    /// None)` returns `context().mature` (context.rs:757 @ `01b532e`), which is
     /// the set `prepare_send` builds from and the set the folded balance
     /// reflects. Nothing is probed: this is the same SET the send path spends
     /// from and the merge planner counts, not a second measurement of it.
@@ -457,7 +457,7 @@ impl WalletEngine {
     /// empty?* — and a mining address reading empty gets folded away under
     /// "empty addresses hidden" while it holds the user's coinbase. Same maps,
     /// same provenance (`processor.stasis()` mirrors `context.stasis`,
-    /// context.rs:305-307 @ `cfafeb4`); different question, so a different
+    /// context.rs:305-307 @ `01b532e`); different question, so a different
     /// answer (`consensus`, this sitting).
     pub fn settling_among(&self, addresses: &[Address]) -> HashSet<Address> {
         let context = self.context();
@@ -603,7 +603,7 @@ impl WalletEngine {
     ///
     /// The mechanism is the pinned Generator's OWN priority-UTXO facility, not a
     /// consensus edit (INV-9): priority entries are consumed BEFORE the general
-    /// UTXO iterator (`generator.rs:588-614` @ `cfafeb4` — stash, then the
+    /// UTXO iterator (`generator.rs:588-614` @ `01b532e` — stash, then the
     /// first-stage iterator which is `None` on a fresh build, then priority,
     /// then the source iterator) and pushed as inputs in consumption order
     /// (`generator.rs:735-763`), so `priority[0]` lands at input[0]. The entries
@@ -815,7 +815,7 @@ fn finish_prepared_send(
 /// below takes one. A chain built without a signer is unsignable in a specific
 /// and unpleasant way: the pin's `PendingTransaction::try_sign` reaches it as
 /// `…signer().as_ref().expect("no signer in tx generator")` (pending.rs:246 @
-/// `cfafeb4`) — a **panic**, not an `Err`, on the one path INV-2 says must
+/// `01b532e`) — a **panic**, not an `Err`, on the one path INV-2 says must
 /// never panic across the bridge. Making the parameter mandatory means a caller
 /// cannot arrive there by defaulting an argument; reaching it now requires
 /// choosing [`price_chain`] by name, whose own doc says it must not be shipped.
@@ -857,7 +857,7 @@ fn price_chain(
 
 /// The shared engine behind [`generate_chain`] and [`price_chain`]. Generation
 /// never mutates the context (context registration happens only in
-/// `try_submit`, pending.rs:214-219 @ `cfafeb4`), so running it twice is
+/// `try_submit`, pending.rs:214-219 @ `01b532e`), so running it twice is
 /// side-effect-free and a discarded chain simply drops.
 fn build_chain(
     context: &kaspa_wallet_core::utxo::UtxoContext,
@@ -872,7 +872,7 @@ fn build_chain(
         context.clone(),
         // The full spend order as priority entries: consumed in list order
         // BEFORE the context iterator, and de-duplicated out of that iterator
-        // by outpoint identity (generator.rs:588-614 @ `cfafeb4`). An empty
+        // by outpoint identity (generator.rs:588-614 @ `01b532e`). An empty
         // order (empty wallet) degrades to the plain draw.
         (!order.is_empty()).then_some(order),
         change.clone(), // change_address (registered by the caller + on the signer)
@@ -886,7 +886,7 @@ fn build_chain(
         // mostly compute mass, with the payload component hardened to account
         // for normalized transient byte mass (generator.rs:646-648) — the
         // mempool's own post-Toccata floor is max(compute, normalized
-        // transient) (check_transaction_standard.rs:145). STORAGE mass is the
+        // transient) (check_transaction_standard.rs:75 @ `01b532e`). STORAGE mass is the
         // one dimension excluded from the floor, which is why a dust-heavy
         // send reports an overall mass far above what it pays for.
         None,
@@ -920,7 +920,7 @@ fn build_chain(
 /// send, sweep, or merge. The policy layer WITHHOLDS these coins from the
 /// priority order (`spend_policy::is_covenant_bound`), but a coin the order
 /// omits still flows through the context iterator behind it (generator.rs:
-/// 588-614 @ `cfafeb4`) — policy alone is a demotion in disguise. So the
+/// 588-614 @ `01b532e`) — policy alone is a demotion in disguise. So the
 /// fence judges the BUILT chain, the same station [`verify_drain`] judges:
 /// a covenant-bound input is a refusal, never a broadcast.
 ///
@@ -928,7 +928,7 @@ fn build_chain(
 /// spend of a covenant-labeled coin is consensus-VALID — enforcement is
 /// script-side, and an input followed by no covenant outputs is simply a
 /// terminated lineage (`crypto/txscript/src/covenants.rs::from_tx` @
-/// `cfafeb4`). That is worse, not better: a plain payment would DESTROY the
+/// `01b532e`). That is worse, not better: a plain payment would DESTROY the
 /// covenant's state machine, and any stake riding it, as a side effect — and
 /// unlike a stranded conversation (the reservation's demote-only argument),
 /// a destroyed lineage is not recoverable.
@@ -1107,7 +1107,7 @@ fn shipped_shape(
     let ridden_fee = ridden.1.aggregate_fees();
     let riderless_fee = riderless_summary.aggregate_fees();
     // What the cheap shape would LEAVE BEHIND, read off the built transaction —
-    // the Generator's own change figure (pending.rs:175 @ `cfafeb4`), zero when
+    // the Generator's own change figure (pending.rs:175 @ `01b532e`), zero when
     // it absorbed the change into the fee.
     let riderless_change = riderless
         .iter()
@@ -1230,7 +1230,7 @@ fn riderless_wins(
 
 /// How a drain (sweep / consolidation) is expressed to the pinned Generator —
 /// chosen by [`plan_drain`], because no single Generator mode covers every
-/// case (each limit below is measured at the pin `cfafeb4` and held by the
+/// case (each limit below is measured at the pin `01b532e` and held by the
 /// permanent tests in this module):
 ///
 /// - **`ReceiverPays`** — a full-balance payment with `Fees::ReceiverPays(0)`:
@@ -1242,7 +1242,7 @@ fn riderless_wins(
 ///   storage mass (surfacing as `StorageMassExceeded` / the Generator's own
 ///   post-build `MassCalculationError`), and the Generator's native sweep
 ///   refuses one coin outright (`aggregated_utxos < 2` → NoOp,
-///   generator.rs:777-780). It is also the only arm that can respect an
+///   generator.rs:775-776). It is also the only arm that can respect an
 ///   exclusion list, because the drawn set is bounded by the priority entries
 ///   plus the amount. Within one stage the accumulator's ReceiverPays gate is
 ///   `inputs >= amount − fees_of_FINALIZED_stages` (generator.rs:700-705), and
@@ -2445,7 +2445,7 @@ fn probe_error(e: kaspa_wallet_core::error::Error) -> Result<ProbeOutcome> {
 ///
 /// Storage mass is harmonic in the OUTPUT values — the pin computes
 /// `C * (|O|/H(O) − |I|/A(I))` over the output harmonic mean
-/// (`consensus/core/src/mass/mod.rs:439-470 @ cfafeb4`) — so for a one-input
+/// (`consensus/core/src/mass/mod.rs:439-470 @ 01b532e`) — so for a one-input
 /// two-output shape it is smallest when the payment and the change are EQUAL.
 /// The buildable band, when one exists, therefore straddles the equal-output
 /// point `(B − fee)/2`, which is just below half the spendable value. The
@@ -2636,7 +2636,7 @@ fn search_minimum(
 ///
 /// `balance` is the mature total, used as the initial not-Builds bound without
 /// probing it: with `Fees::SenderPays` the fee rides ON TOP of the payment
-/// (generator.rs:862 @ `cfafeb4`), so an amount equal to the whole balance
+/// (generator.rs:862 @ `01b532e`), so an amount equal to the whole balance
 /// cannot build. If a pin bump ever made that false, this returns a value below
 /// the true maximum — conservative, never a bound that does not build.
 /// How far either side of a refused amount to look for one that builds, in
@@ -3003,7 +3003,7 @@ fn free_balance(mature: &[UtxoEntryReference], exclude: &[Address]) -> u64 {
 /// A synchronous snapshot of the live context's mature set, in context order.
 ///
 /// The pin's `UtxoContext::get_utxos` is async in signature only: its body
-/// (context.rs:757-807 @ `cfafeb4`) takes a std mutex and contains no await
+/// (context.rs:757-807 @ `01b532e`) takes a std mutex and contains no await
 /// point, so its future is Ready on the first poll and polling it once with a
 /// no-op waker is a complete execution, not a gamble. If a future pin bump
 /// makes it genuinely asynchronous, this returns a typed error — never a hang,
@@ -5203,7 +5203,7 @@ mod tests {
 
     /// THE §0.2 EMISSION TRIPWIRE (D-062 lock; extends the D-054/C5 family):
     /// the pinned Generator emits tx version 0 today (hardcoded at
-    /// generator.rs:1093, `cfafeb4`). We deliberately emit whatever the pin
+    /// generator.rs:1093, `01b532e`). We deliberately emit whatever the pin
     /// emits — building our own v1 route would re-implement consensus (INV-9).
     /// A pin bump that flips emission MUST fail here loudly: when it does,
     /// re-run the D-061 v0/v1 ruling (decode stays version-neutral either way;

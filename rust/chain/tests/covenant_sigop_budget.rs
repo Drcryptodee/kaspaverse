@@ -5,8 +5,8 @@
 //! builds it. The rule it encodes was measured 2026-08-25, before P3.1, precisely so
 //! the constraint is written down before anything is built against it.
 //!
-//! `MAX_STANDARD_P2SH_SIG_OPS = 15` (`mining/src/mempool/check_transaction_standard.rs:19`
-//! @ `cfafeb4`) is enforced by `post_toccata_p2sh_sig_scanner`, which is a **purely
+//! `MAX_STANDARD_P2SH_SIG_OPS = 15` (`mining/src/mempool/check_transaction_standard.rs:17`
+//! @ `01b532e`) is enforced by `p2sh_sig_scanner`, which is a **purely
 //! static linear walk** over the revealed redeem script: it counts every
 //! `OpCheckSig`/`OpCheckSigVerify`/`OpCheckSigECDSA`/`OpCheckSigFromStack`/
 //! `OpCheckSigFromStackECDSA` it passes, **including opcodes in mutually exclusive
@@ -26,21 +26,28 @@
 //!   naive lowering  = 16 sigops over a cap of 15 -> WOULD NOT RELAY, by exactly one
 //!   careful lowering =  1 sigop                  -> relays, and is 7 bytes SMALLER
 //! There is no tradeoff here. The careful lowering wins on both axes.
+//!
+//! Re-proven at the v2.1.0 bump (D-324), not recompiled: v2.1.0 collapsed the Toccata
+//! activation branches, so `post_toccata_p2sh_sig_scanner` @ `cfafeb4` became
+//! `p2sh_sig_scanner` @ `01b532e` (`crypto/txscript/src/lib.rs:242`). The body is
+//! code-identical save one call, `deserialize_i64(data, false)` -> `deserialize_i64(data)`,
+//! and the one-argument form IS the old `enforce_minimal = false` path
+//! (`data_stack.rs:164` @ `01b532e`). The cap and the scanner are unmoved; the two
+//! measured numbers below are re-measured by this test on every gate.
 
 use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::ScriptBuilder;
-use kaspa_txscript::{pay_to_script_hash_script, post_toccata_p2sh_sig_scanner, EngineFlags};
+use kaspa_txscript::{p2sh_sig_scanner, pay_to_script_hash_script};
 
-/// Toccata is LIVE on mainnet. `EngineFlags::default()` is `covenants_enabled: false`
-/// (lib.rs:133, carrying its own `TODO(post-toccata): change default values`), and
-/// `ScriptBuilder::new()` is `with_flags(Default::default())` - so a builder made the
-/// obvious way applies PRE-Toccata limits and refuses a 601-byte redeem script with
-/// `ElementExceedsMaxSize(601, 520)`. Found here by accident on the first run.
+/// A builder under the live network's rules. At `cfafeb4` this had to be spelled
+/// `with_flags(EngineFlags { covenants_enabled: true, .. })`, because the default flags
+/// were PRE-Toccata and refused a 601-byte redeem script with
+/// `ElementExceedsMaxSize(601, 520)` (found here by accident on the first run). At
+/// `01b532e` the flag no longer exists (`EngineFlags` is `sigop_script_units` only,
+/// `lib.rs:123-131`): post-Toccata is the only mode, so the obvious builder is the right
+/// one. The 601-byte `add_data` below still has to succeed, which is that claim's proof.
 fn covenant_builder() -> ScriptBuilder {
-    ScriptBuilder::with_flags(EngineFlags {
-        covenants_enabled: true,
-        ..Default::default()
-    })
+    ScriptBuilder::new()
 }
 
 /// duel_ad's SIGNED entrypoints (STATES.md). Reveals are signature-free
@@ -105,12 +112,12 @@ fn count(redeem: &[u8]) -> u64 {
     let spk = pay_to_script_hash_script(redeem);
     let mut sig = covenant_builder();
     sig.add_data(redeem).unwrap();
-    post_toccata_p2sh_sig_scanner(&sig.drain(), &spk)
+    p2sh_sig_scanner(&sig.drain(), &spk)
 }
 
 #[test]
 fn duel_ad_static_sigop_budget() {
-    const CAP: u64 = 15; // MAX_STANDARD_P2SH_SIG_OPS, check_transaction_standard.rs:19
+    const CAP: u64 = 15; // MAX_STANDARD_P2SH_SIG_OPS, check_transaction_standard.rs:17
 
     let naive = count(&naive_mux());
     let careful = count(&careful_mux());

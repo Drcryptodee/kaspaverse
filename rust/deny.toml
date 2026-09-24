@@ -18,17 +18,21 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-linux-android"]
 # trigger.
 #
 # unmaintained = "workspace": only OUR direct deps must be actively maintained.
-# The pinned rusty-kaspa tree carries 5 unmaintained transitive crates
-# (async-std, atty, derivative, instant, paste — RUSTSEC, 2026-06 state) that we
+# The pinned rusty-kaspa tree carries 7 unmaintained transitive crates
+# (async-std, atty, bincode, derivative, instant, paste, proc-macro-error —
+# RUSTSEC, re-reviewed at the v2.1.0 re-pin 2026-09-24, D-324: the SAME seven at
+# `cfafeb4c` and `01b532e`, so the bump neither added nor cured one) that we
 # cannot fix without breaking the pin (INV-9). Upstream hygiene is reviewed at
-# every re-pin instead: run `cargo deny check advisories` after editing the rev.
+# every re-pin instead: run `cargo deny check advisories` with `unmaintained =
+# "all"` in a scratch copy of this file, after editing the rev.
 unmaintained = "workspace"
 yanked = "deny"
 ignore = []
 
 [licenses]
 # Explicit SPDX allow-list — anything not listed is denied. Derived from the
-# actual tree at the rusty-kaspa v2.0.1 pin, `cfafeb4c`, which is itself ISC. The list
+# actual tree at the rusty-kaspa pin (v2.0.1 `cfafeb4c`; re-verified unchanged at the
+# v2.1.0 re-pin `01b532e`, D-324 — `licenses ok`, zero new packages), itself ISC. The list
 # also has to cover THIS workspace's own crates — cargo-deny reads them like any
 # other — and they are ISC too (D-298, superseding the MIT of D-011).
 allow = [
@@ -60,7 +64,8 @@ confidence-threshold = 0.8
 # kaspa-math (consensus difficulty/Uint arithmetic) → malachite bignum, LGPL-3.0.
 # Statically linked, but the app is ISC open-source: the LGPL's modify-and-relink
 # freedom is preserved by the public source itself. Unavoidable at the v2.0.1 pin
-# (D-024). Revisit at re-pin or before any non-open distribution.
+# (D-024) and still at v2.1.0 (re-pin review 2026-09-24, D-324: `kaspa-math` still
+# pulls malachite 0.9.1). Revisit at re-pin or before any non-open distribution.
 allow = ["LGPL-3.0-only"]
 name = "malachite-base"
 
@@ -76,6 +81,8 @@ name = "option-ext"
 [bans]
 # The rusty-kaspa tree carries duplicate minor versions of common crates —
 # deny would be permanent noise at this pin. Revisit at the next re-pin.
+# Re-pin review 2026-09-24 (v2.1.0, D-324): 22 duplicate-version warnings at
+# `cfafeb4c` and 22 at `01b532e` — the bump added none, so "warn" stands.
 multiple-versions = "warn"
 wildcards = "deny"
 
