@@ -80,7 +80,7 @@ SELF="$ROOT/tools/beacon_floor.sh"
 FLOOR=6
 # Last reading — update via --record. Read by tools/preflight.sh for the staleness nudge
 # and for its own offline re-run of the breach test.
-LAST_READING=2026-08-29
+LAST_READING=2026-09-26
 LAST_YIELDING=9
 LAST_HUNG=5
 LAST_TOTAL=16
