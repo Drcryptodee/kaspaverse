@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `new`, `offer`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Coalescer`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `new`, `new`, `observe`, `offer`, `reset`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Coalescer`, `ScoreClock`, `ScoreNote`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
 /// harness and the debug screen poll it; nothing streams.

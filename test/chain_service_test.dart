@@ -32,8 +32,11 @@ void main() {
   late int resumeCalls;
   late int reconnectCalls;
   late DagStatusDto statusValue;
+  late List<String> marks;
 
   setUp(() async {
+    marks = [];
+    ChainService.uiMarkFn = (marker) async => marks.add(marker);
     controller = StreamController<DagSnapshot>();
     ChainService.streamFactory = () => controller.stream;
     pauseCalls = 0;
@@ -552,5 +555,59 @@ void main() {
     // to name, AND that is not because the user never set one.
     expect(service.pinnedNode.value, isNull);
     expect(service.pinDropped.value, isTrue);
+  });
+
+  group('glass marks (CONN-F1, §11 H2)', () {
+    setUp(() {
+      ChainService.linkPollPeriod = const Duration(milliseconds: 10);
+      ChainService.watchdogPeriod = const Duration(seconds: 30);
+    });
+
+    test(
+      'each change of the chip state is marked once, with the socket bit',
+      () async {
+        statusValue = status(connected: false, searching: true);
+        ChainService.instance.start();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.one),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.two),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(marks, [
+          'beacon none>connecting sock=0 age=- hunt=0',
+          'beacon connecting>connected sock=1 age=0 hunt=0',
+        ]);
+      },
+    );
+
+    test(
+      'an amber lamp over a live socket is marked as exactly that',
+      () async {
+        final service = ChainService.instance..start();
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.one),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        service.lastUpdate.value = DateTime.now().subtract(
+          const Duration(seconds: 6),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(marks.last, 'beacon connected>stale sock=1 age=6 hunt=0');
+      },
+    );
+
+    test('a backgrounded app marks nothing — nobody is looking', () async {
+      final service = ChainService.instance..start();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final before = marks.length;
+      service.didChangeAppLifecycleState(AppLifecycleState.paused);
+      controller.add(DagSnapshot(connected: true, virtualDaaScore: BigInt.one));
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(marks.length, before);
+    });
   });
 }

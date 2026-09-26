@@ -106,6 +106,83 @@ impl Coalescer {
     }
 }
 
+/// **How long a live link may go without a score before the gap earns a
+/// line** (CONN-F1, §11 H2). The glass calls a link stale at five seconds
+/// (`KvFreshness.staleAfter`) and the watchdog acts at thirty; in between,
+/// nothing in Rust said a word, so an amber lamp over a socket that was
+/// starving and one over a socket that was fine read the same in a capture.
+const SCORE_GAP_NOTE: Duration = Duration::from_secs(5);
+
+/// What the score clock saw that is worth a line.
+#[derive(Debug, PartialEq, Eq)]
+enum ScoreNote {
+    /// Two scores on one live link, this far apart.
+    Gap(Duration),
+    /// The link went down this long after its last score.
+    DownAfter(Duration),
+    /// The link went down this long after connecting, having delivered no
+    /// score at all — the "connected and deaf" socket (D-216) named.
+    DownDeaf(Duration),
+}
+
+/// Time since the last DAA score on the live link — the folder's own
+/// freshness clock, kept pure so it is tested against a held clock.
+///
+/// It is **stricter than the glass's** on purpose: the glass restarts its
+/// clock on any connected snapshot that carries a score, and a snapshot
+/// keeps its last score across a reconnect, so the glass can read fresh on a
+/// socket that has said nothing yet. This clock counts DAA scores only, per
+/// connection. A connect restarts it without a note: connect-to-first-score
+/// is the `first_daa` span's to measure. And it is read when the folder
+/// RECEIVES an event, so a stalled folder reads exactly like a starving
+/// socket; a `folder lagged` line tells the two apart only once a stall has
+/// overflowed the monitor's 256-event buffer — a shorter one does not.
+struct ScoreClock {
+    last: Option<Instant>,
+    connected_at: Option<Instant>,
+}
+
+impl ScoreClock {
+    fn new() -> Self {
+        Self {
+            last: None,
+            connected_at: None,
+        }
+    }
+
+    /// Forget the connection — the Lagged arm's answer, because the skipped
+    /// events may have held a whole drop and reconnect.
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn observe(&mut self, event: &DagEvent, now: Instant) -> Option<ScoreNote> {
+        match event {
+            DagEvent::Connected { .. } => {
+                self.last = None;
+                self.connected_at = Some(now);
+                None
+            }
+            DagEvent::Disconnected => {
+                let note = match (self.last, self.connected_at) {
+                    (Some(at), _) => Some(ScoreNote::DownAfter(now.duration_since(at))),
+                    (None, Some(at)) => Some(ScoreNote::DownDeaf(now.duration_since(at))),
+                    (None, None) => None,
+                };
+                self.reset();
+                note
+            }
+            DagEvent::VirtualDaaScore(_) => self
+                .last
+                .replace(now)
+                .map(|at| now.duration_since(at))
+                .filter(|gap| *gap >= SCORE_GAP_NOTE)
+                .map(ScoreNote::Gap),
+            DagEvent::SinkBlueScore(_) => None,
+        }
+    }
+}
+
 /// Snapshot fan-out, created once per process; every Dart subscription
 /// (including after a hot restart) re-attaches to it.
 static SNAPSHOTS: tokio::sync::OnceCell<broadcast::Sender<DagSnapshot>> =
@@ -812,6 +889,7 @@ async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError
             tokio::spawn(async move {
                 let mut current = DagSnapshot::default();
                 let mut gate = Coalescer::new();
+                let mut clock = ScoreClock::new();
                 loop {
                     // A tick is being held: wake at its deadline even if the
                     // chain has gone quiet. `recv` is cancel-safe (tokio's
@@ -831,6 +909,22 @@ async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError
                     };
                     match received {
                         Ok(event) => {
+                            match clock.observe(&event, Instant::now()) {
+                                Some(ScoreNote::Gap(gap)) => log::info!(
+                                    "dag: score gap {} ms on a live link",
+                                    gap.as_millis()
+                                ),
+                                Some(ScoreNote::DownAfter(quiet)) => log::info!(
+                                    "dag: link went down {} ms after its last score",
+                                    quiet.as_millis()
+                                ),
+                                Some(ScoreNote::DownDeaf(up)) => log::info!(
+                                    "dag: link went down {} ms after connecting, \
+                                     having delivered no score",
+                                    up.as_millis()
+                                ),
+                                None => {}
+                            }
                             fold(&mut current, event);
                             // LATEST always carries the freshest fold: a
                             // subscriber attaching mid-interval paints the
@@ -845,8 +939,14 @@ async fn snapshots() -> Result<&'static broadcast::Sender<DagSnapshot>, AppError
                             }
                         }
                         // Lagged: folder fell behind the event buffer; values
-                        // are absolute, so skipping ahead is safe.
-                        Err(RecvError::Lagged(_)) => continue,
+                        // are absolute, so skipping ahead is safe for scores.
+                        // Said out loud because an edge can be among the
+                        // skipped, and a capture must be able to see that.
+                        Err(RecvError::Lagged(skipped)) => {
+                            log::info!("dag: folder lagged — {skipped} event(s) skipped");
+                            clock.reset();
+                            continue;
+                        }
                         Err(RecvError::Closed) => break,
                     }
                 }
@@ -1007,5 +1107,89 @@ mod tests {
         assert!(gate.offer(&score(1), t0));
         assert!(!gate.offer(&score(1), t0 + Duration::from_secs(5)));
         assert_eq!(gate.deadline(&score(1), t0 + Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn the_score_clock_notes_a_live_link_starving_and_nothing_shorter() {
+        let t0 = Instant::now();
+        let mut clock = ScoreClock::new();
+        let up = DagEvent::Connected { url: None };
+        assert_eq!(clock.observe(&up, t0), None);
+        assert_eq!(
+            clock.observe(&DagEvent::VirtualDaaScore(1), t0 + ms(6_000)),
+            None,
+            "connect-to-first-score is first_daa's to measure, not a gap"
+        );
+        assert_eq!(
+            clock.observe(&DagEvent::VirtualDaaScore(2), t0 + ms(6_100)),
+            None,
+            "a block's worth of silence is the steady state"
+        );
+        assert_eq!(
+            clock.observe(&DagEvent::VirtualDaaScore(3), t0 + ms(11_099)),
+            None,
+            "just under the glass's stale bar"
+        );
+        assert_eq!(
+            clock.observe(&DagEvent::VirtualDaaScore(4), t0 + ms(16_099)),
+            Some(ScoreNote::Gap(ms(5_000)))
+        );
+        assert_eq!(
+            clock.observe(&DagEvent::SinkBlueScore(4), t0 + ms(30_000)),
+            None,
+            "only a DAA score moves this clock"
+        );
+    }
+
+    #[test]
+    fn the_score_clock_says_how_quiet_a_link_was_when_it_went_down() {
+        let t0 = Instant::now();
+        let mut clock = ScoreClock::new();
+        assert_eq!(
+            clock.observe(&DagEvent::Disconnected, t0),
+            None,
+            "a link that never scored has no quiet to report"
+        );
+        clock.observe(&DagEvent::Connected { url: None }, t0);
+        clock.observe(&DagEvent::VirtualDaaScore(1), t0 + ms(1_000));
+        assert_eq!(
+            clock.observe(&DagEvent::Disconnected, t0 + ms(1_250)),
+            Some(ScoreNote::DownAfter(ms(250)))
+        );
+        assert_eq!(
+            clock.observe(&DagEvent::VirtualDaaScore(2), t0 + ms(40_000)),
+            None,
+            "a score after the drop starts a fresh clock, not a 39 s gap"
+        );
+    }
+
+    #[test]
+    fn a_deaf_connection_is_named_when_it_goes_down() {
+        let t0 = Instant::now();
+        let mut clock = ScoreClock::new();
+        clock.observe(&DagEvent::Connected { url: None }, t0);
+        clock.observe(&DagEvent::SinkBlueScore(9), t0 + ms(5_000));
+        assert_eq!(
+            clock.observe(&DagEvent::Disconnected, t0 + ms(38_000)),
+            Some(ScoreNote::DownDeaf(ms(38_000))),
+            "up 38 s with no DAA score: the watchdog-stall shape, named"
+        );
+    }
+
+    #[test]
+    fn a_lag_forgets_the_connection_so_a_skipped_reconnect_is_not_a_gap() {
+        let t0 = Instant::now();
+        let mut clock = ScoreClock::new();
+        clock.observe(&DagEvent::Connected { url: None }, t0);
+        clock.observe(&DagEvent::VirtualDaaScore(1), t0 + ms(1_000));
+        clock.reset(); // the Lagged arm: a drop and a reconnect may be in the gap
+        assert_eq!(
+            clock.observe(&DagEvent::VirtualDaaScore(2), t0 + ms(20_000)),
+            None
+        );
+        assert_eq!(
+            clock.observe(&DagEvent::Disconnected, t0 + ms(20_100)),
+            Some(ScoreNote::DownAfter(ms(100)))
+        );
     }
 }

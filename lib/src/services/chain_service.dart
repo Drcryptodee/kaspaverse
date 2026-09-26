@@ -5,6 +5,8 @@ import 'package:flutter/widgets.dart';
 
 import '../rust/api/dag.dart';
 import '../rust/api/error.dart';
+import '../rust/api/wallet.dart' show uiMark;
+import '../ui/widgets/status_beacon.dart';
 
 /// Owns the app's single subscription to the bridge DAG stream.
 ///
@@ -72,6 +74,12 @@ class ChainService with WidgetsBindingObserver {
   /// (L53 proved Dart prints silent there).
   @visibleForTesting
   static Future<List<SpanMarkerDto>> Function() spansFn = perfSpans;
+
+  /// Display-state marker through the Rust liblog lane (L53) — the seam
+  /// WalletService uses. Never throws: in tests (no native lib) a no-op.
+  @visibleForTesting
+  static Future<void> Function(String marker) uiMarkFn = (marker) =>
+      uiMark(marker: marker);
 
   /// Background window before the socket is dropped (PERFORMANCE_BUDGET:
   /// "after 30 s grace"). Tests shorten it.
@@ -168,6 +176,40 @@ class ChainService with WidgetsBindingObserver {
   Timer? _linkTimer;
   bool _foreground = true;
 
+  /// The glass state last marked (CONN-F1, §11 H2). The money plate's chip
+  /// derives it from these same notifiers; re-deriving it here and marking
+  /// each CHANGE is what lets a profile-build capture lay what the user saw
+  /// beside what the socket did. Our own state names and counts only (INV-3).
+  BeaconState? _markedBeacon;
+
+  void _markBeacon() {
+    final now = DateTime.now();
+    final fresh = lastUpdate.value;
+    final down = disconnectedAt.value;
+    final age = fresh == null ? null : now.difference(fresh);
+    final hunting = searching.value || reconnecting.value;
+    final state = evaluateBeacon(
+      connected: connected.value,
+      age: age,
+      error: error.value,
+      searching: hunting,
+      osOffline: osOffline.value,
+      sinceDrop: down == null ? null : now.difference(down),
+    );
+    if (state == _markedBeacon) return;
+    final from = _markedBeacon?.name ?? 'none';
+    _markedBeacon = state;
+    final marker =
+        'beacon $from>${state.name} sock=${connected.value ? 1 : 0} '
+        'age=${age?.inSeconds ?? '-'} hunt=${hunting ? 1 : 0}';
+    try {
+      // Fire-and-forget; a failed marker must never touch the link.
+      unawaited(uiMarkFn(marker).catchError((_) {}));
+    } catch (_) {
+      // Native lib absent (widget tests) — silence is fine.
+    }
+  }
+
   /// Idempotent: the first call attaches the app-lifetime subscription and
   /// registers the lifecycle observer for the background grace-drop, and arms
   /// the foreground liveness watchdog.
@@ -212,6 +254,7 @@ class ChainService with WidgetsBindingObserver {
   /// and that argument is untouched.
   Future<void> _linkTick() async {
     if (!_foreground || _droppedByGrace) return;
+    _markBeacon();
     if (connected.value && !reconnecting.value && !searching.value) {
       osOffline.value = false;
       return;
@@ -463,6 +506,7 @@ class ChainService with WidgetsBindingObserver {
       lastUpdate.value = DateTime.now();
     }
     error.value = null;
+    if (_foreground) _markBeacon();
   }
 
   @visibleForTesting
@@ -478,6 +522,7 @@ class ChainService with WidgetsBindingObserver {
     _linkTimer = null;
     _droppedByGrace = false;
     _foreground = true;
+    _markedBeacon = null;
     onWalletQuiet = null;
     walletLastApply = null;
     connected.value = false;
