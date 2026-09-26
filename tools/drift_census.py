@@ -117,15 +117,30 @@ def c3_next_session_gate_count():
         fail(f"C3 NEXT_SESSION.md expects the gate at {a}/{b}; tools/gate.sh declares {n} lanes in a full tree (a stale count misdirects the next open)")
 
 
-# ── C4 the router's playbook count ───────────────────────────────────────────────────────
+# ── C4 the playbook's index and its chunks name the same patterns ────────────────────────
 def c4_playbook_count():
-    cl, idx = read("CLAUDE.md"), read(".claude", "playbook", "INDEX.md")  # gate-allow:internal-path — the census reads the record; naming its files is its job
-    if cl is None or idx is None:
-        return note("C4 skipped: CLAUDE.md or the playbook index absent")  # gate-allow:internal-path — the census reads the record; naming its files is its job
-    m = re.search(r"(\d+) always-on reasoning triggers", cl)
-    n = len(re.findall(r"^- PB-", idx, flags=re.M))
-    if m and int(m.group(1)) != n:
-        fail(f"C4 CLAUDE.md says {m.group(1)} always-on triggers; .claude/playbook/INDEX.md lists {n}")  # gate-allow:internal-path — the census reads the record; naming its files is its job
+    if not os.path.isdir(p(".claude", "playbook")):
+        return note("C4 skipped: .claude/playbook absent")  # gate-allow:internal-path — the census reads the record; naming its files is its job
+    ids = re.findall(r"^- (PB-\d+)", read(".claude", "playbook", "INDEX.md") or "", flags=re.M)
+    heads = re.findall(r"^### (PB-\d+)", read(".claude", "playbook", "PLAYBOOK.md") or "", flags=re.M)
+    if not ids or not heads:  # a missing file or a changed format must not read as agreement (PB-029)
+        return fail(f"C4 cannot look: the playbook index lists {len(ids)} ids and PLAYBOOK.md heads {len(heads)}")
+    for name, got in (("INDEX.md", ids), ("PLAYBOOK.md", heads)):
+        twice = sorted({i for i in got if got.count(i) > 1})
+        if twice:
+            fail(f"C4 {name} lists {', '.join(twice)} twice")
+    for i in sorted(set(heads) - set(ids)):
+        fail(f"C4 {i} has a chunk in PLAYBOOK.md and no line in INDEX.md")
+    for i in sorted(set(ids) - set(heads)):
+        fail(f"C4 {i} has a line in INDEX.md and no chunk in PLAYBOOK.md")
+    # A typed count is optional (D-330 took them out of the router); one that is present must agree.
+    n = len(set(heads))
+    for rel, pat in (("CLAUDE.md", r"(\d+) always-on reasoning triggers"),  # gate-allow:internal-path — the census reads the record; naming its files is its job
+                     ("AGENTS.md", r"(\d+) always-on reasoning triggers"),  # gate-allow:internal-path — the census reads the record; naming its files is its job
+                     (".claude/playbook/INDEX.md", r"these\s+(?:>\s*)?(\d+)\s+lines")):  # gate-allow:internal-path — the census reads the record; naming its files is its job
+        for m in re.finditer(pat, read(*rel.split("/")) or ""):  # every copy, not the first one found
+            if int(m.group(1)) != n:
+                fail(f"C4 {rel} says {m.group(1)}; PLAYBOOK.md holds {n} patterns")
 
 
 # ── C5 one active phase, and the index names it ──────────────────────────────────────────

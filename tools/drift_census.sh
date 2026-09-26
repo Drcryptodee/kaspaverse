@@ -3,7 +3,7 @@
 #
 # The record is written for readers and stays discursive; what rots first is the handful
 # of facts restated where a session reads them at open: ledger ids, the gate count in the
-# baton, the playbook count in the router, the freshness register's coverage, the active
+# baton, the playbook's index against its chunks, the freshness register's coverage, the active
 # phase, a lesson's declared destination, the upstream record's idea of our own pin, the
 # session index's row numbers. Each
 # check is exact, offline and cheap (tools/drift_census.py holds them, one function each).
@@ -34,7 +34,7 @@ selftest() {
     cp "$ROOT/docs/sessions/NEXT_SESSION.md" "$ROOT/docs/sessions/INDEX.md" "$t/docs/sessions/"
     cp "$ROOT"/docs/phases/*.md "$t/docs/phases/"
     cp "$ROOT"/tools/*.sh "$ROOT"/tools/*.py "$t/tools/" 2>/dev/null; cp "$ROOT/rust/Cargo.toml" "$t/rust/"
-    cp "$ROOT/CLAUDE.md" "$t/"; cp "$ROOT/.claude/playbook/INDEX.md" "$t/.claude/playbook/"
+    cp "$ROOT/CLAUDE.md" "$ROOT/AGENTS.md" "$t/"; cp "$ROOT/.claude/playbook/INDEX.md" "$ROOT/.claude/playbook/PLAYBOOK.md" "$t/.claude/playbook/"
     for s in "$ROOT"/.claude/skills/*/; do mkdir -p "$t/.claude/skills/$(basename "$s")"; cp "$s/SKILL.md" "$t/.claude/skills/$(basename "$s")/"; done
     # the baton's target must exist in the scaffold (the pointer sits on the line after the heading)
     local target; target=$(python3 -c 'import re,sys; m=re.search(r"## Paste this next\s+`([^`]+)`", open(sys.argv[1]).read()); print(m.group(1) if m else "")' "$t/docs/sessions/NEXT_SESSION.md")
@@ -61,8 +61,20 @@ tail = re.sub(r"(gate[^\n]*?)\d+/\d+", r"\g<1>1/1", tail, count=1)   # the block
 open(p, "w").write(head + sep + tail)
 PY
   run "C3 a stale gate count in the baton"            'C3 NEXT_SESSION.md expects the gate at 1/1' 1 "$work/c3"
-  scaffold "$work/c4";     sed -i -E 's/[0-9]+ always-on reasoning triggers/7 always-on reasoning triggers/' "$work/c4/CLAUDE.md"
-  run "C4 the router's playbook count drifts"         'C4 CLAUDE.md says 7 always-on triggers' 1 "$work/c4"  # gate-allow:internal-path — a planted router count in the selftest
+  scaffold "$work/c4";     printf '\n%s always-on reasoning triggers\n7 always-on reasoning triggers\n' "$(grep -c '^### PB-' "$work/c4/.claude/playbook/PLAYBOOK.md")" >> "$work/c4/CLAUDE.md"
+  run "C4 a wrong typed count behind a right one"     'C4 CLAUDE.md says 7;' 1 "$work/c4"  # gate-allow:internal-path — a planted count in the selftest names the file it is planted in
+  scaffold "$work/c4b";    printf '\n7 always-on reasoning triggers\n' >> "$work/c4b/AGENTS.md"
+  run "C4 a typed count in AGENTS.md disagrees"       'C4 AGENTS.md says 7;' 1 "$work/c4b"  # gate-allow:internal-path — a planted count in the selftest names the file it is planted in
+  scaffold "$work/c4c";    printf '\n> these 7 lines\n' >> "$work/c4c/.claude/playbook/INDEX.md"
+  run "C4 a typed count in the index header disagrees" 'C4 .claude/playbook/INDEX.md says 7;' 1 "$work/c4c"  # gate-allow:internal-path — a planted count in the selftest names the file it is planted in
+  scaffold "$work/c4d";    sed -i '0,/^- PB-/{/^- PB-/d}' "$work/c4d/.claude/playbook/INDEX.md"
+  run "C4 a pattern with no index line"               'C4 PB-001 has a chunk in PLAYBOOK.md and no line' 1 "$work/c4d"
+  scaffold "$work/c4e";    printf -- '- PB-999 · a trigger → an action\n' >> "$work/c4e/.claude/playbook/INDEX.md"
+  run "C4 an index line with no pattern"              'C4 PB-999 has a line in INDEX.md and no chunk' 1 "$work/c4e"
+  scaffold "$work/c4f";    printf '\n### PB-001 · a second chunk under one id\n' >> "$work/c4f/.claude/playbook/PLAYBOOK.md"
+  run "C4 one pattern id headed twice"                'C4 PLAYBOOK.md lists PB-001 twice' 1 "$work/c4f"
+  scaffold "$work/c4g";    rm "$work/c4g/.claude/playbook/PLAYBOOK.md"
+  run "C4 the chunks are missing, so it cannot look"  'C4 cannot look' 1 "$work/c4g"
   scaffold "$work/c5";     : > "$work/c5/docs/phases/P9_second_ACTIVE.md"
   run "C5 two active phases"                          'C5 expected exactly one \*_ACTIVE.md' 1 "$work/c5"
   scaffold "$work/c6";     printf '| L9998 | a lesson | **`update-context`** gains a step |\n' >> "$work/c6/docs/LESSONS.md"
@@ -75,7 +87,6 @@ p = sys.argv[1]; s = open(p).read()
 open(p, "w").write(re.sub(r"(## Paste this next\s+`)[^`]+`", r"\g<1>docs/sessions/nope_PROMPT.md`", s, count=1))  # gate-allow:internal-path — gate-allow:dangling-path — a planted missing prompt in the census selftest, meant not to resolve
 PY
   run "C8 the baton points at a missing prompt"       'C8 NEXT_SESSION.md points at docs/sessions/nope_PROMPT.md' 1 "$work/c8"  # gate-allow:internal-path — gate-allow:dangling-path — the planted missing prompt the row expects, meant not to resolve
-  rm -rf "$work"
   scaffold "$work/c9";     python3 - "$work/c9/docs/sessions/INDEX.md" <<'PY'
 import re, sys
 p = sys.argv[1]; s = open(p).read()
@@ -89,6 +100,7 @@ p = sys.argv[1]; s = open(p).read()
 open(p, "w").write(re.sub(r"^## §2 ", lambda m: "| 5 | 2026-01-01 | **ZZ-C** — late and low | c |\n\n" + m.group(0), s, count=1, flags=re.M))
 PY
   run "C9 an index row numbered below its predecessor" 'C9 sessions/INDEX.md rows are out of order at row 5' 1 "$work/c9b"
+  rm -rf "$work"
   if [ "$fails" = 0 ]; then echo "drift census selftest: PASS ($rows rows)"; return 0; fi
   echo "drift census selftest: $fails of $rows FAILED"; return 1
 }

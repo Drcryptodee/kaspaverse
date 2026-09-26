@@ -1560,13 +1560,15 @@ run_check "repo-path resolution (L88 / F48)" repo_path_targets
 # facts restated where a session reads them at open. tools/drift_census.py holds one exact,
 # offline check per fact: a D-/L-number claimed once (two sittings took D-282 and D-283 on
 # the same day), one FRESHNESS row per research doc (a moved-in doc went four days without
-# one), the gate count the baton tells the next session to expect, the router's playbook
-# count, exactly one active phase named by the index, a lesson's declared destination
-# actually citing the lesson (three declared destinations were unbuilt on 2026-09-10), the
-# upstream record's idea of our pin, and the baton's target existing. In a public clone every
-# record-dependent check reports `skip` and the lane stays green: the record is absent there
-# by design (D-102), not stale. Advisory ageing (freshness rows, pending prompts) lives in
-# the same tool but only prints from preflight — age is a nudge, never a red.
+# one), the gate count the baton tells the next session to expect, the playbook's index and
+# its chunks naming the same patterns (and any typed count of them agreeing, D-330), exactly
+# one active phase named by the index, a lesson's declared destination actually citing the
+# lesson (three declared destinations were unbuilt on 2026-09-10), the upstream record's idea
+# of our pin, the baton's target existing, and each session-index row claimed once, in order.
+# In a public clone every record-dependent check reports `skip` and the lane stays green:
+# the record is absent there by design (D-102), not stale. Advisory ageing (freshness rows,
+# pending prompts) lives in the same tool but only prints from preflight — age is a nudge,
+# never a red.
 drift_census_lane() {
   [ -x "$ROOT/tools/drift_census.sh" ] || { echo "   tools/drift_census.sh missing or not executable — failing closed"; return 1; }
   local out rc

@@ -161,9 +161,9 @@ if [ "$HAVE_DOCS" = 1 ] && [ -x tools/upstream_revs.sh ] && [ "${KASPAVERSE_UPST
   [ -n "$UP_OUT" ] && printf '%s\n' "$UP_OUT" | sed '1s/^UPSTREAM /• upstream: /; 2,$s/^UPSTREAM /    /'
 fi
 # Drift census (D-317): do the living pointers still agree with what they restate — ledger
-# ids claimed once, one freshness row per research doc, the baton's gate count, the router's
-# playbook count, one active phase, lesson destinations that cite their lesson, the upstream
-# record's idea of our pin — plus what has merely AGED (freshness rows, pending prompts,
+# ids claimed once, one freshness row per research doc, the baton's gate count, the playbook's
+# index against its chunks, one active phase, lesson destinations that cite their lesson, the
+# upstream record's idea of our pin, session-index rows claimed once — plus what has merely AGED (freshness rows, pending prompts,
 # unpropagated decisions). Offline, exact, a second or two. The strict subset is also a gate
 # lane; here it is advisory so a session opens knowing what rotted while nobody was looking.
 if [ "$HAVE_DOCS" = 1 ] && [ -x tools/drift_census.sh ]; then
