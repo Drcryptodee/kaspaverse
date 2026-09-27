@@ -10,6 +10,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/maturity.dart';
 
@@ -105,8 +106,8 @@ void main() {
   /// **The chip's lamp is the standing link indicator** (founder call,
   /// 2026-08-27, amending BG-7's D-200 narrowing — see `_NetworkChip`'s doc).
   ///
-  /// Read from the FIRST lamp on the screen, which is the chip's: it is
-  /// rendered before the trust line's. Asserting the tone rather than a
+  /// Read from the chip's live dot (the small `KvLiveDot` since D-335; the
+  /// trust line keeps its `KvLamp`). Asserting the tone rather than a
   /// presence is what catches the P0.3 shape — a lamp that reads live beside
   /// words that say the link is gone.
   /// **`ok` green and pulsing while the link holds** — on a bound socket
@@ -115,8 +116,7 @@ void main() {
   /// green by the founder at D-259 from the intake render; the silence hold
   /// is D-331(b)). Teal is never a status.
   bool linkReadsLive(WidgetTester tester) =>
-      tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone! ==
-      KvLampTone.ok;
+      tester.widget<KvLiveDot>(find.byType(KvLiveDot).first).live;
 
   /// The TRUST line's own lamp — the LAST on the screen, where the network
   /// chip's is the first. Both describe the same link, so a test that reads

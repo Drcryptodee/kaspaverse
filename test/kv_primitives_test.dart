@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/kv_page_route.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_breath.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 
 void main() {
   group('KvPageRoute — the §6 v2.2 duration law', () {
@@ -14,54 +14,102 @@ void main() {
     });
   });
 
-  group('KvBreath — the live dot\'s pulse (BG-9, §3)', () {
-    testWidgets('active: one sine period on BOTH channels, 1600 ms', (
+  group('KvLiveDot — the live dot\'s ping (BG-9, §3)', () {
+    // Tailwind's `animate-ping`, number for number: 1 s, the ring travels the
+    // first 75% on `cubic-bezier(0, 0, 0.2, 1)` from 1× / .75 to 2× / 0, and
+    // rests out of sight for the last quarter.
+    test('the ring: 1× at .75 → 2× at 0 by 75%, then out of sight', () {
+      expect(kvPingAt(0).scale, 1.0);
+      expect(kvPingAt(0).opacity, KvLiveDot.pingOpacity);
+      // Halfway through its travel the ring is well past half its distance:
+      // it leaves the dot fast (the curve's first handle is at the origin).
+      final mid = kvPingAt(KvLiveDot.travel / 2);
+      expect(mid.scale, greaterThan(1.7));
+      expect(mid.opacity, lessThan(0.25));
+      for (final t in [KvLiveDot.travel, 0.9, 1.0]) {
+        expect(kvPingAt(t).scale, closeTo(KvLiveDot.pingScale, 1e-9));
+        expect(kvPingAt(t).opacity, closeTo(0, 1e-9));
+      }
+      expect(KvLiveDot.period, const Duration(seconds: 1));
+    });
+
+    testWidgets('live: it loops, and the dot keeps its own box', (
       tester,
     ) async {
       await tester.pumpWidget(
         const Directionality(
           textDirection: TextDirection.ltr,
-          child: KvBreath(child: Text('dot')),
+          child: Center(child: KvLiveDot(live: true)),
         ),
       );
-      final fade = tester.widget<FadeTransition>(
-        find.byType(FadeTransition).first,
+      await tester.pump(KvLiveDot.period * 3.5);
+      expect(tester.hasRunningAnimations, isTrue); // never settles
+      expect(
+        find.descendant(
+          of: find.byType(KvLiveDot),
+          matching: find.byType(CustomPaint),
+        ),
+        findsOneWidget,
       );
-      final scale = tester.widget<ScaleTransition>(
-        find.byType(ScaleTransition).first,
+      // The ring paints outside the dot and takes no layout.
+      expect(
+        tester.getSize(find.byType(KvLiveDot)),
+        const Size.square(KvLiveDot.size),
       );
-      expect(fade.opacity.value, 1.0); // wakes bright
-      expect(scale.scale.value, 1.0);
-
-      // §3: the trough is scale .7 and opacity .55 — NOT `opacityStale`, which
-      // is the *stale* step and would have a live dot reaching a dead
-      // reading's tone twice a second.
-      await tester.pump(KvMotion.pulse * 0.5);
-      expect(fade.opacity.value, closeTo(0.55, 0.01));
-      expect(scale.scale.value, closeTo(0.7, 0.01));
-
-      // …and a full period later it is bright again (seamless loop).
-      await tester.pump(KvMotion.pulse * 0.5);
-      expect(fade.opacity.value, closeTo(1.0, 0.01));
-      expect(scale.scale.value, closeTo(1.0, 0.01));
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('inactive: a static child, no animation to settle', (
+    testWidgets('not live: a still amber dot, no animation to settle', (
       tester,
     ) async {
       await tester.pumpWidget(
         const Directionality(
           textDirection: TextDirection.ltr,
-          child: KvBreath(active: false, child: Text('dot')),
+          child: KvLiveDot(live: false),
         ),
       );
-      expect(find.byType(FadeTransition), findsNothing);
+      expect(find.byType(CustomPaint), findsNothing);
       await tester.pumpAndSettle(); // proves nothing is ticking
-      expect(find.text('dot'), findsOneWidget);
+      expect(find.byType(KvLiveDot), findsOneWidget);
     });
 
-    testWidgets('reduced motion: static full-opacity child (§6 rule)', (
+    testWidgets('a link that drops: green and pinging → amber and still', (
+      tester,
+    ) async {
+      Color fill() =>
+          ((tester
+                      .widget<DecoratedBox>(
+                        find.descendant(
+                          of: find.byType(KvLiveDot),
+                          matching: find.byType(DecoratedBox),
+                        ),
+                      )
+                      .decoration
+                  as BoxDecoration)
+              .color)!;
+      Widget host(bool live) => Directionality(
+        textDirection: TextDirection.ltr,
+        child: KvLiveDot(live: live),
+      );
+      await tester.pumpWidget(host(true));
+      await tester.pump(KvLiveDot.period * 0.3);
+      expect(fill(), KvColor.ok);
+      expect(tester.hasRunningAnimations, isTrue);
+
+      // BG-8: the motion says *live*, so it stops the frame the link does.
+      await tester.pumpWidget(host(false));
+      expect(fill(), KvColor.warn);
+      expect(find.byType(CustomPaint), findsNothing);
+      expect(tester.hasRunningAnimations, isFalse);
+
+      // …and resumes when it comes back.
+      await tester.pumpWidget(host(true));
+      expect(fill(), KvColor.ok);
+      expect(tester.hasRunningAnimations, isTrue);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('reduced motion: the dot alone, no ghost (§6 rule)', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -69,13 +117,13 @@ void main() {
           data: MediaQueryData(disableAnimations: true),
           child: Directionality(
             textDirection: TextDirection.ltr,
-            child: KvBreath(child: Text('dot')),
+            child: KvLiveDot(live: true),
           ),
         ),
       );
-      expect(find.byType(FadeTransition), findsNothing);
+      expect(find.byType(CustomPaint), findsNothing);
       await tester.pumpAndSettle(); // the controller must be stopped
-      expect(find.text('dot'), findsOneWidget);
+      expect(find.byType(KvLiveDot), findsOneWidget);
     });
   });
 

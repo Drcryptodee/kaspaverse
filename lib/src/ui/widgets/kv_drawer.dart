@@ -10,6 +10,7 @@ import '../theme/tokens.dart';
 import 'haptics.dart';
 import 'kv_glyph.dart';
 import 'kv_address.dart';
+import 'kv_live_dot.dart';
 import 'kv_mark.dart';
 import 'kv_rows.dart';
 
@@ -670,17 +671,9 @@ class _DestinationRow extends StatelessWidget {
               const SizedBox(width: KvSpace.s),
               ValueListenableBuilder<bool>(
                 valueListenable: live,
-                builder: (context, up, _) => Container(
-                  width: 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    // The same two readings as the plate's lamp (BG-7 as
-                    // amended: `ok` = link healthy): a dot in `ok` while the
-                    // link is up, `warn` while it is not. Never a third state.
-                    color: up ? KvColor.ok : KvColor.warn,
-                  ),
-                ),
+                // The same dot and reading as the plate's (BG-7 as amended:
+                // `ok` = link healthy), pinging while the link is up (BG-9).
+                builder: (context, up, _) => KvLiveDot(live: up),
               ),
             ],
             if (trailing != null) ...[

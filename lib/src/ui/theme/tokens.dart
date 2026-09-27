@@ -342,9 +342,17 @@ abstract final class KvMotion {
   /// with no configuration surface** (BG-6).
   static const Duration deliberate = Duration(milliseconds: 800);
 
-  /// The live dot: scale 1 → .7, opacity 1 → .55. One of exactly two ambient
-  /// loops (BG-9).
+  /// How long an acknowledgement line holds (every `showSnackBar`). Until
+  /// v4.46 it was also the live dot's breath; the dot pings on [ping] now.
   static const Duration pulse = Duration(milliseconds: 1600);
+
+  /// **The live dot's ping, arrival to arrival** — one of exactly two ambient
+  /// loops (BG-9 as amended, D-335): Tailwind's `animate-ping`, 1 s.
+  static const Duration ping = Duration(milliseconds: 1000);
+
+  /// The ping's easing, Tailwind's `ease-out` — the one ambient motion off [curve],
+  /// because a ring has to leave the dot at full speed (BG-9, D-335).
+  static const Curve pingCurve = Cubic(0, 0, 0.2, 1);
 
   /// The orb's halo, as a **round trip**. The other ambient loop.
   static const Duration breathe = Duration(milliseconds: breatheMs);

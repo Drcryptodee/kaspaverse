@@ -11,9 +11,10 @@ import '../theme/tokens.dart';
 /// "the link is up right now", which is not a state of the user's money.
 /// There is no informational hue and no fourth accent.
 enum KvLampTone {
-  /// **The live dot.** [KvColor.primary] on a [KvColor.tealTint] ring, and the
-  /// one lamp that pulses (BG-9's first ambient loop). It counts against
-  /// BG-2's cap of three.
+  /// **Teal** — the receive QR's centre mark: [KvColor.primary] on a
+  /// [KvColor.tealTint] ring. It counts against BG-2's
+  /// cap of three. **No lamp pings**: the link's live dot is `KvLiveDot`, a
+  /// bare 6 dp dot, since D-335 — a lamp is a state, and states hold still.
   live,
 
   /// Money arriving, accepted on chain, switched on by the user, **link

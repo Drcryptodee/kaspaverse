@@ -14,7 +14,7 @@ import 'theme/tokens.dart';
 import 'widgets/entrance.dart';
 import 'widgets/kv_activity.dart';
 import 'widgets/kv_amount.dart';
-import 'widgets/kv_breath.dart';
+import 'widgets/kv_live_dot.dart';
 import 'widgets/kv_burial_mark.dart';
 import 'widgets/kv_derived.dart';
 import 'widgets/kv_cadence.dart';
@@ -982,8 +982,8 @@ class _HomeScreenState extends State<HomeScreen> {
   /// because D-200's narrowing took link health away from `ok`; BG-7 as
   /// amended in Deep V6 v4.2 lists *"link healthy"* among `ok`'s meanings
   /// outright, so the ask is law-compliant as written and needed no
-  /// amendment. Live is the **live dot** — `primary`, pulsing, one of BG-2's
-  /// three permitted emissions — and a dark link is a static amber lamp.
+  /// amendment. Live is the **live dot** — `KvLiveDot`, `ok` and pinging since
+  /// D-335, not an emission BG-2 counts — and a dark link is a still amber dot.
   ///
   /// The lamp and the trust line are computed from the SAME `_LinkView`, so
   /// they cannot disagree; that is what guards the P0.3 scar now.
@@ -1004,10 +1004,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// link the way P0.3's did.
   Widget _liveDot() => ValueListenableBuilder<bool>(
     valueListenable: _lampLive,
-    builder: (context, live, _) => KvBreath(
-      active: live,
-      child: KvLamp(live ? KvLampTone.ok : KvLampTone.warn),
-    ),
+    builder: (context, live, _) => KvLiveDot(live: live),
   );
 
   VoidCallback? _sendTap() => widget.sendRoute == null
@@ -1297,11 +1294,14 @@ class _NetworkChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // The pulse is the liveness tell; it stills when the link does, the
+          // The ping is the liveness tell; it stills when the link does, the
           // way every other breathing thing in this app does (BG-8/BG-9).
-          KvBreath(
-            active: live,
-            child: KvLamp(live ? KvLampTone.ok : KvLampTone.warn),
+          // **Seated on the word's cap height, not its line box**: Jakarta's
+          // cap centre at 13/18 is 1 dp below the box's (cap 745 / 1000,
+          // leading split by ascent), so the dot drops by exactly that.
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: KvLiveDot(live: live),
           ),
           const SizedBox(width: KvSpace.s),
           const Text(

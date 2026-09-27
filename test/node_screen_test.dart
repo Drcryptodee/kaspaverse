@@ -15,6 +15,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/maturity.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
@@ -532,6 +533,10 @@ Future<void> _pumpScreen(
       data: MediaQueryData(
         size: Size(width, height),
         textScaler: TextScaler.linear(textScale),
+        // **The DAA figure's live dot pings forever** (BG-9), so a settled
+        // screen never quiesces. Reduced motion stills it, which is the
+        // ping's own gate; its motion is proven in `kv_primitives_test`.
+        disableAnimations: settle,
       ),
       child: MaterialApp(
         // **The app's own theme and the app's own fonts.** This harness used
@@ -1580,7 +1585,8 @@ void main() {
       // serving plate's.
       int emissions(WidgetTester t) =>
           find.byType(KvCadence).evaluate().length +
-          find.byType(KvLamp).evaluate().length;
+          find.byType(KvLamp).evaluate().length +
+          find.byType(KvLiveDot).evaluate().length;
 
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
@@ -1691,7 +1697,8 @@ void main() {
       // from the case before it.
       int emissions(WidgetTester t) =>
           find.byType(KvCadence).evaluate().length +
-          find.byType(KvLamp).evaluate().length;
+          find.byType(KvLamp).evaluate().length +
+          find.byType(KvLiveDot).evaluate().length;
 
       final busy = _FakeSeam();
       busy.hold = Completer<void>();
@@ -2027,10 +2034,7 @@ void main() {
     ) async {
       // The same law as the money plate's chip (D-331(b)): a short stall is
       // not amber on either surface.
-      for (final (age, tone) in const [
-        (7, KvLampTone.ok),
-        (16, KvLampTone.warn),
-      ]) {
+      for (final (age, live) in const [(7, true), (16, false)]) {
         await _pumpScreen(
           tester,
           _FakeSeam(),
@@ -2039,10 +2043,11 @@ void main() {
         );
         await tester.pump();
         await tester.pump();
-        final lamps = tester.widgetList<KvLamp>(find.byType(KvLamp));
+        // The plate's own live dot since D-335.
+        final dots = tester.widgetList<KvLiveDot>(find.byType(KvLiveDot));
         expect(
-          lamps.map((l) => l.tone),
-          contains(tone),
+          dots.map((d) => d.live),
+          contains(live),
           reason: 'a $age s silence on a bound socket',
         );
         await tester.pumpWidget(const SizedBox());

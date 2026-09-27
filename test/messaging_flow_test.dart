@@ -2399,7 +2399,7 @@ void main() {
     );
 
     // NOTE: a live pending chip breathes on a repeating controller
-    // (KvBreath), so these tests pump fixed durations instead of
+    // (KvLiveDot), so these tests pump fixed durations instead of
     // pumpAndSettle (which would never settle) — the controller dies with
     // the screen (dispose).
     Future<void> settle(WidgetTester tester) async {

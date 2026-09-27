@@ -14,6 +14,7 @@ import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/finders.dart';
 import 'support/maturity.dart';
@@ -315,14 +316,15 @@ void main() {
       // lamp on a healthy screen: the trust line stays silent, so a second one
       // never appears beside it.
       expect(find.text('Mainnet'), findsOneWidget);
-      expect(find.byType(KvLamp), findsOneWidget);
+      expect(find.byType(KvLiveDot), findsOneWidget);
+      expect(find.byType(KvLamp), findsNothing);
       expect(
-        tester.widget<KvLamp>(find.byType(KvLamp)).tone,
+        tester.widget<KvLiveDot>(find.byType(KvLiveDot)).live,
         // **`ok` green, pulsing** (founder correction D-259, from the intake
         // render). A6 said `ok` from the start — *"link healthy"* is one of
         // BG-7's `ok` meanings — and the teal reading was the transcription,
         // not the design. Teal is never a status.
-        KvLampTone.ok,
+        isTrue,
         reason: 'a live link reads live on the chip',
       );
 
@@ -718,7 +720,8 @@ void main() {
       // Two lamps and no more: the chip's standing indicator, and the trust
       // line's one lamp carrying however many sentences it has. The caption
       // and the link never light separately.
-      expect(find.byType(KvLamp), findsNWidgets(2));
+      expect(find.byType(KvLiveDot), findsOneWidget);
+      expect(find.byType(KvLamp), findsOneWidget);
 
       // The other ordering: a live link has nothing to add, so the number's
       // caption stands alone.
@@ -732,7 +735,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.byType(KvLamp), findsNWidgets(2));
+      expect(find.byType(KvLiveDot), findsOneWidget);
+      expect(find.byType(KvLamp), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
   });
@@ -1028,7 +1032,8 @@ void main() {
         // many sentences it has. Three would mean two lamps saying the same
         // thing, which is the P0.3 shape.
         expect(
-          find.byType(KvLamp).evaluate().length,
+          find.byType(KvLamp).evaluate().length +
+              find.byType(KvLiveDot).evaluate().length,
           lessThanOrEqualTo(2),
           reason: '$label: a third lamp is a second opinion',
         );

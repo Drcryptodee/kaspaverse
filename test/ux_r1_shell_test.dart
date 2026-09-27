@@ -15,7 +15,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_two_pane.dart';
 
@@ -537,7 +537,7 @@ void main() {
         expect(find.text(verb), findsOneWidget, reason: verb);
       }
       expect(
-        find.descendant(of: plate, matching: find.byType(KvLamp)),
+        find.descendant(of: plate, matching: find.byType(KvLiveDot)),
         findsOneWidget,
         reason: 'the live dot is IN the plate (§4)',
       );
@@ -890,13 +890,13 @@ void main() {
       expect(
         find.descendant(
           of: find.byType(KvMoneyPlate),
-          matching: find.byType(KvLamp),
+          matching: find.byType(KvLiveDot),
         ),
         findsOneWidget,
       );
       expect(
-        tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone,
-        KvLampTone.warn,
+        tester.widget<KvLiveDot>(find.byType(KvLiveDot)).live,
+        isFalse,
         reason: 'a dark link is amber on the plate, whatever the geometry',
       );
       // …and so is the dimming: the figure is at 45%, never full brightness.

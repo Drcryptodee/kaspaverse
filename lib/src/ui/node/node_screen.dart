@@ -9,6 +9,7 @@ import '../error_text.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
+import '../widgets/kv_live_dot.dart';
 import '../widgets/kv_cadence.dart';
 import '../theme/kv_window.dart';
 import '../widgets/kv_fact_line.dart';
@@ -2385,7 +2386,14 @@ class _CardValue extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (lamp case final tone?) ...[
-                KvLamp(tone),
+                // The plate's live dot, pinging while the chain is live
+                // (BG-9). `const`, so a DAA tick re-running this row leaves
+                // the dot and its ping untouched (`rebuild_scope_test`). The
+                // mono digits' centre sits 0.2 dp from the line box's at
+                // 13/18, so the row's own centring is already optical.
+                tone == KvLampTone.ok
+                    ? const KvLiveDot(live: true)
+                    : const KvLiveDot(live: false),
                 const SizedBox(width: KvSpace.s),
               ],
               Flexible(

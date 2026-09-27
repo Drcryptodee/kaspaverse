@@ -562,7 +562,7 @@ Widget _homeStatus() => HomeScreen(
 );
 
 /// **The hold window** (LINK-Q1, D-331(b)): a bound socket seven seconds into
-/// a stall. The lamp stays live (the chip's dot keeps breathing), the balance
+/// a stall. The lamp stays live (the chip's dot keeps pinging), the balance
 /// dims on the data's own five-second clock, and the trust line says the
 /// link and the age in the lamp's tone, never in amber. [hunt]: the silence
 /// deadline's hunt running behind it — the plate's longest trust sentence.
