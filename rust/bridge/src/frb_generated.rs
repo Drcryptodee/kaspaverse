@@ -3847,7 +3847,8 @@ impl SseDecode for crate::api::dag::DagStatusDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_connected = <bool>::sse_decode(deserializer);
         let mut var_endpoint = <Option<String>>::sse_decode(deserializer);
-        let mut var_lastBlockAgeSecs = <Option<u64>>::sse_decode(deserializer);
+        let mut var_lastTickAgeSecs = <Option<u64>>::sse_decode(deserializer);
+        let mut var_daaTicks = <u64>::sse_decode(deserializer);
         let mut var_virtualDaaScore = <Option<u64>>::sse_decode(deserializer);
         let mut var_searching = <bool>::sse_decode(deserializer);
         let mut var_osOffline = <bool>::sse_decode(deserializer);
@@ -3856,7 +3857,8 @@ impl SseDecode for crate::api::dag::DagStatusDto {
         return crate::api::dag::DagStatusDto {
             connected: var_connected,
             endpoint: var_endpoint,
-            last_block_age_secs: var_lastBlockAgeSecs,
+            last_tick_age_secs: var_lastTickAgeSecs,
+            daa_ticks: var_daaTicks,
             virtual_daa_score: var_virtualDaaScore,
             searching: var_searching,
             os_offline: var_osOffline,
@@ -4008,10 +4010,12 @@ impl SseDecode for crate::api::dag::LinkProbeDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_latencyMs = <Option<u64>>::sse_decode(deserializer);
+        let mut var_timedOutMs = <Option<u64>>::sse_decode(deserializer);
         let mut var_synced = <Option<bool>>::sse_decode(deserializer);
         let mut var_peers = <Option<u32>>::sse_decode(deserializer);
         return crate::api::dag::LinkProbeDto {
             latency_ms: var_latencyMs,
+            timed_out_ms: var_timedOutMs,
             synced: var_synced,
             peers: var_peers,
         };
@@ -5342,7 +5346,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::dag::DagStatusDto {
         [
             self.connected.into_into_dart().into_dart(),
             self.endpoint.into_into_dart().into_dart(),
-            self.last_block_age_secs.into_into_dart().into_dart(),
+            self.last_tick_age_secs.into_into_dart().into_dart(),
+            self.daa_ticks.into_into_dart().into_dart(),
             self.virtual_daa_score.into_into_dart().into_dart(),
             self.searching.into_into_dart().into_dart(),
             self.os_offline.into_into_dart().into_dart(),
@@ -5546,6 +5551,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::dag::LinkProbeDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.latency_ms.into_into_dart().into_dart(),
+            self.timed_out_ms.into_into_dart().into_dart(),
             self.synced.into_into_dart().into_dart(),
             self.peers.into_into_dart().into_dart(),
         ]
@@ -6306,7 +6312,8 @@ impl SseEncode for crate::api::dag::DagStatusDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.connected, serializer);
         <Option<String>>::sse_encode(self.endpoint, serializer);
-        <Option<u64>>::sse_encode(self.last_block_age_secs, serializer);
+        <Option<u64>>::sse_encode(self.last_tick_age_secs, serializer);
+        <u64>::sse_encode(self.daa_ticks, serializer);
         <Option<u64>>::sse_encode(self.virtual_daa_score, serializer);
         <bool>::sse_encode(self.searching, serializer);
         <bool>::sse_encode(self.os_offline, serializer);
@@ -6418,6 +6425,7 @@ impl SseEncode for crate::api::dag::LinkProbeDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Option<u64>>::sse_encode(self.latency_ms, serializer);
+        <Option<u64>>::sse_encode(self.timed_out_ms, serializer);
         <Option<bool>>::sse_encode(self.synced, serializer);
         <Option<u32>>::sse_encode(self.peers, serializer);
     }

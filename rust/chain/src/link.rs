@@ -73,10 +73,18 @@ pub const PENDING_STRIKE_TTL_SECS: u64 = 30;
 /// connection never lived long enough for its death to say anything about
 /// the endpoint (V6 churn-smoothing, register item 16: the V3 sitting's
 /// first mia strike punished a 25 ms run — pure Wi-Fi re-association noise;
-/// `v3_sitting.log` 13:42:30.698→.723). Ten seconds ≈ ~100 BlockAdded
-/// heartbeats at 10 bps: a run that survives it proves the interface
-/// genuinely held, so a later drop is admissible evidence (and D-084's
-/// self-refutation still acquits it if the same endpoint reconnects).
+/// `v3_sitting.log` 13:42:30.698→.723). A run that survives ten seconds
+/// proves the interface genuinely held, so a later drop is admissible
+/// evidence (and D-084's self-refutation still acquits it if the same
+/// endpoint reconnects).
+///
+/// **It measures the socket's LIFE, not its traffic, so moving the heartbeat
+/// did not move it** (LINK-Q1, D-334). A run is `connected_at` → death, read
+/// off the bind's own clock; no notification enters it. This doc used to
+/// gloss ten seconds as "~100 BlockAdded heartbeats", which was an
+/// illustration and never the rule — the heartbeat is now the DAA tick (one
+/// per virtual resolve, ~10/s on mainnet), and the floor stands at ten
+/// seconds for the reason it was set: churn noise dies faster than that.
 pub const MIN_STRIKE_RUN_SECS: u64 = 10;
 /// Deadline for ONE `Resolver::get_node` fetch (D-089 root cause, C1). The
 /// pinned resolver walks its seeder URLs SEQUENTIALLY inside a single
@@ -361,14 +369,198 @@ pub fn phone_fault_in_round(failed: &[(String, StrikeReason)]) -> bool {
     hosts.len() >= DNS_CORRELATION_MIN
 }
 
-/// The block-silence threshold past which a CONNECTED socket is judged
+/// The heartbeat-silence threshold past which a CONNECTED socket is judged
 /// stalled — the Rust authority for the claim `chain_service.dart`'s
 /// `watchdogStallSecs` (same value) makes from its process-lifetime view.
-/// Mainnet delivers ~10 blocks/s, so 30 s of silence on a live socket is
-/// ~300 missed blocks: real evidence, once the clock is per-socket
-/// ([`crate::DagMonitor`]'s stall verdict uses `max(last_block_at,
-/// connected_at)` — a socket cannot be guilty of silence older than itself).
+/// A socket cannot be guilty of silence older than itself, so the verdict
+/// reads `max(last_tick_at, connected_at)` on the ACCUSED socket's own clocks
+/// ([`crate::DagMonitor`]'s stall verdict).
+///
+/// **The heartbeat is the DAA tick since LINK-Q1 (D-334), and that sharpened
+/// what a conviction says.** It used to be `BlockAdded`: 30 s without a block
+/// on this socket. It is now 30 s without the node's VIRTUAL moving on this
+/// socket — the pin emits `VirtualDaaScoreChanged` once per virtual resolve
+/// (`consensus/src/pipeline/virtual_processor/processor.rs:361` @ `01b532e`),
+/// which batches however many blocks arrived, so ~10/s at mainnet's 10 BPS and
+/// fewer under load. Both ride one TCP stream in order, so a socket that goes
+/// quiet goes quiet on both; they part only when one subscription is honoured
+/// and the other is not, and there the tick is the right witness — a node
+/// whose virtual has stopped serves stale balances and maturity whatever
+/// blocks it still relays, and the wallet processor's own maturity clock
+/// rides this same notification. What the move gave up is named, not hidden:
+/// a node that delivers ticks but silently drops our `BlockAdded` scope used
+/// to be executed at 30 s and now is not — the transport scan would go deaf
+/// until the next reconnect. Never observed; LINK-Q2 reshapes that stream.
 pub const WATCHDOG_STALL_SECS: u64 = 30;
+
+/// **How long a live socket may go without a DAA tick before a replacement is
+/// sought behind it** (LINK-Q1, D-334 — the founder's "a silence deadline that
+/// swaps").
+///
+/// Not a verdict. Nothing is torn down and no strike is parked when it fires:
+/// it starts the bounded find-then-swap hunt D-213 built for the Reconnect
+/// tap, with the silent socket as the incumbent, and the hunt stands down if
+/// that socket speaks again before a replacement is armed. Conviction stays
+/// the watchdog's, on its own 30 s evidence ([`WATCHDOG_STALL_SECS`]).
+///
+/// **Sized from CONN-F1's measurements (`CONNECTIVITY_PASS.md` §12), not
+/// taste.** Every stall on a live socket that recovered by itself did so in
+/// 5.25–7.50 s (arm B ×2, the day ×1). Every silence that did not recover was
+/// 8.1–39.9 s long when something ended it — a drop, the watchdog, or the
+/// founder's own hand (`dag: link went down N ms after its last score`). A
+/// healthy socket's FIRST score came at median 0.42 s, p99 3.09 s, over 569
+/// connects (one outlier at 16.39 s). Nine seconds is 1.5 s past the longest
+/// self-recovered stall — 20 % headroom on a three-sample tail, where eight
+/// would have left half a second — and it still lets a hunt that lands in
+/// 1–2 s put a new socket's first score (p99 3.09 s) inside the lamp's 15 s
+/// hold, so the user never sees amber for it (`KvFreshness.liveHoldBound`;
+/// `test/silence_deadline_test.dart` reads this constant and asserts that
+/// sum, so neither side can move alone). A socket whose first score takes the
+/// outlier's 16 s is, to the person holding the phone, a dead one.
+///
+/// A false positive — a stall that would have recovered at 9.5 s — costs one
+/// bounded cut-over to a node that answered a probe milliseconds earlier
+/// (D-216 measured 577–691 ms, inside the churn hold), or nothing at all if
+/// the incumbent speaks first.
+pub const SILENCE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(9);
+
+// The deadline must hand the hunt its chance before the watchdog convicts —
+// a deadline at or past the stall line would only ever race the execution.
+const _: () = assert!(
+    SILENCE_DEADLINE.as_secs() < WATCHDOG_STALL_SECS,
+    "the silence deadline must fire before the watchdog's stall line"
+);
+
+/// **The silence deadline after `landed` silence swaps the link has not yet
+/// held through** — doubling, and `None` (off) once it would reach the
+/// watchdog's stall line (`consensus-auditor` CONCERNS-1, LINK-Q1).
+///
+/// Every socket's silence clock starts at its own connect, and so does its
+/// stall clock — so without a budget, a run of sockets that each go quiet
+/// would be swapped every ten-odd seconds forever, the watchdog never old
+/// enough to convict any of them, and every swap paying a re-dial, a wallet
+/// renegotiation and a transport catch-up on exactly the weak link that
+/// caused it: a fifth amplifier, built by the fix for the fourth. When the
+/// socket a silence swap landed on goes quiet too, the evidence points at the
+/// path rather than the node, and another swap is the wrong errand.
+///
+/// So: 9 s, then 18 s, then off — **at most two silence swaps per stretch the
+/// link has not held through**, after which the watchdog's hard path, with
+/// its strike justice, owns the silence. A clean [`SILENCE_HOLD_RESET`] on one
+/// socket — no quiet spell of the base deadline in it — gives the nine seconds
+/// back.
+pub fn silence_deadline_after(landed: u32) -> Option<std::time::Duration> {
+    let secs = SILENCE_DEADLINE.as_secs().checked_shl(landed.min(16))?;
+    (secs < WATCHDOG_STALL_SECS).then(|| std::time::Duration::from_secs(secs))
+}
+
+/// **How long a socket must stay up with no quiet spell of the base deadline
+/// for the link to count as having HELD** — which resets the silence deadline's
+/// backoff to nine seconds (LINK-Q1). A minute: long enough that a socket
+/// which coughs one score and dies (the 2026-09-26 `kate` shape) cannot
+/// launder the budget, short enough that one bad patch does not cost the rest
+/// of a sitting its fast recovery.
+pub const SILENCE_HOLD_RESET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// **Has a silent incumbent come back?** — the silence hunt's stand-down test
+/// (LINK-Q1). Pure, so the rule is provable without a socket.
+///
+/// Two facts, both required. It must have ticked since the hunt began
+/// (`ticks_now > ticks_at_start`), and it must not have fallen silent AGAIN
+/// past the deadline (`quiet < SILENCE_DEADLINE`). The second clause is not
+/// pedantry: a socket that coughs one tick and goes quiet again inside the
+/// same hunt is a new silence episode, and standing down on the first cough
+/// would let it take the hunt that episode needed with it — its own deadline
+/// is refused by the single-flight flag this hunt still holds.
+pub fn silent_incumbent_spoke_again(
+    ticks_now: u64,
+    ticks_at_start: u64,
+    quiet: std::time::Duration,
+) -> bool {
+    ticks_now > ticks_at_start && quiet < SILENCE_DEADLINE
+}
+
+/// The probe deadline's floor — RFC 6298 §2.4's own one-second minimum RTO.
+/// A bind's dial is three round trips (TCP, TLS, the websocket upgrade), and
+/// 749 dials across CONN-F1's captures took median 0.91 s, p99 1.87–1.98 s,
+/// max 2.24 s: a round trip of ~0.3 s, ~0.65 s at p99. One second is past
+/// that p99 with room for the queueing a probe meets on a loaded socket.
+pub const PROBE_DEADLINE_FLOOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The probe deadline's ceiling. Past five seconds a round trip on a live
+/// socket is not a latency, it is a stall — the line the score clock notes a
+/// gap at (`bridge/src/api/dag.rs` `SCORE_GAP_NOTE`) and well inside the
+/// lamp's 15 s hold — and it is 2.2× the slowest three-round-trip dial ever
+/// measured (2.24 s). RFC 6298 §2.5 lets a retransmission timer run to 60 s;
+/// a measurement has no packet to deliver, so it owes the reader a bounded
+/// answer instead: "at least five seconds" is itself the reading.
+pub const PROBE_DEADLINE_CAP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// **The link probe's own clock — RFC 6298's estimator, for a measurement**
+/// (LINK-Q1, D-333). One per bound socket: a round trip learned on one node
+/// says nothing about the next.
+///
+/// It replaces a fixed 1.8 s deadline that, on the founder's Starlink hop,
+/// timed out ordinary answers and blanked the reading (D-333). Now the probe
+/// waits `SRTT + 4·RTTVAR` over its own recent answers (α = 1/8, β = 1/4,
+/// K = 4 — §2.2–2.3 verbatim), floored at [`PROBE_DEADLINE_FLOOR`] and capped
+/// at [`PROBE_DEADLINE_CAP`], and a timeout doubles it (§5.5's back-off) until
+/// the next answer resets the doubling.
+///
+/// **One departure, stated:** before the first answer §2.1 sets 1 s. That is
+/// right for a retransmission timer, where a premature fire costs a duplicate
+/// packet; here it would publish "at least 1 s" out of ignorance on exactly
+/// the link where the first answer is slow. So the first probe of a socket
+/// waits the full cap — single-flight makes a long wait cost ticks, not
+/// stacked calls — and the estimator takes over from its first sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProbeClock {
+    /// Smoothed round trip in ms; `None` until the first answer.
+    srtt_ms: Option<f64>,
+    /// Round-trip variation in ms (meaningless while `srtt_ms` is `None`).
+    rttvar_ms: f64,
+    /// Consecutive timeouts since the last answer — the §5.5 doubling count.
+    backoff: u32,
+}
+
+impl ProbeClock {
+    /// How long the next probe may wait.
+    pub fn deadline(&self) -> std::time::Duration {
+        let Some(srtt) = self.srtt_ms else {
+            return PROBE_DEADLINE_CAP;
+        };
+        // `backoff` is capped where it is counted, so the shift cannot
+        // overflow; the clamp below is what actually bounds the wait.
+        let rto_ms = (srtt + 4.0 * self.rttvar_ms) * f64::from(1u32 << self.backoff.min(8));
+        let floor = PROBE_DEADLINE_FLOOR.as_secs_f64() * 1000.0;
+        let cap = PROBE_DEADLINE_CAP.as_secs_f64() * 1000.0;
+        std::time::Duration::from_secs_f64(rto_ms.clamp(floor, cap) / 1000.0)
+    }
+
+    /// The node answered in `rtt_ms`.
+    pub fn answered(&mut self, rtt_ms: u64) {
+        // Precision: a round trip is milliseconds, far inside f64's exact range.
+        let r = rtt_ms as f64;
+        match self.srtt_ms {
+            None => {
+                self.srtt_ms = Some(r);
+                self.rttvar_ms = r / 2.0;
+            }
+            Some(srtt) => {
+                self.rttvar_ms = 0.75 * self.rttvar_ms + 0.25 * (srtt - r).abs();
+                self.srtt_ms = Some(0.875 * srtt + 0.125 * r);
+            }
+        }
+        self.backoff = 0;
+    }
+
+    /// The deadline passed with no answer. The sample is censored — it says
+    /// "at least the deadline", which the reader shows — so it does not enter
+    /// the average; it only backs the next wait off (§5.5).
+    pub fn timed_out(&mut self) {
+        self.backoff = (self.backoff + 1).min(8);
+    }
+}
 
 /// What to do with a strike-worthy event (R2 D3). `Withhold` is not
 /// forgiveness — the event is still recorded against the endpoint via
@@ -2952,5 +3144,115 @@ mod tests {
         // did not validate against the name in the URL.
         drop(stream);
         println!("live wss handshake OK in {elapsed:?} — url={url} (101 upgrade, chain validated)");
+    }
+
+    // ── LINK-Q1 · the silence deadline and the probe's clock (D-334) ───────
+
+    /// A silent incumbent comes back only if it ticked since the hunt began
+    /// AND is not silent past the deadline again — a single cough followed by
+    /// a new silence must not stand the hunt down (its own deadline is refused
+    /// by the single-flight flag this hunt holds).
+    #[test]
+    fn a_silent_incumbent_is_back_only_while_it_keeps_speaking() {
+        let just = std::time::Duration::from_millis(200);
+        let again = SILENCE_DEADLINE;
+        assert!(
+            silent_incumbent_spoke_again(12, 11, just),
+            "it ticked and is talking now"
+        );
+        assert!(
+            !silent_incumbent_spoke_again(11, 11, just),
+            "no tick since the hunt began is no comeback, however recent the clock reads"
+        );
+        assert!(
+            !silent_incumbent_spoke_again(12, 11, again),
+            "a cough followed by a fresh silence is a new episode, not a comeback"
+        );
+        assert!(silent_incumbent_spoke_again(
+            12,
+            11,
+            again - std::time::Duration::from_millis(1)
+        ));
+    }
+
+    /// The silence deadline's budget: nine, eighteen, then off — never at or
+    /// past the stall line, so the watchdog always gets the last word.
+    #[test]
+    fn the_silence_deadline_doubles_then_leaves_it_to_the_watchdog() {
+        let secs = |n| silence_deadline_after(n).map(|d| d.as_secs());
+        assert_eq!(secs(0), Some(SILENCE_DEADLINE.as_secs()));
+        assert_eq!(secs(1), Some(2 * SILENCE_DEADLINE.as_secs()));
+        assert_eq!(secs(2), None, "36 s would race the watchdog's 30 s line");
+        assert_eq!(secs(u32::MAX), None, "and no count overflows it back on");
+        for n in 0..8 {
+            if let Some(d) = silence_deadline_after(n) {
+                assert!(d.as_secs() < WATCHDOG_STALL_SECS);
+            }
+        }
+        assert!(SILENCE_HOLD_RESET > SILENCE_DEADLINE * 2);
+    }
+
+    /// RFC 6298 §2.2–2.3, at our floor and cap: the first answer seeds
+    /// SRTT = R and RTTVAR = R/2; later answers move them by 1/8 and 1/4; the
+    /// wait is SRTT + 4·RTTVAR, never under the floor or over the cap.
+    #[test]
+    fn the_probe_clock_follows_rfc_6298_inside_its_floor_and_cap() {
+        let ms = |d: std::time::Duration| d.as_millis();
+        let mut clock = ProbeClock::default();
+        assert_eq!(
+            clock.deadline(),
+            PROBE_DEADLINE_CAP,
+            "no answer yet: the first probe waits the cap rather than guessing"
+        );
+
+        clock.answered(400);
+        // 400 + 4 × 200 = 1200.
+        assert_eq!(ms(clock.deadline()), 1200);
+
+        clock.answered(400);
+        // RTTVAR = 0.75 × 200 + 0.25 × 0 = 150; SRTT = 400 → 400 + 600 = 1000.
+        assert_eq!(ms(clock.deadline()), 1000);
+
+        // A fast, steady link would fall under the floor; the floor holds.
+        let mut fast = ProbeClock::default();
+        for _ in 0..40 {
+            fast.answered(60);
+        }
+        assert_eq!(fast.deadline(), PROBE_DEADLINE_FLOOR);
+
+        // A slow, jittery one would pass the cap; the cap holds.
+        let mut slow = ProbeClock::default();
+        slow.answered(3_000);
+        assert_eq!(slow.deadline(), PROBE_DEADLINE_CAP);
+    }
+
+    /// §5.5: a timeout doubles the next wait (bounded by the cap), the censored
+    /// sample never enters the average, and the next real answer ends the
+    /// doubling.
+    #[test]
+    fn a_probe_timeout_backs_off_and_an_answer_resets_it() {
+        let ms = |d: std::time::Duration| d.as_millis();
+        let mut clock = ProbeClock::default();
+        clock.answered(400); // 1200 ms
+        clock.timed_out();
+        assert_eq!(ms(clock.deadline()), 2400, "one timeout doubles the wait");
+        clock.timed_out();
+        assert_eq!(ms(clock.deadline()), 4800);
+        for _ in 0..20 {
+            clock.timed_out();
+        }
+        assert_eq!(
+            clock.deadline(),
+            PROBE_DEADLINE_CAP,
+            "and however many follow, the cap bounds it"
+        );
+        let before = clock;
+        clock.answered(400);
+        assert_eq!(
+            ms(clock.deadline()),
+            1000,
+            "an answer resets the doubling, and the timeouts left no trace in \
+             SRTT/RTTVAR (they were censored, not samples): {before:?} → {clock:?}"
+        );
     }
 }

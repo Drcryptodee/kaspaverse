@@ -641,7 +641,7 @@ void main() {
       );
 
       // BG-8's whole demand: dimmed cached truth WITH a visible age.
-      expect(find.text('as of 3 m ago'), findsOneWidget);
+      expect(find.text('as of 3\u00A0m ago'), findsOneWidget);
       expect(
         tester.widget<KvCadence>(find.byType(KvCadence)).running,
         isFalse,
@@ -711,7 +711,7 @@ void main() {
       );
       expect(
         find.text(
-          'node has no UTXO index — retrying another node\nas of 3 m ago',
+          'node has no UTXO index — retrying another node\nas of 3\u00A0m ago',
         ),
         findsOneWidget,
       );

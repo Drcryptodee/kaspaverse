@@ -98,6 +98,7 @@ void main() {
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
       final daa = ValueNotifier<BigInt?>(BigInt.from(523216421));
+      var probes = 0;
       final scope = NodeScope(
         connected: ValueNotifier<bool>(true),
         activeEndpoint: ValueNotifier<String?>('wss://isla.kaspa.red'),
@@ -110,9 +111,16 @@ void main() {
         osOffline: ValueNotifier<bool>(false),
         reconnecting: ValueNotifier<bool>(false),
         onReconnect: () async {},
-        blockAgeSecs: () async => 1,
-        probeLink: ({required bool peers}) async =>
-            (latencyMs: 151, peers: 14, synced: true),
+        tickPulse: () async => (ageSecs: 1, ticks: 1),
+        // A reading that CHANGES every probe — an identical one notifies
+        // nobody now (the reading has value equality), and this measures what
+        // a real change costs.
+        probeLink: ({required bool peers}) async => (
+          latencyMs: 150 + (probes++ % 2),
+          timedOutMs: null,
+          peers: 14,
+          synced: true,
+        ),
       );
       await tester.pumpWidget(_app(NodeScreen(scope: scope)));
       await tester.pump(const Duration(seconds: 1));
@@ -130,7 +138,6 @@ void main() {
       );
       for (final still in [
         'KvLatency',
-        'KvLatencyWord',
         'KvRollingText',
         '_NodeDisc',
         '_SwitchNode',
@@ -144,9 +151,10 @@ void main() {
         expect(tick[still] ?? 0, 0, reason: '$still rebuilt on a DAA tick');
       }
       expect(tick['_CardValue'], 1, reason: 'the DAA reading is the region');
+      // One poll period — twice a second since D-332.
       final probe = await rebuildsDuring(
         tester,
-        () => tester.pump(const Duration(seconds: 2)),
+        () => tester.pump(NodeScreen.pollEvery),
       );
       // **Before: 205** — `NodeScreen` itself, the scaffold, the top bar,
       // the toggle and every text field, through a whole-screen `setState`.

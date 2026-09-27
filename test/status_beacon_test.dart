@@ -251,18 +251,201 @@ void main() {
     });
   });
 
+  // ── LINK-Q1 (D-331(b)): the lamp holds on a bound socket; the data does not ─
+  //
+  // CONN-F1 measured it: on the founder's weak Starlink hop every stall on a
+  // live socket recovered in 5.25–7.50 s, and a five-second lamp turned amber
+  // for each one. The ruling moves the LAMP to fifteen seconds on a bound
+  // socket and leaves the DATA's clock — the balance's dim — at five.
+  group('evaluateBeacon — the lamp\'s hold (LINK-Q1)', () {
+    const hold = KvFreshness.liveHoldBound;
+
+    test('a bound socket\'s lamp stays live through a short stall', () {
+      for (final secs in [5, 6, 7, 10, 14]) {
+        expect(
+          evaluateBeacon(
+            connected: true,
+            age: Duration(seconds: secs),
+            error: null,
+            liveHold: hold,
+          ),
+          BeaconState.connected,
+          reason: 'a $secs s stall on a bound socket is not amber',
+        );
+      }
+      expect(
+        evaluateBeacon(connected: true, age: hold, error: null, liveHold: hold),
+        BeaconState.stale,
+        reason: 'past the hold it is — the boundary is stale, as it always was',
+      );
+    });
+
+    test('the hold is for a BOUND socket — a real drop is not held', () {
+      expect(
+        evaluateBeacon(
+          connected: false,
+          age: const Duration(seconds: 3),
+          error: null,
+          liveHold: hold,
+          sinceDrop: const Duration(seconds: 3),
+        ),
+        BeaconState.stale,
+        reason: 'past the churn grace a dropped link is stale at any age',
+      );
+      expect(
+        evaluateBeacon(
+          connected: false,
+          age: const Duration(seconds: 3),
+          error: null,
+          searching: true,
+          liveHold: hold,
+        ),
+        BeaconState.connecting,
+      );
+    });
+
+    test('the churn hold holds against the caller\'s clock', () {
+      // A silence swap's sub-second cut-over, eleven seconds into a silence:
+      // the lamp still calls the data live, so the drop must not flash amber.
+      expect(
+        evaluateBeacon(
+          connected: false,
+          age: const Duration(seconds: 11),
+          error: null,
+          liveHold: hold,
+          sinceDrop: const Duration(milliseconds: 600),
+        ),
+        BeaconState.connected,
+      );
+      // The data's own clock never held that — and still does not.
+      expect(
+        evaluateBeacon(
+          connected: false,
+          age: const Duration(seconds: 11),
+          error: null,
+          sinceDrop: const Duration(milliseconds: 600),
+        ),
+        BeaconState.stale,
+      );
+      expect(
+        KvFreshness.linkChurnGrace < KvFreshness.liveHoldBound,
+        isTrue,
+        reason: 'the churn hold can never outlast the lamp it holds',
+      );
+    });
+
+    test('a new socket that has not spoken, after a long quiet, is still '
+        'finding the chain — not an age the user is about to leave', () {
+      expect(
+        evaluateBeacon(
+          connected: true,
+          age: const Duration(minutes: 30),
+          error: null,
+          liveHold: hold,
+          awaitingScore: true,
+        ),
+        BeaconState.connecting,
+      );
+      // Once it speaks, the clock is fresh and the lamp is live; a socket that
+      // spoke and then went quiet past the hold IS stale.
+      expect(
+        evaluateBeacon(
+          connected: true,
+          age: const Duration(seconds: 20),
+          error: null,
+          liveHold: hold,
+        ),
+        BeaconState.stale,
+      );
+    });
+
+    test('without a hold the function is exactly what it was — the balance\'s '
+        'clock did not move', () {
+      // Exhaustive over the inputs the old function read, at every second
+      // across both lines: omitting `liveHold` must equal the pre-LINK-Q1 rule.
+      BeaconState old({
+        required bool connected,
+        required Duration? age,
+        required String? error,
+        required bool searching,
+        required bool osOffline,
+        required Duration? sinceDrop,
+      }) {
+        if (error == null &&
+            !connected &&
+            sinceDrop != null &&
+            sinceDrop < KvFreshness.linkChurnGrace &&
+            age != null &&
+            age < KvFreshness.staleAfter) {
+          return BeaconState.connected;
+        }
+        if (!connected && osOffline) return BeaconState.offline;
+        if (error != null) return BeaconState.error;
+        if (!connected && searching) return BeaconState.connecting;
+        if (age == null) return BeaconState.connecting;
+        if (!connected || age >= KvFreshness.staleAfter) {
+          return BeaconState.stale;
+        }
+        return BeaconState.connected;
+      }
+
+      final ages = <Duration?>[
+        null,
+        for (var s = 0; s <= 20; s++) Duration(seconds: s),
+      ];
+      final drops = <Duration?>[
+        null,
+        const Duration(milliseconds: 500),
+        const Duration(seconds: 3),
+      ];
+      for (final connected in [true, false]) {
+        for (final age in ages) {
+          for (final error in [null, 'x']) {
+            for (final searching in [true, false]) {
+              for (final osOffline in [true, false]) {
+                for (final sinceDrop in drops) {
+                  expect(
+                    evaluateBeacon(
+                      connected: connected,
+                      age: age,
+                      error: error,
+                      searching: searching,
+                      osOffline: osOffline,
+                      sinceDrop: sinceDrop,
+                    ),
+                    old(
+                      connected: connected,
+                      age: age,
+                      error: error,
+                      searching: searching,
+                      osOffline: osOffline,
+                      sinceDrop: sinceDrop,
+                    ),
+                    reason:
+                        'connected=$connected age=$age error=$error '
+                        'searching=$searching offline=$osOffline drop=$sinceDrop',
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+  });
+
   group('formatAge — floors, never overstates freshness', () {
     test(
       'seconds',
-      () => expect(formatAge(const Duration(seconds: 12)), '12 s'),
+      () => expect(formatAge(const Duration(seconds: 12)), '12\u00A0s'),
     );
     test(
       'minutes floor',
-      () => expect(formatAge(const Duration(seconds: 125)), '2 m'),
+      () => expect(formatAge(const Duration(seconds: 125)), '2\u00A0m'),
     );
     test(
       'hours floor',
-      () => expect(formatAge(const Duration(minutes: 130)), '2 h'),
+      () => expect(formatAge(const Duration(minutes: 130)), '2\u00A0h'),
     );
   });
 }

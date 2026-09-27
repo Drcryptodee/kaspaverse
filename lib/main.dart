@@ -94,9 +94,17 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
   reconnecting: chain.reconnecting,
   onReconnect: chain.reconnect,
   refreshConfig: () => chain.refreshNodeConfig(),
-  // The scan line the retired network sheet uniquely rendered, carried across
-  // (UX-3). `dagStatus` is a poll that takes no I/O in its steady state.
-  blockAgeSecs: () async => (await dagStatus()).lastBlockAgeSecs?.toInt(),
+  // The link's pulse (UX-3's carried scan line; since LINK-Q1 the DAA tick's
+  // age, and the tick count the screen turns into `DAA · 10 Hz`, D-332).
+  // `dagStatus` is a poll that takes no I/O in its steady state. The count is
+  // a process-lifetime tally of ticks, orders of magnitude under 2^53.
+  tickPulse: () async {
+    final status = await dagStatus();
+    return (
+      ageSecs: status.lastTickAgeSecs?.toInt(),
+      ticks: status.daaTicks.toInt(),
+    );
+  },
   // `T5`'s connection card: one `get_server_info` round trip (the latency and
   // the node's own `is_synced`) and, when asked, the node's peer count —
   // polled only while that screen is open, the peers on a slower cadence.
@@ -107,6 +115,8 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
     final probe = await dagProbeLink(withPeers: peers);
     return (
       latencyMs: probe.latencyMs?.toInt(),
+      // "At least" the socket's own deadline (D-333): a slow, live link.
+      timedOutMs: probe.timedOutMs?.toInt(),
       peers: probe.peers,
       synced: probe.synced,
     );
@@ -351,6 +361,7 @@ class _MoneyShellState extends State<_MoneyShell> {
       searching: widget.chain.searching,
       osOffline: widget.chain.osOffline,
       disconnectedAt: widget.chain.disconnectedAt,
+      awaitingScore: widget.chain.awaitingScore,
     ),
     wallet: WalletScope(
       mature: widget.wallet.mature,

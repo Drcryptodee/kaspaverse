@@ -13,10 +13,10 @@ import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/maturity.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_sheet.dart';
 
 /// A stand-in for `ChainService`'s node seam. Nothing here talks to Rust; the
@@ -94,20 +94,30 @@ class _FakeSeam {
   bool probeThrows = false;
   int probes = 0;
 
+  /// A round trip that outlasted the socket's deadline (D-333): the probe
+  /// answers "at least this", not nothing.
+  int? timedOutMs;
+
   /// The node's own word on its sync, as the probe reports it.
   bool? synced = true;
 
   /// Which ticks asked for the peer count, in order.
   final List<bool> peerAsks = <bool>[];
 
-  Future<({int? latencyMs, int? peers, bool? synced})> probe({
+  /// Holds each probe in flight until completed — for a probe that is still
+  /// out when the node it asked is forgotten.
+  Completer<void>? gate;
+
+  Future<({int? latencyMs, int? timedOutMs, int? peers, bool? synced})> probe({
     required bool peers,
   }) async {
     probes++;
     peerAsks.add(peers);
+    if (gate case final held?) await held.future;
     if (probeThrows) throw StateError('the node went away');
     return (
       latencyMs: latencyMs,
+      timedOutMs: timedOutMs,
       peers: peers ? this.peers : null,
       synced: synced,
     );
@@ -129,7 +139,7 @@ class _FakeSeam {
   }
 
   NodeScope scopeWith({
-    Future<int?> Function()? blockAgeSecs,
+    Future<({int? ageSecs, int ticks})> Function()? tickPulse,
     bool withProbe = false,
     bool withTest = false,
   }) => NodeScope(
@@ -145,7 +155,7 @@ class _FakeSeam {
     onReconnect: reconnect,
     lastUpdate: lastUpdate,
     refreshConfig: refresh,
-    blockAgeSecs: blockAgeSecs,
+    tickPulse: tickPulse,
     probeLink: withProbe ? probe : null,
     testNode: withTest ? testNode : null,
   );
@@ -246,8 +256,8 @@ void pollLifecycleTests() {
       await _pumpScreen(tester, seam, withProbe: true, settle: false);
       await tester.pump();
       expect(seam.probes, 1, reason: 'the open ticks at once');
-      await tester.pump(const Duration(seconds: 2));
-      expect(seam.probes, 2);
+      await tester.pump(NodeScreen.pollEvery);
+      expect(seam.probes, 2, reason: 'and again one period later (D-332)');
 
       // The binding only accepts the transitions the OS makes: resumed →
       // inactive → hidden → paused, and back the same way.
@@ -296,47 +306,51 @@ void pollLifecycleTests() {
           builder: (_) => const Scaffold(body: SizedBox()),
         ),
       );
-      // Pumped by hand: the latency dot breathes for as long as there is a
-      // reading, so a settle would wait on an animation whose whole point is
-      // not to stop. The route's own transition is well inside 400 ms.
+      // Pumped by hand. The route's own transition is well inside 400 ms —
+      // and at two polls a second (D-332) one may land while the new route is
+      // still sliding over a screen that is still visible, which is the gate
+      // doing its job. Count from the moment the route has covered it.
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
+      final covered = seam.probes;
       await tester.pump(const Duration(seconds: 6));
       expect(
         seam.probes,
-        1,
+        covered,
         reason: 'a covered screen asks the node for nothing',
       );
 
       navigator.pop();
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      expect(seam.probes, 2, reason: 'and asks the moment it is back');
+      expect(
+        seam.probes,
+        greaterThan(covered),
+        reason: 'and asks the moment it is back',
+      );
       await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets(
-      'the peer count is asked for on the first tick and every fifth',
+      'the peer count is asked for on the first tick and every ten seconds',
       (tester) async {
         final seam = _FakeSeam()
           ..latencyMs = 80
           ..peers = 9;
         await _pumpScreen(tester, seam, withProbe: true, settle: false);
         await tester.pump();
-        for (var i = 0; i < 9; i++) {
-          await tester.pump(const Duration(seconds: 2));
+        for (var i = 0; i < 2 * NodeScreen.peersEvery - 1; i++) {
+          await tester.pump(NodeScreen.pollEvery);
         }
+        // Twice a second for the latency (D-332), still every ten seconds for
+        // a number that changes over minutes.
+        expect(
+          NodeScreen.pollEvery * NodeScreen.peersEvery,
+          const Duration(seconds: 10),
+        );
         expect(seam.peerAsks, [
-          true,
-          false,
-          false,
-          false,
-          true,
-          false,
-          false,
-          false,
-          false,
-          true,
+          for (var tick = 1; tick <= 2 * NodeScreen.peersEvery; tick++)
+            tick == 1 || tick % NodeScreen.peersEvery == 0,
         ]);
         // Between asks the last answer stands — a number that was not asked
         // for is not a number that went missing.
@@ -489,7 +503,7 @@ Future<void> _pumpScreen(
   _FakeSeam seam, {
   _FakeExplorer? explorer,
   _FakeRate? rate,
-  Future<int?> Function()? blockAge,
+  Future<({int? ageSecs, int ticks})> Function()? pulse,
   bool withProbe = false,
   bool withTest = false,
   // `T5`'s SOURCES rows open their controls in a sheet; a test about one
@@ -504,7 +518,12 @@ Future<void> _pumpScreen(
   // A dark link is a link being hunted, so the cadence runs and "settled"
   // never arrives — which is the meter doing its job, not a test problem.
   bool settle = true,
+  // The screen's clock. Fixed by default so an age reads the same on every
+  // run; a test about a RATE passes the fake-async clock, which advances.
+  DateTime Function()? clock,
 }) async {
+  // No reading may leak from one test's screen into the next one's first frame.
+  NodeScreen.forgetLatency();
   tester.view.physicalSize = Size(width, height);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -527,13 +546,13 @@ Future<void> _pumpScreen(
         builder: (context, page) => KvWindow(child: page!),
         home: NodeScreen(
           scope: seam.scopeWith(
-            blockAgeSecs: blockAge,
+            tickPulse: pulse,
             withProbe: withProbe,
             withTest: withTest,
           ),
           explorer: explorer?.scope,
           rate: rate?.scope,
-          clock: () => DateTime(2026, 8, 27, 12),
+          clock: clock ?? () => DateTime(2026, 8, 27, 12),
         ),
       ),
     ),
@@ -605,87 +624,426 @@ void main() {
     });
 
     group('`T5` — the connection card reads a measurement', () {
-      testWidgets('the latency, its tier and its bars come from the probe', (
+      testWidgets('the latency and its bars come from the probe — no word', (
         tester,
       ) async {
         final seam = _FakeSeam()
           ..latencyMs = 151
           ..peers = 14;
-        // `settle: false`: a live latency reading breathes its dot, so the
-        // card never settles — the same reason the harness already documents
-        // for a dark link. Two pumps let the async probe's microtask land.
         await _pumpScreen(tester, seam, withProbe: true, settle: false);
         await tester.pump();
         await tester.pump();
 
-        // The render's own reading: 151 ms, three amber bars, `Slow` — the
-        // `< 300` band exactly (§4, checked against `T5` rather than assumed).
-        expect(find.text('Slow'), findsOneWidget);
+        // The render's own reading: 151 ms, three amber bars — the `< 300`
+        // band exactly. **No `Slow`** since D-332: the bars and their colour
+        // carry the tier; the word is spoken, not drawn.
+        expect(find.text('151'), findsOneWidget);
         expect(find.text('ms'), findsOneWidget);
+        expect(find.text('Slow'), findsNothing);
+        final handle = tester.ensureSemantics();
+        await tester.pump();
+        // The card's row merges its semantics, so a reader hears the caps
+        // label and the reading as one node — the reading, word included, is
+        // inside it.
         expect(
-          KvLatency.tierFor(151).bars,
-          3,
-          reason: 'the tier the card is drawing',
+          find.bySemanticsLabel(
+            RegExp(r'Connection latency 151 milliseconds\. Slow\.'),
+          ),
+          findsOneWidget,
         );
+        handle.dispose();
         expect(find.text('14'), findsOneWidget, reason: "the node's peers");
         expect(seam.probes, greaterThan(0));
+        await tester.pumpWidget(const SizedBox());
       });
 
-      testWidgets('a failed probe CLEARS the reading rather than holding it', (
-        tester,
-      ) async {
-        // The opposite of what the block-age poll does with its last value, and
-        // deliberately so: a block age that stops advancing is itself the
-        // signal and the line says how old it is, but a latency measures *this*
-        // round trip — so a stale 42 ms beside a dead socket would be a
-        // confident wrong number rather than an old true one (BG-8).
-        final seam = _FakeSeam()
-          ..latencyMs = 42
-          ..peers = 9;
-        // `settle: false`: a live latency reading breathes its dot, so the
-        // card never settles — the same reason the harness already documents
-        // for a dark link. Two pumps let the async probe's microtask land.
-        await _pumpScreen(tester, seam, withProbe: true, settle: false);
-        await tester.pump();
-        await tester.pump();
-        expect(find.text('Fast'), findsOneWidget);
+      testWidgets(
+        'a timeout reads "at least", never "nothing" — the seat stays lit '
+        '(D-333)',
+        (tester) async {
+          // Peers answered on the first tick, so the only dash that could
+          // appear below is the latency's own.
+          final seam = _FakeSeam()
+            ..latencyMs = 120
+            ..peers = 7;
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('120'), findsOneWidget);
 
-        seam.probeThrows = true;
-        await tester.pump(const Duration(seconds: 2));
-        await tester.pump();
-        expect(find.text('Fast'), findsNothing);
-        expect(find.text('No reading'), findsOneWidget);
-        expect(find.text('9'), findsNothing, reason: 'the peer count went too');
-      });
+          // Two probes outlast the socket's deadline: a slow, live link.
+          seam
+            ..latencyMs = null
+            ..timedOutMs = 1800;
+          for (var i = 0; i < 2; i++) {
+            await tester.pump(NodeScreen.pollEvery);
+            await tester.pump();
+          }
+          expect(find.text('> 1.8'), findsOneWidget);
+          expect(find.text('s'), findsOneWidget);
+          expect(find.text('—'), findsNothing, reason: 'never drawn dark');
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+
+      testWidgets(
+        'one refused probe never blanks the seat; three in a row do (D-333)',
+        (tester) async {
+          final seam = _FakeSeam()
+            ..latencyMs = 42
+            ..peers = 9;
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('42'), findsOneWidget);
+
+          seam.probeThrows = true;
+          for (var refused = 1; refused < 3; refused++) {
+            await tester.pump(NodeScreen.pollEvery);
+            await tester.pump();
+            expect(
+              find.text('42'),
+              findsOneWidget,
+              reason: 'refusal $refused of 3: the reading stands',
+            );
+          }
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+          expect(find.text('42'), findsNothing, reason: 'the third goes dark');
+          expect(find.text('—'), findsNWidgets(2));
+          expect(find.text('9'), findsNothing, reason: 'the peer count too');
+
+          // The link answers again: the count dashed by the dwell is owed, so
+          // the first answer brings it back (`ux-auditor` N8).
+          seam.probeThrows = false;
+          final asked = seam.peerAsks.length;
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+          expect(seam.peerAsks[asked], isTrue, reason: 'peers owed after dark');
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.text('9'), findsOneWidget);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
 
       testWidgets('a dropped link cannot leave a latency standing', (
         tester,
       ) async {
-        // The probe clears itself on a failure, but the poll runs at 2 s while
-        // the notifiers are pushed — so a socket that dropped a moment ago
-        // could hold the last good number for one tick. The card gates on
-        // `connected` to close that window without waiting for the probe.
+        // The house rule behind the old wipe stands (BG-8): no number beside
+        // a dead socket. A drop clears the seat at once, dwell or no dwell.
         final seam = _FakeSeam()..latencyMs = 42;
-        // `settle: false`: a live latency reading breathes its dot, so the
-        // card never settles — the same reason the harness already documents
-        // for a dark link. Two pumps let the async probe's microtask land.
         await _pumpScreen(tester, seam, withProbe: true, settle: false);
         await tester.pump();
         await tester.pump();
-        expect(find.text('Fast'), findsOneWidget);
+        expect(find.text('42'), findsOneWidget);
 
         seam.connected.value = false;
         await tester.pump();
-        expect(find.text('Fast'), findsNothing);
-        expect(find.text('No reading'), findsOneWidget);
+        expect(find.text('42'), findsNothing);
+        expect(find.text('—'), findsWidgets);
+
+        // …and the reading does not come back with the next socket: it
+        // belonged to the one that died.
+        seam
+          ..latencyMs = null
+          ..probeThrows = true;
+        seam.connected.value = true;
+        await tester.pump();
+        expect(find.text('42'), findsNothing);
+        await tester.pumpWidget(const SizedBox());
       });
+
+      testWidgets(
+        'the last reading shows at once on open, dimmed with its age, then '
+        'counts to the first fresh answer (D-333)',
+        (tester) async {
+          final seam = _FakeSeam()..latencyMs = 90;
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('90'), findsOneWidget);
+          await tester.pumpWidget(const SizedBox());
+
+          // Reopen without the memory wipe the harness does: the probe will
+          // not answer before the first frame is looked at.
+          final again = _FakeSeam()..probeThrows = true;
+          tester.view.physicalSize = const Size(393, 800);
+          tester.view.devicePixelRatio = 1;
+          await tester.pumpWidget(
+            MediaQuery(
+              data: const MediaQueryData(size: Size(393, 800)),
+              child: MaterialApp(
+                theme: kvDarkTheme(),
+                builder: (context, page) => KvWindow(child: page!),
+                home: NodeScreen(
+                  scope: again.scopeWith(withProbe: true),
+                  clock: () => DateTime(2026, 8, 27, 12, 0, 20),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          expect(
+            find.text('90'),
+            findsOneWidget,
+            reason: 'shown at once, not a dash',
+          );
+          expect(find.text('as of 20\u00A0s ago'), findsOneWidget);
+          expect(
+            _seatDim(tester, find.text('90')),
+            KvFreshness.opacityStaleRegion,
+          );
+
+          // The first fresh answer: it counts, and the age and the dim leave
+          // together over the house's calm step — eased, never cut (BG-24).
+          again
+            ..probeThrows = false
+            ..latencyMs = 130;
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 40));
+          final shown = tester
+              .widgetList<Text>(find.byType(Text))
+              .map((t) => int.tryParse(t.data ?? ''))
+              .whereType<int>()
+              .where((n) => n > 90 && n < 130);
+          expect(shown, isNotEmpty, reason: 'it counts from 90 toward 130');
+          expect(
+            find.text('as of 20\u00A0s ago'),
+            findsOneWidget,
+            reason: 'the age eases out with the dim; it is not cut',
+          );
+          await tester.pump(const Duration(seconds: 1));
+          expect(find.text('130'), findsOneWidget);
+          expect(find.text('as of 20\u00A0s ago'), findsNothing);
+          expect(_seatDim(tester, find.text('130')), 1.0);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+
+      testWidgets(
+        'a carried reading is where the count starts, never a sample — the '
+        'first fresh outcome stands alone, a timeout included (ux-auditor)',
+        (tester) async {
+          // A remembered median of three: [40, 42, 45] reads 42. Merged with
+          // the first fresh outcome, the window's median would be 45 either
+          // way — an old figure at full brightness, as if fresh.
+          final memory = const KvLatencyReading.none()
+              .offer(const KvLatencySample.answered(40))
+              .offer(const KvLatencySample.answered(42))
+              .offer(const KvLatencySample.answered(45));
+          final at = DateTime(2026, 8, 27, 12, 0, 20);
+          for (final (latencyMs, timedOutMs, shows) in const [
+            (300, null, '300'),
+            (null, 1800, '> 1.8'),
+          ]) {
+            final seam = _FakeSeam()..probeThrows = true;
+            NodeScreen.carryLatency(
+              reading: memory,
+              at: at.subtract(const Duration(seconds: 20)),
+              endpoint: seam.activeEndpoint.value!,
+            );
+            await _reopen(tester, seam, at: at);
+            await tester.pump();
+            expect(find.text('42'), findsOneWidget, reason: 'carried, at once');
+            expect(find.text('as of 20\u00A0s ago'), findsOneWidget);
+
+            seam
+              ..probeThrows = false
+              ..latencyMs = latencyMs
+              ..timedOutMs = timedOutMs;
+            await tester.pump(NodeScreen.pollEvery);
+            await tester.pump();
+            await tester.pump(const Duration(seconds: 1));
+            expect(find.text(shows), findsOneWidget);
+            expect(find.text('45'), findsNothing);
+            expect(find.text('as of 20\u00A0s ago'), findsNothing);
+            expect(_seatDim(tester, find.text(shows)), 1.0);
+            await tester.pumpWidget(const SizedBox());
+          }
+        },
+      );
+
+      testWidgets(
+        'a missed peers poll keeps the last count — only the dwell goes dark',
+        (tester) async {
+          final seam = _FakeSeam()
+            ..latencyMs = 42
+            ..peers = 9;
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('9'), findsOneWidget);
+
+          // The link slows past its deadline; a timed-out probe carries no
+          // peers, and the next ask for them lands inside the slow spell.
+          seam
+            ..latencyMs = null
+            ..timedOutMs = 1800
+            ..peers = null;
+          final asked = seam.peerAsks.where((ask) => ask).length;
+          for (var i = 0; i < NodeScreen.peersEvery; i++) {
+            await tester.pump(NodeScreen.pollEvery);
+            await tester.pump();
+          }
+          expect(
+            seam.peerAsks.where((ask) => ask).length,
+            greaterThan(asked),
+            reason: 'a peers poll landed on a timed-out probe',
+          );
+          expect(
+            find.text('9'),
+            findsOneWidget,
+            reason: 'one miss never blanks the count (L144: the whole class)',
+          );
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+
+      testWidgets(
+        "a different node never inherits the last one's peers or sync word "
+        '(ux-auditor)',
+        (tester) async {
+          final seam = _FakeSeam()
+            ..latencyMs = 42
+            ..peers = 9
+            ..synced = false;
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('9'), findsOneWidget);
+          expect(find.text('DAA · syncing'), findsOneWidget);
+
+          // A drop, and the link comes back on the SAME endpoint — so only
+          // the drop can clear what the socket that died measured. Its probes
+          // all time out, so nothing it answers could overwrite the old words.
+          seam
+            ..latencyMs = null
+            ..timedOutMs = 1800
+            ..peers = null
+            ..synced = true;
+          seam.connected.value = false;
+          await tester.pump();
+          seam.connected.value = true;
+          for (var i = 0; i < NodeScreen.peersEvery + 2; i++) {
+            await tester.pump(NodeScreen.pollEvery);
+            await tester.pump();
+          }
+          expect(
+            find.text('9'),
+            findsNothing,
+            reason: 'measured on the socket that died',
+          );
+          expect(find.text('DAA · syncing'), findsNothing);
+          await tester.pumpWidget(const SizedBox());
+
+          // And a swap the stream coalesced into one snapshot — a new node
+          // named with no drop between — clears the same readings.
+          final swap = _FakeSeam()
+            ..latencyMs = 42
+            ..peers = 9;
+          await _pumpScreen(tester, swap, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('42'), findsOneWidget);
+          swap
+            ..latencyMs = null
+            ..timedOutMs = 1800
+            ..peers = null;
+          swap.activeEndpoint.value = 'wss://next.kaspa.example:17110';
+          await tester.pump();
+          expect(
+            find.text('42'),
+            findsNothing,
+            reason: "the old node's reading",
+          );
+          expect(find.text('9'), findsNothing);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+
+      testWidgets(
+        "an answer still in flight when its node is forgotten is dropped, and "
+        'the next probe asks for the peers (ux-auditor N1, N2)',
+        (tester) async {
+          final seam = _FakeSeam()
+            ..latencyMs = 42
+            ..peers = 9
+            ..gate = Completer<void>();
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          // The first probe is out. The node changes under it, and then it
+          // lands — with the OLD node's answer.
+          seam.activeEndpoint.value = 'wss://next.kaspa.example:17110';
+          await tester.pump();
+          seam.gate!.complete();
+          await tester.pump();
+          await tester.pump();
+          expect(
+            find.text('42'),
+            findsNothing,
+            reason: "the old node's answer",
+          );
+          expect(find.text('9'), findsNothing);
+
+          // The next probe asks for the peers at once — not ten seconds on.
+          seam
+            ..gate = null
+            ..latencyMs = 55
+            ..peers = 12;
+          final asked = seam.peerAsks.length;
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+          expect(seam.peerAsks.length, greaterThan(asked));
+          expect(seam.peerAsks[asked], isTrue, reason: 'peers asked at once');
+          await tester.pump(const Duration(seconds: 1));
+          expect(find.text('12'), findsOneWidget);
+          // Answered, the ask is spent: back to every ten seconds, never every
+          // probe (N6 — a debt left standing would ask twice a second).
+          final after = seam.peerAsks.length;
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+          expect(seam.peerAsks.length, greaterThan(after));
+          expect(seam.peerAsks.skip(after), everyElement(isFalse));
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+
+      testWidgets(
+        'a first probe that times out leaves the peers owed, not dashed for '
+        'ten seconds (ux-auditor N8)',
+        (tester) async {
+          final seam = _FakeSeam()
+            ..latencyMs = null
+            ..timedOutMs = 1800
+            ..peers = null;
+          await _pumpScreen(tester, seam, withProbe: true, settle: false);
+          await tester.pump();
+          await tester.pump();
+          seam
+            ..latencyMs = 60
+            ..timedOutMs = null
+            ..peers = 7;
+          final asked = seam.peerAsks.length;
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+          expect(seam.peerAsks[asked], isTrue, reason: 'still owed');
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.text('7'), findsOneWidget);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
 
       testWidgets('with no probe seam the card is dashed, never zeroed', (
         tester,
       ) async {
         await _pumpScreen(tester, _FakeSeam(), settle: false);
         await tester.pump();
-        expect(find.text('No reading'), findsOneWidget);
+        expect(
+          find.text('No reading'),
+          findsNothing,
+          reason: 'no word (D-332)',
+        );
         expect(find.text('0'), findsNothing);
         expect(
           find.text('—'),
@@ -701,9 +1059,8 @@ void main() {
         // transport is encrypted is a property of the URL the socket actually
         // bound. A `ws://` node must not be reported as TLS.
         final seam = _FakeSeam();
-        // `settle: false`: a live latency reading breathes its dot, so the
-        // card never settles — the same reason the harness already documents
-        // for a dark link. Two pumps let the async probe's microtask land.
+        // `settle: false` and two pumps, as in the latency tests: the pumps let
+        // the async probe's microtask land.
         await _pumpScreen(tester, seam, withProbe: true, settle: false);
         await tester.pump();
         await tester.pump();
@@ -813,7 +1170,7 @@ void main() {
       seam.activeEndpoint.value = null;
       await _pumpScreen(tester, seam, settle: false);
       expect(find.text('523,216,421'), findsOneWidget);
-      expect(find.text('as of 3 m ago'), findsOneWidget);
+      expect(find.text('as of 3\u00A0m ago'), findsOneWidget);
       for (final o in tester.widgetList<Opacity>(find.byType(Opacity))) {
         if (o.opacity >= 1) continue;
         for (final t in tester.widgetList<Text>(
@@ -1464,36 +1821,280 @@ void main() {
     });
   });
 
-  group('the block age rides the DAA row (2026-09-05)', () {
-    testWidgets('blocks landing reads streaming; a quiet node says how long', (
+  group('the link\'s pulse rides the DAA row (2026-09-05; D-332, D-334)', () {
+    testWidgets(
+      'a beating link reads its rate in Hz; a quiet one says how long since '
+      'its last block',
+      (tester) async {
+        // Ten ticks a second: five more at every half-second poll.
+        var ticks = 0;
+        final seam = _FakeSeam();
+        await _pumpScreen(
+          tester,
+          seam,
+          pulse: () async {
+            ticks += 5;
+            return (ageSecs: 0, ticks: ticks);
+          },
+          settle: false,
+          clock: () => tester.binding.clock.now(),
+        );
+        await tester.pump();
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+        expect(find.text('DAA · 10 Hz'), findsOneWidget);
+        expect(find.text('DAA · streaming'), findsNothing, reason: 'D-332');
+        await tester.pumpWidget(const SizedBox());
+
+        final quiet = _FakeSeam();
+        await _pumpScreen(
+          tester,
+          quiet,
+          pulse: () async => (ageSecs: 12, ticks: 100),
+          settle: false,
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(
+          tester
+              .widget<Text>(find.text('DAA · 12\u00A0s since last block'))
+              .data,
+          'DAA · 12\u00A0s since last block',
+          reason: 'an age inside a sentence is a word, as S1 sets it (D-261)',
+        );
+        expect(
+          find.text('DAA · 12\u00A0s since last block'),
+          findsOneWidget,
+          reason:
+              "D-332's ruled words: the age is the tick's since LINK-Q1, and a "
+              'tick is blocks landing',
+        );
+        await tester.pumpWidget(const SizedBox());
+
+        // Past a minute the age rolls to minutes, as every age does
+        // (`formatAge`, `ux-auditor` N3).
+        await _pumpScreen(
+          tester,
+          _FakeSeam(),
+          pulse: () async => (ageSecs: 125, ticks: 100),
+          settle: false,
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('DAA · 2\u00A0m since last block'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets('a stall is watched falling toward 0 and recovering', (
       tester,
     ) async {
-      final seam = _FakeSeam();
-      await _pumpScreen(tester, seam, blockAge: () async => 1, settle: false);
+      var ticks = 0;
+      var beating = true;
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async {
+          if (beating) ticks += 5;
+          return (ageSecs: beating ? 0 : 1, ticks: ticks);
+        },
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
       await tester.pump();
+      await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      expect(find.text('DAA · streaming'), findsOneWidget);
-      // A fresh mount: pumping a second seam into the same tree reuses the
-      // state, whose poll would only read the new age on its next tick.
-      await tester.pumpWidget(const SizedBox());
+      expect(find.text('DAA · 10 Hz'), findsOneWidget);
 
-      final quiet = _FakeSeam();
-      await _pumpScreen(tester, quiet, blockAge: () async => 12, settle: false);
+      // Over the three-second window it falls, and only a whole window of
+      // silence reads 0 (the founder on glass, 2026-09-27).
+      beating = false;
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      // A one-digit rate sits in the two-figure slot — a monospace space
+      // holds the tens place, so ` Hz` does not step (`ux-auditor`).
+      expect(
+        find.text('DAA ·  0 Hz'),
+        findsNothing,
+        reason: 'two seconds of silence is not yet a window of it',
+      );
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      expect(find.text('DAA ·  0 Hz'), findsOneWidget);
+      expect(
+        tester.getSemantics(find.text('DAA ·  0 Hz')).label,
+        contains('DAA · 0 Hz'),
+        reason: 'the slot is typography; the spoken figure has no gap',
+      );
+
+      // The backlog lands at once, then the beat.
+      beating = true;
+      ticks += 40;
+      await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      await tester.pump();
-      expect(find.text('DAA · 12 s since last block'), findsOneWidget);
-      expect(find.text('DAA · streaming'), findsNothing);
+      final burst = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data ?? t.textSpan?.toPlainText() ?? '')
+          .firstWhere((d) => d.startsWith('DAA · ') && d.endsWith(' Hz'));
+      expect(
+        double.parse(burst.substring(6, burst.length - 3)),
+        greaterThan(10),
+        reason: 'the recovery shows as the backlog arriving',
+      );
       await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a tick in the window is never read as a stall: fewer than one '
+        'a second reads "< 1", and only a window of none reads 0', (
+      tester,
+    ) async {
+      // One tick lands at the second poll, then nothing: over the widening
+      // window the rate falls through 2 and 1 to a third of a tick a second,
+      // which a whole number would round to the stall face 0 (BG-20).
+      var polls = 0;
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async {
+          polls++;
+          return (ageSecs: 0, ticks: polls >= 2 ? 101 : 100);
+        },
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      expect(find.text('DAA · < 1 Hz'), findsOneWidget);
+      expect(find.text('DAA ·  0 Hz'), findsNothing);
+      for (var i = 0; i < 2; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      expect(
+        find.text('DAA ·  0 Hz'),
+        findsOneWidget,
+        reason: 'the tick has left the window: now it is a stall',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets("the label's figure is mono and tabular; its words are not "
+        '(BG-30)', (tester) async {
+      var ticks = 0;
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async {
+          ticks += 5;
+          return (ageSecs: 0, ticks: ticks);
+        },
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      final label = tester.widget<Text>(find.text('DAA · 10 Hz'));
+      final runs = <(String, String?)>[];
+      label.textSpan!.visitChildren((span) {
+        if (span is TextSpan && span.text != null) {
+          runs.add((span.text!, span.style?.fontFamily));
+        }
+        return true;
+      });
+      expect(runs, const [
+        ('DAA · ', null),
+        ('10', KvFont.mono),
+        (' Hz', null),
+      ], reason: 'the unit holds still while the rate moves');
+      expect(
+        tester.getSemantics(find.text('DAA · 10 Hz')).label,
+        contains('DAA · 10 Hz'),
+        reason: 'one reading, heard as written',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the DAA lamp holds live to the hold on a bound socket', (
+      tester,
+    ) async {
+      // The same law as the money plate's chip (D-331(b)): a short stall is
+      // not amber on either surface.
+      for (final (age, tone) in const [
+        (7, KvLampTone.ok),
+        (16, KvLampTone.warn),
+      ]) {
+        await _pumpScreen(
+          tester,
+          _FakeSeam(),
+          pulse: () async => (ageSecs: age, ticks: 1),
+          settle: false,
+        );
+        await tester.pump();
+        await tester.pump();
+        final lamps = tester.widgetList<KvLamp>(find.byType(KvLamp));
+        expect(
+          lamps.map((l) => l.tone),
+          contains(tone),
+          reason: 'a $age s silence on a bound socket',
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
     });
 
     testWidgets('the DAA reading still refuses to wrap at 320dp', (
       tester,
     ) async {
       final seam = _FakeSeam();
-      await _pumpScreen(tester, seam, width: 320, blockAge: () async => 1);
+      await _pumpScreen(
+        tester,
+        seam,
+        width: 320,
+        pulse: () async => (ageSecs: 1, ticks: 1),
+      );
       final figure = tester.widget<Text>(find.text('523,216,421'));
       expect(figure.maxLines, 1);
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('KvTickRate — the beat, from a count and a clock', () {
+    test('ticks over the most recent three seconds, never the whole '
+        'session', () {
+      final rate = KvTickRate();
+      final t0 = DateTime(2026, 9, 26, 12);
+      expect(rate.offer(t0, 100), isNull, reason: 'one sample is no rate');
+      expect(rate.offer(t0.add(const Duration(milliseconds: 500)), 105), 10.0);
+      expect(rate.offer(t0.add(const Duration(seconds: 1)), 110), 10.0);
+      // A long quiet then a burst: the span is the last window, so the burst
+      // reads as a burst rather than being averaged into the whole session.
+      for (var i = 3; i <= 10; i++) {
+        rate.offer(t0.add(Duration(milliseconds: 500 * i)), 110);
+      }
+      expect(rate.offer(t0.add(const Duration(milliseconds: 5500)), 110), 0.0);
+      expect(
+        rate.offer(t0.add(const Duration(seconds: 6)), 170),
+        20.0,
+        reason: 'sixty ticks over the last three seconds',
+      );
+    });
+
+    test('a count that goes backwards or a clock that stands still starts '
+        'over, rather than printing nonsense', () {
+      final rate = KvTickRate();
+      final t0 = DateTime(2026, 9, 26, 12);
+      rate.offer(t0, 100);
+      expect(rate.offer(t0, 105), isNull);
+      expect(rate.offer(t0.add(const Duration(seconds: 1)), 50), isNull);
+      rate.reset();
+      expect(rate.offer(t0.add(const Duration(seconds: 2)), 60), isNull);
     });
   });
 
@@ -1681,7 +2282,7 @@ void main() {
       // Every significant digit, no trailing zeros (D-210).
       expect(find.text('\$0.0712'), findsOneWidget);
       expect(find.text('Price, per KAS'), findsOneWidget);
-      expect(find.textContaining('30 s ago'), findsOneWidget);
+      expect(find.textContaining('30\u00A0s ago'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -1942,3 +2543,38 @@ Widget _home({required NodeScope? node, required DateTime now}) => MaterialApp(
     clock: () => now,
   ),
 );
+
+/// The latency seat's dim over [figure]: the product of the eased opacities
+/// above it — their targets, which an implicit animation's first frame is
+/// already at, and which a finished one has reached.
+double _seatDim(WidgetTester tester, Finder figure) => tester
+    .widgetList<AnimatedOpacity>(
+      find.ancestor(of: figure, matching: find.byType(AnimatedOpacity)),
+    )
+    .map((o) => o.opacity)
+    .fold(1.0, (a, b) => a * b);
+
+/// Open the screen over whatever latency memory is standing, as a user
+/// reopening it would — [_pumpScreen] wipes that memory on purpose.
+Future<void> _reopen(
+  WidgetTester tester,
+  _FakeSeam seam, {
+  required DateTime at,
+}) async {
+  tester.view.physicalSize = const Size(393, 800);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    MediaQuery(
+      data: const MediaQueryData(size: Size(393, 800)),
+      child: MaterialApp(
+        theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
+        home: NodeScreen(
+          scope: seam.scopeWith(withProbe: true),
+          clock: () => at,
+        ),
+      ),
+    ),
+  );
+}

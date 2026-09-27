@@ -252,7 +252,9 @@ void main() {
     await tester.pump(const Duration(seconds: 1)); // the 1 s ticker fires
     // The plate has the room the 320dp header did not, so the trust line
     // wears the network sheet's fuller phrasing (D-196: shipped strings).
-    expect(find.text('as of 12 s ago'), findsOneWidget);
+    // Twelve seconds on a bound socket is inside the lamp's hold (D-331(b)):
+    // the data is stale, the link is not, and the line says both in words.
+    expect(find.text('connected · last update 12\u00A0s ago'), findsOneWidget);
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
     // **And the word says which one it is** (BG-20, UX-5): a stale link has no
@@ -332,7 +334,7 @@ void main() {
     );
     // The time rides the sub-line after the lifecycle word (`Final · 2 m
     // ago`, render `S1`, D-261).
-    expect(find.textContaining('2 m ago'), findsOneWidget);
+    expect(find.textContaining('2\u00A0m ago'), findsOneWidget);
 
     // A minute passes on the wall clock, but the 1 s ticker never fires
     // (zero-duration pumps) — only the balance notifies.
@@ -343,8 +345,8 @@ void main() {
 
     // The panel repainted (new number), the feed did not (old age line).
     expectFigure('3', '00');
-    expect(find.textContaining('2 m ago'), findsOneWidget);
-    expect(find.text('3 m ago'), findsNothing);
+    expect(find.textContaining('2\u00A0m ago'), findsOneWidget);
+    expect(find.text('3\u00A0m ago'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 

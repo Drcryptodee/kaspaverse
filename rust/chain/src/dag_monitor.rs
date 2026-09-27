@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,12 +34,14 @@ use crate::transport::{self, TransportEvent};
 /// (`consensus-auditor`, UX-R3 second beat).
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// **The deadline on one `probe_link` round trip.** Under the node surface's
-/// 2 s poll, so a stalled node cannot stack in-flight probes and a reading can
-/// never be older than the cadence that asked for it. Deliberately NOT
-/// [`PROBE_TIMEOUT`], which is the connect race's per-round budget: two
-/// different errands, two names (BG-21's shape one layer down).
-const LINK_PROBE_TIMEOUT: Duration = Duration::from_millis(1_800);
+// **The deadline on one `probe_link` round trip is no longer a constant**
+// (LINK-Q1, D-333). It was a fixed 1.8 s, and on the founder's Starlink hop an
+// ordinary answer past it blanked the reading — a slow, live link drawn as no
+// link. Each bound socket now carries its own RFC 6298 clock
+// (`link::ProbeClock`: SRTT + 4·RTTVAR, floored 1 s, capped 5 s, doubled on a
+// timeout), and a timeout is reported as "at least the deadline" rather than
+// as nothing. Still deliberately NOT [`PROBE_TIMEOUT`], the connect race's
+// per-round budget: two different errands, two names (BG-21 one layer down).
 
 /// Bind budget for the shared socket's dial to the race winner — the node
 /// answered a probe milliseconds ago, so a healthy bind is fast; a node that
@@ -137,10 +139,34 @@ enum RaceMode {
     /// signalling a new network). Unbounded rounds: the wallet is dark and
     /// only a node fixes that.
     Cold,
-    /// A live bind is up and the user asked for a different node. Bounded by
+    /// A live bind is up and a different node is wanted. Bounded by
     /// [`SWAP_HUNT_ROUNDS`]; `from` is the incumbent, excluded from every
-    /// round's candidate set.
-    Swap { from: String },
+    /// round's candidate set; `why` says who wanted it, which decides one
+    /// thing only — whether the incumbent speaking again ends the hunt.
+    Swap { from: String, why: SwapWhy },
+}
+
+/// The cause a silence swap's winner retires its incumbent under — the one
+/// token the race's winner arm chooses ([`DagMonitor::retire_cause`]), the
+/// silence budget counts on, and the soak judge reads (`consensus-auditor`
+/// delta CONCERNS-A′: a budget keyed on a log label matching by hand).
+const SILENCE_SWAP: &str = "silence-swap";
+
+/// Why a swap hunt runs — and so whether its incumbent can call it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwapWhy {
+    /// The user tapped for a different node. The incumbent speaking changes
+    /// nothing: they asked to leave it, not to wait for it.
+    Asked,
+    /// The incumbent went quiet past its silence deadline (LINK-Q1). `gen`
+    /// names that socket and `ticks` is its tick count when the hunt began, so
+    /// the hunt stands down if it comes back
+    /// ([`link::silent_incumbent_spoke_again`]) — the founder's "keep the
+    /// incumbent if it speaks again, swap if a new node answers". `asked` is
+    /// the monitor's tap count when it began: a tap that lands DURING the hunt
+    /// makes it the user's, and the user's hunt is never called off by the
+    /// node they asked to leave (`consensus-auditor` CONCERNS-2).
+    Silent { gen: u64, ticks: u64, asked: u64 },
 }
 
 /// A swap that no longer has an incumbent is no longer a swap.
@@ -168,7 +194,7 @@ fn degrade_lost_swap(mode: RaceMode, connected: bool) -> RaceMode {
 /// change nothing.
 fn round_exclusions(demoted: HashSet<String>, mode: &RaceMode) -> HashSet<String> {
     let mut excluded = demoted;
-    if let RaceMode::Swap { from } = mode {
+    if let RaceMode::Swap { from, .. } = mode {
         excluded.insert(from.clone());
     }
     excluded
@@ -184,8 +210,22 @@ fn round_exclusions(demoted: HashSet<String>, mode: &RaceMode) -> HashSet<String
 /// nothing left to preserve, so spending its budget would end the hunt on a
 /// dark wallet — with `on_disconnected`'s own `spawn_race` already refused,
 /// because the loop asking this question still holds the single-flight flag.
-fn swap_hunt_exhausted(mode: &RaceMode, empty_rounds: u32, incumbent_alive: bool) -> bool {
-    incumbent_alive && matches!(mode, RaceMode::Swap { .. }) && empty_rounds >= SWAP_HUNT_ROUNDS
+///
+/// `joined`: a tap has joined a silence hunt the loop head has not re-cast
+/// yet (`consensus-auditor` delta CONCERNS-B). Landing inside the final round,
+/// it used to be spent with the silence's budget — no round of its own, and
+/// logged as silence's (L127). Not exhausted, the loop falls to its pause, the
+/// tap's stored kick skips it, and the head re-casts the hunt as the user's.
+fn swap_hunt_exhausted(
+    mode: &RaceMode,
+    empty_rounds: u32,
+    incumbent_alive: bool,
+    joined: bool,
+) -> bool {
+    incumbent_alive
+        && !joined
+        && matches!(mode, RaceMode::Swap { .. })
+        && empty_rounds >= SWAP_HUNT_ROUNDS
 }
 
 /// May this round drop the demotion ledger to keep the wallet dialing?
@@ -269,6 +309,175 @@ const _: () = assert!(
 /// milliseconds; anything slower is a socket we are abandoning anyway.
 const LISTENER_UNREGISTER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// **The wallet lane's recovery, bounded** (D-101's deferred arm, owed since
+/// LINK-Q1 — D-334). When the wallet processor's connect negotiation fails on
+/// a socket that STAYED bound, the monitor re-announces that socket to it this
+/// many times, after these pauses, before it rebinds.
+///
+/// Why a re-announce is a real retry on the same socket, read at the pin
+/// (`wallet/core/src/utxo/processor.rs` @ `01b532e`): the processor's own task
+/// renegotiates only on a `RpcState::Connected` edge, and only while its own
+/// `is_connected` is false (`:717-718`). A negotiation that failed in
+/// `init_state_from_server` — the `get_server_info` round trip, the only step
+/// that can fail on a live socket — failed BEFORE that flag was set (`:537-539`),
+/// so one more `Connected` on the monitor's ctl makes the processor run its
+/// whole negotiation again, through its own task, serialized behind whatever it
+/// is doing. The processor's task is the ONLY listener on that ctl (`:696`;
+/// the sync monitor and our acceptance tracker listen elsewhere), so the edge
+/// reaches nothing else (PB-036). One retry owner (PB-019): this monitor.
+///
+/// Two, because the one failure a live socket can produce is a round trip that
+/// did not come back, and a second chance covers a node that was briefly busy;
+/// more would only delay the rebind that a node which cannot answer
+/// `get_server_info` needs. **Two per SOCKET, not per check**
+/// (`wallet-security-auditor`): a negotiation that fails fast gets its second
+/// chance five seconds later, but one that hangs to the wRPC timeout (60 s,
+/// polled every 5 — `workflow-rpc 0.18.0 client/mod.rs:151-152`) is still
+/// running when this check settles, and its failure arrives after the check
+/// has ended. That echo starts a new check, which finds the socket's budget
+/// spent and goes straight to rebind-or-stop — so a node that ticks but never
+/// answers costs one socket two retries, not two a minute forever.
+const LANE_REANNOUNCE_AFTER: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// How long the processor gets after the last re-announce before the lane is
+/// judged still dark. A healthy negotiation is one round trip; five seconds
+/// is the probe's own ceiling for one ([`link::PROBE_DEADLINE_CAP`]).
+const LANE_SETTLE: Duration = Duration::from_secs(5);
+
+/// At most ONE lane rebind per this window, whatever keeps failing. A node
+/// that cannot answer its first `get_server_info` on any socket would otherwise
+/// turn this recovery into a rebind loop in the funds lane — the exact thing
+/// D-101 deferred it for. Past the budget the recovery says so and stops; the
+/// next natural drop, a pull (which takes the hard path when the lane is down)
+/// or a tap heals it.
+const LANE_REBIND_WINDOW_SECS: u64 = 600;
+
+/// Milliseconds on a process-wide MONOTONIC clock. The unix-second clocks in
+/// this file are fine for a 30 s verdict and useless for a nine-second
+/// deadline (a whole-second clock is ±1 s of it), and a wall clock can step
+/// under NTP; the silence hunt's stand-down reads this instead.
+fn mono_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+    u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// **The silence deadline's clock, one per socket** (LINK-Q1, D-334).
+///
+/// Owned by the socket's own task, which is the only place its ticks are
+/// folded, so it needs no lock; kept on tokio's clock so a test can run a
+/// nine-second silence in paused time instead of sleeping through it. Pure:
+/// `bind_loop` feeds it and asks it when the next deadline is.
+#[derive(Debug, Default)]
+struct SilenceClock {
+    /// When this socket last proved it was alive: its accepted `Connected`,
+    /// then every DAA tick after it. `None` while the socket is not up.
+    heard: Option<tokio::time::Instant>,
+    /// Whether it has delivered a tick since it came up — the log line names
+    /// the deaf-from-the-start socket (`ivy`, 11 of 30 runs) apart from one
+    /// that stopped.
+    scored: bool,
+    /// This silence already started a hunt. The next tick re-arms the clock;
+    /// until then the socket is the watchdog's to judge, never a second hunt's.
+    fired: bool,
+    /// When the current CLEAN stretch began: this socket's accepted
+    /// `Connected`, or its first tick after a quiet spell of at least the
+    /// BASE deadline — fired or not, since with the budget at 18 s or off a
+    /// silence can pass unfired and the link still did not hold
+    /// (`consensus-auditor` delta NOTE 3). A clean [`link::SILENCE_HOLD_RESET`]
+    /// is the link having HELD. Measured from the LAST quiet spell, not over
+    /// the socket's life (third-delta NOTE 2): a latch kept a long-lived
+    /// socket that coughed once on the watchdog's line for good.
+    clean_since: Option<tokio::time::Instant>,
+    /// This clean stretch already reported holding; once per stretch.
+    held: bool,
+}
+
+impl SilenceClock {
+    fn up(&mut self, now: tokio::time::Instant) {
+        *self = Self {
+            heard: Some(now),
+            clean_since: Some(now),
+            ..Self::default()
+        };
+    }
+
+    /// A tick. Returns true the first time a clean stretch reaches
+    /// [`link::SILENCE_HOLD_RESET`] — a minute with no quiet spell of the base
+    /// deadline: the link HELD, and the silence deadline's backoff may reset.
+    fn tick(&mut self, now: tokio::time::Instant) -> bool {
+        let Some(heard) = self.heard else {
+            return false;
+        };
+        if now.saturating_duration_since(heard) >= link::SILENCE_DEADLINE {
+            self.clean_since = Some(now);
+            self.held = false;
+        }
+        self.heard = Some(now);
+        self.scored = true;
+        self.fired = false;
+        let held = !self.held
+            && self.clean_since.is_some_and(|clean| {
+                now.saturating_duration_since(clean) >= link::SILENCE_HOLD_RESET
+            });
+        self.held |= held;
+        held
+    }
+
+    fn down(&mut self) {
+        *self = Self::default();
+    }
+
+    /// When the deadline falls, or `None` when there is nothing to watch —
+    /// nothing up, this silence already fired, or the budget has switched the
+    /// deadline off (`deadline` is [`link::silence_deadline_after`]'s answer).
+    fn due(&self, deadline: Option<Duration>) -> Option<tokio::time::Instant> {
+        if self.fired {
+            return None;
+        }
+        Some(self.heard? + deadline?)
+    }
+
+    fn fire(&mut self) {
+        self.fired = true;
+    }
+}
+
+/// One re-announce's outcome (D-101's recovery).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reannounce {
+    Done,
+    /// The socket is no longer the bound, announced one.
+    SocketGone,
+    /// This socket already had its re-announces.
+    BudgetSpent,
+}
+
+/// What the wallet lane's recovery found, and what it did (D-101, LINK-Q1).
+/// Every arm is logged by name, so a capture reads the outcome directly —
+/// the trigger that "fired 5×" in CONN-F1's retrospective was five of the
+/// benign first two, and nothing then said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneRecovery {
+    /// A check was already running; this report is queued behind it, and one
+    /// more pass runs when it ends (reports that queue together share it).
+    Queued,
+    /// The processor is up — the error came from its notification path, or
+    /// the negotiation already succeeded on a newer socket.
+    NotDark,
+    /// The socket the negotiation ran on is gone; the next bind's `Connected`
+    /// renegotiates on its own, as it did in all five CONN-F1 cases.
+    SocketGone,
+    /// The lane came up — by itself (`0`) or after this many re-announces in
+    /// this check.
+    Recovered { reannounced: u32 },
+    /// Still dark on the same live socket after the re-announces: rebound.
+    Rebound,
+    /// Still dark, and this window's rebind is spent — logged, and left to
+    /// the next drop, pull or tap.
+    GaveUp,
+}
+
 /// A chain event observed by the [`DagMonitor`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DagEvent {
@@ -329,11 +538,43 @@ struct BoundSocket {
     /// Unix-seconds this socket was accepted as connected (0 = never). The
     /// run-length base and half the stall baseline.
     connected_at: AtomicU64,
-    /// Unix-seconds of the last block THIS socket delivered. The stall
+    /// Unix-seconds of the last DAA tick THIS socket delivered. The stall
     /// verdict's evidence clock (L70: a detector measures its subject against
     /// the subject's own lifetime); the process-wide twin on [`Inner`] stays
-    /// for the glass's data-age reading.
-    last_block_at: AtomicU64,
+    /// for the glass's data-age reading. It was the last BLOCK until LINK-Q1
+    /// moved the heartbeat to the tick every stream shape keeps (D-334; what
+    /// that did to the stall line is on [`link::WATCHDOG_STALL_SECS`]).
+    last_tick_at: AtomicU64,
+    /// DAA ticks this socket has delivered — the silence hunt's "did it come
+    /// back?" counter ([`SwapWhy::Silent`]).
+    ticks: AtomicU64,
+    /// [`mono_ms`] at this socket's last tick (0 = none yet) — the same fact on
+    /// a clock fine enough for a nine-second deadline.
+    last_tick_mono_ms: AtomicU64,
+    /// This socket's probe clock (D-333): a round trip learned on one node
+    /// says nothing about the next, so it is born with the socket and dies
+    /// with it.
+    probe_clock: Mutex<link::ProbeClock>,
+    /// Re-announces this socket has had from the wallet lane's recovery — its
+    /// budget is [`LANE_REANNOUNCE_AFTER`]'s length FOR THE SOCKET, not per
+    /// check (`wallet-security-auditor`): a negotiation that hangs to the wRPC
+    /// timeout (~60 s) fails after the check that retried it has ended, and
+    /// that echo must not buy the same socket two more.
+    lane_reannounced: AtomicU32,
+    /// How many times this identity has been PUBLISHED. A race bind publishes
+    /// once; a pinned bind redials inside one identity (the pin's own retry
+    /// loop), so its gen alone cannot tell one physical socket from the next.
+    /// The wallet lane's recovery keys on (gen, this) — `consensus-auditor`
+    /// delta NOTE 2.
+    publishes: AtomicU64,
+    /// [`mono_ms`] when this socket was published (0 = not yet) and of its
+    /// last `BlockAdded` (0 = none) — the "ticks but no blocks" witness
+    /// (`consensus-auditor` CONCERNS-3): the one case the heartbeat's move
+    /// stopped convicting now at least says its name.
+    connected_mono_ms: AtomicU64,
+    last_block_mono_ms: AtomicU64,
+    /// That line was said for the current blockless stretch; a block re-arms it.
+    blocks_quiet_warned: AtomicBool,
     daa_seen_since_connect: AtomicBool,
     /// True once this bind's `Connected` was announced to consumers (monitor
     /// ctl open + [`DagEvent::Connected`]) — so retirement tells them exactly
@@ -494,17 +735,46 @@ struct Inner {
     /// Unix-seconds of the last cursor write — throttles the hot BlockAdded path
     /// to one small write every [`TRANSPORT_CURSOR_MIN_WRITE_SECS`].
     transport_cursor_written: AtomicU64,
-    /// Unix-seconds of the last BlockAdded we scanned, process-wide (0 = none
-    /// yet). This is the **display** clock: how old the data on the glass is,
-    /// which is a property of the app's session, not of any one socket, and it
-    /// must keep reading across a rebind (C7's no-staleness-before-first-connect
-    /// invariant is built on it). A plain atomic store every block (no I/O),
-    /// unlike the throttled cursor write.
+    /// Unix-seconds of the last DAA tick, process-wide (0 = none yet). This is
+    /// the **display** clock: how old the data on the glass is, which is a
+    /// property of the app's session, not of any one socket, and it must keep
+    /// reading across a rebind (C7's no-staleness-before-first-connect
+    /// invariant is built on it). A plain atomic store per tick (no I/O).
+    /// Fed by `BlockAdded` until LINK-Q1 (D-334) — see
+    /// [`link::WATCHDOG_STALL_SECS`] for what the move changed.
     ///
-    /// Its **judgment** twin is [`BoundSocket::last_block_at`] (R4): a stall
+    /// Its **judgment** twin is [`BoundSocket::last_tick_at`] (R4): a stall
     /// verdict is measured against the accused socket's own silence, never the
     /// process's — that conflation was the D-099/L70 cascade.
-    last_block_at: AtomicU64,
+    last_tick_at: AtomicU64,
+    /// Every DAA tick an installed socket has delivered in this process. A
+    /// plain count, never reset: the node screen reads it twice a second and
+    /// divides by its own clock to show the rate the link is beating at
+    /// (`DAA · 10 Hz`, D-332). Counting here, before the bridge's 250 ms
+    /// coalescer, is what makes it the real tick count rather than the
+    /// coalesced one.
+    daa_ticks: AtomicU64,
+    /// Single-flight for [`DagMonitor::recover_wallet_lane`] (D-101): one
+    /// recovery at a time, however many errors report in.
+    lane_recovering: AtomicBool,
+    /// A report asked for a pass that has not run yet. Set by EVERY report
+    /// before it tries for [`Self::lane_recovering`], drained by whoever holds
+    /// it — so a report that finds a check running is queued behind it, never
+    /// dropped (`wallet-security-auditor`: the running check may be about a
+    /// socket that has since been replaced, and the report about its
+    /// successor was the only one that successor would ever send).
+    lane_report_pending: AtomicBool,
+    /// Unix-seconds of the last lane rebind (0 = never) — the
+    /// [`LANE_REBIND_WINDOW_SECS`] budget.
+    lane_rebound_at: AtomicU64,
+    /// Silence swaps that have landed since the link last HELD
+    /// ([`link::SILENCE_HOLD_RESET`]) — the silence deadline's backoff
+    /// ([`link::silence_deadline_after`], `consensus-auditor` CONCERNS-1).
+    silence_backoff: AtomicU32,
+    /// Every user swap tap, counted. A silence hunt remembers the count it
+    /// began at; a tap during it makes the hunt the user's, which its
+    /// incumbent's comeback can no longer call off (CONCERNS-2).
+    swaps_asked: AtomicU64,
     /// V1 acceptance spine: where the event task forwards VirtualChainChanged
     /// batches once the tracker is attached ([`DagMonitor::attach_acceptance`]).
     /// Unattached (or a dead receiver) = batches drop harmlessly — the tracker's
@@ -530,10 +800,18 @@ enum StallVerdict {
 }
 
 /// One reading of the bound link — see [`DagMonitor::probe_link`].
+///
+/// Three outcomes, never two (D-333): an answer (`latency_ms`), a round trip
+/// that outlasted the deadline (`timed_out_ms` — a lower bound, not an
+/// absence), or neither, which is an error (no socket, a refused call).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkProbe {
     /// Round trip of one `get_server_info` on the bound socket, in ms.
     pub latency_ms: Option<u64>,
+    /// The deadline, in ms, that one `get_server_info` outlasted. The round
+    /// trip was AT LEAST this — a censored sample the reader shows as `> N s`
+    /// rather than blanking a slow, live link.
+    pub timed_out_ms: Option<u64>,
     /// The node's own `is_synced`; `None` when it did not answer.
     pub synced: Option<bool>,
     /// The node's peer count; `None` when not asked for, or not answered.
@@ -581,7 +859,13 @@ impl DagMonitor {
                 paused: AtomicBool::new(false),
                 transport_cursor: Mutex::new(None),
                 transport_cursor_written: AtomicU64::new(0),
-                last_block_at: AtomicU64::new(0),
+                last_tick_at: AtomicU64::new(0),
+                daa_ticks: AtomicU64::new(0),
+                lane_recovering: AtomicBool::new(false),
+                lane_report_pending: AtomicBool::new(false),
+                lane_rebound_at: AtomicU64::new(0),
+                silence_backoff: AtomicU32::new(0),
+                swaps_asked: AtomicU64::new(0),
                 vcc_tx: Mutex::new(None),
             }),
         })
@@ -1121,43 +1405,77 @@ impl DagMonitor {
     /// for it on its own slower cadence and `None` means *not asked* as well
     /// as *not answered* — the caller knows which.
     ///
-    /// Called only while the node surface is open. It takes no lock, holds
-    /// nothing across the await, and never retries: a probe that papered over a
-    /// failure would be reporting the retry's latency, not the link's.
+    /// Called only while the node surface is open. It holds no lock across the
+    /// await and never retries: a probe that papered over a failure would be
+    /// reporting the retry's latency, not the link's.
     ///
-    /// **Both calls carry our own deadline** ([`LINK_PROBE_TIMEOUT`]), and that is a
-    /// correctness property rather than tidiness (`consensus-auditor`, UX-R3).
-    /// Unbounded, the only backstop was the transport's own 60 s default —
-    /// thirty times the surface's poll interval, and a dependency default this
-    /// project does not get to trust. A stalled node would then stack probes,
-    /// and two overlapping ones could land out of order, letting an older slow
-    /// reading overwrite a newer fast one: the confidently-wrong-number this
-    /// probe exists to prevent (BG-8). A probe that misses its cadence answers
-    /// `None`, which is a face the surface already draws.
+    /// **Both calls carry our own deadline**, and that is a correctness
+    /// property rather than tidiness (`consensus-auditor`, UX-R3). Unbounded,
+    /// the only backstop was the transport's own 60 s default, and a stalled
+    /// node would stack probes whose answers could land out of order — an older
+    /// slow reading overwriting a newer fast one: the confidently-wrong-number
+    /// this probe exists to prevent (BG-8).
+    ///
+    /// **The deadline is the bound socket's own RFC 6298 clock** (LINK-Q1,
+    /// D-333 — [`link::ProbeClock`]), no longer a fixed 1.8 s. A fixed deadline
+    /// under the old 2 s poll turned every slow answer on the founder's
+    /// Starlink hop into "no reading", and the seat went dark and relit on a
+    /// socket that never dropped. Now the wait follows the answers this socket
+    /// has actually given, and a round trip that outlasts it comes back as
+    /// `timed_out_ms` — "at least this long" — which the reader draws as a
+    /// slow link, not a dead one. The caller's single-flight is unchanged: a
+    /// slow answer occupies poll ticks rather than stacking calls.
     pub async fn probe_link(&self, with_peers: bool) -> LinkProbe {
         let rpc = self.inner.link_rpc.clone();
+        // The socket whose clock sets the wait. `None` between binds: then
+        // there is no round trip to time, and the call below answers the
+        // typed no-socket error at once — an error, not a timeout.
+        let bind = self.current_bind();
+        let deadline = bind.as_ref().map_or(link::PROBE_DEADLINE_CAP, |bind| {
+            bind.probe_clock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deadline()
+        });
+        let deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX);
         let started = std::time::Instant::now();
-        let (latency_ms, synced) =
-            match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.get_server_info()).await {
-                Ok(Ok(info)) => (
-                    u64::try_from(started.elapsed().as_millis()).ok(),
-                    Some(info.is_synced),
-                ),
-                _ => (None, None),
-            };
-        let peers = if with_peers {
-            match tokio::time::timeout(LINK_PROBE_TIMEOUT, rpc.get_connections(false)).await {
-                Ok(Ok(connections)) => Some(u32::from(connections.peers)),
-                _ => None,
+        let mut probe = LinkProbe::default();
+        match tokio::time::timeout(deadline, rpc.get_server_info()).await {
+            Ok(Ok(info)) => {
+                let rtt = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                probe.latency_ms = Some(rtt);
+                probe.synced = Some(info.is_synced);
+                if let Some(bind) = &bind {
+                    bind.probe_clock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .answered(rtt);
+                }
             }
-        } else {
-            None
-        };
-        LinkProbe {
-            latency_ms,
-            synced,
-            peers,
+            Err(_) => {
+                probe.timed_out_ms = Some(deadline_ms);
+                if let Some(bind) = &bind {
+                    bind.probe_clock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .timed_out();
+                }
+            }
+            // A refused call (no socket, a node error) is neither a sample nor
+            // a lower bound; the reader counts it toward its dwell.
+            Ok(Err(_)) => {}
         }
+        // Peers only after an ANSWER (`ux-auditor` N5): the screen reads a
+        // peer count only beside a latency, so asking after a timeout or a
+        // refusal bought nothing and doubled a slow probe's wait.
+        if with_peers && probe.latency_ms.is_some() {
+            if let Ok(Ok(connections)) =
+                tokio::time::timeout(deadline, rpc.get_connections(false)).await
+            {
+                probe.peers = Some(u32::from(connections.peers));
+            }
+        }
+        probe
     }
 
     pub fn rpc(&self) -> Rpc {
@@ -1486,10 +1804,27 @@ impl DagMonitor {
     /// shared client avoided only because every connect remembered to pass
     /// `options.url: Some(..)`. A per-bind client has no resolver to call.
     async fn install_bind(&self, url: String) -> Result<Arc<BoundSocket>> {
+        self.install_bind_after(url, "superseded").await
+    }
+
+    /// [`Self::install_bind`], naming why the incumbent (if any) leaves. A
+    /// silence hunt's winner retires its incumbent as `silence-swap`, so a
+    /// capture can tell the deadline's swaps from the user's (LINK-Q1).
+    /// Recording is not judging either way: no strike.
+    ///
+    /// A silence swap's cost is paid the instant its incumbent is retired, so
+    /// it is counted against the silence deadline's budget HERE, on the one
+    /// path every silence swap takes (`consensus-auditor` CONCERNS-A: counted
+    /// in the race loop, the line that advances the budget was reachable only
+    /// by a race that found a winner over the network, and no test drove it).
+    async fn install_bind_after(&self, url: String, cause: &str) -> Result<Arc<BoundSocket>> {
         // At most one identity exists at a time. Anything still installed is
         // retired (and recorded) before the new one is allocated — so a bind
         // can never be leaked by a path that forgot to clean up.
-        self.retire_bind("superseded").await;
+        let retired = self.retire_bind(cause).await;
+        if cause == SILENCE_SWAP && retired.is_some() {
+            self.note_silence_swap_landed();
+        }
 
         let client = Arc::new(KaspaRpcClient::new_with_args(
             WrpcEncoding::Borsh,
@@ -1519,7 +1854,15 @@ impl DagMonitor {
             notification_rx,
             listener_id: Mutex::new(None),
             connected_at: AtomicU64::new(0),
-            last_block_at: AtomicU64::new(0),
+            last_tick_at: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            last_tick_mono_ms: AtomicU64::new(0),
+            probe_clock: Mutex::new(link::ProbeClock::default()),
+            lane_reannounced: AtomicU32::new(0),
+            publishes: AtomicU64::new(0),
+            connected_mono_ms: AtomicU64::new(0),
+            last_block_mono_ms: AtomicU64::new(0),
+            blocks_quiet_warned: AtomicBool::new(false),
             daa_seen_since_connect: AtomicBool::new(false),
             announced: AtomicBool::new(false),
             stale_ctl: AtomicU64::new(0),
@@ -1736,13 +2079,15 @@ impl DagMonitor {
         let mut mode = mode;
         match &mode {
             RaceMode::Cold => spans::mark("connect_start"),
-            RaceMode::Swap { from } => spans::mark_with("swap_start", link::endpoint_host(from)),
+            RaceMode::Swap { from, .. } => {
+                spans::mark_with("swap_start", link::endpoint_host(from))
+            }
         }
         let mut empty_rounds = 0u32;
         loop {
             let degraded = degrade_lost_swap(mode.clone(), self.is_connected());
             if degraded != mode {
-                if let RaceMode::Swap { from } = &mode {
+                if let RaceMode::Swap { from, .. } = &mode {
                     log::info!(
                         "link: the swap hunt lost its incumbent ({}) — continuing as an \
                          ordinary hunt",
@@ -1758,6 +2103,28 @@ impl DagMonitor {
             }
             if !self.may_bind_from_race(&mode) {
                 return;
+            }
+            // **A silence hunt whose incumbent is talking again has nothing to
+            // replace** (LINK-Q1: keep the incumbent if it speaks again). Asked
+            // at every round's head — before any candidate is dialled — and
+            // once more before a winner is installed, below.
+            if self.silent_incumbent_is_back(&mode) {
+                return;
+            }
+            // **A tap that joins a silence hunt makes it the user's** — from
+            // here it IS a swap they asked for, with the rounds of one
+            // (`consensus-auditor` note e: joined at round 3, the tap used to
+            // buy no probe of its own, and the log still said "silence").
+            if let Some(theirs) = self.joined_by_tap(&mode) {
+                if let RaceMode::Swap { from, .. } = &theirs {
+                    log::info!(
+                        "link: a tap joined the silence hunt behind {} — it is the user's swap \
+                         now, with its own {SWAP_HUNT_ROUNDS} round(s)",
+                        link::endpoint_host(from)
+                    );
+                }
+                mode = theirs;
+                empty_rounds = 0;
             }
             let now = Self::now_unix();
             // **Hygiene degrades only for a wallet that is actually stranded**
@@ -1831,13 +2198,24 @@ impl DagMonitor {
                 //
                 // **And only while we are DARK** (`consensus-auditor`,
                 // CONCERNS-4). A swap round runs behind a socket delivering
-                // ~10 blocks/s, which is direct positive proof the phone's
+                // ~10 ticks/s, which is direct positive proof the phone's
                 // network works — so "every candidate failed phone-side" is no
                 // longer the only witness available, and stamping a blackout
                 // anyway would make `judge_admissibility` withhold strikes
                 // from genuinely dead endpoints on the word of a round that
                 // had a live prover the whole time. Lenient direction, but it
                 // is the prover-vs-subject rule inverted.
+                //
+                // **A SILENCE hunt's incumbent is not that prover** (LINK-Q1):
+                // it is quiet by definition, so this round is the only witness
+                // of the phone's network, exactly as a dark round is. The gate
+                // is deliberately left where it was all the same — widening it
+                // withholds more strikes, and the strike-admissibility coupling
+                // is to be audited in the same breath as D-091's parked tuning
+                // (LINK-Q2), not moved under a lamp change. Not stamping here
+                // leaves justice exactly as it was before the deadline existed:
+                // the watchdog still judges a silent socket at 30 s, and the
+                // Cold round that follows its execution stamps as it always did.
                 if phone_fault && !self.is_connected() {
                     self.inner.phone_fault_round_at.store(now, Ordering::SeqCst);
                     log::info!(
@@ -1883,12 +2261,22 @@ impl DagMonitor {
                 // placement its top-of-loop check cannot see. Falling through
                 // instead costs one retry pause and the next iteration
                 // degrades to an unbounded Cold hunt.
-                if swap_hunt_exhausted(&mode, empty_rounds, self.is_connected()) {
-                    if let RaceMode::Swap { from } = &mode {
+                if self.swap_hunt_spent(&mode, empty_rounds) {
+                    if let RaceMode::Swap { from, why } = &mode {
                         log::info!(
-                            "link: swap hunt found nothing better in {SWAP_HUNT_ROUNDS} \
-                             round(s) — keeping {}",
-                            link::endpoint_host(from)
+                            "link: {} hunt found nothing better in {SWAP_HUNT_ROUNDS} \
+                             round(s) — keeping {}{}",
+                            if matches!(why, SwapWhy::Silent { .. }) {
+                                "silence"
+                            } else {
+                                "swap"
+                            },
+                            link::endpoint_host(from),
+                            if matches!(why, SwapWhy::Silent { .. }) {
+                                "; the watchdog's stall line stands behind it"
+                            } else {
+                                ""
+                            }
                         );
                         spans::mark_with("swap_kept", link::endpoint_host(from));
                     }
@@ -1948,6 +2336,13 @@ impl DagMonitor {
             if !self.may_bind_from_race(&mode) {
                 return;
             }
+            // The round took real time, and the silent incumbent may have
+            // spoken inside it: it keeps its place over a node that merely
+            // answered a probe (LINK-Q1). Checked before a single byte of the
+            // winner's bind is dialled.
+            if self.silent_incumbent_is_back(&mode) {
+                return;
+            }
 
             log::info!(
                 "link: race winner {} (server {}, rpc v{}, daa {}){}",
@@ -1988,8 +2383,12 @@ impl DagMonitor {
 
             // A NEW identity per bind (R4): its own client, its own ctl and
             // notification streams, its own generation. The socket this dials
-            // can never be confused with the one it replaces.
-            let bind = match self.install_bind(winner.url.clone()).await {
+            // can never be confused with the one it replaces. A silence hunt's
+            // incumbent leaves as `silence-swap`, so a capture can count the
+            // deadline's swaps apart from the user's (recording, not judging).
+            // The cause is the hunt's to earn and the silence budget is counted
+            // inside, the moment the incumbent is retired (CONCERNS-1, A, A′, C).
+            let bind = match self.install_bind_leaving(winner.url.clone(), &mode).await {
                 Ok(bind) => bind,
                 Err(e) => {
                     log::warn!(
@@ -2204,10 +2603,18 @@ impl DagMonitor {
         {
             if let Some(bind) = self.current_bind() {
                 let from = bind.url.clone();
+                // Counted BEFORE the hunt is asked for: a silence hunt already
+                // running reads this and becomes the user's, so the
+                // incumbent's comeback can no longer call it off (LINK-Q1,
+                // `consensus-auditor` CONCERNS-2).
+                self.inner.swaps_asked.fetch_add(1, Ordering::SeqCst);
                 // L127 holds unchanged: the tap ALWAYS acts. A hunt already
                 // running takes the kick — never a second search authority
                 // (D-081), and never a silent no-op.
-                if !self.spawn_race_with(RaceMode::Swap { from: from.clone() }) {
+                if !self.spawn_race_with(RaceMode::Swap {
+                    from: from.clone(),
+                    why: SwapWhy::Asked,
+                }) {
                     self.kick_race("swap-tap");
                 } else {
                     log::info!(
@@ -2232,6 +2639,15 @@ impl DagMonitor {
     /// lie. The user's own tap does not come here while it has a live link to
     /// preserve — see [`Self::reconnect`].
     pub async fn hard_reconnect(&self) -> Result<()> {
+        self.hard_reconnect_because("manual-reconnect", "reconnect")
+            .await
+    }
+
+    /// [`Self::hard_reconnect`], naming its cause: the run-ended line records
+    /// `cause`, and the relink's span carries `source`. The wallet lane's
+    /// rebind (D-101) goes through here as `lane-dark`, so a capture can tell
+    /// it from the user's hand.
+    async fn hard_reconnect_because(&self, cause: &str, source: &str) -> Result<()> {
         // A deliberate reconnect must never park a strike against the healthy
         // endpoint it is bouncing (caught live at the V3 sitting: a
         // swipe-to-refresh demoted the innocent incumbent) — retirement
@@ -2241,14 +2657,14 @@ impl DagMonitor {
         // swap-once guard would skip judging our own teardown. That guard is
         // now structural: the teardown's `Disconnected` arrives on a retired
         // identity, and the gate discards it.
-        self.retire_bind("manual-reconnect").await;
+        self.retire_bind(cause).await;
         // The tap always acts (C4). Unpinned that is spawn-or-kick — the old
         // path silently no-opped here whenever a wedged race loop still held
         // the single-flight flag (the dead-Reconnect symptom's second half).
         // Pinned it redials the user's node, which before D-187 this path
         // could not do at all: it retired the bind and then asked a race that
         // pinned mode refuses to run, so Reconnect KILLED a pinned link.
-        self.relink("reconnect").await
+        self.relink(source).await
     }
 
     /// OS default-network transition (C5/D-089 ruling 4), relayed from
@@ -2329,14 +2745,15 @@ impl DagMonitor {
     }
 
     /// The stall verdict for a watchdog claim (R3 D-099), judged against OUR
-    /// clocks: the Dart watchdog's block-age is process-lifetime, so after a
+    /// clocks: the Dart watchdog's tick-age is process-lifetime, so after a
     /// link blackout it reads stale silence against a seconds-old socket.
-    /// The evidence baseline is `max(last_block_at, connected_at)` — a socket
+    /// The evidence baseline is `max(last_tick_at, connected_at)` — a socket
     /// cannot be guilty of silence older than itself.
     /// R4 sharpens it further: both halves of the baseline are now the ACCUSED
-    /// SOCKET's own (`BoundSocket::last_block_at` / `connected_at`), so a
-    /// block delivered by a previous socket can neither excuse nor condemn
-    /// this one.
+    /// SOCKET's own (`BoundSocket::last_tick_at` / `connected_at`), so a tick
+    /// delivered by a previous socket can neither excuse nor condemn this one.
+    /// Since LINK-Q1 the evidence is the DAA tick, not the block — see
+    /// [`link::WATCHDOG_STALL_SECS`] for exactly what that moved.
     fn stall_verdict(&self) -> StallVerdict {
         let Some(bind) = self.current_bind() else {
             return StallVerdict::Hunting;
@@ -2346,7 +2763,7 @@ impl DagMonitor {
         }
         let now = Self::now_unix();
         let baseline = bind
-            .last_block_at
+            .last_tick_at
             .load(Ordering::Relaxed)
             .max(bind.connected_at.load(Ordering::Relaxed));
         let silent_secs = now.saturating_sub(baseline);
@@ -2357,31 +2774,529 @@ impl DagMonitor {
         }
     }
 
-    /// Record that a block just arrived (the watchdog heartbeat). Two clocks,
-    /// two purposes (R4): the socket's own is the evidence a stall claim is
-    /// judged against, the process-wide one is how old the glass's data is.
-    fn mark_block_seen(&self, bind: &BoundSocket) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        bind.last_block_at.store(now, Ordering::Relaxed);
-        self.inner.last_block_at.store(now, Ordering::Relaxed);
+    /// **Record that the socket's heartbeat beat** — one DAA tick
+    /// (`VirtualDaaScoreChanged`) arrived on it. Two clocks, two purposes (R4):
+    /// the socket's own is the evidence a stall claim is judged against, the
+    /// process-wide one is how old the glass's data is; the counts feed the
+    /// silence hunt's stand-down and the node screen's rate.
+    ///
+    /// **The heartbeat moved here from `BlockAdded` at LINK-Q1 (D-334).** Full
+    /// blocks are the stream LINK-Q2 may reshape, and a watchdog welded to them
+    /// would have gone blind the day they were gated (IDEAS_BACKLOG's "rides
+    /// the most expensive subscription"). The tick is the one notification
+    /// every shape keeps — the pin's own wallet subscribes to nothing but it
+    /// and `UtxosChanged` — and it is the signal the lamp already read, so the
+    /// watchdog, the silence deadline, the node screen and the glass now beat
+    /// to ONE clock instead of two that could disagree.
+    fn mark_tick(&self, bind: &BoundSocket) {
+        let now = Self::now_unix();
+        let mono = mono_ms();
+        bind.last_tick_at.store(now, Ordering::Relaxed);
+        bind.last_tick_mono_ms.store(mono, Ordering::Relaxed);
+        bind.ticks.fetch_add(1, Ordering::SeqCst);
+        self.inner.last_tick_at.store(now, Ordering::Relaxed);
+        self.inner.daa_ticks.fetch_add(1, Ordering::Relaxed);
+        self.note_blockless_ticks(bind, mono);
     }
 
-    /// Seconds since the last BlockAdded, or `None` if none has arrived yet
+    /// **The case the heartbeat's move stopped convicting, named** (D-334
+    /// item 1; `consensus-auditor` CONCERNS-3). A socket whose node keeps
+    /// ticking while no block arrives for the stall line has dropped our
+    /// `BlockAdded` scope: the wallet is live and the transport scan is deaf.
+    /// It used to be executed at 30 s as an ordinary stall; now it is not, so
+    /// it must at least say so — once per blockless stretch, no verdict, for
+    /// the LINK-Q2 trigger to key on. Pure bookkeeping on the socket's own
+    /// monotonic stamps; a block re-arms it.
+    fn note_blockless_ticks(&self, bind: &BoundSocket, mono: u64) {
+        let up = bind.connected_mono_ms.load(Ordering::Relaxed);
+        if up == 0 {
+            return;
+        }
+        let since = up.max(bind.last_block_mono_ms.load(Ordering::Relaxed));
+        let quiet_secs = mono.saturating_sub(since) / 1000;
+        if quiet_secs >= link::WATCHDOG_STALL_SECS
+            && !bind.blocks_quiet_warned.swap(true, Ordering::Relaxed)
+        {
+            log::warn!(
+                "link: {} has ticked for {quiet_secs}s without a block — the transport \
+                 scan may be deaf on this socket (no verdict; the stream is LINK-Q2's)",
+                link::endpoint_host(&bind.url)
+            );
+        }
+    }
+
+    /// Seconds since the last DAA tick, or `None` if none has arrived yet
     /// (fresh boot / never connected). The watchdog's honest-liveness reading:
     /// a healthy mainnet keeps this near zero; a stalled socket lets it grow.
-    pub fn last_block_age_secs(&self) -> Option<u64> {
-        let last = self.inner.last_block_at.load(Ordering::Relaxed);
+    /// It read the last BLOCK until LINK-Q1 (D-334).
+    pub fn last_tick_age_secs(&self) -> Option<u64> {
+        let last = self.inner.last_tick_at.load(Ordering::Relaxed);
         if last == 0 {
             return None;
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Some(now.saturating_sub(last))
+        Some(Self::now_unix().saturating_sub(last))
+    }
+
+    /// Every DAA tick an installed socket has delivered in this process — a
+    /// monotonic count the node screen differences against its own clock to
+    /// show the link's beat as a rate (D-332). Public chain liveness, no I/O.
+    pub fn daa_ticks(&self) -> u64 {
+        self.inner.daa_ticks.load(Ordering::Relaxed)
+    }
+
+    /// **A silence hunt's incumbent is talking again** — then the hunt has
+    /// nothing to replace, and says so on its way out (LINK-Q1). `false` for
+    /// every other mode: a hunt the user asked for is not called off by the
+    /// node they asked to leave.
+    fn silent_incumbent_is_back(&self, mode: &RaceMode) -> bool {
+        let RaceMode::Swap {
+            from,
+            why: SwapWhy::Silent { gen, ticks, asked },
+        } = mode
+        else {
+            return false;
+        };
+        // A tap landed while this hunt ran: it is the user's hunt now, and
+        // they asked to LEAVE the incumbent, not to wait for it
+        // (`consensus-auditor` CONCERNS-2 — L127, the tap always acts).
+        if self.silence_hunt_was_asked(*asked) {
+            return false;
+        }
+        let Some(bind) = self.current_bind().filter(|bind| bind.gen == *gen) else {
+            // The incumbent is gone (retired, died): `degrade_lost_swap` turns
+            // the errand into the ordinary hunt at the next loop head.
+            return false;
+        };
+        let quiet = Duration::from_millis(
+            mono_ms().saturating_sub(bind.last_tick_mono_ms.load(Ordering::Relaxed)),
+        );
+        if !link::silent_incumbent_spoke_again(bind.ticks.load(Ordering::SeqCst), *ticks, quiet) {
+            return false;
+        }
+        log::info!(
+            "link: {} spoke again — the silence hunt stands down and keeps it",
+            link::endpoint_host(from)
+        );
+        spans::mark_with("silence_kept", link::endpoint_host(from));
+        true
+    }
+
+    /// Did a user tap land after a silence hunt that began at tap-count
+    /// `asked`? Then the hunt is theirs.
+    fn silence_hunt_was_asked(&self, asked: u64) -> bool {
+        self.inner.swaps_asked.load(Ordering::SeqCst) != asked
+    }
+
+    /// **Install a race's winner, retiring the incumbent under the cause its
+    /// hunt earned** ([`Self::retire_cause`]) — the winner arm's one call, so
+    /// the choice and the silence budget it feeds are driven together by the
+    /// teardown test (`consensus-auditor` third delta, CONCERNS-C: a cause
+    /// picked in the arm itself could be switched off with every test green).
+    async fn install_bind_leaving(&self, url: String, mode: &RaceMode) -> Result<Arc<BoundSocket>> {
+        self.install_bind_after(url, self.retire_cause(mode)).await
+    }
+
+    /// [`swap_hunt_exhausted`], asked of the live monitor — the race loop's
+    /// one call, reading the incumbent's liveness and a joined tap itself, so
+    /// that call site holds no free argument a test cannot reach
+    /// (`consensus-auditor` third delta, CONCERNS-C).
+    fn swap_hunt_spent(&self, mode: &RaceMode, empty_rounds: u32) -> bool {
+        swap_hunt_exhausted(
+            mode,
+            empty_rounds,
+            self.is_connected(),
+            self.joined_by_tap(mode).is_some(),
+        )
+    }
+
+    /// The cause a race's winner retires its incumbent under: [`SILENCE_SWAP`]
+    /// while the hunt is still silence's own, `superseded` for everything
+    /// else — a tap's swap, a silence hunt a tap has since joined (CONCERNS-2),
+    /// a cold hunt with nothing to retire.
+    fn retire_cause(&self, mode: &RaceMode) -> &'static str {
+        match mode {
+            RaceMode::Swap {
+                why: SwapWhy::Silent { asked, .. },
+                ..
+            } if !self.silence_hunt_was_asked(*asked) => SILENCE_SWAP,
+            _ => "superseded",
+        }
+    }
+
+    /// A silence hunt a tap has since joined, re-cast as the swap the user
+    /// asked for — `None` while it is still silence's own, or was never one.
+    fn joined_by_tap(&self, mode: &RaceMode) -> Option<RaceMode> {
+        match mode {
+            RaceMode::Swap {
+                from,
+                why: SwapWhy::Silent { asked, .. },
+            } if self.silence_hunt_was_asked(*asked) => Some(RaceMode::Swap {
+                from: from.clone(),
+                why: SwapWhy::Asked,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The silence deadline as the budget stands now — nine seconds, eighteen
+    /// after one silence swap the link has not yet held through, off after two
+    /// ([`link::silence_deadline_after`]).
+    fn silence_deadline(&self) -> Option<Duration> {
+        link::silence_deadline_after(self.inner.silence_backoff.load(Ordering::SeqCst))
+    }
+
+    /// A silence swap landed: the next socket's deadline doubles until the
+    /// link holds ([`link::SILENCE_HOLD_RESET`]) — `consensus-auditor`
+    /// CONCERNS-1's budget, so swaps cannot chain every ten seconds forever.
+    fn note_silence_swap_landed(&self) {
+        let landed = self
+            .inner
+            .silence_backoff
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        match link::silence_deadline_after(landed) {
+            Some(next) => log::info!(
+                "link: a silence swap landed — the next silence deadline is {}s until the \
+                 link holds for {}s",
+                next.as_secs(),
+                link::SILENCE_HOLD_RESET.as_secs()
+            ),
+            None => log::info!(
+                "link: {landed} silence swaps without the link holding — the deadline is \
+                 off, and the watchdog's stall line owns a silence until the link holds \
+                 for {}s",
+                link::SILENCE_HOLD_RESET.as_secs()
+            ),
+        }
+    }
+
+    /// A socket stayed up a clean [`link::SILENCE_HOLD_RESET`] — no quiet
+    /// spell of the base deadline in it: the link HELD, and the silence
+    /// deadline is nine seconds again.
+    fn note_link_held(&self, bind: &BoundSocket) {
+        if self.inner.silence_backoff.swap(0, Ordering::SeqCst) > 0 {
+            log::info!(
+                "link: {} held for {}s — the silence deadline is back to {}s",
+                link::endpoint_host(&bind.url),
+                link::SILENCE_HOLD_RESET.as_secs(),
+                link::SILENCE_DEADLINE.as_secs()
+            );
+        }
+    }
+
+    /// **The silence deadline fired on this socket** (LINK-Q1, D-334): it has
+    /// gone its deadline ([`Self::silence_deadline`] — nine seconds unless the
+    /// budget has stretched it) without a DAA tick — never scored, or stopped.
+    /// Start the bounded find-then-swap hunt behind it.
+    ///
+    /// Not a verdict, so it does nothing a verdict does: no teardown, no
+    /// strike, no run recorded. The socket stays up and keeps its place unless
+    /// a different node answers a probe before it speaks again; conviction
+    /// stays the watchdog's, on its 30 s evidence. Pinned, there is no other
+    /// node to find — the watchdog's hard path owns a silent pinned socket.
+    fn on_silence(&self, bind: &Arc<BoundSocket>, scored: bool, after: Duration) {
+        if !self.is_current_bind(bind.gen)
+            || !self.is_connected()
+            || !bind.announced.load(Ordering::SeqCst)
+            || self.inner.paused.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let host = link::endpoint_host(&bind.url);
+        let after = after.as_secs();
+        let silence = if scored {
+            "since its last tick"
+        } else {
+            "since it connected, having delivered no tick"
+        };
+        if self.is_pinned() {
+            log::info!(
+                "link: {host} silent {after}s {silence} — pinned, so there is no other node \
+                 to find; the watchdog's stall line owns it"
+            );
+            return;
+        }
+        log::info!(
+            "link: {host} silent {after}s {silence} — hunting for a replacement behind it \
+             (silence deadline); it keeps its place if it speaks first"
+        );
+        spans::mark_with("silence_hunt", host);
+        let mode = RaceMode::Swap {
+            from: bind.url.clone(),
+            why: SwapWhy::Silent {
+                gen: bind.gen,
+                ticks: bind.ticks.load(Ordering::SeqCst),
+                asked: self.inner.swaps_asked.load(Ordering::SeqCst),
+            },
+        };
+        // One search authority (D-081). A hunt already running — the user's
+        // own swap — takes the kick; it is looking for the same thing.
+        if !self.spawn_race_with(mode) {
+            self.kick_race("silence");
+        }
+    }
+
+    /// The installed bind, if it is up and announced to consumers — the only
+    /// kind the wallet lane negotiates on — as (gen, publish epoch): the
+    /// PHYSICAL socket, which a pinned bind's redial changes under one gen.
+    /// `None` between binds, while paused, and for a bind still coming up.
+    fn announced_live_socket(&self) -> Option<(u64, u64)> {
+        if self.inner.paused.load(Ordering::SeqCst) || !self.is_connected() {
+            return None;
+        }
+        self.inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|bind| bind.announced.load(Ordering::SeqCst))
+            .map(|bind| (bind.gen, bind.publishes.load(Ordering::SeqCst)))
+    }
+
+    /// The re-announces the socket `(gen, publish epoch)` has had, while it is
+    /// still the one bound; `None` once it is not. Nonzero exactly when a
+    /// check has PROVEN the lane dark on it — the proof and the first
+    /// re-announce are one step under the lock ([`Self::reannounce_to_wallet_lane`]).
+    fn socket_reannounces(&self, socket: (u64, u64)) -> Option<u32> {
+        if self.announced_live_socket() != Some(socket) {
+            return None;
+        }
+        self.inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|bind| (bind.gen, bind.publishes.load(Ordering::SeqCst)) == socket)
+            .map(|bind| bind.lane_reannounced.load(Ordering::SeqCst))
+    }
+
+    /// **Prove the lane dark on `socket`, then re-announce it to the wallet
+    /// lane** — one more `Connected` on the monitor's ctl, which makes the
+    /// processor renegotiate on the same socket through its own task (see
+    /// [`LANE_REANNOUNCE_AFTER`] for the pin reading). Under the ONE lock
+    /// retirement and a publish take, so the ctl never says "open" about a
+    /// socket a retirement or a publish has already replaced, and the proof
+    /// the pull keys on can never outlive the physical socket it is about: a
+    /// pinned redial's publish zeroes it under this same lock (`consensus-
+    /// auditor` delta NOTE 2). A pinned DROP stands the link down without
+    /// this lock, so an open here can follow its close; the proof no longer
+    /// depends on that order, and the worst case is one negotiation that fails
+    /// and reads `SocketGone` (`wallet-security-auditor`, fourth delta).
+    fn reannounce_to_wallet_lane(&self, socket: (u64, u64)) -> Reannounce {
+        if self.inner.paused.load(Ordering::SeqCst) {
+            return Reannounce::SocketGone;
+        }
+        let (gen, _) = socket;
+        let bound = self
+            .inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(bind) = bound.as_ref().filter(|bind| {
+            (bind.gen, bind.publishes.load(Ordering::SeqCst)) == socket
+                && bind.announced.load(Ordering::SeqCst)
+                && self.inner.is_connected.load(Ordering::SeqCst)
+        }) else {
+            return Reannounce::SocketGone;
+        };
+        // Dark on this live socket, seconds after an error: PROVEN — the
+        // first re-announce below IS the proof the pull's hard path keys on
+        // ([`Self::wallet_lane_known_dark`] reads this socket's own count), so
+        // it is born, counted and cleared with the physical socket, under
+        // this lock, and no separate record can outlive it.
+        // **The budget is the SOCKET's** (`wallet-security-auditor`): a
+        // negotiation that hangs to the wRPC timeout fails after the check
+        // that retried it has ended, and that echo starts a new check — which
+        // must find this socket's re-announces already spent, not two fresh
+        // ones, or a node that ticks but never answers is retried about once
+        // a minute forever.
+        let spent = bind.lane_reannounced.load(Ordering::SeqCst);
+        let budget = u32::try_from(LANE_REANNOUNCE_AFTER.len()).unwrap_or(u32::MAX);
+        if spent >= budget {
+            return Reannounce::BudgetSpent;
+        }
+        bind.lane_reannounced.store(spent + 1, Ordering::SeqCst);
+        // PB-020: the intent is on record before the act. None of OUR handlers
+        // hears this edge — the bind's own task listens to its CLIENT's ctl,
+        // not this one — and the processor, which does, acts on it only while
+        // its own negotiation has not succeeded.
+        log::info!(
+            "link: wallet lane dark on a live socket (bind gen={gen}, {}) — re-announcing it \
+             to the processor, {}/{budget} for this socket (D-101 recovery)",
+            link::endpoint_host(&bind.url),
+            spent + 1
+        );
+        spans::mark_with("lane_reannounce", link::endpoint_host(&bind.url));
+        let _ = self.inner.monitor_ctl.try_signal_open();
+        Reannounce::Done
+    }
+
+    /// Did the wallet-lane recovery PROVE the lane dark on the physical socket
+    /// bound right now? The pull's hard path asks this, never the processor's
+    /// bit alone — that bit is also false for the sub-second of every healthy
+    /// socket's first negotiation (`consensus-auditor` note a). The proof is
+    /// the socket's own re-announce count, so nothing can hold it past the
+    /// socket: not a retirement, not a pinned redial's publish (which zeroes
+    /// the count under the lock), not a pinned drop — which leaves no
+    /// announced live socket to ask about (`wallet-security-auditor`, third
+    /// delta NOTE 1: a separate proof record outlived that drop).
+    pub fn wallet_lane_known_dark(&self) -> bool {
+        self.announced_live_socket()
+            .and_then(|socket| self.socket_reannounces(socket))
+            .is_some_and(|reannounced| reannounced > 0)
+    }
+
+    /// **The wallet lane's recovery (D-101's deferred arm, owed since
+    /// LINK-Q1).** Called when the wallet processor reports an error; decides,
+    /// from evidence, whether the lane is actually dark on a socket that stayed
+    /// bound, and only then acts: two re-announces of the same socket, then one
+    /// rebind — at most one per [`LANE_REBIND_WINDOW_SECS`] — then it stops and
+    /// says so. `lane_up` is the processor's own "negotiated" bit.
+    ///
+    /// **What the evidence said before this was built** (CONN-F1's 14-day
+    /// capture): all five `UtxoProcError`s were negotiations that died WITH
+    /// their socket — two dropped 0.2 s after connecting, three deaf sockets
+    /// retired at 31–37 s — and every next socket renegotiated in ~2 s by
+    /// itself. Those are [`LaneRecovery::SocketGone`] here, decided in the
+    /// first instant and logged as benign. The case this exists for — the
+    /// lane dark behind a live socket, where the pull's soft path cannot
+    /// re-arm the processor and a swap that finds nothing leaves it dark — has
+    /// not been seen, and would otherwise be silent: the balance at full
+    /// brightness, no live deposits.
+    ///
+    /// Single-flight, and the flag is released by a guard, so a cancelled run
+    /// can never wedge every later one out. **Coalescing, not dropping**: a
+    /// report that finds a check running leaves a request the running check
+    /// drains before it lets go — one pass covers only the socket it began on,
+    /// so the report of a successor that negotiated dark while its
+    /// predecessor's check was still asleep would otherwise never be checked,
+    /// leaving the exact silent dark lane this exists to catch
+    /// (`wallet-security-auditor`). It ends: each extra pass answers a new
+    /// processor error, and those are bounded per socket (two re-announces,
+    /// so three negotiations) and, across sockets, by one rebind per window.
+    pub async fn recover_wallet_lane<F>(&self, lane_up: F) -> LaneRecovery
+    where
+        F: Fn() -> bool + Sync,
+    {
+        struct Release<'a>(&'a AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        // A report with the lane UP has nothing to check — the notification
+        // handler's error (`processor.rs:747`: a node sending a malformed
+        // `UtxosChanged`), or a negotiation already retried. Answered at the
+        // door, with no queued pass and no log line, so a node-paced burst of
+        // them costs the RECOVERY nothing (`wallet-security-auditor`, item
+        // 22's rider) — the engine's arm still logs each and spawns this call.
+        if lane_up() {
+            return LaneRecovery::NotDark;
+        }
+        // The request is on record BEFORE anyone decides who serves it. Whoever
+        // holds the flag re-reads it after letting go, so a report landing
+        // between the last drain and the release is still served (all SeqCst:
+        // a report that saw the flag held stored its request first).
+        self.inner.lane_report_pending.store(true, Ordering::SeqCst);
+        let mut outcome = LaneRecovery::Queued;
+        loop {
+            if self.inner.lane_recovering.swap(true, Ordering::SeqCst) {
+                if outcome == LaneRecovery::Queued {
+                    log::info!(
+                        "link: a wallet-lane check is already running — this report is queued \
+                         behind it (D-101)"
+                    );
+                }
+                return outcome;
+            }
+            {
+                let _release = Release(&self.inner.lane_recovering);
+                while self.inner.lane_report_pending.swap(false, Ordering::SeqCst) {
+                    outcome = self.recover_wallet_lane_once(&lane_up).await;
+                    log::info!("link: wallet-lane check → {outcome:?} (D-101)");
+                }
+            }
+            if !self.inner.lane_report_pending.load(Ordering::SeqCst) {
+                return outcome;
+            }
+        }
+    }
+
+    async fn recover_wallet_lane_once(&self, lane_up: &(dyn Fn() -> bool + Sync)) -> LaneRecovery {
+        if lane_up() {
+            return LaneRecovery::NotDark;
+        }
+        let Some(socket) = self.announced_live_socket() else {
+            log::info!(
+                "link: the wallet lane's negotiation died with its socket — the next bind \
+                 renegotiates on its own; nothing to recover (D-101)"
+            );
+            return LaneRecovery::SocketGone;
+        };
+        let (gen, _) = socket;
+        // **What the lane coming up means depends on where** (`consensus-
+        // auditor` delta notes f and 1, `wallet-security-auditor` delta NOTE).
+        // Up on another physical socket — a successor, or a pinned redial
+        // under the same gen — the negotiation died with its own socket:
+        // `SocketGone`. Up on THIS one before any check proved it dark, it was
+        // never dark here: the processor renegotiates only on a `Connected`
+        // (pin `:717-718`), which only a publish (a new socket) or a
+        // re-announce sends, so what came up was a negotiation still in flight
+        // when this pass began — a queued report's pass can begin on a
+        // successor that never reported (`NotDark`). Only a socket proven dark
+        // and then up is a recovery.
+        let settled = |reannounced| match self.socket_reannounces(socket) {
+            None => LaneRecovery::SocketGone,
+            Some(0) => LaneRecovery::NotDark,
+            Some(_) => LaneRecovery::Recovered { reannounced },
+        };
+        let mut reannounced = 0u32;
+        for wait in LANE_REANNOUNCE_AFTER {
+            tokio::time::sleep(wait).await;
+            if lane_up() {
+                return settled(reannounced);
+            }
+            match self.reannounce_to_wallet_lane(socket) {
+                Reannounce::Done => reannounced += 1,
+                Reannounce::SocketGone => return LaneRecovery::SocketGone,
+                // This socket already had its re-announces (an earlier
+                // check's echo brought us here): straight to rebind-or-stop.
+                Reannounce::BudgetSpent => break,
+            }
+        }
+        tokio::time::sleep(LANE_SETTLE).await;
+        if lane_up() {
+            return settled(reannounced);
+        }
+        if self.announced_live_socket() != Some(socket) {
+            return LaneRecovery::SocketGone;
+        }
+        let now = Self::now_unix();
+        let last = self.inner.lane_rebound_at.load(Ordering::SeqCst);
+        if last != 0 && now.saturating_sub(last) < LANE_REBIND_WINDOW_SECS {
+            log::warn!(
+                "link: wallet lane still dark on bind gen={gen} after this socket's \
+                 re-announces, and this window's rebind is spent (one per \
+                 {LANE_REBIND_WINDOW_SECS}s) — left to the next drop, pull or tap (D-101)"
+            );
+            return LaneRecovery::GaveUp;
+        }
+        self.inner.lane_rebound_at.store(now, Ordering::SeqCst);
+        log::warn!(
+            "link: wallet lane still dark on bind gen={gen} after this socket's re-announces \
+             — rebinding (D-101 escalation)"
+        );
+        // The hard path, not a swap (D-213 §2's doctrine): what the lane needs
+        // is a NEW socket whose `Connected` makes the processor negotiate
+        // afresh, and a swap that found nothing would keep the socket that
+        // cannot serve it. No strike — recording is not judging.
+        if let Err(e) = self.hard_reconnect_because("lane-dark", "lane-dark").await {
+            log::warn!(
+                "link: the wallet lane's rebind failed to start: {}",
+                link::sanitize_node_text(&e.to_string())
+            );
+        }
+        LaneRecovery::Rebound
     }
 
     /// Disconnects, then signals the event task and waits for it to drain.
@@ -2417,6 +3332,13 @@ impl DagMonitor {
     /// late teardown — the one that used to be attributed to the next socket
     /// and kill it — is seen, logged and discarded, then reports what it
     /// refused and exits.
+    ///
+    /// **It also keeps this socket's silence deadline** (LINK-Q1, D-334): the
+    /// task is the only place this socket's ticks are folded, so it owns the
+    /// [`SilenceClock`] outright — armed by the accepted `Connected`, re-armed
+    /// by every DAA tick, disarmed by a drop or retirement. Ticks are polled
+    /// ahead of the deadline (`biased`), so a tick that lands as the deadline
+    /// falls wins: the incumbent speaking is exactly what keeps its place.
     async fn bind_loop(
         self,
         bind: Arc<BoundSocket>,
@@ -2426,7 +3348,12 @@ impl DagMonitor {
         let mut retire_rx = retire_rx;
         // `Some(deadline)` once this bind has been retired.
         let mut exit_at: Option<tokio::time::Instant> = None;
+        let mut silence = SilenceClock::default();
         loop {
+            // The deadline as the budget stands NOW — re-read every turn, so a
+            // swap that landed elsewhere, or a link that held, is honoured.
+            let deadline = self.silence_deadline();
+            let silence_due = silence.due(deadline);
             tokio::select! {
                 // Poll order matters (biased): drain ctl + notifications
                 // before honoring the exit, mirroring the upstream example.
@@ -2436,8 +3363,19 @@ impl DagMonitor {
                         Ok(state) if !self.is_current_bind(bind.gen) => {
                             self.discard_ctl(&bind, state);
                         }
-                        Ok(RpcState::Connected) => self.on_connected(&bind).await,
-                        Ok(RpcState::Disconnected) => self.on_disconnected(&bind).await,
+                        Ok(RpcState::Connected) => {
+                            self.on_connected(&bind).await;
+                            // Only a PUBLISHED socket has a deadline: one that
+                            // was refused or retired while coming up is not
+                            // the wallet's, and nothing may hunt on its behalf.
+                            if bind.announced.load(Ordering::SeqCst) {
+                                silence.up(tokio::time::Instant::now());
+                            }
+                        }
+                        Ok(RpcState::Disconnected) => {
+                            silence.down();
+                            self.on_disconnected(&bind).await;
+                        }
                         // Ctl channel closed: client is gone, nothing to track.
                         Err(_) => {
                             log::warn!(
@@ -2453,7 +3391,16 @@ impl DagMonitor {
                         Ok(_) if !self.is_current_bind(bind.gen) => {
                             self.discard_notification(&bind);
                         }
-                        Ok(notification) => self.on_notification(&bind, notification),
+                        Ok(notification) => {
+                            let tick = matches!(
+                                notification,
+                                Notification::VirtualDaaScoreChanged(_)
+                            );
+                            self.on_notification(&bind, notification);
+                            if tick && silence.tick(tokio::time::Instant::now()) {
+                                self.note_link_held(&bind);
+                            }
+                        }
                         Err(_) => {
                             log::warn!(
                                 "dag-monitor: notification channel closed for bind gen={} — task exiting",
@@ -2465,6 +3412,18 @@ impl DagMonitor {
                 }
                 _ = &mut retire_rx, if exit_at.is_none() => {
                     exit_at = Some(tokio::time::Instant::now() + RETIRED_DRAIN);
+                    silence.down();
+                }
+                _ = async {
+                    match silence_due {
+                        Some(due) => tokio::time::sleep_until(due).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if exit_at.is_none() => {
+                    let scored = silence.scored;
+                    silence.fire();
+                    // `silence_due` was `Some` only because `deadline` was.
+                    self.on_silence(&bind, scored, deadline.unwrap_or(link::SILENCE_DEADLINE));
                 }
                 _ = async {
                     match exit_at {
@@ -2564,6 +3523,18 @@ impl DagMonitor {
                     // R4 makes the point moot as well as ordered — the baseline
                     // lives on the socket itself.
                     bind.connected_at.store(Self::now_unix(), Ordering::Relaxed);
+                    bind.connected_mono_ms.store(mono_ms(), Ordering::Relaxed);
+                    // A pinned bind redials inside one identity (the pin's own
+                    // retry loop), so every publish is a NEW socket: its
+                    // re-announce budget — which is also its dark-lane proof —
+                    // and its blockless warning start clean (`consensus-
+                    // auditor` note g, `wallet-security-auditor`). Loop-safe:
+                    // a re-announce goes to the monitor's ctl, never this
+                    // socket's, so it cannot reach this arm. A no-op for a
+                    // race bind, which publishes once.
+                    bind.publishes.fetch_add(1, Ordering::SeqCst);
+                    bind.lane_reannounced.store(0, Ordering::SeqCst);
+                    bind.blocks_quiet_warned.store(false, Ordering::Relaxed);
                     // The stable handle points at this socket BEFORE anyone is
                     // told it exists, so a consumer reacting to the ctl open
                     // finds it (L59: the funds lanes re-arm on connect).
@@ -2621,6 +3592,14 @@ impl DagMonitor {
             // arm-and-verify (prove the push lane is live on the new socket —
             // `bind.daa_seen_since_connect` already exists and is one `if`
             // away), not a timeout on a local call.
+            //
+            // **Since LINK-Q1 the deaf-but-PUBLISHED shape above is owned**
+            // (D-334): the silence clock arms at the publish, so a socket
+            // that never delivers a tick is hunted behind at
+            // [`link::SILENCE_DEADLINE`] like any other silent one, with the
+            // watchdog's stall line behind that. What stays unowned is THIS
+            // arm — a local failure leaves the bind unpublished, and nothing
+            // arms a deadline for a socket the wallet was never given.
             Err(e) => log::warn!(
                 "dag-monitor: subscription setup failed: {}",
                 link::sanitize_node_text(&e.to_string())
@@ -2729,9 +3708,13 @@ impl DagMonitor {
                     // Send fails only with zero subscribers — fine.
                     let _ = self.inner.transport_events.send(event);
                 }
-                // Liveness heartbeat for the watchdog (P3): a block arrived,
-                // THIS socket is alive right now.
-                self.mark_block_seen(bind);
+                // **No heartbeat here any more** (LINK-Q1, D-334): a block is
+                // the transport scan's input, not the link's pulse. The pulse
+                // is the DAA tick, marked in the arm below — see `mark_tick`.
+                // It does keep the scan's own witness: a block re-arms the
+                // "ticks but no blocks" line.
+                bind.last_block_mono_ms.store(mono_ms(), Ordering::Relaxed);
+                bind.blocks_quiet_warned.store(false, Ordering::Relaxed);
                 // Advance the catch-up cursor past this scanned block
                 // (throttled; no-op until transport arms it). P5/D-067.
                 self.persist_transport_cursor(&added.block.header.hash);
@@ -2762,12 +3745,15 @@ impl DagMonitor {
             }
             other => {
                 if let Some(event) = map_notification(&other) {
-                    // V1 span: the first DAA tick after a connect closes the
-                    // time-to-first-DAA row.
-                    if matches!(event, DagEvent::VirtualDaaScore(_))
-                        && !bind.daa_seen_since_connect.swap(true, Ordering::Relaxed)
-                    {
-                        spans::mark("first_daa");
+                    if matches!(event, DagEvent::VirtualDaaScore(_)) {
+                        // The link's heartbeat (LINK-Q1): THIS socket's node
+                        // just advanced its virtual — it is alive and current.
+                        self.mark_tick(bind);
+                        // V1 span: the first DAA tick after a connect closes
+                        // the time-to-first-DAA row.
+                        if !bind.daa_seen_since_connect.swap(true, Ordering::Relaxed) {
+                            spans::mark("first_daa");
+                        }
                     }
                     self.emit(event);
                 }
@@ -2880,9 +3866,23 @@ mod tests {
         );
         assert!(
             !pinned.may_bind_from_race(&RaceMode::Swap {
-                from: "wss://whatever.example/borsh".to_string()
+                from: "wss://whatever.example/borsh".to_string(),
+                why: SwapWhy::Asked,
             }),
             "not even a swap hunt may bind over the user's node"
+        );
+        // Nor a silence hunt: a pinned socket that goes quiet is the
+        // watchdog's to redial, never the deadline's to replace (LINK-Q1).
+        assert!(
+            !pinned.may_bind_from_race(&RaceMode::Swap {
+                from: "wss://whatever.example/borsh".to_string(),
+                why: SwapWhy::Silent {
+                    gen: 1,
+                    ticks: 0,
+                    asked: 0
+                },
+            }),
+            "not even a silence hunt may bind over the user's node"
         );
 
         // The control: an unpinned monitor DOES race, so the assertions above
@@ -3149,7 +4149,7 @@ mod tests {
         // old rule executed it; the socket must keep its window. Since R4
         // both clocks are the SOCKET'S own, so a previous socket's silence
         // cannot even be read here.
-        bind.last_block_at
+        bind.last_tick_at
             .store(now.saturating_sub(120), Ordering::Relaxed);
         bind.connected_at
             .store(now.saturating_sub(5), Ordering::Relaxed);
@@ -3161,7 +4161,7 @@ mod tests {
         // A true zombie: connected 40+ s and blockless the whole time.
         bind.connected_at
             .store(now.saturating_sub(40), Ordering::Relaxed);
-        bind.last_block_at
+        bind.last_tick_at
             .store(now.saturating_sub(40), Ordering::Relaxed);
         assert!(
             matches!(monitor.stall_verdict(), StallVerdict::Execute { silent_secs } if silent_secs >= link::WATCHDOG_STALL_SECS),
@@ -3169,7 +4169,7 @@ mod tests {
         );
 
         // Blocks flowing now: healthy regardless of age.
-        bind.last_block_at.store(now, Ordering::Relaxed);
+        bind.last_tick_at.store(now, Ordering::Relaxed);
         assert!(matches!(
             monitor.stall_verdict(),
             StallVerdict::Refuse { .. }
@@ -3179,7 +4179,7 @@ mod tests {
         // process reading must never convict a socket that is delivering.
         monitor
             .inner
-            .last_block_at
+            .last_tick_at
             .store(now.saturating_sub(600), Ordering::Relaxed);
         assert!(matches!(
             monitor.stall_verdict(),
@@ -3358,6 +4358,7 @@ mod tests {
         const DEMOTED: &str = "wss://demoted.example/borsh";
         let swap = RaceMode::Swap {
             from: INCUMBENT.to_string(),
+            why: SwapWhy::Asked,
         };
 
         let demoted: HashSet<String> = [DEMOTED.to_string()].into_iter().collect();
@@ -3379,11 +4380,22 @@ mod tests {
         assert_eq!(round_exclusions(demoted, &RaceMode::Cold).len(), 1);
 
         // Bounded, but only while it has something to preserve.
-        assert!(!swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS - 1, true));
-        assert!(swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true));
+        assert!(!swap_hunt_exhausted(
+            &swap,
+            SWAP_HUNT_ROUNDS - 1,
+            true,
+            false
+        ));
+        assert!(swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true, false));
         assert!(
-            !swap_hunt_exhausted(&RaceMode::Cold, SWAP_HUNT_ROUNDS * 100, true),
+            !swap_hunt_exhausted(&RaceMode::Cold, SWAP_HUNT_ROUNDS * 100, true, false),
             "a dark wallet is never given up on"
+        );
+        // A tap that joined in the final round is owed rounds of its own
+        // (`consensus-auditor` delta CONCERNS-B).
+        assert!(
+            !swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true, true),
+            "a joined tap is never spent with the silence's budget"
         );
 
         // Losing the incumbent turns the errand back into the ordinary hunt —
@@ -3410,18 +4422,19 @@ mod tests {
     fn an_exhausted_swap_that_lost_its_incumbent_never_gives_up() {
         let swap = RaceMode::Swap {
             from: "wss://incumbent.example/borsh".to_string(),
+            why: SwapWhy::Asked,
         };
 
         // Still connected on the last round: keeping the incumbent is right.
         assert!(
-            swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true),
+            swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, true, false),
             "a swap that still has its incumbent stops and keeps it"
         );
 
         // The incumbent died inside the final round. The budget is spent, but
         // there is nothing left to preserve — so the loop must NOT return.
         assert!(
-            !swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, false),
+            !swap_hunt_exhausted(&swap, SWAP_HUNT_ROUNDS, false, false),
             "a swap whose incumbent died must keep hunting — returning here \
              leaves the wallet dark with no search authority running, because \
              on_disconnected's own spawn_race was already refused by this loop"
@@ -3442,6 +4455,7 @@ mod tests {
     fn a_swap_round_never_degrades_hygiene() {
         let swap = RaceMode::Swap {
             from: "wss://incumbent.example/borsh".to_string(),
+            why: SwapWhy::Asked,
         };
         for rounds in 0..=(SWAP_HUNT_ROUNDS + 2) {
             assert!(
@@ -3464,6 +4478,7 @@ mod tests {
         let monitor = DagMonitor::mainnet().expect("construct");
         let swap = RaceMode::Swap {
             from: "wss://incumbent.example/borsh".to_string(),
+            why: SwapWhy::Asked,
         };
         assert!(
             monitor.may_bind_from_race(&RaceMode::Cold),
@@ -3746,9 +4761,9 @@ mod tests {
             .listener_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(42);
-        let live_block_clock = live.last_block_at.load(Ordering::Relaxed);
+        let live_tick_clock = live.last_tick_at.load(Ordering::Relaxed);
 
-        // The dead socket keeps talking: a late teardown AND a late block.
+        // The dead socket keeps talking: a late teardown AND a late tick.
         let _ = dead.client.rpc_ctl().signal_close().await;
         let _ = dead
             .notification_tx
@@ -3781,9 +4796,9 @@ mod tests {
              the deafness that produced the soak's 39-40 s stall convictions"
         );
         assert_eq!(
-            live.last_block_at.load(Ordering::Relaxed),
-            live_block_clock,
-            "a dead socket's block must not refresh the live socket's evidence clock"
+            live.last_tick_at.load(Ordering::Relaxed),
+            live_tick_clock,
+            "a dead socket's tick must not refresh the live socket's evidence clock"
         );
         assert!(monitor.is_connected(), "the live link is still up");
     }
@@ -3808,6 +4823,14 @@ mod tests {
                 "wss://c.example/kaspa/mainnet/wrpc/borsh",
             ),
             ("superseded", "wss://d.example/kaspa/mainnet/wrpc/borsh"),
+            // LINK-Q1: the silence hunt's winner retires its incumbent under
+            // its own name, and the wallet lane's rebind goes the hard path
+            // under its own — both record, neither judges.
+            (SILENCE_SWAP, "wss://e.example/kaspa/mainnet/wrpc/borsh"),
+            ("lane-dark", "wss://f.example/kaspa/mainnet/wrpc/borsh"),
+            // A silence hunt a tap joined: its winner retires the incumbent as
+            // the user's swap, and the silence budget does not move.
+            ("tap-joined", "wss://g.example/kaspa/mainnet/wrpc/borsh"),
         ] {
             let monitor = DagMonitor::mainnet().expect("construct");
             // Hold the single-flight flag so a recovery path kicks instead of
@@ -3827,6 +4850,32 @@ mod tests {
                 // `reconnect` for a teardown here would be asking it for the
                 // behaviour the fix removed.
                 "manual-reconnect" => monitor.hard_reconnect().await.expect("hard reconnect"),
+                "lane-dark" => monitor
+                    .hard_reconnect_because("lane-dark", "lane-dark")
+                    .await
+                    .expect("lane rebind"),
+                // The race's winner arm, driven: the cause is the hunt's to
+                // earn (`consensus-auditor` third delta, CONCERNS-C).
+                SILENCE_SWAP | "tap-joined" => {
+                    let silent = RaceMode::Swap {
+                        from: url.to_string(),
+                        why: SwapWhy::Silent {
+                            gen: bind.gen,
+                            ticks: 0,
+                            asked: monitor.inner.swaps_asked.load(Ordering::SeqCst),
+                        },
+                    };
+                    if case == "tap-joined" {
+                        monitor.inner.swaps_asked.fetch_add(1, Ordering::SeqCst);
+                    }
+                    monitor
+                        .install_bind_leaving(
+                            "wss://next.example/kaspa/mainnet/wrpc/borsh".to_string(),
+                            &silent,
+                        )
+                        .await
+                        .expect("arm the hunt's winner");
+                }
                 // Installing over a live bind must not leak it.
                 _ => {
                     monitor
@@ -3835,6 +4884,18 @@ mod tests {
                         .expect("arm the successor");
                 }
             }
+            // Only the silence deadline's own swap spends its budget, and it
+            // does on the install path every silence swap takes
+            // (`consensus-auditor` CONCERNS-A — this case drives that line).
+            assert_eq!(
+                monitor.silence_deadline(),
+                Some(if case == SILENCE_SWAP {
+                    link::SILENCE_DEADLINE * 2
+                } else {
+                    link::SILENCE_DEADLINE
+                }),
+                "{case}: the silence budget moves for a silence swap and nothing else"
+            );
 
             let recorded = last_run(&monitor, url)
                 .unwrap_or_else(|| panic!("{case}: the run must reach the durable ledger"));
@@ -3877,7 +4938,9 @@ mod tests {
             );
             assert!(!monitor.is_connected(), "{case}: the link is down");
             assert!(
-                monitor.current_bind().is_none() || case == "superseded",
+                monitor.current_bind().is_none()
+                    || matches!(case, "superseded" | "tap-joined")
+                    || case == SILENCE_SWAP,
                 "{case}: no bind is left installed"
             );
         }
@@ -3986,7 +5049,7 @@ mod tests {
             .expect("arm a bind");
         mark_accepted(&monitor, &bind, 60);
         // Silent its whole life: a true zombie on its OWN clock.
-        bind.last_block_at.store(0, Ordering::Relaxed);
+        bind.last_tick_at.store(0, Ordering::Relaxed);
 
         monitor.reconnect(true).await.expect("stalled reconnect");
 
@@ -4004,6 +5067,1197 @@ mod tests {
             matches!(parked, Some((ref u, _, link::StrikeReason::Stall)) if u == URL),
             "the execution parks a Stall against the socket it judged, got {parked:?}"
         );
+    }
+
+    // ── LINK-Q1 · the heartbeat, the silence deadline, the wallet lane (D-334) ──
+
+    fn daa_tick(score: u64) -> Notification {
+        Notification::VirtualDaaScoreChanged(VirtualDaaScoreChangedNotification {
+            virtual_daa_score: score,
+        })
+    }
+
+    /// A block with nothing in it — the scan reads its transactions and finds
+    /// none, which is all this needs: a `BlockAdded` that is not a tick.
+    fn empty_block() -> Notification {
+        let zero = Hash::from_bytes([0u8; 32]);
+        Notification::BlockAdded(kaspa_rpc_core::BlockAddedNotification {
+            block: Arc::new(kaspa_rpc_core::RpcBlock {
+                header: kaspa_rpc_core::RpcHeader {
+                    hash: zero,
+                    version: 0,
+                    parents_by_level: vec![],
+                    hash_merkle_root: zero,
+                    accepted_id_merkle_root: zero,
+                    utxo_commitment: zero,
+                    timestamp: 0,
+                    bits: 0,
+                    nonce: 0,
+                    daa_score: 0,
+                    blue_work: Default::default(),
+                    blue_score: 0,
+                    pruning_point: zero,
+                },
+                transactions: vec![],
+                verbose_data: None,
+            }),
+        })
+    }
+
+    /// Stage an announced, live bind — the state a successful publish leaves,
+    /// `announced` included (which `mark_accepted` leaves alone).
+    fn stage_live(monitor: &DagMonitor, bind: &Arc<BoundSocket>) {
+        mark_accepted(monitor, bind, 30);
+        bind.announced.store(true, Ordering::SeqCst);
+    }
+
+    /// A bind's retire signal is taken exactly once, by `retire_bind` — so an
+    /// untaken one proves the socket was never retired, by construction.
+    fn never_retired(bind: &BoundSocket) -> bool {
+        bind.retire_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    fn no_pending_strike(monitor: &DagMonitor) -> bool {
+        monitor
+            .inner
+            .pending_strike
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    }
+
+    /// **LINK-Q1 · the heartbeat is the DAA tick** (D-334). A block is the
+    /// transport scan's input and moves no liveness clock; a tick moves all
+    /// four — the socket's evidence clock, the process's display clock, the
+    /// socket's count the silence hunt reads, and the process count the node
+    /// screen turns into a rate.
+    ///
+    /// The last half is the behaviour change, proven in the direction that
+    /// would catch it being undone (PB-031): a socket connected 40 s that has
+    /// delivered fifty blocks and no tick is SILENT on the heartbeat, and the
+    /// stall verdict executes it. With `BlockAdded` still marking, this reds.
+    #[tokio::test]
+    async fn the_heartbeat_is_the_daa_tick_and_a_block_is_not() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        mark_accepted(&monitor, &bind, 40);
+
+        for _ in 0..50 {
+            monitor.on_notification(&bind, empty_block());
+        }
+        assert_eq!(
+            bind.last_tick_at.load(Ordering::Relaxed),
+            0,
+            "a block is not the heartbeat"
+        );
+        assert_eq!(monitor.inner.last_tick_at.load(Ordering::Relaxed), 0);
+        assert_eq!(bind.ticks.load(Ordering::SeqCst), 0);
+        assert_eq!(monitor.daa_ticks(), 0);
+        assert_eq!(
+            monitor.last_tick_age_secs(),
+            None,
+            "no tick yet: the glass has nothing to age"
+        );
+        assert!(
+            matches!(monitor.stall_verdict(), StallVerdict::Execute { silent_secs } if silent_secs >= link::WATCHDOG_STALL_SECS),
+            "blocks without a tick are silence on the heartbeat — executed on its own clock"
+        );
+
+        monitor.on_notification(&bind, daa_tick(900));
+        assert!(
+            bind.last_tick_at.load(Ordering::Relaxed) > 0,
+            "the socket's evidence clock moved"
+        );
+        assert!(
+            monitor.inner.last_tick_at.load(Ordering::Relaxed) > 0,
+            "and the glass's"
+        );
+        assert_eq!(bind.ticks.load(Ordering::SeqCst), 1);
+        assert_eq!(monitor.daa_ticks(), 1);
+        assert!(monitor.last_tick_age_secs().is_some_and(|age| age <= 1));
+        assert!(
+            matches!(monitor.stall_verdict(), StallVerdict::Refuse { .. }),
+            "a socket that ticked just now is not a zombie"
+        );
+    }
+
+    /// The silence deadline's clock, as a pure thing: armed by the accepted
+    /// connect, re-armed by every tick, one hunt per silence, disarmed by a
+    /// drop — and a tick before the connect arms nothing.
+    #[test]
+    fn the_silence_clock_arms_on_connect_rearms_on_a_tick_and_fires_once() {
+        let deadline = link::SILENCE_DEADLINE;
+        let d = Some(deadline);
+        let t0 = tokio::time::Instant::now();
+        let mut clock = SilenceClock::default();
+        assert_eq!(clock.due(d), None, "nothing up, nothing to watch");
+        assert!(!clock.tick(t0));
+        assert_eq!(clock.due(d), None, "a tick before the connect arms nothing");
+
+        clock.up(t0);
+        assert_eq!(clock.due(d), Some(t0 + deadline));
+        assert_eq!(
+            clock.due(None),
+            None,
+            "a budget that switched it off arms nothing"
+        );
+        assert!(!clock.scored, "never scored until it ticks");
+
+        let t1 = t0 + Duration::from_secs(3);
+        assert!(!clock.tick(t1));
+        assert_eq!(clock.due(d), Some(t1 + deadline));
+        assert!(clock.scored);
+
+        clock.fire();
+        assert_eq!(clock.due(d), None, "one hunt per silence");
+
+        let t2 = t1 + Duration::from_secs(20);
+        assert!(
+            !clock.tick(t2),
+            "a socket whose deadline fired has not held"
+        );
+        assert_eq!(
+            clock.due(d),
+            Some(t2 + deadline),
+            "a tick re-arms it: the next silence may start the next hunt"
+        );
+
+        clock.down();
+        assert_eq!(clock.due(d), None);
+        assert!(!clock.scored);
+    }
+
+    /// **The link HELD** — a clean `SILENCE_HOLD_RESET` on one socket, no
+    /// quiet spell of the base deadline in it — is what gives the silence
+    /// deadline its nine seconds back (CONCERNS-1's budget). Reported once per
+    /// clean stretch; a quiet spell, fired or not, starts the minute again
+    /// (`consensus-auditor` delta NOTE 3), from the LAST quiet spell rather
+    /// than for the socket's life (third-delta NOTE 2), and the base deadline
+    /// is the edge exactly (third-delta NOTE 3).
+    #[test]
+    fn a_socket_that_stays_up_a_minute_says_the_link_held_once() {
+        let t0 = tokio::time::Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let held_at = |clock: &mut SilenceClock, ticks: &[u64]| -> Vec<u64> {
+            ticks
+                .iter()
+                .copied()
+                .filter(|&ms| clock.tick(at(ms)))
+                .collect()
+        };
+        let every_second = |from: u64, to: u64| (from..=to).map(|s| s * 1000).collect::<Vec<_>>();
+
+        let mut steady = SilenceClock::default();
+        steady.up(t0);
+        assert_eq!(
+            held_at(&mut steady, &every_second(1, 90)),
+            [60_000],
+            "once, at the minute"
+        );
+
+        // A silence the deadline fired on: the minute restarts at the tick
+        // that ends it.
+        let mut shaky = SilenceClock::default();
+        shaky.up(t0);
+        assert!(!shaky.tick(at(1_000)));
+        shaky.fire();
+        let mut ticks = vec![12_000];
+        ticks.extend(every_second(13, 90));
+        assert_eq!(
+            held_at(&mut shaky, &ticks),
+            [72_000],
+            "a clean minute after the silence"
+        );
+
+        // Quiet unfired is still quiet — with the budget at 18 s or off, a
+        // twelve-second silence fires nothing and the link still did not hold.
+        let mut quiet = SilenceClock::default();
+        quiet.up(t0);
+        assert!(!quiet.tick(at(1_000)));
+        let mut ticks = vec![13_000];
+        ticks.extend(every_second(14, 90));
+        assert_eq!(held_at(&mut quiet, &ticks), [73_000]);
+
+        // The edge is the base deadline exactly: 8.99 s is not a quiet spell,
+        // 9 s is.
+        let mut under = SilenceClock::default();
+        under.up(t0);
+        assert!(!under.tick(at(1_000)));
+        let mut ticks = vec![9_990];
+        ticks.extend(every_second(10, 70));
+        assert_eq!(
+            held_at(&mut under, &ticks),
+            [60_000],
+            "8.99 s leaves the minute running"
+        );
+        let mut at_edge = SilenceClock::default();
+        at_edge.up(t0);
+        assert!(!at_edge.tick(at(1_000)));
+        let mut ticks = vec![10_000];
+        ticks.extend(every_second(11, 75));
+        assert_eq!(held_at(&mut at_edge, &ticks), [70_000], "9 s restarts it");
+
+        // A long-lived socket that coughs AFTER holding holds again a clean
+        // minute later — the budget is not lost for the socket's life.
+        let mut long = SilenceClock::default();
+        long.up(t0);
+        let mut ticks = every_second(1, 100);
+        ticks.push(111_000);
+        ticks.extend(every_second(112, 180));
+        assert_eq!(held_at(&mut long, &ticks), [60_000, 171_000]);
+    }
+
+    /// **The winner arm's cause is chosen by one tested function**
+    /// (`consensus-auditor` delta CONCERNS-A′): the silence budget counts
+    /// [`SILENCE_SWAP`], so the choice of it is the budget's other half.
+    #[test]
+    fn only_silences_own_hunt_retires_as_a_silence_swap() {
+        const FROM: &str = "wss://ella.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let asked = monitor.inner.swaps_asked.load(Ordering::SeqCst);
+        let silent = RaceMode::Swap {
+            from: FROM.to_string(),
+            why: SwapWhy::Silent {
+                gen: 1,
+                ticks: 0,
+                asked,
+            },
+        };
+        let tapped = RaceMode::Swap {
+            from: FROM.to_string(),
+            why: SwapWhy::Asked,
+        };
+        assert_eq!(monitor.retire_cause(&silent), SILENCE_SWAP);
+        assert_eq!(monitor.retire_cause(&tapped), "superseded");
+        assert_eq!(monitor.retire_cause(&RaceMode::Cold), "superseded");
+        monitor.inner.swaps_asked.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            monitor.retire_cause(&silent),
+            "superseded",
+            "a silence hunt a tap has joined is the user's swap"
+        );
+    }
+
+    /// **LINK-Q1 · a live socket silent past the deadline asks for a hunt
+    /// behind itself, and a tick in time keeps it quiet** — driven through the
+    /// socket's own task (the real publish arms the clock) on tokio's paused
+    /// clock, so eighteen seconds of silence cost none. The single-flight flag
+    /// is held so the hunt becomes a kick the test can see without dialling the
+    /// network — the seam every swap test here uses.
+    ///
+    /// And it is NOT a verdict: after the deadline the socket is still bound,
+    /// no run is recorded and no strike is parked.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_live_socket_hunts_behind_itself_and_a_tick_keeps_it_quiet() {
+        const URL: &str = "wss://kate.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        // Up through its own task: `on_connected` publishes, then the clock arms.
+        let _ = bind.client.rpc_ctl().signal_open().await;
+        wait_for("the bind to publish", || {
+            bind.announced.load(Ordering::SeqCst)
+        })
+        .await;
+        assert!(monitor.is_connected());
+
+        let kicked = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let inner = monitor.inner.clone();
+            let kicked = kicked.clone();
+            tokio::spawn(async move {
+                inner.race_kick.notified().await;
+                kicked.store(true, Ordering::SeqCst);
+            })
+        };
+
+        // Eight seconds of silence, then it speaks: the clock re-arms there.
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let _ = bind.notification_tx.send(daa_tick(1)).await;
+        wait_for("the tick to fold", || {
+            bind.ticks.load(Ordering::SeqCst) == 1
+        })
+        .await;
+
+        // Sixteen seconds since the connect, eight since the tick: no hunt.
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        assert!(
+            !kicked.load(Ordering::SeqCst),
+            "a socket that spoke eight seconds ago is inside its deadline"
+        );
+
+        // Past the deadline measured from the TICK: the hunt is asked for.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        wait_for("the silence hunt to be asked for", || {
+            kicked.load(Ordering::SeqCst)
+        })
+        .await;
+
+        assert!(
+            monitor.is_current_bind(bind.gen),
+            "no teardown on the deadline"
+        );
+        assert!(monitor.is_connected());
+        assert!(
+            never_retired(&bind),
+            "never retired — the structural proof; a run length cannot be one here, because \
+             paused time leaves the wall clock a run is measured on standing still"
+        );
+        assert!(
+            no_pending_strike(&monitor),
+            "and no strike: conviction is the watchdog's"
+        );
+
+        waiter.abort();
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// A pinned socket that goes silent has no other node to find: the deadline
+    /// asks for nothing — neither a hunt nor a kick — and the watchdog's stall
+    /// line owns it. PB-031: without the pinned arm `on_silence` would fall
+    /// through to the kick, and this reds on the stored permit.
+    #[tokio::test]
+    async fn a_pinned_silent_socket_asks_for_no_hunt() {
+        const URL: &str = "wss://mine.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::try_new(NetworkId::new(NetworkType::Mainnet), Some(URL.into()))
+            .expect("construct");
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+
+        monitor.on_silence(&bind, true, link::SILENCE_DEADLINE);
+
+        assert!(!monitor.is_searching(), "no hunt was spawned");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                monitor.inner.race_kick.notified()
+            )
+            .await
+            .is_err(),
+            "and no kick was stored for one to find"
+        );
+        assert!(monitor.is_current_bind(bind.gen));
+    }
+
+    /// The stand-down belongs to the silence hunt and to its own incumbent: a
+    /// socket that ticks since the hunt began is kept; a user's swap is never
+    /// called off by the node they asked to leave; another socket's comeback
+    /// is not this hunt's business.
+    #[tokio::test]
+    async fn a_silence_hunt_stands_down_only_for_its_own_incumbent_speaking() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://kate.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let asked = monitor.inner.swaps_asked.load(Ordering::SeqCst);
+        let silent = |gen: u64, ticks: u64| RaceMode::Swap {
+            from: bind.url.clone(),
+            why: SwapWhy::Silent { gen, ticks, asked },
+        };
+
+        assert!(
+            !monitor.silent_incumbent_is_back(&silent(bind.gen, 0)),
+            "still silent: the hunt goes on"
+        );
+        monitor.on_notification(&bind, daa_tick(7));
+        assert!(
+            monitor.silent_incumbent_is_back(&silent(bind.gen, 0)),
+            "it spoke since the hunt began, and just now: keep it"
+        );
+        assert!(
+            !monitor.silent_incumbent_is_back(&silent(bind.gen, 1)),
+            "no tick since THIS hunt began"
+        );
+        assert!(
+            !monitor.silent_incumbent_is_back(&silent(bind.gen + 1, 0)),
+            "a different socket's tick is not this incumbent's comeback"
+        );
+        assert!(!monitor.silent_incumbent_is_back(&RaceMode::Swap {
+            from: bind.url.clone(),
+            why: SwapWhy::Asked,
+        }));
+        assert!(!monitor.silent_incumbent_is_back(&RaceMode::Cold));
+
+        // **A tap during the hunt makes it the user's** (CONCERNS-2): the tap
+        // path counts itself before asking for a hunt, and a silence hunt that
+        // began at the old count is no longer called off by its incumbent —
+        // the user asked to LEAVE it (L127: the tap always acts).
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        monitor.reconnect(false).await.expect("tap");
+        assert!(
+            !monitor.silent_incumbent_is_back(&silent(bind.gen, 0)),
+            "the incumbent spoke, but the user's tap outranks its comeback"
+        );
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// **The loop itself stands down at its head** (`consensus-auditor` note c,
+    /// PB-031): a silence hunt whose incumbent is talking again returns before
+    /// a single candidate is dialled. Bounded so a regression cannot hang the
+    /// suite — without the check the loop would go on to the resolver.
+    #[tokio::test]
+    async fn a_silence_hunt_whose_incumbent_came_back_never_dials() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://kate.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        monitor.on_notification(&bind, daa_tick(1));
+        let mode = RaceMode::Swap {
+            from: bind.url.clone(),
+            why: SwapWhy::Silent {
+                gen: bind.gen,
+                ticks: 0,
+                asked: monitor.inner.swaps_asked.load(Ordering::SeqCst),
+            },
+        };
+        tokio::time::timeout(Duration::from_millis(500), monitor.race_loop(mode))
+            .await
+            .expect("the hunt stands down at its head, before any network round");
+        assert!(monitor.is_current_bind(bind.gen));
+        assert!(never_retired(&bind));
+    }
+
+    /// **CONCERNS-1's budget: silence swaps cannot chain.** A landed silence
+    /// swap doubles the next deadline; a second switches it off, leaving the
+    /// watchdog's stall line (with its strike justice) to own the silence; a
+    /// socket that holds for a minute gives the nine seconds back.
+    #[tokio::test]
+    async fn silence_swaps_are_budgeted_until_the_link_holds() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://kate.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        assert_eq!(monitor.silence_deadline(), Some(link::SILENCE_DEADLINE));
+        monitor.note_silence_swap_landed();
+        assert_eq!(monitor.silence_deadline(), Some(link::SILENCE_DEADLINE * 2));
+        monitor.note_silence_swap_landed();
+        assert_eq!(monitor.silence_deadline(), None, "two landed: off");
+        monitor.note_link_held(&bind);
+        assert_eq!(monitor.silence_deadline(), Some(link::SILENCE_DEADLINE));
+    }
+
+    /// The budget reaches the socket's own task: with the deadline switched
+    /// off, a live socket silent for a full minute asks for no hunt at all.
+    #[tokio::test(start_paused = true)]
+    async fn with_the_budget_spent_a_silent_socket_asks_for_nothing() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        monitor.inner.silence_backoff.store(2, Ordering::SeqCst);
+        let bind = monitor
+            .install_bind("wss://kate.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        let _ = bind.client.rpc_ctl().signal_open().await;
+        wait_for("the bind to publish", || {
+            bind.announced.load(Ordering::SeqCst)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), monitor.inner.race_kick.notified())
+                .await
+                .is_err(),
+            "no hunt was asked for: the watchdog owns this silence now"
+        );
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// **CONCERNS-3: the case the heartbeat's move stopped convicting says its
+    /// name.** A socket ticking with no block for the stall line flags itself
+    /// once; a block re-arms it.
+    #[tokio::test]
+    async fn a_socket_ticking_without_blocks_says_so_once() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ivy.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let stall_ms = link::WATCHDOG_STALL_SECS * 1000;
+        // Explicit monotonic stamps, so the verdict does not depend on how long
+        // the test process has been alive.
+        bind.connected_mono_ms.store(1_000, Ordering::Relaxed);
+        monitor.note_blockless_ticks(&bind, 1_000 + stall_ms - 1);
+        assert!(
+            !bind.blocks_quiet_warned.load(Ordering::Relaxed),
+            "just under the stall line: nothing to say yet"
+        );
+        monitor.note_blockless_ticks(&bind, 1_000 + stall_ms);
+        assert!(
+            bind.blocks_quiet_warned.load(Ordering::Relaxed),
+            "ticks for the stall line and no block: flagged"
+        );
+        // A block re-arms it, and the stretch is measured from that block.
+        monitor.on_notification(&bind, empty_block());
+        assert!(!bind.blocks_quiet_warned.load(Ordering::Relaxed));
+        let block_at = bind.last_block_mono_ms.load(Ordering::Relaxed);
+        monitor.note_blockless_ticks(&bind, block_at + 1_000);
+        assert!(
+            !bind.blocks_quiet_warned.load(Ordering::Relaxed),
+            "a tick a second after a block is not a blockless stretch"
+        );
+        // A socket not yet published has no stretch to measure.
+        let fresh = monitor
+            .install_bind("wss://kate.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm another");
+        monitor.note_blockless_ticks(&fresh, u64::MAX);
+        assert!(!fresh.blocks_quiet_warned.load(Ordering::Relaxed));
+    }
+
+    /// **The pull keys on proof, not on the bit** (`consensus-auditor` note
+    /// a): before a check has found the lane dark on THIS socket, the pull's
+    /// hard path is not armed; after one has, it is; a new socket clears it.
+    #[tokio::test(start_paused = true)]
+    async fn the_pull_keys_on_a_lane_proven_dark_on_this_socket() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        // The window's rebind is spent, so the check re-announces and stops.
+        monitor
+            .inner
+            .lane_rebound_at
+            .store(DagMonitor::now_unix(), Ordering::SeqCst);
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        assert!(
+            !monitor.wallet_lane_known_dark(),
+            "no check has found it dark"
+        );
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::GaveUp
+        );
+        assert!(
+            monitor.wallet_lane_known_dark(),
+            "proven dark on this socket"
+        );
+        let next = monitor
+            .install_bind("wss://leah.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm the next");
+        stage_live(&monitor, &next);
+        assert!(
+            !monitor.wallet_lane_known_dark(),
+            "the proof was about the socket that is gone"
+        );
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// **The recovery's budget is the SOCKET's** (`wallet-security-auditor`).
+    /// A stand-in for the pin's processor that fails its negotiation sixty
+    /// seconds after EVERY `Connected` it sees — a node that ticks but never
+    /// answers `get_server_info`, so every retry dies at the wRPC timeout,
+    /// after the check that asked for it has ended. Over thirty virtual
+    /// minutes the socket gets at most its two re-announces, and the checks
+    /// stop: a single-flight bound per run alone would have retried it about
+    /// once a minute forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_negotiation_gets_two_reannounces_per_socket_then_quiet() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        monitor
+            .inner
+            .lane_rebound_at
+            .store(DagMonitor::now_unix(), Ordering::SeqCst);
+        let bind = monitor
+            .install_bind("wss://ivy.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let opens = Arc::new(AtomicU64::new(0));
+        let checks = Arc::new(AtomicU64::new(0));
+        let processor = {
+            let ctl = monitor.rpc().rpc_ctl().multiplexer().channel();
+            let monitor = monitor.clone();
+            let opens = opens.clone();
+            let checks = checks.clone();
+            tokio::spawn(async move {
+                while let Ok(state) = ctl.receiver.recv().await {
+                    if state != RpcState::Connected {
+                        continue;
+                    }
+                    opens.fetch_add(1, Ordering::SeqCst);
+                    let (monitor, checks) = (monitor.clone(), checks.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        monitor.recover_wallet_lane(|| false).await;
+                    });
+                }
+            })
+        };
+        // The first failure — the socket's own negotiation.
+        checks.fetch_add(1, Ordering::SeqCst);
+        monitor.recover_wallet_lane(|| false).await;
+        tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+        assert!(
+            opens.load(Ordering::SeqCst) <= LANE_REANNOUNCE_AFTER.len() as u64,
+            "{} re-announces on one socket — the budget is per socket",
+            opens.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            bind.lane_reannounced.load(Ordering::SeqCst) as usize,
+            LANE_REANNOUNCE_AFTER.len()
+        );
+        let settled = checks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+        assert_eq!(
+            checks.load(Ordering::SeqCst),
+            settled,
+            "and the checks stopped: nothing re-triggers a socket whose budget is spent"
+        );
+        processor.abort();
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// With no socket there is no round trip to time: the probe is an ERROR —
+    /// neither a sample nor a lower bound — so the reader counts it toward its
+    /// dwell instead of drawing "at least" a number for a link that is not
+    /// there (D-333).
+    #[tokio::test]
+    async fn a_probe_with_no_socket_is_an_error_not_a_timeout() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        assert_eq!(monitor.probe_link(true).await, LinkProbe::default());
+    }
+
+    /// The wallet-lane check acts only on evidence: an up lane is not dark, and
+    /// a lane with no announced socket died with it — the five CONN-F1 cases.
+    #[tokio::test(start_paused = true)]
+    async fn the_wallet_lane_check_does_nothing_when_nothing_is_dark() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        assert_eq!(
+            monitor.recover_wallet_lane(|| true).await,
+            LaneRecovery::NotDark
+        );
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::SocketGone,
+            "no socket: the negotiation died with it, and the next bind renegotiates"
+        );
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        mark_accepted(&monitor, &bind, 0);
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::SocketGone,
+            "installed and up but never announced: not a socket the lane was offered"
+        );
+    }
+
+    /// **A re-announce IS a retry on the same socket.** Stands in for the pin's
+    /// processor exactly as far as this claim needs: it renegotiates when it
+    /// sees `Connected` on the monitor's ctl while its lane is down
+    /// (`processor.rs:717-718`). The lane comes up on the first re-announce,
+    /// and the socket carrying it was never touched.
+    #[tokio::test(start_paused = true)]
+    async fn a_reannounce_brings_the_lane_up_on_the_same_socket() {
+        const URL: &str = "wss://ella.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let lane = Arc::new(AtomicBool::new(false));
+        let processor = {
+            let ctl = monitor.rpc().rpc_ctl().multiplexer().channel();
+            let lane = lane.clone();
+            tokio::spawn(async move {
+                while let Ok(state) = ctl.receiver.recv().await {
+                    if state == RpcState::Connected {
+                        lane.store(true, Ordering::SeqCst);
+                    }
+                }
+            })
+        };
+        let probe = lane.clone();
+        let outcome = monitor
+            .recover_wallet_lane(move || probe.load(Ordering::SeqCst))
+            .await;
+        assert_eq!(outcome, LaneRecovery::Recovered { reannounced: 1 });
+        assert!(
+            monitor.is_current_bind(bind.gen),
+            "the same socket carries the lane"
+        );
+        assert!(never_retired(&bind), "nothing was torn down");
+        processor.abort();
+    }
+
+    /// **D-101's loop terminates, inside its bound** — what its deferral asked
+    /// for: "its own loop bound". A lane that never comes up on a socket that
+    /// stays bound gets exactly two re-announces and one rebind, in no more
+    /// than the schedule's own time; the next report inside the window gets
+    /// the two re-announces and a stop; outside the window the rebind is
+    /// available again. Paused time: the elapsed VIRTUAL time is the bound.
+    #[tokio::test(start_paused = true)]
+    async fn the_wallet_lane_recovery_is_bounded_and_ends() {
+        const URL: &str = "wss://ella.example/kaspa/mainnet/wrpc/borsh";
+        const NEXT: &str = "wss://leah.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        // The rebind's relink kicks a held flag instead of dialling the network.
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        let ctl = monitor.rpc().rpc_ctl().multiplexer().channel();
+        let drain = |rx: &async_channel::Receiver<RpcState>| {
+            let (mut opens, mut closes) = (0usize, 0usize);
+            while let Ok(state) = rx.try_recv() {
+                match state {
+                    RpcState::Connected => opens += 1,
+                    RpcState::Disconnected => closes += 1,
+                }
+            }
+            (opens, closes)
+        };
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+
+        let started = tokio::time::Instant::now();
+        let outcome = monitor.recover_wallet_lane(|| false).await;
+        let took = started.elapsed();
+        let schedule = LANE_REANNOUNCE_AFTER.iter().sum::<Duration>() + LANE_SETTLE;
+        assert_eq!(outcome, LaneRecovery::Rebound);
+        assert!(
+            took <= schedule + Duration::from_millis(50),
+            "{took:?} past {schedule:?}"
+        );
+        assert_eq!(
+            drain(&ctl.receiver),
+            (LANE_REANNOUNCE_AFTER.len(), 1),
+            "two re-announces, then the rebind's one close"
+        );
+        assert!(!monitor.is_current_bind(bind.gen), "rebound");
+        assert!(
+            last_run(&monitor, URL).is_some(),
+            "the rebind recorded the run it ended"
+        );
+        assert!(no_pending_strike(&monitor), "and judged nothing");
+
+        // The next report, inside the window, on the next socket.
+        let next = monitor
+            .install_bind(NEXT.to_string())
+            .await
+            .expect("arm the next");
+        stage_live(&monitor, &next);
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::GaveUp
+        );
+        assert_eq!(
+            drain(&ctl.receiver),
+            (LANE_REANNOUNCE_AFTER.len(), 0),
+            "re-announced again, but NOT rebound: the window's budget held"
+        );
+        assert!(monitor.is_current_bind(next.gen));
+
+        // Outside the window the rebind is there again (the budget is a
+        // wall-clock stamp, so the window is crossed by backdating it).
+        monitor.inner.lane_rebound_at.store(
+            DagMonitor::now_unix().saturating_sub(LANE_REBIND_WINDOW_SECS + 1),
+            Ordering::SeqCst,
+        );
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::Rebound
+        );
+        assert!(!monitor.is_current_bind(next.gen));
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// One check at a time, and a socket that dies mid-check ends it as
+    /// `SocketGone` with the flag released — a report that lands on a running
+    /// check is queued behind it rather than starting a second loop, and the
+    /// queued pass finds nothing bound either.
+    #[tokio::test(start_paused = true)]
+    async fn one_lane_check_at_a_time_and_a_socket_that_dies_ends_it() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let first = {
+            let monitor = monitor.clone();
+            tokio::spawn(async move { monitor.recover_wallet_lane(|| false).await })
+        };
+        wait_for("the first check to take the flag", || {
+            monitor.inner.lane_recovering.load(Ordering::SeqCst)
+        })
+        .await;
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::Queued
+        );
+        // A report with the lane up is answered at the door — it queues no
+        // pass behind the running one (item 22's rider: a node-paced burst of
+        // notification-handler errors costs nothing).
+        monitor
+            .inner
+            .lane_report_pending
+            .store(false, Ordering::SeqCst);
+        assert_eq!(
+            monitor.recover_wallet_lane(|| true).await,
+            LaneRecovery::NotDark
+        );
+        assert!(!monitor.inner.lane_report_pending.load(Ordering::SeqCst));
+        monitor
+            .inner
+            .lane_report_pending
+            .store(true, Ordering::SeqCst);
+        monitor.retire_bind("ctl-drop").await;
+        assert_eq!(first.await.expect("check task"), LaneRecovery::SocketGone);
+        assert!(
+            !monitor.inner.lane_recovering.load(Ordering::SeqCst),
+            "released for the next report"
+        );
+        assert!(
+            !monitor.inner.lane_report_pending.load(Ordering::SeqCst),
+            "and the queued report was served, not left behind"
+        );
+    }
+
+    /// **A report about a successor is queued, never dropped**
+    /// (`wallet-security-auditor`). A check is asleep on socket A; A is
+    /// replaced by B, and B's negotiation fails at once — B's only report
+    /// lands while A's check still holds the flag. Dropped, nothing would ever
+    /// check B: the pull keyed on A's proof, B's processor never offered
+    /// another `Connected`, the lane dark behind a live socket with nothing on
+    /// the glass. Queued, B gets its own pass: its two re-announces, and the
+    /// proof the pull's hard path keys on.
+    #[tokio::test(start_paused = true)]
+    async fn a_report_about_a_successor_is_queued_and_checked() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        // The window's rebind is spent, so each pass re-announces and stops.
+        monitor
+            .inner
+            .lane_rebound_at
+            .store(DagMonitor::now_unix(), Ordering::SeqCst);
+        let a = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm A");
+        stage_live(&monitor, &a);
+        let first = {
+            let monitor = monitor.clone();
+            tokio::spawn(async move { monitor.recover_wallet_lane(|| false).await })
+        };
+        wait_for("A's check to take the flag", || {
+            monitor.inner.lane_recovering.load(Ordering::SeqCst)
+        })
+        .await;
+        let b = monitor
+            .install_bind("wss://leah.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm B over A");
+        stage_live(&monitor, &b);
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::Queued,
+            "B's report lands on A's running check"
+        );
+        assert_eq!(
+            first.await.expect("check task"),
+            LaneRecovery::GaveUp,
+            "the queued pass ran on B and ended inside its bound"
+        );
+        assert_eq!(
+            b.lane_reannounced.load(Ordering::SeqCst) as usize,
+            LANE_REANNOUNCE_AFTER.len(),
+            "B was checked: its own re-announces were spent on it"
+        );
+        assert!(monitor.wallet_lane_known_dark(), "proven dark on B");
+        assert!(!monitor.inner.lane_recovering.load(Ordering::SeqCst));
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// **The lane coming up on a successor is not this socket's recovery**
+    /// (`consensus-auditor` note f): a check that began on A, where A dropped
+    /// and B negotiated by itself, is the benign case — the negotiation died
+    /// with its socket — and says so, rather than `Recovered`, which a capture
+    /// counts as a dark lane on a live socket.
+    #[tokio::test(start_paused = true)]
+    async fn a_lane_that_comes_up_on_a_successor_is_not_this_sockets_recovery() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let a = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm A");
+        stage_live(&monitor, &a);
+        let lane = Arc::new(AtomicBool::new(false));
+        let check = {
+            let (monitor, lane) = (monitor.clone(), lane.clone());
+            tokio::spawn(async move {
+                monitor
+                    .recover_wallet_lane(move || lane.load(Ordering::SeqCst))
+                    .await
+            })
+        };
+        wait_for("the check to take the flag", || {
+            monitor.inner.lane_recovering.load(Ordering::SeqCst)
+        })
+        .await;
+        let b = monitor
+            .install_bind("wss://leah.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm B over A");
+        stage_live(&monitor, &b);
+        lane.store(true, Ordering::SeqCst);
+        assert_eq!(check.await.expect("check task"), LaneRecovery::SocketGone);
+        assert_eq!(
+            b.lane_reannounced.load(Ordering::SeqCst),
+            0,
+            "nothing was re-announced on a socket that never reported"
+        );
+    }
+
+    /// **A lane that comes up by itself on the socket the check began on was
+    /// never dark there** (`consensus-auditor` delta note 1,
+    /// `wallet-security-auditor` delta NOTE): the processor renegotiates only
+    /// on a `Connected`, and none was sent — what came up was a negotiation
+    /// still in flight when the pass began. `NotDark`, never a `Recovered` a
+    /// capture would count as a dark lane on a live socket, and no proof.
+    #[tokio::test(start_paused = true)]
+    async fn a_lane_that_was_still_negotiating_is_not_dark() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let lane = Arc::new(AtomicBool::new(false));
+        let check = {
+            let (monitor, lane) = (monitor.clone(), lane.clone());
+            tokio::spawn(async move {
+                monitor
+                    .recover_wallet_lane(move || lane.load(Ordering::SeqCst))
+                    .await
+            })
+        };
+        wait_for("the check to take the flag", || {
+            monitor.inner.lane_recovering.load(Ordering::SeqCst)
+        })
+        .await;
+        lane.store(true, Ordering::SeqCst);
+        assert_eq!(check.await.expect("check task"), LaneRecovery::NotDark);
+        assert!(!monitor.wallet_lane_known_dark(), "nothing was proven");
+        assert_eq!(bind.lane_reannounced.load(Ordering::SeqCst), 0);
+    }
+
+    /// **A pinned redial mid-check is a new socket** (`consensus-auditor`
+    /// delta NOTE 2): one identity, a second publish. The check that began on
+    /// the first physical socket ends `SocketGone` and proves nothing about
+    /// the second — its proof would otherwise land just after the publish
+    /// cleared it and arm the pull's hard path over a healthy negotiation.
+    #[tokio::test(start_paused = true)]
+    async fn a_pinned_redial_mid_check_is_a_new_socket() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        monitor.on_connected(&bind).await;
+        assert_eq!(bind.publishes.load(Ordering::SeqCst), 1);
+        let check = {
+            let monitor = monitor.clone();
+            tokio::spawn(async move { monitor.recover_wallet_lane(|| false).await })
+        };
+        wait_for("the check to take the flag", || {
+            monitor.inner.lane_recovering.load(Ordering::SeqCst)
+        })
+        .await;
+        // The pin's retry loop brings the same identity back up.
+        monitor.on_connected(&bind).await;
+        assert_eq!(bind.publishes.load(Ordering::SeqCst), 2);
+        assert_eq!(check.await.expect("check task"), LaneRecovery::SocketGone);
+        assert!(
+            !monitor.wallet_lane_known_dark(),
+            "no proof about the socket the check never saw"
+        );
+        assert_eq!(bind.lane_reannounced.load(Ordering::SeqCst), 0);
+    }
+
+    /// **Each publish is a fresh socket for the lane** (`consensus-auditor`
+    /// note g, `wallet-security-auditor`): a pinned bind redials inside one
+    /// identity, so the re-announce budget, the dark-lane proof and the
+    /// blockless warning of the socket before must not carry into the next.
+    #[tokio::test]
+    async fn each_publish_starts_the_sockets_lane_state_clean() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        // What an earlier socket under this identity left behind: its spent
+        // budget, which is also its proof of a dark lane.
+        bind.lane_reannounced
+            .store(LANE_REANNOUNCE_AFTER.len() as u32, Ordering::SeqCst);
+        bind.blocks_quiet_warned.store(true, Ordering::Relaxed);
+        monitor.on_connected(&bind).await;
+        assert!(monitor.is_connected(), "the socket published");
+        assert_eq!(bind.lane_reannounced.load(Ordering::SeqCst), 0);
+        assert!(!monitor.wallet_lane_known_dark());
+        assert!(!bind.blocks_quiet_warned.load(Ordering::Relaxed));
+    }
+
+    /// **The race loop's exhaustion call reads the live monitor**
+    /// (`consensus-auditor` third delta, CONCERNS-C): a silence hunt's
+    /// budget is spent only while its incumbent lives and no tap has joined.
+    #[tokio::test]
+    async fn a_silence_hunt_is_spent_only_while_its_incumbent_lives_untapped() {
+        const URL: &str = "wss://ella.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind(URL.to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let silent = RaceMode::Swap {
+            from: URL.to_string(),
+            why: SwapWhy::Silent {
+                gen: bind.gen,
+                ticks: 0,
+                asked: monitor.inner.swaps_asked.load(Ordering::SeqCst),
+            },
+        };
+        assert!(!monitor.swap_hunt_spent(&silent, SWAP_HUNT_ROUNDS - 1));
+        assert!(monitor.swap_hunt_spent(&silent, SWAP_HUNT_ROUNDS));
+        monitor.inner.swaps_asked.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !monitor.swap_hunt_spent(&silent, SWAP_HUNT_ROUNDS),
+            "a tap that joined in the final round is owed its own rounds"
+        );
+        monitor.inner.swaps_asked.fetch_sub(1, Ordering::SeqCst);
+        monitor.inner.is_connected.store(false, Ordering::SeqCst);
+        assert!(
+            !monitor.swap_hunt_spent(&silent, SWAP_HUNT_ROUNDS),
+            "a hunt whose incumbent died keeps hunting"
+        );
+    }
+
+    /// **The dark-lane proof cannot outlive its physical socket**
+    /// (`wallet-security-auditor` third delta, NOTE 1): a pinned drop keeps
+    /// the bind but takes the link down (`is_connected` and `announced`
+    /// false, the pinned arm of `on_disconnected`), and the pull's hard path
+    /// must stop reading a proof about a socket that is gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_socket_carries_no_dark_lane_proof() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        monitor.inner.race_running.store(true, Ordering::SeqCst);
+        monitor
+            .inner
+            .lane_rebound_at
+            .store(DagMonitor::now_unix(), Ordering::SeqCst);
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        assert_eq!(
+            monitor.recover_wallet_lane(|| false).await,
+            LaneRecovery::GaveUp
+        );
+        assert!(
+            monitor.wallet_lane_known_dark(),
+            "proven on the live socket"
+        );
+        // The pinned drop itself — the real arm, not its two stores by hand
+        // (`wallet-security-auditor`, fourth delta): the bind is kept, the
+        // link stood down.
+        *monitor
+            .inner
+            .direct_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bind.url.clone());
+        monitor.on_disconnected(&bind).await;
+        assert!(
+            monitor.is_current_bind(bind.gen),
+            "pinned: the bind is kept"
+        );
+        assert!(
+            !monitor.wallet_lane_known_dark(),
+            "no proof over a socket that is gone"
+        );
+        monitor.inner.race_running.store(false, Ordering::SeqCst);
+    }
+
+    /// **A silence swap with no incumbent left spends no budget**
+    /// (`consensus-auditor` fourth delta note 3): the incumbent dropped inside
+    /// the winning round, so the swap cost nothing the budget counts.
+    #[tokio::test]
+    async fn a_silence_swap_with_no_incumbent_left_spends_no_budget() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let silent = RaceMode::Swap {
+            from: "wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string(),
+            why: SwapWhy::Silent {
+                gen: 1,
+                ticks: 0,
+                asked: monitor.inner.swaps_asked.load(Ordering::SeqCst),
+            },
+        };
+        monitor
+            .install_bind_leaving(
+                "wss://leah.example/kaspa/mainnet/wrpc/borsh".to_string(),
+                &silent,
+            )
+            .await
+            .expect("arm the winner");
+        assert_eq!(
+            monitor.silence_deadline(),
+            Some(link::SILENCE_DEADLINE),
+            "nothing was retired, so nothing was spent"
+        );
+    }
+
+    /// **A tap that joins a silence hunt makes it the user's** (`consensus-
+    /// auditor` note e): re-cast as a swap they asked for, it gets that
+    /// swap's rounds and name — joined at round three, it used to buy no
+    /// probe of its own and still be logged as silence's.
+    #[tokio::test]
+    async fn a_tap_that_joins_a_silence_hunt_makes_it_the_users() {
+        const FROM: &str = "wss://ella.example/kaspa/mainnet/wrpc/borsh";
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let asked = monitor.inner.swaps_asked.load(Ordering::SeqCst);
+        let silent = RaceMode::Swap {
+            from: FROM.to_string(),
+            why: SwapWhy::Silent {
+                gen: 1,
+                ticks: 0,
+                asked,
+            },
+        };
+        assert_eq!(monitor.joined_by_tap(&silent), None, "silence's own");
+        monitor.inner.swaps_asked.fetch_add(1, Ordering::SeqCst);
+        let theirs = RaceMode::Swap {
+            from: FROM.to_string(),
+            why: SwapWhy::Asked,
+        };
+        assert_eq!(monitor.joined_by_tap(&silent), Some(theirs.clone()));
+        assert_eq!(monitor.joined_by_tap(&theirs), None, "already the user's");
+        assert_eq!(monitor.joined_by_tap(&RaceMode::Cold), None);
     }
 
     /// Live smoke test against mainnet via the PNN resolver — run manually:

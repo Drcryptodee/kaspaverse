@@ -2082,8 +2082,10 @@ pub async fn transport_start() -> Result<(), AppError> {
     // notifications are live-only (D-049), and within
     // `TRANSPORT_CURSOR_MIN_WRITE_SECS` of the first post-reconnect block the
     // persisted cursor advances past the gap, so the next app open could not
-    // recover it either. The watchdog only fires past `lastBlockAgeSecs > 30`
-    // and the endpoint race must then rebind, so a real gap is ~300 blocks.
+    // recover it either. The watchdog fired only past 30 s without a block and
+    // the endpoint race had then to rebind, so a real gap was ~300 blocks.
+    // Since LINK-Q1 (D-334) the clock is the DAA tick and a silent socket is
+    // swapped at 9 s (`link::SILENCE_DEADLINE`): a shorter gap, still a real one.
     //
     // The sibling acceptance lane has recovered its own gap on every reconnect
     // since V1 (`acceptance.rs`, the `DagEvent::Connected` arm). This is that

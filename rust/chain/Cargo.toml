@@ -45,3 +45,9 @@ kaspa-rpc-core.workspace = true
 # R2 D2 reproduction harness: a loopback ws server for the self-reconnect
 # proof. Never ships (see the workspace note).
 tokio-tungstenite.workspace = true
+# LINK-Q1 (D-334): tokio's OWN paused clock, so a nine-second silence deadline
+# and a twelve-second wallet-lane recovery run in virtual time instead of
+# sleeping the gate. A feature of a crate already in the tree, not a new
+# package — no lockfile delta — and a dev-dependency, which resolver 2 keeps
+# out of every non-test build (the Android cdylib included).
+tokio = { workspace = true, features = ["test-util"] }

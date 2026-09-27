@@ -34,7 +34,7 @@ pub use acceptance::{
 };
 pub use block_list::{BlockList, BlockedContact};
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
-pub use dag_monitor::{DagEvent, DagMonitor, LinkProbe, PROBE_TIMEOUT};
+pub use dag_monitor::{DagEvent, DagMonitor, LaneRecovery, LinkProbe, PROBE_TIMEOUT};
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};
 pub use node_config::NodeConfig;

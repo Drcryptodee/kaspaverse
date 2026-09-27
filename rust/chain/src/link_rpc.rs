@@ -31,27 +31,30 @@
 //! "a socket died that we did not kill" class the item-9 tripwire watches for
 //! (D-005/D-081).
 //!
-//! **Known gap, ledgered with its trigger (D-101).** Closing that path also
-//! removed the recovery it happened to provide. Do NOT believe that the
-//! monitor's watchdog covers it: the monitor's own listener is on the same
-//! socket and keeps delivering, so `last_block_at` stays fresh and the stall
-//! watchdog never fires — there is no block silence to observe. If the
-//! processor's negotiation fails AFTER it sets its own `is_connected`, the
-//! wallet lane sits dark (stale balance, no live deposits) behind a DAG glass
-//! that reads connected, until the next natural drop.
+//! **The gap this left, and how it is closed now (D-101 → LINK-Q1, D-334).**
+//! Closing that path also removed the recovery it happened to provide. The
+//! monitor's watchdog does NOT cover it: the monitor's own listener is on the
+//! same socket and keeps delivering, so the tick clock stays fresh and the
+//! stall line never fires. A negotiation that fails in `init_state_from_server`
+//! (the `get_server_info` round trip — the one step a live socket can fail at
+//! this pin; `WalletEngine::lane_up` states why) leaves the processor's own
+//! `is_connected` false with no further `Connected` edge coming, so the wallet
+//! lane sits dark (stale balance, no live deposits) behind a glass that reads
+//! connected. *(This file used to name "listener registration" as the residue.
+//! That was the wrong step — the registration after the bit cannot fail on a
+//! live socket at this pin — and D-334 corrects it here rather than silently.)*
 //!
-//! What bounds it today: the race probes network id, synced, utxo-index and rpc
-//! major milliseconds before the bind (`link::probe_endpoint`), so every
-//! deterministic cause is excluded before a socket is ever bound; the residue
-//! is a transient failure in the processor's own listener registration. It is
-//! surfaced honestly (`Events::UtxoProcError` → `WalletEvent::Error` → the
-//! glass), and both pull-to-refresh and Reconnect heal it. What is missing is
-//! the AUTOMATIC arm. Wiring one means a new self-triggering reconnect in the
-//! funds lane, which needs its own loop bound and its own audit — deliberately
-//! not bolted on at the end of R4.
-//! `[TRIGGER: a capture shows Events::UtxoProcError on a socket that stayed
-//! bound → wire the deduped, loop-bounded reconnect through DagMonitor and
-//! audit it]`
+//! It is closed by ownership, not by restoring the kill path: the processor's
+//! `UtxoProcError` goes to `DagMonitor::recover_wallet_lane`, which acts only
+//! when the lane is down on a socket that is STILL bound — two re-announces of
+//! that socket on the monitor's own ctl (the processor renegotiates through
+//! its own task), then one rebind at most per ten minutes, then it stops and
+//! says so. Bounded, deduped, audited; the monitor stays the one reconnect
+//! authority. What CONN-F1's retrospective called five firings of this gap's
+//! trigger were five negotiations that died WITH their socket — the next bind
+//! renegotiated each in ~2 s by itself — and the check now names that case
+//! (`SocketGone`) instead of alarming on it. The case the recovery exists for
+//! has not been observed.
 //!
 //! The method list is the pin's `RpcApi` surface verbatim: a pin bump that
 //! changes the trait breaks this file at compile time — loud and desirable.

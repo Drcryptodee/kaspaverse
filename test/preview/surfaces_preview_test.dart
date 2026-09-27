@@ -11,6 +11,7 @@ import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/services/rate_service.dart';
 import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 import 'package:kaspaverse/src/ui/receive/receive_screen.dart';
 import 'package:kaspaverse/src/ui/secret/secret_keyboard.dart';
 import 'package:kaspaverse/src/ui/send/send_screen.dart';
@@ -560,6 +561,34 @@ Widget _homeStatus() => HomeScreen(
   fiat: _fiat(),
 );
 
+/// **The hold window** (LINK-Q1, D-331(b)): a bound socket seven seconds into
+/// a stall. The lamp stays live (the chip's dot keeps breathing), the balance
+/// dims on the data's own five-second clock, and the trust line says the
+/// link and the age in the lamp's tone, never in amber. [hunt]: the silence
+/// deadline's hunt running behind it — the plate's longest trust sentence.
+Widget _homeHold({bool hunt = false}) => HomeScreen(
+  chain: ChainScope(
+    connected: ValueNotifier(true),
+    searching: ValueNotifier(hunt),
+    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
+    error: ValueNotifier<String?>(null),
+    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16, 23)),
+  ),
+  wallet: WalletScope(
+    maturity: kTestMaturity,
+    mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
+    pending: ValueNotifier<BigInt?>(BigInt.zero),
+    activity: ValueNotifier(_activity()),
+    syncing: ValueNotifier(false),
+    utxoIndexMissing: ValueNotifier(false),
+  ),
+  clock: () => DateTime(2026, 8, 30, 11, 16, 30),
+  receiveRoute: (_) => const SizedBox.shrink(),
+  sendRoute: (_, _) => const SizedBox.shrink(),
+  detailRoute: (_, _, _) => const SizedBox.shrink(),
+  fiat: _fiat(),
+);
+
 /// **The money screen inside the app's navigation**, which is the only way it
 /// is ever seen.
 ///
@@ -803,56 +832,121 @@ Future<void> _armTheHold(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 340));
 }
 
+/// The Network screen's own clock and the link's tick count, in the preview.
+/// **Every read of the pulse is one poll of a beating link**: half a second
+/// passes and five DAA ticks land, so any frame taken after two polls shows the
+/// beat as a MEASURED rate (`DAA · 10 Hz`, D-332). A rate needs two samples a
+/// real interval apart; a fixture clock that stood still between polls would
+/// (rightly) print the bare `DAA`, and the harness's own settling pumps poll
+/// more than once.
+DateTime _nodeNow = DateTime(2026, 8, 30, 11, 16, 30);
+int _nodeTicks = 0;
+
+Future<({int? ageSecs, int ticks})> _pulse() async {
+  _nodeNow = _nodeNow.add(NodeScreen.pollEvery);
+  _nodeTicks += 5;
+  return (ageSecs: 0, ticks: _nodeTicks);
+}
+
+/// A quiet spell under the hold: seven seconds since the last tick, the
+/// count standing still — the node row's `N s since last block` beside a
+/// lamp still green (D-331(b)).
+Future<({int? ageSecs, int ticks})> _quietPulse() async {
+  _nodeNow = _nodeNow.add(NodeScreen.pollEvery);
+  return (ageSecs: 7, ticks: _nodeTicks);
+}
+
 /// `T5`, and the two states of its node row the happy path cannot show
 /// (BG-20): a dark hunt with the cadence in the disc, and a live node that
-/// says it is not synced.
-Widget _node({bool hunting = false, bool? synced = true}) => NodeScreen(
-  scope: NodeScope(
-    connected: ValueNotifier(!hunting),
-    activeEndpoint: ValueNotifier<String?>(
-      hunting ? null : 'wss://isla.kaspa.red',
+/// says it is not synced. Since LINK-Q1 also the latency's two new faces:
+/// **at least** (a probe that outlasted the socket's deadline, D-333) and the
+/// **carried** reading (stale-while-revalidate, dimmed with its age).
+Widget _node({
+  bool hunting = false,
+  bool? synced = true,
+  bool slow = false,
+  bool carried = false,
+  bool hold = false,
+}) {
+  _nodeNow = DateTime(2026, 8, 30, 11, 16, 30);
+  _nodeTicks = 0;
+  NodeScreen.forgetLatency();
+  if (carried) {
+    NodeScreen.carryLatency(
+      reading: const KvLatencyReading.none().offer(
+        const KvLatencySample.answered(151),
+      ),
+      at: _nodeNow.subtract(const Duration(seconds: 42)),
+      endpoint: 'wss://isla.kaspa.red',
+    );
+  }
+  return NodeScreen(
+    clock: () => _nodeNow,
+    scope: NodeScope(
+      connected: ValueNotifier(!hunting),
+      activeEndpoint: ValueNotifier<String?>(
+        hunting ? null : 'wss://isla.kaspa.red',
+      ),
+      virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
+      pinnedNode: ValueNotifier<String?>(null),
+      pinDropped: ValueNotifier(false),
+      setPinnedNode: (_) async {},
+      searching: ValueNotifier(hunting),
+      lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16)),
+      // **`T5`'s two live seats, wired** — the `Switch node` glow pill and the
+      // connection card's measured reading. Left unwired the frames showed a
+      // composition the design does not have: no pill at all, and `No reading`
+      // where the render draws `151 ms · Slow`. A preview fixture that omits a
+      // seam is a picture of the fallback, not of the screen.
+      onReconnect: () async {},
+      tickPulse: hold ? _quietPulse : _pulse,
+      // A carried reading is looked at before the first fresh answer lands, so
+      // that frame's probe never answers inside it.
+      probeLink: carried
+          ? ({required bool peers}) =>
+                Completer<
+                      ({
+                        int? latencyMs,
+                        int? timedOutMs,
+                        int? peers,
+                        bool? synced,
+                      })
+                    >()
+                    .future
+          : ({required bool peers}) async => (
+              latencyMs: slow ? null : 151,
+              timedOutMs: slow ? 1800 : null,
+              peers: 14,
+              synced: synced,
+            ),
+      testNode: (_) async =>
+          (latencyMs: 84, serverVersion: '1.0.1', daa: BigInt.from(528980542)),
     ),
-    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
-    pinnedNode: ValueNotifier<String?>(null),
-    pinDropped: ValueNotifier(false),
-    setPinnedNode: (_) async {},
-    searching: ValueNotifier(hunting),
-    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16)),
-    // **`T5`'s two live seats, wired** — the `Switch node` glow pill and the
-    // connection card's measured reading. Left unwired the frames showed a
-    // composition the design does not have: no pill at all, and `No reading`
-    // where the render draws `151 ms · Slow`. A preview fixture that omits a
-    // seam is a picture of the fallback, not of the screen.
-    onReconnect: () async {},
-    probeLink: ({required bool peers}) async =>
-        (latencyMs: 151, peers: 14, synced: synced),
-    testNode: (_) async =>
-        (latencyMs: 84, serverVersion: '1.0.1', daa: BigInt.from(528980542)),
-  ),
-  // `T5`'s SOURCES card needs both seams to draw both rows.
-  explorer: ExplorerScope(
-    read: () async => const ExplorerChoice(
-      txTemplate: 'https://explorer.kaspa.org/txs/{txid}',
-      addressTemplate: 'https://explorer.kaspa.org/addresses/{address}',
-      defaults: [],
+    // `T5`'s SOURCES card needs both seams to draw both rows.
+    explorer: ExplorerScope(
+      read: () async => const ExplorerChoice(
+        txTemplate: 'https://explorer.kaspa.org/txs/{txid}',
+        addressTemplate: 'https://explorer.kaspa.org/addresses/{address}',
+        defaults: [],
+      ),
+      write: (_, _) async {},
     ),
-    write: (_, _) async {},
-  ),
-  rate: RateScope(
-    enabled: ValueNotifier<bool?>(true),
-    endpoint: ValueNotifier('https://api.kaspa.org/info/price'),
-    defaultEndpoint: ValueNotifier('https://api.kaspa.org/info/price'),
-    quote: ValueNotifier(null),
-    error: ValueNotifier(null),
-    setConfig: ({required bool enabled, required String endpoint}) async {},
-    load: () async {},
-  ),
-);
+    rate: RateScope(
+      enabled: ValueNotifier<bool?>(true),
+      endpoint: ValueNotifier('https://api.kaspa.org/info/price'),
+      defaultEndpoint: ValueNotifier('https://api.kaspa.org/info/price'),
+      quote: ValueNotifier(null),
+      error: ValueNotifier(null),
+      setConfig: ({required bool enabled, required String endpoint}) async {},
+      load: () async {},
+    ),
+  );
+}
 
 /// Open the pin, type a node, and test it — `T5`'s field row with its answer.
 Future<void> _testANode(WidgetTester tester) async {
-  // Pumped by hand: the latency dot breathes for as long as there is a
-  // reading, so a settle would wait on an animation whose point is not to stop.
+  // Pumped by hand. The reason was the latency dot's breath, which D-332
+  // retired; the pumps stay, being exact about what each frame waits for.
   // Below the fold at 320 dp: a `ListView` builds only what the viewport
   // reaches, so the toggle is dragged into view before it is tapped.
   await tester.dragUntilVisible(
@@ -1457,6 +1551,13 @@ void main() {
     // `expanded short`.
     framedSurface('home__funded', () => _shell(_home()));
     framedSurface('home__status', () => _shell(_homeStatus()));
+    // LINK-Q1 (D-331(b)): a seven-second stall on a bound socket — the lamp
+    // holds live, the balance dims on its own clock, and the age is said in
+    // the lamp's tone.
+    framedSurface('home__hold', () => _shell(_homeHold()));
+    // Every silence swap passes through this: the hunt inside the hold
+    // (`ux-auditor`, L205 — a new state ships its frames).
+    framedSurface('home__hold_hunt', () => _shell(_homeHold(hunt: true)));
     framedSurface('home__drawer', () => _shell(_home()), act: _summonDrawer);
     // `All` — the feed on its own surface (founder, 2026-09-06), and what a
     // scroll costs: the chain clock, and nothing else.
@@ -1514,7 +1615,15 @@ void main() {
     // **`T5`, in all five frames** (UX-R3): the connection card, the node row
     // and its `Switch node` pill. It clamps with `KvColumn` now, so the four
     // spec frames say something rather than showing one stretched column.
+    // The live state beats: one poll after the open, the DAA line reads the
+    // measured rate (D-332).
     framedSurface('node__connected', _node);
+    // LINK-Q1's two new latency faces (L205 — a new state ships its frames).
+    framedSurface('node__slow', () => _node(slow: true));
+    framedSurface('node__carried', () => _node(carried: true));
+    // The hold window on this screen (`ux-auditor`, L205): a quiet spell of
+    // 5–15 s reads its age beside a lamp that is still green.
+    framedSurface('node__hold', () => _node(hold: true));
     surface('node__hunting', () => _node(hunting: true));
     surface('node__unsynced', () => _node(synced: false));
     surface('node__test', _node, act: _testANode);

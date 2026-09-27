@@ -8,6 +8,7 @@ import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/maturity.dart';
@@ -35,7 +36,7 @@ void main() {
     ValueListenable<bool>? osOffline,
     ValueListenable<bool>? reconnecting,
     Future<void> Function()? onReconnect,
-    Future<int?> Function()? blockAgeSecs,
+    Future<({int? ageSecs, int ticks})> Function()? tickPulse,
   }) => NodeScope(
     connected: connected,
     activeEndpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
@@ -48,7 +49,7 @@ void main() {
     osOffline: osOffline,
     reconnecting: reconnecting,
     onReconnect: onReconnect,
-    blockAgeSecs: blockAgeSecs,
+    tickPulse: tickPulse,
   );
 
   Widget host({
@@ -108,9 +109,11 @@ void main() {
   /// rendered before the trust line's. Asserting the tone rather than a
   /// presence is what catches the P0.3 shape — a lamp that reads live beside
   /// words that say the link is gone.
-  /// **`ok` green and pulsing while the socket is up**, amber the moment it is
-  /// not (A6, corrected to green by the founder at D-259 from the intake
-  /// render). Teal is never a status.
+  /// **`ok` green and pulsing while the link holds** — on a bound socket
+  /// through a silence of up to `KvFreshness.liveHoldBound`, and through a
+  /// drop shorter than `linkChurnGrace` — amber past either (A6, corrected to
+  /// green by the founder at D-259 from the intake render; the silence hold
+  /// is D-331(b)). Teal is never a status.
   bool linkReadsLive(WidgetTester tester) =>
       tester.widgetList<KvLamp>(find.byType(KvLamp)).first.tone! ==
       KvLampTone.ok;
@@ -283,7 +286,7 @@ void main() {
           .widget<Text>(find.textContaining('finding a node…'))
           .data!;
       expect(said, startsWith('finding a node…'));
-      expect(said, contains('last update 20 s ago'));
+      expect(said, contains('last update 20\u00A0s ago'));
       // Motion means something is happening, and a hunt IS something
       // happening — the meter is the tell that separates searching from dead.
       expect(tester.widget<KvCadence>(find.byType(KvCadence)).running, isTrue);
@@ -381,13 +384,113 @@ void main() {
       now = now.add(const Duration(seconds: 1));
       await tester.pump(const Duration(seconds: 1));
 
-      expect(find.text('as of 21 s ago'), findsOneWidget);
+      expect(find.text('as of 21\u00A0s ago'), findsOneWidget);
       expect(
         tester.widget<KvCadence>(find.byType(KvCadence)).running,
         isFalse,
         reason: 'nothing is happening, so nothing may look like it is',
       );
 
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  // ── LINK-Q1 (D-331(b)): the lamp holds on a bound socket; the data does not ─
+  group('the hold window — a short stall on a bound socket (LINK-Q1)', () {
+    testWidgets(
+      'the lamp holds, the balance dims on its own clock, and the age is said '
+      'in the lamp\'s tone — amber only past the hold',
+      (tester) async {
+        var now = DateTime(2026, 7, 30, 0, 53);
+        await tester.pumpWidget(
+          host(
+            connected: ValueNotifier<bool>(true),
+            lastUpdate: ValueNotifier<DateTime?>(now),
+            searching: ValueNotifier<bool>(false),
+            clock: () => now,
+          ),
+        );
+        await tester.pump();
+        expect(linkReadsLive(tester), isTrue);
+
+        // Seven seconds into a stall — CONN-F1's longest self-recovered one
+        // was 7.50 s, and the old five-second lamp went amber for it.
+        now = now.add(const Duration(seconds: 7));
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          linkReadsLive(tester),
+          isTrue,
+          reason: 'the chip holds live on a bound socket',
+        );
+        expect(
+          tester.widget<KvAmount>(find.byType(KvAmount).first).stale,
+          isTrue,
+          reason: 'the balance keeps its own five-second clock (BG-8)',
+        );
+        expect(
+          find.text('connected · last update 7\u00A0s ago'),
+          findsOneWidget,
+          reason:
+              'a dimmed balance carries its age (BG-8), and the link says in '
+              'WORDS that it is fine — not colour alone (BG-20)',
+        );
+        expect(find.textContaining('as of'), findsNothing);
+        expect(
+          trustLampTone(tester),
+          KvLampTone.ok,
+          reason:
+              'never amber under the hold — and never a green chip over an '
+              'amber line on one plate (the P0.3 scar)',
+        );
+
+        // Past the hold the line becomes the stale one — different words, in
+        // amber — and the chip turns with it.
+        now = now.add(const Duration(seconds: 9));
+        await tester.pump(const Duration(seconds: 1));
+        expect(linkReadsLive(tester), isFalse);
+        expect(find.text('as of 16\u00A0s ago'), findsOneWidget);
+        expect(find.textContaining('connected'), findsNothing);
+        expect(trustLampTone(tester), KvLampTone.warn);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets('a silence swap\'s sub-second cut-over never flashes amber', (
+      tester,
+    ) async {
+      // Eleven seconds into a silence the deadline's hunt wins and
+      // `install_bind` retires the incumbent: a drop of ~0.6 s (D-216 measured
+      // 577–691 ms), then the winner. The churn hold covers it against the
+      // lamp's clock.
+      var now = DateTime(2026, 7, 30, 0, 53);
+      final connected = ValueNotifier<bool>(true);
+      final disconnectedAt = ValueNotifier<DateTime?>(null);
+      await tester.pumpWidget(
+        host(
+          connected: connected,
+          lastUpdate: ValueNotifier<DateTime?>(
+            now.subtract(const Duration(seconds: 11)),
+          ),
+          searching: ValueNotifier<bool>(false),
+          disconnectedAt: disconnectedAt,
+          clock: () => now,
+        ),
+      );
+      await tester.pump();
+      expect(linkReadsLive(tester), isTrue);
+      expect(
+        find.text('connected · last update 11\u00A0s ago'),
+        findsOneWidget,
+      );
+      connected.value = false;
+      disconnectedAt.value = now;
+      now = now.add(const Duration(milliseconds: 600));
+      await tester.pump();
+      expect(linkReadsLive(tester), isTrue, reason: 'held through the swap');
+      // The lamp holds; the WORD does not claim a socket that is not there
+      // (`ux-auditor`, BG-8) — the age alone, still not the stale line.
+      expect(find.textContaining('connected'), findsNothing);
+      expect(find.text('last update 11\u00A0s ago'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
   });
@@ -511,7 +614,7 @@ void main() {
     });
   });
 
-  group('the scan line survives the collapse into the node surface', () {
+  group('the pulse line survives the collapse into the node surface', () {
     // The sheet is gone (UX-3) and `NodeScreen` renders its scan line now. The
     // coverage moves with the feature rather than dying with the surface:
     // **the sovereign path is never the degraded path** (D-207 clause c), and
@@ -522,7 +625,9 @@ void main() {
       required bool searching,
       required DateTime now,
       required Duration since,
-      required Future<int?> Function()? blockAge,
+      required Future<({int? ageSecs, int ticks})> Function()? pulse,
+      // Fixed by default; a test about a RATE passes the fake-async clock.
+      DateTime Function()? clock,
     }) async {
       tester.view.physicalSize = const Size(2000, 1400);
       tester.view.devicePixelRatio = 1.0;
@@ -534,7 +639,7 @@ void main() {
           // `KvWindow.of` asserts rather than falling back (UX-R1's law).
           builder: (context, page) => KvWindow(child: page!),
           home: NodeScreen(
-            clock: () => now,
+            clock: clock ?? () => now,
             scope: nodeScope(
               connected: ValueNotifier<bool>(connected),
               lastUpdate: ValueNotifier<DateTime?>(now.subtract(since)),
@@ -542,7 +647,7 @@ void main() {
               osOffline: ValueNotifier<bool>(false),
               reconnecting: ValueNotifier<bool>(false),
               onReconnect: () async {},
-              blockAgeSecs: blockAge,
+              tickPulse: pulse,
             ),
           ),
         ),
@@ -558,13 +663,13 @@ void main() {
         searching: false,
         now: now,
         since: Duration.zero,
-        blockAge: () async => null,
+        pulse: () async => (ageSecs: null, ticks: 0),
       );
-      expect(
-        find.text('DAA · streaming'),
-        findsOneWidget,
-        reason: 'link up, no block seen yet — the honest pre-first-block line',
-      );
+      // Up, and nothing measured yet: the bare label, never a rate nobody
+      // counted. `DAA · streaming` is gone for good (D-332) — the line claims
+      // a MEASURED beat or nothing.
+      expect(find.text('DAA'), findsOneWidget);
+      expect(find.textContaining(' Hz'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -575,16 +680,23 @@ void main() {
       // the degraded branch, and a line that only ever renders its fallback
       // passes a suite while being wrong on every screen.
       final now = DateTime(2026, 7, 30, 0, 53);
+      var ticks = 0;
       await pumpNode(
         tester,
         connected: true,
         searching: false,
         now: now,
         since: Duration.zero,
-        blockAge: () async => 1,
+        pulse: () async {
+          ticks += 5;
+          return (ageSecs: 0, ticks: ticks);
+        },
+        clock: () => tester.binding.clock.now(),
       );
       await tester.pump();
-      expect(find.text('DAA · streaming'), findsOneWidget);
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      expect(find.text('DAA · 10 Hz'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -598,11 +710,11 @@ void main() {
         searching: false,
         now: now,
         since: Duration.zero,
-        blockAge: () async => 42,
+        pulse: () async => (ageSecs: 42, ticks: 7),
       );
       await tester.pump();
-      expect(find.text('DAA · 42 s since last block'), findsOneWidget);
-      expect(find.text('DAA · streaming'), findsNothing);
+      expect(find.text('DAA · 42\u00A0s since last block'), findsOneWidget);
+      expect(find.textContaining(' Hz'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -614,13 +726,13 @@ void main() {
         searching: true,
         now: now,
         since: const Duration(seconds: 20),
-        blockAge: () async => null,
+        pulse: () async => (ageSecs: null, ticks: 0),
       );
-      // The link decides whether the scan may claim liveness; the age only
-      // refines the claim. Otherwise a 2 s poll could read "live — scanning
-      // every block" beside a status chip saying the opposite.
+      // The link decides whether the line may claim a beat; the age only
+      // refines the claim. Otherwise a poll could read a live rate beside a
+      // status chip saying the opposite.
       expect(find.text('DAA'), findsOneWidget);
-      expect(find.text('DAA · streaming'), findsNothing);
+      expect(find.textContaining(' Hz'), findsNothing);
       expect(find.text('Searching…'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
@@ -639,11 +751,11 @@ void main() {
         searching: true,
         now: now,
         since: Duration.zero,
-        blockAge: () async => 1,
+        pulse: () async => (ageSecs: 1, ticks: 3),
       );
       await tester.pump();
-      expect(find.text('DAA · streaming'), findsNothing);
-      expect(find.text('DAA · 1 s since last block'), findsOneWidget);
+      expect(find.textContaining(' Hz'), findsNothing);
+      expect(find.text('DAA · 1\u00A0s since last block'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -655,11 +767,12 @@ void main() {
         searching: false,
         now: now,
         since: Duration.zero,
-        blockAge: null,
+        pulse: null,
       );
       await tester.pump();
       expect(find.text('Transport scan'), findsNothing);
-      expect(find.textContaining('since last block'), findsNothing);
+      expect(find.textContaining('since last'), findsNothing);
+      expect(find.textContaining(' Hz'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });

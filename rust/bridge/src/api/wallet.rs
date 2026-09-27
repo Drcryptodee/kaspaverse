@@ -456,8 +456,14 @@ async fn republish_window(before: (u32, u32)) -> bool {
                 // Not silent, and not lost: `extend_watch` publishes the wider
                 // set before registering, so the next `UtxoProcStart` or any
                 // pull-to-refresh re-asks the node for it.
+                // The error can carry a server's own words (a failed
+                // `scan_and_register_addresses` passes `ServerError::Text`
+                // through verbatim), so it enters the evidence lane filtered
+                // — `rescan`'s twin line already is (`ffi-leak-auditor`,
+                // LINK-Q1, L144's whole class).
                 Ok(Err(e)) => log::warn!(
-                    "wallet: widened window not registered ({e}) — a refresh or reconnect re-asks"
+                    "wallet: widened window not registered ({}) — a refresh or reconnect re-asks",
+                    kaspaverse_chain::link::sanitize_node_text(&e.to_string())
                 ),
                 Err(_) => log::warn!(
                     "wallet: widened window registration timed out — a refresh or reconnect re-asks"
@@ -1202,6 +1208,11 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                 vault::wallet_store_path()?,
             )
             .map_err(AppError::chain)?;
+            // Before `start`, so the processor's first negotiation already has
+            // a link to report a failure to (D-101's recovery, LINK-Q1): the
+            // monitor is the one reconnect authority and decides, from its own
+            // evidence, whether the lane is dark on a live socket.
+            engine.attach_link(monitor.clone());
 
             let mut events = engine.subscribe();
             engine

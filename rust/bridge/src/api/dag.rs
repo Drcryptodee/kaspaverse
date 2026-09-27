@@ -107,10 +107,12 @@ impl Coalescer {
 }
 
 /// **How long a live link may go without a score before the gap earns a
-/// line** (CONN-F1, §11 H2). The glass calls a link stale at five seconds
-/// (`KvFreshness.staleAfter`) and the watchdog acts at thirty; in between,
-/// nothing in Rust said a word, so an amber lamp over a socket that was
-/// starving and one over a socket that was fine read the same in a capture.
+/// line** (CONN-F1, §11 H2). The balance dims at five seconds
+/// (`KvFreshness.staleAfter`); since LINK-Q1 the lamp holds live to fifteen on
+/// a bound socket (`KvFreshness.liveHoldBound`, D-331), the silence deadline
+/// hunts behind the socket at nine (`link::SILENCE_DEADLINE`) and the watchdog
+/// acts at thirty. The note stays at five so a re-soak's gaps are counted on
+/// the same ruler as CONN-F1's arm B — the ruler moved nothing it measures.
 const SCORE_GAP_NOTE: Duration = Duration::from_secs(5);
 
 /// What the score clock saw that is worth a line.
@@ -447,10 +449,12 @@ pub async fn dag_resume() -> Result<(), AppError> {
 
 /// Honest-liveness snapshot for the connection-health sheet AND the foreground
 /// watchdog (P3/D-068). A PULL surface (not the stream): the sheet paints it on
-/// open and the watchdog polls it. `last_block_age_secs` is the load-bearing
-/// field — a healthy mainnet keeps it near zero (~10 blocks/s); a large value
-/// while foreground means a silently dead socket (the midnight DAA stall), the
-/// watchdog's trigger to [`dag_reconnect`]. `None` before the first connect.
+/// open and the watchdog polls it. `last_tick_age_secs` is the load-bearing
+/// field — a healthy mainnet keeps it near zero (~10 DAA ticks/s); a large
+/// value while foreground means a silently dead socket (the midnight DAA
+/// stall), the watchdog's trigger to [`dag_reconnect`]. `None` before the first
+/// tick. It was `last_block_age_secs`, fed by `BlockAdded`, until LINK-Q1 moved
+/// the heartbeat to the tick every stream shape keeps (D-334).
 ///
 /// It is ALSO the honest-states lane (C7/D-091): `searching` + `os_offline`
 /// ride here rather than on the event stream because the stream only speaks
@@ -462,7 +466,14 @@ pub async fn dag_resume() -> Result<(), AppError> {
 pub struct DagStatusDto {
     pub connected: bool,
     pub endpoint: Option<String>,
-    pub last_block_age_secs: Option<u64>,
+    /// Seconds since the last DAA tick on any installed socket — see above.
+    pub last_tick_age_secs: Option<u64>,
+    /// Every DAA tick an installed socket has delivered in this process — a
+    /// plain monotonic count, counted in Rust BEFORE the 250 ms coalescer, so
+    /// the node screen can difference it against its own clock and show the
+    /// beat the link is really keeping (`DAA · 10 Hz`, D-332). Public chain
+    /// liveness; a count, never a value.
+    pub daa_ticks: u64,
     pub virtual_daa_score: Option<u64>,
     /// A connect race is hunting right now (C7's second truth) — held for the
     /// whole multi-round hunt, so the glass can name it honestly instead of a
@@ -498,30 +509,32 @@ pub struct DagStatusDto {
 }
 
 /// Read the current connection health (see [`DagStatusDto`]). Endpoint + DAA
-/// come from the folded snapshot; connected + block-age come straight from the
+/// come from the folded snapshot; connected + tick-age come straight from the
 /// monitor so a silently dead socket (still `connected` in the snapshot) is
-/// caught by a growing block-age.
+/// caught by a growing tick-age.
 pub fn dag_status() -> DagStatusDto {
     let latest = LATEST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .unwrap_or_default();
-    let (connected, last_block_age_secs, searching, os_offline) = match MONITOR.get() {
+    let (connected, last_tick_age_secs, daa_ticks, searching, os_offline) = match MONITOR.get() {
         Some(monitor) => (
             monitor.is_connected(),
-            monitor.last_block_age_secs(),
+            monitor.last_tick_age_secs(),
+            monitor.daa_ticks(),
             monitor.is_searching(),
             monitor.os_offline(),
         ),
         // No monitor yet: not connected, and nothing is known — never claim a
         // hunt or accuse the phone on a guess.
-        None => (false, None, false, false),
+        None => (false, None, 0, false, false),
     };
     DagStatusDto {
         connected,
         endpoint: latest.endpoint,
-        last_block_age_secs,
+        last_tick_age_secs,
+        daa_ticks,
         virtual_daa_score: latest.virtual_daa_score,
         searching,
         os_offline,
@@ -551,9 +564,15 @@ pub fn dag_status() -> DagStatusDto {
 #[derive(Clone, Copy, Default)]
 pub struct LinkProbeDto {
     /// Round trip of one `get_server_info` on the bound socket, in
-    /// milliseconds. `None` = the node did not answer, and the surface says so
-    /// rather than showing a stale figure (BG-8).
+    /// milliseconds. `None` = no answer inside the deadline, or an error.
     pub latency_ms: Option<u64>,
+    /// **The deadline, in ms, that the round trip outlasted** (D-333). Not an
+    /// absence: the link is live and the answer is AT LEAST this slow, which
+    /// the surface draws as `> N s` on one bar instead of blanking the seat.
+    /// The deadline is the bound socket's own RFC 6298 clock, 1–5 s. Both this
+    /// and `latency_ms` `None` is an error (no socket, a refused call) — the
+    /// one outcome the surface counts toward going dark.
+    pub timed_out_ms: Option<u64>,
     /// **The node's own word on whether it is synced**, from the same answer
     /// the latency was timed on. The connect race checks this once at
     /// candidacy and never again; a node that falls behind while bound keeps
@@ -576,6 +595,7 @@ pub async fn dag_probe_link(with_peers: bool) -> LinkProbeDto {
     let probe = monitor.probe_link(with_peers).await;
     LinkProbeDto {
         latency_ms: probe.latency_ms,
+        timed_out_ms: probe.timed_out_ms,
         synced: probe.synced,
         peers: probe.peers,
     }
@@ -753,16 +773,17 @@ const RESYNC_MIN_INTERVAL_SECS: u64 = 20;
 /// socket.
 const SOFT_RESYNC_MIN_INTERVAL_SECS: u64 = 5;
 
-/// Healthy = connected AND blocks flowing within the same stall threshold the
-/// Dart watchdog uses (`chain_service.dart` `watchdogStallSecs` = 30) — Rust
-/// and Dart agree on what "healthy" means. A `None` block age (no block since
-/// BOOT — `last_block_at` is process-lifetime, not per-connection) is NOT
-/// healthy: no evidence, hard path. Within ≤30 s of a rebind the age can
-/// still carry the PRIOR connection's last block, so a just-reconnected deaf
-/// socket can read healthy for that bounded window — the soft rescan is a
-/// real node round-trip that errs/times out on a dead lane and escalates, so
-/// the window costs one probe, never a missed heal (consensus-audit note).
-const SOFT_REFRESH_MAX_BLOCK_AGE_SECS: u64 = 30;
+/// Healthy = connected AND DAA ticks flowing within the same stall threshold
+/// the Dart watchdog uses (`chain_service.dart` `watchdogStallSecs` = 30) —
+/// Rust and Dart agree on what "healthy" means. A `None` tick age (no tick
+/// since BOOT — `last_tick_at` is process-lifetime, not per-connection) is NOT
+/// healthy: no evidence, hard path. Within ≤30 s of a rebind the age can still
+/// carry the PRIOR connection's last tick, so a just-reconnected deaf socket
+/// can read healthy for that bounded window — the soft rescan is a real node
+/// round-trip that errs/times out on a dead lane and escalates, so the window
+/// costs one probe, never a missed heal (consensus-audit note). Ticks, not
+/// blocks, since LINK-Q1 (D-334).
+const SOFT_REFRESH_MAX_TICK_AGE_SECS: u64 = 30;
 
 /// Budget for the in-place rescan — a "healthy" socket that hangs the scan
 /// was lying; the timeout escalates to the hard reconnect, so the pull's
@@ -790,10 +811,37 @@ pub async fn dag_resync() -> Result<bool, AppError> {
         return Ok(false);
     };
 
+    // **A live socket is not a live wallet lane** (D-101, LINK-Q1). The soft
+    // path re-fetches UTXOs over the socket, but it cannot re-arm a processor
+    // whose connect negotiation failed: that processor's live `UtxosChanged`
+    // and maturity clock stay dark however many rescans land. D-101 recorded
+    // "pull-to-refresh heals it" before find-then-swap made the tap a swap and
+    // left the soft path as the pull's first answer — so a dark lane on a
+    // healthy socket now takes the hard path, whose new socket's `Connected`
+    // is exactly the edge that processor needs. The engine not started yet
+    // (pre-unlock) is not a dark lane: there is no lane.
+    //
+    // **Keyed on PROOF, not on the bit** (`consensus-auditor` note a): the
+    // processor's bit is also false for the sub-second of every healthy
+    // socket's first negotiation, and a pull landing there would tear down a
+    // socket that was about to serve. The recovery marks a socket dark only
+    // after it found the lane still down seconds after an error — its own, or
+    // a queued report's on a successor whose first negotiation is merely slow,
+    // which costs at most one needless redial (D-334) — with the socket still
+    // bound. That is the evidence the hard path acts on.
+    let lane_dark = monitor.wallet_lane_known_dark()
+        && super::wallet::engine_handle().is_some_and(|engine| !engine.lane_up());
     let healthy = monitor.is_connected()
+        && !lane_dark
         && monitor
-            .last_block_age_secs()
-            .is_some_and(|age| age <= SOFT_REFRESH_MAX_BLOCK_AGE_SECS);
+            .last_tick_age_secs()
+            .is_some_and(|age| age <= SOFT_REFRESH_MAX_TICK_AGE_SECS);
+    if lane_dark && monitor.is_connected() {
+        log::info!(
+            "dag: pull on a live socket with the wallet lane down — taking the hard path \
+             (D-101)"
+        );
+    }
     if healthy {
         if now.saturating_sub(LAST_SOFT.load(Ordering::Relaxed)) < SOFT_RESYNC_MIN_INTERVAL_SECS {
             log::info!(

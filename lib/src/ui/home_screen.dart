@@ -192,14 +192,20 @@ class ChainScope {
     this.searching,
     this.osOffline,
     this.disconnectedAt,
+    this.awaitingScore,
   });
 
   final ValueListenable<bool> connected;
   final ValueListenable<BigInt?> virtualDaaScore;
   final ValueListenable<String?> error;
 
-  /// Time of the last fresh node snapshot — the link freshness clock (BG-8).
+  /// Time of the last fresh score — the freshness clock both the lamp and the
+  /// data read (BG-8). Moves only on a NEW score since LINK-Q1.
   final ValueListenable<DateTime?> lastUpdate;
+
+  /// The socket now up has not delivered a score yet (LINK-Q1). Optional like
+  /// the C7 truths: absent reads as "it has", the pre-LINK-Q1 behaviour.
+  final ValueListenable<bool>? awaitingScore;
 
   /// True while a reconnect is in flight (P3) — the honest hunt indicator.
   final ValueListenable<bool>? reconnecting;
@@ -273,10 +279,23 @@ class WalletScope {
 
 /// The link, as the plate renders it. Records compare structurally, which is
 /// what lets [KvDerived] swallow the no-op ticks.
+///
+/// **Two states since LINK-Q1 (D-331(b))**: [state] is the LAMP's — the chip
+/// and the live dot, live through a silence of up to
+/// `KvFreshness.liveHoldBound` on a bound socket — and [dataState] is the
+/// DATA's, on `KvFreshness.staleAfter`, which is what dims the balance. The
+/// ruling moved the lamp, not the balance's honesty, so they can differ for
+/// ten seconds of a stall — and when they do, the trust line says the data's
+/// age in the lamp's own tone ([dataAge]).
 typedef _LinkView = ({
   BeaconState state,
+  BeaconState dataState,
   String? error,
   Duration? age,
+
+  /// The data's age while the lamp holds live over dimmed data — the hold
+  /// window — floored to the second; null otherwise.
+  Duration? dataAge,
   bool hunting,
 
   /// The SOCKET, not [state]. `evaluateBeacon` reports `connected` for up to
@@ -309,6 +328,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   late final KvDerived<_LinkView> _link;
   late final KvDerived<bool> _dimmed;
+
+  /// The lamp's own bit — the chip and the short bar's live dot (LINK-Q1).
+  /// Deliberately NOT [_dimmed]: that is the data's clock, and since D-331(b)
+  /// the lamp holds live longer than the data stays fresh.
+  late final KvDerived<bool> _lampLive;
   late final KvDerived<_TrustView> _trust;
   late final KvDerived<_BalanceView> _balance;
 
@@ -350,14 +374,19 @@ class _HomeScreenState extends State<HomeScreen> {
       if (widget.chain.osOffline != null) widget.chain.osOffline!,
       if (widget.chain.disconnectedAt != null) widget.chain.disconnectedAt!,
       if (widget.chain.reconnecting != null) widget.chain.reconnecting!,
+      if (widget.chain.awaitingScore != null) widget.chain.awaitingScore!,
       _now,
     ], _computeLink);
     // BG-8 dimming is "not live", not "stale" specifically: since C7 a dark
     // link can read *finding a node…* or *phone offline* instead of stale, and
     // last-known data must never sit at full brightness through any of them.
+    // It reads the DATA's clock — the lamp's longer hold never reaches it.
     _dimmed = KvDerived([
       _link,
-    ], () => _link.value.state != BeaconState.connected);
+    ], () => _link.value.dataState != BeaconState.connected);
+    _lampLive = KvDerived([
+      _link,
+    ], () => _link.value.state == BeaconState.connected);
     _trust = KvDerived([
       _link,
       widget.wallet.syncing,
@@ -412,6 +441,10 @@ class _HomeScreenState extends State<HomeScreen> {
             oldWidget.chain.disconnectedAt,
             widget.chain.disconnectedAt,
           ) &&
+          identical(
+            oldWidget.chain.awaitingScore,
+            widget.chain.awaitingScore,
+          ) &&
           identical(oldWidget.wallet.mature, widget.wallet.mature) &&
           identical(oldWidget.wallet.pending, widget.wallet.pending) &&
           identical(oldWidget.wallet.syncing, widget.wallet.syncing) &&
@@ -437,6 +470,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // Chained deriveds unhook in reverse dependency order.
     _balance.dispose();
     _trust.dispose();
+    _lampLive.dispose();
     _dimmed.dispose();
     _link.dispose();
     _now.dispose();
@@ -462,16 +496,34 @@ class _HomeScreenState extends State<HomeScreen> {
     final hunting =
         (widget.chain.searching?.value ?? false) ||
         (widget.chain.reconnecting?.value ?? false);
+    final connected = widget.chain.connected.value;
+    final error = widget.chain.error.value;
+    final osOffline = widget.chain.osOffline?.value ?? false;
+    final sinceDrop = _sinceDrop();
+    // The lamp: live through a silence of up to the hold on a bound socket
+    // (D-331(b)).
     final state = evaluateBeacon(
-      connected: widget.chain.connected.value,
+      connected: connected,
       age: age,
-      error: widget.chain.error.value,
+      error: error,
       searching: hunting,
-      osOffline: widget.chain.osOffline?.value ?? false,
-      sinceDrop: _sinceDrop(),
+      osOffline: osOffline,
+      sinceDrop: sinceDrop,
+      awaitingScore: widget.chain.awaitingScore?.value ?? false,
+      liveHold: KvFreshness.liveHoldBound,
+    );
+    // The data: the balance's own clock, unchanged by the ruling.
+    final dataState = evaluateBeacon(
+      connected: connected,
+      age: age,
+      error: error,
+      searching: hunting,
+      osOffline: osOffline,
+      sinceDrop: sinceDrop,
     );
     return (
       state: state,
+      dataState: dataState,
       error: widget.chain.error.value,
       // **Every non-live state carries the age**, not only `stale`.
       //
@@ -485,6 +537,14 @@ class _HomeScreenState extends State<HomeScreen> {
       age: state == BeaconState.connected || age == null
           ? null
           : Duration(seconds: age.inSeconds),
+      // The hold window: the lamp live, the data dimmed. BG-8 owes the dimmed
+      // balance its visible age, and the trust line carries it.
+      dataAge:
+          state == BeaconState.connected &&
+              dataState != BeaconState.connected &&
+              age != null
+          ? Duration(seconds: age.inSeconds)
+          : null,
       hunting: hunting,
       live: widget.chain.connected.value,
     );
@@ -562,8 +622,30 @@ class _HomeScreenState extends State<HomeScreen> {
     // The age rides the link sentence as a trailing clause. `stale` already
     // IS the age, so it never doubles.
     final age = link.age;
-    final linkSaid =
-        link_ == null || age == null || link.state == BeaconState.stale
+    // **The hold window** (LINK-Q1, D-331(b)): the lamp is live, the data has
+    // dimmed — a short stall on a bound socket. BG-8 owes the dimmed balance
+    // its age, and it is said in the shipped `· last update N ago` clause
+    // (D-196) after the link's own state, **in words**: the stale line past
+    // the hold says `as of N ago`, and with the chip reading `Mainnet` in
+    // both, colour alone told "link fine, data briefly old" from "link stale"
+    // — nothing at all to a screen reader or in greyscale (`ux-auditor`,
+    // BG-20 / BG-7). `connected` is this line's one new word (the founder's
+    // ruling, D-337), and it is said only while the
+    // socket IS up (`link.live`, the same gate the swap's sentence takes):
+    // the churn hold keeps the lamp live through a sub-2 s drop, and naming
+    // a connection over no socket would be the claim BG-8 forbids — there
+    // the line is the age alone, which still is not the stale line's words.
+    // It is said in the lamp's tone (below), never in amber: the ruling's bar
+    // is no amber over a live socket for a stall under the hold, and a green
+    // chip over an amber line would be two lamps disagreeing on one plate
+    // (the P0.3 scar).
+    final dataAge = link.dataAge;
+    final linkWord = link_ ?? (link.live ? 'connected' : null);
+    final linkSaid = dataAge != null
+        ? (linkWord == null
+              ? 'last update ${formatAge(dataAge)} ago'
+              : '$linkWord · last update ${formatAge(dataAge)} ago')
+        : link_ == null || age == null || link.state == BeaconState.stale
         ? link_
         : '$link_ · last update ${formatAge(age)} ago';
     // **One indicator, however many facts it has.** These used to be two
@@ -580,22 +662,19 @@ class _HomeScreenState extends State<HomeScreen> {
     // twelve pixels above, the P0.3 scar `_NetworkChip` still carries a
     // comment about.
     //
-    // Green only when the swap sentence stands ALONE. A balance that may be
-    // short keeps the lamp, because that is the more consequential fact, and
-    // this arm must never launder it.
-    final swapOnly =
-        number == null &&
-        !syncing &&
-        link.state == BeaconState.connected &&
-        link.hunting &&
-        link.live;
+    // Green only when the LINK's sentence stands alone over a live lamp — the
+    // swap, or since LINK-Q1 the hold window's age. A balance that may be
+    // short keeps the amber lamp, because that is the more consequential fact,
+    // and this arm must never launder it; a first scan is amber too.
+    final linkOnly =
+        number == null && !syncing && link.state == BeaconState.connected;
     return (
       words: said.isEmpty ? null : said.join('\n'),
       // **Motion means something is happening.** A hunt and a first scan are
       // both happening; a dead or stale link is not, and the meter freezing is
       // exactly what makes "live" a felt thing rather than a claimed one.
       running: link.hunting || link.state == BeaconState.connecting || syncing,
-      tone: swapOnly ? KvLampTone.ok : KvLampTone.warn,
+      tone: linkOnly ? KvLampTone.ok : KvLampTone.warn,
     );
   }
 
@@ -908,22 +987,26 @@ class _HomeScreenState extends State<HomeScreen> {
   ///
   /// The lamp and the trust line are computed from the SAME `_LinkView`, so
   /// they cannot disagree; that is what guards the P0.3 scar now.
+  ///
+  /// **It reads the LAMP's bit, not the data's** (LINK-Q1, D-331(b)): on a
+  /// bound socket it stays live through a silence of up to
+  /// `KvFreshness.liveHoldBound`, where the balance dims at five seconds.
   Widget _indicator() => ValueListenableBuilder<bool>(
-    valueListenable: _dimmed,
-    builder: (context, stale, _) => _NetworkChip(
-      live: !stale,
+    valueListenable: _lampLive,
+    builder: (context, live, _) => _NetworkChip(
+      live: live,
       onTap: widget.nodeRoute == null ? null : _openNode,
     ),
   );
 
   /// The bare live dot the `short` bar carries. Same widget, same law, same
-  /// `_dimmed` reading as the chip's — so the two can never disagree about a
+  /// `_lampLive` reading as the chip's — so the two can never disagree about a
   /// link the way P0.3's did.
   Widget _liveDot() => ValueListenableBuilder<bool>(
-    valueListenable: _dimmed,
-    builder: (context, stale, _) => KvBreath(
-      active: !stale,
-      child: KvLamp(stale ? KvLampTone.warn : KvLampTone.ok),
+    valueListenable: _lampLive,
+    builder: (context, live, _) => KvBreath(
+      active: live,
+      child: KvLamp(live ? KvLampTone.ok : KvLampTone.warn),
     ),
   );
 

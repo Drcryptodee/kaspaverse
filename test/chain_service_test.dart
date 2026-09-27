@@ -11,14 +11,15 @@ import 'package:kaspaverse/src/services/chain_service.dart';
 /// call site again.
 DagStatusDto status({
   bool connected = true,
-  int? blockAgeSecs,
+  int? tickAgeSecs,
   bool searching = false,
   bool osOffline = false,
   String? pinnedNode,
   bool pinDropped = false,
 }) => DagStatusDto(
   connected: connected,
-  lastBlockAgeSecs: blockAgeSecs == null ? null : BigInt.from(blockAgeSecs),
+  lastTickAgeSecs: tickAgeSecs == null ? null : BigInt.from(tickAgeSecs),
+  daaTicks: BigInt.zero,
   searching: searching,
   osOffline: osOffline,
   pinnedNode: pinnedNode,
@@ -199,7 +200,7 @@ void main() {
     test('a stalled chain while foreground forces a reconnect', () async {
       ChainService.instance.start();
       // Block-age past the stall threshold: the socket went silently dead.
-      statusValue = status(blockAgeSecs: 30);
+      statusValue = status(tickAgeSecs: 30);
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(
         reconnectCalls,
@@ -211,7 +212,7 @@ void main() {
     test('a live chain never triggers a reconnect', () async {
       ChainService.instance.start();
       // Fresh blocks arriving — nothing to recover.
-      statusValue = status(blockAgeSecs: 1);
+      statusValue = status(tickAgeSecs: 1);
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(reconnectCalls, 0);
     });
@@ -219,7 +220,7 @@ void main() {
     test('the watchdog stays quiet while backgrounded', () async {
       final service = ChainService.instance..start();
       // Stalled, but we're backgrounded — the grace-drop owns the socket.
-      statusValue = status(blockAgeSecs: 30);
+      statusValue = status(tickAgeSecs: 30);
       service.didChangeAppLifecycleState(AppLifecycleState.paused);
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(
@@ -257,7 +258,7 @@ void main() {
         await service.reconnect();
         expect(stalledSeen, [false]);
         // Then a genuine stall: 30 s past threshold while foreground.
-        statusValue = status(blockAgeSecs: 30);
+        statusValue = status(tickAgeSecs: 30);
         await Future<void>.delayed(const Duration(milliseconds: 40));
         expect(stalledSeen, contains(true));
       },
@@ -577,28 +578,42 @@ void main() {
           DagSnapshot(connected: true, virtualDaaScore: BigInt.two),
         );
         await Future<void>.delayed(const Duration(milliseconds: 40));
+        // Two channels since LINK-Q1: the lamp and the data, each marked on
+        // its own change.
         expect(marks, [
-          'beacon none>connecting sock=0 age=- hunt=0',
-          'beacon connecting>connected sock=1 age=0 hunt=0',
+          'lamp none>connecting sock=0 age=- hunt=0',
+          'data none>connecting sock=0 age=- hunt=0',
+          'lamp connecting>connected sock=1 age=0 hunt=0',
+          'data connecting>connected sock=1 age=0 hunt=0',
         ]);
       },
     );
 
-    test(
-      'an amber lamp over a live socket is marked as exactly that',
-      () async {
-        final service = ChainService.instance..start();
-        controller.add(
-          DagSnapshot(connected: true, virtualDaaScore: BigInt.one),
-        );
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        service.lastUpdate.value = DateTime.now().subtract(
-          const Duration(seconds: 6),
-        );
-        await Future<void>.delayed(const Duration(milliseconds: 40));
-        expect(marks.last, 'beacon connected>stale sock=1 age=6 hunt=0');
-      },
-    );
+    test('over a live socket the data dims at its stale line and the lamp only '
+        'at the hold — each marked as exactly that (D-331(b))', () async {
+      final service = ChainService.instance..start();
+      controller.add(DagSnapshot(connected: true, virtualDaaScore: BigInt.one));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      service.lastUpdate.value = DateTime.now().subtract(
+        const Duration(seconds: 6),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(
+        marks.last,
+        'data connected>stale sock=1 age=6 hunt=0',
+        reason: 'the balance keeps its own five-second clock',
+      );
+      expect(
+        marks.where((m) => m.startsWith('lamp connected>')),
+        isEmpty,
+        reason: 'a six-second stall on a bound socket keeps the lamp live',
+      );
+      service.lastUpdate.value = DateTime.now().subtract(
+        const Duration(seconds: 16),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(marks.last, 'lamp connected>stale sock=1 age=16 hunt=0');
+    });
 
     test('a backgrounded app marks nothing — nobody is looking', () async {
       final service = ChainService.instance..start();
@@ -609,5 +624,74 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 40));
       expect(marks.length, before);
     });
+  });
+
+  // ── LINK-Q1 · the freshness clock moves only on a NEW score (D-334) ─────
+  //
+  // CONN-F1 §12 named it: a reconnect re-states the last score, and the clock
+  // restarted on that re-statement — the glass read live on a socket that had
+  // said nothing yet. With the lamp holding fifteen seconds on a bound socket
+  // and the silence deadline swapping deaf sockets every nine, a string of
+  // deaf sockets would have held the lamp live indefinitely.
+  group('the freshness clock (LINK-Q1)', () {
+    test(
+      'a reconnect that re-states the last score is not a fresh score',
+      () async {
+        final service = ChainService.instance..start();
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.one),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        final fresh = service.lastUpdate.value;
+        expect(fresh, isNotNull);
+        expect(service.awaitingScore.value, isFalse);
+
+        // The socket drops and a new one comes up. The bridge kept the score, so
+        // both snapshots carry it; neither is news.
+        controller.add(
+          DagSnapshot(connected: false, virtualDaaScore: BigInt.one),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.one),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(
+          service.lastUpdate.value,
+          fresh,
+          reason: 'a re-stated score must not restart the clock',
+        );
+        expect(
+          service.awaitingScore.value,
+          isTrue,
+          reason: 'the socket that came up has not spoken yet',
+        );
+
+        // Its first score is news.
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.two),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(service.lastUpdate.value!.isAfter(fresh!), isTrue);
+        expect(service.awaitingScore.value, isFalse);
+      },
+    );
+
+    test(
+      'the first score of a process is news, and so is every change',
+      () async {
+        final service = ChainService.instance..start();
+        controller.add(const DagSnapshot(connected: true));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(service.lastUpdate.value, isNull, reason: 'no score yet');
+        expect(service.awaitingScore.value, isTrue);
+        controller.add(
+          DagSnapshot(connected: true, virtualDaaScore: BigInt.one),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(service.lastUpdate.value, isNotNull);
+        expect(service.awaitingScore.value, isFalse);
+      },
+    );
   });
 }

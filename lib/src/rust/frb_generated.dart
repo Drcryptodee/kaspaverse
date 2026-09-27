@@ -3716,17 +3716,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DagStatusDto dco_decode_dag_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return DagStatusDto(
       connected: dco_decode_bool(arr[0]),
       endpoint: dco_decode_opt_String(arr[1]),
-      lastBlockAgeSecs: dco_decode_opt_box_autoadd_u_64(arr[2]),
-      virtualDaaScore: dco_decode_opt_box_autoadd_u_64(arr[3]),
-      searching: dco_decode_bool(arr[4]),
-      osOffline: dco_decode_bool(arr[5]),
-      pinnedNode: dco_decode_opt_String(arr[6]),
-      pinDropped: dco_decode_bool(arr[7]),
+      lastTickAgeSecs: dco_decode_opt_box_autoadd_u_64(arr[2]),
+      daaTicks: dco_decode_u_64(arr[3]),
+      virtualDaaScore: dco_decode_opt_box_autoadd_u_64(arr[4]),
+      searching: dco_decode_bool(arr[5]),
+      osOffline: dco_decode_bool(arr[6]),
+      pinnedNode: dco_decode_opt_String(arr[7]),
+      pinDropped: dco_decode_bool(arr[8]),
     );
   }
 
@@ -3850,12 +3851,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LinkProbeDto dco_decode_link_probe_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return LinkProbeDto(
       latencyMs: dco_decode_opt_box_autoadd_u_64(arr[0]),
-      synced: dco_decode_opt_box_autoadd_bool(arr[1]),
-      peers: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      timedOutMs: dco_decode_opt_box_autoadd_u_64(arr[1]),
+      synced: dco_decode_opt_box_autoadd_bool(arr[2]),
+      peers: dco_decode_opt_box_autoadd_u_32(arr[3]),
     );
   }
 
@@ -4660,7 +4662,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_connected = sse_decode_bool(deserializer);
     var var_endpoint = sse_decode_opt_String(deserializer);
-    var var_lastBlockAgeSecs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_lastTickAgeSecs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_daaTicks = sse_decode_u_64(deserializer);
     var var_virtualDaaScore = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_searching = sse_decode_bool(deserializer);
     var var_osOffline = sse_decode_bool(deserializer);
@@ -4669,7 +4672,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return DagStatusDto(
       connected: var_connected,
       endpoint: var_endpoint,
-      lastBlockAgeSecs: var_lastBlockAgeSecs,
+      lastTickAgeSecs: var_lastTickAgeSecs,
+      daaTicks: var_daaTicks,
       virtualDaaScore: var_virtualDaaScore,
       searching: var_searching,
       osOffline: var_osOffline,
@@ -4810,10 +4814,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LinkProbeDto sse_decode_link_probe_dto(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_latencyMs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_timedOutMs = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_synced = sse_decode_opt_box_autoadd_bool(deserializer);
     var var_peers = sse_decode_opt_box_autoadd_u_32(deserializer);
     return LinkProbeDto(
       latencyMs: var_latencyMs,
+      timedOutMs: var_timedOutMs,
       synced: var_synced,
       peers: var_peers,
     );
@@ -5830,7 +5836,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.connected, serializer);
     sse_encode_opt_String(self.endpoint, serializer);
-    sse_encode_opt_box_autoadd_u_64(self.lastBlockAgeSecs, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.lastTickAgeSecs, serializer);
+    sse_encode_u_64(self.daaTicks, serializer);
     sse_encode_opt_box_autoadd_u_64(self.virtualDaaScore, serializer);
     sse_encode_bool(self.searching, serializer);
     sse_encode_bool(self.osOffline, serializer);
@@ -5941,6 +5948,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_link_probe_dto(LinkProbeDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_opt_box_autoadd_u_64(self.latencyMs, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.timedOutMs, serializer);
     sse_encode_opt_box_autoadd_bool(self.synced, serializer);
     sse_encode_opt_box_autoadd_u_32(self.peers, serializer);
   }

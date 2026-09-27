@@ -62,7 +62,7 @@ class NodeScope {
     this.reconnecting,
     this.onReconnect,
     this.refreshConfig,
-    this.blockAgeSecs,
+    this.tickPulse,
     this.probeLink,
     this.testNode,
   });
@@ -125,33 +125,38 @@ class NodeScope {
   /// the truth rather than the last thing the app happened to see.
   final Future<void> Function()? refreshConfig;
 
-  /// Seconds since the node last handed us a block, polled while this screen
-  /// is open — the transport scan's own freshness.
+  /// **The link's pulse**, polled while this screen is open: seconds since
+  /// the last DAA tick (`null` before the first), and every tick the link has
+  /// delivered in this process — a monotonic count the screen differences
+  /// against its own clock to print the beat as `DAA · 10 Hz` (D-332).
   ///
-  /// **Carried across from `NetworkSheet` when UX-3 collapsed the two
-  /// surfaces**, and it is the one thing that sheet rendered and this screen
-  /// did not. Dropping it would have made the sovereign path the poorer one
-  /// (D-207 clause c): a user who came here to understand their link would
-  /// have lost the most precise liveness signal the app has by the surface
-  /// being merged rather than by anyone deciding to remove it.
-  final Future<int?> Function()? blockAgeSecs;
+  /// It was `blockAgeSecs` until LINK-Q1 moved the heartbeat off full blocks
+  /// (D-334): the same freshness line, now read off the tick every stream
+  /// shape keeps. **Carried across from `NetworkSheet` when UX-3 collapsed the
+  /// two surfaces** — dropping it would have made the sovereign path the
+  /// poorer one (D-207 clause c).
+  final Future<({int? ageSecs, int ticks})> Function()? tickPulse;
 
   /// **One honest round trip, the node's own word on its sync, and — when
   /// asked — its peer count**, polled while this screen is open (`T5`'s
   /// connection card).
   ///
+  /// Three outcomes (D-333): an answer (`latencyMs`), a round trip that
+  /// outlasted the probe's own adaptive deadline (`timedOutMs` — "at least
+  /// this", a slow live link, never drawn as no link), or neither — a refused
+  /// probe, which the screen counts toward its dwell before going dark.
+  ///
   /// A pull rather than a stream, and on the screen's own cadence, for the
-  /// same reason [blockAgeSecs] is: it costs real RPC calls, and the money
+  /// same reason [tickPulse] is: it costs a real round trip, and the money
   /// screen's link tick must not start paying for a card it never draws. The
   /// caller says whether it wants the peer count this time — that number
   /// changes over minutes where a latency changes over seconds, so it is asked
-  /// for one tick in [_NodeScreenState.peersEvery].
+  /// for one tick in [NodeScreen.peersEvery].
   ///
   /// Null ⇒ the seam is not wired, and the card renders the readings as absent
   /// rather than as zeros (BG-8). A widget test gets exactly that.
-  final Future<({int? latencyMs, int? peers, bool? synced})> Function({
-    required bool peers,
-  })?
+  final Future<({int? latencyMs, int? timedOutMs, int? peers, bool? synced})>
+  Function({required bool peers})?
   probeLink;
 
   /// **`T5`'s `Test`** — dial a node the user typed, on an ephemeral client,
@@ -275,9 +280,45 @@ class NodeScreen extends StatefulWidget {
   /// clock — the same seam `HomeScreen` takes.
   final DateTime Function() clock;
 
+  /// **The poll's cadence: twice a second** (D-332 — it was the retired
+  /// sheet's 2 s). A number can only be as live as its measurement, so the
+  /// latency's liveliness comes from measuring more, never from animating a
+  /// stale value; the figure is the median of the last three answers, a 1.5 s
+  /// window. Still gated to the screen being open and in the foreground.
+  /// The probe is one small round trip on the bound socket — H1's cleared
+  /// suspect (D-331) — and the pulse pull takes no I/O at all.
+  static const Duration pollEvery = Duration(milliseconds: 500);
+
+  /// How many polls apart the peer count is asked for: every ten seconds,
+  /// as before the faster cadence — a node's peers change over minutes.
+  static const int peersEvery = 20;
+
+  /// Forget the latency reading carried between openings — for tests, which
+  /// must not leak one test's reading into the next one's first frame.
+  @visibleForTesting
+  static void forgetLatency() => _latencyMemory = null;
+
+  /// Carry a reading into the next opening, as a previous visit would have —
+  /// for the preview catalogue's frame of that face (L205).
+  @visibleForTesting
+  static void carryLatency({
+    required KvLatencyReading reading,
+    required DateTime at,
+    required String endpoint,
+  }) => _latencyMemory = (reading: reading, at: at, endpoint: endpoint);
+
   @override
   State<NodeScreen> createState() => _NodeScreenState();
 }
+
+/// **The last latency reading, held past the screen's life** (D-333's
+/// stale-while-revalidate). A user who opens the Network screen sees the
+/// link's last known distance at once, dimmed with its age, and watches it
+/// count to the first fresh answer — not a dash for as long as a first probe
+/// takes on a slow link. Keyed to the endpoint it was measured on: another
+/// node's distance is no reading of this one. Process memory only — nothing
+/// is persisted, and the value is a public round-trip time (INV-3).
+({KvLatencyReading reading, DateTime at, String endpoint})? _latencyMemory;
 
 class _NodeScreenState extends State<NodeScreen> {
   final TextEditingController _url = TextEditingController();
@@ -312,23 +353,39 @@ class _NodeScreenState extends State<NodeScreen> {
   /// **205 elements every two seconds, four `TextField`s among them**,
   /// measured with `debugOnRebuildDirtyWidget` (UX-R3, second beat).
   ///
-  /// The scan's freshness carries whether a poll has ever landed, because
-  /// "0 s since the last block" and "we have never been told" are different
-  /// sentences (the retired sheet's own `_haveStatus` distinction).
-  final ValueNotifier<({bool have, int? secs})> _scan = ValueNotifier((
-    have: false,
-    secs: null,
-  ));
+  /// The link's pulse: whether a poll has ever landed — "0 s since the last
+  /// tick" and "we have never been told" are different sentences (the retired
+  /// sheet's own `_haveStatus` distinction) — the tick age, and the beat as a
+  /// rate once two polls have landed (D-332).
+  final ValueNotifier<({bool have, int? secs, double? hz})> _scan =
+      ValueNotifier((have: false, secs: null, hz: null));
+
+  /// The pulse's rate, from the process's tick count and this screen's clock.
+  final KvTickRate _rate = KvTickRate();
 
   /// `T5`'s latency — smoothed and tiered by [KvLatencyReading] — the node's
   /// own word on whether it is synced, and its peer count. Each is *no
-  /// reading* until a probe actually answers: never a zero, and never the
-  /// last good number still standing after the link died (BG-8).
+  /// reading* until a probe actually answers: never a zero, and never a number
+  /// beside a dead socket (BG-8).
   final ValueNotifier<KvLatencyReading> _latency = ValueNotifier(
     const KvLatencyReading.none(),
   );
   final ValueNotifier<bool?> _synced = ValueNotifier(null);
   final ValueNotifier<int?> _peers = ValueNotifier(null);
+
+  /// When the reading on the seat was taken, while it is the one carried over
+  /// from before this screen opened (stale-while-revalidate, D-333); null once
+  /// a fresh probe has answered. The seat dims and says this age until then.
+  final ValueNotifier<DateTime?> _latencyTakenAt = ValueNotifier(null);
+
+  /// Refused probes in a row. Only these count toward going dark — a timeout
+  /// is a reading ("at least"), and one miss never blanks a live link (D-333).
+  int _refusals = 0;
+
+  /// **Three refused probes in a row before the seat goes dark** (D-333) — at
+  /// two probes a second, a second and a half of a link that will not answer
+  /// at all. A socket that actually drops clears the seat at once, as before.
+  static const int refusalsBeforeDark = 3;
 
   /// **The last `Test`, as one value**: in flight, what answered, or why it
   /// was refused. Its own notifier, so a result lands on the field's own
@@ -355,19 +412,14 @@ class _NodeScreenState extends State<NodeScreen> {
   ValueListenable<TickerModeData>? _visible;
   late final AppLifecycleListener _lifecycle;
 
-  /// The poll's cadence (the retired sheet's 2 s, unchanged), and how many
-  /// ticks apart the peer count is asked for.
-  static const Duration pollEvery = Duration(seconds: 2);
-  static const int peersEvery = 5;
-
   /// **One probe in flight at a time** (`consensus-auditor`, UX-R3).
   ///
-  /// Without it a stalled node stacked a probe every 2 s, and two overlapping
-  /// ones could land out of order — an older slow reading overwriting a newer
-  /// fast one through last-writer-wins, which is exactly the
-  /// confidently-wrong-number the probe exists to prevent (BG-8). Rust carries
-  /// its own deadline under the cadence as well, so this is belt AND braces on
-  /// a reading a user reads as *how far away is this node*.
+  /// Without it a stalled node would stack probes, and two overlapping ones
+  /// could land out of order — an older slow reading overwriting a newer fast
+  /// one through last-writer-wins, which is exactly the confidently-wrong-
+  /// number the probe exists to prevent (BG-8). Rust carries the socket's own
+  /// adaptive deadline (1–5 s, D-333), so a slow answer occupies poll ticks
+  /// instead of stacking calls.
   bool _probing = false;
 
   @override
@@ -376,6 +428,19 @@ class _NodeScreenState extends State<NodeScreen> {
     _seeded = widget.scope.pinnedNode.value ?? '';
     _url.text = _seeded;
     _wantPin = widget.scope.pinnedNode.value != null;
+    // **Stale-while-revalidate** (D-333): the last reading measured on THIS
+    // endpoint shows at once, dimmed with its age, until the first fresh
+    // answer lands and the figure counts to it.
+    final carried = _latencyMemory;
+    if (carried != null &&
+        widget.scope.connected.value &&
+        carried.endpoint == widget.scope.activeEndpoint.value) {
+      _latency.value = carried.reading;
+      _latencyTakenAt.value = carried.at;
+    }
+    widget.scope.connected.addListener(_onLink);
+    _endpoint = widget.scope.activeEndpoint.value;
+    widget.scope.activeEndpoint.addListener(_onEndpoint);
     _lifecycle = AppLifecycleListener(onStateChange: _onLifecycle);
     _loadExplorer();
     _loadRate();
@@ -411,9 +476,12 @@ class _NodeScreenState extends State<NodeScreen> {
 
   @override
   void dispose() {
+    widget.scope.connected.removeListener(_onLink);
+    widget.scope.activeEndpoint.removeListener(_onEndpoint);
     _lifecycle.dispose();
     _visible?.removeListener(_gate);
     _poll?.cancel();
+    _latencyTakenAt.dispose();
     _scan.dispose();
     _test.dispose();
     _explorerChoice.dispose();
@@ -425,6 +493,60 @@ class _NodeScreenState extends State<NodeScreen> {
     _now.dispose();
     _url.dispose();
     super.dispose();
+  }
+
+  /// **A socket that drops takes its readings with it** — the dwell's first
+  /// clause (D-333), and the house rule behind the old wipe: no confident
+  /// number beside a dead socket (BG-8). A reading measured on the socket that
+  /// died says nothing about the next one, so the window starts empty there.
+  ///
+  /// **Every reading of the node, not only its distance** (`ux-auditor`): the
+  /// peer count and the node's word on its sync belong to the node that gave
+  /// them. Kept across a drop, the old node's `14` stood beside the next node
+  /// for up to ten seconds, and — since a timeout no longer clears the sync
+  /// word — its `syncing` could stand there as long as the new node's probes
+  /// timed out. A silence swap lands on a different node by design.
+  void _onLink() {
+    if (widget.scope.connected.value) return;
+    _forgetNode();
+  }
+
+  /// **A different node is a different set of readings** — the same clear,
+  /// for the swap the drop does not show: the bridge coalesces its stream,
+  /// so a fast cut-over can arrive as one connected snapshot naming a new
+  /// endpoint, and the window would carry the last node's samples into the
+  /// memory kept under the new one.
+  void _onEndpoint() {
+    final endpoint = widget.scope.activeEndpoint.value;
+    if (endpoint == _endpoint) return;
+    final had = _endpoint != null;
+    _endpoint = endpoint;
+    if (had) _forgetNode();
+  }
+
+  /// The endpoint the readings on this screen were measured on.
+  String? _endpoint;
+
+  /// Bumped every time the node's readings are forgotten. A probe in flight
+  /// across a forget belongs to the node that was forgotten, and is dropped
+  /// when it lands — by construction, not by the bridge coalescer's timing
+  /// happening to deliver the endpoint change first (`ux-auditor` N1).
+  int _nodeEpoch = 0;
+
+  /// The next probe asks for the peers, so an empty count is filled at the
+  /// next answer rather than dashed for up to ten seconds (`ux-auditor` N2):
+  /// owed from the start (a first probe that times out carries none), after
+  /// a forget, and after the dwell goes dark (N8). Spent only by an answer.
+  bool _peersDue = true;
+
+  void _forgetNode() {
+    _nodeEpoch++;
+    _peersDue = true;
+    _latency.value = const KvLatencyReading.none();
+    _latencyTakenAt.value = null;
+    _synced.value = null;
+    _peers.value = null;
+    _refusals = 0;
   }
 
   void _onLifecycle(AppLifecycleState state) {
@@ -461,11 +583,14 @@ class _NodeScreenState extends State<NodeScreen> {
   /// first tick asks for everything, peers included.
   void _start() {
     if (_poll != null) return;
-    if (widget.scope.blockAgeSecs == null && widget.scope.probeLink == null) {
+    if (widget.scope.tickPulse == null && widget.scope.probeLink == null) {
       return;
     }
+    // A rate across a stretch the screen was not watching would average the
+    // pause in: every start begins the beat afresh.
+    _rate.reset();
     _tick(first: true);
-    _poll = Timer.periodic(pollEvery, (_) => _tick());
+    _poll = Timer.periodic(NodeScreen.pollEvery, (_) => _tick());
   }
 
   void _stop() {
@@ -476,51 +601,127 @@ class _NodeScreenState extends State<NodeScreen> {
   void _tick({bool first = false}) {
     _ticks++;
     _now.value = widget.clock();
-    unawaited(_refreshScan());
-    unawaited(_refreshProbe(peers: first || _ticks % peersEvery == 0));
+    unawaited(_refreshPulse());
+    unawaited(
+      _refreshProbe(
+        peers: first || _peersDue || _ticks % NodeScreen.peersEvery == 0,
+      ),
+    );
   }
 
-  /// **The link probe, on the screen's own cadence.**
+  /// **The link probe, on the screen's own cadence** — three outcomes, and
+  /// only one of them can darken the seat (D-333).
   ///
-  /// A failed probe **clears** the readings rather than leaving the last good
-  /// set standing — the opposite of what [_refreshScan] does with the block
-  /// age, and deliberately so. A block age that stops advancing is itself the
-  /// signal, and the line says how old it is; a latency is a measurement of
-  /// *this* round trip, so a stale 42 ms beside a dead socket would be a
-  /// confident wrong number rather than an old true one (BG-8, and the P0.3
-  /// scar in its original shape). The smoothing in [KvLatencyReading] never
-  /// becomes holding for the same reason: a `null` empties its window.
+  /// * **An answer** is a sample.
+  /// * **A timeout** is a sample too — a *lower bound*: the round trip took at
+  ///   least the socket's own adaptive deadline. The seat shows `> N s` on one
+  ///   bar. The old seat blanked here, and on the founder's Starlink hop a
+  ///   slow, live link blinked dark and relit five times while he wrote one
+  ///   message.
+  /// * **A refusal** (no socket, an error, a thrown seam) is not a sample.
+  ///   Three in a row and the seat goes dark; fewer, and the reading stands.
+  ///
+  /// A socket that actually drops still clears everything at once ([_onLink])
+  /// — the P0.3 scar's rule is untouched: never a confident number beside a
+  /// dead socket. What changed is that a slow round trip on a LIVE socket is
+  /// no longer mistaken for one.
   Future<void> _refreshProbe({required bool peers}) async {
     final probe = widget.scope.probeLink;
     if (probe == null || _probing) return;
     _probing = true;
+    final epoch = _nodeEpoch;
     try {
-      final reading = await probe(peers: peers);
-      if (!mounted) return;
-      _latency.value = _latency.value.offer(reading.latencyMs);
-      _synced.value = reading.synced;
+      // ONE epoch check for the answer and the refusal alike: a probe that
+      // crossed a forget belongs to the node that was forgotten, whichever
+      // way it ends (`ux-auditor` N1, and N6 — two checks left the refusal's
+      // untested).
+      ({int? latencyMs, int? timedOutMs, int? peers, bool? synced})? reading;
+      try {
+        reading = await probe(peers: peers);
+      } catch (_) {
+        reading = null;
+      }
+      if (!mounted || epoch != _nodeEpoch) return;
+      if (reading == null) {
+        _refused();
+        return;
+      }
+      final sample = switch ((reading.latencyMs, reading.timedOutMs)) {
+        (final int ms, _) => KvLatencySample.answered(ms),
+        (null, final int deadline) => KvLatencySample.atLeast(deadline),
+        (null, null) => null,
+      };
+      if (sample == null) {
+        _refused();
+      } else {
+        _fresh(sample);
+        // Only an answer says anything about the node's sync; a timeout is
+        // silence on that question, so the last word stands.
+        if (reading.latencyMs != null) _synced.value = reading.synced;
+      }
       // Not asked for this tick ⇒ the last answer stands; asked and absent ⇒
       // the dash. The seam's `null` means both, and only this side knows which.
-      if (peers) _peers.value = reading.peers;
-    } catch (_) {
-      if (!mounted) return;
-      _latency.value = const KvLatencyReading.none();
-      _synced.value = null;
-      _peers.value = null;
+      // **Only an answered probe speaks for the peers** (`ux-auditor`, L144's
+      // whole class): a timed-out or refused one carries none, and one miss
+      // must not blank a count for the ten seconds to the next ask — the
+      // dwell, not a single miss, is what goes dark ([_refused]).
+      if (peers && reading.latencyMs != null) {
+        _peers.value = reading.peers;
+        _peersDue = false;
+      }
     } finally {
       _probing = false;
     }
   }
 
-  Future<void> _refreshScan() async {
-    final read = widget.scope.blockAgeSecs;
+  /// A fresh outcome: into the window, the carried reading is retired, and
+  /// the memory the next opening shows first is updated.
+  ///
+  /// **The carried reading is where the count starts, never a sample**
+  /// (`ux-auditor`): offered into the carried window, a first fresh 300 ms
+  /// answer beside a remembered `[40, 42, 45]` took the median to 45 and lifted
+  /// the dim, so an old figure stood at full brightness as fresh — and a first
+  /// probe that timed out left it standing until the next deadline. The window
+  /// starts empty at the first fresh outcome; the figure still counts from the
+  /// carried number, because that is the number on the glass.
+  void _fresh(KvLatencySample sample) {
+    _refusals = 0;
+    final base = _latencyTakenAt.value == null
+        ? _latency.value
+        : const KvLatencyReading.none();
+    _latency.value = base.offer(sample);
+    _latencyTakenAt.value = null;
+    final endpoint = widget.scope.activeEndpoint.value;
+    if (endpoint != null) {
+      _latencyMemory = (
+        reading: _latency.value,
+        at: widget.clock(),
+        endpoint: endpoint,
+      );
+    }
+  }
+
+  /// A refused probe: counted, and only the third in a row goes dark.
+  void _refused() {
+    _refusals++;
+    if (_refusals < refusalsBeforeDark) return;
+    _latency.value = const KvLatencyReading.none();
+    _latencyTakenAt.value = null;
+    _synced.value = null;
+    _peers.value = null;
+    _peersDue = true;
+  }
+
+  Future<void> _refreshPulse() async {
+    final read = widget.scope.tickPulse;
     if (read == null) return;
     try {
-      final age = await read();
+      final pulse = await read();
       if (!mounted) return;
-      _scan.value = (have: true, secs: age);
+      final hz = _rate.offer(widget.clock(), pulse.ticks);
+      _scan.value = (have: true, secs: pulse.ageSecs, hz: hz);
     } catch (_) {
-      // A failed pull leaves the last-known age standing; never crash the
+      // A failed pull leaves the last-known pulse standing; never crash the
       // screen a user opened to diagnose a link.
     }
   }
@@ -933,8 +1134,14 @@ class _NodeScreenState extends State<NodeScreen> {
   Widget _connectionPlate() {
     final s = widget.scope;
     // `T5`'s row labels are `inkMeta` (122,133,131), measured.
-    Widget row(String label, String text, Widget value) => KvFactLine(
+    Widget row(
+      String label,
+      String text,
+      Widget value, {
+      InlineSpan? labelSpan,
+    }) => KvFactLine(
       label: label,
+      labelSpan: labelSpan,
       dense: true,
       labelColor: KvColor.inkMeta,
       valueText: text,
@@ -944,54 +1151,92 @@ class _NodeScreenState extends State<NodeScreen> {
       children: [
         Padding(
           padding: const EdgeInsets.only(top: KvSpace.xs, bottom: KvSpace.xs),
-          child: ListenableBuilder(
-            listenable: Listenable.merge([_latency, s.connected]),
-            builder: (context, _) {
-              // **A latency reading belongs to a live socket, and only to
-              // one.** The probe clears itself on a failure, but the poll runs
-              // at 2 s while the notifiers are pushed — so a socket that
-              // dropped a moment ago could still be holding the last good
-              // number for one tick. Gating on `connected` closes that window.
-              final reading = s.connected.value
-                  ? _latency.value
-                  : const KvLatencyReading.none();
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
+          // **Two listeners, so a probe rebuilds only the instrument** (the V4
+          // seam law, `rebuild_scope_test`): the caption row hears whether a
+          // carried reading stands, the instrument hears the reading too.
+          // **A latency reading belongs to a live socket, and only to one.**
+          // A drop clears the seat ([_onLink]), and each gate here closes the
+          // frame between the notifier and its listener.
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ListenableBuilder(
+                listenable: Listenable.merge([_latencyTakenAt, s.connected]),
+                builder: (context, _) {
+                  final carried = s.connected.value
+                      ? _latencyTakenAt.value
+                      : null;
                   // A `Wrap`, not a `Row` (L160): at 320 dp / 1.3× the flex
-                  // broke `CONNECTION` mid-word; the tier word drops to its
-                  // own line instead.
-                  Wrap(
+                  // broke `CONNECTION` mid-word. **No tier word here any
+                  // more** (D-332): the bars and their colour carry the
+                  // reading. The seat's only caption is the age of a reading
+                  // carried over from before the screen opened (D-333).
+                  return Wrap(
                     alignment: WrapAlignment.spaceBetween,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: KvSpace.s,
                     runSpacing: KvSpace.xs,
                     children: [
                       const KvRuledLabel('Connection', tight: true),
-                      KvLatencyWord(
-                        milliseconds: reading.milliseconds,
-                        tier: reading.tier,
+                      // Eased out on the house curve when the first fresh
+                      // answer lands, in step with the seat's own un-dimming
+                      // (BG-24) — never cut in one frame.
+                      AnimatedSwitcher(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : KvMotion.calm,
+                        switchInCurve: KvMotion.curve,
+                        switchOutCurve: KvMotion.curve,
+                        child: carried == null
+                            ? const SizedBox.shrink(key: ValueKey('fresh'))
+                            : _CarriedAge(
+                                key: const ValueKey('carried'),
+                                since: carried,
+                                now: _now,
+                              ),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: KvSpace.s),
-                  KvLatency(
+                  );
+                },
+              ),
+              const SizedBox(height: KvSpace.s),
+              ListenableBuilder(
+                listenable: Listenable.merge([
+                  _latency,
+                  _latencyTakenAt,
+                  s.connected,
+                ]),
+                builder: (context, _) {
+                  final live = s.connected.value;
+                  final reading = live
+                      ? _latency.value
+                      : const KvLatencyReading.none();
+                  return KvLatency(
                     milliseconds: reading.milliseconds,
+                    atLeast: reading.atLeast,
                     tier: reading.tier,
-                  ),
-                ],
-              );
-            },
+                    stale: live && _latencyTakenAt.value != null,
+                  );
+                },
+              ),
+            ],
           ),
         ),
         // BG-8, all three states. `ChainService` deliberately KEEPS the
         // last-known score when a dropped link emits nulls — which is only
         // honest if the screen dims it and says how old it is. **Streamed,
         // not stepped** (BG-18 / D-226). In a layer of its own: the count
-        // paints every frame of a crossing. **The scan's freshness rides the
-        // label** (founder on glass, 2026-09-05 — the separate *Transport
-        // scan* line is gone): `streaming` while blocks are landing, the
-        // block age when they are not, `syncing` when the node says so.
+        // paints every frame of a crossing. **The link's pulse rides the
+        // label** (founder on glass, 2026-09-05; D-332): the beat as a live
+        // rate — `DAA · 10 Hz`, counted from real ticks, falling toward 0
+        // through a stall and bursting as the backlog lands — the tick age
+        // once the link has been quiet past the data's stale line, `syncing`
+        // when the node says so. **`N s since last block` stands** (D-332's
+        // ruled words): since LINK-Q1 the age is the DAA tick's (D-334), and a
+        // tick is the node's virtual moving because blocks landed — so the
+        // ruled words stay true at the user's level, where "tick" was jargon
+        // (`ux-auditor`). The rate's figure is mono and tabular (BG-30), so
+        // ` Hz` holds still while it moves; the age stays a word.
         RepaintBoundary(
           child: ListenableBuilder(
             listenable: Listenable.merge([
@@ -1010,8 +1255,22 @@ class _NodeScreenState extends State<NodeScreen> {
               final syncing = connected && _synced.value == false;
               final scan = _scan.value;
               final age = scan.secs;
-              final quiet = connected && scan.have && age != null && age > 5;
-              // *Streaming* is the strongest claim on this screen (C7): it is
+              // The DATA's stale line — the balance's clock, 5 s — decides
+              // when the label trades the rate for the age.
+              final quiet =
+                  connected &&
+                  scan.have &&
+                  age != null &&
+                  age > KvFreshness.staleAfter.inSeconds;
+              // The LAMP's line: live through a quiet spell of up to 15 s on
+              // a bound socket (D-331(b)) — the same hold the money plate's
+              // chip keeps, so the two surfaces never disagree about a link.
+              final lampQuiet =
+                  connected &&
+                  scan.have &&
+                  age != null &&
+                  age >= KvFreshness.liveHoldBound.inSeconds;
+              // A live rate is the strongest claim on this screen (C7): it is
               // withheld while the link is hunting or the phone is offline,
               // exactly as the retired scan line withheld *live*.
               final settledLink =
@@ -1022,20 +1281,39 @@ class _NodeScreenState extends State<NodeScreen> {
               // A hunting link prints the age it has rather than the claim it
               // may not make.
               final aged = scan.have && age != null && (quiet || !settledLink);
+              final hz = scan.hz;
+              // **The rate is a live reading and takes the counting face; an
+              // age inside a sentence is a word** — S1 sets its `Final · 2 h
+              // ago` in Jakarta (D-261), and the render outranks BG-30's list
+              // (D-259). So `7 s since last block` reads as the money plate's
+              // trust line does, and only `10` is mono (`ux-auditor`).
+              final rate = connected && !syncing && !aged && settledLink
+                  ? _rateFigure(hz)
+                  : null;
               final label = !connected
                   ? 'DAA'
                   : syncing
                   ? 'DAA · syncing'
                   : aged
-                  ? 'DAA · $age s since last block'
-                  : settledLink
-                  ? 'DAA · streaming'
+                  ? 'DAA · ${formatAge(Duration(seconds: age))} since last block'
+                  : rate != null
+                  ? 'DAA · ${rate.trim()} Hz'
                   : 'DAA';
+              final labelSpan = rate == null
+                  ? null
+                  : TextSpan(
+                      children: [
+                        const TextSpan(text: 'DAA · '),
+                        TextSpan(text: rate, style: _labelFigure),
+                        const TextSpan(text: ' Hz'),
+                      ],
+                    );
               return KvStreamingCount(
                 value: s.virtualDaaScore.value,
                 stalled: !connected,
                 builder: (context, shown) => row(
                   label,
+                  labelSpan: labelSpan,
                   // **The lamp and its gap are part of the value's width.**
                   // `KvFactLine` measures the STRING it is given, so a row
                   // whose value carries a mark has to say so or the row will
@@ -1047,7 +1325,7 @@ class _NodeScreenState extends State<NodeScreen> {
                     formatScore(shown),
                     lamp: !connected
                         ? null
-                        : (syncing || quiet)
+                        : (syncing || lampQuiet)
                         ? KvLampTone.warn
                         : KvLampTone.ok,
                     stale: !connected,
@@ -1936,6 +2214,118 @@ class _SourceRow extends StatelessWidget {
   );
 }
 
+/// **The card's age line** — `inkMeta` at full strength, 4.75:1 on `plate`,
+/// because body size never dims (BG-14 as narrowed by D-257). One style for
+/// both seats that say how old a reading is.
+const TextStyle _ageLine = TextStyle(
+  fontFamily: KvFont.ui,
+  fontSize: 12,
+  height: 17 / 12,
+  color: KvColor.inkMeta,
+);
+
+/// A figure inside a row's label — mono and tabular (BG-30), everything else
+/// inherited from the label it sits in.
+const TextStyle _labelFigure = TextStyle(
+  fontFamily: KvFont.mono,
+  fontFeatures: [FontFeature.tabularFigures()],
+);
+
+/// **The age of a latency reading carried over from before the screen opened**
+/// (D-333) — the seat's one caption, where the tier word used to sit. BG-8's
+/// "a dimmed reading carries a visible age", in the card's own age-line style
+/// (`inkMeta` at full strength, 4.75:1 — body size never dims). It listens to
+/// the poll's clock alone, so the age counts without rebuilding the seat.
+class _CarriedAge extends StatelessWidget {
+  const _CarriedAge({super.key, required this.since, required this.now});
+
+  final DateTime since;
+  final ValueListenable<DateTime> now;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<DateTime>(
+    valueListenable: now,
+    builder: (context, at, _) {
+      final age = at.difference(since);
+      return Text(
+        'as of ${formatAge(age.isNegative ? Duration.zero : age)} ago',
+        // On the label's line, so in the label's line metrics
+        // (`KvRuledLabel`, tight: 12 / 16): a taller caption lifted the
+        // figure row a dp when it left (`ux-auditor`).
+        style: _ageLine.copyWith(height: 16 / 12),
+      );
+    },
+  );
+}
+
+/// **The rate's figure**: whole ticks a second in a two-figure slot — a
+/// monospace space holds the tens place, so ` Hz` does not step a digit's
+/// width as mainnet at rest reads 9 and 10 by turns — and `< 1` when ticks DID
+/// arrive but fewer than one a second on average: over three seconds a single
+/// tick rounds to 0, and `0` is the stall's face, which a tick is not (BG-20,
+/// `ux-auditor`). Null when there is no rate yet.
+String? _rateFigure(double? hz) {
+  if (hz == null) return null;
+  final whole = hz.round();
+  if (whole == 0 && hz > 0) return '< 1';
+  return '$whole'.padLeft(2);
+}
+
+/// **The link's beat as a rate** (D-332) — `DAA · 10 Hz`, from a monotonic
+/// tick count sampled on the screen's own clock. Pure, so the arithmetic is
+/// provable without a socket.
+///
+/// The count is Rust's (every DAA tick an installed socket delivered, counted
+/// before the bridge's 250 ms coalescer); the rate is ticks over the most
+/// recent **three seconds** of samples, in whole ticks a second. A stall shows
+/// as the rate falling toward 0 over those seconds; the recovery as the
+/// backlog landing, a burst past 10, then the beat again. The pin emits one
+/// tick per virtual resolve, batching whatever blocks arrived, so ~10 Hz is
+/// mainnet at rest and fewer is a busy node, not a fault.
+///
+/// **Three seconds, whole numbers** (the founder on glass, 2026-09-27: "too
+/// busy"): on a weak link the ticks arrive in bursts, and over one second the
+/// rate leapt 6 → 12 → 19 twice a second while its tenths digit, which a
+/// one-second count of whole ticks cannot resolve, printed noise (`ux-auditor`,
+/// the same finding from the other side). Three seconds resolves a third of a
+/// tick a second, so the whole number is the honest precision. (For the
+/// screen's first three seconds the window is what has been sampled — the
+/// first rate spans one poll, half a second.)
+class KvTickRate {
+  final List<(DateTime, int)> _samples = <(DateTime, int)>[];
+
+  /// The span a rate is taken over, once the samples reach back that far.
+  static const Duration window = Duration(seconds: 3);
+
+  /// Forget every sample — a rate must never average across a stretch the
+  /// screen was not watching.
+  void reset() => _samples.clear();
+
+  /// The rate after a sample of `ticks` taken `at`, in ticks per second, or
+  /// null until two samples exist.
+  double? offer(DateTime at, int ticks) {
+    if (_samples.isNotEmpty &&
+        (ticks < _samples.last.$2 || !at.isAfter(_samples.last.$1))) {
+      // A count that went backwards or a clock that did not advance is not a
+      // beat to measure — start again from here rather than print nonsense.
+      _samples.clear();
+    }
+    _samples.add((at, ticks));
+    // Keep exactly one sample at or past the window's edge, and every newer
+    // one: the span is then the most recent window (a little more on a late
+    // poll), never the whole time the screen has been open.
+    while (_samples.length > 2 &&
+        !at.difference(_samples[1].$1).isNegative &&
+        at.difference(_samples[1].$1) >= window) {
+      _samples.removeAt(0);
+    }
+    if (_samples.length < 2) return null;
+    final (from, fromTicks) = _samples.first;
+    final seconds = at.difference(from).inMicroseconds / 1e6;
+    return (ticks - fromTicks) / seconds;
+  }
+}
+
 /// A label and its reading. Mono and tabular on the value, because every value
 /// on this screen is an identifier or a counter.
 /// A value in the connection card's right column — `T5` puts every one of them
@@ -2015,16 +2405,7 @@ class _CardValue extends StatelessWidget {
               ),
             ],
           ),
-          if (age != null)
-            Text(
-              age!,
-              style: const TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: 12,
-                height: 17 / 12,
-                color: KvColor.inkMeta,
-              ),
-            ),
+          if (age != null) Text(age!, style: _ageLine),
         ],
       ),
     );

@@ -312,6 +312,14 @@ pub(crate) fn install() {
         // Once per bridge init: the first line only a build carrying this
         // sink can emit, so a persistent capture can be windowed on it (L74).
         log::info!("log: pinned close reasons armed, capped (CONN-F1)");
+        // LINK-Q1's own window token (L74): the heartbeat moved to the DAA
+        // tick and the silence deadline exists only from this build on, so a
+        // re-soak beside CONN-F1's arm B windows on this line. The number is
+        // read from the constant, never restated.
+        log::info!(
+            "log: heartbeat on the DAA tick, silence deadline {}s (LINK-Q1)",
+            kaspaverse_chain::link::SILENCE_DEADLINE.as_secs()
+        );
     }
     #[cfg(not(target_os = "android"))]
     {

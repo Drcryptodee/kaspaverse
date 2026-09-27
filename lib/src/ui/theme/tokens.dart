@@ -365,6 +365,13 @@ abstract final class KvMotion {
   /// Streaming cadence for a chain counter (BG-18).
   static const Duration stream = Duration(seconds: 1);
 
+  /// **The longest interval a streamed reading replays over** — the latency
+  /// figure's glide (BG-18 as amended at v4.45, D-334): each change replays
+  /// the interval since the one before at an even pace, and a longer gap is a
+  /// stall rather than a cadence, so the glide finishes within this. Two probe
+  /// cadences on a slow link; linear, like [stream] — a replay, not a curve.
+  static const Duration replayCap = Duration(seconds: 2);
+
   /// One breath of the loading cadence — `KvCadence`'s five bars rise and fall
   /// once in this time (§4 *Cadence*; the app's one loading indicator). Not
   /// [breathe], which is the orb's halo at 3200: two loops, two names, one
@@ -502,8 +509,32 @@ abstract final class KvFreshness {
   /// signal in its own right.
   static const double staleDimFloor = 18.66;
 
-  /// How long a reading stays live without a refresh.
+  /// How long a reading stays live without a refresh — **the data's clock**:
+  /// the balance dims and says its age past this, whatever the lamp says.
   static const Duration staleAfter = Duration(seconds: 5);
+
+  /// **How long the link's lamp holds live through a silence on a BOUND
+  /// socket** (the founder's ruling, D-331(b); built LINK-Q1, D-334).
+  ///
+  /// The chip's lamp and the short bar's live dot stay live through a DAA gap
+  /// of up to this long while a socket is bound, and turn amber only past it
+  /// — or once the socket has been down for [linkChurnGrace]: the churn hold
+  /// keeps the lamp live through a sub-2 s drop, a swap's cut-over included.
+  /// **It moves the lamp, not the data's honesty**: [staleAfter] still dims
+  /// the balance at five seconds
+  /// and still makes it say its age; the plate says that age in the lamp's
+  /// own tone rather than in amber, so two lamps on one plate never disagree.
+  ///
+  /// **Sized from CONN-F1** (`CONNECTIVITY_PASS.md` §12): on the founder's
+  /// weak Starlink hop every stall on a live socket recovered in 5.25–7.50 s,
+  /// and the old five-second lamp turned amber for each one — 1.3 an hour,
+  /// "since the dark redesign". Fifteen seconds is twice the longest of them,
+  /// and it covers the silence deadline's own recovery: a hunt that starts at
+  /// nine seconds (`link::SILENCE_DEADLINE`) and lands in one or two puts the
+  /// new socket's first tick (p99 3.09 s) inside it —
+  /// `test/silence_deadline_test.dart` reads the Rust constant and asserts
+  /// that sum, so neither side can move alone.
+  static const Duration liveHoldBound = Duration(seconds: 15);
 
   /// Grace before a churning link is called stale.
   static const Duration linkChurnGrace = Duration(seconds: 2);

@@ -650,6 +650,12 @@ struct Inner {
     /// change, never a deposit (D-043). Widens with the watch set, or a change
     /// address discovered after `start()` would be filed as an incoming deposit.
     change_set: Mutex<Arc<HashSet<Address>>>,
+    /// The link this engine's socket belongs to — the ONE reconnect authority
+    /// (D-081), handed the processor's errors so it can decide, from evidence,
+    /// whether the wallet lane is dark on a live socket (D-101's recovery,
+    /// LINK-Q1). `None` in harnesses that drive the engine without a monitor:
+    /// there is then nobody to ask, and the error is reported and left there.
+    link: Mutex<Option<crate::DagMonitor>>,
 }
 
 /// Drives one [`UtxoProcessor`] + [`UtxoContext`] over a shared [`Rpc`], folding
@@ -679,8 +685,46 @@ impl WalletEngine {
                 shutdown: Mutex::new(None),
                 watch: Mutex::new(Arc::new(Vec::new())),
                 change_set: Mutex::new(Arc::new(HashSet::new())),
+                link: Mutex::new(None),
             }),
         })
+    }
+
+    /// Hand the engine the link its socket belongs to (the bridge does, before
+    /// [`Self::start`]). From then on a processor error goes to
+    /// [`crate::DagMonitor::recover_wallet_lane`], which decides whether the lane
+    /// is actually dark on a live socket and, only then, retries it (D-101).
+    pub fn attach_link(&self, link: crate::DagMonitor) {
+        *self
+            .inner
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(link);
+    }
+
+    /// **Is the wallet lane up** — has the processor negotiated its connection
+    /// on the current socket? The pin's own bit (`UtxoProcessor::is_connected`,
+    /// set by `handle_connect_impl` only after `get_server_info` answered —
+    /// `processor.rs:537-539` @ `01b532e`), so a lane that failed its
+    /// negotiation reads `false` here even while the socket delivers ticks.
+    ///
+    /// **Why the bit is enough — a property of THIS pin, written down so a
+    /// bump can reopen it** (`consensus-auditor` note b). Everything the
+    /// negotiation does after setting the bit cannot fail on a live socket
+    /// that stays the same: the wRPC client's `start_notify` never leaves the
+    /// phone (`rpc/wrpc/client/src/client.rs:694-696`), the server-side
+    /// `Subscribe` is sent later by a background subscriber whose failure never
+    /// reaches the processor (`:133-135`), and an unknown listener id is
+    /// logged, not an error (`notify/src/notifier.rs:394-396`). So the only
+    /// step that can fail is `get_server_info`, BEFORE the bit — and a failure
+    /// leaves it false, which is exactly what this reads. A pin that makes
+    /// `start_notify` wait on the server breaks that: the negotiation could
+    /// then fail AFTER the bit, reading "up" over a dark lane — re-derive this
+    /// at the bump, or witness `UtxoProcStart` instead. (D-101's first text
+    /// named "listener registration" as the residue; that was the wrong step,
+    /// and D-334 corrects it.)
+    pub fn lane_up(&self) -> bool {
+        self.inner.processor.is_connected()
     }
 
     /// A snapshot of the current watched window. Taken by value (an `Arc` bump)
@@ -982,6 +1026,17 @@ impl WalletEngine {
         let _ = self.inner.events.send(event);
     }
 
+    /// **The one way an error enters the fold** (`ffi-leak-auditor`,
+    /// LINK-Q1). Its text can be a node's own words — the processor builds
+    /// its errors from them, and a failed wRPC call carries the server's
+    /// `ServerError::Text` through as `RpcError::RpcSubsystem` verbatim (pin
+    /// `rpc/macros/src/wrpc/client.rs:74`; workflow-rpc 0.18.0
+    /// `error.rs:64-65`) — and it crosses the FFI as `WalletSnapshot.error`.
+    /// Filtered here, where every sender passes, so none can forget (L167).
+    fn emit_error(&self, text: &str) {
+        self.emit(WalletEvent::Error(crate::link::sanitize_node_text(text)));
+    }
+
     /// The processor's live DAA — `None` until it has connected and synced
     /// (never a fabricated 0: with DAA 0 every receive classifies Pending,
     /// the finding-13 storm).
@@ -1050,7 +1105,7 @@ impl WalletEngine {
                         "wallet-sync: live utxos-changed re-armed for {} addresses",
                         addresses.len()
                     ),
-                    Err(e) => self.emit(WalletEvent::Error(e.to_string())),
+                    Err(e) => self.emit_error(&e.to_string()),
                 }
                 // Register the address window and fetch the initial UTXO set;
                 // this drives Discovery + Balance events (the latter even for an
@@ -1062,7 +1117,7 @@ impl WalletEngine {
                     .scan_and_register_addresses(addresses.to_vec(), None)
                     .await
                 {
-                    self.emit(WalletEvent::Error(e.to_string()));
+                    self.emit_error(&e.to_string());
                 }
             }
             Events::Connect { url, .. } => self.emit(WalletEvent::Connected { url }),
@@ -1148,37 +1203,70 @@ impl WalletEngine {
             }
             // Coinbase stasis is never a user row (events.rs:185).
             Events::Stasis { .. } => {}
-            // The witness for D-101's armed trigger. `UtxoProcError` is the
-            // processor's CONNECT-negotiation failure (pin `processor.rs`
-            // emits it only from `handle_connect`'s error arm and the ctl
-            // task's connect handler) — the one case whose automatic recovery
-            // R4 deliberately did not wire, because the pin's own
-            // force-disconnect is no longer reachable through the link's
-            // stable handle. It must be greppable in OUR lane, naming the
-            // endpoint, or the trigger cannot fire from a capture: the pin's
-            // own error line carries neither endpoint nor bind.
+            // **D-101's witness, and since LINK-Q1 its recovery's trigger.**
+            //
+            // `UtxoProcError` has TWO sources at the pin, and this arm used to
+            // name only one (`processor.rs` @ `01b532e`): the connect
+            // negotiation's error arm (`:579`) and the notification handler's
+            // (`:747`). The old line called every one of them "connect
+            // negotiation failed … the wallet lane is dark on this socket" — and
+            // CONN-F1's retrospective counted five such lines as five dark
+            // lanes, when each was a negotiation that died WITH its socket.
+            //
+            // So this arm no longer judges. It names the error neutrally, hands
+            // it to the link, and the link decides from evidence it owns —
+            // is the processor up; is the socket it negotiated on still bound
+            // — then logs its verdict by name (`link: wallet-lane check → …`).
             Events::UtxoProcError { message } => {
+                // **Sanitized at the SOURCE, not at one consumer** (ffi-leak,
+                // L167): the pin builds this from the node's own error text
+                // (`processor.rs:579/747`). The log line reads the same
+                // filtered string the emit does (`emit_error`).
+                let message = crate::link::sanitize_node_text(&message);
                 // HOST only (§19 drain). `RpcCtl::descriptor()` is the FULL wRPC
                 // URL — the pin sets it from `options.url` verbatim
                 // (`client.rs:243,443`) — so a token-auth path segment would
-                // land in logcat here too. The D-101 trigger greps for the
-                // endpoint being NAMED, which the host still does.
+                // land in logcat here too.
                 let endpoint = self
                     .inner
                     .processor
                     .try_rpc_ctl()
                     .and_then(|ctl| ctl.descriptor());
+                // The pin's error text can carry the node's own words (PB-024):
+                // through the house sanitizer before it reaches the log lane.
                 log::warn!(
-                    "wallet-sync: processor connect negotiation failed on {} — \
-                     the wallet lane is dark on this socket until it drops or the \
-                     user reconnects (D-101 trigger)",
-                    endpoint
-                        .as_deref()
-                        .map_or("<no endpoint>", crate::link::endpoint_host)
+                    "wallet-sync: processor error (UtxoProcError) on {}: {} — asking the link \
+                     whether the wallet lane is dark on a live socket (D-101)",
+                    crate::link::sanitize_node_text(
+                        endpoint
+                            .as_deref()
+                            .map_or("<no endpoint>", crate::link::endpoint_host)
+                    ),
+                    message
                 );
-                self.emit(WalletEvent::Error(message))
+                let link = self
+                    .inner
+                    .link
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                if let Some(link) = link {
+                    // Detached: the fold task owes the glass its next event,
+                    // and the check waits seconds by design. Decided inside:
+                    // a report with the lane up (the notification handler's,
+                    // `:747`) is answered at the door with no log line, a
+                    // burst of dark reports runs one check, and a report that
+                    // lands mid-check queues one more pass, never none.
+                    let engine = self.clone();
+                    tokio::spawn(async move {
+                        link.recover_wallet_lane(move || engine.lane_up()).await;
+                    });
+                }
+                self.emit_error(&message)
             }
-            Events::Error { message } => self.emit(WalletEvent::Error(message)),
+            // Same source, same filter (ffi-leak): node text never crosses the
+            // FFI raw from any sender.
+            Events::Error { message } => self.emit_error(&message),
             _ => {}
         }
     }
@@ -1190,6 +1278,55 @@ mod tests {
     use kaspa_wallet_core::storage::Binding;
     use kaspa_wallet_core::utxo::UtxoContextId;
     use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
+
+    /// **Node text never crosses the FFI raw** (`ffi-leak-auditor`, LINK-Q1):
+    /// the processor's error is built from the node's own words, and every
+    /// sender of `WalletEvent::Error` — both processor arms here, and the
+    /// re-arm and scan failures that carry a server's error text — passes
+    /// through `emit_error`, so every consumer, the FFI snapshot included,
+    /// reads the filtered string. A newline and an escape sequence stand in
+    /// for whatever a hostile node would send.
+    #[tokio::test]
+    async fn a_processor_error_is_filtered_at_the_source() {
+        let monitor = crate::DagMonitor::mainnet().expect("construct");
+        let store =
+            std::env::temp_dir().join(format!("kv-wallet-sanitize-{}.kvlog", std::process::id()));
+        let _ = std::fs::remove_file(&store);
+        let engine = WalletEngine::new(
+            monitor.rpc(),
+            NetworkId::new(NetworkType::Mainnet),
+            store.clone(),
+        )
+        .expect("engine");
+        let mut events = engine.subscribe();
+        let hostile = "refused\n\u{1b}[31mFAKE: your wallet is empty\u{7}";
+        for event in [
+            Events::UtxoProcError {
+                message: hostile.to_string(),
+            },
+            Events::Error {
+                message: hostile.to_string(),
+            },
+        ] {
+            engine.handle_event(event).await;
+            let Ok(WalletEvent::Error(message)) = events.try_recv() else {
+                panic!("the error must reach the fold");
+            };
+            assert!(
+                !message.chars().any(char::is_control),
+                "control bytes crossed into the snapshot: {message:?}"
+            );
+            assert_eq!(message, crate::link::sanitize_node_text(hostile));
+        }
+        // The re-arm and scan arms have no seam short of a live node; they
+        // share the one door, which is proven here.
+        engine.emit_error(hostile);
+        let Ok(WalletEvent::Error(message)) = events.try_recv() else {
+            panic!("the error must reach the fold");
+        };
+        assert_eq!(message, crate::link::sanitize_node_text(hostile));
+        let _ = std::fs::remove_file(&store);
+    }
 
     fn incoming(id_byte: u8, value: u64, daa: u64) -> TransactionRecord {
         record(

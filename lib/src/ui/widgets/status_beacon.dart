@@ -30,16 +30,32 @@ enum BeaconState { connected, connecting, stale, error, offline }
 ///    survives a narrow header (2026-08-24 — see rule 6's arm below).
 /// 5. No data ever ([age] null) is also *finding a node* — honest in the
 ///    instant between mount and the first race flag.
-/// 6. A dropped link or silence past [staleAfter] is `stale`.
-/// 7. Otherwise `connected`.
+/// 6. A bound socket reads `connected` while [age] is under the HOLD — see
+///    below; past it, a fresh socket that has not spoken yet
+///    ([awaitingScore]) is still *finding a node*, not a staleness phrase.
+/// 7. Otherwise — a dropped link, or silence past the hold — `stale`.
+///
+/// **Two clocks, one function (LINK-Q1, D-331(b)).** [staleAfter] is the
+/// DATA's clock: how long a reading stays live, and so when the balance dims
+/// and says its age. [liveHold] is the LAMP's: how long the link's lamp stays
+/// live through a silence on a bound socket (`KvFreshness.liveHoldBound`, 15 s
+/// — every stall CONN-F1 saw on a live socket recovered in 5.25–7.50 s, and a
+/// five-second lamp turned amber for each). Omit [liveHold] and the lamp keeps
+/// the data's clock: exactly the pre-LINK-Q1 function, which is what the
+/// balance's derivation still calls. The churn hold (rule 1) holds against the
+/// same clock as its caller, so a swap's sub-second cut-over never flashes an
+/// amber lamp over data the lamp itself still calls live.
 ///
 /// **Invariant this ordering buys (C7's acceptance bar):** a staleness phrase
 /// can never render before the first `wss_connected` of a process. Reaching
-/// rule 6 while disconnected requires `age != null`, and only a connected
+/// rule 7 while disconnected requires `age != null`, and only a connected
 /// snapshot bearing real chain data ever sets that clock.
 ///
-/// [age] is the time since the last *fresh* snapshot (null ⇒ none ever);
-/// [sinceDrop] the time since the link last went down (null ⇒ up, or never up).
+/// [age] is the time since the last *fresh* score (null ⇒ none ever) —
+/// `ChainService.lastUpdate`, which since LINK-Q1 moves only on a genuinely new
+/// score, never on a reconnect that re-states the last one;
+/// [sinceDrop] the time since the link last went down (null ⇒ up, or never up);
+/// [awaitingScore] that the socket now up has not delivered a score yet.
 BeaconState evaluateBeacon({
   required bool connected,
   required Duration? age,
@@ -47,31 +63,47 @@ BeaconState evaluateBeacon({
   bool searching = false,
   bool osOffline = false,
   Duration? sinceDrop,
+  bool awaitingScore = false,
   Duration staleAfter = KvFreshness.staleAfter,
+  Duration? liveHold,
   Duration churnGrace = KvFreshness.linkChurnGrace,
 }) {
+  final hold = liveHold ?? staleAfter;
   if (error == null &&
       !connected &&
       sinceDrop != null &&
       sinceDrop < churnGrace &&
       age != null &&
-      age < staleAfter) {
+      age < hold) {
     return BeaconState.connected;
   }
   if (!connected && osOffline) return BeaconState.offline;
   if (error != null) return BeaconState.error;
   if (!connected && searching) return BeaconState.connecting;
   if (age == null) return BeaconState.connecting;
-  if (!connected || age >= staleAfter) return BeaconState.stale;
-  return BeaconState.connected;
+  if (connected && age < hold) return BeaconState.connected;
+  // A socket that just came up after a long quiet — a resume, a silence
+  // swap's winner — has not spoken yet, and the data is older than the hold.
+  // It is still finding the chain: "as of 30 m ago" for the half-second
+  // before its first score would name an age the user is about to leave.
+  if (connected && awaitingScore) return BeaconState.connecting;
+  return BeaconState.stale;
 }
 
 /// Human age for the stale line: "12 s", "3 m", "2 h". Floors — never
 /// overstates freshness.
+///
+/// **The figure and its unit never part** (BG-30's age clause, v4.45): they
+/// are joined by a no-break space, so a sentence that wraps can never leave
+/// `7` at the end of one line and `s ago` at the head of the next — which the
+/// LINK-Q1 hunt sentence, *looking for a different node… · last update 7 s
+/// ago*, did at the 393 reference width (`home__hold_hunt`). One seam, so
+/// every age in the app holds together, the stale line and the carried
+/// caption included.
 String formatAge(Duration age) {
-  if (age.inSeconds < 60) return '${age.inSeconds} s';
-  if (age.inMinutes < 60) return '${age.inMinutes} m';
-  return '${age.inHours} h';
+  if (age.inSeconds < 60) return '${age.inSeconds}\u00A0s';
+  if (age.inMinutes < 60) return '${age.inMinutes}\u00A0m';
+  return '${age.inHours}\u00A0h';
 }
 
 // **The `StatusBeacon` widget was retired at UX-2** (register item 2). It

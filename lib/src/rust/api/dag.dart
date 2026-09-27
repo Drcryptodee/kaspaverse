@@ -26,9 +26,9 @@ Future<void> dagPause() => RustLib.instance.api.crateApiDagDagPause();
 Future<void> dagResume() => RustLib.instance.api.crateApiDagDagResume();
 
 /// Read the current connection health (see [`DagStatusDto`]). Endpoint + DAA
-/// come from the folded snapshot; connected + block-age come straight from the
+/// come from the folded snapshot; connected + tick-age come straight from the
 /// monitor so a silently dead socket (still `connected` in the snapshot) is
-/// caught by a growing block-age.
+/// caught by a growing tick-age.
 Future<DagStatusDto> dagStatus() => RustLib.instance.api.crateApiDagDagStatus();
 
 /// Probe the live link — see [`LinkProbeDto`]. Returns an empty probe rather
@@ -166,10 +166,12 @@ class DagSnapshot {
 
 /// Honest-liveness snapshot for the connection-health sheet AND the foreground
 /// watchdog (P3/D-068). A PULL surface (not the stream): the sheet paints it on
-/// open and the watchdog polls it. `last_block_age_secs` is the load-bearing
-/// field — a healthy mainnet keeps it near zero (~10 blocks/s); a large value
-/// while foreground means a silently dead socket (the midnight DAA stall), the
-/// watchdog's trigger to [`dag_reconnect`]. `None` before the first connect.
+/// open and the watchdog polls it. `last_tick_age_secs` is the load-bearing
+/// field — a healthy mainnet keeps it near zero (~10 DAA ticks/s); a large
+/// value while foreground means a silently dead socket (the midnight DAA
+/// stall), the watchdog's trigger to [`dag_reconnect`]. `None` before the first
+/// tick. It was `last_block_age_secs`, fed by `BlockAdded`, until LINK-Q1 moved
+/// the heartbeat to the tick every stream shape keeps (D-334).
 ///
 /// It is ALSO the honest-states lane (C7/D-091): `searching` + `os_offline`
 /// ride here rather than on the event stream because the stream only speaks
@@ -180,7 +182,16 @@ class DagSnapshot {
 class DagStatusDto {
   final bool connected;
   final String? endpoint;
-  final BigInt? lastBlockAgeSecs;
+
+  /// Seconds since the last DAA tick on any installed socket — see above.
+  final BigInt? lastTickAgeSecs;
+
+  /// Every DAA tick an installed socket has delivered in this process — a
+  /// plain monotonic count, counted in Rust BEFORE the 250 ms coalescer, so
+  /// the node screen can difference it against its own clock and show the
+  /// beat the link is really keeping (`DAA · 10 Hz`, D-332). Public chain
+  /// liveness; a count, never a value.
+  final BigInt daaTicks;
   final BigInt? virtualDaaScore;
 
   /// A connect race is hunting right now (C7's second truth) — held for the
@@ -221,7 +232,8 @@ class DagStatusDto {
   const DagStatusDto({
     required this.connected,
     this.endpoint,
-    this.lastBlockAgeSecs,
+    this.lastTickAgeSecs,
+    required this.daaTicks,
     this.virtualDaaScore,
     required this.searching,
     required this.osOffline,
@@ -236,7 +248,8 @@ class DagStatusDto {
   int get hashCode =>
       connected.hashCode ^
       endpoint.hashCode ^
-      lastBlockAgeSecs.hashCode ^
+      lastTickAgeSecs.hashCode ^
+      daaTicks.hashCode ^
       virtualDaaScore.hashCode ^
       searching.hashCode ^
       osOffline.hashCode ^
@@ -250,7 +263,8 @@ class DagStatusDto {
           runtimeType == other.runtimeType &&
           connected == other.connected &&
           endpoint == other.endpoint &&
-          lastBlockAgeSecs == other.lastBlockAgeSecs &&
+          lastTickAgeSecs == other.lastTickAgeSecs &&
+          daaTicks == other.daaTicks &&
           virtualDaaScore == other.virtualDaaScore &&
           searching == other.searching &&
           osOffline == other.osOffline &&
@@ -272,9 +286,16 @@ class DagStatusDto {
 /// while a latency changes over seconds.
 class LinkProbeDto {
   /// Round trip of one `get_server_info` on the bound socket, in
-  /// milliseconds. `None` = the node did not answer, and the surface says so
-  /// rather than showing a stale figure (BG-8).
+  /// milliseconds. `None` = no answer inside the deadline, or an error.
   final BigInt? latencyMs;
+
+  /// **The deadline, in ms, that the round trip outlasted** (D-333). Not an
+  /// absence: the link is live and the answer is AT LEAST this slow, which
+  /// the surface draws as `> N s` on one bar instead of blanking the seat.
+  /// The deadline is the bound socket's own RFC 6298 clock, 1–5 s. Both this
+  /// and `latency_ms` `None` is an error (no socket, a refused call) — the
+  /// one outcome the surface counts toward going dark.
+  final BigInt? timedOutMs;
 
   /// **The node's own word on whether it is synced**, from the same answer
   /// the latency was timed on. The connect race checks this once at
@@ -288,13 +309,22 @@ class LinkProbeDto {
   /// reading is its own face rather than a zero.
   final int? peers;
 
-  const LinkProbeDto({this.latencyMs, this.synced, this.peers});
+  const LinkProbeDto({
+    this.latencyMs,
+    this.timedOutMs,
+    this.synced,
+    this.peers,
+  });
 
   static Future<LinkProbeDto> default_() =>
       RustLib.instance.api.crateApiDagLinkProbeDtoDefault();
 
   @override
-  int get hashCode => latencyMs.hashCode ^ synced.hashCode ^ peers.hashCode;
+  int get hashCode =>
+      latencyMs.hashCode ^
+      timedOutMs.hashCode ^
+      synced.hashCode ^
+      peers.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -302,6 +332,7 @@ class LinkProbeDto {
       other is LinkProbeDto &&
           runtimeType == other.runtimeType &&
           latencyMs == other.latencyMs &&
+          timedOutMs == other.timedOutMs &&
           synced == other.synced &&
           peers == other.peers;
 }

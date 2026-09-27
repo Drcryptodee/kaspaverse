@@ -40,6 +40,7 @@ class KvFactLine extends StatelessWidget {
     super.key,
     required this.label,
     required this.value,
+    this.labelSpan,
     this.valueText,
     // `S7` draws `Network fee` and `Leaves your wallet` both inline at the
     // reference width; 0.62 stacked the second of them there (`ux-auditor`,
@@ -58,6 +59,15 @@ class KvFactLine extends StatelessWidget {
 
   final String label;
   final Widget value;
+
+  /// **The label composed** — for the one case a string cannot carry: words
+  /// around a live figure, which BG-30 sets in two faces (`DAA · 10 Hz`,
+  /// D-332; `KvAction.labelWidget` is the precedent, D-286). Its runs inherit
+  /// the label's style and override only what differs, and it is what the row
+  /// MEASURES, since a mono figure is wider than the same digits in Jakarta.
+  /// [label] stays required and is what a screen reader hears, so the
+  /// composed form can never quietly say something else.
+  final InlineSpan? labelSpan;
 
   /// **What [value] will print, for MEASUREMENT only.**
   ///
@@ -111,8 +121,11 @@ class KvFactLine extends StatelessWidget {
           // which is under the width of the word — so Flutter did the only
           // thing left and broke it, rendering `Accepte` over `d` on a
           // receipt (found in the floor frame, not argued).
+          final composed = labelSpan == null
+              ? TextSpan(text: label, style: _labelStyle)
+              : TextSpan(style: _labelStyle, children: [labelSpan!]);
           final painter = TextPainter(
-            text: TextSpan(text: label, style: _labelStyle),
+            text: composed,
             textDirection: TextDirection.ltr,
             textScaler: scaler,
           )..layout();
@@ -120,7 +133,9 @@ class KvFactLine extends StatelessWidget {
           painter.dispose();
           final room = width * (1 - valueShare) - KvSpace.m;
 
-          final text = Text(label, style: _labelStyle);
+          final text = labelSpan == null
+              ? Text(label, style: _labelStyle)
+              : Text.rich(composed, semanticsLabel: label);
           // **The value gets everything the label does not need**, floored at
           // its share so a long label cannot starve it either way.
           //

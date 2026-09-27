@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../rust/api/dag.dart';
 import '../rust/api/error.dart';
 import '../rust/api/wallet.dart' show uiMark;
+import '../ui/theme/tokens.dart' show KvFreshness;
 import '../ui/widgets/status_beacon.dart';
 
 /// Owns the app's single subscription to the bridge DAG stream.
@@ -36,9 +37,9 @@ class ChainService with WidgetsBindingObserver {
 
   /// Test seams for the foreground watchdog (P3/D-068): the liveness pull and
   /// the forced reconnect. `stalled` carries the caller's evidence: the
-  /// watchdog passes true (30 s block silence — a pending strike the Rust race
-  /// commits only with network-alive proof, V3 demotion); the manual button
-  /// passes false (bouncing a healthy node must never demote it).
+  /// watchdog passes true (30 s of DAA-tick silence — a pending strike the Rust
+  /// race commits only with network-alive proof, V3 demotion); the manual
+  /// button passes false (bouncing a healthy node must never demote it).
   @visibleForTesting
   static Future<DagStatusDto> Function() statusFn = dagStatus;
   @visibleForTesting
@@ -87,10 +88,13 @@ class ChainService with WidgetsBindingObserver {
   static Duration graceDuration = const Duration(seconds: 30);
 
   /// Foreground watchdog cadence and stall threshold (P3/D-068). A healthy
-  /// mainnet delivers ~10 blocks/s, so a block-age past [watchdogStallSecs]
+  /// mainnet delivers ~10 DAA ticks/s, so a tick-age past [watchdogStallSecs]
   /// while foreground means the wRPC socket died silently (the midnight DAA
   /// stall) — the watchdog forces a reconnect. Generous enough not to fire on
-  /// brief hiccups; tests shorten both.
+  /// brief hiccups; tests shorten both. Since LINK-Q1 a silent socket is
+  /// usually replaced long before this: Rust's own silence deadline hunts
+  /// behind it at nine seconds (`link::SILENCE_DEADLINE`), and this stays the
+  /// backstop that convicts, on its own thirty-second evidence.
   @visibleForTesting
   static Duration watchdogPeriod = const Duration(seconds: 10);
   @visibleForTesting
@@ -133,9 +137,30 @@ class ChainService with WidgetsBindingObserver {
   /// Last bridge error message, null while healthy.
   final ValueNotifier<String?> error = ValueNotifier(null);
 
-  /// Wall-clock of the last *fresh* snapshot (connected + a real score). Drives
-  /// the StatusBeacon stale state (BG-8); null until the first fresh tip.
+  /// Wall-clock of the last *fresh* score — a connected snapshot whose DAA
+  /// score is NEW. Drives the stale state of both the lamp and the data
+  /// (BG-8); null until the first fresh tip.
+  ///
+  /// **A reconnect is not a fresh score** (LINK-Q1, D-334). The bridge keeps
+  /// the last score across a drop, so the `Connected` snapshot re-states it,
+  /// and this clock used to restart on that re-statement — the glass read
+  /// live on a socket that had said nothing yet (CONN-F1 §12's "false fresh
+  /// on reconnect", 5 s of it on every deaf socket). Harmless-looking at a
+  /// five-second lamp; with the lamp holding fifteen on a bound socket and a
+  /// silence deadline swapping deaf sockets every nine, it would have let a
+  /// string of deaf sockets hold the lamp live indefinitely. Only a score the
+  /// glass has not seen moves it now.
   final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
+
+  /// The socket now up has not delivered a score yet — true from the dark→up
+  /// edge until the first NEW score (LINK-Q1). While the data is older than
+  /// the lamp's hold, such a socket reads *finding a node…* rather than an
+  /// age the user is about to leave (`evaluateBeacon`, rule 6).
+  final ValueNotifier<bool> awaitingScore = ValueNotifier(false);
+
+  /// The last score this service applied — what makes a snapshot's score
+  /// "new" for [lastUpdate].
+  BigInt? _lastScore;
 
   /// True while a reconnect is in flight (watchdog-triggered OR the manual
   /// Reconnect button). The honest-liveness indicator — never a silent stall.
@@ -176,11 +201,17 @@ class ChainService with WidgetsBindingObserver {
   Timer? _linkTimer;
   bool _foreground = true;
 
-  /// The glass state last marked (CONN-F1, §11 H2). The money plate's chip
-  /// derives it from these same notifiers; re-deriving it here and marking
-  /// each CHANGE is what lets a profile-build capture lay what the user saw
-  /// beside what the socket did. Our own state names and counts only (INV-3).
-  BeaconState? _markedBeacon;
+  /// The glass states last marked (CONN-F1, §11 H2) — the LAMP (the chip and
+  /// the live dot, holding live to `KvFreshness.liveHoldBound` on a bound
+  /// socket) and the DATA (the balance's dim, on `KvFreshness.staleAfter`).
+  /// The money plate derives both from these same notifiers; re-deriving them
+  /// here and marking each CHANGE is what lets a profile-build capture lay
+  /// what the user saw beside what the socket did. Two names since LINK-Q1
+  /// split the one clock in two (`glass: lamp …`, `glass: data …`; the soak
+  /// judge reads both, and CONN-F1's `glass: beacon …` in older captures).
+  /// Our own state names and counts only (INV-3).
+  BeaconState? _markedLamp;
+  BeaconState? _markedData;
 
   void _markBeacon() {
     final now = DateTime.now();
@@ -188,20 +219,39 @@ class ChainService with WidgetsBindingObserver {
     final down = disconnectedAt.value;
     final age = fresh == null ? null : now.difference(fresh);
     final hunting = searching.value || reconnecting.value;
-    final state = evaluateBeacon(
+    final sinceDrop = down == null ? null : now.difference(down);
+    final lamp = evaluateBeacon(
       connected: connected.value,
       age: age,
       error: error.value,
       searching: hunting,
       osOffline: osOffline.value,
-      sinceDrop: down == null ? null : now.difference(down),
+      sinceDrop: sinceDrop,
+      awaitingScore: awaitingScore.value,
+      liveHold: KvFreshness.liveHoldBound,
     );
-    if (state == _markedBeacon) return;
-    final from = _markedBeacon?.name ?? 'none';
-    _markedBeacon = state;
-    final marker =
-        'beacon $from>${state.name} sock=${connected.value ? 1 : 0} '
-        'age=${age?.inSeconds ?? '-'} hunt=${hunting ? 1 : 0}';
+    final data = evaluateBeacon(
+      connected: connected.value,
+      age: age,
+      error: error.value,
+      searching: hunting,
+      osOffline: osOffline.value,
+      sinceDrop: sinceDrop,
+    );
+    final tail =
+        'sock=${connected.value ? 1 : 0} age=${age?.inSeconds ?? '-'} '
+        'hunt=${hunting ? 1 : 0}';
+    if (lamp != _markedLamp) {
+      _mark('lamp ${_markedLamp?.name ?? 'none'}>${lamp.name} $tail');
+      _markedLamp = lamp;
+    }
+    if (data != _markedData) {
+      _mark('data ${_markedData?.name ?? 'none'}>${data.name} $tail');
+      _markedData = data;
+    }
+  }
+
+  void _mark(String marker) {
     try {
       // Fire-and-forget; a failed marker must never touch the link.
       unawaited(uiMarkFn(marker).catchError((_) {}));
@@ -319,7 +369,7 @@ class ChainService with WidgetsBindingObserver {
     }
   }
 
-  /// Foreground liveness check (P3/D-068): pull the honest block-age; if the
+  /// Foreground liveness check (P3/D-068): pull the honest tick-age; if the
   /// chain has gone quiet past the stall threshold while we're foreground, the
   /// socket is silently dead — force a reconnect rather than let the DAA readout
   /// freeze. Skipped while backgrounded (the grace-drop owns the socket then)
@@ -333,7 +383,7 @@ class ChainService with WidgetsBindingObserver {
     } catch (_) {
       return; // a failed pull is not itself evidence of a stall
     }
-    final age = status.lastBlockAgeSecs;
+    final age = status.lastTickAgeSecs;
     if (age != null && age.toInt() > watchdogStallSecs) {
       // Watchdog evidence: the node went quiet on us — a pending strike.
       await reconnect(stalled: true);
@@ -484,7 +534,11 @@ class ChainService with WidgetsBindingObserver {
     if (connected.value && !snapshot.connected) {
       disconnectedAt.value = DateTime.now();
     } else if (snapshot.connected) {
-      if (!connected.value) searching.value = false;
+      if (!connected.value) {
+        searching.value = false;
+        // A socket just came up: it has said nothing yet (LINK-Q1).
+        awaitingScore.value = true;
+      }
       disconnectedAt.value = null;
       osOffline.value = false;
     }
@@ -501,10 +555,14 @@ class ChainService with WidgetsBindingObserver {
       sinkBlueScore.value = snapshot.sinkBlueScore;
     }
     // Freshness clock for the stale beacon: only a connected snapshot bearing
-    // real chain data resets it. Silence or a dropped link lets age grow.
-    if (snapshot.connected && snapshot.virtualDaaScore != null) {
+    // a NEW score resets it (LINK-Q1). Silence, a dropped link, or a reconnect
+    // re-stating the last score lets age grow — see [lastUpdate].
+    final score = snapshot.virtualDaaScore;
+    if (snapshot.connected && score != null && score != _lastScore) {
       lastUpdate.value = DateTime.now();
+      awaitingScore.value = false;
     }
+    if (score != null) _lastScore = score;
     error.value = null;
     if (_foreground) _markBeacon();
   }
@@ -522,7 +580,10 @@ class ChainService with WidgetsBindingObserver {
     _linkTimer = null;
     _droppedByGrace = false;
     _foreground = true;
-    _markedBeacon = null;
+    _markedLamp = null;
+    _markedData = null;
+    _lastScore = null;
+    awaitingScore.value = false;
     onWalletQuiet = null;
     walletLastApply = null;
     connected.value = false;

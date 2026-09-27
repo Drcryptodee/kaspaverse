@@ -247,11 +247,12 @@ void main() {
 
   /// Home with a live-but-stale link: connected, last snapshot 12 s old, so the
   /// plate's trust line speaks and wears its age.
-  Widget staleHome() => _home(
+  Widget staleHome({required int seconds, bool searching = false}) => _home(
     settings: screen(),
     connected: true,
+    searching: searching,
     lastUpdate: DateTime(2026, 8, 24, 12),
-    now: DateTime(2026, 8, 24, 12, 0, 12),
+    now: DateTime(2026, 8, 24, 12, 0, seconds),
     mature: BigInt.from(1000),
   );
 
@@ -264,13 +265,19 @@ void main() {
   // UX-2 gave the age a plate instead of a pill, so the fuller phrasing fits
   // again and the line wraps to a second line before it ellipsizes anything.
   // The invariant does not change with the room: **whatever is cut, the age is
-  // not.** Asserted against the width '12 s' alone needs in the same style and
-  // scale, so it tracks the token rather than a hardcoded number.
+  // not.** Asserted against the width the age alone needs in the same style
+  // and scale, so it tracks the token rather than a hardcoded number.
+  //
+  // **Two lines carry an age now** (LINK-Q1, D-331(b)): past the lamp's 15 s
+  // hold, the stale line; inside it, on a bound socket, the hold window's
+  // longer sentence — the link in words, then the data's age. Both are held
+  // to the invariant, the longer one especially.
   for (final geometry in const [
     (320.0, 1.0),
     (320.0, 1.15),
     (320.0, 1.30),
     (360.0, 1.30),
+    (393.0, 1.0),
   ]) {
     testWidgets('a stale link keeps its AGE readable at '
         '${geometry.$1.toInt()} dp / textScale ${geometry.$2}', (tester) async {
@@ -282,30 +289,60 @@ void main() {
         tester.view.resetDevicePixelRatio();
         tester.platformDispatcher.clearTextScaleFactorTestValue();
       });
-      await tester.pumpWidget(staleHome());
-      await tester.pump();
+      for (final (seconds, searching, said, token) in const [
+        (20, false, 'as of 20\u00A0s ago', '20\u00A0s'),
+        (12, false, 'connected · last update 12\u00A0s ago', '12\u00A0s'),
+        // The longest trust sentence the plate can show: a silence hunt
+        // inside the hold, which every silence swap passes through (the
+        // deadline fires at 9 s, inside the lamp's 15).
+        (
+          12,
+          true,
+          'looking for a different node… · last update 12\u00A0s ago',
+          '12\u00A0s',
+        ),
+      ]) {
+        await tester.pumpWidget(
+          staleHome(seconds: seconds, searching: searching),
+        );
+        await tester.pump();
 
-      final label = find.text('as of 12 s ago');
-      expect(label, findsOneWidget, reason: 'the stale state renders its age');
-      final paragraph = tester.renderObject<RenderParagraph>(label);
-      final age = TextPainter(
-        text: TextSpan(text: '12 s', style: paragraph.text.style),
-        textDirection: TextDirection.ltr,
-        textScaler: paragraph.textScaler,
-      )..layout();
-      expect(
-        paragraph.size.width,
-        greaterThanOrEqualTo(age.width),
-        reason:
-            'the age itself was ellipsized away — BG-8 requires a stale link '
-            'to show dimming AND a visible age',
-      );
-      expect(
-        paragraph.didExceedMaxLines,
-        isFalse,
-        reason: 'the plate has room for the whole phrase and lost it',
-      );
-      await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
+        final label = find.text(said);
+        expect(label, findsOneWidget, reason: 'the state renders its age');
+        final paragraph = tester.renderObject<RenderParagraph>(label);
+        final age = TextPainter(
+          text: TextSpan(text: token, style: paragraph.text.style),
+          textDirection: TextDirection.ltr,
+          textScaler: paragraph.textScaler,
+        )..layout();
+        expect(
+          paragraph.size.width,
+          greaterThanOrEqualTo(age.width),
+          reason:
+              'the age itself was ellipsized away — BG-8 requires dimmed data '
+              'to show a visible age ($said)',
+        );
+        expect(
+          paragraph.didExceedMaxLines,
+          isFalse,
+          reason:
+              'the plate has room for the whole phrase and lost it '
+              '($said)',
+        );
+        // **And the age is never split from its unit** (BG-30's age
+        // clause): the hunt sentence once wrapped as `last update 7` /
+        // `s ago` at 393 dp. The age's glyph boxes must stand on one line.
+        final at = said.indexOf(token);
+        final boxes = paragraph.getBoxesForSelection(
+          TextSelection(baseOffset: at, extentOffset: at + token.length),
+        );
+        expect(
+          boxes.map((box) => box.top.round()).toSet(),
+          hasLength(1),
+          reason: 'the age broke across lines ($said)',
+        );
+        await tester.pumpWidget(const SizedBox()); // cancel the 1 s ticker
+      }
     });
   }
 
@@ -1868,6 +1905,7 @@ Widget _home({
   required Widget settings,
   Widget? messages,
   bool connected = true,
+  bool searching = false,
   DateTime? lastUpdate,
   DateTime? now,
   BigInt? mature,
@@ -1903,6 +1941,7 @@ Widget _home({
         child: HomeScreen(
           chain: ChainScope(
             connected: ValueNotifier(connected),
+            searching: ValueNotifier(searching),
             virtualDaaScore: ValueNotifier(BigInt.from(2000)),
             error: ValueNotifier(null),
             lastUpdate: ValueNotifier(lastUpdate),
