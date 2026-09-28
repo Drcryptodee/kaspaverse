@@ -4,4 +4,8 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- LINK-Q2's dev A/B (`LinkDevAb.kt`): a WifiLock's acquire() needs WAKE_LOCK.
+         Debug and profile only — release declares no new permission until LINK-Q3
+         decides whether the low-latency lock ships. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
 </manifest>

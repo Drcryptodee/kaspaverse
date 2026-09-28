@@ -7,6 +7,10 @@ pub fn init_app() {
     // to install a logger, first-one-wins, and theirs is the one L40 proved
     // never surfaced our lines.
     crate::logging::install();
+    // LINK-Q2: hand the chain crate the socket witness's platform half.
+    // Inert until a dev flags file says `on=1`.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    crate::sockstat::install();
     // Default utilities - feel free to customize
     flutter_rust_bridge::setup_default_user_utils();
 }

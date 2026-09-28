@@ -77,20 +77,25 @@ hmac = "0.12.1"
 # Sender actually is). FRB's own runtime is also tokio (rust-async default).
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
 async-channel = "2"
-# Test-only (chain dev-deps): the reconnect-survival fake implements the pin's
-# `#[async_trait] RpcApi` trait, which requires the same macro crate the pin
-# itself uses. Already resolved in the lock as a transitive of the pinned tree
-# (zero new packages); dev-deps never enter the Android build.
+# A chain dependency since R4 (it began as a dev-dep for the reconnect-survival
+# fake, which implements the pin's `#[async_trait] RpcApi`; `LinkRpc` then
+# implemented it in the library, and LINK-Q2's `DevHost` uses it too) — the same
+# macro crate the pin itself uses. Already resolved in the lock as a transitive
+# of the pinned tree (zero new packages). Corrected at LINK-Q2: this comment said
+# "test-only … never enter the Android build" from R4 on (dependency-steward).
 async-trait = "0.1"
-# Test-only (chain dev-deps), R2 D2: a LOCAL ws server that completes a real
+# A chain dev-dep (R2 D2) and, since LINK-Q2, a bridge normal dep: a LOCAL ws server that completes a real
 # handshake and then closes — the only way to prove what the pinned ws client
 # does after a socket opens and dies, which is the mechanism behind the D-095
 # cascade. Deliberately the SAME library the pin's own client speaks
 # (`workflow-websocket 0.18` → `tokio-tungstenite 0.23.1`), so the server side
 # of the test cannot disagree with the client under test about the protocol.
 # Already resolved in the lock as a transitive of the pinned tree (zero new
-# packages); dev-deps never enter the Android build. Local-only: INV-8 is
-# untouched — nothing in this test leaves the loopback interface.
+# packages). Local-only: INV-8 is untouched — nothing in this test leaves the
+# loopback interface. **Since LINK-Q2 also a normal dependency of the bridge**
+# (android/linux targets): it reads the vendored dialer's socket registry for
+# the dev-flagged TCP_INFO witness (D-338) — the same already-compiled crate,
+# two lockfile edges and no new package.
 tokio-tungstenite = "0.23.1"
 # Observability: `log::` is the facade our crates emit through. L40 (device,
 # 2026-06-15): no sink was ever installed for it — FRB's default utils did NOT
@@ -115,8 +120,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # ── Vendored dependency (D-217, INV-7) ──────────────────────────────────────
-# `tokio-tungstenite 0.23.1`, the crates.io tarball VERBATIM save for one
-# function, redirected here for the whole graph — ours and the pinned tree's
+# `tokio-tungstenite 0.23.1`, the crates.io tarball VERBATIM save for three
+# patched files (`src/connect.rs`, `src/lib.rs`, `Cargo.toml` — listed in
+# `rust/vendor/PROVENANCE.md`), redirected here for the whole graph — ours and the pinned tree's
 # (`workflow-websocket` → `workflow-rpc` → `kaspa-wrpc-client`), which is the
 # point: no call site anywhere has to know.
 #
@@ -125,9 +131,12 @@ serde_json = "1"
 # error inside any timeout a wallet can afford. On the founder's Wi-Fi that cost
 # 4 m 34 s to reach a node while the app's own HTTPS egress reached the same
 # hostnames in under a second, because hyper-util races the families (its
-# `happy_eyeballs_timeout` defaults to 300 ms). The one changed function is that
-# race, mirrored from hyper-util's `ConnectingTcp` — which is already compiled
-# into this binary.
+# `happy_eyeballs_timeout` defaults to 300 ms). The first patch is that race,
+# mirrored from hyper-util's `ConnectingTcp` — which is already compiled into
+# this binary. The second (LINK-Q2) sets `TCP_NODELAY` on every dialed socket —
+# the pinned client passes `disable_nagle = false`, so Nagle ran on every wRPC
+# socket — and exports an off-by-default registry of dialed sockets for a
+# dev-flagged witness.
 #
 # NOT A PIN MOVE, and not for want of trying: upstream HEAD of BOTH
 # `workflow-rs` and `snapview/tokio-tungstenite` still carries the same
@@ -147,8 +156,12 @@ serde_json = "1"
 # (c6989540…631cd). Per-file manifest + the verify command:
 # `rust/vendor/PROVENANCE.md`.
 #
-# DELETION TRIGGER. The day a released `tokio-tungstenite` carries a concurrent
-# dial, delete this stanza and `rust/vendor/tokio-tungstenite/`; the build
-# returns to the registry crate. That is also the whole reversal.
+# DELETION TRIGGER — all three conditions, not the first alone (LINK-Q2): a
+# released `tokio-tungstenite` dials concurrently; AND the pinned client's path
+# sets `TCP_NODELAY` upstream (or the app sets it another way, with its test
+# moved beside it); AND the LINK-Q2 socket registry is retired or has another
+# home (the bridge imports it — deleting the directory first breaks the build,
+# loudly). Then delete this stanza and `rust/vendor/tokio-tungstenite/`; the
+# build returns to the registry crate.
 [patch.crates-io]
 tokio-tungstenite = { path = "vendor/tokio-tungstenite" }

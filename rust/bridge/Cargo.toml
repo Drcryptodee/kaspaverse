@@ -41,5 +41,15 @@ jni = { version = "0.21.1", default-features = false }
 # enumerated every V1 line). dependency-steward audits at name+version.
 android_logger = { version = "0.15", default-features = false }
 
+# LINK-Q2: the TCP_INFO witness's platform half (`src/sockstat.rs`) —
+# dev flags only. `libc` for four syscalls on a descriptor the dialer's registry
+# names; the vendored `tokio-tungstenite` for that registry (`kaspaverse`). Both
+# are already compiled into this library (tokio's and workflow-websocket's
+# edges), so the lockfile gains two dependency edges and no package. `libc`'s
+# floor is the version the lock already resolves.
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+libc = "0.2.186"
+tokio-tungstenite.workspace = true
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

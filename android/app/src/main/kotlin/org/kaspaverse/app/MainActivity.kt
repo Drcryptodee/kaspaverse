@@ -497,6 +497,20 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }.getOrNull()
 
+    // LINK-Q2's platform half of the dev A/B seam (Wi-Fi low-latency lock, own
+    // byte counts). Inert on a release build and with no flags file.
+    private val linkDevAb by lazy { LinkDevAb(this) }
+
+    override fun onResume() {
+        super.onResume()
+        linkDevAb.resume()
+    }
+
+    override fun onPause() {
+        linkDevAb.pause()
+        super.onPause()
+    }
+
     override fun onDestroy() {
         networkCallback?.let {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it)

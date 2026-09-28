@@ -3153,8 +3153,10 @@ dependencies = [
  "jni",
  "kaspaverse-chain",
  "kaspaverse-core",
+ "libc",
  "log",
  "tokio",
+ "tokio-tungstenite",
  "workflow-log",
  "zeroize",
 ]

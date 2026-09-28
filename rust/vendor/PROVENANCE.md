@@ -4,6 +4,13 @@ Ratified by **D-217**. This directory exists so the websocket dial races the two
 address families instead of walking them serially; the argument, the measurements
 and the four options considered are in that entry and are not repeated here.
 
+**Second patch, LINK-Q2 (2026-09-28):** `TCP_NODELAY` is set on every socket
+the dialer produces (the pinned client passes `disable_nagle = false`, so upstream's
+opt-in never ran and Nagle was on), and an off-by-default registry of recently dialed
+sockets — descriptor and address pair, no ownership — is exported for a dev-flagged
+`TCP_INFO` witness (D-338). That export is the one reason `src/lib.rs` is now a
+patched file.
+
 **Everything below is checkable by a reviewer with no network access and no trust in
 whoever wrote it.**
 
@@ -44,11 +51,12 @@ cargo after it verified the download against the crates.io index. Matching it
 proves the vendored tree descends from the published crate rather than from
 anyone's working copy.
 
-## What differs from upstream — exactly two files
+## What differs from upstream — exactly three files
 
 | file | why |
 |:--|:--|
-| `src/connect.rs` | **The patch.** `TcpStream::connect("host:port")` becomes a concurrent v4/v6 race with a 300 ms fallback delay, mirrored from `hyper-util`'s `ConnectingTcp`. The file's own header block explains it. Public API unchanged. |
+| `src/connect.rs` | **The patches.** (D-217) `TcpStream::connect("host:port")` becomes a concurrent v4/v6 race with a 300 ms fallback delay, mirrored from `hyper-util`'s `ConnectingTcp`. (LINK-Q2) `set_nodelay(true)` on every dialed socket whatever `disable_nagle` says, a failure logged and survived as `hyper-util` 0.1.20 does (`http.rs:560-562`); and the `kaspaverse` module, a registry of recent sockets that records nothing until `remember_sockets(true)`. The file's own header block explains each. The dial's public API is unchanged. |
+| `src/lib.rs` | **One re-export** (LINK-Q2): `pub use connect::kaspaverse;` under `#[cfg(all(unix, feature = "connect"))]`, because `mod connect` is private and nothing in it is reachable otherwise. |
 | `Cargo.toml` | **One word.** `"time"` added to the `tokio` feature list, because the 300 ms stagger needs a timer and the crate declared only `io-util` (+ `net` via `connect`). |
 
 `Cargo.toml.orig` is upstream's pre-normalisation manifest; cargo never reads it,
@@ -66,7 +74,7 @@ code into the binary** — it only makes the crate honest about what it uses. Th
 ## Verify it yourself
 
 ```bash
-# 1. every file except the two named above is byte-identical to the published crate
+# 1. every file except the three named above is byte-identical to the published crate
 diff -r --exclude=target rust/vendor/tokio-tungstenite \
   ~/.cargo/registry/src/*/tokio-tungstenite-0.23.1
 #    expected output, and nothing else:
@@ -74,6 +82,7 @@ diff -r --exclude=target rust/vendor/tokio-tungstenite \
 #                                                                    not part of the tarball
 #      diff ... Cargo.toml
 #      diff ... src/connect.rs
+#      diff ... src/lib.rs
 
 # 2. the patch is actually the one being compiled, not the registry copy
 cargo metadata --format-version 1 --manifest-path rust/Cargo.toml \
@@ -88,7 +97,7 @@ CARGO_TARGET_DIR=rust/target/vendor-tests \
 
 ## Pristine manifest (sha256 of the tarball's own bytes, all 22 files)
 
-The two `← PATCHED` rows are the hashes **before** our change, so this table stays
+The three `← PATCHED` rows are the hashes **before** our change, so this table stays
 a record of upstream rather than of us.
 
 ```
@@ -111,21 +120,22 @@ b3f8369b474af3e73ae544dae200e5634c45f84a62788c7d6ce50d2eefc8dd1e  examples/serve
 691667016a1f818d8370f98db177896ce7f03f04a18a929ea521348da1814df7  src/compat.rs
 bb8130f2150addda8ffc1cd9a834f3f28f089e6b827108f7fe50e0ae6266a3b7  src/connect.rs  ← PATCHED
 2030d6e704a97606cd88c3cf16404e9fded9beef9b9f661c9ddb988528e1873d  src/handshake.rs
-9dae674dbfa530abf7a93e36a2148e546d49ccefc9fa80b8e69ce11fe9f6890e  src/lib.rs
+9dae674dbfa530abf7a93e36a2148e546d49ccefc9fa80b8e69ce11fe9f6890e  src/lib.rs  ← PATCHED
 735aed6eabec038a9789c2f94723c10dcbc26e052b0126642ac77f8cd8afbf25  src/stream.rs
 c42474f07f5e7f145f22b95bc98f8441744649e09b59865f8f68a3e810c24cb5  src/tls.rs
 ```
 
-## Post-patch anchors — the two files that are ours
+## Post-patch anchors — the three files that are ours
 
-The table above deliberately records the **upstream** hashes of the two patched files, so
+The table above deliberately records the **upstream** hashes of the three patched files, so
 it stays a record of the published crate. These are what those files hash to **as
 shipped**, so drift in our own patch also requires a deliberate record update rather than
 passing unnoticed. The gate lane checks these too.
 
 ```
 PATCHED  bbc996232ec642a8a7cf4ac8167df5247b73448c6f1c8efba775a7fe8792217a  Cargo.toml
-PATCHED  96901a72fdf4aa788c60bee68a296e927f496c53e6c065d72490a34845cc9f90  src/connect.rs
+PATCHED  b7b1c24afc0c2fb9c90ddb15bdc38ac193d82b437970d0f37cc9c816e51ddc5e  src/connect.rs
+PATCHED  77b1ba53a8232e2833918e927748864a6f4580d54b98b9588e42b349e81f3e13  src/lib.rs
 ```
 
 ## Scope of the standalone test lane, honestly
@@ -133,17 +143,39 @@ PATCHED  96901a72fdf4aa788c60bee68a296e927f496c53e6c065d72490a34845cc9f90  src/c
 `cargo test --lib` on this manifest resolves the crate's **own** upstream `Cargo.lock`
 — ~147 packages (hyper, env_logger, http-body-util…) that are not in our workspace
 lockfile and are therefore outside `cargo deny` entirely. That exposure is bounded and
-deliberate: the lockfile is one of the 20 hash-verified verbatim files above, and the
+deliberate: the lockfile is one of the 19 hash-verified verbatim files above, and the
 lane passes `--locked` so it cannot be silently re-resolved. Nothing from that graph is
 compiled into the app — it exists only to run the dialer's own tests.
 
+**One limit, stated (LINK-Q2 steward note):** that lock is the tarball's, so the
+lane compiles the patches against *its* resolutions — tokio 1.28.0 and libc
+0.2.154 — while the app compiles tokio 1.52.3. The APIs the patches use
+(`TcpStream::{set_nodelay, local_addr, peer_addr}`, `AsRawFd`, `lookup_host`,
+`time::sleep`) are stable across that range; a patch that reached for a newer API
+would fail here first, which is the safe direction.
+
 ## Deletion trigger
 
-Delete `rust/vendor/tokio-tungstenite/`, the `[patch.crates-io]` stanza and the
-`exclude` line in `rust/Cargo.toml`, and the `vendored dialer (D-217)` lane in
-`tools/gate.sh`, on the day a **released** `tokio-tungstenite` dials concurrently.
-The build then returns to the registry crate. That is also the entire reversal if
-this turns out to be wrong.
+**All three conditions, not the first alone (LINK-Q2 added two).** This directory
+now carries a production behaviour besides the race — Nagle off on every wRPC
+socket, whose only test lives here — and the socket registry the bridge imports.
+Deleting it on the first condition alone would break the bridge's build (loudly),
+and the obvious repair, dropping the witness, would then remove Nagle-off and its
+test without a signal. So delete it only when:
 
-Upstreaming the patch is **not** ratified (D-217): it is outward-facing and stays
+1. a **released** `tokio-tungstenite` dials concurrently; AND
+2. the pinned client's path sets `TCP_NODELAY` upstream — or the app sets it
+   another way, with its test moved beside it; AND
+3. the LINK-Q2 socket registry is retired or has another home.
+
+Then delete `rust/vendor/tokio-tungstenite/`, the `[patch.crates-io]` stanza and
+the `exclude` line in `rust/Cargo.toml`, and the `vendored dialer (D-217)` lane in
+`tools/gate.sh`; the build returns to the registry crate.
+
+**Reversing one patch is not deleting the directory.** Nagle-off alone reverts by
+restoring upstream's `if disable_nagle { … }` in `connect.rs` and its anchor; the
+registry by removing the `kaspaverse` module, `lib.rs`'s one line (its hash
+returns to the pristine row) and `rust/bridge/src/sockstat.rs`.
+
+Upstreaming the patches is **not** ratified (D-217): it is outward-facing and stays
 the founder's call. It remains the only defined end date for this directory.

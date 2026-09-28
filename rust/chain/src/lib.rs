@@ -13,6 +13,7 @@ mod acceptance;
 pub mod block_list;
 pub mod contact_names;
 mod dag_monitor;
+pub mod devab;
 pub mod discovery;
 mod error;
 pub mod history_fill;

@@ -154,6 +154,10 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
   # function the wallet's only path to consensus goes through cannot also be the
   # one piece of code nothing checks.
   #
+  # Its tests carry LINK-Q2's second patch too: Nagle off on every dialed
+  # socket, asserted through `connect_async_with_config(…, false)` — the call the
+  # pinned client makes — and the socket registry's off-by-default contract.
+  #
   # Runs AFTER `cargo deny` on purpose: the advisory tripwire below reads the
   # RustSec database that cargo-deny fetches, so on a cold CI machine this lane
   # must not be the one to look for it first.
@@ -177,7 +181,7 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
       # (a) every VERBATIM file still matches the published crate. Fail CLOSED: a
       #     manifest that cannot be read, or reads short, is a finding (PB-029).
       while read -r want file marker; do
-        [ -n "$marker" ] && continue   # the two files D-217 deliberately patched
+        [ -n "$marker" ] && continue   # the three patched files (D-217, LINK-Q2)
         got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d' ' -f1)"
         if [ "$got" != "$want" ]; then
           echo "   DRIFT: $file no longer matches the published crate"
@@ -185,18 +189,35 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
         fi
         checked=$((checked+1))
       done < <(grep -E '^[0-9a-f]{64}  ' "$rec")
-      if [ "$checked" -ne 20 ]; then
-        echo "   PROVENANCE.md listed $checked verbatim files, expected 20 — the record moved"
+      if [ "$checked" -ne 19 ]; then
+        echo "   PROVENANCE.md listed $checked verbatim files, expected 19 — the record moved"
         rc=1
       fi
-      # (b) our OWN two files still hash to what the record says they do.
+      # (b) our OWN three files still hash to what the record says they do —
+      #     counted, so a deleted anchor row reds instead of skipping (PB-029).
+      local anchored=0
       while read -r _tag want file; do
         got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d' ' -f1)"
         if [ "$got" != "$want" ]; then
           echo "   DRIFT: $file changed without its PROVENANCE.md anchor being updated"
           rc=1
         fi
+        anchored=$((anchored+1))
       done < <(grep -E '^PATCHED  [0-9a-f]{64}  ' "$rec")
+      if [ "$anchored" -ne 3 ]; then
+        echo "   PROVENANCE.md anchors $anchored patched files, expected 3 — the record moved"
+        rc=1
+      fi
+      #     And the files MARKED patched are exactly the files ANCHORED — a
+      #     duplicated anchor row would pass the count alone (steward, LINK-Q2).
+      local marked_set anchored_set
+      marked_set="$(awk '/^[0-9a-f]{64}  .*← PATCHED$/{print $2}' "$rec" | sort)"
+      anchored_set="$(awk '/^PATCHED  [0-9a-f]{64}  /{print $3}' "$rec" | sort)"
+      if [ -z "$marked_set" ] || [ "$marked_set" != "$anchored_set" ]; then
+        echo "   the patched files marked and the files anchored differ:"
+        diff <(echo "$marked_set") <(echo "$anchored_set") | sed 's/^/     /'
+        rc=1
+      fi
       # (c) NOTHING WAS ADDED. Hashing only what the record lists cannot see a new
       #     file, and cargo auto-detects and EXECUTES a build.rs that upstream
       #     0.23.1 does not have — so "verbatim" has to mean the file set too.

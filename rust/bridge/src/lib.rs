@@ -7,3 +7,7 @@ mod logging;
 // only by tests there — hence the targeted dead-code allow on those fns.
 #[cfg(target_os = "android")]
 mod jni_seed;
+
+// LINK-Q2: the TCP_INFO witness's platform half — dev flags only.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+mod sockstat;

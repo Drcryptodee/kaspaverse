@@ -20,6 +20,7 @@ use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::acceptance::VccBatch;
+use crate::devab;
 use crate::error::Result;
 use crate::link::{self, EndpointHealth};
 use crate::link_rpc::LinkRpc;
@@ -358,8 +359,26 @@ const LANE_REBIND_WINDOW_SECS: u64 = 600;
 /// under NTP; the silence hunt's stand-down reads this instead.
 fn mono_ms() -> u64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
-    u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+    ms_since(*EPOCH.get_or_init(std::time::Instant::now))
+}
+
+/// Milliseconds since `epoch`, **counted from 1**. Every monotonic stamp on a
+/// socket keeps 0 for "never" (`connected_mono_ms`, `last_tick_mono_ms`,
+/// `last_block_mono_ms`), and the clock's epoch is its first call — which in a
+/// process is the first socket's publish. Counted from 0, that socket stamped
+/// itself "never published", and the blockless-ticks witness (D-334 item 1)
+/// stayed silent for the first socket of every process: found by LINK-Q2's
+/// `ba=0` arms, an hour of blockless ticks and not one line. A uniform +1
+/// moves no difference and no deadline.
+fn ms_since(epoch: std::time::Instant) -> u64 {
+    ms_of(epoch.elapsed())
+}
+
+/// A span in whole milliseconds, counted from 1 (see [`ms_since`]).
+fn ms_of(span: Duration) -> u64 {
+    u64::try_from(span.as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
 }
 
 /// **The silence deadline's clock, one per socket** (LINK-Q1, D-334).
@@ -780,6 +799,12 @@ struct Inner {
     /// Unattached (or a dead receiver) = batches drop harmlessly — the tracker's
     /// own reconnect catch-up recovers anything missed while detached.
     vcc_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<VccBatch>>>,
+    /// LINK-Q2's measurement seam: dev flags, default OFF. Every hook
+    /// into it is one relaxed load that returns while the flags file is absent.
+    devab: Arc<devab::DevAb>,
+    /// Set when the flags file said `on=1` as the files dir became known —
+    /// then, and only then, [`Self::start`] spawns the flags loop.
+    devab_armed: AtomicBool,
 }
 
 /// Owns one wRPC client plus the event task that tracks its connection state
@@ -867,6 +892,8 @@ impl DagMonitor {
                 silence_backoff: AtomicU32::new(0),
                 swaps_asked: AtomicU64::new(0),
                 vcc_tx: Mutex::new(None),
+                devab: Arc::new(devab::DevAb::default()),
+                devab_armed: AtomicBool::new(false),
             }),
         })
     }
@@ -901,6 +928,11 @@ impl DagMonitor {
             .health_path
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(health_path);
+        // LINK-Q2: the dev flags live beside the ledger. Read now, so
+        // an armed build's socket registry is on before the first dial.
+        if devab::prime(&self.inner.devab, &path.with_file_name(devab::FLAGS_FILE)) {
+            self.inner.devab_armed.store(true, Ordering::SeqCst);
+        }
         *self
             .inner
             .endpoint_cache
@@ -1484,6 +1516,13 @@ impl DagMonitor {
 
     /// Initiates the first connect. Must be called from within a tokio runtime.
     pub async fn start(&self) -> Result<()> {
+        // LINK-Q2: the flags loop exists only in a process that
+        // started with the flags file saying `on=1` — never in today's app.
+        if self.inner.devab_armed.load(Ordering::SeqCst) {
+            tokio::spawn(devab::run(DevHostHandle {
+                inner: Arc::downgrade(&self.inner),
+            }));
+        }
         self.relink("start").await
     }
 
@@ -2797,6 +2836,7 @@ impl DagMonitor {
         self.inner.last_tick_at.store(now, Ordering::Relaxed);
         self.inner.daa_ticks.fetch_add(1, Ordering::Relaxed);
         self.note_blockless_ticks(bind, mono);
+        self.inner.devab.on_tick(mono);
     }
 
     /// **The case the heartbeat's move stopped convicting, named** (D-334
@@ -3693,6 +3733,9 @@ impl DagMonitor {
             // construction (transport.rs, §0.2).
             Notification::BlockAdded(added) => {
                 let matches = transport::scan_block(&added.block, self.inner.address_prefix);
+                // LINK-Q2: inert unless the dev flags are on.
+                self.inner.devab.on_block(&added.block);
+                self.inner.devab.on_ba_matches(&matches);
                 if !matches.is_empty() {
                     // Three-lights producer log (V3/L55): count + receiver
                     // count only — payload bodies are never logged (§4
@@ -3811,9 +3854,14 @@ impl DagMonitor {
         // P2.1: the payload-transport scan source. Joins the SAME listener +
         // channel as the score scopes (D-053 single-listener machinery; §0.3) —
         // re-registered on every connect like the others, paused with the
-        // socket (foreground-only posture unchanged).
-        rpc.start_notify(listener_id, Scope::BlockAdded(BlockAddedScope {}))
-            .await?;
+        // socket (foreground-only posture unchanged). Left off only by a
+        // LINK-Q2 dev arm (`ba=0`) — never with the flags file absent.
+        let with_block_added = !self.inner.devab.block_added_off();
+        if with_block_added {
+            rpc.start_notify(listener_id, Scope::BlockAdded(BlockAddedScope {}))
+                .await?;
+        }
+        self.inner.devab.subscribed(bind.gen, with_block_added);
         // V1 acceptance spine (D-073): which txids each chain block accepted,
         // plus removed-chain-block hashes on reorg — same listener, same
         // socket (D-005), re-registered per connect like the rest. The stream
@@ -3827,6 +3875,80 @@ impl DagMonitor {
         )
         .await?;
         Ok(())
+    }
+}
+
+/// The monitor's side of LINK-Q2's seam: the dev loops hold only a
+/// weak handle, so they never keep a monitor alive and exit when it is gone.
+#[derive(Clone)]
+struct DevHostHandle {
+    inner: std::sync::Weak<Inner>,
+}
+
+#[async_trait::async_trait]
+impl devab::DevHost for DevHostHandle {
+    fn alive(&self) -> bool {
+        self.inner.strong_count() > 0
+    }
+
+    fn flags_path(&self) -> Option<PathBuf> {
+        let inner = self.inner.upgrade()?;
+        let health = inner
+            .health_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        Some(health.with_file_name(devab::FLAGS_FILE))
+    }
+
+    fn bound(&self) -> Option<(u64, String)> {
+        let inner = self.inner.upgrade()?;
+        let bind = inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        Some((bind.gen, bind.url.clone()))
+    }
+
+    fn rpc(&self) -> Arc<dyn RpcApi> {
+        match self.inner.upgrade() {
+            Some(inner) => inner.link_rpc.clone(),
+            None => LinkRpc::new(),
+        }
+    }
+
+    fn devab(&self) -> Arc<devab::DevAb> {
+        match self.inner.upgrade() {
+            Some(inner) => inner.devab.clone(),
+            None => Arc::new(devab::DevAb::default()),
+        }
+    }
+
+    async fn set_block_added(&self, gen: u64, subscribe: bool) -> std::result::Result<(), String> {
+        let inner = self.inner.upgrade().ok_or("the monitor is gone")?;
+        let bind = inner
+            .bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or("no bound socket")?;
+        if bind.gen != gen {
+            return Err("the bound socket changed".to_string());
+        }
+        let listener = (*bind
+            .listener_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
+        .ok_or("no listener on the bound socket")?;
+        let rpc = bind.client.rpc_api();
+        let scope = Scope::BlockAdded(BlockAddedScope {});
+        let outcome = if subscribe {
+            rpc.start_notify(listener, scope).await
+        } else {
+            rpc.stop_notify(listener, scope).await
+        };
+        outcome.map_err(|e| e.to_string())
     }
 }
 
@@ -4946,6 +5068,38 @@ mod tests {
         }
     }
 
+    /// **The connect step subscribes the block stream — unless a dev arm said
+    /// otherwise** (LINK-Q2, `consensus-auditor` CONCERNS-2). Drives the real
+    /// `handle_connect` offline on an armed-but-unconnected bind and reads the
+    /// step's own report, so flipping the one production line reds this.
+    #[tokio::test]
+    async fn the_connect_step_subscribes_the_stream_unless_a_dev_arm_says_otherwise() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://a.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        monitor
+            .handle_connect(&bind)
+            .await
+            .expect("the connect step runs without a node");
+        assert_eq!(
+            monitor.inner.devab.ba_known(bind.gen),
+            Some(true),
+            "with no flags file the block stream must be subscribed at connect"
+        );
+        devab::store_switches(&monitor.inner.devab, &devab::DevFlags::parse("on=1\nba=0"));
+        let next = monitor
+            .install_bind("wss://b.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm the successor");
+        monitor
+            .handle_connect(&next)
+            .await
+            .expect("the connect step runs without a node");
+        assert_eq!(monitor.inner.devab.ba_known(next.gen), Some(false));
+    }
+
     /// **R4 — a bind retired while it was coming up must not publish.**
     ///
     /// The wallet-security BLOCK: the identity gate runs at event INTAKE, but
@@ -5620,6 +5774,36 @@ mod tests {
             .expect("arm another");
         monitor.note_blockless_ticks(&fresh, u64::MAX);
         assert!(!fresh.blocks_quiet_warned.load(Ordering::Relaxed));
+    }
+
+    /// **The first socket of a process can say it too** (LINK-Q2). The
+    /// monotonic clock's epoch is its first call — the first publish — so that
+    /// publish's stamp is the clock's very first reading; it must not collide
+    /// with the "never published" 0, or the witness above is silent for the
+    /// socket most sessions keep for hours.
+    #[tokio::test]
+    async fn the_first_socket_of_a_process_is_stamped_published() {
+        // Deterministic first: the clock's reading at its own epoch is 1, never
+        // the 0 every stamp keeps for "never" (`consensus-auditor` second delta).
+        assert_eq!(ms_of(Duration::ZERO), 1);
+        let first_reading = ms_since(std::time::Instant::now());
+        assert!(
+            first_reading >= 1,
+            "the clock's first reading is the 'never' sentinel"
+        );
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ivy.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        bind.connected_mono_ms
+            .store(first_reading, Ordering::Relaxed);
+        monitor.note_blockless_ticks(&bind, first_reading + link::WATCHDOG_STALL_SECS * 1000);
+        assert!(
+            bind.blocks_quiet_warned.load(Ordering::Relaxed),
+            "a socket published at the clock's first reading still flags a blockless stretch"
+        );
     }
 
     /// **The pull keys on proof, not on the bit** (`consensus-auditor` note

@@ -60,6 +60,10 @@ pub use connect::{connect_async, connect_async_with_config};
 #[cfg(all(any(feature = "native-tls", feature = "__rustls-tls"), feature = "connect"))]
 pub use connect::connect_async_tls_with_config;
 
+// PATCHED (KaspaVerse LINK-Q2, D-338): the dialer's off-by-default socket registry.
+#[cfg(all(unix, feature = "connect"))]
+pub use connect::kaspaverse;
+
 #[cfg(feature = "stream")]
 pub use stream::MaybeTlsStream;
 

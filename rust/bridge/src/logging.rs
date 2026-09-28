@@ -320,6 +320,9 @@ pub(crate) fn install() {
             "log: heartbeat on the DAA tick, silence deadline {}s (LINK-Q1)",
             kaspaverse_chain::link::SILENCE_DEADLINE.as_secs()
         );
+        // LINK-Q2's window token (L74): Nagle off at the dialer and the dev
+        // A/B seam exist only from this build on.
+        log::info!("log: nagle off at the dialer, dev A/B seam present (LINK-Q2)");
     }
     #[cfg(not(target_os = "android"))]
     {

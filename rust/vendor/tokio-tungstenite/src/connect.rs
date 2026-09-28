@@ -1,9 +1,10 @@
 //! Connection helper.
 //!
 //! ─────────────────────────────────────────────────────────────────────────────
-//! VENDORED AND PATCHED — KaspaVerse, D-217. This is the ONLY source file that
-//! differs from the crates.io tarball for 0.23.1 (see `rust/vendor/PROVENANCE.md`;
-//! the manifest's one-word `tokio` feature addition is the only other delta).
+//! VENDORED AND PATCHED — KaspaVerse, D-217 and LINK-Q2. This file carries the
+//! patches; the other deltas from the crates.io tarball for 0.23.1 are the
+//! manifest's one-word `tokio` feature addition and one `pub use` line in `lib.rs`
+//! that exports the registry below (all three listed in `rust/vendor/PROVENANCE.md`).
 //!
 //! Upstream dialed with `TcpStream::connect("host:port")`, which walks the
 //! resolved addresses SERIALLY and advances only when one returns an `Err`. A
@@ -16,13 +17,30 @@
 //! The delta is `connect_happy_eyeballs` and its three helpers below, mirrored
 //! from `hyper-util`'s `ConnectingTcp` (`client/legacy/connect/http.rs:951-988`)
 //! rather than re-derived from RFC 8305 — that code is already compiled into this
-//! binary. The public API is unchanged: no new function, parameter or feature
-//! flag, so no call site here or in `workflow-websocket` knows this happened.
+//! binary. The dial's public API is unchanged: no new function, parameter or
+//! feature flag, so no call site here or in `workflow-websocket` knows it happened.
+//! (LINK-Q2 adds one module, [`kaspaverse`], which nothing upstream calls.)
 //!
 //! TLS is untouched. The race sits strictly BELOW it and hands the winning
 //! `TcpStream` to the same `client_async_tls_with_config` as before, so SNI still
 //! comes from `domain(&request)` and certificate validation is byte-for-byte
 //! upstream's.
+//!
+//! **Second patch, LINK-Q2: Nagle is off on every socket this dials.**
+//! Upstream sets `TCP_NODELAY` only `if disable_nagle`, and the pinned client
+//! passes `false` (`workflow-websocket 0.18.0`, `src/client/native.rs:181`), so
+//! every wRPC socket ran with Nagle ON: a small request written while an earlier
+//! one was still unacknowledged waited for that ACK. The option is now set
+//! unconditionally, and a failure to set it is logged and survived rather than
+//! failing the dial — `hyper-util` makes the same choice for its own sockets
+//! (0.1.20, `client/legacy/connect/http.rs:560-562`), and a latency option must
+//! never cost the wallet its link. The `disable_nagle` parameter stays in every
+//! public signature, so no caller changes; its value no longer matters.
+//!
+//! **And a registry, off unless asked for** ([`kaspaverse`]): the last few
+//! sockets dialed, by descriptor and address pair, so a dev-flagged witness can
+//! read the kernel's own round trip for the wRPC socket (D-338). Nothing is
+//! recorded until [`kaspaverse::remember_sockets`] turns it on.
 //! ─────────────────────────────────────────────────────────────────────────────
 use std::{
     io::{Error as IoError, ErrorKind, Result as IoResult},
@@ -121,11 +139,111 @@ async fn connect(
     // walked.
     let socket = connect_happy_eyeballs(&addr).await.map_err(Error::Io)?;
 
-    if disable_nagle {
-        socket.set_nodelay(true)?;
-    }
+    // PATCHED (LINK-Q2): was `if disable_nagle { socket.set_nodelay(true)?; }`,
+    // which the pinned client never reached (it passes `false`). Now unconditional,
+    // and survived rather than propagated — see the header block.
+    let _ = disable_nagle;
+    disable_nagle_on(&socket);
+    #[cfg(unix)]
+    kaspaverse::remember(&socket, &domain);
 
     crate::tls::client_async_tls_with_config(request, socket, config, connector).await
+}
+
+/// Turn Nagle off on a freshly dialed socket. A failure is logged and survived:
+/// the socket still works, only with Nagle's coalescing, and a latency option
+/// must not turn into a failed dial (`hyper-util` logs and continues the same way).
+fn disable_nagle_on(socket: &TcpStream) {
+    if let Err(e) = socket.set_nodelay(true) {
+        log::warn!("tokio-tungstenite (KaspaVerse): TCP_NODELAY not set: {}", e);
+    }
+}
+
+/// **KaspaVerse LINK-Q2 (D-338): which sockets this crate dialed.** A bounded
+/// record of the last few, by descriptor and address pair, so a dev-flagged
+/// witness elsewhere in the app can ask the kernel for the wRPC socket's own
+/// round trip (`TCP_INFO`). Off by default: until [`remember_sockets`] is called
+/// with `true`, [`recent_sockets`] is empty and dialing records nothing.
+///
+/// The record takes no ownership. A descriptor here may already be closed, or
+/// reused by another file, by the time anyone reads it — a reader must check
+/// that the descriptor still names `local` and `peer` before and after using it,
+/// and must never close it.
+#[cfg(unix)]
+pub mod kaspaverse {
+    use std::{
+        net::SocketAddr,
+        os::unix::io::{AsRawFd, RawFd},
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            Mutex, PoisonError,
+        },
+    };
+
+    use tokio::net::TcpStream;
+
+    /// How many recent sockets are kept; older ones fall off the front.
+    const KEEP: usize = 8;
+
+    static REMEMBER: AtomicBool = AtomicBool::new(false);
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    static RECENT: Mutex<Vec<DialedSocket>> = Mutex::new(Vec::new());
+
+    /// One socket as it was dialed.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct DialedSocket {
+        /// The descriptor at dial time. Not owned; may be stale by now.
+        pub fd: RawFd,
+        /// Our end of the connection.
+        pub local: SocketAddr,
+        /// The node's end (the address the race connected to).
+        pub peer: SocketAddr,
+        /// The host the request named, as the TLS layer's SNI sees it.
+        pub host: String,
+        /// Dial order in this process, from 1.
+        pub seq: u64,
+    }
+
+    /// Start or stop recording. Stopping also forgets everything recorded.
+    pub fn remember_sockets(on: bool) {
+        REMEMBER.store(on, Ordering::SeqCst);
+        if !on {
+            RECENT.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        }
+    }
+
+    /// The recorded sockets, oldest first. Empty while recording is off.
+    pub fn recent_sockets() -> Vec<DialedSocket> {
+        RECENT.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn remember(socket: &TcpStream, host: &str) {
+        if !REMEMBER.load(Ordering::SeqCst) {
+            return;
+        }
+        let (local, peer) = match (socket.local_addr(), socket.peer_addr()) {
+            (Ok(local), Ok(peer)) => (local, peer),
+            _ => return,
+        };
+        let entry = DialedSocket {
+            fd: socket.as_raw_fd(),
+            local,
+            peer,
+            host: host.to_string(),
+            seq: SEQ.fetch_add(1, Ordering::SeqCst) + 1,
+        };
+        let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+        // Re-read under the lock: `remember_sockets(false)` stores, then clears
+        // under this same lock, so once it returns nothing can land after it.
+        if !REMEMBER.load(Ordering::SeqCst) {
+            return;
+        }
+        recent.push(entry);
+        if recent.len() > KEEP {
+            let excess = recent.len() - KEEP;
+            recent.drain(..excess);
+        }
+    }
 }
 
 /// Resolve `addr` and connect, racing the two address families against each other.
@@ -429,6 +547,106 @@ mod happy_eyeballs_tests {
         // Nothing stronger than "it is an io::Error": the kind is the resolver's
         // to choose and upstream never promised one either.
         let _ = err.kind();
+    }
+
+    /// A loopback WebSocket server that accepts one connection and holds it,
+    /// so the client end can be inspected while the connection is up.
+    async fn one_ws_server() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 127.0.0.1");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(ws) = crate::accept_async(tcp).await {
+                        // Hold the server end open while the test inspects the client.
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        drop(ws);
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// The client's own `TcpStream` under a dialed WebSocket.
+    fn client_tcp(ws: &WebSocketStream<MaybeTlsStream<TcpStream>>) -> &TcpStream {
+        match ws.get_ref() {
+            MaybeTlsStream::Plain(tcp) => tcp,
+            // Reachable only when a TLS feature adds variants; the lane builds without.
+            #[allow(unreachable_patterns)]
+            _ => panic!("a ws:// dial must hand back a plain TCP stream"),
+        }
+    }
+
+    /// **LINK-Q2's patch, through the production path.** The pinned client calls
+    /// `connect_async_with_config(url, config, false)` — `disable_nagle = false`
+    /// (`workflow-websocket 0.18.0`, `client/native.rs:181`) — and the socket it gets
+    /// back must still have Nagle off. Before the patch this read `false`: the only
+    /// `set_nodelay(true)` sat behind `if disable_nagle`.
+    #[tokio::test]
+    async fn nagle_is_off_on_every_dialed_socket_whatever_the_caller_passes() {
+        let server = one_ws_server().await;
+        for caller_asked in [false, true] {
+            let (ws, _) = connect_async_with_config(format!("ws://{}", server), None, caller_asked)
+                .await
+                .expect("a loopback ws dial");
+            assert!(
+                client_tcp(&ws).nodelay().expect("read TCP_NODELAY"),
+                "disable_nagle={}: the dialed socket still runs Nagle",
+                caller_asked
+            );
+        }
+    }
+
+    /// **The registry is off until asked, records the socket it dialed, and stays
+    /// bounded.** One test on purpose: the registry is a process-wide static, and
+    /// two tests toggling it would race each other. Other tests' dials may land in
+    /// it while it is on, so entries are found by this test's own local address.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_registry_is_off_until_asked_then_records_what_was_dialed_and_stays_bounded() {
+        use std::os::unix::io::AsRawFd;
+
+        let server = one_ws_server().await;
+        let url = format!("ws://{}", server);
+
+        kaspaverse::remember_sockets(false);
+        let (quiet, _) = connect_async_with_config(url.as_str(), None, false).await.expect("dial");
+        let quiet_local = client_tcp(&quiet).local_addr().unwrap();
+        assert!(
+            kaspaverse::recent_sockets().iter().all(|s| s.local != quiet_local),
+            "a dial made while the registry is off was recorded"
+        );
+
+        kaspaverse::remember_sockets(true);
+        let (seen, _) = connect_async_with_config(url.as_str(), None, false).await.expect("dial");
+        let tcp = client_tcp(&seen);
+        let local = tcp.local_addr().unwrap();
+        let entry = kaspaverse::recent_sockets()
+            .into_iter()
+            .find(|s| s.local == local)
+            .expect("the dial made while recording is on must be recorded");
+        assert_eq!(entry.peer, server);
+        assert_eq!(entry.fd, tcp.as_raw_fd());
+        assert_eq!(entry.host, "127.0.0.1");
+
+        // Bounded: ten more dials leave at most KEEP (8) entries, newest kept.
+        let mut last_local = local;
+        let mut held = Vec::new();
+        for _ in 0..10 {
+            let (ws, _) = connect_async_with_config(url.as_str(), None, false).await.expect("dial");
+            last_local = client_tcp(&ws).local_addr().unwrap();
+            held.push(ws);
+        }
+        let recent = kaspaverse::recent_sockets();
+        assert!(recent.len() <= 8, "the registry grew past its bound: {}", recent.len());
+        assert!(recent.iter().any(|s| s.local == last_local), "the newest dial fell off");
+
+        // Off again: forgotten, and nothing new is recorded.
+        kaspaverse::remember_sockets(false);
+        assert!(kaspaverse::recent_sockets().is_empty(), "turning it off must forget");
+        let (_after, _) = connect_async_with_config(url.as_str(), None, false).await.expect("dial");
+        assert!(kaspaverse::recent_sockets().is_empty(), "recorded while off");
     }
 
     /// The split follows the resolver, and keeps every address.
