@@ -833,27 +833,95 @@ Future<void> _armTheHold(WidgetTester tester) async {
 }
 
 /// The Network screen's own clock and the link's tick count, in the preview.
-/// **Every read of the pulse is one poll of a beating link**: half a second
-/// passes and five DAA ticks land, so any frame taken after two polls shows the
-/// beat as a MEASURED rate (`DAA · 10 Hz`, D-332). A rate needs two samples a
-/// real interval apart; a fixture clock that stood still between polls would
-/// (rightly) print the bare `DAA`, and the harness's own settling pumps poll
+/// **Every read of the pulse is one poll of a beating chain**: half a second
+/// passes and the DAA score climbs by five, so any frame taken after two polls
+/// shows the pace as a MEASURED figure (`BPS` `10`, D-338). A pace needs two
+/// samples a real interval apart; a fixture clock that stood still between
+/// polls would (rightly) print `—`, and the harness's own settling pumps poll
 /// more than once.
 DateTime _nodeNow = DateTime(2026, 8, 30, 11, 16, 30);
-int _nodeTicks = 0;
+int _nodeScore = 526633447;
 
-Future<({int? ageSecs, int ticks})> _pulse() async {
+Future<({int? ageSecs, int? score})> _pulse() async {
   _nodeNow = _nodeNow.add(NodeScreen.pollEvery);
-  _nodeTicks += 5;
-  return (ageSecs: 0, ticks: _nodeTicks);
+  _nodeScore += 5;
+  return (ageSecs: 0, score: _nodeScore);
 }
 
 /// A quiet spell under the hold: seven seconds since the last tick, the
-/// count standing still — the node row's `N s since last block` beside a
+/// score standing still — the `BPS` row's `7 s since last block` beside a
 /// lamp still green (D-331(b)).
-Future<({int? ageSecs, int ticks})> _quietPulse() async {
+Future<({int? ageSecs, int? score})> _quietPulse() async {
   _nodeNow = _nodeNow.add(NodeScreen.pollEvery);
-  return (ageSecs: 7, ticks: _nodeTicks);
+  return (ageSecs: 7, score: _nodeScore);
+}
+
+/// A stall inside the data's stale line: the score has stopped climbing for
+/// three seconds but the last tick is only two old — `BPS` watched falling
+/// to `0`, the stall's own face (D-332).
+Future<({int? ageSecs, int? score})> _stallPulse() async {
+  _nodeNow = _nodeNow.add(NodeScreen.pollEvery);
+  return (ageSecs: 2, score: _nodeScore);
+}
+
+/// A trickle: one block every two seconds, the tick fresh — the pace reads
+/// `< 1`, blocks landing but fewer than one a second (BG-20: not the stall's
+/// `0`).
+int _tricklePolls = 0;
+Future<({int? ageSecs, int? score})> _tricklePulse() async {
+  _nodeNow = _nodeNow.add(NodeScreen.pollEvery);
+  if (++_tricklePolls % 4 == 0) _nodeScore += 1;
+  return (ageSecs: 1, score: _nodeScore);
+}
+
+/// The caption held down — the press the explainer's control shows (§9).
+Future<void> _pressTheCaption(WidgetTester tester) async {
+  await _watchAMinute(tester);
+  await tester.startGesture(tester.getCenter(find.text('NODE REPLY')));
+  await tester.pump();
+}
+
+/// The refused pin's notice brought into view — at the floor and on its side
+/// the card sits below the fold, and a frame of the resting screen under this
+/// name would show no refusal at all (`ux-auditor`, L125).
+Future<void> _showTheRefusal(WidgetTester tester) async {
+  // Dragged, not `ensureVisible`: a `ListView` builds only what its viewport
+  // reaches, so on its side the notice does not exist until the list moves.
+  await tester.dragUntilVisible(
+    find.textContaining('Switch on Use my own node to set it again.'),
+    find.byType(ListView),
+    const Offset(0, -120),
+  );
+  await tester.pump();
+}
+
+/// **A real minute on the founder's air** — `get_server_info` round trips
+/// from LINK-Q2's capture (`e1_probes.csv`, 2026-09-28, the `info` answers
+/// 200–259 on `ivy`), cycled. The frames draw what the seat draws after
+/// watching his link, not a flat line a constant fixture would make.
+const List<int> _airMinute = [
+  176, 172, 190, 172, 201, 181, 205, 176, 175, 171, 228, 188, 176, 171, 184, //
+  173, 173, 178, 171, 171, 171, 173, 175, 171, 175, 173, 172, 171, 175, 168,
+  176, 176, 171, 179, 168, 175, 179, 167, 174, 171, 172, 171, 167, 172, 171,
+  167, 175, 167, 179, 171, 171, 171, 171, 171, 168, 172, 171, 176, 172, 171,
+];
+int _probeN = 0;
+
+/// Let the open screen poll for a minute of fixture time, so the history is
+/// full and every ten-second window has filled — the frame a user sees after
+/// watching, not the first half-second.
+Future<void> _watchAMinute(WidgetTester tester) async {
+  for (var i = 0; i < 120; i++) {
+    await tester.pump(NodeScreen.pollEvery);
+  }
+}
+
+/// The same minute, then the reading's explainer opened from its mark.
+Future<void> _watchThenExplain(WidgetTester tester) async {
+  await _watchAMinute(tester);
+  await tester.tap(find.bySemanticsLabel('About node reply'));
+  await tester.pump();
+  await tester.pump(KvMotion.enter);
 }
 
 /// `T5`, and the two states of its node row the happy path cannot show
@@ -867,29 +935,49 @@ Widget _node({
   bool slow = false,
   bool carried = false,
   bool hold = false,
+  bool measuring = false,
+  bool waiting = false,
+  bool stall = false,
+  bool trickle = false,
+  bool refused = false,
 }) {
   _nodeNow = DateTime(2026, 8, 30, 11, 16, 30);
-  _nodeTicks = 0;
+  _nodeScore = 526633447;
+  _probeN = 0;
+  _tricklePolls = 0;
   NodeScreen.forgetLatency();
   if (carried) {
+    // A visit that watched the link for twenty seconds and left 42 s ago: the
+    // reading is carried with its own stretch of the minute.
+    var reading = const KvLatencyReading.none();
+    final left = _nodeNow.subtract(const Duration(seconds: 42));
+    for (var i = 0; i < 40; i++) {
+      reading = reading.offer(
+        KvLatencySample.answered(_airMinute[i]),
+        at: left.subtract(NodeScreen.pollEvery * (39 - i)),
+      );
+    }
     NodeScreen.carryLatency(
-      reading: const KvLatencyReading.none().offer(
-        const KvLatencySample.answered(151),
-      ),
-      at: _nodeNow.subtract(const Duration(seconds: 42)),
-      endpoint: 'wss://isla.kaspa.red',
+      reading: reading,
+      at: left,
+      endpoint: 'wss://nina.kaspa.blue/kaspa/mainnet/wrpc/borsh',
     );
   }
   return NodeScreen(
     clock: () => _nodeNow,
     scope: NodeScope(
       connected: ValueNotifier(!hunting),
+      // **The public resolver's own shape** — the founder's phone showed
+      // `wss://nina.kaspa.blue/kaspa/mainnet/wrpc/borsh`, whole, on four
+      // lines (D-342): a frame on a short host would never show that.
       activeEndpoint: ValueNotifier<String?>(
-        hunting ? null : 'wss://isla.kaspa.red',
+        hunting ? null : 'wss://nina.kaspa.blue/kaspa/mainnet/wrpc/borsh',
       ),
       virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
       pinnedNode: ValueNotifier<String?>(null),
-      pinDropped: ValueNotifier(false),
+      // A pin the wallet refused at startup: the notice names the act that
+      // repairs it, over a folded field (D-342).
+      pinDropped: ValueNotifier(refused),
       setPinnedNode: (_) async {},
       searching: ValueNotifier(hunting),
       lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16)),
@@ -899,10 +987,23 @@ Widget _node({
       // where the render draws `151 ms · Slow`. A preview fixture that omits a
       // seam is a picture of the fallback, not of the screen.
       onReconnect: () async {},
-      tickPulse: hold ? _quietPulse : _pulse,
-      // A carried reading is looked at before the first fresh answer lands, so
-      // that frame's probe never answers inside it.
-      probeLink: carried
+      // Thirty-seven minutes of the chain's pace, kept by `ChainService`.
+      paceAverage: () =>
+          (bps: 10.02, span: const Duration(minutes: 37, seconds: 12)),
+      tickPulse: hold
+          ? _quietPulse
+          : stall
+          ? _stallPulse
+          : trickle
+          ? _tricklePulse
+          : _pulse,
+      // A carried reading is looked at before the first fresh answer lands,
+      // and *measuring…* before the first answer at all, so those frames'
+      // probes never answer inside them. **Slow**: the minute, then the link
+      // stops answering inside its deadline — the last ten seconds are
+      // timeouts. **Waiting**: the same, and then a probe that is still out,
+      // its wait counting on the figure.
+      probeLink: carried || measuring
           ? ({required bool peers}) =>
                 Completer<
                       ({
@@ -913,12 +1014,19 @@ Widget _node({
                       })
                     >()
                     .future
-          : ({required bool peers}) async => (
-              latencyMs: slow ? null : 151,
-              timedOutMs: slow ? 1800 : null,
-              peers: 14,
-              synced: synced,
-            ),
+          : ({required bool peers}) async {
+              final i = _probeN++;
+              if (waiting && i >= 116) {
+                await Completer<void>().future;
+              }
+              final late = (slow || waiting) && i >= 100;
+              return (
+                latencyMs: late ? null : _airMinute[i % _airMinute.length],
+                timedOutMs: late ? 1800 : null,
+                peers: 14,
+                synced: synced,
+              );
+            },
       testNode: (_) async =>
           (latencyMs: 84, serverVersion: '1.0.1', daa: BigInt.from(528980542)),
     ),
@@ -1617,16 +1725,48 @@ void main() {
     // spec frames say something rather than showing one stretched column.
     // The live state beats: one poll after the open, the DAA line reads the
     // measured rate (D-332).
-    framedSurface('node__connected', _node);
-    // LINK-Q1's two new latency faces (L205 — a new state ships its frames).
-    framedSurface('node__slow', () => _node(slow: true));
+    // **After a minute of watching** (LINK-UX1): the history full, the path
+    // and the ten-second tier settled, `BPS` measured.
+    framedSurface('node__connected', _node, act: _watchAMinute);
+    // LINK-Q1's two latency faces and LINK-UX1's three new ones (L205 — a new
+    // state ships its frames): "at least" after ten seconds of timeouts; the
+    // live count of a probe still out; the carried reading with its stretch
+    // of the minute; *measuring…* before the first answer; the reading's
+    // explainer open.
+    framedSurface('node__slow', () => _node(slow: true), act: _watchAMinute);
+    framedSurface(
+      'node__waiting',
+      () => _node(waiting: true),
+      act: _watchAMinute,
+    );
     framedSurface('node__carried', () => _node(carried: true));
+    framedSurface('node__measuring', () => _node(measuring: true));
+    framedSurface('node__explained', _node, act: _watchThenExplain);
     // The hold window on this screen (`ux-auditor`, L205): a quiet spell of
-    // 5–15 s reads its age beside a lamp that is still green.
+    // 5–15 s reads its age in the `BPS` row beside a lamp that is still green.
     framedSurface('node__hold', () => _node(hold: true));
-    surface('node__hunting', () => _node(hunting: true));
-    surface('node__unsynced', () => _node(synced: false));
-    surface('node__test', _node, act: _testANode);
+    // A stall inside the stale line: the pace watched falling to `0`; a
+    // trickle, blocks landing slower than one a second: `< 1`.
+    framedSurface('node__stall', () => _node(stall: true), act: _watchAMinute);
+    framedSurface(
+      'node__trickle',
+      () => _node(trickle: true),
+      act: _watchAMinute,
+    );
+    // The caption held down: the explainer's control, pressed (§9).
+    framedSurface('node__pressed', _node, act: _pressTheCaption);
+    // `BPS`'s two other states, at every geometry (LINK-UX1 deliverable 8):
+    // `—` with no socket (a dark hunt) and `syncing`.
+    framedSurface('node__hunting', () => _node(hunting: true));
+    framedSurface(
+      'node__refused',
+      () => _node(refused: true),
+      act: _showTheRefusal,
+    );
+    framedSurface('node__unsynced', () => _node(synced: false));
+    // The own-node card switched on, the field eased in and a node tested —
+    // the fold's open face, at every geometry (D-342).
+    framedSurface('node__test', _node, act: _testANode);
     // **`T1` · `T2` · `T3` · `T4` · `T6`, the whole group** (UX-R4). The root
     // and Security owe a one-view fit, so both are framed: a frame is where
     // the fit is *read*, and the guard in `settings_group_test` is where it is

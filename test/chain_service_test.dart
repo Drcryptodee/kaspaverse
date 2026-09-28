@@ -57,8 +57,52 @@ void main() {
 
   tearDown(() async {
     await ChainService.instance.reset();
+    ChainService.clock = DateTime.now;
     await controller.close();
   });
+
+  test(
+    'only a fresh score enters the pace log — after two hours away, the '
+    'reconnect\'s re-stated score must not anchor the next window (D-342)',
+    () async {
+      var now = DateTime(2026, 9, 28, 12);
+      ChainService.clock = () => now;
+      final service = ChainService.instance..start();
+      Future<void> snap(bool connected, int? score) async {
+        controller.add(
+          DagSnapshot(
+            connected: connected,
+            endpoint: 'wss://node.example/borsh',
+            virtualDaaScore: score == null ? null : BigInt.from(score),
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      await snap(true, 1000);
+      now = now.add(const Duration(minutes: 3));
+      await snap(true, 1000 + 1800);
+      // Two hours in the background: the link drops…
+      now = now.add(const Duration(seconds: 1));
+      await snap(false, null);
+      // …and comes back re-stating the score it had (the Rust fold keeps it),
+      now = now.add(const Duration(hours: 2));
+      await snap(true, 1000 + 1800);
+      // then the first fresh score: two hours of chain later.
+      now = now.add(const Duration(seconds: 2));
+      const back = 1000 + 1800 + 72020;
+      await snap(true, back);
+      now = now.add(const Duration(minutes: 3));
+      await snap(true, back + 1800);
+      final average = service.paceLog.average()!;
+      expect(
+        average.bps,
+        closeTo(10, 0.1),
+        reason: 'anchored on the old score stamped "now", this read ~405',
+      );
+      expect(average.span, const Duration(minutes: 3));
+    },
+  );
 
   test('folded snapshots land in the notifiers', () async {
     final service = ChainService.instance..start();

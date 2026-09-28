@@ -111,7 +111,7 @@ void main() {
         osOffline: ValueNotifier<bool>(false),
         reconnecting: ValueNotifier<bool>(false),
         onReconnect: () async {},
-        tickPulse: () async => (ageSecs: 1, ticks: 1),
+        tickPulse: () async => (ageSecs: 1, score: 1),
         // A reading that CHANGES every probe — an identical one notifies
         // nobody now (the reading has value equality), and this measures what
         // a real change costs.

@@ -95,16 +95,21 @@ NodeScope _nodeScope(ChainService chain) => NodeScope(
   onReconnect: chain.reconnect,
   refreshConfig: () => chain.refreshNodeConfig(),
   // The link's pulse (UX-3's carried scan line; since LINK-Q1 the DAA tick's
-  // age, and the tick count the screen turns into `DAA · 10 Hz`, D-332).
-  // `dagStatus` is a poll that takes no I/O in its steady state. The count is
-  // a process-lifetime tally of ticks, orders of magnitude under 2^53.
+  // age, and since LINK-UX1 the virtual DAA score the screen turns into
+  // `BPS`, D-338 — the freshest fold, read before the 250 ms coalescer).
+  // `dagStatus` is a poll that takes no I/O in its steady state. A DAA score
+  // is orders of magnitude under 2^53 (mainnet is in the hundreds of
+  // millions), so `toInt` is exact.
   tickPulse: () async {
     final status = await dagStatus();
     return (
       ageSecs: status.lastTickAgeSecs?.toInt(),
-      ticks: status.daaTicks.toInt(),
+      score: status.virtualDaaScore?.toInt(),
     );
   },
+  // The chain's average pace over up to the last hour (D-342): read from the
+  // samples `ChainService` keeps off the stream it already holds — no fetch.
+  paceAverage: () => chain.paceLog.average(),
   // `T5`'s connection card: one `get_server_info` round trip (the latency and
   // the node's own `is_synced`) and, when asked, the node's peer count —
   // polled only while that screen is open, the peers on a slower cadence.

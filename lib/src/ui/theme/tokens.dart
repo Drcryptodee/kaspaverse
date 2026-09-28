@@ -373,12 +373,15 @@ abstract final class KvMotion {
   /// Streaming cadence for a chain counter (BG-18).
   static const Duration stream = Duration(seconds: 1);
 
-  /// **The longest interval a streamed reading replays over** — the latency
-  /// figure's glide (BG-18 as amended at v4.45, D-334): each change replays
-  /// the interval since the one before at an even pace, and a longer gap is a
-  /// stall rather than a cadence, so the glide finishes within this. Two probe
-  /// cadences on a slow link; linear, like [stream] — a replay, not a curve.
-  static const Duration replayCap = Duration(seconds: 2);
+  /// **The latency figure's glide** — the natural frequency, in rad/s, of a
+  /// critically damped spring (damping ratio 1: no overshoot, BG-9's carve-out
+  /// for streamed figures, BG-18; v4.47, D-342). Measured against the
+  /// founder's probe cadence rather than chosen: a 100 ms move lands in
+  /// 0.24 s — the house's [calm] step — and a 5 s jump inside the shortest
+  /// probe interval he sees (p10 0.476 s), so the figure never trails a
+  /// reading by more than one interval. It replaced v4.45's even-paced replay
+  /// and its 2 s `replayCap`.
+  static const double glide = 20;
 
   /// One breath of the loading cadence — `KvCadence`'s five bars rise and fall
   /// once in this time (§4 *Cadence*; the app's one loading indicator). Not

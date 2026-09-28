@@ -64,6 +64,7 @@ class NodeScope {
     this.onReconnect,
     this.refreshConfig,
     this.tickPulse,
+    this.paceAverage,
     this.probeLink,
     this.testNode,
   });
@@ -127,16 +128,34 @@ class NodeScope {
   final Future<void> Function()? refreshConfig;
 
   /// **The link's pulse**, polled while this screen is open: seconds since
-  /// the last DAA tick (`null` before the first), and every tick the link has
-  /// delivered in this process — a monotonic count the screen differences
-  /// against its own clock to print the beat as `DAA · 10 Hz` (D-332).
+  /// the last DAA tick (`null` before the first), and the node's virtual DAA
+  /// score at that moment — the freshest fold, read before the bridge's 250 ms
+  /// coalescer — which the screen differences against its own clock to print
+  /// the chain's pace as `BPS` (D-338).
+  ///
+  /// **The score, not the tick count** (D-338): the pinned node emits one
+  /// `VirtualDaaScoreChanged` per virtual resolve and folds whatever blocks
+  /// arrived into it, so the tick count read a busy node as a slower chain
+  /// (6 where the chain ran at 10). The score climbs by one per block the
+  /// virtual merges inside the DAA window — `daa_score = sp_daa_score +
+  /// mergeset_size − |mergeset_non_daa|`, the mergeset counting the selected
+  /// parent (`consensus/src/processes/difficulty.rs:27-29`,
+  /// `model/stores/ghostdag.rs:111` @ `01b532e`, verified at LINK-UX1, INV-9)
+  /// — so its climb IS the chain's pace, `BlockrateParams::new::<10>()` on
+  /// mainnet. The tick count stays in the logs, where it diagnoses a lagging
+  /// node.
   ///
   /// It was `blockAgeSecs` until LINK-Q1 moved the heartbeat off full blocks
-  /// (D-334): the same freshness line, now read off the tick every stream
-  /// shape keeps. **Carried across from `NetworkSheet` when UX-3 collapsed the
+  /// (D-334). **Carried across from `NetworkSheet` when UX-3 collapsed the
   /// two surfaces** — dropping it would have made the sovereign path the
   /// poorer one (D-207 clause c).
-  final Future<({int? ageSecs, int ticks})> Function()? tickPulse;
+  final Future<({int? ageSecs, int? score})> Function()? tickPulse;
+
+  /// **The chain's average pace over up to the last hour**, and the span it
+  /// covers (D-342) — `ChainService.paceLog`, kept from the score the app
+  /// already receives. Null ⇒ not yet two minutes of it (or the seam is not
+  /// wired), and the `BPS` row's right side reads `—` (BG-5).
+  final ({double bps, Duration span})? Function()? paceAverage;
 
   /// **One honest round trip, the node's own word on its sync, and — when
   /// asked — its peer count**, polled while this screen is open (`T5`'s
@@ -288,7 +307,7 @@ class NodeScreen extends StatefulWidget {
   /// window. Still gated to the screen being open and in the foreground.
   /// The probe is one small round trip on the bound socket — H1's cleared
   /// suspect (D-331) — and the pulse pull takes no I/O at all.
-  static const Duration pollEvery = Duration(milliseconds: 500);
+  static const Duration pollEvery = KvLatencyReading.cadence;
 
   /// How many polls apart the peer count is asked for: every ten seconds,
   /// as before the faster cadence — a node's peers change over minutes.
@@ -331,6 +350,11 @@ class _NodeScreenState extends State<NodeScreen> {
   final ValueNotifier<bool> _nodeInfo = ValueNotifier(false);
   final ValueNotifier<bool> _sourcesInfo = ValueNotifier(false);
 
+  /// **The reading's own explainer** (LINK-UX1): what *node reply* and *path*
+  /// are, what their gap means, what the bars read — behind the circled-i on
+  /// the connection card's caption, eased in beneath the card (BG-34).
+  final ValueNotifier<bool> _replyInfo = ValueNotifier(false);
+
   /// What the last attempt to pin or unpin said, in plain English. Null while
   /// nothing has gone wrong.
   String? _problem;
@@ -356,13 +380,18 @@ class _NodeScreenState extends State<NodeScreen> {
   ///
   /// The link's pulse: whether a poll has ever landed — "0 s since the last
   /// tick" and "we have never been told" are different sentences (the retired
-  /// sheet's own `_haveStatus` distinction) — the tick age, and the beat as a
-  /// rate once two polls have landed (D-332).
-  final ValueNotifier<({bool have, int? secs, double? hz})> _scan =
-      ValueNotifier((have: false, secs: null, hz: null));
+  /// sheet's own `_haveStatus` distinction) — the tick age, and the chain's
+  /// pace in blocks a second once two polls have landed (D-338).
+  final ValueNotifier<({bool have, int? secs, double? bps})> _scan =
+      ValueNotifier((have: false, secs: null, bps: null));
 
-  /// The pulse's rate, from the process's tick count and this screen's clock.
-  final KvTickRate _rate = KvTickRate();
+  /// The chain's pace, from the node's DAA score and this screen's clock.
+  final KvBlockRate _rate = KvBlockRate();
+
+  /// The chain's average pace, read from [NodeScope.paceAverage] each poll.
+  final ValueNotifier<({double bps, Duration span})?> _average = ValueNotifier(
+    null,
+  );
 
   /// `T5`'s latency — smoothed and tiered by [KvLatencyReading] — the node's
   /// own word on whether it is synced, and its peer count. Each is *no
@@ -382,6 +411,15 @@ class _NodeScreenState extends State<NodeScreen> {
   /// Refused probes in a row. Only these count toward going dark — a timeout
   /// is a reading ("at least"), and one miss never blanks a live link (D-333).
   int _refusals = 0;
+
+  /// **The dwell ran out** (three refusals): the seat reads `—`, not
+  /// *measuring…* — the link is up, and the node will not answer.
+  final ValueNotifier<bool> _dark = ValueNotifier(false);
+
+  /// When the probe now in flight was sent, on [NodeScreen.clock] — the live
+  /// count's origin (LINK-UX1: `> 1.8 s` counts up while the probe is out,
+  /// because the elapsed time is itself a measurement). Null with none out.
+  final ValueNotifier<DateTime?> _probeOutSince = ValueNotifier(null);
 
   /// **Three refused probes in a row before the seat goes dark** (D-333) — at
   /// two probes a second, a second and a half of a link that will not answer
@@ -484,10 +522,14 @@ class _NodeScreenState extends State<NodeScreen> {
     _poll?.cancel();
     _latencyTakenAt.dispose();
     _scan.dispose();
+    _average.dispose();
     _test.dispose();
     _explorerChoice.dispose();
     _nodeInfo.dispose();
     _sourcesInfo.dispose();
+    _replyInfo.dispose();
+    _dark.dispose();
+    _probeOutSince.dispose();
     _latency.dispose();
     _synced.dispose();
     _peers.dispose();
@@ -548,6 +590,12 @@ class _NodeScreenState extends State<NodeScreen> {
     _synced.value = null;
     _peers.value = null;
     _refusals = 0;
+    _dark.value = false;
+    _probeOutSince.value = null;
+    // **Another node's score is another count** (D-338): nodes differ by a
+    // few blocks at any moment, so a rate across a swap would print the
+    // difference as a burst the chain never had.
+    _rate.reset();
   }
 
   void _onLifecycle(AppLifecycleState state) {
@@ -577,6 +625,7 @@ class _NodeScreenState extends State<NodeScreen> {
   void _closeExplainers() {
     _nodeInfo.value = false;
     _sourcesInfo.value = false;
+    _replyInfo.value = false;
   }
 
   /// Absent seams ⇒ no poll and no line, never a fabricated reading. A start
@@ -631,6 +680,7 @@ class _NodeScreenState extends State<NodeScreen> {
     if (probe == null || _probing) return;
     _probing = true;
     final epoch = _nodeEpoch;
+    _probeOutSince.value = widget.clock();
     try {
       // ONE epoch check for the answer and the refusal alike: a probe that
       // crossed a forget belongs to the node that was forgotten, whichever
@@ -672,6 +722,7 @@ class _NodeScreenState extends State<NodeScreen> {
       }
     } finally {
       _probing = false;
+      if (mounted) _probeOutSince.value = null;
     }
   }
 
@@ -683,14 +734,17 @@ class _NodeScreenState extends State<NodeScreen> {
   /// answer beside a remembered `[40, 42, 45]` took the median to 45 and lifted
   /// the dim, so an old figure stood at full brightness as fresh — and a first
   /// probe that timed out left it standing until the next deadline. The window
-  /// starts empty at the first fresh outcome; the figure still counts from the
-  /// carried number, because that is the number on the glass.
+  /// starts empty at the first fresh outcome ([KvLatencyReading.resumed]); the
+  /// figure still glides from the carried number, because that is the number
+  /// on the glass, and the carried minute stays drawn in the history, where
+  /// time places it honestly.
   void _fresh(KvLatencySample sample) {
     _refusals = 0;
+    _dark.value = false;
     final base = _latencyTakenAt.value == null
         ? _latency.value
-        : const KvLatencyReading.none();
-    _latency.value = base.offer(sample);
+        : _latency.value.resumed();
+    _latency.value = base.offer(sample, at: widget.clock());
     _latencyTakenAt.value = null;
     final endpoint = widget.scope.activeEndpoint.value;
     if (endpoint != null) {
@@ -706,6 +760,7 @@ class _NodeScreenState extends State<NodeScreen> {
   void _refused() {
     _refusals++;
     if (_refusals < refusalsBeforeDark) return;
+    _dark.value = true;
     _latency.value = const KvLatencyReading.none();
     _latencyTakenAt.value = null;
     _synced.value = null;
@@ -719,8 +774,10 @@ class _NodeScreenState extends State<NodeScreen> {
     try {
       final pulse = await read();
       if (!mounted) return;
-      final hz = _rate.offer(widget.clock(), pulse.ticks);
-      _scan.value = (have: true, secs: pulse.ageSecs, hz: hz);
+      final score = pulse.score;
+      final bps = score == null ? null : _rate.offer(widget.clock(), score);
+      _scan.value = (have: true, secs: pulse.ageSecs, bps: bps);
+      _average.value = widget.scope.paceAverage?.call();
     } catch (_) {
       // A failed pull leaves the last-known pulse standing; never crash the
       // screen a user opened to diagnose a link.
@@ -867,6 +924,24 @@ class _NodeScreenState extends State<NodeScreen> {
                     // every section break is the header row's own air, and
                     // nothing else is added between the cards.
                     _connectionPlate(),
+                    // **What the reading means, behind its own mark**
+                    // (LINK-UX1, BG-34): explanation only — the figure, the
+                    // path and the bars are all on the card itself.
+                    // **Concise, natural, exact** (the founder on glass,
+                    // 2026-09-28: the first cut was "too long"): one fact a
+                    // sentence, the numbers mono (§7.1), every claim the
+                    // instrument makes and nothing it does not.
+                    _Explainer(
+                      open: _replyInfo,
+                      figures: true,
+                      text:
+                          'Node reply is how long this node takes to answer, '
+                          'smoothed. Path, its best answer in the last 10 s, '
+                          'is mostly distance. The gap between '
+                          'them is queueing. Bars grade the last 10 s. The '
+                          'chart shows the last minute. In it, red marks a '
+                          'wait with no answer.',
+                    ),
                     // **`NODE`, with its circled-i** (founder on glass,
                     // 2026-09-05): the caps label sits at the card's upper
                     // left like `MY OWN NODE`, and the explainer — what a node
@@ -1128,21 +1203,29 @@ class _NodeScreenState extends State<NodeScreen> {
   ///
   /// The home's card (founder on glass, 2026-09-05): `plate`, radius 28, no
   /// border, the house 6 / 20 padding with a hairline between one reading and
-  /// the next, and nothing under the last row. Four regions, four listeners —
-  /// the instrument hears the probe and the link; the chain clock hears the
-  /// score, the link, the scan and the poll clock; the transport line hears
+  /// the next, and nothing under the last row.
+  ///
+  /// **The instrument is `T5`'s head, grown into two numbers and a minute of
+  /// history at no height** (LINK-UX1 — the founder's ruling in the sitting,
+  /// 2026-09-28, on the Recommended option: the screen fits his phone). The
+  /// caps label over the figure names what the figure is — **`NODE REPLY`**,
+  /// the render's `CONNECTION` renamed to the honest name of the number under
+  /// it (D-337: never "ping", never "network") — and carries the reading's
+  /// circled-i; **`PATH`** takes the seat on the right where the render drew
+  /// its tier word (D-332 retired the word); the history runs between the
+  /// figure and the staircase. Then `DAA`, and directly under it its own
+  /// `BPS` row (D-338 addendum). The `BPS` row is the one line of height
+  /// this sitting adds.
+  ///
+  /// Each region its own listener (the V4 seam law, `rebuild_scope_test`): a
+  /// probe rebuilds the caption and the instrument; the chain clock hears the
+  /// score and the link; the pace hears the pulse; the transport line hears
   /// the endpoint; the peers hear the probe.
   Widget _connectionPlate() {
     final s = widget.scope;
     // `T5`'s row labels are `inkMeta` (122,133,131), measured.
-    Widget row(
-      String label,
-      String text,
-      Widget value, {
-      InlineSpan? labelSpan,
-    }) => KvFactLine(
+    Widget row(String label, String text, Widget value) => KvFactLine(
       label: label,
-      labelSpan: labelSpan,
       dense: true,
       labelColor: KvColor.inkMeta,
       valueText: text,
@@ -1152,92 +1235,96 @@ class _NodeScreenState extends State<NodeScreen> {
       children: [
         Padding(
           padding: const EdgeInsets.only(top: KvSpace.xs, bottom: KvSpace.xs),
-          // **Two listeners, so a probe rebuilds only the instrument** (the V4
-          // seam law, `rebuild_scope_test`): the caption row hears whether a
-          // carried reading stands, the instrument hears the reading too.
           // **A latency reading belongs to a live socket, and only to one.**
           // A drop clears the seat ([_onLink]), and each gate here closes the
           // frame between the notifier and its listener.
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ListenableBuilder(
-                listenable: Listenable.merge([_latencyTakenAt, s.connected]),
-                builder: (context, _) {
-                  final carried = s.connected.value
-                      ? _latencyTakenAt.value
-                      : null;
-                  // A `Wrap`, not a `Row` (L160): at 320 dp / 1.3× the flex
-                  // broke `CONNECTION` mid-word. **No tier word here any
-                  // more** (D-332): the bars and their colour carry the
-                  // reading. The seat's only caption is the age of a reading
-                  // carried over from before the screen opened (D-333).
-                  return Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: KvSpace.s,
-                    runSpacing: KvSpace.xs,
-                    children: [
-                      const KvRuledLabel('Connection', tight: true),
-                      // Eased out on the house curve when the first fresh
-                      // answer lands, in step with the seat's own un-dimming
-                      // (BG-24) — never cut in one frame.
-                      AnimatedSwitcher(
-                        duration: MediaQuery.disableAnimationsOf(context)
-                            ? Duration.zero
-                            : KvMotion.calm,
-                        switchInCurve: KvMotion.curve,
-                        switchOutCurve: KvMotion.curve,
-                        child: carried == null
-                            ? const SizedBox.shrink(key: ValueKey('fresh'))
-                            : _CarriedAge(
-                                key: const ValueKey('carried'),
-                                since: carried,
-                                now: _now,
-                              ),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: KvSpace.s),
-              ListenableBuilder(
-                listenable: Listenable.merge([
-                  _latency,
-                  _latencyTakenAt,
-                  s.connected,
-                ]),
-                builder: (context, _) {
-                  final live = s.connected.value;
-                  final reading = live
-                      ? _latency.value
-                      : const KvLatencyReading.none();
-                  return KvLatency(
-                    milliseconds: reading.milliseconds,
-                    atLeast: reading.atLeast,
-                    tier: reading.tier,
-                    stale: live && _latencyTakenAt.value != null,
-                  );
-                },
-              ),
-            ],
+          child: _ReplyHead(
+            open: _replyInfo,
+            // The seat on the right: the age of a reading carried over from
+            // before the screen opened (D-333), or else the path. Eased on
+            // the house curve when the first fresh answer replaces the one
+            // with the other, in step with the seat's own un-dimming (BG-24).
+            trailing: ListenableBuilder(
+              listenable: Listenable.merge([
+                _latency,
+                _latencyTakenAt,
+                s.connected,
+                _now,
+              ]),
+              builder: (context, _) {
+                final live = s.connected.value;
+                final carried = live ? _latencyTakenAt.value : null;
+                return AnimatedSwitcher(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : KvMotion.calm,
+                  switchInCurve: KvMotion.curve,
+                  switchOutCurve: KvMotion.curve,
+                  child: carried != null
+                      ? _CarriedAge(
+                          key: const ValueKey('carried'),
+                          since: carried,
+                          now: _now,
+                        )
+                      : _PathReading(
+                          key: const ValueKey('path'),
+                          ms: live ? _printedPath(_latency.value) : null,
+                        ),
+                );
+              },
+            ),
+            instrument: ListenableBuilder(
+              listenable: Listenable.merge([
+                _latency,
+                _latencyTakenAt,
+                s.connected,
+                _dark,
+                _probeOutSince,
+                _now,
+              ]),
+              builder: (context, _) {
+                final live = s.connected.value;
+                final reading = live
+                    ? _latency.value
+                    : const KvLatencyReading.none();
+                final carried = live && _latencyTakenAt.value != null;
+                // *measuring…* only where a measurement is under way: a live
+                // socket, a probe seam wired, nothing answered on this node
+                // yet, and the dwell not run out (that face is `—`).
+                final measuring =
+                    live &&
+                    s.probeLink != null &&
+                    !_dark.value &&
+                    !carried &&
+                    reading.isEmpty;
+                final out = live ? _probeOutSince.value : null;
+                return KvLatency(
+                  milliseconds: reading.milliseconds,
+                  atLeast: reading.atLeast,
+                  tier: reading.tier,
+                  stale: carried,
+                  measuring: measuring,
+                  waitingSince: out,
+                  clock: widget.clock,
+                  path: live && !carried ? _printedPath(reading) : null,
+                  history: KvLatencyHistory(
+                    reading: reading,
+                    now: _now.value,
+                    waitingSince: out,
+                  ),
+                );
+              },
+            ),
           ),
         ),
         // BG-8, all three states. `ChainService` deliberately KEEPS the
         // last-known score when a dropped link emits nulls — which is only
         // honest if the screen dims it and says how old it is. **Streamed,
         // not stepped** (BG-18 / D-226). In a layer of its own: the count
-        // paints every frame of a crossing. **The link's pulse rides the
-        // label** (founder on glass, 2026-09-05; D-332): the beat as a live
-        // rate — `DAA · 10 Hz`, counted from real ticks, falling toward 0
-        // through a stall and bursting as the backlog lands — the tick age
-        // once the link has been quiet past the data's stale line, `syncing`
-        // when the node says so. **`N s since last block` stands** (D-332's
-        // ruled words): since LINK-Q1 the age is the DAA tick's (D-334), and a
-        // tick is the node's virtual moving because blocks landed — so the
-        // ruled words stay true at the user's level, where "tick" was jargon
-        // (`ux-auditor`). The rate's figure is mono and tabular (BG-30), so
-        // ` Hz` holds still while it moves; the age stays a word.
+        // paints every frame of a crossing. **`DAA` and nothing else on the
+        // left** (the founder, D-338 addendum: *"DAA remains DAA since to the
+        // right is actually the DAA reading"*) — the pace and every state it
+        // used to carry moved to the `BPS` row under it.
         RepaintBoundary(
           child: ListenableBuilder(
             listenable: Listenable.merge([
@@ -1247,74 +1334,24 @@ class _NodeScreenState extends State<NodeScreen> {
               _now,
               _synced,
               _scan,
-              if (s.searching != null) s.searching!,
-              if (s.reconnecting != null) s.reconnecting!,
-              if (s.osOffline != null) s.osOffline!,
             ]),
             builder: (context, _) {
               final connected = s.connected.value;
               final syncing = connected && _synced.value == false;
-              final scan = _scan.value;
-              final age = scan.secs;
-              // The DATA's stale line — the balance's clock, 5 s — decides
-              // when the label trades the rate for the age.
-              final quiet =
-                  connected &&
-                  scan.have &&
-                  age != null &&
-                  age > KvFreshness.staleAfter.inSeconds;
+              final age = _scan.value.secs;
               // The LAMP's line: live through a quiet spell of up to 15 s on
               // a bound socket (D-331(b)) — the same hold the money plate's
               // chip keeps, so the two surfaces never disagree about a link.
               final lampQuiet =
                   connected &&
-                  scan.have &&
+                  _scan.value.have &&
                   age != null &&
                   age >= KvFreshness.liveHoldBound.inSeconds;
-              // A live rate is the strongest claim on this screen (C7): it is
-              // withheld while the link is hunting or the phone is offline,
-              // exactly as the retired scan line withheld *live*.
-              final settledLink =
-                  connected &&
-                  !(s.searching?.value ?? false) &&
-                  !(s.reconnecting?.value ?? false) &&
-                  !(s.osOffline?.value ?? false);
-              // A hunting link prints the age it has rather than the claim it
-              // may not make.
-              final aged = scan.have && age != null && (quiet || !settledLink);
-              final hz = scan.hz;
-              // **The rate is a live reading and takes the counting face; an
-              // age inside a sentence is a word** — S1 sets its `Final · 2 h
-              // ago` in Jakarta (D-261), and the render outranks BG-30's list
-              // (D-259). So `7 s since last block` reads as the money plate's
-              // trust line does, and only `10` is mono (`ux-auditor`).
-              final rate = connected && !syncing && !aged && settledLink
-                  ? _rateFigure(hz)
-                  : null;
-              final label = !connected
-                  ? 'DAA'
-                  : syncing
-                  ? 'DAA · syncing'
-                  : aged
-                  ? 'DAA · ${formatAge(Duration(seconds: age))} since last block'
-                  : rate != null
-                  ? 'DAA · ${rate.trim()} Hz'
-                  : 'DAA';
-              final labelSpan = rate == null
-                  ? null
-                  : TextSpan(
-                      children: [
-                        const TextSpan(text: 'DAA · '),
-                        TextSpan(text: rate, style: _labelFigure),
-                        const TextSpan(text: ' Hz'),
-                      ],
-                    );
               return KvStreamingCount(
                 value: s.virtualDaaScore.value,
                 stalled: !connected,
                 builder: (context, shown) => row(
-                  label,
-                  labelSpan: labelSpan,
+                  'DAA',
                   // **The lamp and its gap are part of the value's width.**
                   // `KvFactLine` measures the STRING it is given, so a row
                   // whose value carries a mark has to say so or the row will
@@ -1336,6 +1373,96 @@ class _NodeScreenState extends State<NodeScreen> {
               );
             },
           ),
+        ),
+        // **`BPS · 10` on the left, the average on the right** (the founder
+        // on glass, 2026-09-28, D-342, reshaping the D-338 addendum's row: *"let
+        // BPS read like this 'BPS · 10' on the left of it, then on the right
+        // side, let it show an avg"*). The live pace — blocks a second from the
+        // DAA score's climb over three seconds ([KvBlockRate]) — rides the
+        // label as `DAA · 10 Hz` once did, its figure mono in a two-figure slot
+        // (BG-30), and with it the states that stand in its seat: `syncing`,
+        // `7 s since last block` past the data's stale line, bare `BPS` with no
+        // socket. The right side is the chain's average pace over up to the
+        // last hour ([NodeScope.paceAverage]): `12 m avg 10.0`, `1 h avg 10.0`,
+        // `—` until two minutes of it exist or with no socket.
+        ListenableBuilder(
+          listenable: Listenable.merge([
+            s.connected,
+            _synced,
+            _scan,
+            _average,
+            if (s.searching != null) s.searching!,
+            if (s.reconnecting != null) s.reconnecting!,
+            if (s.osOffline != null) s.osOffline!,
+          ]),
+          builder: (context, _) {
+            final connected = s.connected.value;
+            final syncing = connected && _synced.value == false;
+            final scan = _scan.value;
+            final age = scan.secs;
+            // The DATA's stale line — the balance's clock, 5 s — decides when
+            // the label trades the pace for the silence.
+            final quiet =
+                connected &&
+                scan.have &&
+                age != null &&
+                age > KvFreshness.staleAfter.inSeconds;
+            // A live pace is the strongest claim on this screen (C7): it is
+            // withheld while the link is hunting or the phone is offline,
+            // exactly as the retired scan line withheld *live*.
+            final settledLink =
+                connected &&
+                !(s.searching?.value ?? false) &&
+                !(s.reconnecting?.value ?? false) &&
+                !(s.osOffline?.value ?? false);
+            // A hunting link prints the age it has rather than the claim it
+            // may not make.
+            final aged = scan.have && age != null && (quiet || !settledLink);
+            final rate = _rateFigure(scan.bps);
+            // The label's second run, and how it is heard. **An age inside a
+            // sentence is a word** (BG-30's age clause, D-261): Jakarta, as the
+            // money plate's trust line sets it; only the pace is a figure.
+            final (String? words, String? figure, String spoken) = !connected
+                ? (null, null, 'Blocks per second')
+                : syncing
+                ? ('syncing', null, 'Blocks per second: the node is syncing')
+                : aged
+                ? (
+                    '${formatAge(Duration(seconds: age))} since last block',
+                    null,
+                    'Blocks per second: '
+                        '${formatAge(Duration(seconds: age))} since last block',
+                  )
+                : settledLink && rate != null
+                ? (null, rate, _spokenRate(rate))
+                : (null, null, 'Blocks per second');
+            // **The average is the chain's pace, so it keeps the pace's
+            // rules** (`ux-auditor`): nothing beside a dead link (BG-8), and
+            // nothing while the node syncs — a syncing node's climb is its
+            // catch-up speed, not the chain's.
+            final average = connected && !syncing ? _average.value : null;
+            final span = average == null ? null : formatAge(average.span);
+            final value = average == null
+                ? '—'
+                : '$span avg ${average.bps.toStringAsFixed(1).padLeft(4)}';
+            return KvFactLine(
+              label: spoken,
+              labelSpan: TextSpan(
+                children: [
+                  const TextSpan(text: 'BPS'),
+                  if (words != null) TextSpan(text: ' · $words'),
+                  if (figure != null) ...[
+                    const TextSpan(text: ' · '),
+                    TextSpan(text: figure, style: _labelFigure),
+                  ],
+                ],
+              ),
+              dense: true,
+              labelColor: KvColor.inkMeta,
+              valueText: value,
+              value: _PaceAverage(average: average, span: span, text: value),
+            );
+          },
         ),
         // **Read off the live endpoint, never asserted.** Whether the
         // transport is encrypted is a property of the URL the socket
@@ -1361,6 +1488,16 @@ class _NodeScreenState extends State<NodeScreen> {
     );
   }
 
+  /// **The path this screen prints and speaks** — one helper for both, so
+  /// the caption and the sentence a screen reader hears cannot disagree
+  /// (floored to its step, never above the figure: [KvLatencyReading
+  /// .printedPath]).
+  int? _printedPath(KvLatencyReading reading) => KvLatencyReading.printedPath(
+    reading.pathAt(_now.value),
+    figure: reading.milliseconds,
+    atLeast: reading.atLeast,
+  );
+
   /// `wRPC · borsh` plus `TLS` only where the bound socket actually has it.
   static String _transportLine(String? endpoint) {
     const base = 'wRPC · borsh';
@@ -1376,9 +1513,9 @@ class _NodeScreenState extends State<NodeScreen> {
   /// **`T5`'s own-node card**: the toggle row over its field and `Test`, in
   /// one card of the home's topography (founder on glass, 2026-09-05).
   ///
-  /// **The switch governs the field** (his second finding): off, the field and
-  /// `Test` are disabled and the field's hint says why; on, the field takes a
-  /// node and `Test` can dial it. **The commit is a standard pill** — `KvAction
+  /// **The switch governs the field** (his second finding, 2026-09-05; since
+  /// D-342 by folding it): off, the card is the toggle row alone; on, the
+  /// field eases in, takes a node, and `Test` can dial it. **The commit is a standard pill** — `KvAction
   /// .raised`, disabled with its reason until there is a change to commit,
   /// enabled when there is, pressed one step lighter — not an edge that lights
   /// (the pattern he asked to lose). The playbook allows no fourth kind of
@@ -1448,64 +1585,84 @@ class _NodeScreenState extends State<NodeScreen> {
                     words:
                         'The node you pinned was refused when the wallet started, '
                         'so you are back on public nodes. Your money is safe. '
-                        'Check the address below and set it again.',
+                        'Switch on Use my own node to set it again.',
                   ),
                 ],
-                const SizedBox(height: KvSpace.sm),
-                // **`T5`: the field with `Test` beside it** — measured, both
-                // 44 dp tall with a 10 dp gap, the pill in `chip`. Off, the
-                // field's hint is the reason it is disabled (BG-12).
-                Row(
-                  children: [
-                    Expanded(
-                      child: _UrlField(
-                        controller: _url,
-                        enabled: on && !_busy,
-                        // **The address shape, whether it is on or off**
-                        // (founder on glass, 2026-09-05): a hint that says what
-                        // to type teaches the form, where one saying the control
-                        // is off repeats what the toggle beside it already
-                        // shows. `wss://`, the scheme a public node speaks —
-                        // Rust takes either, and this is the one to encourage.
-                        hint: 'wss://host:port',
-                        onSubmitted: canApply ? () => _apply(typed) : null,
+                // **The field folds behind the switch** (the founder's ruling,
+                // 2026-09-28, D-342 — reversing D-275 item 2's disabled field
+                // under an off switch): off, the card is the toggle row alone;
+                // on, the field, `Test` and the commit ease in beneath it. A
+                // field that cannot be used is chrome the one-view screen could
+                // not afford on his phone (360 × 769 dp at 0.9 text), and
+                // switching it on is the deliberate act that asks for it. A
+                // refused pin is no exception: its notice names that act
+                // (`ux-auditor`: pointing at an empty, disabled field below
+                // asked for something the user could not do).
+                _Unfold(
+                  open: on,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: KvSpace.sm),
+                      // **`T5`: the field with `Test` beside it** — measured, both
+                      // 44 dp tall with a 10 dp gap, the pill in `chip`.
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _UrlField(
+                              controller: _url,
+                              enabled: on && !_busy,
+                              // **The address shape** (founder on glass,
+                              // 2026-09-05): a hint that says what to type teaches
+                              // the form. `wss://`, the scheme a public node speaks —
+                              // Rust takes either, and this is the one to encourage.
+                              hint: 'wss://host:port',
+                              onSubmitted: canApply
+                                  ? () => _apply(typed)
+                                  : null,
+                            ),
+                          ),
+                          if (s.testNode != null) ...[
+                            const SizedBox(width: KvSpace.s10),
+                            _ChipPill(
+                              label: test.busy ? 'Testing…' : 'Test',
+                              dim: !canTest,
+                              // Nothing to dial: no tap and no haptic.
+                              onTap: canTest
+                                  ? () => unawaited(_runTest())
+                                  : null,
+                            ),
+                          ],
+                        ],
                       ),
-                    ),
-                    if (s.testNode != null) ...[
-                      const SizedBox(width: KvSpace.s10),
-                      _ChipPill(
-                        label: test.busy ? 'Testing…' : 'Test',
-                        dim: !canTest,
-                        // Nothing to dial: no tap and no haptic.
-                        onTap: canTest ? () => unawaited(_runTest()) : null,
+                      if (test.answer case final answer?) ...[
+                        const SizedBox(height: KvSpace.s),
+                        _TestAnswer(answer),
+                      ],
+                      if (test.problem case final problem?) ...[
+                        const SizedBox(height: KvSpace.s),
+                        _Fault(problem),
+                      ],
+                      // The commit: disabled with its reason until there is a
+                      // change, enabled when there is (BG-12). **No `if (on)` of
+                      // its own** — the fold already gates on the switch, and a
+                      // second gate dropped the pill and its gap (~68 dp) in the
+                      // first frame of every close (`ux-auditor`, BG-24).
+                      const SizedBox(height: KvSpace.sm),
+                      KvAction.raised(
+                        label: 'Use this node',
+                        onTap: () => _apply(typed),
+                        disabledReason: _busy
+                            ? 'Setting the node…'
+                            : typed.isEmpty
+                            ? 'Type the address of your node first.'
+                            : !changed
+                            ? 'This is already the node you pinned.'
+                            : null,
                       ),
                     ],
-                  ],
-                ),
-                if (test.answer case final answer?) ...[
-                  const SizedBox(height: KvSpace.s),
-                  _TestAnswer(answer),
-                ],
-                if (test.problem case final problem?) ...[
-                  const SizedBox(height: KvSpace.s),
-                  _Fault(problem),
-                ],
-                // The commit, while the switch is on: disabled with its reason
-                // until there is a change, enabled when there is (BG-12).
-                if (on) ...[
-                  const SizedBox(height: KvSpace.sm),
-                  KvAction.raised(
-                    label: 'Use this node',
-                    onTap: () => _apply(typed),
-                    disabledReason: _busy
-                        ? 'Setting the node…'
-                        : typed.isEmpty
-                        ? 'Type the address of your node first.'
-                        : !changed
-                        ? 'This is already the node you pinned.'
-                        : null,
                   ),
-                ],
+                ),
                 if (_problem != null) ...[
                   const SizedBox(height: KvSpace.sm),
                   KvStatusChip(
@@ -1635,37 +1792,99 @@ class _NodeScreenState extends State<NodeScreen> {
   }
 }
 
-/// **A caps label with the founder's circled-i** (2026-09-05). The mark is
-/// `primaryMuted` while its explainer is open — *ours*, uncounted (playbook
-/// §5) — and `inkMeta` at rest; the target is 44 dp (BG-12's icon button
-/// target) around a 16 dp glyph.
+/// **A block that eases open AND shut beneath its trigger** — the own-node
+/// card's field (D-342) and every explainer on this screen. Closed it takes
+/// no room; it grows and fades in over `enter`, and on closing it keeps what
+/// it held while it shrinks and fades out, then lets it go (BG-24 in both
+/// directions — `ux-auditor`: an `AnimatedSize` around a swapped child grew
+/// smoothly and vanished in one frame, the field, `Test` and the commit all
+/// at once). The house curve both ways, flipped for closing so the motion
+/// still only decelerates (BG-9). Under reduced motion it simply appears and
+/// goes.
+class _Unfold extends StatefulWidget {
+  const _Unfold({required this.open, required this.child});
+
+  final bool open;
+  final Widget child;
+
+  @override
+  State<_Unfold> createState() => _UnfoldState();
+}
+
+class _UnfoldState extends State<_Unfold> with SingleTickerProviderStateMixin {
+  late final AnimationController _run = AnimationController(
+    vsync: this,
+    duration: KvMotion.enter,
+    value: widget.open ? 1 : 0,
+  )..addStatusListener(_onStatus);
+
+  late final Animation<double> _eased = CurvedAnimation(
+    parent: _run,
+    curve: KvMotion.curve,
+    reverseCurve: KvMotion.curve.flipped,
+  );
+
+  /// Shut and done: the child leaves the tree (a folded field holds nothing).
+  void _onStatus(AnimationStatus status) {
+    if (status == AnimationStatus.dismissed) setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(_Unfold old) {
+    super.didUpdateWidget(old);
+    if (widget.open == old.open) return;
+    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) {
+      _run.value = widget.open ? 1 : 0;
+      return;
+    }
+    widget.open ? _run.forward() : _run.reverse();
+  }
+
+  @override
+  void dispose() {
+    _run.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.open && _run.isDismissed) {
+      return const SizedBox(width: double.infinity);
+    }
+    return SizeTransition(
+      sizeFactor: _eased,
+      axisAlignment: -1,
+      child: FadeTransition(opacity: _eased, child: widget.child),
+    );
+  }
+}
+
 /// **An explainer that eases in beneath its card** (founder, 2026-09-05):
 /// closed it takes no room; open it pushes what follows down over `enter`
-/// and fades in — motion that accounts for where the text came from (BG-24).
+/// and fades in, and closing runs the same way back ([_Unfold]) — motion that
+/// accounts for where the text came from and where it went (BG-24).
 class _Explainer extends StatelessWidget {
-  const _Explainer({required this.open, required this.text});
+  const _Explainer({
+    required this.open,
+    required this.text,
+    this.figures = false,
+  });
 
   final ValueNotifier<bool> open;
   final String text;
 
+  /// Its numerals are figures (see [_TrustLabel.figures]).
+  final bool figures;
+
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<bool>(
     valueListenable: open,
-    builder: (context, on, _) => AnimatedSize(
-      duration: KvMotion.enter,
-      curve: KvMotion.curve,
-      alignment: Alignment.topCenter,
-      child: on
-          ? Padding(
-              padding: const EdgeInsets.only(top: KvSpace.sm),
-              child: AnimatedOpacity(
-                opacity: 1,
-                duration: KvMotion.enter,
-                curve: KvMotion.curve,
-                child: _TrustLabel(text),
-              ),
-            )
-          : const SizedBox(width: double.infinity),
+    builder: (context, on, _) => _Unfold(
+      open: on,
+      child: Padding(
+        padding: const EdgeInsets.only(top: KvSpace.sm),
+        child: _TrustLabel(text, figures: figures),
+      ),
     ),
   );
 }
@@ -2225,13 +2444,6 @@ const TextStyle _ageLine = TextStyle(
   color: KvColor.inkMeta,
 );
 
-/// A figure inside a row's label — mono and tabular (BG-30), everything else
-/// inherited from the label it sits in.
-const TextStyle _labelFigure = TextStyle(
-  fontFamily: KvFont.mono,
-  fontFeatures: [FontFeature.tabularFigures()],
-);
-
 /// **The age of a latency reading carried over from before the screen opened**
 /// (D-333) — the seat's one caption, where the tier word used to sit. BG-8's
 /// "a dimmed reading carries a visible age", in the card's own age-line style
@@ -2259,59 +2471,71 @@ class _CarriedAge extends StatelessWidget {
   );
 }
 
-/// **The rate's figure**: whole ticks a second in a two-figure slot — a
-/// monospace space holds the tens place, so ` Hz` does not step a digit's
-/// width as mainnet at rest reads 9 and 10 by turns — and `< 1` when ticks DID
-/// arrive but fewer than one a second on average: over three seconds a single
-/// tick rounds to 0, and `0` is the stall's face, which a tick is not (BG-20,
-/// `ux-auditor`). Null when there is no rate yet.
-String? _rateFigure(double? hz) {
-  if (hz == null) return null;
-  final whole = hz.round();
-  if (whole == 0 && hz > 0) return '< 1';
+/// **The pace's figure**: whole blocks a second in a two-figure slot — a
+/// monospace space holds the tens place, so the figure does not step a
+/// digit's width as mainnet at rest reads 9 and 10 by turns — and `< 1` when
+/// the score DID climb but by fewer than one block a second on average: over
+/// three seconds a single block rounds to 0, and `0` is the stall's face,
+/// which a block is not (BG-20, `ux-auditor`). Null when there is no pace yet.
+String? _rateFigure(double? bps) {
+  if (bps == null) return null;
+  final whole = bps.round();
+  if (whole == 0 && bps > 0) return '< 1';
   return '$whole'.padLeft(2);
 }
 
-/// **The link's beat as a rate** (D-332) — `DAA · 10 Hz`, from a monotonic
-/// tick count sampled on the screen's own clock. Pure, so the arithmetic is
-/// provable without a socket.
+/// The pace as a screen reader hears it — words, never a glyph (`< 1`).
+String _spokenRate(String figure) {
+  final f = figure.trim();
+  if (f == '< 1') return 'Fewer than one block per second';
+  if (f == '1') return '1 block per second';
+  return '$f blocks per second';
+}
+
+/// **The chain's pace** (D-338) — `BPS` `10`, blocks a second from the
+/// node's virtual DAA score sampled on the screen's own clock. Pure, so the
+/// arithmetic is provable without a socket.
 ///
-/// The count is Rust's (every DAA tick an installed socket delivered, counted
-/// before the bridge's 250 ms coalescer); the rate is ticks over the most
-/// recent **three seconds** of samples, in whole ticks a second. A stall shows
-/// as the rate falling toward 0 over those seconds; the recovery as the
-/// backlog landing, a burst past 10, then the beat again. The pin emits one
-/// tick per virtual resolve, batching whatever blocks arrived, so ~10 Hz is
-/// mainnet at rest and fewer is a busy node, not a fault.
+/// The score is Rust's freshest fold (read before the bridge's 250 ms
+/// coalescer), and it climbs by one per block the virtual merges inside the
+/// DAA window (verified at the pin — [NodeScope.tickPulse]); the pace is its
+/// climb over the most recent **three seconds** of samples, in whole blocks a
+/// second. A stall shows as the pace falling toward 0 over those seconds; the
+/// recovery as the backlog landing, a burst past 10, then the pace again.
+/// Until LINK-UX1 this counted `VirtualDaaScoreChanged` ticks and read a busy
+/// node as a slower chain; the score cannot, because it counts blocks.
 ///
 /// **Three seconds, whole numbers** (the founder on glass, 2026-09-27: "too
-/// busy"): on a weak link the ticks arrive in bursts, and over one second the
-/// rate leapt 6 → 12 → 19 twice a second while its tenths digit, which a
-/// one-second count of whole ticks cannot resolve, printed noise (`ux-auditor`,
-/// the same finding from the other side). Three seconds resolves a third of a
-/// tick a second, so the whole number is the honest precision. (For the
-/// screen's first three seconds the window is what has been sampled — the
-/// first rate spans one poll, half a second.)
-class KvTickRate {
+/// busy"): on a weak link the updates arrive in bursts, and over one second
+/// the figure leapt 6 → 12 → 19 twice a second while a tenths digit printed
+/// noise (`ux-auditor`, the same finding from the other side). Three seconds
+/// resolves a third of a block a second, so the whole number is the honest
+/// precision. (For the screen's first three seconds the window is what has
+/// been sampled — the first pace spans one poll, half a second.)
+///
+/// **Reset on a new node** ([_NodeScreenState._forgetNode]): another node's
+/// score is another count, a few blocks apart at any moment.
+class KvBlockRate {
   final List<(DateTime, int)> _samples = <(DateTime, int)>[];
 
-  /// The span a rate is taken over, once the samples reach back that far.
+  /// The span a pace is taken over, once the samples reach back that far.
   static const Duration window = Duration(seconds: 3);
 
-  /// Forget every sample — a rate must never average across a stretch the
-  /// screen was not watching.
+  /// Forget every sample — a pace must never average across a stretch the
+  /// screen was not watching, or across two nodes.
   void reset() => _samples.clear();
 
-  /// The rate after a sample of `ticks` taken `at`, in ticks per second, or
-  /// null until two samples exist.
-  double? offer(DateTime at, int ticks) {
+  /// The pace after a sample of the [score] taken [at], in blocks per second,
+  /// or null until two samples exist.
+  double? offer(DateTime at, int score) {
     if (_samples.isNotEmpty &&
-        (ticks < _samples.last.$2 || !at.isAfter(_samples.last.$1))) {
-      // A count that went backwards or a clock that did not advance is not a
-      // beat to measure — start again from here rather than print nonsense.
+        (score < _samples.last.$2 || !at.isAfter(_samples.last.$1))) {
+      // A score that went backwards (a virtual reorg) or a clock that did not
+      // advance is not a pace to measure — start again from here rather than
+      // print nonsense.
       _samples.clear();
     }
-    _samples.add((at, ticks));
+    _samples.add((at, score));
     // Keep exactly one sample at or past the window's edge, and every newer
     // one: the span is then the most recent window (a little more on a late
     // poll), never the whole time the screen has been open.
@@ -2321,10 +2545,283 @@ class KvTickRate {
       _samples.removeAt(0);
     }
     if (_samples.length < 2) return null;
-    final (from, fromTicks) = _samples.first;
+    final (from, fromScore) = _samples.first;
     final seconds = at.difference(from).inMicroseconds / 1e6;
-    return (ticks - fromTicks) / seconds;
+    return (score - fromScore) / seconds;
   }
+}
+
+/// A figure inside a row's label — mono and tabular (BG-30), everything else
+/// inherited from the label it sits in: `BPS · 10`'s pace (D-342).
+const TextStyle _labelFigure = TextStyle(
+  fontFamily: KvFont.mono,
+  fontFeatures: [FontFeature.tabularFigures()],
+);
+
+/// **The `BPS` row's right side: the chain's average pace** (D-342) — the span
+/// in words (`12 m avg`, Jakarta `inkDim`: an age inside a phrase is a word,
+/// BG-30) and the average as a figure (mono, tabular, `ink`), hard right on
+/// the card's one edge; `—` until two minutes of it exist. Heard as a
+/// sentence (§11).
+class _PaceAverage extends StatelessWidget {
+  const _PaceAverage({
+    required this.average,
+    required this.span,
+    required this.text,
+  });
+
+  final ({double bps, Duration span})? average;
+  final String? span;
+
+  /// What the row measures and prints (`12 m avg 10.0`, or `—`).
+  final String text;
+
+  static const TextStyle _figure = TextStyle(
+    fontFamily: KvFont.mono,
+    fontSize: _CardValue.figureSize,
+    height: 18 / _CardValue.figureSize,
+    color: KvColor.ink,
+    fontFeatures: [FontFeature.tabularFigures()],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final average = this.average;
+    if (average == null) return _CardValue(text);
+    // **A slot as wide as `10.0`** (BG-30's slot precedent, `ux-auditor`): an
+    // hour of mainnet averages 10 ± 0.07 and crosses 9.95 often, and without
+    // the slot every crossing would move the words beside it by a cell.
+    final figure = average.bps.toStringAsFixed(1).padLeft(4);
+    final over = average.span >= const Duration(hours: 1)
+        ? 'the last hour'
+        : 'the last ${average.span.inMinutes} minutes';
+    return Semantics(
+      label: 'Average over $over: ${figure.trim()} blocks per second',
+      excludeSemantics: true,
+      child: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: '$span avg ',
+              style: const TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: _CardValue.figureSize,
+                height: 18 / _CardValue.figureSize,
+                color: KvColor.inkDim,
+              ),
+            ),
+            TextSpan(text: figure, style: _figure),
+          ],
+        ),
+        maxLines: 1,
+        textAlign: TextAlign.right,
+      ),
+    );
+  }
+}
+
+/// **The path, in the seat on the caption's right** (LINK-UX1, D-337) — the
+/// best answer in the last ten seconds, where `T5` drew its tier word. Caps
+/// like the label it faces, the figure mono on the figure's display grid
+/// ([KvLatencyReading.quantize]) so the two numbers read in the same steps,
+/// `—` when nothing answered in the window (BG-5). Not heard from here: the
+/// instrument speaks it with the figure, as one sentence.
+///
+/// **What it is, stated honestly** (LINK-Q2 measured it, D-340 item 5): the
+/// best round trip to THIS node right now — not the phone's network. The
+/// public nodes sit behind Cloudflare, whose edge is 35–47 ms away on the
+/// founder's air; the rest of the floor is the edge-to-node leg, i.e. where
+/// the node is hosted.
+class _PathReading extends StatelessWidget {
+  const _PathReading({super.key, required this.ms});
+
+  final int? ms;
+
+  @override
+  Widget build(BuildContext context) {
+    final ms = this.ms;
+    return ExcludeSemantics(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          const KvRuledLabel('Path', tight: true),
+          const SizedBox(width: KvSpace.s),
+          // Already on its grid ([KvLatencyReading.printedPath]). **From a
+          // second up it is printed in seconds**, floored to a tenth: `1480`
+          // and its `ms` pushed the caption past the 320 dp / 1.3× floor and
+          // onto a second line (`ux-auditor`, measured 252.3 against 248).
+          Text(
+            ms == null
+                ? '—'
+                : ms >= 1000
+                ? KvLatency.seconds(ms)
+                : '$ms',
+            style: const TextStyle(
+              fontFamily: KvFont.mono,
+              fontSize: 13,
+              height: 16 / 13,
+              color: KvColor.ink,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
+          ),
+          if (ms != null) ...[
+            const SizedBox(width: KvSpace.xs),
+            Text(
+              ms >= 1000 ? 's' : 'ms',
+              style: TextStyle(
+                fontFamily: KvFont.ui,
+                fontSize: 12,
+                height: 16 / 12,
+                color: KvColor.inkMeta,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// **The instrument's head: its caption over its reading, and the caption is
+/// the reading's explainer** (LINK-UX1) — `NODE REPLY` with the circled-i,
+/// the house's mark for "there is more to read about this" (D-275), and the
+/// path or a carried reading's age in the seat on the right.
+///
+/// **A 52 dp target that adds no height** (BG-12). The caption line is 16 dp
+/// and the screen has none to spare (the founder's one-view bar, D-278), so
+/// the target is laid OVER the head rather than grown into it: the caption,
+/// the gap under it and the top of the reading below — a figure and a chart
+/// that take no touch of their own, so a thumb that lands on the number opens
+/// what the number means. The press tints the caption line, one step lighter
+/// (§9); the mark lights `primaryMuted` while its explainer is open, as the
+/// section headers' marks do. A screen reader meets one button, *About node
+/// reply*, toggled, and hears the reading as its own node.
+class _ReplyHead extends StatefulWidget {
+  const _ReplyHead({
+    required this.open,
+    required this.trailing,
+    required this.instrument,
+  });
+
+  final ValueNotifier<bool> open;
+  final Widget trailing;
+  final Widget instrument;
+
+  /// The caption's words — the figure's honest name (D-337).
+  static const String label = 'Node reply';
+
+  @override
+  State<_ReplyHead> createState() => _ReplyHeadState();
+}
+
+class _ReplyHeadState extends State<_ReplyHead> {
+  bool _down = false;
+
+  void _toggle() => widget.open.value = !widget.open.value;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+    valueListenable: widget.open,
+    builder: (context, open, _) => Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // A `Wrap`, not a `Row` (L160): at 320 dp / 1.3× the path drops
+            // to its own run rather than squeezing the caps label mid-word.
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: KvSpace.s,
+              runSpacing: KvSpace.xs,
+              children: [
+                // The press tints the words and their mark, and nothing
+                // else: the seat on the right sets `inkMeta` (the path's
+                // unit, a carried age), which is 4.30:1 on `chip` — under AA
+                // (BG-14, `ux-auditor`).
+                CustomPaint(
+                  painter: _PressTint(down: _down),
+                  child: ExcludeSemantics(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const KvRuledLabel(_ReplyHead.label, tight: true),
+                        const SizedBox(width: KvSpace.s),
+                        KvInfoMark(open: open),
+                      ],
+                    ),
+                  ),
+                ),
+                widget.trailing,
+              ],
+            ),
+            const SizedBox(height: KvSpace.s),
+            widget.instrument,
+          ],
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          top: 0,
+          height: KvSpace.touchTarget,
+          // **The control is the 52 dp overlay, and so is its semantics**
+          // (`KvSectionHeader`'s shape, L143): a screen reader meets one
+          // button, *About node reply*, toggled, whose rect is the target a
+          // thumb gets — not the 16 dp caption line under it. **`GestureDetector`,
+          // not `InkWell`** — the house rule (`KvRow`'s own note, D-277): this
+          // language has no ripple.
+          child: Semantics(
+            container: true,
+            button: true,
+            toggled: open,
+            label: KvSectionHeader.aboutLabel(_ReplyHead.label),
+            onTap: _toggle,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              excludeFromSemantics: true,
+              onTapDown: (_) => setState(() => _down = true),
+              onTapCancel: () => setState(() => _down = false),
+              onTapUp: (_) => setState(() => _down = false),
+              onTap: _toggle,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// The caption's pressed state — `chip` behind the words and their mark, the
+/// pill's radius, reaching 12 dp past their ends and 6 dp above and below so
+/// the words sit inside the tint rather than on its edge. Painted, not laid
+/// out: the press must not move a pixel of the card.
+class _PressTint extends CustomPainter {
+  const _PressTint({required this.down});
+
+  final bool down;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!down) return;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTRB(
+          -KvSpace.sm,
+          -KvSpace.xs - 2,
+          size.width + KvSpace.sm,
+          size.height + KvSpace.xs + 2,
+        ),
+        const Radius.circular(KvRadius.control),
+      ),
+      Paint()..color = KvColor.chip,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_PressTint old) => old.down != down;
 }
 
 /// A label and its reading. Mono and tabular on the value, because every value
@@ -2594,22 +3091,49 @@ class _UrlField extends StatelessWidget {
 /// service ("an explorer", "a node") is what D-192 refused — *a departure you
 /// cannot name is not one you consented to*.
 class _TrustLabel extends StatelessWidget {
-  const _TrustLabel(this.words);
+  const _TrustLabel(this.words, {this.figures = false});
 
   final String words;
 
-  @override
-  Widget build(BuildContext context) => Text(
-    words,
-    style: const TextStyle(
-      fontFamily: KvFont.ui,
-      fontSize: 12,
-      height: 17 / 12,
-      // Information is colourless (BG-7), and 6.08:1 on the ground clears AA
-      // for a paragraph a user is expected to actually read.
-      color: KvColor.inkMeta,
-    ),
+  /// **Set its numerals in mono** (BG-30, §7.1: a number is checked, not
+  /// read) — for an explanation that states thresholds, the reading's own
+  /// (`60 ms`, `10 seconds`). Off by default: the trust lines' ages are words
+  /// (BG-30's age clause), and a mono `7` inside *last update 7 s ago* would
+  /// break the rule the other way.
+  final bool figures;
+
+  static const TextStyle _style = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 12,
+    height: 17 / 12,
+    // Information is colourless (BG-7), and 5.12:1 on the ground (`inkMeta`
+    // on `abyss`, measured from the hexes — the 6.08 once written here was
+    // never measured, `ux-auditor`) clears AA for a paragraph a user is
+    // expected to actually read.
+    color: KvColor.inkMeta,
   );
+
+  @override
+  Widget build(BuildContext context) {
+    if (!figures) return Text(words, style: _style);
+    return Text.rich(
+      TextSpan(
+        style: _style,
+        children: [
+          for (final run in RegExp(r'\d+|\D+').allMatches(words))
+            TextSpan(
+              text: run[0],
+              style: run[0]!.contains(RegExp(r'\d'))
+                  ? const TextStyle(
+                      fontFamily: KvFont.mono,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    )
+                  : null,
+            ),
+        ],
+      ),
+    );
+  }
 }
 
 /// What a tested node answered — one sentence, its three figures in mono
@@ -2722,11 +3246,10 @@ class _NodeRow extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title, maxLines: 1, softWrap: false, style: titleStyle),
-            // **The host is an identifier and never truncates to nothing**
-            // (BG-15's reasoning, one layer over): it wraps to a second line
-            // rather than losing its tail. `T5` clips it with an ellipsis at
-            // the reference width; two lines at the floor is the honest
-            // version of the same picture.
+            // **The endpoint is an identifier and never truncates** (BG-15's
+            // reasoning, one layer over): whole, wrapping at its own `/`
+            // (D-342). `T5` clips it with an ellipsis; the founder ruled the
+            // whole address on glass.
             if (endpoint != null) _EndpointText(endpoint!),
           ],
         ),
@@ -2739,23 +3262,19 @@ class _NodeRow extends StatelessWidget {
   );
 }
 
-/// **The endpoint on one line, and a tap opens it** (founder on glass,
-/// 2026-09-05: *"20% smaller so the whole text can show in one line, but if
-/// it breaks the link should be minimized with a '…' continuation that
-/// maximizes if user taps"*). 11 dp mono — 20 % under the row's 13, landing
-/// on BG-14's floor — so all but the longest addresses stand whole.
+/// **The endpoint, whole, always** (the founder on glass, 2026-09-28, D-342:
+/// *"i want 'Connected to' to always show full link of the wss thingy and no
+/// compacting it with '…' in between anymore"*). It wraps at the URL's own
+/// break points (after each `/`) under the title, beside the disc — the
+/// resolver's endpoints carry a path (`wss://nina.kaspa.blue/kaspa/mainnet/
+/// wrpc/borsh`), and folded to one line with a middle ellipsis the card read
+/// as empty space around a fragment. It supersedes his 2026-09-05 ruling
+/// (fold to one line, tap to open), and with it the fold's 52 dp target and
+/// its width measurement: plain text takes no target and measures nothing.
 ///
-/// **Where it will not fit, the MIDDLE goes** (BG-15's reasoning, the same
-/// one `KvAddress` follows): a tail ellipsis eats `:17110` and the
-/// distinguishing subdomain, which is the half that tells two nodes apart.
-/// The split is measured against the width actually given, never guessed.
-///
-/// **And only then is it a control** — a folded line is a 52 dp target
-/// (BG-12; `KvExplorerExit`'s own 34 dp scar is why this is not left at the
-/// line's 16), with its own semantics node; a line that fits is plain text
-/// and takes no target at all, which is what keeps the card compact in the
-/// ordinary case.
-class _EndpointText extends StatefulWidget {
+/// 11 dp mono in `inkDim`, BG-14's floor, as before; an identifier never
+/// truncates (BG-15's reasoning).
+class _EndpointText extends StatelessWidget {
   const _EndpointText(this.endpoint);
 
   final String endpoint;
@@ -2768,91 +3287,7 @@ class _EndpointText extends StatefulWidget {
   );
 
   @override
-  State<_EndpointText> createState() => _EndpointTextState();
-}
-
-class _EndpointTextState extends State<_EndpointText> {
-  bool _open = false;
-
-  /// The widest head…tail that fits [width], or null when the whole string
-  /// does. Measured with the same painter that lays the line out.
-  static String? _folded(String text, double width, TextScaler scaler) {
-    double widthOf(String s) {
-      final p = TextPainter(
-        text: TextSpan(text: s, style: _EndpointText.style),
-        textDirection: TextDirection.ltr,
-        textScaler: scaler,
-      )..layout();
-      final w = p.width;
-      p.dispose();
-      return w;
-    }
-
-    if (widthOf(text) <= width) return null;
-    // Keep the tail — the port and the distinguishing label — and give the
-    // head whatever is left. A binary search, so the measurement runs a
-    // handful of times rather than once per character.
-    var lo = 0;
-    var hi = text.length;
-    var best = '…${text.substring(text.length - 1)}';
-    while (lo <= hi) {
-      final keep = (lo + hi) ~/ 2;
-      if (keep * 2 >= text.length) {
-        hi = keep - 1;
-        continue;
-      }
-      final candidate =
-          '${text.substring(0, keep)}…${text.substring(text.length - keep)}';
-      if (widthOf(candidate) <= width) {
-        best = candidate;
-        lo = keep + 1;
-      } else {
-        hi = keep - 1;
-      }
-    }
-    return best;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scaler = MediaQuery.textScalerOf(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final folded = _folded(widget.endpoint, constraints.maxWidth, scaler);
-        if (folded == null) {
-          return Text(widget.endpoint, maxLines: 1, style: _EndpointText.style);
-        }
-        final text = Text(
-          _open ? widget.endpoint : folded,
-          maxLines: _open ? null : 1,
-          style: _EndpointText.style,
-        );
-        return Semantics(
-          container: true,
-          button: true,
-          expanded: _open,
-          label: _open ? 'Fold the address' : 'Show the whole address',
-          child: ExcludeSemantics(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => setState(() => _open = !_open),
-              child: AnimatedSize(
-                duration: KvMotion.fast,
-                curve: KvMotion.curve,
-                alignment: Alignment.topLeft,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    minHeight: KvSpace.touchTarget,
-                  ),
-                  child: Align(alignment: Alignment.centerLeft, child: text),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
+  Widget build(BuildContext context) => Text(endpoint, style: style);
 }
 
 /// The node row's disc: `T5`'s 40 dp tint disc with the `network` glyph, in

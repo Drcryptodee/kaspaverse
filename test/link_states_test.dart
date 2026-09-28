@@ -10,6 +10,7 @@ import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_fact_line.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
 import 'support/maturity.dart';
@@ -37,7 +38,7 @@ void main() {
     ValueListenable<bool>? osOffline,
     ValueListenable<bool>? reconnecting,
     Future<void> Function()? onReconnect,
-    Future<({int? ageSecs, int ticks})> Function()? tickPulse,
+    Future<({int? ageSecs, int? score})> Function()? tickPulse,
   }) => NodeScope(
     connected: connected,
     activeEndpoint: ValueNotifier<String?>('wss://nora.kaspa.stream/borsh'),
@@ -625,7 +626,7 @@ void main() {
       required bool searching,
       required DateTime now,
       required Duration since,
-      required Future<({int? ageSecs, int ticks})> Function()? pulse,
+      required Future<({int? ageSecs, int? score})> Function()? pulse,
       // Fixed by default; a test about a RATE passes the fake-async clock.
       DateTime Function()? clock,
     }) async {
@@ -663,13 +664,13 @@ void main() {
         searching: false,
         now: now,
         since: Duration.zero,
-        pulse: () async => (ageSecs: null, ticks: 0),
+        pulse: () async => (ageSecs: null, score: null),
       );
-      // Up, and nothing measured yet: the bare label, never a rate nobody
-      // counted. `DAA · streaming` is gone for good (D-332) — the line claims
-      // a MEASURED beat or nothing.
+      // Up, and nothing measured yet: a dash, never a pace nobody counted.
+      // `DAA · streaming` is gone for good (D-332) and the pace has its own
+      // row since D-338 — it claims a MEASURED pace or nothing.
       expect(find.text('DAA'), findsOneWidget);
-      expect(find.textContaining(' Hz'), findsNothing);
+      expect(_paceShows('BPS'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -680,7 +681,7 @@ void main() {
       // the degraded branch, and a line that only ever renders its fallback
       // passes a suite while being wrong on every screen.
       final now = DateTime(2026, 7, 30, 0, 53);
-      var ticks = 0;
+      var score = 526633447;
       await pumpNode(
         tester,
         connected: true,
@@ -688,15 +689,15 @@ void main() {
         now: now,
         since: Duration.zero,
         pulse: () async {
-          ticks += 5;
-          return (ageSecs: 0, ticks: ticks);
+          score += 5;
+          return (ageSecs: 0, score: score);
         },
         clock: () => tester.binding.clock.now(),
       );
       await tester.pump();
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      expect(find.text('DAA · 10 Hz'), findsOneWidget);
+      expect(_paceShows('BPS · 10'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -710,11 +711,11 @@ void main() {
         searching: false,
         now: now,
         since: Duration.zero,
-        pulse: () async => (ageSecs: 42, ticks: 7),
+        pulse: () async => (ageSecs: 42, score: 7),
       );
       await tester.pump();
-      expect(find.text('DAA · 42\u00A0s since last block'), findsOneWidget);
-      expect(find.textContaining(' Hz'), findsNothing);
+      expect(_paceShows('BPS · 42\u00A0s since last block'), findsOneWidget);
+      expect(find.text('DAA'), findsOneWidget, reason: 'DAA stays DAA');
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -726,13 +727,13 @@ void main() {
         searching: true,
         now: now,
         since: const Duration(seconds: 20),
-        pulse: () async => (ageSecs: null, ticks: 0),
+        pulse: () async => (ageSecs: null, score: null),
       );
       // The link decides whether the line may claim a beat; the age only
       // refines the claim. Otherwise a poll could read a live rate beside a
       // status chip saying the opposite.
       expect(find.text('DAA'), findsOneWidget);
-      expect(find.textContaining(' Hz'), findsNothing);
+      expect(_paceShows('BPS'), findsOneWidget);
       expect(find.text('Searching…'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
@@ -751,11 +752,10 @@ void main() {
         searching: true,
         now: now,
         since: Duration.zero,
-        pulse: () async => (ageSecs: 1, ticks: 3),
+        pulse: () async => (ageSecs: 1, score: 3),
       );
       await tester.pump();
-      expect(find.textContaining(' Hz'), findsNothing);
-      expect(find.text('DAA · 1\u00A0s since last block'), findsOneWidget);
+      expect(_paceShows('BPS · 1\u00A0s since last block'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -772,8 +772,15 @@ void main() {
       await tester.pump();
       expect(find.text('Transport scan'), findsNothing);
       expect(find.textContaining('since last'), findsNothing);
-      expect(find.textContaining(' Hz'), findsNothing);
+      expect(_paceShows('BPS'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
   });
 }
+
+/// The `BPS` row, when its label reads [label] — since D-342 the live pace and
+/// every state it carries ride the label (`BPS · 10`, `BPS · 42 s since last
+/// block`, bare `BPS`), never `DAA`'s.
+Finder _paceShows(String label) => find.byWidgetPredicate(
+  (w) => w is KvFactLine && w.labelSpan?.toPlainText() == label,
+);

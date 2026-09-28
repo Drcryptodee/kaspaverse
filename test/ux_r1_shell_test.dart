@@ -103,17 +103,16 @@ void main() {
               'width',
         ),
         'lib/src/ui/node/node_screen.dart': (
-          6,
+          4,
           'the node row measures the space it was GIVEN to decide whether '
               'the `Switch node` pill can stand beside the title without breaking '
               'a word, and stacks it under the sentence when it cannot — '
               '`KvFactLine`\'s stack-when-tight, a legibility floor found in the '
               '320 dp / 1.3× frame, never a layout chosen from a width (UX-R3, '
-              'second beat). It reads the width TWICE since D-277: the second is '
-              '`_EndpointText`, which measures the box it was handed to decide '
-              'where the endpoint\'s middle ellipsis falls — a text measurement, '
-              'not a window class, and the allowance is file-granular so the '
-              'reason has to name both',
+              'second beat); and a SOURCES row caps its host at half the box it '
+              'was handed, so a long host cannot push the title out. '
+              '`_EndpointText` no longer measures anything since D-342 (the '
+              'endpoint is always whole), which took this file from 6 to 4',
         ),
         'lib/src/ui/settings/wallet_screen.dart': (
           1,

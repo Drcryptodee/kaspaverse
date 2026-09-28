@@ -8,6 +8,7 @@ import '../rust/api/error.dart';
 import '../rust/api/wallet.dart' show uiMark;
 import '../ui/theme/tokens.dart' show KvFreshness;
 import '../ui/widgets/status_beacon.dart';
+import 'pace_log.dart';
 
 /// Owns the app's single subscription to the bridge DAG stream.
 ///
@@ -42,6 +43,11 @@ class ChainService with WidgetsBindingObserver {
   /// button passes false (bouncing a healthy node must never demote it).
   @visibleForTesting
   static Future<DagStatusDto> Function() statusFn = dagStatus;
+
+  /// The clock a fresh score is stamped on — [lastUpdate] and [paceLog] —
+  /// so a test can drive an hour of chain without waiting one.
+  @visibleForTesting
+  static DateTime Function() clock = DateTime.now;
   @visibleForTesting
   static Future<void> Function(bool stalled) reconnectFn = (stalled) =>
       dagReconnect(stalled: stalled);
@@ -132,6 +138,12 @@ class ChainService with WidgetsBindingObserver {
   /// Scores stay [BigInt] end-to-end — they exceed 2^53 (L3); format only
   /// at render.
   final ValueNotifier<BigInt?> virtualDaaScore = ValueNotifier(null);
+
+  /// **The chain's average pace over up to the last hour** (D-342) — one
+  /// sample every ten seconds of the score this service already receives,
+  /// read by the Network screen's `BPS` row. No fetch, no timer: it rides
+  /// [_apply].
+  final KvPaceLog paceLog = KvPaceLog();
   final ValueNotifier<BigInt?> sinkBlueScore = ValueNotifier(null);
 
   /// Last bridge error message, null while healthy.
@@ -559,8 +571,16 @@ class ChainService with WidgetsBindingObserver {
     // re-stating the last score lets age grow — see [lastUpdate].
     final score = snapshot.virtualDaaScore;
     if (snapshot.connected && score != null && score != _lastScore) {
-      lastUpdate.value = DateTime.now();
+      final now = clock();
+      lastUpdate.value = now;
       awaitingScore.value = false;
+      // **Only a fresh score is a point on the chain's clock** — the average
+      // pace needs nothing else (the score counts every block whether or not
+      // a snapshot carried it). A reconnect re-states the last score on a
+      // connected snapshot (see [lastUpdate]); stamped "now", that old score
+      // would read the chain as having climbed faster since, by every block
+      // of the drop (found on glass, LINK-UX1).
+      paceLog.record(now, score.toInt());
     }
     if (score != null) _lastScore = score;
     error.value = null;
@@ -583,6 +603,7 @@ class ChainService with WidgetsBindingObserver {
     _markedLamp = null;
     _markedData = null;
     _lastScore = null;
+    paceLog.reset();
     awaitingScore.value = false;
     onWalletQuiet = null;
     walletLastApply = null;

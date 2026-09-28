@@ -13,6 +13,8 @@ import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_fact_line.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
@@ -116,6 +118,13 @@ class _FakeSeam {
     peerAsks.add(peers);
     if (gate case final held?) await held.future;
     if (probeThrows) throw StateError('the node went away');
+    // **Rust refuses a probe with no socket** — `DagMonitor::probe_link`
+    // (`dag_monitor.rs`) answers the typed no-socket error at once, both
+    // fields empty, which the screen counts as a refusal — so the fake does
+    // too: a fake that answered while dark let a poll during a drop's fade
+    // land a reading on the node the drop had just forgotten, a failure the
+    // real seam cannot produce.
+    if (!connected.value) throw StateError('no socket');
     return (
       latencyMs: latencyMs,
       timedOutMs: timedOutMs,
@@ -140,7 +149,8 @@ class _FakeSeam {
   }
 
   NodeScope scopeWith({
-    Future<({int? ageSecs, int ticks})> Function()? tickPulse,
+    Future<({int? ageSecs, int? score})> Function()? tickPulse,
+    ({double bps, Duration span})? Function()? paceAverage,
     bool withProbe = false,
     bool withTest = false,
   }) => NodeScope(
@@ -157,6 +167,7 @@ class _FakeSeam {
     lastUpdate: lastUpdate,
     refreshConfig: refresh,
     tickPulse: tickPulse,
+    paceAverage: paceAverage,
     probeLink: withProbe ? probe : null,
     testNode: withTest ? testNode : null,
   );
@@ -504,7 +515,8 @@ Future<void> _pumpScreen(
   _FakeSeam seam, {
   _FakeExplorer? explorer,
   _FakeRate? rate,
-  Future<({int? ageSecs, int ticks})> Function()? pulse,
+  Future<({int? ageSecs, int? score})> Function()? pulse,
+  ({double bps, Duration span})? Function()? paceAverage,
   bool withProbe = false,
   bool withTest = false,
   // `T5`'s SOURCES rows open their controls in a sheet; a test about one
@@ -552,6 +564,7 @@ Future<void> _pumpScreen(
         home: NodeScreen(
           scope: seam.scopeWith(
             tickPulse: pulse,
+            paceAverage: paceAverage,
             withProbe: withProbe,
             withTest: withTest,
           ),
@@ -640,19 +653,27 @@ void main() {
         await tester.pump();
 
         // The render's own reading: 151 ms, three amber bars — the `< 300`
-        // band exactly. **No `Slow`** since D-332: the bars and their colour
+        // band exactly — printed on the display grid (10 ms steps above 100,
+        // LINK-UX1: a single millisecond there is precision the probe does
+        // not have). **No `Slow`** since D-332: the bars and their colour
         // carry the tier; the word is spoken, not drawn.
-        expect(find.text('151'), findsOneWidget);
-        expect(find.text('ms'), findsOneWidget);
+        expect(_seat('150'), findsOneWidget);
+        expect(find.text('ms'), findsWidgets);
         expect(find.text('Slow'), findsNothing);
+        // **Two numbers** (D-337): the caption names the figure for what it
+        // is, and the path sits in the seat on its right.
+        expect(find.text('NODE REPLY'), findsOneWidget);
+        expect(find.text('CONNECTION'), findsNothing);
+        expect(find.text('PATH'), findsOneWidget);
+        expect(find.byType(KvLatencyHistory), findsOneWidget);
         final handle = tester.ensureSemantics();
         await tester.pump();
-        // The card's row merges its semantics, so a reader hears the caps
-        // label and the reading as one node — the reading, word included, is
-        // inside it.
+        // One sentence for the instrument: the reading, its word and the path.
         expect(
           find.bySemanticsLabel(
-            RegExp(r'Connection latency 151 milliseconds\. Slow\.'),
+            RegExp(
+              r'Node reply 150 milliseconds\. Slow\. Path 150 milliseconds\.',
+            ),
           ),
           findsOneWidget,
         );
@@ -674,7 +695,7 @@ void main() {
           await _pumpScreen(tester, seam, withProbe: true, settle: false);
           await tester.pump();
           await tester.pump();
-          expect(find.text('120'), findsOneWidget);
+          expect(_seat('120'), findsOneWidget);
 
           // Two probes outlast the socket's deadline: a slow, live link.
           seam
@@ -686,7 +707,7 @@ void main() {
           }
           expect(find.text('> 1.8'), findsOneWidget);
           expect(find.text('s'), findsOneWidget);
-          expect(find.text('—'), findsNothing, reason: 'never drawn dark');
+          expect(_seat('—'), findsNothing, reason: 'never drawn dark');
           await tester.pumpWidget(const SizedBox());
         },
       );
@@ -700,22 +721,33 @@ void main() {
           await _pumpScreen(tester, seam, withProbe: true, settle: false);
           await tester.pump();
           await tester.pump();
-          expect(find.text('42'), findsOneWidget);
+          expect(_seat('42'), findsOneWidget);
 
           seam.probeThrows = true;
           for (var refused = 1; refused < 3; refused++) {
             await tester.pump(NodeScreen.pollEvery);
             await tester.pump();
             expect(
-              find.text('42'),
+              _seat('42'),
               findsOneWidget,
               reason: 'refusal $refused of 3: the reading stands',
             );
           }
           await tester.pump(NodeScreen.pollEvery);
           await tester.pump();
-          expect(find.text('42'), findsNothing, reason: 'the third goes dark');
-          expect(find.text('—'), findsNWidgets(2));
+          // The figure leaves over the house's fade (BG-24) — it is going,
+          // not standing beside the dark; the spoken label changes at once.
+          await tester.pump(const Duration(milliseconds: 16));
+          await tester.pump(KvMotion.calm);
+          expect(_seat('42'), findsNothing, reason: 'the third goes dark');
+          expect(
+            find.text('—'),
+            findsNWidgets(4),
+            reason:
+                'the figure, the path, the pace (no pulse wired here) and '
+                'the peers — and the figure is the dash, not *measuring…*',
+          );
+          expect(find.text('measuring…'), findsNothing);
           expect(find.text('9'), findsNothing, reason: 'the peer count too');
 
           // The link answers again: the count dashed by the dwell is owed, so
@@ -740,11 +772,13 @@ void main() {
         await _pumpScreen(tester, seam, withProbe: true, settle: false);
         await tester.pump();
         await tester.pump();
-        expect(find.text('42'), findsOneWidget);
+        expect(_seat('42'), findsOneWidget);
 
         seam.connected.value = false;
         await tester.pump();
-        expect(find.text('42'), findsNothing);
+        await tester.pump(const Duration(milliseconds: 16));
+        await tester.pump(KvMotion.calm);
+        expect(_seat('42'), findsNothing, reason: 'faded out with the socket');
         expect(find.text('—'), findsWidgets);
 
         // …and the reading does not come back with the next socket: it
@@ -754,7 +788,7 @@ void main() {
           ..probeThrows = true;
         seam.connected.value = true;
         await tester.pump();
-        expect(find.text('42'), findsNothing);
+        expect(_seat('42'), findsNothing);
         await tester.pumpWidget(const SizedBox());
       });
 
@@ -766,7 +800,7 @@ void main() {
           await _pumpScreen(tester, seam, withProbe: true, settle: false);
           await tester.pump();
           await tester.pump();
-          expect(find.text('90'), findsOneWidget);
+          expect(_seat('90'), findsOneWidget);
           await tester.pumpWidget(const SizedBox());
 
           // Reopen without the memory wipe the harness does: the probe will
@@ -789,15 +823,12 @@ void main() {
           );
           await tester.pump();
           expect(
-            find.text('90'),
+            _seat('90'),
             findsOneWidget,
             reason: 'shown at once, not a dash',
           );
           expect(find.text('as of 20\u00A0s ago'), findsOneWidget);
-          expect(
-            _seatDim(tester, find.text('90')),
-            KvFreshness.opacityStaleRegion,
-          );
+          expect(_seatDim(tester, _seat('90')), KvFreshness.opacityStaleRegion);
 
           // The first fresh answer: it counts, and the age and the dim leave
           // together over the house's calm step — eased, never cut (BG-24).
@@ -819,9 +850,9 @@ void main() {
             reason: 'the age eases out with the dim; it is not cut',
           );
           await tester.pump(const Duration(seconds: 1));
-          expect(find.text('130'), findsOneWidget);
+          expect(_seat('130'), findsOneWidget);
           expect(find.text('as of 20\u00A0s ago'), findsNothing);
-          expect(_seatDim(tester, find.text('130')), 1.0);
+          expect(_seatDim(tester, _seat('130')), 1.0);
           await tester.pumpWidget(const SizedBox());
         },
       );
@@ -830,14 +861,24 @@ void main() {
         'a carried reading is where the count starts, never a sample — the '
         'first fresh outcome stands alone, a timeout included (ux-auditor)',
         (tester) async {
-          // A remembered median of three: [40, 42, 45] reads 42. Merged with
-          // the first fresh outcome, the window's median would be 45 either
-          // way — an old figure at full brightness, as if fresh.
-          final memory = const KvLatencyReading.none()
-              .offer(const KvLatencySample.answered(40))
-              .offer(const KvLatencySample.answered(42))
-              .offer(const KvLatencySample.answered(45));
+          // A remembered reading of [40, 42, 45]. Merged with the first fresh
+          // outcome, the window's median would be 45 either way — an old
+          // figure at full brightness, as if fresh.
           final at = DateTime(2026, 8, 27, 12, 0, 20);
+          final memory = const KvLatencyReading.none()
+              .offer(
+                const KvLatencySample.answered(40),
+                at: at.subtract(const Duration(seconds: 21)),
+              )
+              .offer(
+                const KvLatencySample.answered(42),
+                at: at.subtract(const Duration(milliseconds: 20500)),
+              )
+              .offer(
+                const KvLatencySample.answered(45),
+                at: at.subtract(const Duration(seconds: 20)),
+              );
+          final carried = '${memory.milliseconds}';
           for (final (latencyMs, timedOutMs, shows) in const [
             (300, null, '300'),
             (null, 1800, '> 1.8'),
@@ -850,7 +891,7 @@ void main() {
             );
             await _reopen(tester, seam, at: at);
             await tester.pump();
-            expect(find.text('42'), findsOneWidget, reason: 'carried, at once');
+            expect(_seat(carried), findsOneWidget, reason: 'carried, at once');
             expect(find.text('as of 20\u00A0s ago'), findsOneWidget);
 
             seam
@@ -860,10 +901,10 @@ void main() {
             await tester.pump(NodeScreen.pollEvery);
             await tester.pump();
             await tester.pump(const Duration(seconds: 1));
-            expect(find.text(shows), findsOneWidget);
+            expect(_seat(shows), findsOneWidget);
             expect(find.text('45'), findsNothing);
             expect(find.text('as of 20\u00A0s ago'), findsNothing);
-            expect(_seatDim(tester, find.text(shows)), 1.0);
+            expect(_seatDim(tester, _seat(shows)), 1.0);
             await tester.pumpWidget(const SizedBox());
           }
         },
@@ -917,7 +958,10 @@ void main() {
           await tester.pump();
           await tester.pump();
           expect(find.text('9'), findsOneWidget);
-          expect(find.text('DAA · syncing'), findsOneWidget);
+          // The node's word on its sync lives in the `BPS` row's value since
+          // the D-338 addendum; `DAA` stays `DAA`.
+          expect(find.text('BPS · syncing'), findsOneWidget);
+          expect(find.text('DAA'), findsOneWidget);
 
           // A drop, and the link comes back on the SAME endpoint — so only
           // the drop can clear what the socket that died measured. Its probes
@@ -939,7 +983,7 @@ void main() {
             findsNothing,
             reason: 'measured on the socket that died',
           );
-          expect(find.text('DAA · syncing'), findsNothing);
+          expect(find.text('BPS · syncing'), findsNothing);
           await tester.pumpWidget(const SizedBox());
 
           // And a swap the stream coalesced into one snapshot — a new node
@@ -950,18 +994,16 @@ void main() {
           await _pumpScreen(tester, swap, withProbe: true, settle: false);
           await tester.pump();
           await tester.pump();
-          expect(find.text('42'), findsOneWidget);
+          expect(_seat('42'), findsOneWidget);
           swap
             ..latencyMs = null
             ..timedOutMs = 1800
             ..peers = null;
           swap.activeEndpoint.value = 'wss://next.kaspa.example:17110';
           await tester.pump();
-          expect(
-            find.text('42'),
-            findsNothing,
-            reason: "the old node's reading",
-          );
+          await tester.pump(const Duration(milliseconds: 16));
+          await tester.pump(KvMotion.calm);
+          expect(_seat('42'), findsNothing, reason: "the old node's reading");
           expect(find.text('9'), findsNothing);
           await tester.pumpWidget(const SizedBox());
         },
@@ -984,11 +1026,7 @@ void main() {
           seam.gate!.complete();
           await tester.pump();
           await tester.pump();
-          expect(
-            find.text('42'),
-            findsNothing,
-            reason: "the old node's answer",
-          );
+          expect(_seat('42'), findsNothing, reason: "the old node's answer");
           expect(find.text('9'), findsNothing);
 
           // The next probe asks for the peers at once — not ten seconds on.
@@ -1052,8 +1090,15 @@ void main() {
         expect(find.text('0'), findsNothing);
         expect(
           find.text('—'),
-          findsNWidgets(2),
-          reason: 'the latency figure and the peer count, both absent',
+          findsNWidgets(4),
+          reason:
+              'the figure, the path, the pace and the peer count, all '
+              'absent',
+        );
+        expect(
+          find.text('measuring…'),
+          findsNothing,
+          reason: 'nothing is being measured with no probe wired',
         );
       });
 
@@ -1207,12 +1252,13 @@ void main() {
       final seam = _FakeSeam();
       seam.daa.value = null;
       await _pumpScreen(tester, seam);
-      // **Three readings, three dashes, and that is the point.** `T5`'s
-      // connection card carries the DAA, the latency and the peer count, and a
-      // fixture with no probe seam has none of them — every one renders BG-8's
-      // dash rather than a fabricated zero. The count is asserted so a future
-      // reading that quietly defaults to `0` shows up here.
-      expect(find.text('—'), findsNWidgets(3));
+      // **Five readings, five dashes, and that is the point.** `T5`'s
+      // connection card carries the DAA, the latency, the path, the pace and
+      // the peer count (LINK-UX1 added the path and the pace), and a fixture
+      // with no probe or pulse seam has none of them — every one renders
+      // BG-8's dash rather than a fabricated zero. The count is asserted so a
+      // future reading that quietly defaults to `0` shows up here.
+      expect(find.text('—'), findsNWidgets(5));
       expect(find.text('0'), findsNothing);
     });
 
@@ -1221,19 +1267,20 @@ void main() {
     ) async {
       final seam = _FakeSeam();
       await _pumpScreen(tester, seam);
-      // `T5`'s own-node card always holds its field, and the switch governs
-      // it (2026-09-05): off, the field is disabled and says why; on, it takes
-      // a node and the commit appears, disabled until there is one.
-      expect(find.byType(TextField), findsOneWidget);
-      expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
-      // The hint teaches the address shape whether the switch is on or off
-      // (founder, 2026-09-05) — the toggle beside it already says it is off.
-      expect(find.text('wss://host:port'), findsOneWidget);
+      // **The field folds behind the switch** (the founder, 2026-09-28,
+      // D-342, reversing D-275 item 2): off, the card is the toggle row alone;
+      // on, the field eases in, takes a node, and the commit appears, disabled
+      // until there is one.
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Test'), findsNothing);
       expect(find.text('Use this node'), findsNothing);
 
       await tester.tap(find.text('Use my own node'));
       await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
       expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+      // The hint teaches the address shape (founder, 2026-09-05).
+      expect(find.text('wss://host:port'), findsOneWidget);
       // **The pill is present and disabled, and its LABEL is the reason**
       // (D-284): the verb arrives with the ability to use it. The control was
       // never absent — `Use this node` returns the moment there is something
@@ -1293,6 +1340,70 @@ void main() {
       expect(find.text('This is already the node you pinned.'), findsOneWidget);
     });
 
+    testWidgets('a refused pin names the act that repairs it, and the field '
+        'stays folded until that act (D-342)', (tester) async {
+      final seam = _FakeSeam();
+      seam.pinDropped.value = true;
+      await _pumpScreen(tester, seam);
+      expect(
+        find.textContaining('Switch on Use my own node to set it again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.byType(TextField),
+        findsNothing,
+        reason: 'never an empty, disabled field to "check"',
+      );
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.widget<TextField>(find.byType(TextField)).enabled, isTrue);
+    });
+
+    testWidgets('the field closes the way it opened — every frame of the '
+        'close eases, none of it drops at once (BG-24)', (tester) async {
+      final seam = _FakeSeam();
+      await _pumpScreen(tester, seam, settle: false);
+      double card() => tester.getSize(find.byType(KvRowContainer).at(2)).height;
+      await tester.tap(find.text('Use my own node'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump(KvMotion.enter);
+      await tester.pump();
+      final open = card();
+      await tester.tap(find.text('Use my own node'));
+      final heights = <double>[open];
+      for (var i = 0; i < 30; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        heights.add(card());
+      }
+      final shut = heights.last;
+      expect(find.byType(TextField), findsNothing, reason: 'gone at the end');
+      final travel = open - shut;
+      expect(travel, greaterThan(40), reason: 'the field, Test and the commit');
+      var biggest = 0.0;
+      for (var i = 1; i < heights.length; i++) {
+        expect(
+          heights[i],
+          lessThanOrEqualTo(heights[i - 1] + 0.01),
+          reason: 'it only closes',
+        );
+        final step = heights[i - 1] - heights[i];
+        if (step > biggest) biggest = step;
+      }
+      // The house curve, flipped, moves fastest first: about a fifth of the
+      // travel in a 16 ms frame. A child that left the tree at the switch —
+      // the commit behind a second `if (on)` did — drops half at once.
+      expect(
+        biggest / travel,
+        lessThan(0.3),
+        reason:
+            'largest single-frame drop ${biggest.toStringAsFixed(1)} of '
+            '${travel.toStringAsFixed(1)} dp',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('turning it off clears the pin at once', (tester) async {
       final seam = _FakeSeam(pinned: 'ws://10.0.0.5:17110');
       await _pumpScreen(tester, seam);
@@ -1311,10 +1422,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(seam.calls, [null]);
       expect(seam.pinnedNode.value, isNull);
-      // The field stays (it is the card's, 2026-09-05), cleared and disabled.
+      // The field folds away with the switch (D-342), cleared: switched on
+      // again it opens empty, never on the pin just cleared.
+      expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.text('Use my own node'));
+      await tester.pumpAndSettle();
       final field = tester.widget<TextField>(find.byType(TextField));
       expect(field.controller!.text, '');
-      expect(field.enabled, isFalse);
+      expect(field.enabled, isTrue);
     });
 
     testWidgets('a REJECTED node says nothing changed — because nothing did', (
@@ -1739,46 +1854,37 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a long endpoint folds to one line, and a tap opens it', (
-      tester,
-    ) async {
-      // D-277: 11 dp mono on one line; only a line that would not fit is a
-      // target, and the whole address is one tap away.
-      final seam = _FakeSeam();
-      const long = 'wss://a-very-long-public-node-name.kaspa.example:17110';
-      seam.activeEndpoint.value = long;
-      await _pumpScreen(tester, seam, width: 320);
-      // Folded: the MIDDLE goes, so the scheme and the port both survive —
-      // a tail ellipsis would eat `:17110` (BG-15's reasoning).
-      final folded = tester
-          .widgetList<Text>(find.byType(Text))
-          .firstWhere(
-            (t) =>
-                (t.data ?? '').contains('…') &&
-                (t.data ?? '').contains(':17110'),
-          );
-      expect(folded.data, startsWith('wss://'));
-      expect(folded.style!.fontSize, 11);
-      expect(find.text(long), findsNothing, reason: 'it did not fit');
-      // And it is a control, so it owes a control's target (BG-12).
-      final target = tester.getSize(
-        find
-            .ancestor(
-              of: find.byWidget(folded),
-              matching: find.byType(ConstrainedBox),
-            )
-            .first,
-      );
-      expect(target.height, greaterThanOrEqualTo(KvSpace.touchTarget));
-      await tester.tap(find.bySemanticsLabel('Show the whole address'));
-      await tester.pumpAndSettle();
-      expect(find.text(long), findsOneWidget, reason: 'open: the whole thing');
-      expect(find.bySemanticsLabel('Fold the address'), findsOneWidget);
-      // A short one is plain text, not a control.
-      seam.activeEndpoint.value = 'ws://n.kaspa:1';
-      await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Show the whole address'), findsNothing);
-      expect(find.text('ws://n.kaspa:1'), findsOneWidget);
+    testWidgets('the endpoint is whole, always — it wraps at its own `/`, is '
+        'never a control, and never clips (D-342)', (tester) async {
+      // The founder on glass, 2026-09-28: *"i want 'Connected to' to always
+      // show full link … and no compacting it with '...' in between anymore"*
+      // — superseding his 2026-09-05 fold (D-277).
+      const long = 'wss://sara.kaspa.stream/kaspa/mainnet/wrpc/borsh';
+      for (final width in [320.0, 393.0]) {
+        final seam = _FakeSeam();
+        seam.activeEndpoint.value = long;
+        await _pumpScreen(tester, seam, width: width, textScale: 1.3);
+        expect(find.text(long), findsOneWidget, reason: 'whole at $width dp');
+        expect(find.textContaining('…'), findsNothing, reason: 'no fold');
+        expect(find.bySemanticsLabel('Show the whole address'), findsNothing);
+        // L131: a clipped `Text` raises no overflow, so re-lay the line in
+        // the width it was given and prove every character is drawn.
+        final text = tester.widget<Text>(find.text(long));
+        final box = tester.renderObject<RenderBox>(find.text(long));
+        final painter = TextPainter(
+          text: TextSpan(text: long, style: text.style),
+          textDirection: TextDirection.ltr,
+          textScaler: const TextScaler.linear(1.3),
+        )..layout(maxWidth: box.size.width);
+        expect(painter.didExceedMaxLines, isFalse);
+        expect(
+          painter.height,
+          lessThanOrEqualTo(box.size.height + 0.5),
+          reason: 'every line it needs is laid out at $width dp',
+        );
+        painter.dispose();
+        await tester.pumpWidget(const SizedBox());
+      }
     });
 
     testWidgets('the whole screen fits the phone, with nothing to scroll', (
@@ -1786,21 +1892,47 @@ void main() {
     ) async {
       // **The founder's bar, twice on glass** (2026-09-05, D-278): *"the
       // network screen has everything in view and i dont have to scroll down
-      // to tap on API source"*. The V60 is 1080 × 2460 at 2.75, so 393 × 894
-      // logical, and the status and gesture bars take about 50 of it — this
-      // asserts the content against what is actually left. A `maxScrollExtent`
-      // of zero is the whole claim: there is nothing below the fold. The
-      // guard is 800 against a content height of ~790 and a device that
-      // leaves ~845, so it reds well before he would see it.
-      final seam = _FakeSeam();
+      // to tap on API source"*.
+      //
+      // **Cut from his phone, measured, not from the playbook** (LINK-UX1,
+      // D-342). The V60 is 1080 × 2460 px, and on 2026-09-28 it ran a forced
+      // density of 480 (the larger display size) with text at 0.9× — so the
+      // app gets 360 dp across, and 2460 px less a 76 px status bar and a
+      // 76 px gesture bar is **769.3 dp** down (`adb shell wm density`,
+      // `settings get system font_scale`, the bars' window frames). The
+      // playbook's 393 × 845 was a different setting of the same phone; this
+      // guard modelled that for three weeks while the phone showed less.
+      // The shipped screen measured 769.2 there — 0.1 dp to spare — and
+      // LINK-UX1's `BPS` row would have taken it to 808.2; the own-node field
+      // folds behind its switch (his ruling the same day) and the endpoint is
+      // whole: 760.2. The guard stands at **765**, 4 dp under the phone, so it
+      // reds before he would see a scroll. Every seam the screen can show is
+      // pumped (§19.3), and the endpoint is the public resolver's longest
+      // shape, the one his phone showed on four lines.
+      //
+      // **If the phone's display size or text size changes, re-measure and
+      // re-cut** — the numbers above are the claim.
+      final seam = _FakeSeam()
+        ..latencyMs = 170
+        ..peers = 14;
+      seam.activeEndpoint.value =
+          'wss://sara.kaspa.stream/kaspa/mainnet/wrpc/borsh';
       await _pumpScreen(
         tester,
         seam,
         explorer: _FakeExplorer(),
         rate: _FakeRate(),
-        width: 393,
-        height: 800,
+        withProbe: true,
+        pulse: () async => (ageSecs: 0, score: 100),
+        paceAverage: () =>
+            (bps: 10.02, span: const Duration(minutes: 37, seconds: 12)),
+        width: 360,
+        height: 765,
+        textScale: 0.9,
+        settle: false,
       );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
       final position = tester
           .state<ScrollableState>(
             find
@@ -1815,10 +1947,11 @@ void main() {
         position.maxScrollExtent,
         0,
         reason:
-            'the Network screen overflows its own phone by '
+            'the Network screen overflows the phone by '
             '${position.maxScrollExtent.toStringAsFixed(1)} dp — `API source` '
             'is below the fold, which is the finding this guards',
       );
+      await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('back goes back', (tester) async {
@@ -1828,82 +1961,19 @@ void main() {
     });
   });
 
-  group('the link\'s pulse rides the DAA row (2026-09-05; D-332, D-334)', () {
-    testWidgets(
-      'a beating link reads its rate in Hz; a quiet one says how long since '
-      'its last block',
-      (tester) async {
-        // Ten ticks a second: five more at every half-second poll.
-        var ticks = 0;
-        final seam = _FakeSeam();
-        await _pumpScreen(
-          tester,
-          seam,
-          pulse: () async {
-            ticks += 5;
-            return (ageSecs: 0, ticks: ticks);
-          },
-          settle: false,
-          clock: () => tester.binding.clock.now(),
-        );
-        await tester.pump();
-        await tester.pump(NodeScreen.pollEvery);
-        await tester.pump();
-        expect(find.text('DAA · 10 Hz'), findsOneWidget);
-        expect(find.text('DAA · streaming'), findsNothing, reason: 'D-332');
-        await tester.pumpWidget(const SizedBox());
-
-        final quiet = _FakeSeam();
-        await _pumpScreen(
-          tester,
-          quiet,
-          pulse: () async => (ageSecs: 12, ticks: 100),
-          settle: false,
-        );
-        await tester.pump();
-        await tester.pump();
-        expect(
-          tester
-              .widget<Text>(find.text('DAA · 12\u00A0s since last block'))
-              .data,
-          'DAA · 12\u00A0s since last block',
-          reason: 'an age inside a sentence is a word, as S1 sets it (D-261)',
-        );
-        expect(
-          find.text('DAA · 12\u00A0s since last block'),
-          findsOneWidget,
-          reason:
-              "D-332's ruled words: the age is the tick's since LINK-Q1, and a "
-              'tick is blocks landing',
-        );
-        await tester.pumpWidget(const SizedBox());
-
-        // Past a minute the age rolls to minutes, as every age does
-        // (`formatAge`, `ux-auditor` N3).
-        await _pumpScreen(
-          tester,
-          _FakeSeam(),
-          pulse: () async => (ageSecs: 125, ticks: 100),
-          settle: false,
-        );
-        await tester.pump();
-        await tester.pump();
-        expect(find.text('DAA · 2\u00A0m since last block'), findsOneWidget);
-        await tester.pumpWidget(const SizedBox());
-      },
-    );
-
-    testWidgets('a stall is watched falling toward 0 and recovering', (
+  group('`DAA`, and `BPS` on its own row under it (D-338 and its addendum)', () {
+    testWidgets('a beating chain reads its pace; a quiet one says how long '
+        'since its last block — and `DAA` stays `DAA` throughout', (
       tester,
     ) async {
-      var ticks = 0;
-      var beating = true;
+      // Ten blocks a second: the score climbs five at every half-second poll.
+      var score = 523216421;
       await _pumpScreen(
         tester,
         _FakeSeam(),
         pulse: () async {
-          if (beating) ticks += 5;
-          return (ageSecs: beating ? 0 : 1, ticks: ticks);
+          score += 5;
+          return (ageSecs: 0, score: score);
         },
         settle: false,
         clock: () => tester.binding.clock.now(),
@@ -1911,7 +1981,80 @@ void main() {
       await tester.pump();
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      expect(find.text('DAA · 10 Hz'), findsOneWidget);
+      expect(_pace(tester), 'BPS · 10');
+      expect(find.text('DAA'), findsOneWidget, reason: 'DAA remains DAA');
+      expect(find.textContaining('Hz'), findsNothing, reason: 'D-338');
+      await tester.pumpWidget(const SizedBox());
+
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async => (ageSecs: 12, score: 100),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        _pace(tester),
+        'BPS · 12 s since last block',
+        reason:
+            "D-332's ruled words, now in the pace's own seat (the founder's "
+            'approval of the Recommended detail, D-338 addendum)',
+      );
+      expect(find.text('DAA'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+
+      // Past a minute the age rolls to minutes, as every age does
+      // (`formatAge`, `ux-auditor` N3).
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async => (ageSecs: 125, score: 100),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(_pace(tester), 'BPS · 2 m since last block');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('with no socket the pace is a dash', (tester) async {
+      final seam = _FakeSeam(connected: false);
+      var score = 100;
+      await _pumpScreen(
+        tester,
+        seam,
+        pulse: () async => (ageSecs: 0, score: score += 5),
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      expect(_pace(tester), 'BPS');
+      expect(_paceAverage(tester), '—');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a stall is watched falling toward 0 and recovering', (
+      tester,
+    ) async {
+      var score = 523216421;
+      var beating = true;
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async {
+          if (beating) score += 5;
+          return (ageSecs: beating ? 0 : 1, score: score);
+        },
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      expect(_pace(tester), 'BPS · 10');
 
       // Over the three-second window it falls, and only a whole window of
       // silence reads 0 (the founder on glass, 2026-09-27).
@@ -1920,47 +2063,46 @@ void main() {
         await tester.pump(NodeScreen.pollEvery);
         await tester.pump();
       }
-      // A one-digit rate sits in the two-figure slot — a monospace space
-      // holds the tens place, so ` Hz` does not step (`ux-auditor`).
       expect(
-        find.text('DAA ·  0 Hz'),
-        findsNothing,
+        _pace(tester),
+        isNot('BPS ·  0'),
         reason: 'two seconds of silence is not yet a window of it',
       );
       for (var i = 0; i < 4; i++) {
         await tester.pump(NodeScreen.pollEvery);
         await tester.pump();
       }
-      expect(find.text('DAA ·  0 Hz'), findsOneWidget);
+      // A one-digit pace sits in the two-figure slot — a monospace space
+      // holds the tens place, so the figure does not step (`ux-auditor`).
+      expect(_pace(tester), 'BPS ·  0');
+      final handle = tester.ensureSemantics();
+      await tester.pump();
       expect(
-        tester.getSemantics(find.text('DAA ·  0 Hz')).label,
-        contains('DAA · 0 Hz'),
-        reason: 'the slot is typography; the spoken figure has no gap',
+        find.bySemanticsLabel(RegExp(r'(^|\n)0 blocks per second(\n|$)')),
+        findsOneWidget,
+        reason: 'the slot is typography; the pace is heard as words',
       );
+      handle.dispose();
 
-      // The backlog lands at once, then the beat.
+      // The backlog lands at once, then the pace.
       beating = true;
-      ticks += 40;
+      score += 40;
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      final burst = tester
-          .widgetList<Text>(find.byType(Text))
-          .map((t) => t.data ?? t.textSpan?.toPlainText() ?? '')
-          .firstWhere((d) => d.startsWith('DAA · ') && d.endsWith(' Hz'));
       expect(
-        double.parse(burst.substring(6, burst.length - 3)),
+        double.parse(_pace(tester).substring('BPS · '.length)),
         greaterThan(10),
         reason: 'the recovery shows as the backlog arriving',
       );
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a tick in the window is never read as a stall: fewer than one '
-        'a second reads "< 1", and only a window of none reads 0', (
+    testWidgets('a block in the window is never read as a stall: fewer than '
+        'one a second reads "< 1", and only a window of none reads 0', (
       tester,
     ) async {
-      // One tick lands at the second poll, then nothing: over the widening
-      // window the rate falls through 2 and 1 to a third of a tick a second,
+      // One block lands at the second poll, then nothing: over the widening
+      // window the pace falls through 2 and 1 to a third of a block a second,
       // which a whole number would round to the stall face 0 (BG-20).
       var polls = 0;
       await _pumpScreen(
@@ -1968,7 +2110,7 @@ void main() {
         _FakeSeam(),
         pulse: () async {
           polls++;
-          return (ageSecs: 0, ticks: polls >= 2 ? 101 : 100);
+          return (ageSecs: 0, score: polls >= 2 ? 101 : 100);
         },
         settle: false,
         clock: () => tester.binding.clock.now(),
@@ -1978,54 +2120,243 @@ void main() {
         await tester.pump(NodeScreen.pollEvery);
         await tester.pump();
       }
-      expect(find.text('DAA · < 1 Hz'), findsOneWidget);
-      expect(find.text('DAA ·  0 Hz'), findsNothing);
+      expect(_pace(tester), 'BPS · < 1');
+      final handle = tester.ensureSemantics();
+      await tester.pump();
+      expect(
+        find.bySemanticsLabel(
+          RegExp(r'(^|\n)Fewer than one block per second(\n|$)'),
+        ),
+        findsOneWidget,
+      );
+      handle.dispose();
       for (var i = 0; i < 2; i++) {
         await tester.pump(NodeScreen.pollEvery);
         await tester.pump();
       }
       expect(
-        find.text('DAA ·  0 Hz'),
-        findsOneWidget,
-        reason: 'the tick has left the window: now it is a stall',
+        _pace(tester),
+        'BPS ·  0',
+        reason: 'the block has left the window: now it is a stall',
       );
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets("the label's figure is mono and tabular; its words are not "
+    testWidgets('a new node starts the pace again — its score is another '
+        'count, and the difference is no burst', (tester) async {
+      // Node B is thirty blocks ahead of node A at the moment of the swap.
+      // Differenced across the swap, the pace would print ten blocks a
+      // second plus thirty over the window — a burst the chain never had.
+      var score = 1000;
+      final seam = _FakeSeam();
+      await _pumpScreen(
+        tester,
+        seam,
+        pulse: () async => (ageSecs: 0, score: score += 5),
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      expect(_pace(tester), 'BPS · 10');
+      score += 30;
+      seam.activeEndpoint.value = 'wss://next.kaspa.example:17110';
+      await tester.pump();
+      for (var i = 0; i < 2; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      expect(
+        _pace(tester),
+        'BPS · 10',
+        reason: 'measured on the new node alone, not across the swap',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets("the pace's figure is mono and tabular; its states are words "
         '(BG-30)', (tester) async {
-      var ticks = 0;
+      var score = 100;
       await _pumpScreen(
         tester,
         _FakeSeam(),
-        pulse: () async {
-          ticks += 5;
-          return (ageSecs: 0, ticks: ticks);
-        },
+        pulse: () async => (ageSecs: 0, score: score += 5),
         settle: false,
         clock: () => tester.binding.clock.now(),
       );
       await tester.pump();
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      final label = tester.widget<Text>(find.text('DAA · 10 Hz'));
+      List<(String, String?)> runs() {
+        final out = <(String, String?)>[];
+        tester.widget<KvFactLine>(_bpsRow()).labelSpan!.visitChildren((span) {
+          if (span is TextSpan && span.text != null) {
+            out.add((span.text!, span.style?.fontFamily));
+          }
+          return true;
+        });
+        return out;
+      }
+
+      expect(runs(), const [
+        ('BPS', null),
+        (' · ', null),
+        ('10', KvFont.mono),
+      ], reason: 'only the figure is mono; the rest inherits the label');
+      final handle = tester.ensureSemantics();
+      await tester.pump();
+      expect(
+        find.bySemanticsLabel(RegExp(r'(^|\n)10 blocks per second(\n|$)')),
+        findsOneWidget,
+      );
+      handle.dispose();
+      await tester.pumpWidget(const SizedBox());
+
+      await _pumpScreen(
+        tester,
+        _FakeSeam(),
+        pulse: () async => (ageSecs: 9, score: 100),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        runs(),
+        const [('BPS', null), (' · 9 s since last block', null)],
+        reason: 'an age inside a sentence is a word, as S1 sets it (D-261)',
+      );
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the right side is the chain\'s average pace over the span it '
+        'covers — a figure, its span in words, heard as a sentence (D-342)', (
+      tester,
+    ) async {
+      ({double bps, Duration span})? average;
+      final seam = _FakeSeam();
+      await _pumpScreen(
+        tester,
+        seam,
+        pulse: () async => (ageSecs: 0, score: 100),
+        paceAverage: () => average,
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(_paceAverage(tester), '—', reason: 'under two minutes: nothing');
+
+      average = (bps: 10.04, span: const Duration(minutes: 12, seconds: 40));
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      expect(_paceAverage(tester), '12 m avg 10.0');
+      final value = tester.widget<Text>(
+        find.descendant(
+          of: _bpsRow(),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is Text && (w.textSpan?.toPlainText() ?? '').contains('avg'),
+          ),
+        ),
+      );
       final runs = <(String, String?)>[];
-      label.textSpan!.visitChildren((span) {
+      value.textSpan!.visitChildren((span) {
         if (span is TextSpan && span.text != null) {
           runs.add((span.text!, span.style?.fontFamily));
         }
         return true;
       });
-      expect(runs, const [
-        ('DAA · ', null),
-        ('10', KvFont.mono),
-        (' Hz', null),
-      ], reason: 'the unit holds still while the rate moves');
+      expect(runs, const [('12 m avg ', KvFont.ui), ('10.0', KvFont.mono)]);
+      final handle = tester.ensureSemantics();
+      await tester.pump();
       expect(
-        tester.getSemantics(find.text('DAA · 10 Hz')).label,
-        contains('DAA · 10 Hz'),
-        reason: 'one reading, heard as written',
+        find.bySemanticsLabel(
+          RegExp(
+            r'(^|\n)Average over the last 12 minutes: 10\.0 blocks per second',
+          ),
+        ),
+        findsOneWidget,
       );
+      handle.dispose();
+
+      average = (bps: 9.98, span: const Duration(hours: 1));
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      expect(_paceAverage(tester), '1 h avg 10.0');
+
+      // No socket: the average is history, and a number beside a dead link is
+      // the one BG-8 forbids.
+      seam.connected.value = false;
+      await tester.pump();
+      expect(_paceAverage(tester), '—');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('no average while the node syncs — its climb is catch-up '
+        'speed, not the chain\'s pace', (tester) async {
+      final seam = _FakeSeam()
+        ..latencyMs = 150
+        ..synced = false;
+      await _pumpScreen(
+        tester,
+        seam,
+        withProbe: true,
+        pulse: () async => (ageSecs: 0, score: 100),
+        paceAverage: () => (bps: 31.7, span: const Duration(minutes: 9)),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(_pace(tester), 'BPS · syncing');
+      expect(_paceAverage(tester), '—');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the average holds a slot as wide as `10.0`, and never clips '
+        'at the 320 dp / 1.3x floor (BG-30, L131)', (tester) async {
+      ({double bps, Duration span}) average = (
+        bps: 10.0,
+        span: const Duration(minutes: 37),
+      );
+      final seam = _FakeSeam();
+      await _pumpScreen(
+        tester,
+        seam,
+        width: 320,
+        textScale: 1.3,
+        pulse: () async => (ageSecs: 0, score: 100),
+        paceAverage: () => average,
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      Text value() => tester.widget<Text>(
+        find.descendant(
+          of: _bpsRow(),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is Text && (w.textSpan?.toPlainText() ?? '').contains('avg'),
+          ),
+        ),
+      );
+      final wide = value().textSpan!.toPlainText();
+      average = (bps: 9.94, span: const Duration(minutes: 37));
+      await tester.pump(NodeScreen.pollEvery);
+      await tester.pump();
+      final narrow = value().textSpan!.toPlainText();
+      expect(narrow.length, wide.length, reason: '"$narrow" against "$wide"');
+      // L131: re-lay the value in the box it was given.
+      final box = tester.renderObject<RenderBox>(find.byWidget(value()));
+      final painter = TextPainter(
+        text: value().textSpan,
+        textDirection: TextDirection.ltr,
+        textScaler: const TextScaler.linear(1.3),
+        maxLines: 1,
+      )..layout(maxWidth: box.size.width);
+      expect(painter.didExceedMaxLines, isFalse);
+      painter.dispose();
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -2038,7 +2369,7 @@ void main() {
         await _pumpScreen(
           tester,
           _FakeSeam(),
-          pulse: () async => (ageSecs: age, ticks: 1),
+          pulse: () async => (ageSecs: age, score: 1),
           settle: false,
         );
         await tester.pump();
@@ -2062,7 +2393,7 @@ void main() {
         tester,
         seam,
         width: 320,
-        pulse: () async => (ageSecs: 1, ticks: 1),
+        pulse: () async => (ageSecs: 1, score: 1),
       );
       final figure = tester.widget<Text>(find.text('523,216,421'));
       expect(figure.maxLines, 1);
@@ -2070,12 +2401,12 @@ void main() {
     });
   });
 
-  group('KvTickRate — the beat, from a count and a clock', () {
-    test('ticks over the most recent three seconds, never the whole '
+  group('KvBlockRate — the chain\'s pace, from a score and a clock', () {
+    test('blocks over the most recent three seconds, never the whole '
         'session', () {
-      final rate = KvTickRate();
+      final rate = KvBlockRate();
       final t0 = DateTime(2026, 9, 26, 12);
-      expect(rate.offer(t0, 100), isNull, reason: 'one sample is no rate');
+      expect(rate.offer(t0, 100), isNull, reason: 'one sample is no pace');
       expect(rate.offer(t0.add(const Duration(milliseconds: 500)), 105), 10.0);
       expect(rate.offer(t0.add(const Duration(seconds: 1)), 110), 10.0);
       // A long quiet then a burst: the span is the last window, so the burst
@@ -2087,19 +2418,200 @@ void main() {
       expect(
         rate.offer(t0.add(const Duration(seconds: 6)), 170),
         20.0,
-        reason: 'sixty ticks over the last three seconds',
+        reason: 'sixty blocks over the last three seconds',
       );
     });
 
-    test('a count that goes backwards or a clock that stands still starts '
+    test('a score that goes backwards or a clock that stands still starts '
         'over, rather than printing nonsense', () {
-      final rate = KvTickRate();
+      final rate = KvBlockRate();
       final t0 = DateTime(2026, 9, 26, 12);
       rate.offer(t0, 100);
       expect(rate.offer(t0, 105), isNull);
       expect(rate.offer(t0.add(const Duration(seconds: 1)), 50), isNull);
       rate.reset();
       expect(rate.offer(t0.add(const Duration(seconds: 2)), 60), isNull);
+    });
+  });
+
+  group('the instrument — node reply, path, the minute (LINK-UX1, D-337)', () {
+    testWidgets('*measuring…* before the first answer, not a dash', (
+      tester,
+    ) async {
+      final seam = _FakeSeam()
+        ..latencyMs = 150
+        ..gate = Completer<void>();
+      await _pumpScreen(tester, seam, withProbe: true, settle: false);
+      await tester.pump();
+      expect(find.text('measuring…'), findsOneWidget);
+      expect(find.text('—'), findsWidgets, reason: 'the path has no answer');
+      seam.gate!.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump(KvMotion.calm);
+      expect(find.text('measuring…'), findsNothing, reason: 'faded out');
+      expect(_seat('150'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a probe still out past the bound counts up on the figure — '
+        'the screen hands its own clock and the probe\'s start to the seat', (
+      tester,
+    ) async {
+      final seam = _FakeSeam()
+        ..latencyMs = null
+        ..timedOutMs = 1800;
+      await _pumpScreen(
+        tester,
+        seam,
+        withProbe: true,
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      for (var i = 0; i < 2; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      expect(find.text('> 1.8'), findsOneWidget);
+      // The next probe does not come back.
+      seam.gate = Completer<void>();
+      await tester.pump(NodeScreen.pollEvery);
+      for (var i = 0; i < 25; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      final shown = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data ?? '')
+          .firstWhere((d) => d.startsWith('> '));
+      expect(
+        double.parse(shown.substring(2)),
+        greaterThan(1.8),
+        reason: 'the elapsed wait is a measurement, and it is growing',
+      );
+      seam.gate!.complete();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the reading explains itself: its mark, and a 52 dp target '
+        'laid over the head that adds no height (BG-12, BG-34)', (
+      tester,
+    ) async {
+      final seam = _FakeSeam()..latencyMs = 150;
+      await _pumpScreen(tester, seam, withProbe: true, settle: false);
+      await tester.pump();
+      await tester.pump();
+      const explained = 'The gap between them is queueing';
+      expect(find.textContaining(explained), findsNothing);
+      final handle = tester.ensureSemantics();
+      await tester.tap(find.bySemanticsLabel('About node reply'));
+      await tester.pump();
+      await tester.pump(KvMotion.enter);
+      expect(find.textContaining(explained), findsOneWidget);
+      handle.dispose();
+      // A thumb that lands on the number opens and closes what it means —
+      // closing is eased too, so its end is the frame after `enter`.
+      await tester.tap(_seat('150'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump(KvMotion.enter);
+      await tester.pump();
+      expect(find.textContaining(explained), findsNothing);
+      // **The control a screen reader meets is the 52 dp target**, not the
+      // 16 dp caption line under it (`ux-auditor`: the first cut put the
+      // button on the caption, and this test only measured the overlay's
+      // own declared height — it could not have failed).
+      final a11y = tester.ensureSemantics();
+      await tester.pump();
+      final node = tester.getSemantics(
+        find.bySemanticsLabel('About node reply'),
+      );
+      expect(node.rect.height, greaterThanOrEqualTo(KvSpace.touchTarget));
+      a11y.dispose();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('both explainer controls speak and toggle by one rule — the '
+        'section header\'s and the card\'s (BG-21, L143)', (tester) async {
+      await _pumpScreen(tester, _FakeSeam());
+      final handle = tester.ensureSemantics();
+      for (final label in ['Node', 'Node reply']) {
+        final about = find.bySemanticsLabel(KvSectionHeader.aboutLabel(label));
+        expect(about, findsOneWidget, reason: label);
+        expect(
+          tester.getSemantics(about),
+          isSemantics(isButton: true, hasToggledState: true, isToggled: false),
+          reason: label,
+        );
+        await tester.tap(about);
+        await tester.pumpAndSettle();
+        expect(
+          tester.getSemantics(about),
+          isSemantics(hasToggledState: true, isToggled: true),
+          reason: '$label opens',
+        );
+        expect(
+          tester
+              .widgetList<KvInfoMark>(find.byType(KvInfoMark))
+              .where((m) => m.open),
+          hasLength(1),
+          reason: 'one mark lit, the open one',
+        );
+        await tester.tap(about);
+        await tester.pumpAndSettle();
+      }
+      handle.dispose();
+    });
+
+    testWidgets('the explainer says what the numbers are — and never calls '
+        'the round trip "ping" or "network" (D-337)', (tester) async {
+      await _pumpScreen(tester, _FakeSeam());
+      await tester.tap(find.bySemanticsLabel('About node reply'));
+      await tester.pumpAndSettle();
+      final said = tester
+          .widgetList<Text>(find.byType(Text))
+          .firstWhere(
+            (t) => (t.data ?? t.textSpan?.toPlainText() ?? '').startsWith(
+              'Node reply is',
+            ),
+          );
+      final text = said.textSpan!.toPlainText();
+      for (final claim in [
+        'Path, its best answer in the last 10 s',
+        'mostly distance',
+        'queueing',
+        'Bars grade the last 10 s',
+        'The chart shows the last minute',
+        'In it, red marks a wait with no answer',
+      ]) {
+        expect(text, contains(claim));
+      }
+      expect(text.toLowerCase(), isNot(contains('ping')));
+      expect(text.toLowerCase(), isNot(contains('network')));
+      // Its numbers are figures, its words are words (BG-30, §7.1).
+      final runs = <(String, String?)>[];
+      said.textSpan!.visitChildren((span) {
+        if (span is TextSpan && span.text != null) {
+          runs.add((span.text!, span.style?.fontFamily));
+        }
+        return true;
+      });
+      expect(
+        runs.where((r) => r.$1.contains(RegExp(r'\d'))),
+        everyElement(predicate<(String, String?)>((r) => r.$2 == KvFont.mono)),
+      );
+      expect(
+        runs.where((r) => !r.$1.contains(RegExp(r'\d'))),
+        everyElement(predicate<(String, String?)>((r) => r.$2 == null)),
+      );
+      // Short sentences (§7.1: 8–14 words).
+      for (final sentence in text.split(RegExp(r'(?<=\.) '))) {
+        expect(
+          sentence.split(' ').length,
+          lessThanOrEqualTo(14),
+          reason: '"$sentence"',
+        );
+      }
     });
   });
 
@@ -2583,3 +3095,33 @@ Future<void> _reopen(
     ),
   );
 }
+
+/// The `BPS` row — found by its label, which since D-342 carries the live
+/// pace (`BPS · 10`).
+Finder _bpsRow() => find.byWidgetPredicate(
+  (w) =>
+      w is KvFactLine &&
+      (w.labelSpan?.toPlainText() ?? w.label).startsWith('BPS'),
+);
+
+/// The `BPS` row's label, as printed: `BPS · 10`, `BPS · syncing`, `BPS`.
+String _pace(WidgetTester tester) =>
+    tester.widget<KvFactLine>(_bpsRow()).labelSpan!.toPlainText();
+
+/// The `BPS` row's right side, as printed: `12 m avg 10.0`, or `—`.
+String _paceAverage(WidgetTester tester) {
+  final texts = tester
+      .widgetList<Text>(
+        find.descendant(of: _bpsRow(), matching: find.byType(Text)),
+      )
+      .map((t) => t.data ?? t.textSpan?.toPlainText() ?? '')
+      .where((d) => !d.startsWith('BPS'))
+      .toList();
+  expect(texts, hasLength(1));
+  return texts.single;
+}
+
+/// A text on the latency seat itself — the path in the caption prints the
+/// same figures, so a bare `find.text` would find both.
+Finder _seat(String text) =>
+    find.descendant(of: find.byType(KvLatency), matching: find.text(text));

@@ -303,6 +303,26 @@ class KvRuledLabel extends StatelessWidget {
   );
 }
 
+/// **The circled-i that opens an explainer** (D-275) — `inkMeta` at rest,
+/// `primaryMuted` while its explainer is open (uncounted: it is *ours*, §5
+/// item 5). The one part for the section headers and the Network card's
+/// caption (BG-21). **Not yet for `KvDisclosure`**, which draws its own mark
+/// and lights it `primary` when open — a counted emission on a mark that should
+/// be uncounted; recorded as a carry at LINK-UX1 (`ux-auditor`), for the
+/// sitting that next touches a disclosure.
+class KvInfoMark extends StatelessWidget {
+  const KvInfoMark({super.key, required this.open});
+
+  final bool open;
+
+  @override
+  Widget build(BuildContext context) => KvGlyphIcon(
+    KvGlyph.info,
+    tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
+    size: 16,
+  );
+}
+
 /// **A section's caps label, and the mark that opens its explainer** (§4;
 /// D-275 / D-276 / D-277).
 ///
@@ -360,6 +380,12 @@ class KvSectionHeader extends StatefulWidget {
   /// register (D-278).
   static const double height = 52;
   static const double plainHeight = 32;
+
+  /// **What a screen reader hears for an explainer's control** — one rule
+  /// for every seat that opens one, the section headers and the Network
+  /// card's `NODE REPLY` alike (BG-21, L143: a second copy of this control
+  /// had begun to drift from the first, `ux-auditor`).
+  static String aboutLabel(String label) => 'About ${label.toLowerCase()}';
 
   /// Where the words sit inside the row — **measured, not guessed**: a 16 dp
   /// label in a 52 dp box leaves 36, and `(1 + 1/3) / 2 × 36` is exactly 24
@@ -458,7 +484,7 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
             container: true,
             button: true,
             toggled: open,
-            label: 'About ${label.toLowerCase()}',
+            label: KvSectionHeader.aboutLabel(label),
             child: ExcludeSemantics(
               // **`GestureDetector`, not `InkWell`** — the house rule
               // (`KvRow`'s own note): a ripple needs a `Material` ancestor,
@@ -485,11 +511,7 @@ class _KvSectionHeaderState extends State<KvSectionHeader> {
                         children: [
                           title,
                           const SizedBox(width: KvSpace.s),
-                          KvGlyphIcon(
-                            KvGlyph.info,
-                            tone: open ? KvColor.primaryMuted : KvColor.inkMeta,
-                            size: 16,
-                          ),
+                          KvInfoMark(open: open),
                           const SizedBox(width: KvSpace.xs),
                         ],
                       ),
