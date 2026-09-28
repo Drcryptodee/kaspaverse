@@ -100,7 +100,7 @@ void main() {
     expect(log.average()!.bps, closeTo(10, 0.01));
   });
 
-  test('a gap longer than the span starts the window again — "1 h avg" is '
+  test('a gap longer than the span starts the window again — "1 hour avg" is '
       'never printed over nine hours', () {
     final log = feed(over: const Duration(hours: 1));
     // Eight hours in the background, then five minutes back.

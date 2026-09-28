@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/rust/api/wallet.dart';
@@ -2201,11 +2202,17 @@ void main() {
         return out;
       }
 
-      expect(runs(), const [
-        ('BPS', null),
-        (' · ', null),
-        ('10', KvFont.mono),
-      ], reason: 'only the figure is mono; the rest inherits the label');
+      expect(
+        runs(),
+        const [
+          ('BPS', null),
+          (' ', null),
+          ('·', KvFont.mono),
+          (' ', null),
+          ('10', KvFont.mono),
+        ],
+        reason: 'the figure and the dot are mono; the rest inherits the label',
+      );
       final handle = tester.ensureSemantics();
       await tester.pump();
       expect(
@@ -2225,7 +2232,13 @@ void main() {
       await tester.pump();
       expect(
         runs(),
-        const [('BPS', null), (' · 9 s since last block', null)],
+        const [
+          ('BPS', null),
+          (' ', null),
+          ('·', KvFont.mono),
+          (' ', null),
+          ('9\u00A0s since last block', null),
+        ],
         reason: 'an age inside a sentence is a word, as S1 sets it (D-261)',
       );
       await tester.pumpWidget(const SizedBox());
@@ -2251,24 +2264,42 @@ void main() {
       average = (bps: 10.04, span: const Duration(minutes: 12, seconds: 40));
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      expect(_paceAverage(tester), '12 m avg 10.0');
-      final value = tester.widget<Text>(
-        find.descendant(
-          of: _bpsRow(),
-          matching: find.byWidgetPredicate(
-            (w) =>
-                w is Text && (w.textSpan?.toPlainText() ?? '').contains('avg'),
-          ),
-        ),
+      expect(_paceAverage(tester), '12\u00A0mins avg: 10.0');
+      // A caption in the label's own face, then the figure in mono — two
+      // texts on ONE baseline (the founder on glass: *"align it well"*).
+      final caption = find.descendant(
+        of: _bpsRow(),
+        matching: find.text('12\u00A0mins avg:'),
       );
-      final runs = <(String, String?)>[];
-      value.textSpan!.visitChildren((span) {
-        if (span is TextSpan && span.text != null) {
-          runs.add((span.text!, span.style?.fontFamily));
-        }
-        return true;
-      });
-      expect(runs, const [('12 m avg ', KvFont.ui), ('10.0', KvFont.mono)]);
+      final figure = find.descendant(
+        of: _bpsRow(),
+        matching: find.text('10.0'),
+      );
+      expect(tester.widget<Text>(caption).style!.fontFamily, KvFont.ui);
+      expect(tester.widget<Text>(caption).style!.fontSize, 12);
+      expect(tester.widget<Text>(figure).style!.fontFamily, KvFont.mono);
+      // L131's method: a render object's baseline may only be asked for by
+      // its parent mid-layout, so each paragraph is re-laid by a painter.
+      double baseline(Finder f) {
+        final paragraph = tester.renderObject<RenderParagraph>(f);
+        final painter = TextPainter(
+          text: paragraph.text,
+          textDirection: TextDirection.ltr,
+          textScaler: paragraph.textScaler,
+        )..layout();
+        final b = painter.computeDistanceToActualBaseline(
+          TextBaseline.alphabetic,
+        );
+        painter.dispose();
+        return paragraph.localToGlobal(Offset.zero).dy + b;
+      }
+
+      expect(baseline(caption), moreOrLessEquals(baseline(figure)));
+      expect(
+        tester.getTopLeft(figure).dx - tester.getTopRight(caption).dx,
+        KvSpace.xs,
+        reason: 'after the colon, the air of a typed space',
+      );
       final handle = tester.ensureSemantics();
       await tester.pump();
       expect(
@@ -2284,7 +2315,7 @@ void main() {
       average = (bps: 9.98, span: const Duration(hours: 1));
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      expect(_paceAverage(tester), '1 h avg 10.0');
+      expect(_paceAverage(tester), '1\u00A0hour avg: 10.0');
 
       // No socket: the average is history, and a number beside a dead link is
       // the one BG-8 forbids.
@@ -2332,31 +2363,43 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      Text value() => tester.widget<Text>(
-        find.descendant(
-          of: _bpsRow(),
-          matching: find.byWidgetPredicate(
-            (w) =>
-                w is Text && (w.textSpan?.toPlainText() ?? '').contains('avg'),
-          ),
+      Finder caption() => find.descendant(
+        of: _bpsRow(),
+        matching: find.byWidgetPredicate(
+          (w) => w is Text && (w.data ?? '').endsWith(' avg:'),
         ),
       );
-      final wide = value().textSpan!.toPlainText();
+      Finder figure() => find.descendant(
+        of: _bpsRow(),
+        matching: find.byWidgetPredicate(
+          (w) => w is Text && RegExp(r'^[ 0-9.]+$').hasMatch(w.data ?? ''),
+        ),
+      );
+      final wide = tester.widget<Text>(figure()).data!;
+      final at = tester.getTopLeft(caption()).dx;
       average = (bps: 9.94, span: const Duration(minutes: 37));
       await tester.pump(NodeScreen.pollEvery);
       await tester.pump();
-      final narrow = value().textSpan!.toPlainText();
+      final narrow = tester.widget<Text>(figure()).data!;
       expect(narrow.length, wide.length, reason: '"$narrow" against "$wide"');
-      // L131: re-lay the value in the box it was given.
-      final box = tester.renderObject<RenderBox>(find.byWidget(value()));
-      final painter = TextPainter(
-        text: value().textSpan,
-        textDirection: TextDirection.ltr,
-        textScaler: const TextScaler.linear(1.3),
-        maxLines: 1,
-      )..layout(maxWidth: box.size.width);
-      expect(painter.didExceedMaxLines, isFalse);
-      painter.dispose();
+      expect(
+        tester.getTopLeft(caption()).dx,
+        at,
+        reason: 'the caption holds still as the figure crosses 9.95',
+      );
+      // L131: re-lay each text in the box it was given.
+      for (final f in [caption(), figure()]) {
+        final text = tester.widget<Text>(f);
+        final box = tester.renderObject<RenderBox>(f);
+        final painter = TextPainter(
+          text: TextSpan(text: text.data, style: text.style),
+          textDirection: TextDirection.ltr,
+          textScaler: const TextScaler.linear(1.3),
+          maxLines: 1,
+        )..layout(maxWidth: box.size.width);
+        expect(painter.didExceedMaxLines, isFalse, reason: text.data);
+        painter.dispose();
+      }
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -3108,7 +3151,8 @@ Finder _bpsRow() => find.byWidgetPredicate(
 String _pace(WidgetTester tester) =>
     tester.widget<KvFactLine>(_bpsRow()).labelSpan!.toPlainText();
 
-/// The `BPS` row's right side, as printed: `12 m avg 10.0`, or `—`.
+/// The `BPS` row's right side, as printed: `12 mins avg: 10.0` (a caption and
+/// a figure), or `—`.
 String _paceAverage(WidgetTester tester) {
   final texts = tester
       .widgetList<Text>(
@@ -3117,8 +3161,8 @@ String _paceAverage(WidgetTester tester) {
       .map((t) => t.data ?? t.textSpan?.toPlainText() ?? '')
       .where((d) => !d.startsWith('BPS'))
       .toList();
-  expect(texts, hasLength(1));
-  return texts.single;
+  expect(texts.length, inInclusiveRange(1, 2));
+  return texts.join(' ');
 }
 
 /// A text on the latency seat itself — the path in the caption prints the

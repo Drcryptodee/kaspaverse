@@ -13,9 +13,10 @@
 /// changes nothing.
 ///
 /// **Why "up to an hour", and not a fixed window:** the app only knows what it
-/// has been connected to see, so the span is the honest one — `12 m avg` until
-/// an hour exists, then `1 h avg` rolling. Nothing is fetched: one sample every
-/// [spacing] rides the stream the app already holds (≤ 361 entries).
+/// has been connected to see, so the span is the honest one — `12 mins avg:`
+/// until an hour exists, then `1 hour avg:` rolling. Nothing is fetched: one
+/// sample every [spacing] rides the stream the app already holds (≤ 361
+/// entries).
 ///
 /// **Its precision is earned by its span.** The endpoints are timed on the
 /// phone's clock a coalesced snapshot after the score moved (≤ ~0.3 s), so
@@ -56,7 +57,7 @@ class KvPaceLog {
     if (latest != null && score < latest.$2 - skewTolerance) _kept.clear();
     // **A gap longer than the span starts the window again** (`ux-auditor`,
     // LINK-UX1): after hours in the background the sample from before the
-    // gap would anchor the average for a whole hour more — `1 h avg` printed
+    // gap would anchor the average for a whole hour more — `1 hour avg:` printed
     // over nine. The chain's pace across the gap is still true, but it is not
     // the last hour's, and the label says the last hour.
     if (_kept.isNotEmpty && at.difference(_kept.last.$1) > span) {
@@ -74,8 +75,8 @@ class KvPaceLog {
     // **And never one older than the span by more than a sample's spacing**
     // (`ux-auditor`): across a gap shorter than the hour, the sample from
     // before it stayed the anchor while the first one after it aged in, and
-    // `1 h avg` covered up to nearly two. Dropped, the window is the shorter
-    // span actually covered, and its label says so (`35 m avg`).
+    // `1 hour avg:` covered up to nearly two. Dropped, the window is the shorter
+    // span actually covered, and its label says so (`35 mins avg:`).
     while (_kept.length > 1 && at.difference(_kept.first.$1) > span + spacing) {
       _kept.removeAt(0);
     }
@@ -92,7 +93,8 @@ class KvPaceLog {
     final bps = (latest.$2 - fromScore) / (covered.inMicroseconds / 1e6);
     // Within a sample's spacing of the hour IS the hour: the anchor's age
     // steps by the snapshot cadence's jitter, and without this the label
-    // flickered `1 h avg` ↔ `59 m avg` ~1.7 times a minute (`ux-auditor`).
+    // flickered `1 h avg` ↔ `59 m avg` (the first cut's words) ~1.7 times a
+    // minute (`ux-auditor`).
     return (bps: bps, span: covered >= span - spacing ? span : covered);
   }
 }

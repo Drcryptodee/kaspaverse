@@ -1383,8 +1383,9 @@ class _NodeScreenState extends State<NodeScreen> {
         // (BG-30), and with it the states that stand in its seat: `syncing`,
         // `7 s since last block` past the data's stale line, bare `BPS` with no
         // socket. The right side is the chain's average pace over up to the
-        // last hour ([NodeScope.paceAverage]): `12 m avg 10.0`, `1 h avg 10.0`,
-        // `—` until two minutes of it exist or with no socket.
+        // last hour ([NodeScope.paceAverage]): `12 mins avg: 10.0`, then
+        // `1 hour avg: 10.0`; `—` until two minutes of it exist or with no
+        // socket.
         ListenableBuilder(
           listenable: Listenable.merge([
             s.connected,
@@ -1441,26 +1442,37 @@ class _NodeScreenState extends State<NodeScreen> {
             // nothing while the node syncs — a syncing node's climb is its
             // catch-up speed, not the chain's.
             final average = connected && !syncing ? _average.value : null;
-            final span = average == null ? null : formatAge(average.span);
             final value = average == null
                 ? '—'
-                : '$span avg ${average.bps.toStringAsFixed(1).padLeft(4)}';
+                : '${_PaceAverage.window(average.span)} avg: '
+                      '${average.bps.toStringAsFixed(1).padLeft(4)}';
             return KvFactLine(
               label: spoken,
               labelSpan: TextSpan(
                 children: [
                   const TextSpan(text: 'BPS'),
-                  if (words != null) TextSpan(text: ' · $words'),
-                  if (figure != null) ...[
-                    const TextSpan(text: ' · '),
-                    TextSpan(text: figure, style: _labelFigure),
+                  // **The dot is JetBrains Mono's** (the founder on glass,
+                  // 2026-09-28: *"i expect the dot to be well centered"*) —
+                  // the Transport row's own separator. Measured off both
+                  // faces' outlines at the label's 12 dp: Jakarta's `·` sits
+                  // 1.3 dp under the capitals' centre and is 1 dp wide; the
+                  // mono one sits within 0.4 dp and is 2 dp. The spaces stay
+                  // Jakarta's, so the dot keeps the label's rhythm and not
+                  // the mono cell's.
+                  if (words != null || figure != null) ...const [
+                    TextSpan(text: ' '),
+                    TextSpan(text: '·', style: _labelDot),
+                    TextSpan(text: ' '),
                   ],
+                  if (words != null) TextSpan(text: words),
+                  if (figure != null)
+                    TextSpan(text: figure, style: _labelFigure),
                 ],
               ),
               dense: true,
               labelColor: KvColor.inkMeta,
               valueText: value,
-              value: _PaceAverage(average: average, span: span, text: value),
+              value: _PaceAverage(average: average, text: value),
             );
           },
         ),
@@ -2558,23 +2570,51 @@ const TextStyle _labelFigure = TextStyle(
   fontFeatures: [FontFeature.tabularFigures()],
 );
 
-/// **The `BPS` row's right side: the chain's average pace** (D-342) — the span
-/// in words (`12 m avg`, Jakarta `inkDim`: an age inside a phrase is a word,
-/// BG-30) and the average as a figure (mono, tabular, `ink`), hard right on
-/// the card's one edge; `—` until two minutes of it exist. Heard as a
-/// sentence (§11).
+/// The separator inside a row's label — `BPS · 10`'s dot, set in mono so it
+/// sits on the capitals' centre (D-342, re-set on glass).
+const TextStyle _labelDot = TextStyle(fontFamily: KvFont.mono);
+
+/// **The `BPS` row's right side: the chain's average pace** (D-342) — a
+/// caption, `37 mins avg:`, then the average as a figure (mono, tabular,
+/// `ink`) hard right on the card's one edge, the two on one baseline; `—`
+/// until two minutes of it exist. Heard as a sentence (§11).
+///
+/// **Re-set on glass the same day** (the founder: *"the way its written is not
+/// appealing … just write it better and align it well"*). The first cut ran
+/// the window, in `formatAge`'s words, straight into the figure at the
+/// figure's own size — `37 m avg 10.0`, where `m avg` read as one word and
+/// the span outweighed the number it qualifies. Now the caption is set as the
+/// row's own label is (Jakarta 12/500, `inkMeta`), a step under the figure,
+/// and the window is spelled for reading. The words are his, on the second
+/// look: *"let the avg say `3 mins avg: 10.2` like that"* — so `mins` (one
+/// minute never shows: the average waits for two), `1 hour` once the hour
+/// exists, and the colon carries the separation, with `xs` of air after it
+/// where a typed space would sit.
 class _PaceAverage extends StatelessWidget {
-  const _PaceAverage({
-    required this.average,
-    required this.span,
-    required this.text,
-  });
+  const _PaceAverage({required this.average, required this.text});
 
   final ({double bps, Duration span})? average;
-  final String? span;
 
-  /// What the row measures and prints (`12 m avg 10.0`, or `—`).
+  /// What the row measures (`37 mins avg: 10.0`, or `—`).
   final String text;
+
+  /// The average's window as its caption reads it: `37 mins`, then `1 hour`.
+  /// Figure and unit never part (§7.1).
+  static String window(Duration span) {
+    if (span >= const Duration(hours: 1)) return '1\u00A0hour';
+    final minutes = span.inMinutes;
+    return minutes == 1 ? '1\u00A0min' : '$minutes\u00A0mins';
+  }
+
+  /// The caption: the row label's own face, size and ink.
+  static const TextStyle _caption = TextStyle(
+    fontFamily: KvFont.ui,
+    fontSize: 12,
+    height: 17 / 12,
+    fontWeight: FontWeight.w500,
+    fontVariations: KvWeight.w500,
+    color: KvColor.inkMeta,
+  );
 
   static const TextStyle _figure = TextStyle(
     fontFamily: KvFont.mono,
@@ -2598,23 +2638,15 @@ class _PaceAverage extends StatelessWidget {
     return Semantics(
       label: 'Average over $over: ${figure.trim()} blocks per second',
       excludeSemantics: true,
-      child: Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: '$span avg ',
-              style: const TextStyle(
-                fontFamily: KvFont.ui,
-                fontSize: _CardValue.figureSize,
-                height: 18 / _CardValue.figureSize,
-                color: KvColor.inkDim,
-              ),
-            ),
-            TextSpan(text: figure, style: _figure),
-          ],
-        ),
-        maxLines: 1,
-        textAlign: TextAlign.right,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          Text('${window(average.span)} avg:', maxLines: 1, style: _caption),
+          const SizedBox(width: KvSpace.xs),
+          Text(figure, maxLines: 1, style: _figure),
+        ],
       ),
     );
   }
