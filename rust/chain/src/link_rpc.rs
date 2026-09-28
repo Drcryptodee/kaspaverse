@@ -117,6 +117,18 @@ impl LinkRpc {
         Ok(())
     }
 
+    /// Which socket calls land on right now — an identity, never the client:
+    /// the message walk compares it across a page call to tell a socket that
+    /// died under the call from a node that answered (LINK-Q3). `None` while
+    /// nothing is bound.
+    pub(crate) fn bound_identity(&self) -> Option<usize> {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|client| Arc::as_ptr(client) as usize)
+    }
+
     /// The current socket, or the typed no-socket error. The lock is released
     /// before any await — a bind rotation must never wait on an RPC round trip.
     fn bound(&self) -> RpcResult<Arc<KaspaRpcClient>> {

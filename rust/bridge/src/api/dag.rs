@@ -397,6 +397,14 @@ async fn escalation_task(mut events: broadcast::Receiver<AcceptanceEvent>, monit
     }
 }
 
+/// Hold the message intake (LINK-Q3): called by `lock_vault`. A no-op before
+/// the monitor exists — nothing is armed then either.
+pub(crate) fn hold_intake(why: &str) {
+    if let Some(monitor) = MONITOR.get() {
+        monitor.hold_intake(why);
+    }
+}
+
 /// Sync peek at the tracker for non-async call sites (the transport fold);
 /// `None` until the first [`shared_tracker`] bootstrap completes.
 pub(crate) fn tracker_handle() -> Option<Arc<AcceptanceTracker>> {
@@ -469,10 +477,11 @@ pub struct DagStatusDto {
     /// Seconds since the last DAA tick on any installed socket — see above.
     pub last_tick_age_secs: Option<u64>,
     /// Every DAA tick an installed socket has delivered in this process — a
-    /// plain monotonic count, counted in Rust BEFORE the 250 ms coalescer, so
-    /// the node screen can difference it against its own clock and show the
-    /// beat the link is really keeping (`DAA · 10 Hz`, D-332). Public chain
-    /// liveness; a count, never a value.
+    /// plain monotonic count, counted in Rust BEFORE the 250 ms coalescer. It
+    /// fed the Network screen's `DAA · 10 Hz` (D-332) until LINK-UX1 (D-342),
+    /// whose `BPS` reads the climb of `virtual_daa_score` instead; since then
+    /// it serves the logs and diagnostics only. Public chain liveness; a count,
+    /// never a value.
     pub daa_ticks: u64,
     pub virtual_daa_score: Option<u64>,
     /// A connect race is hunting right now (C7's second truth) — held for the

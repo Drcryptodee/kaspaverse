@@ -19,13 +19,14 @@ use kaspa_wallet_core::rpc::{Rpc, RpcCtl};
 use kaspa_wrpc_client::prelude::*;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::acceptance::VccBatch;
+use crate::acceptance::{TrackerFeed, VccBatch};
 use crate::devab;
 use crate::error::Result;
 use crate::link::{self, EndpointHealth};
 use crate::link_rpc::LinkRpc;
 use crate::spans;
 use crate::transport::{self, TransportEvent};
+use crate::walk::{self, MessageSink, TransportMatcher, Walk};
 
 /// Per-candidate probe budget in the connect race (dial + `get_server_info`).
 /// Bounded like the old cached fast path (3 s) plus one health round-trip.
@@ -244,34 +245,13 @@ fn hygiene_may_degrade(mode: &RaceMode, empty_rounds: u32) -> bool {
     empty_rounds >= 2 && matches!(mode, RaceMode::Cold)
 }
 
-/// Throttle for the catch-up cursor write in the hot BlockAdded path: at most
-/// one tiny hash write this often. A killed app loses at most this much scan
-/// progress, which the next open's catch-up re-covers anyway (idempotent — the
-/// fold dedups by txid), so a coarse throttle costs nothing but I/O churn.
-const TRANSPORT_CURSOR_MIN_WRITE_SECS: u64 = 3;
-
-/// Bound on one catch-up replay (P5). `get_blocks` returns up to
-/// ~`mergeset_size_limit`+1 blocks/page (mainnet = 2·ghostdag_k+1 = 249 at
-/// 10 bps), so 48 pages ≈ 12k blocks ≈ **~20 min** of gap — a comfortable
-/// idle/background window (the P2.3b sitting's first miss came from a 9-min
-/// gap that was borderline under the old 24-page cap). The common small gap
-/// stops early (a page of just the low_hash = caught up), so this ceiling only
-/// costs work on a genuinely long outage — which is NOT fully recovered (an
-/// indexer's job, INV-8; the P3 liveness surface tells the user to reconnect).
-const MAX_CATCHUP_PAGES: u32 = 48;
-
-/// Per-page `get_blocks` retry budget for the catch-up. The replay fires the
-/// instant transport starts — often BEFORE the wRPC reconnect completes on a
-/// cold reopen — so the first page routinely races a not-yet-live socket. We
-/// retry (rather than give up after one error, the P2.3b sitting's
-/// first-of-three miss) so a message that arrived while the app was closed is
-/// never lost to a connect-timing race. Exhausting the budget = the node is
-/// truly unreachable or the cursor is pruned; the walk then stops honestly.
-const CATCHUP_RPC_ATTEMPTS: u32 = 15;
-/// Delay between catch-up `get_blocks` retries — long enough to let a cold
-/// wRPC socket finish connecting (cached fast-path ≤3 s; resolver a little
-/// more), short enough that the recovery feels immediate.
-const CATCHUP_RETRY_DELAY: Duration = Duration::from_millis(1000);
+/// How long the V2b fill waits for the message walk's first run after an arm,
+/// so node truth folds before any indexer claim (D-074's order). A run that
+/// cannot reach its node ends in about eight seconds (the walk's retries); one
+/// whose page times out ends at the page timeout (60 s); a full catch-up is up
+/// to sixteen pages. Past this the fill runs anyway, as it did after a
+/// catch-up that ended early.
+pub const INTAKE_SETTLE_WAIT: Duration = Duration::from_secs(120);
 
 /// How long a RETIRED bind's task keeps servicing its own channels before it
 /// exits (R4). Its events are all stale by then — the window exists so the
@@ -357,15 +337,15 @@ const LANE_REBIND_WINDOW_SECS: u64 = 600;
 /// this file are fine for a 30 s verdict and useless for a nine-second
 /// deadline (a whole-second clock is ±1 s of it), and a wall clock can step
 /// under NTP; the silence hunt's stand-down reads this instead.
-fn mono_ms() -> u64 {
+pub(crate) fn mono_ms() -> u64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     ms_since(*EPOCH.get_or_init(std::time::Instant::now))
 }
 
 /// Milliseconds since `epoch`, **counted from 1**. Every monotonic stamp on a
-/// socket keeps 0 for "never" (`connected_mono_ms`, `last_tick_mono_ms`,
-/// `last_block_mono_ms`), and the clock's epoch is its first call — which in a
-/// process is the first socket's publish. Counted from 0, that socket stamped
+/// socket keeps 0 for "never" (`connected_mono_ms`, `last_tick_mono_ms`, and
+/// the message walk's progress stamp, `walk.rs`), and the clock's epoch is its
+/// first call — which in a process is the first socket's publish. Counted from 0, that socket stamped
 /// itself "never published", and the blockless-ticks witness (D-334 item 1)
 /// stayed silent for the first socket of every process: found by LINK-Q2's
 /// `ba=0` arms, an hour of blockless ticks and not one line. A uniform +1
@@ -586,14 +566,11 @@ struct BoundSocket {
     /// The wallet lane's recovery keys on (gen, this) — `consensus-auditor`
     /// delta NOTE 2.
     publishes: AtomicU64,
-    /// [`mono_ms`] when this socket was published (0 = not yet) and of its
-    /// last `BlockAdded` (0 = none) — the "ticks but no blocks" witness
-    /// (`consensus-auditor` CONCERNS-3): the one case the heartbeat's move
-    /// stopped convicting now at least says its name.
+    /// [`mono_ms`] when this socket was published (0 = not yet): where the
+    /// witness's stretch starts (`consensus-auditor` CONCERNS-3, D-334). Since
+    /// LINK-Q3 the witness watches the message walk, not blocks
+    /// (`Walk::note_ticks`).
     connected_mono_ms: AtomicU64,
-    last_block_mono_ms: AtomicU64,
-    /// That line was said for the current blockless stretch; a block re-arms it.
-    blocks_quiet_warned: AtomicBool,
     daa_seen_since_connect: AtomicBool,
     /// True once this bind's `Connected` was announced to consumers (monitor
     /// ctl open + [`DagEvent::Connected`]) — so retirement tells them exactly
@@ -635,10 +612,12 @@ struct Inner {
     next_gen: AtomicU64,
     is_connected: AtomicBool,
     events: broadcast::Sender<DagEvent>,
-    /// Payload-transport fan-out (P2.1): matches from the BlockAdded scan.
-    /// Separate from `events` — these are discrete deliveries, not foldable
-    /// absolute-state snapshots, and they stay sparse (only `ciph_msg:` matches
-    /// are ever sent; the ~10 blocks/s stream itself never crosses).
+    /// Payload-transport fan-out (P2.1) for OBSERVERS (the dev wire view):
+    /// matches from the message walk (LINK-Q3). Separate from `events` — these
+    /// are discrete deliveries, not foldable snapshots, and they stay sparse
+    /// (only `ciph_msg:`/`kchat:` matches are ever sent). The hub does not read
+    /// this: it folds each page through its [`MessageSink`], so its success is
+    /// what commits the walk's cursor.
     transport_events: broadcast::Sender<TransportEvent>,
     /// Address prefix for the scan's output-address extraction — derived from
     /// the network this monitor was constructed for.
@@ -744,16 +723,13 @@ struct Inner {
     /// deliberate grace-drop also emits `Disconnected`, and the rotation-restore
     /// logic must not treat it as a dead node and dial right back.
     paused: AtomicBool,
-    /// App-private file holding the hash of the last block whose transport scan
-    /// we advanced past — the catch-up cursor (P5/D-067). Public chain data
-    /// (INV-3). `None` until transport arms it (`set_transport_cursor`); while
-    /// armed, the BlockAdded scan persists it (throttled) so a killed app can
-    /// replay the gap on next open ([`catch_up_transport`]). Node-only (INV-8):
-    /// the replay is `get_blocks` from this hash, never an indexer.
-    transport_cursor: Mutex<Option<PathBuf>>,
-    /// Unix-seconds of the last cursor write — throttles the hot BlockAdded path
-    /// to one small write every [`TRANSPORT_CURSOR_MIN_WRITE_SECS`].
-    transport_cursor_written: AtomicU64,
+    /// **The message walk** (LINK-Q3, D-344): one cursor, one fetch per chain
+    /// move, the transport matcher over what the chain accepted (`walk.rs`).
+    /// Poked by this socket's `VirtualChainChanged` and by every publish; armed
+    /// by the hub at unlock, held at lock.
+    walk: Arc<Walk>,
+    /// The walk's transport matcher, kept to hand it the hub's sink at arm.
+    transport_matcher: Arc<TransportMatcher>,
     /// Unix-seconds of the last DAA tick, process-wide (0 = none yet). This is
     /// the **display** clock: how old the data on the glass is, which is a
     /// property of the app's session, not of any one socket, and it must keep
@@ -767,11 +743,11 @@ struct Inner {
     /// process's — that conflation was the D-099/L70 cascade.
     last_tick_at: AtomicU64,
     /// Every DAA tick an installed socket has delivered in this process. A
-    /// plain count, never reset: the node screen reads it twice a second and
-    /// divides by its own clock to show the rate the link is beating at
-    /// (`DAA · 10 Hz`, D-332). Counting here, before the bridge's 250 ms
-    /// coalescer, is what makes it the real tick count rather than the
-    /// coalesced one.
+    /// plain count, never reset, counted here before the bridge's 250 ms
+    /// coalescer so it is the real tick count rather than the coalesced one.
+    /// It fed the Network screen's `DAA · 10 Hz` until LINK-UX1 (D-342), whose
+    /// `BPS` reads the DTO's `virtual_daa_score` climb instead; since then it
+    /// reaches the logs and the diagnostics pull only (`dag_status`).
     daa_ticks: AtomicU64,
     /// Single-flight for [`DagMonitor::recover_wallet_lane`] (D-101): one
     /// recovery at a time, however many errors report in.
@@ -795,10 +771,12 @@ struct Inner {
     /// incumbent's comeback can no longer call off (CONCERNS-2).
     swaps_asked: AtomicU64,
     /// V1 acceptance spine: where the event task forwards VirtualChainChanged
-    /// batches once the tracker is attached ([`DagMonitor::attach_acceptance`]).
-    /// Unattached (or a dead receiver) = batches drop harmlessly — the tracker's
-    /// own reconnect catch-up recovers anything missed while detached.
-    vcc_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<VccBatch>>>,
+    /// batches, and the message walk its pages' acceptances (LINK-Q3), once
+    /// the tracker is attached ([`DagMonitor::attach_acceptance`]). Shared with
+    /// the walk's transport matcher. Unattached (or a dead receiver) = batches
+    /// drop harmlessly — the tracker's own reconnect catch-up recovers anything
+    /// missed while detached.
+    vcc_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<TrackerFeed>>>>,
     /// LINK-Q2's measurement seam: dev flags, default OFF. Every hook
     /// into it is one relaxed load that returns while the flags file is absent.
     devab: Arc<devab::DevAb>,
@@ -855,6 +833,16 @@ impl DagMonitor {
         let resolver = Resolver::default();
         let (events, _) = broadcast::channel(256);
         let (transport_events, _) = broadcast::channel(256);
+        let address_prefix = Prefix::from(network_id.network_type);
+        let vcc_tx = Arc::new(Mutex::new(None));
+        let devab = Arc::new(devab::DevAb::default());
+        let transport_matcher = TransportMatcher::new(
+            address_prefix,
+            transport_events.clone(),
+            vcc_tx.clone(),
+            devab.clone(),
+        );
+        let walk = Walk::new(vec![transport_matcher.clone() as Arc<dyn walk::WalkMatcher>]);
         Ok(Self {
             inner: Arc::new(Inner {
                 link_rpc: LinkRpc::new(),
@@ -865,7 +853,7 @@ impl DagMonitor {
                 is_connected: AtomicBool::new(false),
                 events,
                 transport_events,
-                address_prefix: Prefix::from(network_id.network_type),
+                address_prefix,
                 endpoint_cache: Mutex::new(None),
                 resolver,
                 network_id,
@@ -882,8 +870,8 @@ impl DagMonitor {
                 pause_gen: AtomicU64::new(0),
                 direct_url: Mutex::new(url),
                 paused: AtomicBool::new(false),
-                transport_cursor: Mutex::new(None),
-                transport_cursor_written: AtomicU64::new(0),
+                walk,
+                transport_matcher,
                 last_tick_at: AtomicU64::new(0),
                 daa_ticks: AtomicU64::new(0),
                 lane_recovering: AtomicBool::new(false),
@@ -891,17 +879,18 @@ impl DagMonitor {
                 lane_rebound_at: AtomicU64::new(0),
                 silence_backoff: AtomicU32::new(0),
                 swaps_asked: AtomicU64::new(0),
-                vcc_tx: Mutex::new(None),
-                devab: Arc::new(devab::DevAb::default()),
+                vcc_tx,
+                devab,
                 devab_armed: AtomicBool::new(false),
             }),
         })
     }
 
     /// Attach the acceptance tracker (V1): returns the receiving end of the
-    /// VirtualChainChanged forward. Batches that arrive before attachment
-    /// drop harmlessly (the tracker's connect catch-up covers the gap).
-    pub fn attach_acceptance(&self) -> tokio::sync::mpsc::UnboundedReceiver<VccBatch> {
+    /// VirtualChainChanged forward, which since LINK-Q3 also carries the
+    /// message walk's acceptances. Batches that arrive before attachment drop
+    /// harmlessly (the tracker's connect catch-up covers the gap).
+    pub fn attach_acceptance(&self) -> tokio::sync::mpsc::UnboundedReceiver<TrackerFeed> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         *self
             .inner
@@ -1171,170 +1160,48 @@ impl DagMonitor {
         }
     }
 
-    /// Arm the transport catch-up cursor at `path` (called by the transport hub
-    /// on start, AFTER it has read the prior value for its replay — see
-    /// [`take_transport_cursor`]). Once set, the BlockAdded scan persists the
-    /// last-scanned block hash here (throttled), so the next open can replay the
-    /// gap. Idempotent; changing paths mid-run just re-homes the cursor.
-    pub fn set_transport_cursor(&self, path: PathBuf) {
-        *self
-            .inner
-            .transport_cursor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+    /// **Arm the message intake** (LINK-Q3, D-344): from now on the walk folds
+    /// every page's transport matches through `sink` (the unlocked hub), and
+    /// commits its cursor at `cursor_path` only once they are folded. Resumes
+    /// from the committed cursor, so whatever the walk has not folded since, a
+    /// cold open's gap, a reconnect's, a lock's, is replayed by construction.
+    /// Called at every unlock (`transport_start`); returns the arm's epoch for
+    /// [`Self::intake_settled`].
+    pub fn arm_intake(&self, cursor_path: PathBuf, sink: Arc<dyn MessageSink>) -> u64 {
+        // The sink first: the walk may run the moment it is armed.
+        self.inner.transport_matcher.set_sink(sink);
+        self.inner.walk.arm(cursor_path)
     }
 
-    fn transport_cursor_path(&self) -> Option<PathBuf> {
-        self.inner
-            .transport_cursor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+    /// **Hold the message intake** (the vault locked): no page is fetched until
+    /// the next arm, and the committed cursor is written, so the unlock replays
+    /// what the lock refused (deliverable 4, `wallet-security-auditor`).
+    pub fn hold_intake(&self, why: &str) {
+        self.inner.walk.hold(why);
     }
 
-    /// Read the persisted cursor hash from a file WITHOUT arming persistence —
-    /// the transport hub calls this at open to get the PRIOR session's last
-    /// scan point for the catch-up replay, before it arms the live cursor.
-    /// A missing/corrupt file yields `None` (first run, or nothing to recover).
-    pub fn read_transport_cursor(path: &PathBuf) -> Option<Hash> {
-        let text = std::fs::read_to_string(path).ok()?;
-        text.trim().parse::<Hash>().ok()
+    /// **Hold the intake and wait out a fold in flight**: once this returns no
+    /// page is being folded and none can start until the next arm. The hub
+    /// calls it before it restarts on a new store, so the store has one writer
+    /// (the previous fold task used to be aborted for the same reason).
+    pub async fn quiesce_intake(&self, why: &str) {
+        self.inner.walk.hold(why);
+        self.inner.walk.quiesce().await;
     }
 
-    /// Best-effort, throttled persist of the last-scanned block hash. Called
-    /// from the BlockAdded scan; a write happens at most every
-    /// [`TRANSPORT_CURSOR_MIN_WRITE_SECS`] so the ~10 blocks/s stream never
-    /// hammers the disk. No-op until the cursor is armed.
-    fn persist_transport_cursor(&self, hash: &Hash) {
-        let Some(path) = self.transport_cursor_path() else {
-            return;
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let last = self.inner.transport_cursor_written.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < TRANSPORT_CURSOR_MIN_WRITE_SECS {
-            return;
-        }
-        self.inner
-            .transport_cursor_written
-            .store(now, Ordering::Relaxed);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&path, hash.to_string()) {
-            log::warn!("dag-monitor: transport cursor write failed: {e}");
-        }
+    /// Wait (at most `within`) until the walk's first run after the arm that
+    /// returned `epoch` has ended — reached the tip, gave up on an unreachable
+    /// node, or spent its budget. The V2b fill waits on it so node truth folds
+    /// before any indexer claim (D-074's order). `false` on the timeout.
+    pub async fn intake_settled(&self, epoch: u64, within: Duration) -> bool {
+        self.inner.walk.settled(epoch, within).await
     }
 
-    /// Replay the transport scan over the blocks the app missed while closed —
-    /// the P5/D-067 catch-up. From `from` (the prior session's cursor), walk the
-    /// DAG forward with `get_blocks` (node-only, INV-8), run the SAME
-    /// [`transport::scan_block`] the live path uses, and fan the matches out on
-    /// the transport channel so the hub folds them exactly like live arrivals
-    /// (dedup-by-txid makes the boundary-block overlap harmless). Bounded by
-    /// [`MAX_CATCHUP_PAGES`]; a pruned/unknown cursor just ends the walk (the
-    /// live scan takes over). Returns the number of matches re-emitted.
-    ///
-    /// `from = None` (first run / no prior cursor) seeds the cursor at the
-    /// current sink so the NEXT gap is coverable, and replays nothing — there is
-    /// no prior session whose arrivals could have been missed.
-    pub async fn catch_up_transport(&self, from: Option<Hash>) -> Result<usize> {
-        // Through the stable handle: the replay commonly starts before the
-        // first bind lands, and it must keep working across any rebind that
-        // happens mid-walk.
-        let rpc = self.inner.link_rpc.clone();
-        let Some(mut low) = from else {
-            if let Ok(sink) = rpc.get_sink().await {
-                self.write_cursor_now(&sink.sink);
-            }
-            return Ok(0);
-        };
-
-        let mut emitted = 0usize;
-        let mut last_hash = low;
-        for _page in 0..MAX_CATCHUP_PAGES {
-            // Retry across a still-connecting socket so a cold-reopen race never
-            // strands a closed-app arrival. `None` = unreachable/pruned → stop.
-            let Some(resp) = self.catch_up_get_blocks(low).await else {
-                log::warn!("dag-monitor: catch-up get_blocks unreachable — stopping");
-                break;
-            };
-            // `low_hash` is returned inclusively; a page of just it = caught up.
-            if resp.block_hashes.len() <= 1 {
-                if let Some(h) = resp.block_hashes.last() {
-                    last_hash = *h;
-                }
-                break;
-            }
-            for block in &resp.blocks {
-                for event in transport::scan_block(block, self.inner.address_prefix) {
-                    if self.inner.transport_events.send(event).is_ok() {
-                        emitted += 1;
-                    }
-                }
-            }
-            if let Some(h) = resp.block_hashes.last() {
-                last_hash = *h;
-            }
-            // Next page starts at the last hash (re-included, then skipped by
-            // the dedup fold). Reaching the sink returns a short/So single page.
-            low = last_hash;
-        }
-        // Advance the persisted cursor to where the replay reached, so a second
-        // open doesn't redo the same walk.
-        self.write_cursor_now(&last_hash);
-        log::info!("dag-monitor: transport catch-up re-emitted {emitted} match(es)");
-        Ok(emitted)
-    }
-
-    /// One catch-up page, tolerant of a still-connecting or briefly-flaky wRPC
-    /// socket. `include_blocks + include_transactions` because we need the
-    /// payloads. Retries up to [`CATCHUP_RPC_ATTEMPTS`] with a
-    /// [`CATCHUP_RETRY_DELAY`] pause — the first page on a cold reopen commonly
-    /// runs before the reconnect lands, and a single failure must NOT abandon
-    /// the walk (the closed-app arrival would be lost, the sitting bug).
-    /// `None` after the whole budget = the node is unreachable or the cursor is
-    /// pruned.
-    async fn catch_up_get_blocks(&self, low: Hash) -> Option<GetBlocksResponse> {
-        // "No bound socket" is just another retryable answer here — the walk
-        // is allowed to start before the race has bound anything.
-        let rpc = self.inner.link_rpc.clone();
-        for attempt in 0..CATCHUP_RPC_ATTEMPTS {
-            match rpc.get_blocks(Some(low), true, true).await {
-                Ok(resp) => return Some(resp),
-                Err(e) => {
-                    log::debug!(
-                        "dag-monitor: catch-up get_blocks attempt {attempt} failed ({}); retrying",
-                        link::sanitize_node_text(&e.to_string())
-                    );
-                    tokio::time::sleep(CATCHUP_RETRY_DELAY).await;
-                }
-            }
-        }
-        None
-    }
-
-    /// Force-write the cursor now (bypassing the throttle) — used at the ends of
-    /// catch-up and on seeding, where the exact point matters.
-    fn write_cursor_now(&self, hash: &Hash) {
-        let Some(path) = self.transport_cursor_path() else {
-            return;
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.inner
-            .transport_cursor_written
-            .store(now, Ordering::Relaxed);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&path, hash.to_string()) {
-            log::warn!("dag-monitor: transport cursor write failed: {e}");
-        }
+    /// Read a persisted intake cursor WITHOUT arming anything — the hub reads
+    /// the PRIOR session's point at open, for the gap-age line. A missing or
+    /// corrupt file yields `None` (first run, or nothing to recover).
+    pub fn read_transport_cursor(path: &std::path::Path) -> Option<Hash> {
+        walk::read_cursor(path)
     }
 
     pub fn mainnet() -> Result<Self> {
@@ -1391,10 +1258,12 @@ impl DagMonitor {
     }
 
     /// New receiver onto the payload-transport fan-out (P2.1): one
-    /// [`TransportEvent`] per `ciph_msg:` match seen in the BlockAdded stream.
-    /// Live-only by design (D-049/§0.3): a late subscriber sees the next match,
-    /// never history — the P2.3 message store owns persistence. Rides the same
-    /// socket + pause/resume posture as everything else (foreground-only).
+    /// [`TransportEvent`] per `ciph_msg:`/`kchat:` match in an ACCEPTED
+    /// transaction, as the message walk folds it (LINK-Q3). For observers (the
+    /// dev wire view): the hub folds through its [`MessageSink`] instead, so a
+    /// slow observer can lag without losing a message. A late subscriber sees
+    /// the next match, never history — the P2.3 message store owns persistence.
+    /// Rides the same socket + pause/resume posture as everything else.
     pub fn subscribe_transport(&self) -> broadcast::Receiver<TransportEvent> {
         self.inner.transport_events.subscribe()
     }
@@ -1514,8 +1383,18 @@ impl DagMonitor {
         Rpc::new(self.inner.link_rpc.clone(), self.inner.monitor_ctl.clone())
     }
 
-    /// Initiates the first connect. Must be called from within a tokio runtime.
+    /// Initiates the first connect and starts the message walk's task (idle
+    /// until the hub arms it). Must be called from within a tokio runtime.
     pub async fn start(&self) -> Result<()> {
+        // LINK-Q3: one task, one fetch at a time, through the stable handle so
+        // a rebind mid-page is survived; it waits for its first poke.
+        let source = walk::LinkSource(self.inner.link_rpc.clone());
+        tokio::spawn(
+            self.inner
+                .walk
+                .clone()
+                .run(Arc::new(source) as Arc<dyn walk::ChainSource>),
+        );
         // LINK-Q2: the flags loop exists only in a process that
         // started with the flags file saying `on=1` — never in today's app.
         if self.inner.devab_armed.load(Ordering::SeqCst) {
@@ -1900,8 +1779,6 @@ impl DagMonitor {
             lane_reannounced: AtomicU32::new(0),
             publishes: AtomicU64::new(0),
             connected_mono_ms: AtomicU64::new(0),
-            last_block_mono_ms: AtomicU64::new(0),
-            blocks_quiet_warned: AtomicBool::new(false),
             daa_seen_since_connect: AtomicBool::new(false),
             announced: AtomicBool::new(false),
             stale_ctl: AtomicU64::new(0),
@@ -2835,34 +2712,14 @@ impl DagMonitor {
         bind.ticks.fetch_add(1, Ordering::SeqCst);
         self.inner.last_tick_at.store(now, Ordering::Relaxed);
         self.inner.daa_ticks.fetch_add(1, Ordering::Relaxed);
-        self.note_blockless_ticks(bind, mono);
+        // D-334's witness, re-aimed at the message walk (LINK-Q3): ticking
+        // while no page is answered says so once per stretch, no verdict.
+        self.inner.walk.note_ticks(
+            link::endpoint_host(&bind.url),
+            bind.connected_mono_ms.load(Ordering::Relaxed),
+            mono,
+        );
         self.inner.devab.on_tick(mono);
-    }
-
-    /// **The case the heartbeat's move stopped convicting, named** (D-334
-    /// item 1; `consensus-auditor` CONCERNS-3). A socket whose node keeps
-    /// ticking while no block arrives for the stall line has dropped our
-    /// `BlockAdded` scope: the wallet is live and the transport scan is deaf.
-    /// It used to be executed at 30 s as an ordinary stall; now it is not, so
-    /// it must at least say so — once per blockless stretch, no verdict, for
-    /// the LINK-Q2 trigger to key on. Pure bookkeeping on the socket's own
-    /// monotonic stamps; a block re-arms it.
-    fn note_blockless_ticks(&self, bind: &BoundSocket, mono: u64) {
-        let up = bind.connected_mono_ms.load(Ordering::Relaxed);
-        if up == 0 {
-            return;
-        }
-        let since = up.max(bind.last_block_mono_ms.load(Ordering::Relaxed));
-        let quiet_secs = mono.saturating_sub(since) / 1000;
-        if quiet_secs >= link::WATCHDOG_STALL_SECS
-            && !bind.blocks_quiet_warned.swap(true, Ordering::Relaxed)
-        {
-            log::warn!(
-                "link: {} has ticked for {quiet_secs}s without a block — the transport \
-                 scan may be deaf on this socket (no verdict; the stream is LINK-Q2's)",
-                link::endpoint_host(&bind.url)
-            );
-        }
     }
 
     /// Seconds since the last DAA tick, or `None` if none has arrived yet
@@ -3567,14 +3424,14 @@ impl DagMonitor {
                     // A pinned bind redials inside one identity (the pin's own
                     // retry loop), so every publish is a NEW socket: its
                     // re-announce budget — which is also its dark-lane proof —
-                    // and its blockless warning start clean (`consensus-
-                    // auditor` note g, `wallet-security-auditor`). Loop-safe:
-                    // a re-announce goes to the monitor's ctl, never this
+                    // and its witness stretch start clean (`consensus-auditor`
+                    // note g, `wallet-security-auditor`). Loop-safe: a
+                    // re-announce goes to the monitor's ctl, never this
                     // socket's, so it cannot reach this arm. A no-op for a
                     // race bind, which publishes once.
                     bind.publishes.fetch_add(1, Ordering::SeqCst);
                     bind.lane_reannounced.store(0, Ordering::SeqCst);
-                    bind.blocks_quiet_warned.store(false, Ordering::Relaxed);
+                    self.inner.walk.socket_published();
                     // The stable handle points at this socket BEFORE anyone is
                     // told it exists, so a consumer reacting to the ctl open
                     // finds it (L59: the funds lanes re-arm on connect).
@@ -3592,6 +3449,9 @@ impl DagMonitor {
                 }
                 // V1 spans: close the cold-connect leg, arm the first-DAA one.
                 spans::mark("wss_connected");
+                // LINK-Q3: a new socket may follow a gap; the walk resumes
+                // from its committed cursor (a no-op while the intake is held).
+                self.inner.walk.poke();
                 // Shape note for the forensic lane: the endpoint is no longer
                 // Debug-printed through an `Option` (it used to read
                 // `connected to Some("wss://…")`), because a bind always knows
@@ -3727,45 +3587,25 @@ impl DagMonitor {
     /// this bind produced; a retired socket's stream is discarded upstream.
     fn on_notification(&self, bind: &Arc<BoundSocket>, notification: Notification) {
         match notification {
-            // P2.1 payload scan: BlockAdded is consumed here — the ~10
-            // blocks/s stream never leaves this task; only `ciph_msg:` matches
-            // fan out (sparse by design, §0.3). Version-neutral by
-            // construction (transport.rs, §0.2).
+            // **No production subscription since LINK-Q3** (D-344): messages
+            // come from accepted transactions (`walk.rs`). A block arrives only
+            // under the dev install's parity arm (`ba=1`), which scans it to
+            // set the stream's sighting beside the walk's, logs only: nothing
+            // is emitted, nothing is committed, no witness moves.
             Notification::BlockAdded(added) => {
-                let matches = transport::scan_block(&added.block, self.inner.address_prefix);
-                // LINK-Q2: inert unless the dev flags are on.
-                self.inner.devab.on_block(&added.block);
-                self.inner.devab.on_ba_matches(&matches);
-                if !matches.is_empty() {
-                    // Three-lights producer log (V3/L55): count + receiver
-                    // count only — payload bodies are never logged (§4
-                    // plaintext discipline). `info`: the liblog lane is
-                    // Info-max, a `debug` light is dark on device (L53).
-                    log::info!(
-                        "dag-monitor: transport emit matches={} receivers={}",
-                        matches.len(),
-                        self.inner.transport_events.receiver_count()
-                    );
+                if self.inner.devab.block_added_on() {
+                    self.inner.devab.on_block(&added.block);
+                    self.inner.devab.on_ba_matches(&transport::scan_block(
+                        &added.block,
+                        self.inner.address_prefix,
+                    ));
                 }
-                for event in matches {
-                    // Send fails only with zero subscribers — fine.
-                    let _ = self.inner.transport_events.send(event);
-                }
-                // **No heartbeat here any more** (LINK-Q1, D-334): a block is
-                // the transport scan's input, not the link's pulse. The pulse
-                // is the DAA tick, marked in the arm below — see `mark_tick`.
-                // It does keep the scan's own witness: a block re-arms the
-                // "ticks but no blocks" line.
-                bind.last_block_mono_ms.store(mono_ms(), Ordering::Relaxed);
-                bind.blocks_quiet_warned.store(false, Ordering::Relaxed);
-                // Advance the catch-up cursor past this scanned block
-                // (throttled; no-op until transport arms it). P5/D-067.
-                self.persist_transport_cursor(&added.block.header.hash);
             }
             // V1 acceptance spine: forward the batch to the tracker task when
             // one is attached (never processed here — the event task stays
             // non-blocking; blue-score resolution and persistence live in the
-            // tracker).
+            // tracker). And since LINK-Q3 the chain moving is the message
+            // walk's cue: one more page, coalesced with any already asked for.
             Notification::VirtualChainChanged(vcc) => {
                 let sender = self
                     .inner
@@ -3779,12 +3619,13 @@ impl DagMonitor {
                         .iter()
                         .map(|a| (a.accepting_block_hash, a.accepted_transaction_ids.clone()))
                         .collect();
-                    let _ = tx.send(VccBatch {
+                    let _ = tx.send(TrackerFeed::Vcc(VccBatch {
                         removed_chain_block_hashes: vcc.removed_chain_block_hashes.clone(),
                         added_chain_block_hashes: vcc.added_chain_block_hashes.clone(),
                         accepted: Arc::new(accepted),
-                    });
+                    }));
                 }
+                self.inner.walk.poke();
             }
             other => {
                 if let Some(event) = map_notification(&other) {
@@ -3851,12 +3692,12 @@ impl DagMonitor {
             Scope::SinkBlueScoreChanged(SinkBlueScoreChangedScope {}),
         )
         .await?;
-        // P2.1: the payload-transport scan source. Joins the SAME listener +
-        // channel as the score scopes (D-053 single-listener machinery; §0.3) —
-        // re-registered on every connect like the others, paused with the
-        // socket (foreground-only posture unchanged). Left off only by a
-        // LINK-Q2 dev arm (`ba=0`) — never with the flags file absent.
-        let with_block_added = !self.inner.devab.block_added_off();
+        // **The full-block stream is no longer subscribed** (LINK-Q3, D-344,
+        // moving D-062's receive lock as D-340 approved): 97 % of the app's
+        // download, for sightings the message walk no longer reads. Only the
+        // dev install's parity arm (`ba=1`) subscribes it, on the SAME
+        // listener, never with the flags file absent (`devab.rs`'s fence).
+        let with_block_added = self.inner.devab.block_added_on();
         if with_block_added {
             rpc.start_notify(listener_id, Scope::BlockAdded(BlockAddedScope {}))
                 .await?;
@@ -3866,7 +3707,8 @@ impl DagMonitor {
         // plus removed-chain-block hashes on reorg — same listener, same
         // socket (D-005), re-registered per connect like the rest. The stream
         // is consumed by the event task and forwarded (sparse-filtered by the
-        // tracker) — it never crosses to Dart.
+        // tracker) — it never crosses to Dart. Since LINK-Q3 it is also the
+        // message walk's cue to fetch the page it describes.
         rpc.start_notify(
             listener_id,
             Scope::VirtualChainChanged(VirtualChainChangedScope {
@@ -4379,31 +4221,26 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The intake cursor's reader. **The old build's file is the fixture**
+    /// (PB-023): the block scan wrote a bare hex hash, no newline, and the walk
+    /// reads that same format as its starting point (a non-chain start is fine
+    /// at the pin, `walk.rs` module doc). Missing or corrupt reads as none, and
+    /// the walk then seeds at the sink rather than walking from garbage.
     #[test]
     fn transport_cursor_round_trips_and_rejects_garbage() {
-        let monitor = DagMonitor::mainnet().expect("construct");
         let dir = std::env::temp_dir().join(format!("kv-tcursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("scan.cursor");
         let _ = std::fs::remove_file(&path);
-
-        // No file → None (first run / nothing to recover).
         assert_eq!(DagMonitor::read_transport_cursor(&path), None);
-        // Unarmed: persist is a no-op, no crash.
-        monitor.write_cursor_now(&Hash::from_bytes([1u8; 32]));
-        assert_eq!(DagMonitor::read_transport_cursor(&path), None);
-
-        // Armed: a forced write round-trips as the exact block hash.
-        monitor.set_transport_cursor(path.clone());
         let h = Hash::from_bytes([7u8; 32]);
-        monitor.write_cursor_now(&h);
+        std::fs::write(&path, h.to_string()).unwrap();
         assert_eq!(DagMonitor::read_transport_cursor(&path), Some(h));
-
-        // A corrupt cursor never misdirects the walk — it reads as None (the
-        // replay then just seeds from the current sink).
+        std::fs::write(&path, format!("{h}\n")).unwrap();
+        assert_eq!(DagMonitor::read_transport_cursor(&path), Some(h));
         std::fs::write(&path, "not-a-hash").unwrap();
         assert_eq!(DagMonitor::read_transport_cursor(&path), None);
-
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **P0b — the tap that cost five minutes.**
@@ -5068,12 +4905,12 @@ mod tests {
         }
     }
 
-    /// **The connect step subscribes the block stream — unless a dev arm said
-    /// otherwise** (LINK-Q2, `consensus-auditor` CONCERNS-2). Drives the real
+    /// **The connect step leaves the block stream OFF — unless the dev arm asks
+    /// for it** (LINK-Q3, D-344; the LINK-Q2 test inverted). Drives the real
     /// `handle_connect` offline on an armed-but-unconnected bind and reads the
     /// step's own report, so flipping the one production line reds this.
     #[tokio::test]
-    async fn the_connect_step_subscribes_the_stream_unless_a_dev_arm_says_otherwise() {
+    async fn the_connect_step_leaves_the_stream_off_unless_a_dev_arm_asks_for_it() {
         let monitor = DagMonitor::mainnet().expect("construct");
         let bind = monitor
             .install_bind("wss://a.example/kaspa/mainnet/wrpc/borsh".to_string())
@@ -5085,10 +4922,10 @@ mod tests {
             .expect("the connect step runs without a node");
         assert_eq!(
             monitor.inner.devab.ba_known(bind.gen),
-            Some(true),
-            "with no flags file the block stream must be subscribed at connect"
+            Some(false),
+            "with no flags file the block stream must NOT be subscribed at connect"
         );
-        devab::store_switches(&monitor.inner.devab, &devab::DevFlags::parse("on=1\nba=0"));
+        devab::store_switches(&monitor.inner.devab, &devab::DevFlags::parse("on=1\nba=1"));
         let next = monitor
             .install_bind("wss://b.example/kaspa/mainnet/wrpc/borsh".to_string())
             .await
@@ -5097,7 +4934,7 @@ mod tests {
             .handle_connect(&next)
             .await
             .expect("the connect step runs without a node");
-        assert_eq!(monitor.inner.devab.ba_known(next.gen), Some(false));
+        assert_eq!(monitor.inner.devab.ba_known(next.gen), Some(true));
     }
 
     /// **R4 — a bind retired while it was coming up must not publish.**
@@ -5733,77 +5570,83 @@ mod tests {
         monitor.inner.race_running.store(false, Ordering::SeqCst);
     }
 
-    /// **CONCERNS-3: the case the heartbeat's move stopped convicting says its
-    /// name.** A socket ticking with no block for the stall line flags itself
-    /// once; a block re-arms it.
+    /// **D-334's witness, re-aimed** (LINK-Q3): a published socket that keeps
+    /// ticking while the message walk has had no page answered says so once,
+    /// through the tick path itself; a socket not yet published has no stretch.
     #[tokio::test]
-    async fn a_socket_ticking_without_blocks_says_so_once() {
+    async fn ticks_without_walk_progress_say_so_once() {
         let monitor = DagMonitor::mainnet().expect("construct");
+        let dir = std::env::temp_dir().join(format!("kv-witness-{}", std::process::id()));
+        monitor.inner.walk.arm(dir.join("scan.cursor"));
+        monitor.inner.walk.set_running_since(1);
         let bind = monitor
             .install_bind("wss://ivy.example/kaspa/mainnet/wrpc/borsh".to_string())
             .await
             .expect("arm a bind");
         stage_live(&monitor, &bind);
+        bind.connected_mono_ms.store(1, Ordering::Relaxed);
         let stall_ms = link::WATCHDOG_STALL_SECS * 1000;
-        // Explicit monotonic stamps, so the verdict does not depend on how long
-        // the test process has been alive.
-        bind.connected_mono_ms.store(1_000, Ordering::Relaxed);
-        monitor.note_blockless_ticks(&bind, 1_000 + stall_ms - 1);
+        // The real clock is far past 1 + stall here only if the process is old;
+        // drive the witness at explicit readings instead.
+        monitor.inner.walk.note_ticks("ivy.example", 1, stall_ms);
+        assert!(!monitor.inner.walk.witness_spoke(), "under the stall line");
+        monitor
+            .inner
+            .walk
+            .note_ticks("ivy.example", 1, 1 + stall_ms);
         assert!(
-            !bind.blocks_quiet_warned.load(Ordering::Relaxed),
-            "just under the stall line: nothing to say yet"
+            monitor.inner.walk.witness_spoke(),
+            "a stretch the length of the stall line"
         );
-        monitor.note_blockless_ticks(&bind, 1_000 + stall_ms);
-        assert!(
-            bind.blocks_quiet_warned.load(Ordering::Relaxed),
-            "ticks for the stall line and no block: flagged"
-        );
-        // A block re-arms it, and the stretch is measured from that block.
-        monitor.on_notification(&bind, empty_block());
-        assert!(!bind.blocks_quiet_warned.load(Ordering::Relaxed));
-        let block_at = bind.last_block_mono_ms.load(Ordering::Relaxed);
-        monitor.note_blockless_ticks(&bind, block_at + 1_000);
-        assert!(
-            !bind.blocks_quiet_warned.load(Ordering::Relaxed),
-            "a tick a second after a block is not a blockless stretch"
-        );
-        // A socket not yet published has no stretch to measure.
-        let fresh = monitor
-            .install_bind("wss://kate.example/kaspa/mainnet/wrpc/borsh".to_string())
-            .await
-            .expect("arm another");
-        monitor.note_blockless_ticks(&fresh, u64::MAX);
-        assert!(!fresh.blocks_quiet_warned.load(Ordering::Relaxed));
+        // A publish starts the next socket's stretch clean.
+        monitor.on_connected(&bind).await;
+        assert!(!monitor.inner.walk.witness_spoke());
+        // Not yet published: nothing to measure.
+        monitor.inner.walk.note_ticks("kate.example", 0, u64::MAX);
+        assert!(!monitor.inner.walk.witness_spoke());
     }
 
-    /// **The first socket of a process can say it too** (LINK-Q2). The
-    /// monotonic clock's epoch is its first call — the first publish — so that
-    /// publish's stamp is the clock's very first reading; it must not collide
-    /// with the "never published" 0, or the witness above is silent for the
-    /// socket most sessions keep for hours.
-    #[tokio::test]
-    async fn the_first_socket_of_a_process_is_stamped_published() {
-        // Deterministic first: the clock's reading at its own epoch is 1, never
-        // the 0 every stamp keeps for "never" (`consensus-auditor` second delta).
+    /// **The monotonic clock counts from 1** (LINK-Q2, L232): its epoch is
+    /// its first call, the first publish, so that stamp is the clock's very
+    /// first reading, and it must not collide with the "never" 0 every stamp
+    /// keeps, or the witness is silent for the socket most sessions keep for
+    /// hours (`consensus-auditor` second delta: deterministic, at the epoch).
+    #[test]
+    fn the_monotonic_clock_counts_from_one() {
         assert_eq!(ms_of(Duration::ZERO), 1);
-        let first_reading = ms_since(std::time::Instant::now());
-        assert!(
-            first_reading >= 1,
-            "the clock's first reading is the 'never' sentinel"
-        );
+        assert!(ms_since(std::time::Instant::now()) >= 1);
+        assert!(mono_ms() >= 1);
+    }
+
+    /// **The walk hears the chain move and every publish** (LINK-Q3): a
+    /// `VirtualChainChanged` on the installed socket and an accepted connect
+    /// each poke it; a DAA tick does not.
+    #[tokio::test]
+    async fn the_chain_moving_and_a_publish_poke_the_walk() {
         let monitor = DagMonitor::mainnet().expect("construct");
         let bind = monitor
             .install_bind("wss://ivy.example/kaspa/mainnet/wrpc/borsh".to_string())
             .await
             .expect("arm a bind");
-        stage_live(&monitor, &bind);
-        bind.connected_mono_ms
-            .store(first_reading, Ordering::Relaxed);
-        monitor.note_blockless_ticks(&bind, first_reading + link::WATCHDOG_STALL_SECS * 1000);
+        let quick = Duration::from_millis(20);
+        assert!(!monitor.inner.walk.take_poke(quick).await, "nothing yet");
+        monitor.on_notification(&bind, daa_tick(1));
         assert!(
-            bind.blocks_quiet_warned.load(Ordering::Relaxed),
-            "a socket published at the clock's first reading still flags a blockless stretch"
+            !monitor.inner.walk.take_poke(quick).await,
+            "a tick is not a chain move"
         );
+        monitor.on_notification(
+            &bind,
+            Notification::VirtualChainChanged(kaspa_rpc_core::VirtualChainChangedNotification {
+                removed_chain_block_hashes: Arc::new(vec![]),
+                added_chain_block_hashes: Arc::new(vec![Hash::from_bytes([3u8; 32])]),
+                accepted_transaction_ids: Arc::new(vec![]),
+            }),
+        );
+        assert!(monitor.inner.walk.take_poke(quick).await, "the chain moved");
+        monitor.on_connected(&bind).await;
+        assert!(monitor.is_connected());
+        assert!(monitor.inner.walk.take_poke(quick).await, "a publish");
     }
 
     /// **The pull keys on proof, not on the bit** (`consensus-auditor` note
@@ -6299,12 +6142,25 @@ mod tests {
         // budget, which is also its proof of a dark lane.
         bind.lane_reannounced
             .store(LANE_REANNOUNCE_AFTER.len() as u32, Ordering::SeqCst);
-        bind.blocks_quiet_warned.store(true, Ordering::Relaxed);
+        monitor.inner.walk.arm(
+            std::env::temp_dir()
+                .join(format!("kv-publish-{}", std::process::id()))
+                .join("scan.cursor"),
+        );
+        monitor.inner.walk.set_running_since(1);
+        monitor
+            .inner
+            .walk
+            .note_ticks("ella.example", 1, 1 + link::WATCHDOG_STALL_SECS * 1000);
+        assert!(monitor.inner.walk.witness_spoke(), "the stretch before");
         monitor.on_connected(&bind).await;
         assert!(monitor.is_connected(), "the socket published");
         assert_eq!(bind.lane_reannounced.load(Ordering::SeqCst), 0);
         assert!(!monitor.wallet_lane_known_dark());
-        assert!(!bind.blocks_quiet_warned.load(Ordering::Relaxed));
+        assert!(
+            !monitor.inner.walk.witness_spoke(),
+            "a publish starts the stretch clean"
+        );
     }
 
     /// **The race loop's exhaustion call reads the live monitor**

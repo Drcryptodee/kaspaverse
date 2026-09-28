@@ -323,6 +323,9 @@ pub(crate) fn install() {
         // LINK-Q2's window token (L74): Nagle off at the dialer and the dev
         // A/B seam exist only from this build on.
         log::info!("log: nagle off at the dialer, dev A/B seam present (LINK-Q2)");
+        // LINK-Q3's window token (L74): messages from accepted transactions,
+        // no full-block stream, exist only from this build on.
+        log::info!("log: messages from accepted transactions, no block stream (LINK-Q3)");
     }
     #[cfg(not(target_os = "android"))]
     {

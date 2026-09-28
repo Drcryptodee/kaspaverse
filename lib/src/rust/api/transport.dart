@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `any`, `apply_intent`, `apply_parked_acceptance`, `arm`, `await_spendable_at`, `backfill_invitation_sender`, `bound_preview`, `branch_token`, `build`, `bytes`, `chain_stamp`, `clamp_display`, `clear_side_files`, `clear`, `comm_already_parked`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `contains`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `forget_alias`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_reuses`, `handshake_slots`, `hold`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `lift_block_on_contact`, `locate_and_adopt`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `new`, `new`, `notice`, `now_unix_ms`, `on_connect`, `on_drop`, `on_lag`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_comm`, `park`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `purge_comms_keeping_handshake`, `purge_contact_rows`, `quarantine_unreadable_block_list`, `read_marks`, `refuse_blocked_knock_comms`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `resweep_invitation_senders`, `revival_refusal`, `revive_or_drop`, `revived_conversation`, `row_source_label`, `row_source`, `run_fill`, `schedule_sender_locate`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_by_alias`, `take_intent`, `take_parked_acceptance`, `take_parked_comm`, `take_parked_siblings`, `take`, `take`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `try_take`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `KeyWindow`, `LocatingGuard`, `ParkedAcceptance`, `ParkedComm`, `ParkedComms`, `PinPolicy`, `RateWindow`, `ReplayGap`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `any`, `apply_intent`, `apply_parked_acceptance`, `await_spendable_at`, `backfill_invitation_sender`, `bound_preview`, `branch_token`, `build`, `bytes`, `chain_stamp`, `clamp_display`, `clear_side_files`, `clear`, `comm_already_parked`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `contains`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `forget_alias`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_reuses`, `handshake_slots`, `hold`, `holds`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `lift_block_on_contact`, `locate_and_adopt`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_comm`, `park`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `purge_comms_keeping_handshake`, `purge_contact_rows`, `quarantine_unreadable_block_list`, `read_marks`, `refuse_blocked_knock_comms`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `resweep_invitation_senders`, `revival_refusal`, `revive_or_drop`, `revived_conversation`, `row_source_label`, `row_source`, `run_fill`, `schedule_sender_locate`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_by_alias`, `take_intent`, `take_parked_acceptance`, `take_parked_comm`, `take_parked_siblings`, `take`, `take`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `try_take`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `HubSink`, `KeyWindow`, `LocatingGuard`, `ParkedAcceptance`, `ParkedComm`, `ParkedComms`, `PinPolicy`, `RateWindow`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fold`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -41,9 +41,10 @@ Future<FillReportDto> transportFillNow() =>
     RustLib.instance.api.crateApiTransportTransportFillNow();
 
 /// Start (or restart after a re-unlock) the transport hub: load the stores,
-/// take a vault-scoped decryptor, derive the PUBLIC watched window, and
-/// attach the inbound task to the live `ciph_msg:` scan. Idempotent while
-/// the vault stays unlocked; called by Dart alongside the wallet start.
+/// take a vault-scoped decryptor, derive the PUBLIC watched window, and arm
+/// the message walk with this hub as the consumer that folds each page of
+/// accepted transactions (LINK-Q3). Idempotent while the vault stays unlocked;
+/// called by Dart alongside the wallet start.
 Future<void> transportStart() =>
     RustLib.instance.api.crateApiTransportTransportStart();
 
@@ -475,8 +476,9 @@ Future<WipeReportDto> transportWipePreview() =>
 ///   replay is in flight can re-fold handshakes mined before it and re-create
 ///   conversations in the emptied store as fresh invitations. Comms cannot come
 ///   back that way (post-erase they drop unrouted, `NoConversationForAlias`),
-///   and the window is bounded by the cursor's own write cadence and
-///   `MAX_CATCHUP_PAGES` — but it is a real, accepted residual, not a free
+///   and the window is bounded by the cursor's own write cadence and the
+///   walk's page budget (LINK-Q3; it was `MAX_CATCHUP_PAGES`), which a replay
+///   after a lock now also runs — but it is a real, accepted residual, not a free
 ///   omission. The node lane has no epoch guard; closing it means an erase
 ///   check inside the fold's own lock scope, which is a change to the live
 ///   intake path and is deliberately NOT made at the end of this sitting
@@ -600,11 +602,13 @@ Future<TxStatusDto?> txAcceptanceStatus({required String txid}) =>
 Stream<String> subscribeThreadPings() =>
     RustLib.instance.api.crateApiTransportSubscribeThreadPings();
 
-/// Subscribe to live `ciph_msg:` matches from the BlockAdded scan. Discrete
-/// deliveries, not snapshots: there is deliberately no cached-latest replay
-/// (unlike `subscribe_dag_updates`) — history is the P2.3 message store's job;
-/// this stream is the live wire. Foreground-only by construction: the scan
-/// rides the shared socket's `dag_pause()`/`dag_resume()` posture (D-053).
+/// Subscribe to live `ciph_msg:`/`kchat:` matches as the message walk folds
+/// them (accepted transactions, LINK-Q3). Discrete deliveries, not snapshots:
+/// there is deliberately no cached-latest replay (unlike
+/// `subscribe_dag_updates`) — history is the P2.3 message store's job; this
+/// stream is the live wire, for the dev panel. Foreground-only by
+/// construction: the walk rides the shared socket's `dag_pause()`/
+/// `dag_resume()` posture (D-053).
 Stream<TransportEventDto> subscribeTransportEvents() =>
     RustLib.instance.api.crateApiTransportSubscribeTransportEvents();
 
@@ -1243,7 +1247,8 @@ class ThreadMessageDto {
           provenance == other.provenance;
 }
 
-/// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).
+/// One `ciph_msg:`/`kchat:` match in an ACCEPTED transaction, from the message
+/// walk (P2.1 raw receive; LINK-Q3 moved its source off the full-block stream).
 /// Raw by design: kind is the verbatim wire token, `body` the raw bytes after
 /// it — semantics (decryption, conversations) arrive in P2.2/P2.3.
 class TransportEventDto {

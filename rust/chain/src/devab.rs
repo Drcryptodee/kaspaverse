@@ -1,12 +1,18 @@
-//! **LINK-Q2's measurement seam** — dev flags, default OFF, logs only.
+//! **LINK-Q2's measurement seam, turned around at LINK-Q3** — dev flags,
+//! default OFF, logs only.
 //!
-//! LINK-Q2 prices two ratified locks — P1 §0.8's one shared socket and D-062's
-//! full-block stream — on the founder's own network before anything moves them.
-//! That needs the app to change ONE thing at a time on its live socket and say
-//! what it saw: `BlockAdded` unsubscribed (the head-of-line question), `ping`
-//! probed beside `get_server_info`, Nagle put back on, accepted transactions
-//! polled instead of full blocks streamed, and the kernel's own round trip read
-//! beside every probe (D-338).
+//! LINK-Q2 priced two ratified locks — P1 §0.8's one shared socket and D-062's
+//! full-block stream — on the founder's own network before anything moved them:
+//! the app changed ONE thing at a time on its live socket and said what it saw
+//! (`ping` probed beside `get_server_info`, Nagle put back on, the kernel's own
+//! round trip read beside every probe, D-338). The founder then approved
+//! stream-less on one socket (D-340), and LINK-Q3 built it (D-344): messages
+//! now come from accepted transactions (`walk.rs`) and `BlockAdded` is not
+//! subscribed in production. **So the stream arm inverted:** `ba=1` puts the
+//! full-block stream BACK on the dev install's socket, scanned for the parity
+//! log only (`devab: msg path=ba`), beside the walk's own first sightings
+//! (`path=v2`); the V2 poller arm is retired, because production now is that
+//! path.
 //!
 //! **The fence.** Everything here keys on one file, [`FLAGS_FILE`], beside the
 //! endpoint health ledger in the app's private files dir, and is read only when
@@ -19,11 +25,10 @@
 //! No file, an unreadable or stale one, or anything but `on=1` is "all off" —
 //! today's app: every hook below is one relaxed load that returns.
 //!
-//! **What an arm costs the dev install, named.** A `ba=0` arm deafens the
-//! transport scan on purpose, and ending it in place re-subscribes without
-//! replaying what it missed (the cursor sat still while the stream was off). The
-//! dev install's wallet is a throwaway, so the experiment keeps its cells clean
-//! rather than pay a catch-up download inside the next arm.
+//! **What an arm costs the dev install, named.** A `ba=1` arm adds the stream's
+//! ~455 MB an hour back to the dev install's download, and nothing else: the
+//! stream is scanned for the log and never folded, so the message intake, its
+//! cursor and the witness are the walk's whatever the arm says.
 //!
 //! **Never user-visible, never a verdict.** Nothing here feeds the glass, a
 //! strike, the watchdog or the wallet lane. Every line starts `devab: ` at Info
@@ -39,10 +44,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use kaspa_consensus_core::header::CompressedParents;
 use kaspa_rpc_core::api::rpc::RpcApi;
-use kaspa_rpc_core::{RpcBlock, RpcDataVerbosityLevel, RpcHash};
+use kaspa_rpc_core::{RpcBlock, RpcHash};
 
 use crate::link;
-use crate::transport::{self, TransportEvent};
+use crate::transport::TransportEvent;
 
 /// The flags file's name, in the same directory as `endpoint.health`.
 pub const FLAGS_FILE: &str = "devab.flags";
@@ -67,9 +72,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Our own bound on the dev loop's subscribe/unsubscribe call — the pin's is
 /// the wRPC sweep's 60 s (`wallet-security-auditor`, LINK-Q2 note 3).
 const SET_TIMEOUT: Duration = Duration::from_secs(10);
-/// The accepted-transactions poller's cadence, and its per-call bound.
-const V2_EVERY: Duration = Duration::from_secs(1);
-const V2_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounds on what accumulates between flushes (a 10 s window at 10 BPS holds
 /// ~100 ticks) and on the first-sighting memory per path.
 const MAX_GAPS: usize = 4096;
@@ -88,16 +90,15 @@ pub struct DevFlags {
     pub cell: String,
     /// `probe=1`: the open-loop prober, alternating `ping` and `get_server_info`.
     pub probe: bool,
-    /// `ba=0`: `BlockAdded` unsubscribed on the bound socket (and not
-    /// subscribed on the next). Absent or `ba=1` is today's stream.
-    pub block_added_off: bool,
+    /// `ba=1`: `BlockAdded` subscribed on the bound socket (and on the next),
+    /// for the parity window's `path=ba` sightings. Absent or `ba=0` is
+    /// production since LINK-Q3: no stream.
+    pub block_added_on: bool,
     /// `nagle=1`: Nagle put back ON for the bound socket — the A/B's old arm.
     /// Absent is the dialer's production setting (off, `TCP_NODELAY`).
     pub nagle_on: bool,
-    /// `frames=1`: per-block parents statistics, written every 10 s.
+    /// `frames=1`: per-block parents statistics (under `ba=1`), every 10 s.
     pub frames: bool,
-    /// `v2=1`: `GetVirtualChainFromBlockV2` at High verbosity, polled each second.
-    pub v2: bool,
 }
 
 impl DevFlags {
@@ -113,10 +114,9 @@ impl DevFlags {
             match (key.trim(), value.trim()) {
                 ("on", "1") => f.on = true,
                 ("probe", "1") => f.probe = true,
-                ("ba", "0") => f.block_added_off = true,
+                ("ba", "1") => f.block_added_on = true,
                 ("nagle", "1") => f.nagle_on = true,
                 ("frames", "1") => f.frames = true,
-                ("v2", "1") => f.v2 = true,
                 ("cell", cell) => f.cell = sanitize_cell(cell),
                 _ => {}
             }
@@ -147,13 +147,12 @@ impl DevFlags {
     /// The log form — every key, so a capture line states the whole arm.
     pub fn line(&self) -> String {
         format!(
-            "on={} probe={} ba={} nagle={} frames={} v2={} cell={}",
+            "on={} probe={} ba={} nagle={} frames={} cell={}",
             u8::from(self.on),
             u8::from(self.probe),
-            u8::from(!self.block_added_off),
+            u8::from(self.block_added_on),
             u8::from(self.nagle_on),
             u8::from(self.frames),
-            u8::from(self.v2),
             self.cell_or_dash(),
         )
     }
@@ -342,7 +341,7 @@ impl Seen {
 pub(crate) struct DevAb {
     flags: Mutex<DevFlags>,
     on: AtomicBool,
-    block_added_off: AtomicBool,
+    block_added_on: AtomicBool,
     frames: AtomicBool,
     last_tick_mono_ms: AtomicU64,
     gaps: Mutex<Vec<u32>>,
@@ -352,13 +351,13 @@ pub(crate) struct DevAb {
     seen_v2: Mutex<Seen>,
     probe_seq: AtomicU64,
     probe_running: AtomicBool,
-    v2_running: AtomicBool,
     /// The bound socket generation the per-socket settings were last applied
     /// to (0 = none yet, or an arm changed since).
     applied_gen: AtomicU64,
-    /// What the socket `gen` was last told about `BlockAdded`: `(gen, true)`
-    /// once its connect subscribed it (today), `(gen, false)` once an arm
-    /// removed it. Only a socket an arm changed is ever touched with the flags off.
+    /// What the socket `gen` was last told about `BlockAdded`: `(gen, false)`
+    /// once its connect left it off (production since LINK-Q3), `(gen, true)`
+    /// once an arm subscribed it. Only a socket an arm changed is ever touched
+    /// with the flags off.
     ba_known: Mutex<(u64, bool)>,
     /// The socket an arm put Nagle back on (0 = none), restored when the flags
     /// switch off.
@@ -377,10 +376,11 @@ impl DevAb {
         self.flags().cell_or_dash().to_string()
     }
 
-    /// Is `BlockAdded` to be left unsubscribed on a new socket? Read by the
-    /// bind's subscribe step; `false` unless the flags say `on=1` and `ba=0`.
-    pub(crate) fn block_added_off(&self) -> bool {
-        self.block_added_off.load(Ordering::Relaxed)
+    /// Is `BlockAdded` to be subscribed on a new socket? Read by the bind's
+    /// subscribe step and the block arm; `false` unless the flags say `on=1`
+    /// and `ba=1` (LINK-Q3: production has no stream).
+    pub(crate) fn block_added_on(&self) -> bool {
+        self.block_added_on.load(Ordering::Relaxed)
     }
 
     /// The bind's subscribe step reports what it did for socket `gen`. A report
@@ -483,6 +483,26 @@ impl DevAb {
         }
     }
 
+    /// The message walk's matches (production's path since LINK-Q3): the first
+    /// time each txid is seen on it, logged as `path=v2` beside the stream's
+    /// `path=ba`, so the judge pairs the two per message as E2 did, inverted.
+    /// Txids only — never a payload (§4).
+    pub(crate) fn on_walk_matches(&self, matches: &[TransportEvent]) {
+        if !self.on.load(Ordering::Relaxed) || matches.is_empty() {
+            return;
+        }
+        let t = unix_ms();
+        let cell = self.cell();
+        let mut seen = self.seen_v2.lock().unwrap_or_else(PoisonError::into_inner);
+        for event in matches {
+            if let Some(txid) = &event.txid {
+                if seen.first(txid) {
+                    log::info!("devab: msg path=v2 txid={txid} t={t} cell={cell}");
+                }
+            }
+        }
+    }
+
     /// Write out the tick gaps and frame totals gathered since the last flush.
     fn flush(&self) {
         let cell = self.cell();
@@ -576,8 +596,8 @@ pub(crate) fn is_dev_install(path: &Path) -> bool {
 pub(crate) fn store_switches(state: &DevAb, flags: &DevFlags) {
     state.on.store(flags.on, Ordering::Relaxed);
     state
-        .block_added_off
-        .store(flags.on && flags.block_added_off, Ordering::Relaxed);
+        .block_added_on
+        .store(flags.on && flags.block_added_on, Ordering::Relaxed);
     let frames_was = state
         .frames
         .swap(flags.on && flags.frames, Ordering::Relaxed);
@@ -644,9 +664,6 @@ pub(crate) async fn apply<H: DevHost>(host: &H, state: &Arc<DevAb>, flags: DevFl
     if now.on && now.probe && !state.probe_running.swap(true, Ordering::SeqCst) {
         tokio::spawn(prober(host.clone()));
     }
-    if now.on && now.v2 && !state.v2_running.swap(true, Ordering::SeqCst) {
-        tokio::spawn(v2_poller(host.clone()));
-    }
 }
 
 /// Nagle back off (the dialer's production setting) on the socket an arm
@@ -676,7 +693,7 @@ fn restore_nagle<H: DevHost>(host: &H, state: &DevAb) {
 /// Keep the bound socket in the arm's shape: `BlockAdded` subscribed or not,
 /// and — only while the flags are on — Nagle as the arm says. Re-applied once
 /// per socket and once per arm change. With the flags off this touches nothing
-/// but a subscription an arm had removed, which it restores.
+/// but a subscription an arm had added, which it removes.
 pub(crate) async fn follow_socket<H: DevHost>(host: &H, state: &Arc<DevAb>) {
     let Some((gen, url)) = host.bound() else {
         return;
@@ -697,12 +714,12 @@ pub(crate) async fn follow_socket<H: DevHost>(host: &H, state: &Arc<DevAb>) {
     // The raw host keys the registry; the logged form is sanitized (the rule
     // `endpoint_host`'s doc sets for every caller that logs it).
     let shown = link::sanitize_node_text(&hostname);
-    let want_ba = !(flags.on && flags.block_added_off);
+    let want_ba = flags.on && flags.block_added_on;
     // A socket's connect subscribed it per the switch and said so; only an arm
     // change on a live socket needs a call. With the flags off, the one socket
-    // ever touched is one an arm left unsubscribed — restored here.
+    // ever touched is one an arm left subscribed — back to production here.
     let mut in_shape = true;
-    if known != Some(want_ba) && (flags.on || known == Some(false)) {
+    if known != Some(want_ba) && (flags.on || known == Some(true)) {
         let outcome = tokio::time::timeout(SET_TIMEOUT, host.set_block_added(gen, want_ba))
             .await
             .unwrap_or_else(|_| Err(format!("no answer in {}s", SET_TIMEOUT.as_secs())));
@@ -810,95 +827,6 @@ async fn prober<H: DevHost>(host: H) {
     }
 }
 
-/// The stream-less candidate (deliverable 6): accepted transactions from the
-/// last chain block, once a second, at the lowest verbosity that carries a
-/// payload (High). Message txids are logged at their first sighting, beside
-/// the `BlockAdded` scan's, so a capture pairs the two paths per message.
-async fn v2_poller<H: DevHost>(host: H) {
-    let state = host.devab();
-    let mut every = tokio::time::interval(V2_EVERY);
-    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut cursor: Option<RpcHash> = None;
-    loop {
-        every.tick().await;
-        let flags = state.flags();
-        if !host.alive() || !flags.on || !flags.v2 {
-            state.v2_running.store(false, Ordering::SeqCst);
-            return;
-        }
-        let cell = flags.cell_or_dash().to_string();
-        let rpc = host.rpc();
-        let start = match cursor {
-            Some(hash) => hash,
-            None => match tokio::time::timeout(V2_TIMEOUT, rpc.get_sink()).await {
-                Ok(Ok(sink)) => sink.sink,
-                _ => {
-                    log::info!("devab: v2 failed (no sink) cell={cell}");
-                    continue;
-                }
-            },
-        };
-        let started = Instant::now();
-        let outcome = tokio::time::timeout(
-            V2_TIMEOUT,
-            rpc.get_virtual_chain_from_block_v2(start, Some(RpcDataVerbosityLevel::High), None),
-        )
-        .await;
-        let ms = started.elapsed().as_millis();
-        match outcome {
-            Ok(Ok(resp)) => {
-                let t = unix_ms();
-                let mut txs = 0usize;
-                let mut seen = state.seen_v2.lock().unwrap_or_else(PoisonError::into_inner);
-                for block in resp.chain_block_accepted_transactions.iter() {
-                    for tx in &block.accepted_transactions {
-                        txs += 1;
-                        let is_message = tx
-                            .payload
-                            .as_deref()
-                            .is_some_and(|p| transport::parse_payload_in(p).is_some());
-                        let txid = tx.verbose_data.as_ref().and_then(|v| v.transaction_id);
-                        if let (true, Some(txid)) = (is_message, txid) {
-                            let txid = txid.to_string();
-                            if seen.first(&txid) {
-                                log::info!("devab: msg path=v2 txid={txid} t={t} cell={cell}");
-                            }
-                        }
-                    }
-                }
-                drop(seen);
-                cursor = resp
-                    .added_chain_block_hashes
-                    .last()
-                    .copied()
-                    .or(Some(start));
-                log::info!(
-                    "devab: v2 rtt={ms} added={} removed={} txs={txs} cell={cell}",
-                    resp.added_chain_block_hashes.len(),
-                    resp.removed_chain_block_hashes.len()
-                );
-            }
-            Ok(Err(e)) => {
-                // Re-seed from the sink: the cursor may have left the chain.
-                cursor = None;
-                log::info!(
-                    "devab: v2 failed ({}) rtt={ms} cell={cell}",
-                    link::sanitize_node_text(&e.to_string())
-                );
-            }
-            Err(_) => {
-                // Re-seed on a timeout too: kept, the cursor would ask for the
-                // whole stall at High verbosity in one reply on the shared
-                // socket — a burst that skews the very head-of-line numbers
-                // this measures (`consensus-auditor`). The skipped stretch is
-                // named in the log, so a capture excludes it.
-                cursor = None;
-                log::info!("devab: v2 failed (timeout) rtt={ms} cell={cell}");
-            }
-        }
-    }
-}
-
 fn unix_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -914,7 +842,7 @@ mod tests {
     fn no_file_or_no_master_switch_is_all_off() {
         assert_eq!(DevFlags::parse(""), DevFlags::default());
         assert_eq!(
-            DevFlags::parse("probe=1\nba=0\nnagle=1\nframes=1\nv2=1\ncell=x"),
+            DevFlags::parse("probe=1\nba=1\nnagle=1\nframes=1\ncell=x"),
             DevFlags::default(),
             "without on=1 nothing may move"
         );
@@ -927,11 +855,12 @@ mod tests {
 
     #[test]
     fn only_exact_values_move_a_flag() {
-        let f = DevFlags::parse("on=1\nprobe=yes\nba=1\nnagle=0\nframes=2\nv2=1\nbogus=1");
-        assert!(f.on && f.v2);
-        assert!(!f.probe && !f.block_added_off && !f.nagle_on && !f.frames);
-        let g = DevFlags::parse(" on = 1 \n ba = 0 \n nagle=1\nprobe=1\nframes=1");
-        assert!(g.on && g.block_added_off && g.nagle_on && g.probe && g.frames && !g.v2);
+        // `v2=1` is the retired poller's key (LINK-Q3): now unknown, ignored.
+        let f = DevFlags::parse("on=1\nprobe=yes\nba=0\nnagle=0\nframes=2\nv2=1\nbogus=1");
+        assert!(f.on);
+        assert!(!f.probe && !f.block_added_on && !f.nagle_on && !f.frames);
+        let g = DevFlags::parse(" on = 1 \n ba = 1 \n nagle=1\nprobe=1\nframes=1");
+        assert!(g.on && g.block_added_on && g.nagle_on && g.probe && g.frames);
     }
 
     #[test]
@@ -942,7 +871,7 @@ mod tests {
         assert_eq!(long.cell.len(), 32);
         assert_eq!(
             DevFlags::default().line(),
-            "on=0 probe=0 ba=1 nagle=0 frames=0 v2=0 cell=-"
+            "on=0 probe=0 ba=0 nagle=0 frames=0 cell=-"
         );
     }
 
@@ -979,13 +908,13 @@ mod tests {
         );
     }
 
-    /// No file (today's app): the seam is not armed, the registry is never
-    /// asked for, and a connect subscribes the stream as it always has.
+    /// No file (production): the seam is not armed, the registry is never
+    /// asked for, and a connect leaves the stream off (LINK-Q3).
     #[test]
     fn priming_without_a_file_arms_nothing() {
         let state = DevAb::default();
         assert!(!prime(&state, Path::new("/nonexistent/devab.flags")));
-        assert!(!state.block_added_off() && !state.on.load(Ordering::Relaxed));
+        assert!(!state.block_added_on() && !state.on.load(Ordering::Relaxed));
         assert_eq!(state.flags(), DevFlags::default());
     }
 
@@ -1009,16 +938,32 @@ mod tests {
         state.on_tick(1_000);
         state.on_tick(1_100);
         assert!(state.gaps.lock().unwrap().is_empty());
-        assert!(!state.block_added_off());
-        store_switches(&state, &DevFlags::parse("on=1\nba=0"));
-        assert!(state.block_added_off());
+        assert!(!state.block_added_on());
+        let walked = TransportEvent {
+            txid: Some("aa".repeat(32)),
+            kind: "comm".to_string(),
+            namespace: crate::transport::WireNamespace::CiphMsg,
+            body: Vec::new(),
+            addresses: Vec::new(),
+            block_time_ms: None,
+            block_hash: None,
+        };
+        state.on_walk_matches(std::slice::from_ref(&walked));
+        assert!(
+            state.seen_v2.lock().unwrap().set.is_empty(),
+            "off: the walk's sightings are not recorded"
+        );
+        store_switches(&state, &DevFlags::parse("on=1\nba=1"));
+        assert!(state.block_added_on());
+        state.on_walk_matches(std::slice::from_ref(&walked));
+        assert_eq!(state.seen_v2.lock().unwrap().set.len(), 1);
         state.on_tick(2_000);
         state.on_tick(2_150);
         assert_eq!(*state.gaps.lock().unwrap(), vec![150]);
         store_switches(&state, &DevFlags::default());
         assert!(
-            !state.block_added_off(),
-            "off must restore today's subscription"
+            !state.block_added_on(),
+            "off must return to production: no stream"
         );
         state.on_tick(3_000);
         assert_eq!(state.gaps.lock().unwrap().len(), 1);
@@ -1088,19 +1033,19 @@ mod tests {
         }
     }
 
-    /// **Today's app is untouched.** With no flags file, a socket whose connect
-    /// subscribed `BlockAdded` as always is followed without a single call —
-    /// on the first socket, on the next, and on a repeat pass.
+    /// **Production is untouched.** With no flags file, a socket whose connect
+    /// left `BlockAdded` off (LINK-Q3) is followed without a single call — on
+    /// the first socket, on the next, and on a repeat pass.
     #[tokio::test]
     async fn with_the_flags_off_the_seam_makes_no_call_on_any_socket() {
         let host = FakeHost::new(1);
         let state = host.devab();
-        state.subscribed(1, !state.block_added_off());
+        state.subscribed(1, state.block_added_on());
         apply(&host, &state, DevFlags::default()).await;
         follow_socket(&host, &state).await;
         follow_socket(&host, &state).await;
         *host.bound.lock().unwrap() = Some((2, "wss://other.example/wrpc".into()));
-        state.subscribed(2, !state.block_added_off());
+        state.subscribed(2, state.block_added_on());
         follow_socket(&host, &state).await;
         assert!(
             host.calls().is_empty(),
@@ -1117,7 +1062,7 @@ mod tests {
     async fn the_seam_waits_for_the_connect_step_before_touching_a_socket() {
         let host = FakeHost::new(3);
         let state = host.devab();
-        apply(&host, &state, DevFlags::parse("on=1\nba=0")).await;
+        apply(&host, &state, DevFlags::parse("on=1\nba=1")).await;
         follow_socket(&host, &state).await;
         assert!(
             host.calls().is_empty(),
@@ -1128,38 +1073,38 @@ mod tests {
             0,
             "marked done while waiting"
         );
-        state.subscribed(3, true);
+        state.subscribed(3, false);
         follow_socket(&host, &state).await;
-        assert_eq!(host.calls(), vec![(3, false)]);
+        assert_eq!(host.calls(), vec![(3, true)]);
     }
 
-    /// An arm that removes `BlockAdded` does it once on the live socket, a new
-    /// socket connects without it (the bind asks the switch), and switching
-    /// the flags off restores exactly the socket the arm changed.
+    /// An arm that adds `BlockAdded` does it once on the live socket, a new
+    /// socket connects with it (the bind asks the switch), and switching the
+    /// flags off takes it off exactly the socket the arm left with it.
     #[tokio::test]
-    async fn an_arm_removes_the_stream_once_and_switching_off_restores_it() {
+    async fn an_arm_adds_the_stream_once_and_switching_off_removes_it() {
         let host = FakeHost::new(7);
         let state = host.devab();
-        state.subscribed(7, true);
-        apply(&host, &state, DevFlags::parse("on=1\nba=0\ncell=b0")).await;
+        state.subscribed(7, false);
+        apply(&host, &state, DevFlags::parse("on=1\nba=1\ncell=b1")).await;
         follow_socket(&host, &state).await;
         follow_socket(&host, &state).await;
-        assert_eq!(host.calls(), vec![(7, false)]);
-        // A swap: the new socket's connect read the switch and skipped it.
+        assert_eq!(host.calls(), vec![(7, true)]);
+        // A swap: the new socket's connect read the switch and subscribed it.
         *host.bound.lock().unwrap() = Some((8, "wss://other.example/wrpc".into()));
-        assert!(state.block_added_off());
-        state.subscribed(8, !state.block_added_off());
+        assert!(state.block_added_on());
+        state.subscribed(8, state.block_added_on());
         follow_socket(&host, &state).await;
         assert_eq!(
             host.calls(),
-            vec![(7, false)],
+            vec![(7, true)],
             "the new socket needed no call"
         );
-        // Off: only the socket an arm left without the stream is restored.
+        // Off: only the socket an arm left with the stream goes back.
         apply(&host, &state, DevFlags::default()).await;
         follow_socket(&host, &state).await;
-        assert_eq!(host.calls(), vec![(7, false), (8, true)]);
-        assert!(!state.block_added_off());
+        assert_eq!(host.calls(), vec![(7, true), (8, false)]);
+        assert!(!state.block_added_on());
     }
 
     /// **The fence** (`consensus-auditor`, LINK-Q2): only the dev install's
@@ -1189,10 +1134,10 @@ mod tests {
             let dir = root.join(pkg).join("files").join("wallet");
             std::fs::create_dir_all(&dir).unwrap();
             let file = dir.join(FLAGS_FILE);
-            std::fs::write(&file, "on=1\nba=0\n").unwrap();
+            std::fs::write(&file, "on=1\nba=1\n").unwrap();
             let state = DevAb::default();
             assert_eq!(prime(&state, &file), armed, "{pkg}");
-            assert_eq!(state.block_added_off(), armed, "{pkg}");
+            assert_eq!(state.block_added_on(), armed, "{pkg}");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1204,7 +1149,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kv-devab-stale-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(FLAGS_FILE);
-        std::fs::write(&file, "on=1\nba=0\n").unwrap();
+        std::fs::write(&file, "on=1\nba=1\n").unwrap();
         assert!(DevFlags::read(&file).on, "a fresh file is read");
         let old = std::time::SystemTime::now() - FLAGS_MAX_AGE - Duration::from_secs(60);
         std::fs::File::options()
@@ -1248,9 +1193,9 @@ mod tests {
     async fn a_refused_call_is_retried_on_the_next_poll() {
         let host = FakeHost::new(9);
         let state = host.devab();
-        state.subscribed(9, true);
+        state.subscribed(9, false);
         host.fail.store(true, Ordering::SeqCst);
-        apply(&host, &state, DevFlags::parse("on=1\nba=0")).await;
+        apply(&host, &state, DevFlags::parse("on=1\nba=1")).await;
         follow_socket(&host, &state).await;
         assert_eq!(
             state.applied_gen.load(Ordering::Relaxed),
@@ -1259,7 +1204,7 @@ mod tests {
         );
         host.fail.store(false, Ordering::SeqCst);
         follow_socket(&host, &state).await;
-        assert_eq!(host.calls(), vec![(9, false), (9, false)]);
+        assert_eq!(host.calls(), vec![(9, true), (9, true)]);
         assert_eq!(state.applied_gen.load(Ordering::Relaxed), 9);
     }
 
@@ -1277,15 +1222,15 @@ mod tests {
             let dir = root.join(pkg).join("files").join("wallet");
             std::fs::create_dir_all(&dir).unwrap();
             let file = dir.join(FLAGS_FILE);
-            std::fs::write(&file, "on=1\nba=0\n").unwrap();
+            std::fs::write(&file, "on=1\nba=1\n").unwrap();
             let mut host = FakeHost::new(4);
             host.flags = Some(file);
             let state = host.devab();
-            state.subscribed(4, true);
+            state.subscribed(4, false);
             step(&host, &state).await;
             assert_eq!(state.flags().on, armed, "{pkg}");
-            assert_eq!(state.block_added_off(), armed, "{pkg}");
-            let want: Vec<(u64, bool)> = if armed { vec![(4, false)] } else { vec![] };
+            assert_eq!(state.block_added_on(), armed, "{pkg}");
+            let want: Vec<(u64, bool)> = if armed { vec![(4, true)] } else { vec![] };
             assert_eq!(host.calls(), want, "{pkg}");
         }
         let _ = std::fs::remove_dir_all(&root);

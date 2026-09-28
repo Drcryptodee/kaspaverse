@@ -28,14 +28,18 @@ pub mod spans;
 mod spend_policy;
 mod transport;
 mod transport_store;
+mod walk;
 mod wallet_sync;
 
 pub use acceptance::{
-    pruning_horizon_ms, AcceptanceEvent, AcceptanceTracker, TxStatus, VccBatch, WatchSource,
+    pruning_horizon_ms, AcceptanceEvent, AcceptanceTracker, TrackerFeed, TxStatus, VccBatch,
+    WalkAcceptance, WalkBatch, WatchSource,
 };
 pub use block_list::{BlockList, BlockedContact};
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
-pub use dag_monitor::{DagEvent, DagMonitor, LaneRecovery, LinkProbe, PROBE_TIMEOUT};
+pub use dag_monitor::{
+    DagEvent, DagMonitor, LaneRecovery, LinkProbe, INTAKE_SETTLE_WAIT, PROBE_TIMEOUT,
+};
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};
 pub use node_config::NodeConfig;
@@ -51,10 +55,13 @@ pub use transport::{
     resolve_return_address, split_comm_body, strip_stash_scope, TransportEvent, WireNamespace,
     HANDSHAKE_BOND_SOMPI, KCHAT_PREFIX, KIND_LEGACY, KIND_UNKNOWN, STASH_SCOPE_SAVED_HANDSHAKE,
 };
+// LINK-Q3 (D-344): the message walk's seam — the hub implements `MessageSink`;
+// P3.4's Cov-ID matcher implements `WalkMatcher`.
 pub use transport_store::{
     ContactMergeReport, ConversationRecord, ConversationStatus, ConversationTail, KeyBranch,
     MessageDirection, MessageRecord, RowSource, StoredKind, TransportStore, WipeReport,
 };
+pub use walk::{MessageSink, Verdict, VerdictFuture, WalkMatcher, WalkPage};
 pub use wallet_sync::{
     maturity_params, ActivityDirection, ActivityMaturity, MaturityParams, WalletActivityRecord,
     WalletEngine, WalletEvent,

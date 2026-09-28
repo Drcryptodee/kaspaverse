@@ -7,8 +7,9 @@ import '../rust/api/transport.dart';
 import '../rust/api/wallet.dart' show uiMark;
 
 /// Owns the app's single subscription to the bridge transport-event stream
-/// (P2.1 raw receive) — one `ciph_msg:` match per event, straight off the
-/// BlockAdded scan.
+/// (P2.1 raw receive) — one `ciph_msg:`/`kchat:` match per event, as the
+/// message walk folds accepted transactions (LINK-Q3; the full-block stream it
+/// replaced is gone).
 ///
 /// FRB streams are single-subscription (L4): exactly one listener attaches
 /// here, for the app's lifetime; consumers watch [events]. This is the LIVE
@@ -75,7 +76,7 @@ class TransportService {
 
   void _apply(TransportEventDto event) {
     // Three-lights apply echo: pairs with the producer's
-    // "dag-monitor: transport emit matches=N receivers=M".
+    // "walk: transport emit matches=N receivers=M" (LINK-Q3).
     _mark('transport apply txid=${event.txid != null}');
     final current = events.value;
     // Display dedup: a DAG can include the same tx in more than one block, so

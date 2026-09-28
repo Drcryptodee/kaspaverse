@@ -19,6 +19,22 @@
 //! **INV-3/8:** everything persisted here is public chain data (txids,
 //! block hashes, timestamps) in an app-private kvlog; every read is
 //! node-only — no indexer anywhere on this path.
+//!
+//! **Second feed since LINK-Q3 (D-344): the message walk's pages.** Messages now
+//! come from ACCEPTED transactions (`walk.rs`), so the acceptance is known
+//! BEFORE the message is folded, and a watch or a sender lookup the fold
+//! registers arrives after the live `VirtualChainChanged` batch that named the
+//! txid has already been folded here. Left alone, every inbound message's watch
+//! would sit `Submitted` (a pending chip that never settles), its reorg would
+//! never displace it, and its sender would wait on the slow locate. So the walk
+//! hands the tracker each page's removals and the acceptance of every MATCHED
+//! txid, with the accepting block's own header facts, and folds it by the same
+//! rules as a live batch ([`AcceptanceTracker::fold_walk`]). What no one watches
+//! yet is remembered in a bounded, in-memory set ([`MATCHED_MEMORY_CAPACITY`])
+//! that [`AcceptanceTracker::watch`] and
+//! [`AcceptanceTracker::note_sender_interest`] consult. The reorg rule is this
+//! file's, unchanged: displaced, then tombstone-due past the window unless
+//! re-accepted.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -81,21 +97,21 @@ const TICK: Duration = Duration::from_secs(10);
 /// ≈ ~1 h of gap. Past it the walk stops honestly: the cursor re-seeds at
 /// sink, unresolved watches stay as-persisted, and consumers degrade
 /// (wallet-core's own rescan covers sends; V2b's fill covers messages).
-const MAX_VCC_CATCHUP_PAGES: u32 = 16;
+pub(crate) const MAX_VCC_CATCHUP_PAGES: u32 = 16;
 
 /// A page this far below the node's own batch bound means the walk reached
 /// the tip (the chain advances ~10 blocks/s between round-trips, so an
 /// is-empty test chases the tip to the page budget — observed live,
 /// 2026-07-09 sitting). The live stream, buffered since Connected, owns
 /// everything past the final short page; overlap folds idempotently.
-const VCC_TIP_PAGE_THRESHOLD: usize = 100;
+pub(crate) const VCC_TIP_PAGE_THRESHOLD: usize = 100;
 
 /// Per-page retry budget across a still-dialing socket — the cold-reopen
 /// race: the first page routinely fires before the reconnect lands, and one
 /// failure must not strand a mid-pending watch (the transport walk's law,
-/// dag_monitor CATCHUP_RPC_ATTEMPTS; lived live 2026-07-09).
-const VCC_PAGE_ATTEMPTS: u32 = 8;
-const VCC_PAGE_RETRY_DELAY: Duration = Duration::from_millis(1000);
+/// the message walk's since LINK-Q3; lived live 2026-07-09).
+pub(crate) const VCC_PAGE_ATTEMPTS: u32 = 8;
+pub(crate) const VCC_PAGE_RETRY_DELAY: Duration = Duration::from_millis(1000);
 
 /// Throttle for cursor writes on the live VCC stream (~1 chain-block batch
 /// per second) — same discipline as the transport scan cursor.
@@ -247,6 +263,8 @@ struct TrackerState {
     confirmed_emitted: HashSet<String>,
     /// Latest sink blue score seen (node-read; 0 = none yet).
     sink_blue: u64,
+    /// What the live stream took off the chain (LINK-Q3): see [`OffChain`].
+    off_chain: OffChain,
 }
 
 impl TrackerState {
@@ -272,6 +290,7 @@ impl TrackerState {
             elapse_emitted: HashSet::new(),
             confirmed_emitted: HashSet::new(),
             sink_blue: 0,
+            off_chain: OffChain::default(),
         })
     }
 
@@ -309,6 +328,107 @@ impl TrackerState {
                 },
             },
         )
+    }
+
+    /// The live stream put these chain blocks (back) on the chain.
+    fn note_added(&mut self, added_blocks: &[String]) {
+        for block in added_blocks {
+            self.off_chain.added(block);
+        }
+    }
+
+    /// **The walk says `txid` was accepted by `block`** (LINK-Q3). The log is
+    /// the ordered live stream's; the walk may speak only where that stream
+    /// cannot have spoken for the record — a `Transport` watch not currently
+    /// accepted (registered after the live batch naming it had passed, the
+    /// ordering flip; or displaced before a re-acceptance the stream folded
+    /// while it was still unwatched) — and never onto a block the stream has
+    /// removed. A `Send` watch is watched from submission, so every batch
+    /// reached it: the walk never moves one (`wallet-security-auditor`). One
+    /// correction for any source: the same block's own facts replace the
+    /// fallback a failed `get_block` stored (a sink bound, time 0).
+    fn walk_accepted(
+        &mut self,
+        txid: &str,
+        block: &str,
+        blue_score: u64,
+        accepted_unix_ms: u64,
+    ) -> Result<Vec<AcceptanceEvent>> {
+        let Some(record) = self.log.records.get(txid).cloned() else {
+            return Ok(Vec::new());
+        };
+        match &record.status {
+            PersistedStatus::Accepted {
+                accepting_block,
+                accepted_unix_ms: 0,
+                ..
+            } if accepting_block == block && accepted_unix_ms != 0 => {
+                let mut updated = record;
+                updated.status = PersistedStatus::Accepted {
+                    accepting_block: block.to_string(),
+                    accepting_blue_score: blue_score,
+                    accepted_unix_ms,
+                };
+                self.log.upsert(txid.to_string(), updated)?;
+                Ok(Vec::new())
+            }
+            PersistedStatus::Submitted { .. } | PersistedStatus::Displaced { .. }
+                if record.source == WatchSource::Transport && !self.off_chain.contains(block) =>
+            {
+                self.on_accepted(block, blue_score, &[txid.to_string()], accepted_unix_ms)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Register a txid whose fate the message walk already read (LINK-Q3): as
+    /// accepted by its block (the index a later removal displaces from), or as
+    /// displaced since then (the tombstone window already running). Returns
+    /// the events the transition makes, as a live fold would.
+    fn watch_remembered(
+        &mut self,
+        txid: &str,
+        source: WatchSource,
+        now_ms: u64,
+        remembered: Remembered,
+    ) -> Result<Vec<AcceptanceEvent>> {
+        self.watch(txid, source, now_ms)?;
+        // The walk remembered an acceptance the live stream has since retired:
+        // the watch starts displaced, its window running from now.
+        let remembered = match remembered {
+            Remembered::Accepted { block, .. } if self.off_chain.contains(&block) => {
+                Remembered::Displaced {
+                    since_unix_ms: now_ms,
+                    prior_block: block,
+                }
+            }
+            other => other,
+        };
+        match remembered {
+            Remembered::Accepted {
+                block,
+                blue_score,
+                accepted_unix_ms,
+                ..
+            } => self.on_accepted(&block, blue_score, &[txid.to_string()], accepted_unix_ms),
+            Remembered::Displaced {
+                since_unix_ms,
+                prior_block,
+            } => {
+                let Some(record) = self.log.records.get(txid).cloned() else {
+                    return Ok(Vec::new());
+                };
+                let mut updated = record;
+                updated.status = PersistedStatus::Displaced {
+                    since_unix_ms,
+                    prior_block,
+                };
+                self.log.upsert(txid.to_string(), updated)?;
+                Ok(vec![AcceptanceEvent::Displaced {
+                    txid: txid.to_string(),
+                }])
+            }
+        }
     }
 
     fn drop_watch(&mut self, txid: &str) -> Result<()> {
@@ -408,6 +528,9 @@ impl TrackerState {
     ) -> Result<Vec<AcceptanceEvent>> {
         let mut events = Vec::new();
         for block in removed_blocks {
+            // The ordered stream's word: only its removals reach here since
+            // LINK-Q3 (the walk's never touch the log; see `fold_walk`).
+            self.off_chain.removed(block);
             let Some(txids) = self.by_accepting_block.remove(block) else {
                 continue;
             };
@@ -630,6 +753,10 @@ pub struct AcceptanceTracker {
     /// [`SENDER_INTEREST_CAPACITY`], and forgotten on restart — losing an
     /// entry costs one deferred lookup, never a message.
     sender_interest: Mutex<VecDeque<String>>,
+    /// Acceptance facts for matched txids no one watches yet (LINK-Q3): see
+    /// [`MATCHED_MEMORY_CAPACITY`]. Lock order: `state` before this, and
+    /// `sender_interest` before this; this one is always taken last.
+    matched: Mutex<MatchedMemory>,
 }
 
 /// How many unresolved senders we will carry at once. Sized for a human
@@ -663,6 +790,159 @@ pub struct VccBatch {
     pub accepted: Arc<Vec<(Hash, Vec<Hash>)>>,
 }
 
+/// What the monitor feeds the tracker: the live `VirtualChainChanged` stream,
+/// and since LINK-Q3 the message walk's pages (D-344).
+#[derive(Debug, Clone)]
+pub enum TrackerFeed {
+    Vcc(VccBatch),
+    Walk(WalkBatch),
+}
+
+/// One page of the message walk, reduced to what the tracker needs: the chain
+/// blocks it removed, and for each chain block that accepted a MATCHED
+/// transaction, that block's own facts and those txids. Never every txid a
+/// block accepted: the live stream carries those.
+#[derive(Debug, Clone)]
+pub struct WalkBatch {
+    pub removed_chain_block_hashes: Arc<Vec<Hash>>,
+    pub accepted: Vec<WalkAcceptance>,
+}
+
+/// A chain block's acceptance of matched txids, as the walk read it (V2 at High
+/// carries the header's Low fields, so no `get_block` round trip is needed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkAcceptance {
+    pub accepting_block: Hash,
+    pub blue_score: u64,
+    pub daa_score: u64,
+    /// The accepting block's own header timestamp, unix ms ([`accepted_stamp`]'s
+    /// rule: the chain's moment, never this device's clock).
+    pub timestamp_ms: u64,
+    pub txids: Vec<Hash>,
+}
+
+/// How many matched txids the tracker remembers the acceptance of before
+/// anyone watches them. The walk matches by payload prefix, so nearly every
+/// entry is a stranger's message and the set is attacker-mintable: bounded,
+/// in-memory, forgotten on restart, and never the persisted watch log
+/// (the [`SENDER_INTEREST_CAPACITY`] reasoning). Sized far above a page's
+/// organic matches (~2 a minute on today's mainnet, ~10 in a four-minute
+/// catch-up page), because an entry only has to outlive the fold that folds
+/// its message; losing one costs a pending chip or the slower sender locate,
+/// never the message.
+pub const MATCHED_MEMORY_CAPACITY: usize = 1024;
+
+/// How often an eviction summary may be logged. Evictions are routine under
+/// a flood of strangers' matches, so a line each would be the log-eviction
+/// weapon the intake's `dropped` rule denies.
+const MATCHED_EVICTION_LOG_EVERY_MS: u64 = 10 * 60 * 1000;
+
+/// What the tracker remembers about a matched txid no one watches yet: the
+/// same two states a watch can be in after the chain speaks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Remembered {
+    Accepted {
+        block: String,
+        blue_score: u64,
+        daa_score: u64,
+        accepted_unix_ms: u64,
+    },
+    Displaced {
+        since_unix_ms: u64,
+        prior_block: String,
+    },
+}
+
+/// The bounded memory behind [`MATCHED_MEMORY_CAPACITY`]: oldest out first.
+#[derive(Default)]
+struct MatchedMemory {
+    order: VecDeque<String>,
+    map: HashMap<String, Remembered>,
+    evicted: u64,
+    logged_at_ms: u64,
+}
+
+impl MatchedMemory {
+    fn get(&self, txid: &str) -> Option<&Remembered> {
+        self.map.get(txid)
+    }
+
+    fn remember(&mut self, txid: String, remembered: Remembered, now_ms: u64) {
+        if !self.map.contains_key(&txid) {
+            if self.order.len() >= MATCHED_MEMORY_CAPACITY {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.map.remove(&oldest);
+                    self.evicted += 1;
+                    if now_ms.saturating_sub(self.logged_at_ms) >= MATCHED_EVICTION_LOG_EVERY_MS {
+                        log::info!(
+                            "acceptance: matched-acceptance memory full — {} oldest evicted since \
+                             the last line (a late watch falls back to Submitted, a late sender \
+                             lookup to the locate)",
+                            self.evicted
+                        );
+                        self.evicted = 0;
+                        self.logged_at_ms = now_ms;
+                    }
+                }
+            }
+            self.order.push_back(txid.clone());
+        }
+        self.map.insert(txid, remembered);
+    }
+
+    /// Removed chain blocks displace what they accepted, as for a watch.
+    fn displace(&mut self, removed: &[String], now_ms: u64) {
+        for remembered in self.map.values_mut() {
+            if let Remembered::Accepted { block, .. } = remembered {
+                if removed.contains(block) {
+                    *remembered = Remembered::Displaced {
+                        since_unix_ms: now_ms,
+                        prior_block: block.clone(),
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// How many chain blocks the live stream removed (and has not re-added) the
+/// tracker remembers. Removals are node facts, a handful a minute on mainnet,
+/// never attacker-mintable, so this holds hours; the oldest goes first.
+const OFF_CHAIN_CAPACITY: usize = 4096;
+
+/// **The chain blocks the ordered live stream has removed and not re-added**
+/// (LINK-Q3). The walk's pages arrive on their own clock and can be older than
+/// a live batch; a walk acceptance onto a block in here would resurrect an
+/// acceptance the stream has already retired (`consensus-auditor`).
+#[derive(Default)]
+struct OffChain {
+    order: VecDeque<String>,
+    set: HashSet<String>,
+}
+
+impl OffChain {
+    fn removed(&mut self, block: &str) {
+        if self.set.insert(block.to_string()) {
+            self.order.push_back(block.to_string());
+            if self.order.len() > OFF_CHAIN_CAPACITY {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.set.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    fn added(&mut self, block: &str) {
+        if self.set.remove(block) {
+            self.order.retain(|b| b != block);
+        }
+    }
+
+    fn contains(&self, block: &str) -> bool {
+        self.set.contains(block)
+    }
+}
+
 impl AcceptanceTracker {
     /// Load (or create) the tracker's persistence in `dir`
     /// (`acceptance.kvlog` + `vcc.cursor`).
@@ -675,6 +955,7 @@ impl AcceptanceTracker {
             cursor_path: dir.join("vcc.cursor"),
             cursor_written: AtomicU64::new(0),
             sender_interest: Mutex::new(VecDeque::new()),
+            matched: Mutex::new(MatchedMemory::default()),
         }))
     }
 
@@ -684,14 +965,47 @@ impl AcceptanceTracker {
     }
 
     /// Watch a txid (idempotent; first source wins).
+    ///
+    /// **A txid the message walk already saw accepted is registered as what the
+    /// chain said** (LINK-Q3): its acceptance, or its displacement, from the
+    /// matched memory. The live batch that named it was folded before this
+    /// watch existed, so without the memory it would sit `Submitted` for good.
     pub fn watch(&self, txid: &str, source: WatchSource) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Err(e) = state.watch(txid, source, now_unix_ms()) {
-            log::warn!("acceptance: watch persist failed: {e}");
+        let mut events = Vec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.is_watched(txid) {
+                return;
+            }
+            // Only a message watch takes the walk's memory: a Send watch is the
+            // ordered stream's alone, registered at the submit ack, which in
+            // practice precedes the live batch naming it; a late one stays
+            // Submitted for the stall lane (`wallet-security-auditor`, round 4 — the
+            // rule `walk_accepted` keeps, made structural here too).
+            let remembered = if source == WatchSource::Transport {
+                self.matched
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(txid)
+                    .cloned()
+            } else {
+                None
+            };
+            let now_ms = now_unix_ms();
+            let outcome = match remembered {
+                Some(remembered) => state
+                    .watch_remembered(txid, source, now_ms, remembered)
+                    .map(|found| events = found),
+                None => state.watch(txid, source, now_ms),
+            };
+            if let Err(e) = outcome {
+                log::warn!("acceptance: watch persist failed: {e}");
+            }
         }
+        self.broadcast(events);
     }
 
     /// Register a txid whose SENDER we want named once the chain accepts it.
@@ -706,11 +1020,44 @@ impl AcceptanceTracker {
     /// Bounded and in-memory by design: see [`Self::sender_interest`].
     /// Idempotent.
     pub fn note_sender_interest(&self, txid: &str) {
+        // Lock order: state, then interest, then the memory — `fold_batch`
+        // takes state before interest, and the memory is always last.
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut set = self
             .sender_interest
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if set.iter().any(|t| t == txid) {
+            return;
+        }
+        // LINK-Q3: the message walk folds a message AFTER its acceptance, so
+        // the batch that would resolve this interest may already have been
+        // folded. Its DAA score is then in the matched memory: answer now —
+        // unless the live stream has since taken that block off the chain, in
+        // which case its score would name nobody (`consensus-auditor`). Taken
+        // under the interest lock, so the interest resolves exactly once
+        // whichever of this and `fold_walk` lands first.
+        let known = match self
+            .matched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(txid)
+        {
+            Some(Remembered::Accepted {
+                daa_score, block, ..
+            }) if !state.off_chain.contains(block) => Some(*daa_score),
+            _ => None,
+        };
+        drop(state);
+        if let Some(accepting_daa_score) = known {
+            drop(set);
+            self.broadcast(vec![AcceptanceEvent::SenderResolvable {
+                txid: txid.to_string(),
+                accepting_daa_score,
+            }]);
             return;
         }
         if set.len() >= SENDER_INTEREST_CAPACITY {
@@ -859,6 +1206,19 @@ impl AcceptanceTracker {
             };
             self.broadcast(events);
         }
+        // Blocks this batch put (back) on the chain leave the off-chain set, so
+        // a walk acceptance onto them is admitted again (LINK-Q3).
+        if !batch.added_chain_block_hashes.is_empty() {
+            let added: Vec<String> = batch
+                .added_chain_block_hashes
+                .iter()
+                .map(|h| h.to_string())
+                .collect();
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_added(&added);
+        }
 
         // Acceptances: pre-filter to txids we care about, then resolve scores.
         // Two independent interests share the one `get_block` round trip —
@@ -933,9 +1293,11 @@ impl AcceptanceTracker {
                             }
                             Err(e2) => {
                                 log::warn!(
-                                    "acceptance: get_block({accepting_block}) failed ({e}) and \
-                                     no sink blue score available ({e2}) — fold skipped, \
+                                    "acceptance: get_block({accepting_block}) failed ({}) and \
+                                     no sink blue score available ({}) — fold skipped, \
                                      {} watch(es) stay Submitted",
+                                    crate::link::sanitize_node_text(&e.to_string()),
+                                    crate::link::sanitize_node_text(&e2.to_string()),
                                     txids.len()
                                 );
                                 continue;
@@ -943,8 +1305,9 @@ impl AcceptanceTracker {
                         }
                     }
                     log::warn!(
-                        "acceptance: get_block({accepting_block}) failed ({e}) — \
-                         using sink blue score {sink} as a conservative bound"
+                        "acceptance: get_block({accepting_block}) failed ({}) — \
+                         using sink blue score {sink} as a conservative bound",
+                        crate::link::sanitize_node_text(&e.to_string())
                     );
                     sink
                 }
@@ -987,6 +1350,86 @@ impl AcceptanceTracker {
         if let Some(last_added) = batch.added_chain_block_hashes.last() {
             self.write_cursor(last_added, false);
         }
+    }
+
+    /// **Fold one page of the message walk** (LINK-Q3, D-344). The log belongs
+    /// to the ordered live stream; the walk's page arrives on its own clock and
+    /// can be older than a live batch, so it speaks to the log only where the
+    /// stream cannot have (`TrackerState::walk_accepted`), and its REMOVALS
+    /// never reach the log at all: applied late, they would displace a record
+    /// the stream had already re-accepted — a payment read "Displaced by the
+    /// network" (`wallet-security-auditor`). Everything else goes to the
+    /// bounded memory the walk owns, which a watch or a sender lookup
+    /// registered later consults. An interested txid resolves on the page's
+    /// own DAA score, unless its block has left the chain. `state` is held
+    /// while the memory is written, the order [`Self::watch`] takes them in,
+    /// so a watch lands either before (folded here) or after (found in the
+    /// memory), never between.
+    pub(crate) fn fold_walk(&self, batch: &WalkBatch) {
+        let now_ms = now_unix_ms();
+        let removed: Vec<String> = batch
+            .removed_chain_block_hashes
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+        let mut events = Vec::new();
+        let mut resolvable: Vec<(Vec<String>, u64)> = Vec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut memory = self
+                .matched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !removed.is_empty() {
+                memory.displace(&removed, now_ms);
+            }
+            for acceptance in &batch.accepted {
+                let block = acceptance.accepting_block.to_string();
+                let off_chain = state.off_chain.contains(&block);
+                let txids: Vec<String> = acceptance.txids.iter().map(|t| t.to_string()).collect();
+                for txid in &txids {
+                    events.extend(
+                        state
+                            .walk_accepted(
+                                txid,
+                                &block,
+                                acceptance.blue_score,
+                                acceptance.timestamp_ms,
+                            )
+                            .unwrap_or_else(|e| {
+                                log::warn!("acceptance: walk acceptance fold persist failed: {e}");
+                                Vec::new()
+                            }),
+                    );
+                }
+                for txid in &txids {
+                    let remembered = if off_chain {
+                        Remembered::Displaced {
+                            since_unix_ms: now_ms,
+                            prior_block: block.clone(),
+                        }
+                    } else {
+                        Remembered::Accepted {
+                            block: block.clone(),
+                            blue_score: acceptance.blue_score,
+                            daa_score: acceptance.daa_score,
+                            accepted_unix_ms: acceptance.timestamp_ms,
+                        }
+                    };
+                    memory.remember(txid.clone(), remembered, now_ms);
+                }
+                if !off_chain {
+                    resolvable.push((txids, acceptance.daa_score));
+                }
+            }
+        }
+        for (txids, daa_score) in resolvable {
+            events.extend(self.take_resolvable(&txids, daa_score));
+        }
+        self.broadcast(events);
     }
 
     /// Reopen/reconnect catch-up: walk `get_virtual_chain_from_block` from
@@ -1066,8 +1509,10 @@ impl AcceptanceTracker {
             {
                 Ok(resp) => return Some(resp),
                 Err(e) => {
+                    // Node-controlled text, sanitized before any log lane (L167).
                     log::debug!(
-                        "acceptance: catch-up page attempt {attempt} failed ({e}); retrying"
+                        "acceptance: catch-up page attempt {attempt} failed ({}); retrying",
+                        crate::link::sanitize_node_text(&e.to_string())
                     );
                     tokio::time::sleep(VCC_PAGE_RETRY_DELAY).await;
                 }
@@ -1076,13 +1521,14 @@ impl AcceptanceTracker {
         None
     }
 
-    /// Spawn the tracker task: folds live VCC batches from `vcc_rx`, runs
+    /// Spawn the tracker task: folds live VCC batches and the message walk's
+    /// pages from `vcc_rx` (one channel, so each feed is folded in its own order), runs
     /// catch-up on every (re)connect via `dag_rx`, folds sink blue score
     /// updates, and ticks the stall/tombstone windows.
     pub fn run(
         self: &Arc<Self>,
         rpc: Rpc,
-        mut vcc_rx: mpsc::UnboundedReceiver<VccBatch>,
+        mut vcc_rx: mpsc::UnboundedReceiver<TrackerFeed>,
         mut dag_rx: broadcast::Receiver<crate::DagEvent>,
     ) -> tokio::task::JoinHandle<()> {
         let tracker = self.clone();
@@ -1104,9 +1550,10 @@ impl AcceptanceTracker {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
-                    batch = vcc_rx.recv() => {
-                        match batch {
-                            Some(batch) => tracker.fold_batch(&rpc, &batch).await,
+                    feed = vcc_rx.recv() => {
+                        match feed {
+                            Some(TrackerFeed::Vcc(batch)) => tracker.fold_batch(&rpc, &batch).await,
+                            Some(TrackerFeed::Walk(batch)) => tracker.fold_walk(&batch),
                             None => break, // monitor gone
                         }
                     }
@@ -1608,6 +2055,458 @@ mod tests {
         let record = state.log.records.get(&txid(1)).unwrap();
         assert_eq!(record.source, WatchSource::Send);
         assert_eq!(record.watched_unix_ms, 1_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── LINK-Q3: the message walk's feed (D-344) ──────────────────────────────
+
+    fn hb(n: u8) -> Hash {
+        Hash::from_bytes([n; 32])
+    }
+
+    /// One walk page's worth: `removed`, then `txids` accepted by `block` with
+    /// facts no clock could produce by accident.
+    fn walk_batch(removed: &[Hash], block: Hash, txids: &[Hash], daa: u64) -> WalkBatch {
+        WalkBatch {
+            removed_chain_block_hashes: Arc::new(removed.to_vec()),
+            accepted: if txids.is_empty() {
+                Vec::new()
+            } else {
+                vec![WalkAcceptance {
+                    accepting_block: block,
+                    blue_score: 4_000,
+                    daa_score: daa,
+                    timestamp_ms: 883_612_800_000,
+                    txids: txids.to_vec(),
+                }]
+            },
+        }
+    }
+
+    /// **The ordering flip, both ways round.** A message is folded AFTER the
+    /// live batch that accepted it, so its watch must come out `Accepted` on the
+    /// accepting block's own time whether the walk's page reaches the tracker
+    /// before the watch (the memory answers) or after it (the fold answers).
+    /// Mutation: dropping the memory read in `watch` leaves the first case
+    /// `Submitted`, the pending chip that never settles.
+    #[test]
+    fn a_message_watched_after_its_acceptance_is_accepted_either_way_round() {
+        let dir = test_dir("walk-order");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (early, late) = (hb(0x21), hb(0x22));
+
+        tracker.fold_walk(&walk_batch(&[], hb(0xB1), &[early], 7));
+        tracker.watch(&early.to_string(), WatchSource::Transport);
+
+        tracker.watch(&late.to_string(), WatchSource::Transport);
+        assert_eq!(tracker.status(&late.to_string()), Some(TxStatus::Submitted));
+        tracker.fold_walk(&walk_batch(&[], hb(0xB1), &[late], 7));
+
+        for txid in [early, late] {
+            assert!(
+                matches!(
+                    tracker.status(&txid.to_string()),
+                    Some(TxStatus::Accepted {
+                        accepted_unix_ms: 883_612_800_000,
+                        ..
+                    })
+                ),
+                "{txid} read {:?}",
+                tracker.status(&txid.to_string())
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live stream's fold of a removal or an addition, as `fold_batch`
+    /// applies them (no RPC is needed for either).
+    fn live_removed(tracker: &AcceptanceTracker, blocks: &[Hash]) {
+        let blocks: Vec<String> = blocks.iter().map(|b| b.to_string()).collect();
+        let events = tracker
+            .state
+            .lock()
+            .unwrap()
+            .on_removed(&blocks, now_unix_ms())
+            .unwrap();
+        tracker.broadcast(events);
+    }
+
+    fn live_accepted(tracker: &AcceptanceTracker, block: Hash, txids: &[Hash]) {
+        let mut state = tracker.state.lock().unwrap();
+        state.note_added(&[block.to_string()]);
+        let txids: Vec<String> = txids.iter().map(|t| t.to_string()).collect();
+        state
+            .on_accepted(&block.to_string(), 4_100, &txids, 883_612_900_000)
+            .unwrap();
+    }
+
+    /// **Deliverable 2's fixture: a message whose accepting block leaves the
+    /// chain takes this file's rule, unchanged.** Registered from the walk's
+    /// facts, the watch sits in the accepting-block index, so the LIVE stream's
+    /// removal displaces it: tombstone-due past the window, or accepted again
+    /// when the stream re-accepts it. When the removal reached the tracker
+    /// BEFORE the watch did, the watch starts displaced (the window already
+    /// running), and a re-acceptance the stream folded while it was unwatched
+    /// reaches it through the walk's next page.
+    #[test]
+    fn a_reorged_message_follows_the_spines_displacement_rule() {
+        let dir = test_dir("walk-reorg");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (lost, moved, early) = (hb(0x31), hb(0x32), hb(0x33));
+        let (b, b2) = (hb(0xB2), hb(0xB3));
+
+        tracker.fold_walk(&walk_batch(&[], b, &[lost, moved], 9));
+        tracker.watch(&lost.to_string(), WatchSource::Transport);
+        tracker.watch(&moved.to_string(), WatchSource::Transport);
+        live_removed(&tracker, &[b]);
+        live_accepted(&tracker, b2, &[moved]);
+        assert_eq!(tracker.status(&lost.to_string()), Some(TxStatus::Displaced));
+        assert!(matches!(
+            tracker.status(&moved.to_string()),
+            Some(TxStatus::Accepted { .. })
+        ));
+
+        let later = now_unix_ms() + TOMBSTONE_WINDOW_MS + 1;
+        let elapsed = tracker.state.lock().unwrap().tick(later);
+        assert_eq!(
+            elapsed,
+            vec![AcceptanceEvent::DisplacedElapsed {
+                txid: lost.to_string()
+            }]
+        );
+
+        // The removal lands before the watch: the watch starts displaced.
+        tracker.fold_walk(&walk_batch(&[], hb(0xB4), &[early], 9));
+        live_removed(&tracker, &[hb(0xB4)]);
+        tracker.watch(&early.to_string(), WatchSource::Transport);
+        assert_eq!(
+            tracker.status(&early.to_string()),
+            Some(TxStatus::Displaced)
+        );
+        // Re-accepted while it was unwatched: only the walk can say so.
+        tracker.fold_walk(&walk_batch(&[], hb(0xB6), &[early], 9));
+        assert!(
+            matches!(
+                tracker.status(&early.to_string()),
+                Some(TxStatus::Accepted { .. })
+            ),
+            "re-accepted inside the window: the ghost is reversed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The walk's removals reach its own memory** (and only it): an
+    /// acceptance no one watches yet, whose block the walk saw leave the
+    /// chain, registers displaced even before the live stream says so — the
+    /// window runs, and the walk's next page heals it if the block returns.
+    #[test]
+    fn a_walk_removal_displaces_what_only_the_memory_holds() {
+        let dir = test_dir("walk-memory-removal");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (tx, x) = (hb(0x91), hb(0xA9));
+        tracker.fold_walk(&walk_batch(&[], x, &[tx], 2));
+        tracker.fold_walk(&walk_batch(&[x], hb(0xAA), &[], 2));
+        tracker.watch(&tx.to_string(), WatchSource::Transport);
+        assert_eq!(tracker.status(&tx.to_string()), Some(TxStatus::Displaced));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A payment's watch never takes the walk's memory**: a Send watch is
+    /// the ordered stream's alone, whatever the walk remembered about the txid.
+    #[test]
+    fn a_send_watch_never_takes_the_walks_memory() {
+        let dir = test_dir("walk-send-memory");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let sent = hb(0x95);
+        tracker.fold_walk(&walk_batch(&[], hb(0xAB), &[sent], 2));
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        assert_eq!(tracker.status(&sent.to_string()), Some(TxStatus::Submitted));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A stale walk removal never displaces a payment** (`wallet-security-
+    /// auditor`, LINK-Q3). The stream removed block X and re-added it with the
+    /// payment S accepted; the walk's older page, still saying "X removed",
+    /// lands after. S stays accepted: the walk's removals never reach the log.
+    /// Mutation: letting `fold_walk` fold removals into the log reads S
+    /// `Displaced` — the receipt that invites a second payment.
+    #[test]
+    fn a_stale_walk_removal_never_displaces_a_payment() {
+        let dir = test_dir("walk-stale-removal");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (payment, x) = (hb(0x51), hb(0xC1));
+        tracker.watch(&payment.to_string(), WatchSource::Send);
+        live_accepted(&tracker, x, &[payment]);
+        live_removed(&tracker, &[x]);
+        live_accepted(&tracker, x, &[payment]);
+        tracker.fold_walk(&walk_batch(&[x], hb(0xC2), &[], 1));
+        assert!(
+            matches!(
+                tracker.status(&payment.to_string()),
+                Some(TxStatus::Accepted { .. })
+            ),
+            "read {:?}",
+            tracker.status(&payment.to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A stale walk acceptance never lands on a block the stream removed,
+    /// and never moves an acceptance the stream already made** (`consensus-
+    /// auditor`, LINK-Q3). A message the stream moved to B′ stays on B′; a
+    /// Submitted one is not accepted by the removed B, and is by the live B2;
+    /// a Send watch is never moved by the walk at all.
+    #[test]
+    fn a_stale_walk_acceptance_never_overrides_the_stream() {
+        let dir = test_dir("walk-stale-acceptance");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (waiting, moved, sent) = (hb(0x61), hb(0x62), hb(0x63));
+        let (b, b_prime, b2) = (hb(0xD1), hb(0xD2), hb(0xD3));
+        tracker.watch(&waiting.to_string(), WatchSource::Transport);
+        tracker.watch(&moved.to_string(), WatchSource::Transport);
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        live_accepted(&tracker, b_prime, &[moved]);
+        live_removed(&tracker, &[b]);
+
+        tracker.fold_walk(&walk_batch(&[], b, &[waiting, moved, sent], 3));
+        assert_eq!(
+            tracker.status(&waiting.to_string()),
+            Some(TxStatus::Submitted)
+        );
+        let accepting =
+            |txid: Hash| match &tracker.state.lock().unwrap().log.records[&txid.to_string()].status
+            {
+                PersistedStatus::Accepted {
+                    accepting_block, ..
+                } => Some(accepting_block.clone()),
+                _ => None,
+            };
+        assert_eq!(
+            accepting(moved),
+            Some(b_prime.to_string()),
+            "the stream's move stands"
+        );
+        assert_eq!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Submitted),
+            "a Send watch is the stream's"
+        );
+
+        // On a block the stream has NOT removed, the walk still moves only the
+        // record it alone can speak for.
+        tracker.fold_walk(&walk_batch(&[], b2, &[waiting, moved, sent], 3));
+        assert_eq!(accepting(waiting), Some(b2.to_string()));
+        assert_eq!(
+            accepting(moved),
+            Some(b_prime.to_string()),
+            "an acceptance the stream made stands"
+        );
+        assert_eq!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Submitted),
+            "a Send watch is never the walk's"
+        );
+
+        // The stream puts B back: a walk acceptance onto it is admitted again.
+        let back = hb(0x64);
+        tracker.watch(&back.to_string(), WatchSource::Transport);
+        tracker.state.lock().unwrap().note_added(&[b.to_string()]);
+        tracker.fold_walk(&walk_batch(&[], b, &[back], 3));
+        assert_eq!(
+            accepting(back),
+            Some(b.to_string()),
+            "B is on the chain again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The one correction the walk may make to any record: the same block's
+    /// own facts replace the fallback a failed `get_block` stored (time 0).
+    #[test]
+    fn a_walk_fact_upgrades_a_fallback_acceptance_of_the_same_block() {
+        let dir = test_dir("walk-upgrade");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (sent, x) = (hb(0x71), hb(0xE1));
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        tracker
+            .state
+            .lock()
+            .unwrap()
+            .on_accepted(&x.to_string(), 9_999, &[sent.to_string()], 0)
+            .unwrap();
+        tracker.fold_walk(&walk_batch(&[], x, &[sent], 3));
+        assert!(matches!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Accepted {
+                accepted_unix_ms: 883_612_800_000,
+                ..
+            })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A sender lookup resolves on the page's own DAA score, exactly once,
+    /// whichever arrives first.**
+    #[tokio::test]
+    async fn a_sender_lookup_resolves_once_either_way_round() {
+        let dir = test_dir("walk-sender");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let mut events = tracker.subscribe();
+        let (after, before) = (hb(0x41), hb(0x42));
+
+        tracker.fold_walk(&walk_batch(&[], hb(0xB7), &[after], 5_150));
+        tracker.note_sender_interest(&after.to_string());
+        tracker.note_sender_interest(&before.to_string());
+        tracker.fold_walk(&walk_batch(&[], hb(0xB7), &[before], 5_151));
+
+        let mut resolved = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let AcceptanceEvent::SenderResolvable {
+                txid,
+                accepting_daa_score,
+            } = event
+            {
+                resolved.push((txid, accepting_daa_score));
+            }
+        }
+        assert_eq!(
+            resolved,
+            vec![(after.to_string(), 5_150), (before.to_string(), 5_151)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The memory's ceiling, at its edge: full holds every entry, one more
+    /// evicts exactly the oldest.
+    #[test]
+    fn the_matched_memory_evicts_exactly_at_its_ceiling() {
+        let dir = test_dir("walk-memory-edge");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let txid = |i: u32| {
+            let mut bytes = [0x5F; 32];
+            bytes[..4].copy_from_slice(&i.to_le_bytes());
+            Hash::from_bytes(bytes)
+        };
+        let upto = |n: u32| (0..n).map(txid).collect::<Vec<_>>();
+        tracker.fold_walk(&walk_batch(
+            &[],
+            hb(0xB9),
+            &upto(MATCHED_MEMORY_CAPACITY as u32 - 1),
+            1,
+        ));
+        assert_eq!(
+            tracker.matched.lock().unwrap().order.len(),
+            MATCHED_MEMORY_CAPACITY - 1
+        );
+        tracker.fold_walk(&walk_batch(
+            &[],
+            hb(0xB9),
+            &[txid(MATCHED_MEMORY_CAPACITY as u32 - 1)],
+            1,
+        ));
+        let memory = tracker.matched.lock().unwrap();
+        assert_eq!(memory.order.len(), MATCHED_MEMORY_CAPACITY);
+        assert!(
+            memory.get(&txid(0).to_string()).is_some(),
+            "full is not over"
+        );
+        drop(memory);
+        tracker.fold_walk(&walk_batch(
+            &[],
+            hb(0xB9),
+            &[txid(MATCHED_MEMORY_CAPACITY as u32)],
+            1,
+        ));
+        let memory = tracker.matched.lock().unwrap();
+        assert_eq!(memory.order.len(), MATCHED_MEMORY_CAPACITY);
+        assert!(
+            memory.get(&txid(0).to_string()).is_none(),
+            "one over evicts the oldest"
+        );
+        assert!(
+            memory.get(&txid(1).to_string()).is_some(),
+            "and only the oldest"
+        );
+        drop(memory);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The off-chain set's ceiling, at its edge: full holds every block, one
+    /// more forgets exactly the oldest, and a re-add leaves at once.
+    #[test]
+    fn the_off_chain_set_evicts_exactly_at_its_ceiling() {
+        let block = |i: u32| format!("{i:064x}");
+        let mut set = OffChain::default();
+        for i in 0..OFF_CHAIN_CAPACITY as u32 - 1 {
+            set.removed(&block(i));
+        }
+        assert_eq!(set.order.len(), OFF_CHAIN_CAPACITY - 1);
+        set.removed(&block(OFF_CHAIN_CAPACITY as u32 - 1));
+        assert_eq!(set.order.len(), OFF_CHAIN_CAPACITY);
+        assert!(set.contains(&block(0)), "full is not over");
+        set.removed(&block(OFF_CHAIN_CAPACITY as u32));
+        assert_eq!(
+            (set.order.len(), set.set.len()),
+            (OFF_CHAIN_CAPACITY, OFF_CHAIN_CAPACITY)
+        );
+        assert!(!set.contains(&block(0)), "one over forgets the oldest");
+        assert!(set.contains(&block(1)), "and only the oldest");
+        set.added(&block(5));
+        assert!(!set.contains(&block(5)));
+        assert_eq!(set.order.len(), OFF_CHAIN_CAPACITY - 1);
+    }
+
+    /// **A sender lookup never resolves on a block the stream removed**
+    /// (`consensus-auditor`): the remembered DAA score would name nobody, so
+    /// the interest waits for the acceptance that stands.
+    #[tokio::test]
+    async fn a_sender_lookup_never_resolves_on_a_block_the_stream_removed() {
+        let dir = test_dir("walk-sender-offchain");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let mut events = tracker.subscribe();
+        let (tx, b, b2) = (hb(0x81), hb(0xF1), hb(0xF2));
+        tracker.fold_walk(&walk_batch(&[], b, &[tx], 6_000));
+        live_removed(&tracker, &[b]);
+        tracker.note_sender_interest(&tx.to_string());
+        assert!(events.try_recv().is_err(), "resolved on a retired block");
+        tracker.fold_walk(&walk_batch(&[], b2, &[tx], 6_001));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AcceptanceEvent::SenderResolvable {
+                accepting_daa_score: 6_001,
+                ..
+            })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The matched memory is the attacker-mintable set here: bounded, oldest
+    /// out, and never the persisted watch log.
+    #[test]
+    fn the_matched_memory_is_bounded_and_never_a_watch() {
+        let dir = test_dir("walk-memory");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let txids: Vec<Hash> = (0..MATCHED_MEMORY_CAPACITY as u32 + 10)
+            .map(|i| {
+                let mut bytes = [0x5E; 32];
+                bytes[..4].copy_from_slice(&i.to_le_bytes());
+                Hash::from_bytes(bytes)
+            })
+            .collect();
+        tracker.fold_walk(&walk_batch(&[], hb(0xB8), &txids, 1));
+        let memory = tracker.matched.lock().unwrap();
+        assert_eq!(memory.order.len(), MATCHED_MEMORY_CAPACITY);
+        assert_eq!(memory.map.len(), MATCHED_MEMORY_CAPACITY);
+        assert!(
+            memory.get(&txids[0].to_string()).is_none(),
+            "the oldest went first"
+        );
+        assert!(memory.get(&txids.last().unwrap().to_string()).is_some());
+        drop(memory);
+        assert!(
+            tracker.status(&txids[0].to_string()).is_none(),
+            "remembering is not watching"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

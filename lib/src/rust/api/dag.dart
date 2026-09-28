@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `new`, `new`, `observe`, `offer`, `reset`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
+// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `hold_intake`, `new`, `new`, `observe`, `offer`, `reset`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Coalescer`, `ScoreClock`, `ScoreNote`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
@@ -187,10 +187,11 @@ class DagStatusDto {
   final BigInt? lastTickAgeSecs;
 
   /// Every DAA tick an installed socket has delivered in this process — a
-  /// plain monotonic count, counted in Rust BEFORE the 250 ms coalescer, so
-  /// the node screen can difference it against its own clock and show the
-  /// beat the link is really keeping (`DAA · 10 Hz`, D-332). Public chain
-  /// liveness; a count, never a value.
+  /// plain monotonic count, counted in Rust BEFORE the 250 ms coalescer. It
+  /// fed the Network screen's `DAA · 10 Hz` (D-332) until LINK-UX1 (D-342),
+  /// whose `BPS` reads the climb of `virtual_daa_score` instead; since then
+  /// it serves the logs and diagnostics only. Public chain liveness; a count,
+  /// never a value.
   final BigInt daaTicks;
   final BigInt? virtualDaaScore;
 

@@ -137,7 +137,8 @@ pub enum RowSource {
     Unknown,
     /// Self-authored at commit (our own outbound send) — never overridable.
     Own,
-    /// Folded from the node's BlockAdded scan / catch-up walk (chain truth).
+    /// Folded from the node (chain truth): the message walk's accepted
+    /// transactions since LINK-Q3, the `BlockAdded` scan before it.
     NodeScanned,
     /// Folded from an indexer fill row (D-074) — an unverifiable txid label;
     /// yields to node truth on the same txid.
@@ -931,8 +932,9 @@ impl TransportStore {
 
     /// Record a message, deduplicating by txid (the D-065 law). Returns
     /// `false` — without touching the log — when the txid is already stored,
-    /// so BlockAdded re-deliveries and parity-bit-malleated duplicates
-    /// collapse to one row.
+    /// so the walk's replays (a held page, a re-seed, a crash before the
+    /// cursor write; LINK-Q3's at-least-once) and parity-bit-malleated
+    /// duplicates collapse to one row.
     pub fn record_message(&mut self, record: MessageRecord) -> Result<bool> {
         if self.messages.records.contains_key(&record.txid) {
             return Ok(false);
@@ -942,7 +944,7 @@ impl TransportStore {
     }
 
     /// Whether a txid is already stored — the cheap pre-crypto skip for our
-    /// own outbound txs echoing back through the BlockAdded scan.
+    /// own outbound txs echoing back through the message walk.
     pub fn has_message_txid(&self, txid: &str) -> bool {
         self.messages.records.contains_key(txid)
     }

@@ -1,7 +1,8 @@
 //! Payload transport across the FFI (P2.1 · T2): the send side reuses the
 //! two-phase prepare/commit discipline of `api/send.rs` with payload bytes
-//! threaded through the same pinned Generator; the receive side streams
-//! `ciph_msg:` matches from the chain-layer BlockAdded scan.
+//! threaded through the same pinned Generator; the receive side folds the
+//! `ciph_msg:`/`kchat:` matches of the chain layer's message walk: ACCEPTED
+//! transactions, not the full-block stream it replaced (LINK-Q3, D-344).
 //!
 //! What crosses here is PUBLIC data only (INV-1/3): addresses, amounts, a
 //! Rust-decoded summary of the built txs, and on-chain payload bytes (raw
@@ -59,7 +60,8 @@ use crate::api::send::{
 use crate::api::{dag, vault, wallet};
 use crate::frb_generated::StreamSink;
 
-/// One `ciph_msg:` match from the live BlockAdded scan (P2.1 raw receive).
+/// One `ciph_msg:`/`kchat:` match in an ACCEPTED transaction, from the message
+/// walk (P2.1 raw receive; LINK-Q3 moved its source off the full-block stream).
 /// Raw by design: kind is the verbatim wire token, `body` the raw bytes after
 /// it — semantics (decryption, conversations) arrive in P2.2/P2.3.
 #[derive(Clone, Debug)]
@@ -599,73 +601,40 @@ pub(crate) fn widen_key_window(window: (u32, u32)) {
 }
 
 static HUB: Mutex<Option<Arc<TransportHub>>> = Mutex::new(None);
-static HUB_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
-/// V1 consumer #2 (reorg tombstones) — replaced like [`HUB_TASK`] on re-unlock
-/// so one stream never feeds two folders.
+/// V1 consumer #2 (reorg tombstones) — replaced on re-unlock so one stream
+/// never feeds two folders.
 static ACCEPTANCE_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
-/// F4's reconnect replay — replaced like [`HUB_TASK`] so a re-unlock never
-/// leaves two tasks walking the DAG over the same gap.
-static REPLAY_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+/// F5's sweep lane — replaced on re-unlock like the tombstone task. (It carried
+/// F4's reconnect replay too until LINK-Q3's walk made every gap a replay.)
+static SWEEP_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 
-/// Which block the reconnect replay must walk from (F4) — the whole subtlety
-/// of that fix, kept as a state machine so it can be proven without a socket.
-///
-/// The bound is captured when the socket **drops**. Reading the cursor when the
-/// replay wakes instead would look identical and do nothing: subscriptions are
-/// registered before `emit(Connected)` in `handle_connect`, so post-reconnect
-/// `BlockAdded` notifications can already have advanced the persisted cursor
-/// past the gap by then, and the walk would start above the messages it exists
-/// to recover.
-/// Deliberately NOT `#[derive(Default)]`. A derived `Default` is a **public**
-/// associated fn returning this type, and FRB reads that as a reason to export
-/// it: codegen generated a whole Dart `ReplayGap` class and pulled `Hash` into
-/// a new generated `lib.dart`, putting an internal state machine on the FFI
-/// surface for nothing. A private constructor keeps this side of the bridge.
-struct ReplayGap {
-    low: Option<kaspaverse_chain::Hash>,
+/// **The message hub as the walk's committing consumer** (LINK-Q3, D-344).
+/// Each page's matches fold here in chain order, and the walk commits its
+/// cursor only when every one of them folded — Kafka's commit-after-processing,
+/// made safe to replay by the store's dedupe by txid. A vault that locks under
+/// the fold holds the page: the fold stops at the first `Locked` drop (what came
+/// before it in the page is stored, and the replay dedupes it), and the
+/// unlock's arm replays the page. This replaced a broadcast receiver, which
+/// could lag and drop live messages outright (the 14-day capture's 8,153
+/// `fold lagged` lines, 2026-09-05..07); a sink is backpressure, it cannot lag.
+struct HubSink {
+    hub: Arc<TransportHub>,
 }
 
-impl ReplayGap {
-    fn new() -> Self {
-        Self { low: None }
-    }
-
-    /// The socket dropped. `cursor_now` is the persisted cursor read at this
-    /// instant — at most `TRANSPORT_CURSOR_MIN_WRITE_SECS` behind the true
-    /// drop point, which errs BELOW the gap, where dedup-by-txid absorbs it.
-    ///
-    /// **Earliest bound wins**, the same rule as [`Self::on_lag`]. An armed
-    /// bound is only ever cleared by a `Connected` that consumed it, so if one
-    /// survives to here its gap is still unwalked and it is necessarily the
-    /// earlier of the two. Overwriting would raise the floor above that gap —
-    /// the silent no-op this type exists to prevent, arriving by a second door
-    /// — and an unguarded `on_drop(None)` would erase an armed bound outright.
-    /// Reachable whenever a `Connected` is lost to a lag, which the sizing
-    /// below makes ordinary rather than exotic.
-    fn on_drop(&mut self, cursor_now: Option<kaspaverse_chain::Hash>) {
-        self.arm(cursor_now);
-    }
-
-    /// Events were lost, and a drop may be among them. Arm from the best bound
-    /// available rather than assume the window was covered (PB-025).
-    fn on_lag(&mut self, cursor_now: Option<kaspaverse_chain::Hash>) {
-        self.arm(cursor_now);
-    }
-
-    /// One rule, one place: never raise the floor, never clear an armed bound.
-    fn arm(&mut self, cursor_now: Option<kaspaverse_chain::Hash>) {
-        if self.low.is_none() {
-            self.low = cursor_now;
-        }
-    }
-
-    /// The socket came back. `None` = nothing to replay (the first connect of a
-    /// session, whose gap the unlock catch-up already owns). One shot: a bound
-    /// consumed here must not re-walk on the next reconnect.
-    fn on_connect(&mut self) -> Option<kaspaverse_chain::Hash> {
-        self.low.take()
+impl kaspaverse_chain::MessageSink for HubSink {
+    fn fold(&self, matches: Vec<TransportEvent>) -> kaspaverse_chain::VerdictFuture<'_> {
+        Box::pin(async move {
+            for event in matches {
+                if handle_inbound(&self.hub, event, EventOrigin::Node).await == FoldOutcome::Locked
+                {
+                    return kaspaverse_chain::Verdict::Held;
+                }
+            }
+            kaspaverse_chain::Verdict::Folded
+        })
     }
 }
+
 /// Sparse, content-free change pings (a conversation id) — Dart re-pulls.
 static THREAD_PINGS: OnceLock<broadcast::Sender<String>> = OnceLock::new();
 
@@ -1077,9 +1046,7 @@ async fn fill_walks(
                         Ok(plaintext) => plaintext,
                         Err(error) => {
                             let reason = decrypt_drop(&error);
-                            if dropped(SELF_STASH, &row.tx_id, reason, EventOrigin::Fill)
-                                == FoldOutcome::Held
-                            {
+                            if dropped(SELF_STASH, &row.tx_id, reason, EventOrigin::Fill).holds() {
                                 held.hold(row.block_time);
                             }
                             continue;
@@ -1109,7 +1076,7 @@ async fn fill_walks(
                                 Err(error) => {
                                     let reason = decrypt_drop(&error);
                                     if dropped(SELF_STASH, &row.tx_id, reason, EventOrigin::Fill)
-                                        == FoldOutcome::Held
+                                        .holds()
                                     {
                                         held.hold(row.block_time);
                                     }
@@ -1193,7 +1160,7 @@ async fn fill_walks(
                         match fold_stash_row(hub, tx_id, payload, &mut created, windows) {
                             FoldOutcome::Recorded => report.new_rows += 1,
                             FoldOutcome::Settled => {}
-                            FoldOutcome::Held => held.hold(0),
+                            FoldOutcome::Held | FoldOutcome::Locked => held.hold(0),
                         }
                     }
                 }
@@ -1373,7 +1340,7 @@ async fn fill_walks(
             match handle_inbound(hub, event, EventOrigin::Fill).await {
                 FoldOutcome::Recorded => report.new_rows += 1,
                 FoldOutcome::Settled => {}
-                FoldOutcome::Held => held.hold(row.block_time),
+                FoldOutcome::Held | FoldOutcome::Locked => held.hold(row.block_time),
             }
         }
         let resume = held.resume_from(outcome.cursor);
@@ -1471,7 +1438,7 @@ async fn fill_walks(
             match handle_inbound(hub, event, EventOrigin::Fill).await {
                 FoldOutcome::Recorded => report.new_rows += 1,
                 FoldOutcome::Settled => {}
-                FoldOutcome::Held => held.hold(row.block_time),
+                FoldOutcome::Held | FoldOutcome::Locked => held.hold(row.block_time),
             }
         }
         let resume = held.resume_from(outcome.cursor);
@@ -1898,9 +1865,10 @@ fn x_only_of(address: &Address) -> Result<[u8; 32], AppError> {
 }
 
 /// Start (or restart after a re-unlock) the transport hub: load the stores,
-/// take a vault-scoped decryptor, derive the PUBLIC watched window, and
-/// attach the inbound task to the live `ciph_msg:` scan. Idempotent while
-/// the vault stays unlocked; called by Dart alongside the wallet start.
+/// take a vault-scoped decryptor, derive the PUBLIC watched window, and arm
+/// the message walk with this hub as the consumer that folds each page of
+/// accepted transactions (LINK-Q3). Idempotent while the vault stays unlocked;
+/// called by Dart alongside the wallet start.
 pub async fn transport_start() -> Result<(), AppError> {
     {
         let guard = HUB.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1911,11 +1879,20 @@ pub async fn transport_start() -> Result<(), AppError> {
         }
     }
 
+    // **One writer from here on** (LINK-Q3). The previous hub may still be
+    // folding a page through the message walk — it is the walk's consumer now,
+    // not a task this function could abort — so hold the walk and wait out any
+    // fold in flight BEFORE the store is loaded: from this line no page folds
+    // until the arm below hands the walk this start's hub.
+    let monitor = dag::shared_monitor().await?;
+    monitor.quiesce_intake("the message hub restarts").await;
+
     let transport_dir = vault::transport_store_dir()?;
     let store = TransportStore::load(transport_dir.clone()).map_err(AppError::chain)?;
     let cursor_path = transport_dir.join("scan.cursor");
-    // The PRIOR session's last scan point, read BEFORE we arm the live cursor —
-    // the anchor for the catch-up replay (P5/D-067). None on first ever run.
+    // The walk's committed cursor as this start finds it, read only for the
+    // gap-age line below (the walk itself resumes from it). None on the first
+    // ever run.
     let catch_up_from = kaspaverse_chain::DagMonitor::read_transport_cursor(&cursor_path);
     let decryptor = vault::transport_decryptor()?;
     // One window read, used for BOTH the watched set and the key slots below:
@@ -1947,40 +1924,6 @@ pub async fn transport_start() -> Result<(), AppError> {
     });
     *HUB.lock().unwrap_or_else(PoisonError::into_inner) = Some(hub.clone());
 
-    let monitor = dag::shared_monitor().await?;
-    // Subscribe BEFORE the catch-up so its re-emitted matches land in this
-    // receiver's buffer and are folded, not dropped.
-    let mut events = monitor.subscribe_transport();
-    let fold_hub = hub.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            match events.recv().await {
-                Ok(event) => {
-                    handle_inbound(&fold_hub, event, EventOrigin::Node).await;
-                }
-                // Missed live events are the live-only law's accepted cost
-                // (D-049) — but in a change whose whole theme is that no
-                // rejection may be silent, this was the last silent one. The
-                // fold now awaits I/O, so lag is no longer exotic: say how
-                // many were lost rather than discarding them mutely.
-                Err(RecvError::Lagged(n)) => {
-                    log::info!("transport-intake: fold lagged — {n} live event(s) dropped");
-                    continue;
-                }
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
-    // Replace (and stop) any previous inbound task so a re-unlock never
-    // leaves two tasks double-processing one stream.
-    let old = HUB_TASK
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .replace(task);
-    if let Some(old) = old {
-        old.abort();
-    }
-
     // ONE ROW PER CONTACT (D-141), for rows the old fold lane already minted —
     // see `backfill_invitation_sender` for the lane and the store's
     // `merge_duplicate_contacts` for the rule. Idempotent and cheap (one pass
@@ -1989,7 +1932,10 @@ pub async fn transport_start() -> Result<(), AppError> {
     // runs: before the swap, a re-unlock's old hub was still reachable through
     // `hub()` and its fold task, and either could have appended a frame to a
     // conversation this pass had just removed, orphaning that row for good
-    // (`wallet-security-auditor`, 2026-09-07). Counts only in the log: a report
+    // (`wallet-security-auditor`, 2026-09-07). Since LINK-Q3 there is no fold
+    // task to abort: the walk was held and quiesced at the top of this
+    // function, and folds again only once the arm below hands it this hub.
+    // Counts only in the log: a report
     // about folding user threads carries none of their content.
     {
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2048,141 +1994,67 @@ pub async fn transport_start() -> Result<(), AppError> {
     // wait on the network for a label (see `resweep_invitation_senders`).
     tokio::spawn(resweep_invitation_senders());
 
-    // Arm the live cursor (the BlockAdded scan now persists scan progress), then
-    // run the catch-up replay in the BACKGROUND so unlock returns immediately
-    // and missed messages surface as the walk finds them (P5/D-067). The fold
-    // task above is already draining, so the replay's matches are folded (and
-    // deduped by txid against anything the live scan already caught).
-    monitor.set_transport_cursor(cursor_path.clone());
-    let catch_up_monitor = monitor.clone();
+    // **Arm the message walk** (LINK-Q3, D-344): from here every page of
+    // accepted transactions folds through this hub, and the walk commits its
+    // cursor only once the page's matches are folded. It resumes from the
+    // committed cursor, so the closed-app gap (D-067's catch-up), a reconnect's
+    // (F4's replay) and a lock's (deliverable 4) are all the same replay. The
+    // old unlock catch-up and the F4 replay task are gone with the stream.
+    let epoch = monitor.arm_intake(cursor_path, Arc::new(HubSink { hub: hub.clone() }));
+    let fill_monitor = monitor.clone();
     let fill_hub = hub.clone();
     tokio::spawn(async move {
-        if let Err(e) = catch_up_monitor.catch_up_transport(catch_up_from).await {
-            log::warn!("transport-hub: catch-up ended early: {e}");
-        }
-        // V2b auto-fill (D-074) — SEQUENCED after the node catch-up so node
+        // V2b auto-fill (D-074) — SEQUENCED after the walk's first run so node
         // truth folds first: a fill row's txid is an indexer CLAIM (we hold
         // only its payload, so the pinned recompute cannot check it); folding
-        // node-scanned rows first means a mislabeled hint cannot suppress a
-        // message the node was about to deliver (consensus-audit finding,
-        // V2b). Config-gated inside (defaults OFF, the §0 lock); a first-ever
-        // run (no cursor) still fills — that IS the restore-from-seed case
-        // the V0 casualty lived. Deliberately unconditional on gap size: the
-        // rewind covers ~20 min, the indexer covers the rest, and txid dedup
-        // makes the overlap free.
+        // node rows first means a mislabeled hint cannot suppress a message the
+        // node was about to deliver (consensus-audit finding, V2b). Config-gated
+        // inside (defaults OFF, the §0 lock); a first-ever run (no cursor) still
+        // fills — that IS the restore-from-seed case the V0 casualty lived.
+        // Deliberately unconditional on gap size: the walk covers about an
+        // hour, the indexer the rest, and txid dedup makes the overlap free.
+        if !fill_monitor
+            .intake_settled(epoch, kaspaverse_chain::INTAKE_SETTLE_WAIT)
+            .await
+        {
+            log::info!(
+                "transport-hub: the walk's first run has not settled in {} s — the fill runs anyway",
+                kaspaverse_chain::INTAKE_SETTLE_WAIT.as_secs()
+            );
+        }
         run_fill(&fill_hub).await;
     });
 
-    // ── F4: replay the gap on RECONNECT, not only on unlock ────────────────
+    // ── F5's completion lane, on the chain's pulse ─────────────────────────
     //
-    // `catch_up_transport` had exactly ONE call site — the spawn just above,
-    // inside `transport_start`, which early-returns while the hub's decryptor
-    // is live. So it ran once per vault unlock and never again, and every
-    // `ciph_msg:` landing in a block while the socket was down was lost:
-    // notifications are live-only (D-049), and within
-    // `TRANSPORT_CURSOR_MIN_WRITE_SECS` of the first post-reconnect block the
-    // persisted cursor advances past the gap, so the next app open could not
-    // recover it either. The watchdog fired only past 30 s without a block and
-    // the endpoint race had then to rebind, so a real gap was ~300 blocks.
-    // Since LINK-Q1 (D-334) the clock is the DAA tick and a silent socket is
-    // swapped at 9 s (`link::SILENCE_DEADLINE`): a shorter gap, still a real one.
-    //
-    // The sibling acceptance lane has recovered its own gap on every reconnect
-    // since V1 (`acceptance.rs`, the `DagEvent::Connected` arm). This is that
-    // pattern, owed to the message lane. Note what D-087's PB-022 sweep asked
-    // — "is each subscription re-established?" (it was) — and what it did not:
-    // "is each *gap* replayed?"
-    //
-    // **The low bound is taken when the socket DROPS, never when the replay
-    // wakes.** Subscriptions are registered before `emit(Connected)` in
-    // `handle_connect`, so post-reconnect `BlockAdded` notifications can
-    // already be advancing the persisted cursor by the time `Connected`
-    // reaches this task — reading the cursor then would silently hand the walk
-    // a low bound above the gap and make the whole thing a no-op.
-    let replay_monitor = monitor.clone();
+    // This task also carried F4's reconnect replay until LINK-Q3; the walk now
+    // replays every gap by construction (its cursor never passes anything
+    // unfolded), so what remains is the sweep. It rides here because this is
+    // the one task in the hub that wakes at the block rate without being on
+    // the fold's critical path: single-flight, spawned rather than awaited, and
+    // skipped entirely when nothing is parked — the overwhelmingly common case.
+    // THROTTLED, not merely single-flight. Single-flight caps concurrency at
+    // one; it does not cap RATE, and this loop wakes at roughly 20 events/s. An
+    // entry whose lookup fails FAST — a node that answers
+    // `get_utxo_return_address` with an immediate error — would otherwise be
+    // retried as fast as the previous attempt returned: a spin against our own
+    // node, and being rate-limited or dropped by it produces a `Disconnected`.
+    // Resolution latency is dominated by the activity record landing, never by
+    // how often we ask, so a slow cadence costs nothing real. Connectivity is
+    // asked of the MONITOR, never remembered from an event this task saw: a lag
+    // can hide the `Connected` as easily as a drop.
+    let sweep_monitor = monitor.clone();
     let mut dag_rx = monitor.subscribe();
-    // **The walk runs OFF this loop**, and that is load-bearing rather than
-    // tidy. Awaiting `catch_up_transport` inline would stop draining `dag_rx`
-    // for the length of a walk, and this receiver is not idle: `DagEvent`
-    // carries `VirtualDaaScore` + `SinkBlueScore` at roughly the block rate
-    // into a 256-slot broadcast, so a stalled loop overflows it in tens of
-    // seconds while a real ~300-block walk over mobile takes longer. Every
-    // walk would then end in `Lagged`, and — worse — a `Disconnected` arriving
-    // during one would be handled only after it finished, reading the cursor
-    // at a moment when the reconnect had already dragged it past the gap.
-    // That is precisely the no-op `ReplayGap` exists to prevent, re-entering
-    // one level up: the fix defeating itself through the door it built.
-    let replay = tokio::spawn(async move {
-        let read_cursor = || kaspaverse_chain::DagMonitor::read_transport_cursor(&cursor_path);
-        let mut gap = ReplayGap::new();
-        // Single-flight, so a flapping socket cannot fan out overlapping walks
-        // over the same blocks.
-        let walking = Arc::new(AtomicBool::new(false));
+    let sweep = tokio::spawn(async move {
         let sweeping = Arc::new(AtomicBool::new(false));
-        // Sweep immediately the first time, then at most every
-        // `SWEEP_INTERVAL`.
+        // Sweep immediately the first time, then at most every `SWEEP_INTERVAL`.
         let mut last_sweep = tokio::time::Instant::now() - SWEEP_INTERVAL;
         loop {
             match dag_rx.recv().await {
-                Ok(kaspaverse_chain::DagEvent::Disconnected) => gap.on_drop(read_cursor()),
-                Ok(kaspaverse_chain::DagEvent::Connected { .. }) => {}
-                Ok(_) => {}
-                Err(RecvError::Lagged(n)) => {
-                    log::info!("transport-hub: dag events lagged — {n} dropped, arming replay");
-                    gap.on_lag(read_cursor());
-                }
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => break,
             }
-            // ONE decision point, re-evaluated after every event rather than
-            // only on `Connected`. That is what closes the liveness hole: a
-            // bound armed while a walk was in flight would otherwise wait for
-            // a further reconnect that may never come. `VirtualDaaScore` and
-            // `SinkBlueScore` tick at roughly the block rate, so this is
-            // re-checked continuously for as long as the chain is moving —
-            // and if it is not moving, there is no gap accruing either.
-            //
-            // Connectivity is asked of the MONITOR, not remembered from an
-            // event this task saw. A latch would be exactly as lossy as the
-            // receiver feeding it: the `Lagged` arm exists because a lag can
-            // hide a drop, and the same lag can hide the `Connected` — leaving
-            // the task holding an armed bound while believing the socket is
-            // down, with nothing able to consume it until a fresh reconnect
-            // that may never come.
-            let connected = replay_monitor.is_connected();
-            if connected && !walking.load(Ordering::SeqCst) {
-                if let Some(low) = gap.on_connect() {
-                    walking.store(true, Ordering::SeqCst);
-                    let walk_monitor = replay_monitor.clone();
-                    let done = walking.clone();
-                    tokio::spawn(async move {
-                        match walk_monitor.catch_up_transport(Some(low)).await {
-                            Ok(n) => log::info!(
-                                "transport-hub: reconnect replay re-emitted {n} match(es)"
-                            ),
-                            Err(e) => {
-                                log::warn!("transport-hub: reconnect replay ended early: {e}")
-                            }
-                        }
-                        done.store(false, Ordering::SeqCst);
-                    });
-                }
-            }
-            // F5's completion lane rides here for the same reason the walk
-            // does: this is the one task in the hub that wakes at the block
-            // rate without being on the fold's critical path. Single-flight,
-            // spawned rather than awaited, and skipped entirely when nothing
-            // is parked — which is the overwhelmingly common case.
-            // THROTTLED, not merely single-flight. Single-flight caps
-            // concurrency at one; it does not cap RATE, and this loop wakes at
-            // roughly 20 events/s. An entry whose lookup fails FAST — a node
-            // that answers `get_utxo_return_address` with an immediate error —
-            // would otherwise be retried as fast as the previous attempt
-            // returned: a spin against our own node, and being rate-limited or
-            // dropped by it produces a `Disconnected`, which is this loop's own
-            // trigger machinery. Resolution latency is dominated by the
-            // activity record landing, never by how often we ask, so a slow
-            // cadence costs nothing real.
-            if connected
+            if sweep_monitor.is_connected()
                 && last_sweep.elapsed() >= SWEEP_INTERVAL
                 && !sweeping.load(Ordering::SeqCst)
                 && !PENDING_ACCEPTANCE
@@ -2200,10 +2072,10 @@ pub async fn transport_start() -> Result<(), AppError> {
             }
         }
     });
-    if let Some(old) = REPLAY_TASK
+    if let Some(old) = SWEEP_TASK
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .replace(replay)
+        .replace(sweep)
     {
         old.abort();
     }
@@ -2398,9 +2270,9 @@ fn watch_acceptance(txid: &str, block_time_ms: Option<u64>) {
 }
 
 /// Where an inbound event came from — the fold's provenance input (V5,
-/// finding 14). Everything delivered through the monitor's broadcast lane
-/// (live BlockAdded scan + catch-up walk) is node truth; only the fill's
-/// direct calls are indexer claims. A parameter, not a `TransportEvent`
+/// finding 14). Everything the message walk folds through `HubSink` (live and
+/// catch-up alike, LINK-Q3) is node truth; only the fill's direct calls are
+/// indexer claims. A parameter, not a `TransportEvent`
 /// field: the event type (and its dev wire view) stays untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EventOrigin {
@@ -2534,6 +2406,22 @@ enum FoldOutcome {
     /// We could not fold a row that may well be ours. A cursor must not
     /// advance past it.
     Held,
+    /// [`FoldOutcome::Held`] because the vault was locked — the one hold the
+    /// message walk acts on (LINK-Q3). On the node lane `NotAddressedToUs` is
+    /// every stranger's handshake (holding for it would let one pin the walk)
+    /// and `StoreRace` was settled by the other writer. `StoreFailed` is our
+    /// own write failing on a message that decrypted, and the walk commits
+    /// past it: parity with the old stream, whose cursor moved on regardless,
+    /// not an improvement (`consensus-auditor`, `wallet-security-auditor`).
+    /// The fill treats `Locked` exactly as `Held`.
+    Locked,
+}
+
+impl FoldOutcome {
+    /// Does a fill cursor hold at this row? (`Locked` is a `Held`.)
+    fn holds(self) -> bool {
+        matches!(self, FoldOutcome::Held | FoldOutcome::Locked)
+    }
 }
 
 impl DropReason {
@@ -2556,10 +2444,10 @@ impl DropReason {
     /// by the only test we trust (D-074: omission is possible, forgery is not).
     fn outcome(self) -> FoldOutcome {
         match self {
-            DropReason::VaultLocked
-            | DropReason::StoreRace
-            | DropReason::StoreFailed
-            | DropReason::NotAddressedToUs => FoldOutcome::Held,
+            DropReason::VaultLocked => FoldOutcome::Locked,
+            DropReason::StoreRace | DropReason::StoreFailed | DropReason::NotAddressedToUs => {
+                FoldOutcome::Held
+            }
             _ => FoldOutcome::Settled,
         }
     }
@@ -2675,16 +2563,15 @@ fn dropped(kind: &str, txid: &str, reason: DropReason, origin: EventOrigin) -> F
 /// Resolve who sent a handshake, via the node's own return-address lookup
 /// (INV-8: same untrusted node, same socket, no indexer).
 ///
-/// `None` when the bond has not reached our activity record yet — the live
-/// scan routinely sees a handshake before its accepting block exists. The
-/// caller then falls back to the alias-only path, so a slow resolution costs
-/// a duplicate conversation at worst, never a lost message.
-/// **Bounded**, because the NODE lane awaits this inline in the fold loop that
-/// drains the BlockAdded broadcast. An unbounded RPC here would let one slow
-/// node stall that loop, and a stalled consumer is a LAGGED channel — which on
-/// this stream means live messages are dropped outright. The lookup is a
-/// best-effort enrichment; the fold below works without it, so it must never
-/// be able to cost more than it can give.
+/// `None` when the bond has not reached our activity record yet. The caller
+/// then falls back to the alias-only path, so a slow resolution costs a
+/// duplicate conversation at worst, never a lost message.
+/// **Bounded**, because the NODE lane awaits this inline in the walk's fold.
+/// Since LINK-Q3 a slow fold can no longer drop a message (the walk waits for
+/// it, where the old broadcast receiver lagged and dropped), but it holds back
+/// every message behind it, and the walk's next page with them. The lookup is
+/// a best-effort enrichment; the fold works without it, so it must never be
+/// able to cost more than it can give.
 const SENDER_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Floor on how often [`sweep_parked_acceptances`] may run. Its driver wakes at
@@ -4055,8 +3942,9 @@ async fn handle_inbound_handshake(
         return dropped(HANDSHAKE, txid, DropReason::MalformedEnvelope, origin);
     };
     // Establishment scan: whichever watched key opens it becomes the §0.7
-    // binding. Not ours / vault locked ⇒ skip (live-only law: an envelope
-    // seen while locked is missed, same as one seen while offline). This
+    // binding. Not ours ⇒ skip. Vault locked ⇒ `Locked`: on the node lane the
+    // walk holds the page and replays it at the unlock (LINK-Q3, deliverable
+    // 4); it used to be missed, like one seen while offline. This
     // decrypt is ALSO the fill's verify step: an indexer row no watched key
     // opens is dropped here — omission is possible, forgery is not (D-074).
     let (slot, plaintext) = match hub
@@ -7577,8 +7465,9 @@ pub fn transport_wipe_preview() -> Result<WipeReportDto, AppError> {
 ///   replay is in flight can re-fold handshakes mined before it and re-create
 ///   conversations in the emptied store as fresh invitations. Comms cannot come
 ///   back that way (post-erase they drop unrouted, `NoConversationForAlias`),
-///   and the window is bounded by the cursor's own write cadence and
-///   `MAX_CATCHUP_PAGES` — but it is a real, accepted residual, not a free
+///   and the window is bounded by the cursor's own write cadence and the
+///   walk's page budget (LINK-Q3; it was `MAX_CATCHUP_PAGES`), which a replay
+///   after a lock now also runs — but it is a real, accepted residual, not a free
 ///   omission. The node lane has no epoch guard; closing it means an erase
 ///   check inside the fold's own lock scope, which is a change to the live
 ///   intake path and is deliberately NOT made at the end of this sitting
@@ -8336,11 +8225,13 @@ pub async fn subscribe_thread_pings(sink: StreamSink<String>) -> Result<(), AppE
     Ok(())
 }
 
-/// Subscribe to live `ciph_msg:` matches from the BlockAdded scan. Discrete
-/// deliveries, not snapshots: there is deliberately no cached-latest replay
-/// (unlike `subscribe_dag_updates`) — history is the P2.3 message store's job;
-/// this stream is the live wire. Foreground-only by construction: the scan
-/// rides the shared socket's `dag_pause()`/`dag_resume()` posture (D-053).
+/// Subscribe to live `ciph_msg:`/`kchat:` matches as the message walk folds
+/// them (accepted transactions, LINK-Q3). Discrete deliveries, not snapshots:
+/// there is deliberately no cached-latest replay (unlike
+/// `subscribe_dag_updates`) — history is the P2.3 message store's job; this
+/// stream is the live wire, for the dev panel. Foreground-only by
+/// construction: the walk rides the shared socket's `dag_pause()`/
+/// `dag_resume()` posture (D-053).
 pub async fn subscribe_transport_events(
     sink: StreamSink<TransportEventDto>,
 ) -> Result<(), AppError> {
@@ -9126,9 +9017,8 @@ mod tests {
             DropReason::StoreFailed,
             DropReason::NotAddressedToUs,
         ] {
-            assert_eq!(
-                reason.outcome(),
-                FoldOutcome::Held,
+            assert!(
+                reason.outcome().holds(),
                 "{reason:?} is our own transient condition — the row must be retried"
             );
         }
@@ -9312,130 +9202,98 @@ mod tests {
         );
     }
 
-    // ── F4: the reconnect replay walks from the DROP, not from the wake ───
+    // ── F4 moved into the walk (LINK-Q3) ──────────────────────────────────
+    //
+    // The reconnect replay's own state machine (`ReplayGap`) and its eight
+    // tests left with it: the message walk's cursor never passes anything
+    // unfolded, so a gap is replayed by construction. The property is held in
+    // `kaspaverse_chain`'s `walk::tests::a_reconnect_gap_is_replayed_from_the_
+    // committed_cursor`, and the lock's version of it just below.
 
-    fn hash_of(byte: u8) -> kaspaverse_chain::Hash {
-        kaspaverse_chain::Hash::from_bytes([byte; 32])
+    /// **The node lane holds the walk for a locked vault and nothing else**
+    /// (LINK-Q3, deliverable 4). `Locked` is the one outcome `HubSink` acts on;
+    /// every other drop, `NotAddressedToUs` above all (every stranger's
+    /// handshake), must leave the walk free to commit, or one attacker-minted
+    /// transaction would pin the message cursor forever.
+    #[test]
+    fn only_a_locked_vault_holds_the_message_walk() {
+        assert_eq!(DropReason::VaultLocked.outcome(), FoldOutcome::Locked);
+        for reason in [
+            DropReason::NotAddressedToUs,
+            DropReason::StoreRace,
+            DropReason::StoreFailed,
+            DropReason::NoConversationForAlias,
+            DropReason::AlreadyStored,
+            DropReason::RevivalBudgetSpent,
+        ] {
+            assert_ne!(
+                reason.outcome(),
+                FoldOutcome::Locked,
+                "{reason:?} would pin the walk"
+            );
+        }
+        // The fill still holds on all four of its own transient reasons.
+        assert!(FoldOutcome::Locked.holds() && FoldOutcome::Held.holds());
+        assert!(!FoldOutcome::Settled.holds() && !FoldOutcome::Recorded.holds());
     }
 
-    /// **The race the fix exists to survive.** `AT_DROP` is where the gap
-    /// begins; `AFTER_RECONNECT` is where the persisted cursor has already been
-    /// dragged to by the `BlockAdded` notifications that resume before
-    /// `Connected` reaches this task. A replay that read the cursor on wake
-    /// would walk from `AFTER_RECONNECT` — above every message in the gap — and
-    /// be a silent no-op that looks exactly like a working fix.
-    #[test]
-    fn the_replay_walks_from_the_cursor_as_it_stood_at_the_drop() {
-        const AT_DROP: u8 = 0x11;
-        const AFTER_RECONNECT: u8 = 0x99;
-
-        let mut gap = ReplayGap::new();
-        gap.on_drop(Some(hash_of(AT_DROP)));
-        // …blocks resume and the live scan advances the persisted cursor…
-        let _cursor_now = Some(hash_of(AFTER_RECONNECT));
-        assert_eq!(
-            gap.on_connect(),
-            Some(hash_of(AT_DROP)),
-            "the replay must start where the gap did, not where the cursor got to"
+    /// **A page the locked vault refused is held, not passed** (LINK-Q3,
+    /// deliverable 4), through the real fold: a hub whose vault has locked (a
+    /// real decryptor on a dropped vault) folds a handshake addressed to one of
+    /// its watched addresses, the decrypt answers `VaultLocked`, and `HubSink`
+    /// answers `Held`, so the walk keeps the page for the unlock. A page with
+    /// nothing that needs the vault still folds. Mutation: a sink that folds
+    /// past the `Locked` drop answers `Folded` and the page is lost.
+    #[tokio::test]
+    async fn the_hub_sink_holds_a_page_the_locked_vault_refused() {
+        use kaspaverse_chain::MessageSink;
+        let dir = std::env::temp_dir().join(format!("kv-hubsink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = kaspaverse_core::UnlockedVault::new(
+            kaspaverse_core::KeyChain::from_seed(
+                kaspaverse_core::SecretSeed::from_seed_bytes(Box::new([7u8; 64])),
+                kaspaverse_core::Prefix::Mainnet,
+            )
+            .unwrap(),
         );
-    }
-
-    /// The first connect of a session replays nothing: no drop has happened, so
-    /// there is no gap, and `transport_start`'s own catch-up already owns the
-    /// closed-app window. Arming here would double-walk every unlock.
-    #[test]
-    fn a_first_connect_replays_nothing() {
-        let mut gap = ReplayGap::new();
-        assert_eq!(gap.on_connect(), None);
-    }
-
-    /// One shot. A bound already walked must not be walked again on the next
-    /// reconnect — that would re-emit the same gap on every future bind.
-    #[test]
-    fn a_replayed_gap_is_not_replayed_again() {
-        let mut gap = ReplayGap::new();
-        gap.on_drop(Some(hash_of(1)));
-        assert!(gap.on_connect().is_some());
+        let decryptor = vault.transport_decryptor();
+        drop(vault); // the lock: every decrypt now answers VaultLocked
+        let watched = Address::try_from(VICTIM_CONTACT).unwrap();
+        let hub = Arc::new(TransportHub {
+            store: Mutex::new(TransportStore::load(dir.clone()).unwrap()),
+            decryptor,
+            block_list: Mutex::new(BlockList::load(&dir)),
+            keys: Mutex::new(Arc::new(KeyWindow::build(1, 0, &[watched]))),
+        });
+        let sink = HubSink { hub };
+        // A structurally sound envelope (nonce, a tagged key, ciphertext):
+        // the vault is asked before any curve math.
+        let mut envelope = vec![0u8; 12];
+        envelope.push(0x02);
+        envelope.extend([0x11u8; 32]);
+        envelope.extend([0x22u8; 16]);
+        let event = |kind: &str, n: u8, body: Vec<u8>| TransportEvent {
+            txid: Some(format!("{n:02x}").repeat(32)),
+            kind: kind.to_string(),
+            namespace: WireNamespace::CiphMsg,
+            body,
+            addresses: vec![VICTIM_CONTACT.to_string()],
+            block_time_ms: Some(1_727_000_000_000),
+            block_hash: Some("cb".repeat(32)),
+        };
         assert_eq!(
-            gap.on_connect(),
-            None,
-            "a second reconnect must not re-walk a gap already covered"
+            sink.fold(vec![event("handshake", 1, envelope.clone())])
+                .await,
+            kaspaverse_chain::Verdict::Held,
+            "a locked vault's drop must hold the page"
         );
-    }
-
-    /// A lag may have hidden a drop, so it arms — but it must never overwrite a
-    /// bound already taken at a real drop, which is older and therefore covers
-    /// more. Overwriting would narrow the walk to above the gap: the same
-    /// silent no-op, arriving by a different door.
-    #[test]
-    fn a_lag_arms_the_replay_but_never_narrows_an_existing_bound() {
-        let mut fresh = ReplayGap::new();
-        fresh.on_lag(Some(hash_of(0x55)));
         assert_eq!(
-            fresh.on_connect(),
-            Some(hash_of(0x55)),
-            "a lag that may have hidden a drop must still arm a replay"
+            sink.fold(vec![event("bcast", 2, b"x:y".to_vec())]).await,
+            kaspaverse_chain::Verdict::Folded,
+            "a page that needs no key folds"
         );
-
-        let mut armed = ReplayGap::new();
-        armed.on_drop(Some(hash_of(0x11))); // the real drop, lower
-        armed.on_lag(Some(hash_of(0x99))); // a later lag, higher
-        assert_eq!(
-            armed.on_connect(),
-            Some(hash_of(0x11)),
-            "the earlier bound wins — a lag must never raise the floor"
-        );
-    }
-
-    /// The reverse order, which the first pass left untested and got wrong:
-    /// `on_drop` overwrote unconditionally while `on_lag` refused to, so a
-    /// lag-armed bound was silently raised by the next real drop and the window
-    /// between them was never walked. Reachable whenever a `Connected` is lost
-    /// to a lag — which a 256-slot event buffer against block-rate traffic
-    /// makes ordinary, not exotic. Both entry points now obey one rule
-    /// (wallet-security + consensus, F4).
-    #[test]
-    fn a_drop_never_narrows_a_bound_a_lag_already_armed() {
-        let mut gap = ReplayGap::new();
-        gap.on_lag(Some(hash_of(0x11))); // armed low by a lag…
-        gap.on_drop(Some(hash_of(0x99))); // …then a real drop, higher
-        assert_eq!(
-            gap.on_connect(),
-            Some(hash_of(0x11)),
-            "the earlier bound wins whichever call armed it"
-        );
-    }
-
-    /// Two drops with no `Connected` between them — the shape a lost
-    /// `Connected` produces. The first gap is still unwalked, so its bound is
-    /// the one that must survive.
-    #[test]
-    fn a_second_drop_keeps_the_first_gaps_bound() {
-        let mut gap = ReplayGap::new();
-        gap.on_drop(Some(hash_of(0x11)));
-        gap.on_drop(Some(hash_of(0x22)));
-        assert_eq!(gap.on_connect(), Some(hash_of(0x11)));
-    }
-
-    /// A cursor that reads back `None` must not ERASE an armed bound. Wiping it
-    /// would turn a recoverable gap into a permanent one, silently — and the
-    /// unguarded `self.low = cursor_now` did exactly that.
-    #[test]
-    fn an_unreadable_cursor_never_erases_an_armed_bound() {
-        let mut gap = ReplayGap::new();
-        gap.on_drop(Some(hash_of(0x11)));
-        gap.on_drop(None);
-        gap.on_lag(None);
-        assert_eq!(gap.on_connect(), Some(hash_of(0x11)));
-    }
-
-    /// No cursor at all (a first-ever run has none) arms nothing rather than
-    /// walking from an invented point.
-    #[test]
-    fn a_drop_with_no_persisted_cursor_arms_nothing() {
-        let mut gap = ReplayGap::new();
-        gap.on_drop(None);
-        assert_eq!(gap.on_connect(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── F5: the acceptance leg is gated on node truth ─────────────────────
@@ -10178,8 +10036,8 @@ mod tests {
             FoldOutcome::Settled
         );
         // …while the genuinely transient ones still hold the cursor.
-        assert_eq!(DropReason::VaultLocked.outcome(), FoldOutcome::Held);
-        assert_eq!(DropReason::StoreFailed.outcome(), FoldOutcome::Held);
+        assert!(DropReason::VaultLocked.outcome().holds());
+        assert!(DropReason::StoreFailed.outcome().holds());
     }
 
     /// THE D-138 OWNER-ATTRIBUTION ORDERING.

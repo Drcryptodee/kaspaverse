@@ -1541,6 +1541,12 @@ pub fn lock_vault() {
     {
         log::info!("create ceremony dropped (lifecycle)");
     }
+    // The message walk stops at the lock and replays from its cursor at the
+    // unlock (LINK-Q3, deliverable 4, `wallet-security-auditor`): nothing is
+    // fetched for a hub that cannot fold, and a page the lock interrupted is
+    // held, never skipped. Synchronous and lock-free here (the walk's own state
+    // lock only), so the lifecycle hook stays instant.
+    super::dag::hold_intake("vault locked");
     // NOTE: `SCAN_MARKS` deliberately survives a lock. It is tempting to clear
     // it as "vault state", and that would be a real bug: if the persist to disk
     // had failed, clearing the memo makes the re-unlock read `(0, 0)` and

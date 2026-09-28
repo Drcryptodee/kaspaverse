@@ -17,12 +17,15 @@
 //!   (`acceptance.rs`) → `tracker_lane_*` goes RED.
 //!
 //! PB-022 sweep disposition (audited at V6): the OTHER two lanes need no
-//! fake. The DagMonitor's four scopes are re-registered by construction —
-//! `handle_connect()` runs unregister-prior + register + start_notify ×4 on
-//! every `RpcState::Connected` (its client is concrete `KaspaRpcClient`;
-//! refactoring it behind `RpcApi` for a test would rewrite the connect
-//! authority for no product gain — INV-12). The transport hub consumes the
-//! monitor's BlockAdded matches and holds no node subscription of its own.
+//! fake. The DagMonitor's scopes are re-registered by construction —
+//! `handle_connect()` runs unregister-prior + register + start_notify on
+//! every `RpcState::Connected` (three scopes since LINK-Q3; the fourth,
+//! `BlockAdded`, only under the dev install's parity arm). Its client is
+//! concrete `KaspaRpcClient`; refactoring it behind `RpcApi` for a test would
+//! rewrite the connect authority for no product gain — INV-12. The transport
+//! hub folds the message walk's matches (accepted transactions, fetched when
+//! the socket's `VirtualChainChanged` says the chain moved) and holds no node
+//! subscription of its own.
 
 mod support;
 
@@ -30,7 +33,9 @@ use std::time::Duration;
 
 use kaspa_wallet_core::rpc::RpcCtl;
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
-use kaspaverse_chain::{AcceptanceTracker, Address, DagEvent, VccBatch, WalletEngine, WalletEvent};
+use kaspaverse_chain::{
+    AcceptanceTracker, Address, DagEvent, TrackerFeed, WalletEngine, WalletEvent,
+};
 use support::FakeRpc;
 
 const WAIT: Duration = Duration::from_secs(15);
@@ -198,7 +203,7 @@ async fn tracker_lane_reruns_vcc_catch_up_on_reconnect() {
 
     let tracker = AcceptanceTracker::load(dir.clone()).expect("tracker");
     // The tracker keys off plain channels — the test owns both ends.
-    let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel::<VccBatch>();
+    let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel::<TrackerFeed>();
     let (dag_tx, dag_rx) = tokio::sync::broadcast::channel::<DagEvent>(16);
     let handle = tracker.run(fake.rpc(ctl), vcc_rx, dag_rx);
 

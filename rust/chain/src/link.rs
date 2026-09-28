@@ -391,6 +391,10 @@ pub fn phone_fault_in_round(failed: &[(String, StrikeReason)]) -> bool {
 /// a node that delivers ticks but silently drops our `BlockAdded` scope used
 /// to be executed at 30 s and now is not — the transport scan would go deaf
 /// until the next reconnect. Never observed; LINK-Q2 reshapes that stream.
+/// **Since LINK-Q3 there is no such scope** (D-344): messages ride the walk,
+/// which this socket's `VirtualChainChanged` pokes, and the witness speaks for
+/// a node that ticks while the walk has had no page answered
+/// (`Walk::note_ticks`, `walk.rs`).
 pub const WATCHDOG_STALL_SECS: u64 = 30;
 
 /// **How long a live socket may go without a DAA tick before a replacement is

@@ -19,7 +19,9 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use kaspa_addresses::Prefix;
+use kaspa_consensus_core::tx::ScriptPublicKey;
 use kaspa_consensus_core::tx::Transaction;
+use kaspa_rpc_core::RpcOptionalTransaction;
 use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wrpc_client::prelude::{RpcBlock, RpcTransaction};
 
@@ -28,23 +30,27 @@ use crate::Rpc;
 
 /// The wire namespace the Kasia population rides under (ASCII on-wire).
 pub const CIPH_MSG_PREFIX: &[u8] = b"ciph_msg:";
-/// The SECOND namespace on the wire. **KaChat 4.0** (App Store 2026-08-27)
-/// moved its emission from `ciph_msg:1:` to `kchat:1:` on 2026-08-29 — same
-/// grammar, same kinds, same 12-hex aliases, same base64 comm body, same
-/// envelope layout, same self-send shape. Only this token changed, and nothing
-/// but the chain records it: KaChat's own site still documents `ciph_msg:1:`,
-/// the Kasia indexer serves nothing under it, and Kasia web cannot see it
-/// (kasia_messaging §K11, measured 2026-09-07).
+/// The SECOND namespace on the wire. **KaChat**'s iOS client (open source,
+/// MIT, github.com/vsmirn0v/KaChat — the repository holds the iOS app; public
+/// since 2026-02-16) writes `kchat:` since its commit `bd34241` (2026-08-18,
+/// "iOS: migrate on-chain protocol … to the kchat: prefix"), shipped in 4.0
+/// (App Store 2026-08-27) and first seen on chain 2026-08-29 14:13:18Z — same grammar, same kinds, same 12-hex aliases,
+/// same base64 comm body, same envelope layout, same self-send shape. Only this
+/// token changed. KaChat's site still documents `ciph_msg:1:`, the Kasia indexer
+/// serves nothing under it, and Kasia web cannot see it (kasia_messaging §K11,
+/// measured 2026-09-07; the repository verified 2026-09-28, LINK-Q3).
 pub const KCHAT_PREFIX: &[u8] = b"kchat:";
 
 /// Which namespace a payload rode under.
 ///
 /// Two clients, one grammar (`<namespace>:1:<kind>:…`), two spellings of the
 /// namespace. We READ both, and we ANSWER a conversation in the namespace its
-/// counterparty last spoke — a KaChat 4.0 user's client may no longer look at
-/// `ciph_msg:` at all, and a Kasia user's client has never looked at `kchat:`.
-/// The dialect is a fact about the counterparty's software, learned from
-/// their traffic, never a setting.
+/// counterparty last spoke. For a Kasia user that is required: their client
+/// has never looked at `kchat:`. For KaChat's iOS client the source reads both
+/// roots (`bd34241`'s dual-read), yet on 2026-09-07 it did not show four of
+/// our `ciph_msg:` comms — that stays open, so answering in `kchat:` is kept
+/// as the safe side. The dialect is a fact about the counterparty's software,
+/// learned from their traffic, never a setting.
 ///
 /// Borsh law (kvlog.rs): this rides inside [`crate::MessageRecord`], so
 /// variants are append-only and positional — never reorder or remove.
@@ -168,9 +174,11 @@ pub fn parse_payload_in(payload: &[u8]) -> Option<(WireNamespace, String, &[u8])
     }
 }
 
-/// Scan one block's transactions for `ciph_msg:` / `kchat:` payloads. Runs on every
-/// BlockAdded notification (~10 blocks/s), so the non-match path is one prefix
-/// compare per tx; ids/addresses are resolved only for matches (sparse).
+/// Scan one block's transactions for `ciph_msg:` / `kchat:` payloads. The
+/// intake's source until LINK-Q3; since then only the dev install's parity arm
+/// (`ba=1`) reads a block, to set the stream beside [`scan_accepted`] (D-344).
+/// The non-match path is one prefix compare per tx; ids and addresses are
+/// resolved only for matches (sparse).
 pub fn scan_block(block: &RpcBlock, prefix: Prefix) -> Vec<TransportEvent> {
     block
         .transactions
@@ -219,12 +227,65 @@ fn resolve_txid(tx: &RpcTransaction) -> Option<String> {
         .map(|t| t.id().to_string())
 }
 
+/// Match one ACCEPTED transaction as `GetVirtualChainFromBlockV2` sends it at
+/// High verbosity: the intake's source since LINK-Q3 (D-344, `walk.rs`). The
+/// same payload prefix and the same [`parse_payload_in`] as [`scan_block`]; no
+/// `tx.version` branch (§0.2, and at High the version is not even sent).
+///
+/// **The txid is the node's own** (`verbose_data.transaction_id`, sent at Low).
+/// At High the version, lock time, subnetwork and gas are withheld (Full only,
+/// pin `rpc/core/src/convert/verbosity.rs` @ `01b532e`), so the pinned
+/// recompute [`resolve_txid`] falls back to on a block has nothing to hash.
+/// Without it the id is `None`, never fabricated, and the hub drops the event
+/// (`NoTxid`). The stream's id was the node's word in the same way whenever its
+/// verbose data was present, which was almost always.
+///
+/// **The block facts are the CARRYING block's**, the merged block the node
+/// accepted the transaction from (`verbose_data.block_hash` / `block_time`,
+/// pin `rpc/service/src/converter/consensus.rs:538-566`), the same facts the
+/// stream read off a block, so the sender locate's cursor (D-307) and the
+/// thread's clock keep their meaning.
+pub fn scan_accepted(tx: &RpcOptionalTransaction, prefix: Prefix) -> Option<TransportEvent> {
+    let (namespace, kind, body) = parse_payload_in(tx.payload.as_deref()?)?;
+    let verbose = tx.verbose_data.as_ref();
+    Some(TransportEvent {
+        txid: verbose
+            .and_then(|v| v.transaction_id)
+            .map(|id| id.to_string()),
+        kind,
+        namespace,
+        body: body.to_vec(),
+        addresses: addresses_of(
+            tx.outputs
+                .iter()
+                .filter_map(|output| output.script_public_key.as_ref()),
+            prefix,
+        ),
+        block_time_ms: verbose.and_then(|v| v.block_time),
+        block_hash: verbose
+            .and_then(|v| v.block_hash)
+            .map(|hash| hash.to_string()),
+    })
+}
+
 /// Output addresses via the pinned standard-script decoder; non-standard
 /// scripts have no address form and are skipped. De-duplicated, order kept.
 fn output_addresses(tx: &RpcTransaction, prefix: Prefix) -> Vec<String> {
+    addresses_of(
+        tx.outputs.iter().map(|output| &output.script_public_key),
+        prefix,
+    )
+}
+
+/// [`output_addresses`] over any run of output scripts: the one decoder both
+/// scans share.
+fn addresses_of<'a>(
+    scripts: impl Iterator<Item = &'a ScriptPublicKey>,
+    prefix: Prefix,
+) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
-    for output in &tx.outputs {
-        if let Ok(address) = extract_script_pub_key_address(&output.script_public_key, prefix) {
+    for script in scripts {
+        if let Ok(address) = extract_script_pub_key_address(script, prefix) {
             let address = address.to_string();
             if !seen.contains(&address) {
                 seen.push(address);
@@ -793,6 +854,94 @@ mod tests {
             block_time: 0,
         });
         assert_eq!(resolve_txid(&tx).unwrap(), node_id.to_string());
+    }
+
+    /// An accepted transaction as V2 sends it at High: the payload, both
+    /// outputs, and the node's verbose data (txid, carrying block, its time).
+    fn accepted_with(
+        payload: Option<&[u8]>,
+        txid: Option<kaspa_consensus_core::Hash>,
+    ) -> RpcOptionalTransaction {
+        let output = |address: &str| kaspa_rpc_core::RpcOptionalTransactionOutput {
+            value: Some(20_000_000),
+            script_public_key: Some(pay_to_address_script(&addr(address))),
+            verbose_data: None,
+            covenant: None,
+        };
+        RpcOptionalTransaction {
+            version: None,
+            inputs: vec![],
+            outputs: vec![output(DEST), output(CHANGE), output(DEST)],
+            lock_time: None,
+            subnetwork_id: None,
+            gas: None,
+            payload: payload.map(<[u8]>::to_vec),
+            storage_mass: None,
+            verbose_data: Some(kaspa_rpc_core::RpcOptionalTransactionVerboseData {
+                transaction_id: txid,
+                hash: None,
+                compute_mass: None,
+                block_hash: Some(kaspa_consensus_core::Hash::from_bytes([0xCB; 32])),
+                block_time: Some(1_727_000_000_123),
+            }),
+        }
+    }
+
+    /// **LINK-Q3: the accepted-transaction scan is the block scan's twin.**
+    /// Same prefix and grammar under both namespaces; the node's txid; the
+    /// addresses through the pinned decoder, de-duplicated; the CARRYING
+    /// block's hash and time (D-307's locate cursor); nothing for a transfer
+    /// or a payload-less transaction.
+    #[test]
+    fn an_accepted_transaction_scans_like_a_block_one() {
+        let id = kaspa_consensus_core::Hash::from_bytes([0x5A; 32]);
+        let event = scan_accepted(
+            &accepted_with(Some(b"ciph_msg:1:comm:aabbccddeeff:body"), Some(id)),
+            Prefix::Mainnet,
+        )
+        .expect("a ciph_msg payload matches");
+        assert_eq!(event.txid, Some(id.to_string()));
+        assert_eq!(
+            (event.kind.as_str(), event.namespace),
+            ("comm", WireNamespace::CiphMsg)
+        );
+        assert_eq!(event.body, b"aabbccddeeff:body".to_vec());
+        assert_eq!(event.addresses, vec![DEST.to_string(), CHANGE.to_string()]);
+        assert_eq!(event.block_time_ms, Some(1_727_000_000_123));
+        assert_eq!(
+            event.block_hash,
+            Some(kaspa_consensus_core::Hash::from_bytes([0xCB; 32]).to_string())
+        );
+
+        let kchat = scan_accepted(
+            &accepted_with(Some(b"kchat:1:handshake:x"), Some(id)),
+            Prefix::Mainnet,
+        )
+        .expect("a kchat payload matches");
+        assert_eq!(
+            (kchat.kind.as_str(), kchat.namespace),
+            ("handshake", WireNamespace::KChat)
+        );
+
+        assert!(scan_accepted(
+            &accepted_with(Some(b"hello world"), Some(id)),
+            Prefix::Mainnet
+        )
+        .is_none());
+        assert!(scan_accepted(&accepted_with(Some(b""), Some(id)), Prefix::Mainnet).is_none());
+        assert!(scan_accepted(&accepted_with(None, Some(id)), Prefix::Mainnet).is_none());
+    }
+
+    /// At High there is nothing to recompute an id from, so a missing id stays
+    /// missing: never fabricated, never a hash of partial fields.
+    #[test]
+    fn an_accepted_transaction_without_the_nodes_id_carries_none() {
+        let event = scan_accepted(
+            &accepted_with(Some(b"ciph_msg:1:bcast:x:y"), None),
+            Prefix::Mainnet,
+        )
+        .expect("still a match");
+        assert_eq!(event.txid, None);
     }
 
     #[test]
